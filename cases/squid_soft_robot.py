@@ -343,8 +343,14 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "solid_mpm_total_force_z_n",
 )
 
-RUN_CHECKPOINT_VERSION = 2
+RUN_CHECKPOINT_VERSION = 3
 RUN_CHECKPOINT_FILENAME = "run_checkpoint.npz"
+CHECKPOINT_MARKER_STATE_FIELD_NAMES = (
+    "x_gamma_m",
+    "v_gamma_mps",
+    "n_gamma",
+    "A_gamma_m2",
+)
 CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "source_config",
     "steps_explicit",
@@ -408,6 +414,8 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "use_nozzle_taper",
     "nozzle_taper_length_m",
     "nozzle_taper_inlet_radius_m",
+    "diagnostic_disable_pressure_neumann_matrix_rows",
+    "arch",
 )
 
 
@@ -3581,10 +3589,12 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
                 continue
             seen.add(key)
             fieldnames.append(key)
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    temp_path = path.with_name(path.name + ".tmp")
+    with temp_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(temp_path, path)
 
 
 def read_csv_rows(path: Path) -> list[dict[str, object]]:
@@ -3809,6 +3819,44 @@ def _interface_state_from_checkpoint(data: object) -> InterfaceReactionRelaxatio
     )
 
 
+def sharp_marker_state_arrays(markers) -> dict[str, np.ndarray]:
+    """Export the dynamic HIBM sharp marker state for checkpointing.
+
+    Markers advance by dt*v surface feedback, so their state cannot be rebuilt
+    from rest solid particles on resume. Checkpoint read/write is case-level
+    host I/O, matching the existing fluid/solid checkpoint transfers.
+    """
+    count = int(markers.marker_count)
+    state: dict[str, np.ndarray] = {}
+    for name in CHECKPOINT_MARKER_STATE_FIELD_NAMES:
+        state[name] = np.asarray(getattr(markers, name).to_numpy())[:count].copy()
+    return state
+
+
+def restore_sharp_marker_state_arrays(
+    markers,
+    state: Mapping[str, object],
+) -> None:
+    """Restore dynamic HIBM sharp marker state exported by sharp_marker_state_arrays."""
+    count = int(markers.marker_count)
+    for name in CHECKPOINT_MARKER_STATE_FIELD_NAMES:
+        if name not in state:
+            raise ValueError(f"checkpoint sharp marker state is missing {name!r}")
+        field = getattr(markers, name)
+        full = field.to_numpy()
+        array = np.asarray(state[name], dtype=full.dtype)
+        expected_shape = tuple(full[:count].shape)
+        if tuple(array.shape) != expected_shape:
+            raise ValueError(
+                "checkpoint sharp marker state shape does not match the current "
+                f"marker layout for {name!r}: {tuple(array.shape)} != {expected_shape}"
+            )
+        if not bool(np.all(np.isfinite(array))):
+            raise ValueError(f"checkpoint sharp marker state {name!r} must be finite")
+        full[:count] = array
+        field.from_numpy(full)
+
+
 def write_run_checkpoint(
     path: Path,
     *,
@@ -3819,6 +3867,7 @@ def write_run_checkpoint(
     simulator: ReducedSquidFSI,
     solid_mpm: object,
     interface_reaction_state: InterfaceReactionRelaxationState,
+    sharp_coupling_state=None,
 ) -> None:
     payload: dict[str, np.ndarray] = {}
     metadata = {
@@ -3882,6 +3931,16 @@ def write_run_checkpoint(
     else:
         raise ValueError(f"unsupported solid model for checkpoint: {args.solid_model!r}")
 
+    if sharp_coupling_state is not None:
+        marker_state = sharp_marker_state_arrays(sharp_coupling_state.markers)
+        for name in CHECKPOINT_MARKER_STATE_FIELD_NAMES:
+            _array_to_payload(payload, f"marker_{name}", marker_state[name])
+    _array_to_payload(
+        payload,
+        "has_marker_state",
+        np.asarray(sharp_coupling_state is not None),
+    )
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(path.name + ".tmp.npz")
     np.savez_compressed(temp_path, **payload)
@@ -3896,6 +3955,7 @@ def load_run_checkpoint(
     solid_mpm: object,
     step_count: int | None = None,
     full_pressure_waveform_steps: int | None = None,
+    sharp_coupling_state=None,
 ) -> tuple[int, InterfaceReactionRelaxationState]:
     if not path.exists():
         raise FileNotFoundError(f"checkpoint not found: {path}")
@@ -3975,6 +4035,27 @@ def load_run_checkpoint(
         else:
             raise ValueError(f"unsupported solid model for checkpoint: {args.solid_model!r}")
 
+        if sharp_coupling_state is not None:
+            missing_marker_keys = [
+                f"marker_{name}"
+                for name in CHECKPOINT_MARKER_STATE_FIELD_NAMES
+                if f"marker_{name}" not in checkpoint
+            ]
+            if missing_marker_keys:
+                raise ValueError(
+                    "checkpoint does not contain HIBM sharp marker state "
+                    f"(missing {', '.join(missing_marker_keys)}); resuming a "
+                    "sharp-coupling run from it would rebuild the immersed "
+                    "boundary from rest geometry against a deformed fluid state"
+                )
+            restore_sharp_marker_state_arrays(
+                sharp_coupling_state.markers,
+                {
+                    name: checkpoint[f"marker_{name}"]
+                    for name in CHECKPOINT_MARKER_STATE_FIELD_NAMES
+                },
+            )
+
         return (
             int(metadata["completed_step"]),
             _interface_state_from_checkpoint(metadata.get("interface_reaction_state")),
@@ -4052,6 +4133,23 @@ def _raise_for_step_numerical_guard(
                     f"step {step} numerical guard failed: {breakdown_field}="
                     f"{breakdown_count:.0f}"
                 )
+
+
+def _raise_for_step_solid_out_of_bounds_guard(row: dict[str, object]) -> None:
+    step = row.get("step")
+    field = "solid_mpm_grid_out_of_bounds_particle_count"
+    if field not in row:
+        return
+    out_of_bounds_count = _required_finite_row_number(
+        row,
+        field,
+        context=f"step {step} numerical guard",
+    )
+    if out_of_bounds_count > 0.0:
+        raise RuntimeError(
+            f"step {step} numerical guard failed: {field}="
+            f"{out_of_bounds_count:.0f} solid MPM particle(s) outside the solid grid"
+        )
 
 
 def _ascii_vtk_numbers(values: np.ndarray, *, precision: int = 9) -> str:
@@ -5229,6 +5327,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             solid_mpm=solid_mpm,
             step_count=step_count,
             full_pressure_waveform_steps=full_pressure_waveform_steps,
+            sharp_coupling_state=sharp_coupling_state,
         )
         if completed_step >= step_count:
             raise ValueError(
@@ -5899,6 +5998,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     cfl_limit=0.5,
                     divergence_l2_limit=float(args.projection_divergence_tolerance),
                 )
+                _raise_for_step_solid_out_of_bounds_guard(row)
             except Exception as exc:
                 _write_step_failure_artifacts(
                     process_path=process_path,
@@ -5921,6 +6021,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     simulator=simulator,
                     solid_mpm=solid_mpm,
                     interface_reaction_state=interface_reaction_state,
+                    sharp_coupling_state=sharp_coupling_state,
                 )
                 checkpoint_wall_time_s = time.perf_counter() - checkpoint_wall_started_at
                 row["checkpoint_wall_time_s"] = checkpoint_wall_time_s
@@ -6929,6 +7030,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 cfl_limit=0.5,
                 divergence_l2_limit=float(args.projection_divergence_tolerance),
             )
+            _raise_for_step_solid_out_of_bounds_guard(row)
         except Exception as exc:
             _write_step_failure_artifacts(
                 process_path=process_path,
@@ -6951,6 +7053,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 simulator=simulator,
                 solid_mpm=solid_mpm,
                 interface_reaction_state=interface_reaction_state,
+                sharp_coupling_state=sharp_coupling_state,
             )
             checkpoint_wall_time_s = time.perf_counter() - checkpoint_wall_started_at
             row["checkpoint_wall_time_s"] = checkpoint_wall_time_s
@@ -6978,6 +7081,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             break
 
     write_csv(history_path, rows)
+
+    if rows and not args.checkpoint_every_step:
+        # Closing checkpoint at loop exit (wall-time break or normal
+        # completion) so every run can be resumed or extended. With
+        # --checkpoint-every-step the final step already wrote it.
+        write_run_checkpoint(
+            run_checkpoint_path,
+            completed_step=int(rows[-1]["step"]),
+            step_count=step_count,
+            full_pressure_waveform_steps=full_pressure_waveform_steps,
+            args=args,
+            simulator=simulator,
+            solid_mpm=solid_mpm,
+            interface_reaction_state=interface_reaction_state,
+            sharp_coupling_state=sharp_coupling_state,
+        )
 
     if sharp_case_runner_enabled:
         last = rows[-1] if rows else {}
