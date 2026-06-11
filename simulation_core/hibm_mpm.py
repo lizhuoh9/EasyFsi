@@ -46,6 +46,7 @@ class HibmMpmFluidStressSampleReport:
     viscous_gradient_invalid_marker_count: int = 0
     far_pressure_closed_marker_count: int = 0
     far_pressure_closed_extended_marker_count: int = 0
+    closure_gradient_missing_marker_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -256,6 +257,10 @@ class HibmMpmSurfaceMarkers:
             shape=(),
         )
         self.report_stress_far_pressure_closed_extended_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_stress_closure_gradient_missing_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -979,6 +984,7 @@ class HibmMpmSurfaceMarkers:
         self.report_stress_viscous_gradient_invalid_marker_count[None] = 0
         self.report_stress_far_pressure_closed_marker_count[None] = 0
         self.report_stress_far_pressure_closed_extended_marker_count[None] = 0
+        self.report_stress_closure_gradient_missing_marker_count[None] = 0
         for marker in range(marker_count):
             position = self.x_gamma_m[marker]
             normal = self.n_gamma[marker]
@@ -1022,14 +1028,42 @@ class HibmMpmSurfaceMarkers:
                 inside_pressure = 0.0
                 outside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
                 inside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
-                outside_found = 0
-                inside_found = 0
+                # S2-A4: per-side "found" is split into pressure-found and
+                # gradient-found. In far-pressure closure regions the squid
+                # band obstacle slabs leave only 1-3 cell wide water gaps
+                # behind the membranes at production grids: trilinear
+                # pressure is samplable inside such a gap, but the one-sided
+                # viscous gradient stencil (complete fluid neighbor pairs on
+                # all three axes) almost never is, and the merged acceptance
+                # gate rejected the whole candidate - silently dropping the
+                # O(1e3 Pa) pressure drive over an O(0.1 Pa) viscous term.
+                # Branch decisions (two-sided / closure / mirrored closure)
+                # key on the pressure flags; an unfound gradient side simply
+                # keeps its zero matrix. Outside closure regions both flags
+                # are only ever set together, preserving the original merged
+                # gate bit for bit.
+                outside_pressure_found = 0
+                outside_gradient_found = 0
+                inside_pressure_found = 0
+                inside_gradient_found = 0
                 inside_found_extended = 0
+                closure_region_marker = 0
+                if (
+                    far_pressure_region_id != -1
+                    and self.region_id[marker] == far_pressure_region_id
+                ):
+                    closure_region_marker = 1
                 for probe_index in ti.static(range(5)):
                     probe_distance = probe_distance_m * (
                         1.0 + 0.5 * ti.cast(probe_index, ti.f32)
                     )
-                    if outside_found == 0:
+                    # Walk on while the side pressure is missing; in closure
+                    # regions additionally walk on to fill a still-missing
+                    # gradient from a farther candidate (the gradient update
+                    # below never overwrites an already-found pressure).
+                    if outside_pressure_found == 0 or (
+                        closure_region_marker == 1 and outside_gradient_found == 0
+                    ):
                         outside_position = position + normal * probe_distance
                         outside_coordinate = self._grid_coordinate_from_fields(
                             outside_position,
@@ -1071,11 +1105,32 @@ class HibmMpmSurfaceMarkers:
                                     cell_center_z_m,
                                 )
                             )
-                        if sample_weight > 1.0e-12 and sample_gradient_valid == 1:
-                            outside_pressure = sample_pressure
-                            outside_gradient = sample_gradient
-                            outside_found = 1
-                    if inside_found == 0:
+                        if closure_region_marker == 1:
+                            # S2-A4 decoupled acceptance (closure regions
+                            # only): pressure needs trilinear fluid weight;
+                            # the gradient additionally needs its complete
+                            # one-sided stencil. Two independent guards so a
+                            # farther candidate can still supply the gradient.
+                            if sample_weight > 1.0e-12 and outside_pressure_found == 0:
+                                outside_pressure = sample_pressure
+                                outside_pressure_found = 1
+                            if (
+                                sample_weight > 1.0e-12
+                                and sample_gradient_valid == 1
+                                and outside_gradient_found == 0
+                            ):
+                                outside_gradient = sample_gradient
+                                outside_gradient_found = 1
+                        else:
+                            # Original merged gate, bit for bit.
+                            if sample_weight > 1.0e-12 and sample_gradient_valid == 1:
+                                outside_pressure = sample_pressure
+                                outside_gradient = sample_gradient
+                                outside_pressure_found = 1
+                                outside_gradient_found = 1
+                    if inside_pressure_found == 0 or (
+                        closure_region_marker == 1 and inside_gradient_found == 0
+                    ):
                         inside_position = position - normal * probe_distance
                         inside_coordinate = self._grid_coordinate_from_fields(
                             inside_position,
@@ -1117,27 +1172,46 @@ class HibmMpmSurfaceMarkers:
                                     cell_center_z_m,
                                 )
                             )
-                        if sample_weight > 1.0e-12 and sample_gradient_valid == 1:
-                            inside_pressure = sample_pressure
-                            inside_gradient = sample_gradient
-                            inside_found = 1
+                        if closure_region_marker == 1:
+                            # S2-A4 decoupled acceptance, symmetric to the
+                            # outside (+n) walk above.
+                            if sample_weight > 1.0e-12 and inside_pressure_found == 0:
+                                inside_pressure = sample_pressure
+                                inside_pressure_found = 1
+                            if (
+                                sample_weight > 1.0e-12
+                                and sample_gradient_valid == 1
+                                and inside_gradient_found == 0
+                            ):
+                                inside_gradient = sample_gradient
+                                inside_gradient_found = 1
+                        else:
+                            # Original merged gate, bit for bit.
+                            if sample_weight > 1.0e-12 and sample_gradient_valid == 1:
+                                inside_pressure = sample_pressure
+                                inside_gradient = sample_gradient
+                                inside_pressure_found = 1
+                                inside_gradient_found = 1
                 # S2-A3 extended inside (-n) walk: opt-in, far-pressure
                 # closure regions only. It runs strictly after the standard
                 # ladder above failed to find inside water within 3x, and
                 # extends the reach uniformly to the requested multiplier.
                 # The outside (+n) walk is intentionally never extended.
-                # The outside_found == 0 gate keeps mirrored-orientation
-                # markers (water on +n, structurally dry -n) on the mirrored
-                # closure branch: without it the extended walk could tunnel
-                # through a thin dry band to unrelated deep water and silently
-                # replace the known far pressure with a spurious two-sided
-                # sample, dropping the drive on exactly the markers the
-                # closure exists for.
+                # The outside_pressure_found == 0 gate keeps
+                # mirrored-orientation markers (water on +n, structurally dry
+                # -n) on the mirrored closure branch: without it the extended
+                # walk could tunnel through a thin dry band to unrelated deep
+                # water and silently replace the known far pressure with a
+                # spurious two-sided sample, dropping the drive on exactly
+                # the markers the closure exists for. S2-A4: the gate keys on
+                # the pressure flag (not the gradient flag) so a mirrored
+                # marker whose outside water has a broken gradient stencil
+                # stays mirror-protected as well.
                 if (
                     far_pressure_region_id != -1
                     and self.region_id[marker] == far_pressure_region_id
-                    and inside_found == 0
-                    and outside_found == 0
+                    and inside_pressure_found == 0
+                    and outside_pressure_found == 0
                     and far_pressure_inside_probe_max_multiplier > 3.0
                 ):
                     for probe_index in ti.static(range(5)):
@@ -1147,7 +1221,10 @@ class HibmMpmSurfaceMarkers:
                             * (ti.cast(probe_index, ti.f32) + 1.0)
                             / 5.0
                         )
-                        if inside_found == 0:
+                        # The extension only runs for closure-region markers
+                        # (see the entry gate above), so the S2-A4 decoupled
+                        # acceptance applies unconditionally here.
+                        if inside_pressure_found == 0 or inside_gradient_found == 0:
                             inside_position = position - normal * probe_distance
                             inside_coordinate = self._grid_coordinate_from_fields(
                                 inside_position,
@@ -1189,12 +1266,18 @@ class HibmMpmSurfaceMarkers:
                                         cell_center_z_m,
                                     )
                                 )
-                            if sample_weight > 1.0e-12 and sample_gradient_valid == 1:
+                            if sample_weight > 1.0e-12 and inside_pressure_found == 0:
                                 inside_pressure = sample_pressure
-                                inside_gradient = sample_gradient
-                                inside_found = 1
+                                inside_pressure_found = 1
                                 inside_found_extended = 1
-                if outside_found == 1 and inside_found == 1:
+                            if (
+                                sample_weight > 1.0e-12
+                                and sample_gradient_valid == 1
+                                and inside_gradient_found == 0
+                            ):
+                                inside_gradient = sample_gradient
+                                inside_gradient_found = 1
+                if outside_pressure_found == 1 and inside_pressure_found == 1:
                     pressure_traction = (inside_pressure - outside_pressure) * normal
                     pressure_sample_valid = True
                     gradient = outside_gradient - inside_gradient
@@ -1205,8 +1288,8 @@ class HibmMpmSurfaceMarkers:
                 elif (
                     far_pressure_region_id != -1
                     and self.region_id[marker] == far_pressure_region_id
-                    and inside_found == 1
-                    and outside_found == 0
+                    and inside_pressure_found == 1
+                    and outside_pressure_found == 0
                 ):
                     outside_pressure = far_pressure_pa
                     pressure_traction = (inside_pressure - outside_pressure) * normal
@@ -1224,14 +1307,17 @@ class HibmMpmSurfaceMarkers:
                 elif (
                     far_pressure_region_id != -1
                     and self.region_id[marker] == far_pressure_region_id
-                    and outside_found == 1
-                    and inside_found == 0
+                    and outside_pressure_found == 1
+                    and inside_pressure_found == 0
                 ):
                     # Mirrored closure: the structurally dry side sits on the
                     # inside (-n) walk because of the CAD winding. The same
                     # covariant formula applies with the known far pressure
                     # substituted on the dry side; inside_gradient is provably
-                    # zero here (it is only written when inside_found == 1).
+                    # zero here (it is only written when inside_gradient_found
+                    # is set, and a gradient can only be found at a candidate
+                    # whose fluid weight also sets the pressure flag, which is
+                    # 0 on this branch).
                     inside_pressure = far_pressure_pa
                     pressure_traction = (inside_pressure - outside_pressure) * normal
                     pressure_sample_valid = True
@@ -1242,6 +1328,26 @@ class HibmMpmSurfaceMarkers:
                     )
                 else:
                     pressure_sample_valid = False
+                # S2-A4 diagnostic: the marker closes on pressure while at
+                # least one pressure-found side never completed a viscous
+                # gradient stencil (that side's gradient contribution is
+                # exactly zero). In two-sided mode the outer gradient_valid
+                # stays 1, so final validity equals pressure_sample_valid and
+                # counting here counts exactly the finally-valid markers.
+                if closure_region_marker == 1 and pressure_sample_valid:
+                    if (
+                        outside_pressure_found == 1
+                        and outside_gradient_found == 0
+                    ) or (
+                        inside_pressure_found == 1
+                        and inside_gradient_found == 0
+                    ):
+                        ti.atomic_add(
+                            self.report_stress_closure_gradient_missing_marker_count[
+                                None
+                            ],
+                            1,
+                        )
             else:
                 gradient, gradient_valid = self._sample_velocity_gradient(
                     velocity_field,
@@ -1353,6 +1459,9 @@ class HibmMpmSurfaceMarkers:
             ),
             far_pressure_closed_extended_marker_count=int(
                 self.report_stress_far_pressure_closed_extended_marker_count[None]
+            ),
+            closure_gradient_missing_marker_count=int(
+                self.report_stress_closure_gradient_missing_marker_count[None]
             ),
         )
 
@@ -5734,6 +5843,9 @@ def hibm_mpm_sharp_step_summary(
         ),
         "hibm_full_stress_far_pressure_closed_extended_marker_count": (
             load.fluid_stress.far_pressure_closed_extended_marker_count
+        ),
+        "hibm_full_stress_closure_gradient_missing_marker_count": (
+            load.fluid_stress.closure_gradient_missing_marker_count
         ),
         "hibm_marker_primary_count": marker_forces.primary_marker_count,
         "hibm_marker_secondary_count": marker_forces.secondary_marker_count,
