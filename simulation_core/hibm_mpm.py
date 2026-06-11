@@ -1135,6 +1135,25 @@ class HibmMpmSurfaceMarkers:
                         self.report_stress_far_pressure_closed_marker_count[None],
                         1,
                     )
+                elif (
+                    far_pressure_region_id != -1
+                    and self.region_id[marker] == far_pressure_region_id
+                    and outside_found == 1
+                    and inside_found == 0
+                ):
+                    # Mirrored closure: the structurally dry side sits on the
+                    # inside (-n) walk because of the CAD winding. The same
+                    # covariant formula applies with the known far pressure
+                    # substituted on the dry side; inside_gradient is provably
+                    # zero here (it is only written when inside_found == 1).
+                    inside_pressure = far_pressure_pa
+                    pressure_traction = (inside_pressure - outside_pressure) * normal
+                    pressure_sample_valid = True
+                    gradient = outside_gradient - inside_gradient
+                    ti.atomic_add(
+                        self.report_stress_far_pressure_closed_marker_count[None],
+                        1,
+                    )
                 else:
                     pressure_sample_valid = False
             else:
@@ -4431,6 +4450,8 @@ class HibmMpmSharpCouplingState:
         mpm_support_radius_m: float,
         primary_region_id: int = 0,
         secondary_region_id: int = 0,
+        far_pressure_region_id: int = -1,
+        far_pressure_pa: float = 0.0,
         fluid_dt_s: float | None = None,
         fluid_substeps: int = 1,
         projection_iterations: int = 40,
@@ -4471,6 +4492,8 @@ class HibmMpmSharpCouplingState:
             mpm_support_radius_m=float(mpm_support_radius_m),
             primary_region_id=int(primary_region_id),
             secondary_region_id=int(secondary_region_id),
+            far_pressure_region_id=int(far_pressure_region_id),
+            far_pressure_pa=float(far_pressure_pa),
             fluid_dt_s=fluid_dt_s,
             fluid_substeps=int(fluid_substeps),
             projection_iterations=int(projection_iterations),
@@ -4507,6 +4530,8 @@ class HibmMpmSharpCouplingState:
         lambda_pa: float,
         primary_region_id: int,
         secondary_region_id: int,
+        far_pressure_region_id: int = -1,
+        far_pressure_pa: float = 0.0,
         fluid_dt_s: float | None = None,
         fluid_substeps: int = 1,
         projection_iterations: int = 40,
@@ -4545,6 +4570,8 @@ class HibmMpmSharpCouplingState:
             lambda_pa=float(lambda_pa),
             primary_region_id=int(primary_region_id),
             secondary_region_id=int(secondary_region_id),
+            far_pressure_region_id=int(far_pressure_region_id),
+            far_pressure_pa=float(far_pressure_pa),
             fluid_dt_s=fluid_dt_s,
             fluid_substeps=int(fluid_substeps),
             projection_iterations=int(projection_iterations),
@@ -4585,6 +4612,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     mpm_support_radius_m: float,
     primary_region_id: int = 0,
     secondary_region_id: int = 0,
+    far_pressure_region_id: int = -1,
+    far_pressure_pa: float = 0.0,
     dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -5075,6 +5104,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         fluid.grid.grid_nodes,
         viscosity_pa_s=fluid.mu,
         two_sided_pressure=True,
+        far_pressure_region_id=int(far_pressure_region_id),
+        far_pressure_pa=float(far_pressure_pa),
     )
     markers.compute_marker_forces()
     marker_force_report = markers.aggregate_region_forces(
@@ -5131,6 +5162,8 @@ def advance_hibm_mpm_sharp_mpm_step(
     mpm_support_radius_m: float,
     primary_region_id: int = 0,
     secondary_region_id: int = 0,
+    far_pressure_region_id: int = -1,
+    far_pressure_pa: float = 0.0,
     fluid_dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -5193,6 +5226,8 @@ def advance_hibm_mpm_sharp_mpm_step(
         mpm_support_radius_m=float(mpm_support_radius_m),
         primary_region_id=int(primary_region_id),
         secondary_region_id=int(secondary_region_id),
+        far_pressure_region_id=int(far_pressure_region_id),
+        far_pressure_pa=float(far_pressure_pa),
         dt_s=fluid_dt_s,
         fluid_substeps=int(fluid_substeps),
         projection_iterations=int(projection_iterations),
@@ -5582,6 +5617,9 @@ def hibm_mpm_sharp_step_summary(
         "hibm_full_stress_max_abs_traction_pa": (
             load.fluid_stress.max_abs_traction_pa
         ),
+        "hibm_full_stress_far_pressure_closed_marker_count": (
+            load.fluid_stress.far_pressure_closed_marker_count
+        ),
         "hibm_marker_primary_count": marker_forces.primary_marker_count,
         "hibm_marker_secondary_count": marker_forces.secondary_marker_count,
         "hibm_marker_total_count": marker_forces.total_marker_count,
@@ -5703,6 +5741,8 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
     lambda_pa: float,
     primary_region_id: int,
     secondary_region_id: int,
+    far_pressure_region_id: int = -1,
+    far_pressure_pa: float = 0.0,
     fluid_dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -5757,6 +5797,8 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
         mpm_support_radius_m=float(mpm_support_radius_m),
         primary_region_id=int(primary_region_id),
         secondary_region_id=int(secondary_region_id),
+        far_pressure_region_id=int(far_pressure_region_id),
+        far_pressure_pa=float(far_pressure_pa),
         fluid_dt_s=fluid_dt_s,
         fluid_substeps=int(fluid_substeps),
         projection_iterations=int(projection_iterations),
