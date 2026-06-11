@@ -844,9 +844,11 @@ class CartesianFluidSolver:
         self.reduction_max = ti.field(dtype=ti.f32, shape=())
         self.reduction_count = ti.field(dtype=ti.i32, shape=())
         self.divergence_report_snapshot = ti.Vector.field(3, dtype=ti.f64, shape=())
-        self.divergence_combined_sum = ti.field(dtype=ti.f32, shape=16)
-        self.divergence_combined_max = ti.field(dtype=ti.f32, shape=16)
-        self.divergence_combined_count = ti.field(dtype=ti.i32, shape=16)
+        # 18 slots: 16 partition slots + 2 anchored-unreached slots; must
+        # match the static slot range of _divergence_final_report_kernel.
+        self.divergence_combined_sum = ti.field(dtype=ti.f32, shape=18)
+        self.divergence_combined_max = ti.field(dtype=ti.f32, shape=18)
+        self.divergence_combined_count = ti.field(dtype=ti.i32, shape=18)
         self.divergence_final_report_snapshot = ti.Vector.field(
             24,
             dtype=ti.f64,
