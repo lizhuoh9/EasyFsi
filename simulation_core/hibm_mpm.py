@@ -1126,10 +1126,18 @@ class HibmMpmSurfaceMarkers:
                 # ladder above failed to find inside water within 3x, and
                 # extends the reach uniformly to the requested multiplier.
                 # The outside (+n) walk is intentionally never extended.
+                # The outside_found == 0 gate keeps mirrored-orientation
+                # markers (water on +n, structurally dry -n) on the mirrored
+                # closure branch: without it the extended walk could tunnel
+                # through a thin dry band to unrelated deep water and silently
+                # replace the known far pressure with a spurious two-sided
+                # sample, dropping the drive on exactly the markers the
+                # closure exists for.
                 if (
                     far_pressure_region_id != -1
                     and self.region_id[marker] == far_pressure_region_id
                     and inside_found == 0
+                    and outside_found == 0
                     and far_pressure_inside_probe_max_multiplier > 3.0
                 ):
                     for probe_index in ti.static(range(5)):

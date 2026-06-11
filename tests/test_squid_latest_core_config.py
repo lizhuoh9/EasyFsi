@@ -3877,6 +3877,9 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
         self.assertIn("far_pressure_region_id=7", sharp_advance_call)
         self.assertIn("far_pressure_pa=pressure_pa", sharp_advance_call)
+        self.assertIn(
+            "far_pressure_inside_probe_max_multiplier=6.0", sharp_advance_call
+        )
         sharp_pressure_setup = source.split("if sharp_case_runner_enabled:", 1)[
             1
         ].split("def advance_sharp_solid_substeps():", 1)[0]
