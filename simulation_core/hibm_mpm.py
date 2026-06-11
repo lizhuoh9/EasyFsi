@@ -44,6 +44,7 @@ class HibmMpmFluidStressSampleReport:
     max_abs_traction_pa: float
     two_sided_pressure_marker_count: int = 0
     viscous_gradient_invalid_marker_count: int = 0
+    far_pressure_closed_marker_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,10 @@ class HibmMpmSurfaceMarkers:
             shape=(),
         )
         self.report_stress_viscous_gradient_invalid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_stress_far_pressure_closed_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -958,12 +963,15 @@ class HibmMpmSurfaceMarkers:
         nz: ti.i32,
         viscosity_pa_s: ti.f32,
         two_sided_pressure: ti.i32,
+        far_pressure_region_id: ti.i32,
+        far_pressure_pa: ti.f32,
     ):
         self.report_stress_valid_marker_count[None] = 0
         self.report_stress_invalid_marker_count[None] = 0
         self.report_stress_max_abs_traction_pa[None] = 0.0
         self.report_stress_two_sided_pressure_marker_count[None] = 0
         self.report_stress_viscous_gradient_invalid_marker_count[None] = 0
+        self.report_stress_far_pressure_closed_marker_count[None] = 0
         for marker in range(marker_count):
             position = self.x_gamma_m[marker]
             normal = self.n_gamma[marker]
@@ -1113,6 +1121,20 @@ class HibmMpmSurfaceMarkers:
                         self.report_stress_two_sided_pressure_marker_count[None],
                         1,
                     )
+                elif (
+                    far_pressure_region_id != -1
+                    and self.region_id[marker] == far_pressure_region_id
+                    and inside_found == 1
+                    and outside_found == 0
+                ):
+                    outside_pressure = far_pressure_pa
+                    pressure_traction = (inside_pressure - outside_pressure) * normal
+                    pressure_sample_valid = True
+                    gradient = outside_gradient - inside_gradient
+                    ti.atomic_add(
+                        self.report_stress_far_pressure_closed_marker_count[None],
+                        1,
+                    )
                 else:
                     pressure_sample_valid = False
             else:
@@ -1167,6 +1189,8 @@ class HibmMpmSurfaceMarkers:
         *,
         viscosity_pa_s: float,
         two_sided_pressure: bool = False,
+        far_pressure_region_id: int = -1,
+        far_pressure_pa: float = 0.0,
     ) -> HibmMpmFluidStressSampleReport:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
@@ -1174,6 +1198,10 @@ class HibmMpmSurfaceMarkers:
         viscosity = float(viscosity_pa_s)
         if not math.isfinite(viscosity) or viscosity < 0.0:
             raise ValueError("viscosity_pa_s must be a finite non-negative number")
+        far_region_id = int(far_pressure_region_id)
+        far_pressure = float(far_pressure_pa)
+        if not math.isfinite(far_pressure):
+            raise ValueError("far_pressure_pa must be a finite number")
         self._sample_fluid_stress_to_marker_tractions_kernel(
             velocity_field,
             pressure_field,
@@ -1193,6 +1221,8 @@ class HibmMpmSurfaceMarkers:
             int(nodes[2]),
             viscosity,
             1 if bool(two_sided_pressure) else 0,
+            far_region_id,
+            far_pressure,
         )
         return HibmMpmFluidStressSampleReport(
             valid_marker_count=int(self.report_stress_valid_marker_count[None]),
@@ -1205,6 +1235,9 @@ class HibmMpmSurfaceMarkers:
             ),
             viscous_gradient_invalid_marker_count=int(
                 self.report_stress_viscous_gradient_invalid_marker_count[None]
+            ),
+            far_pressure_closed_marker_count=int(
+                self.report_stress_far_pressure_closed_marker_count[None]
             ),
         )
 
