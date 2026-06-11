@@ -779,6 +779,24 @@ class CartesianFluidSolver:
         self.cg_unreached_component_sum = ti.field(dtype=ti.f64, shape=32)
         self.cg_unreached_component_volume = ti.field(dtype=ti.f64, shape=32)
         self.cg_unreached_component_scan = ti.field(dtype=ti.i32, shape=())
+        # R2-H1 observability: overlap between the flood-unreachable anchoring
+        # set and rows touched by pressure-interface matrix terms. The cell-hit
+        # grid deduplicates coupling-edge hits (a row can be the target of
+        # several edges); the 32-slot array deduplicates per component.
+        self.hibm_unreached_interface_cell_hit = ti.field(dtype=ti.i32, shape=shape)
+        self.hibm_unreached_interface_component_hit = ti.field(dtype=ti.i32, shape=32)
+        self.report_hibm_unreached_interface_diagonal_cells = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_unreached_interface_coupling_cells = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_unreached_interface_component_hits = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.fv_diag = ti.field(dtype=ti.f32, shape=shape)
         self.cg_r = ti.field(dtype=ti.f32, shape=shape)
         self.cg_z = ti.field(dtype=ti.f32, shape=shape)
@@ -980,6 +998,11 @@ class CartesianFluidSolver:
         self.last_hibm_pressure_unreached_component_count = 0
         self._hibm_pressure_unreached_component_count = 0
         self.last_hibm_pressure_unreached_component_overflow = False
+        self.last_hibm_pressure_component_labels_converged = True
+        self.last_hibm_unreached_cells_with_interface_diagonal = 0
+        self.last_hibm_unreached_cells_with_interface_coupling = 0
+        self.last_hibm_unreached_components_with_interface_hits = 0
+        self.last_hibm_solid_band_marked_increment = 0
         self.last_unreached_divergence_raw_stats = {
             "max_abs": 0.0,
             "l2": 0.0,
@@ -1270,10 +1293,20 @@ class CartesianFluidSolver:
         *,
         pressure_outlet_zmin: bool = False,
     ) -> int:
+        """Mark one band sweep and return the newly marked cell count.
+
+        The kernel resets the 0-D counter each call, so the return value is
+        already the per-round increment the caller's fixed-round cap loops on.
+        ``last_hibm_solid_band_marked_increment`` keeps the most recent
+        increment host-side (R2-M3): a non-zero value at projection-report
+        time means the caller's band budget was exhausted before saturation.
+        """
         self._mark_hibm_solid_band_nonprojectable_cells_kernel(
             1 if pressure_outlet_zmin else 0,
         )
-        return int(self.report_hibm_solid_band_nonprojectable_cells[None])
+        marked = int(self.report_hibm_solid_band_nonprojectable_cells[None])
+        self.last_hibm_solid_band_marked_increment = marked
+        return marked
 
     @ti.func
     def _pressure_outlet_reachable_neighbor_exists(
@@ -1406,24 +1439,37 @@ class CartesianFluidSolver:
             self.last_hibm_pressure_unreached_component_count = 0
             self._hibm_pressure_unreached_component_count = 0
             self.last_hibm_pressure_unreached_component_overflow = False
+            self.last_hibm_pressure_component_labels_converged = True
+            self.last_hibm_unreached_cells_with_interface_diagonal = 0
+            self.last_hibm_unreached_cells_with_interface_coupling = 0
+            self.last_hibm_unreached_components_with_interface_hits = 0
             self._hibm_reachability_checksum = None
             return 0
         # Reuse is opt-in only: an A/B resume on 2026-06-11 proved the checksum
         # skip corrupted the step-163 guard state in the 2-second squid run
-        # (clean once disabled), so a full recompute is the safe default.
-        pattern_checksum = float(self._hibm_reachability_pattern_checksum_kernel())
-        if (
-            os.environ.get("HIBM_ENABLE_REACHABILITY_REUSE") == "1"
-            and self._hibm_reachability_checksum is not None
-            and pattern_checksum == self._hibm_reachability_checksum
-        ):
-            self.last_hibm_pressure_reachability_reused = True
-            return int(self._hibm_pressure_unreached_count)
+        # (clean once disabled), so a full recompute is the safe default. The
+        # full-grid checksum kernel only runs when reuse is opted in (R2-M1);
+        # with reuse disabled the stored checksum stays None, which preserves
+        # the always-recompute semantics below.
+        reuse_enabled = os.environ.get("HIBM_ENABLE_REACHABILITY_REUSE") == "1"
+        pattern_checksum: float | None = None
+        if reuse_enabled:
+            pattern_checksum = float(self._hibm_reachability_pattern_checksum_kernel())
+            if (
+                self._hibm_reachability_checksum is not None
+                and pattern_checksum == self._hibm_reachability_checksum
+            ):
+                self.last_hibm_pressure_reachability_reused = True
+                return int(self._hibm_pressure_unreached_count)
         self._hibm_reachability_checksum = None
         self.last_hibm_pressure_unreached_cell_count = 0
         self.last_hibm_pressure_reachability_converged = True
         self.last_hibm_pressure_reachability_sweeps = 0
         self.last_hibm_pressure_reachability_reused = False
+        self.last_hibm_pressure_component_labels_converged = True
+        self.last_hibm_unreached_cells_with_interface_diagonal = 0
+        self.last_hibm_unreached_cells_with_interface_coupling = 0
+        self.last_hibm_unreached_components_with_interface_hits = 0
         self._hibm_pressure_unreached_count = 0
         self._init_hibm_pressure_outlet_reachable_kernel()
         sweep_block = max(1, int(self.nx + self.ny + self.nz))
@@ -1452,11 +1498,17 @@ class CartesianFluidSolver:
         self.last_hibm_pressure_unreached_component_overflow = False
         if unreached > 0:
             self._init_hibm_unreached_component_labels_kernel()
+            labels_converged = False
             for _ in range(max_blocks):
                 for _ in range(sweep_block):
                     self._propagate_hibm_unreached_component_labels_kernel()
                 if int(self._propagate_hibm_unreached_component_labels_kernel()) == 0:
+                    labels_converged = True
                     break
+            # R2-M5: False means the block budget ran out before the label
+            # propagation reached a fixed point, so one physical component may
+            # still carry several labels (partial merge).
+            self.last_hibm_pressure_component_labels_converged = labels_converged
             component_count = 0
             for component_index in range(32):
                 self._scan_min_unreached_raw_label_kernel()
@@ -1517,6 +1569,15 @@ class CartesianFluidSolver:
         self.last_hibm_pressure_unreached_cell_count = 0
         self._hibm_pressure_unreached_component_count = 0
         self.last_hibm_pressure_unreached_component_count = 0
+        self.last_hibm_pressure_unreached_component_overflow = False
+        self.last_hibm_pressure_reachability_converged = True
+        self.last_hibm_pressure_reachability_sweeps = 0
+        self.last_hibm_pressure_reachability_reused = False
+        self.last_hibm_pressure_component_labels_converged = True
+        self.last_hibm_unreached_cells_with_interface_diagonal = 0
+        self.last_hibm_unreached_cells_with_interface_coupling = 0
+        self.last_hibm_unreached_components_with_interface_hits = 0
+        self.last_hibm_solid_band_marked_increment = 0
         self._hibm_reachability_checksum = None
 
     @ti.kernel
@@ -3687,6 +3748,121 @@ class CartesianFluidSolver:
             self._subtract_cg_weighted_mean_from_unreached_set_kernel(field)
         self.last_cg_unreached_set_mean_projection_count += 1
 
+    @ti.func
+    def _flag_unreached_interface_component_hit(
+        self,
+        i: ti.i32,
+        j: ti.i32,
+        k: ti.i32,
+        component_count: ti.i32,
+    ):
+        label = self.hibm_pressure_unreached_component_label[i, j, k]
+        if label < 0:
+            component = -label - 1
+            if component < component_count:
+                ti.atomic_or(
+                    self.hibm_unreached_interface_component_hit[component],
+                    1,
+                )
+
+    # R2-H1 diagnostics: count flood-unreachable cells whose pressure row is
+    # nevertheless touched by interface matrix terms. A diagonal hit is an
+    # unreached cell with a positive pressure_interface_matrix_diagonal entry
+    # (the row is anchored). A coupling hit is an unreached cell whose row
+    # receives an active interface coupling contribution, either as the owning
+    # cell or as the target neighbor of another cell's edge, using exactly the
+    # validity checks the FV operator applies in _fv_laplacian_apply_kernel.
+    # Component hits deduplicate per compacted unreached-component label.
+    @ti.kernel
+    def _scan_hibm_unreached_interface_hits_kernel(self, component_count: ti.i32):
+        self.report_hibm_unreached_interface_diagonal_cells[None] = 0
+        self.report_hibm_unreached_interface_coupling_cells[None] = 0
+        self.report_hibm_unreached_interface_component_hits[None] = 0
+        for c in range(32):
+            self.hibm_unreached_interface_component_hit[c] = 0
+        for i, j, k in self.obstacle:
+            self.hibm_unreached_interface_cell_hit[i, j, k] = 0
+        for i, j, k in self.obstacle:
+            if (
+                self.obstacle[i, j, k] == 0
+                and self.hibm_pressure_outlet_reachable[i, j, k] == 0
+                and self.pressure_interface_matrix_diagonal[i, j, k] > 0.0
+            ):
+                ti.atomic_add(
+                    self.report_hibm_unreached_interface_diagonal_cells[None],
+                    1,
+                )
+                self._flag_unreached_interface_component_hit(
+                    i,
+                    j,
+                    k,
+                    component_count,
+                )
+        for i, j, k in self.obstacle:
+            if (
+                self.pressure_interface_coupling_active[i, j, k] == 1
+                and self.obstacle[i, j, k] == 0
+            ):
+                neighbor = self.pressure_interface_coupling_neighbor[i, j, k]
+                ni = neighbor.x
+                nj = neighbor.y
+                nk = neighbor.z
+                if (
+                    0 <= ni < self.nx
+                    and 0 <= nj < self.ny
+                    and 0 <= nk < self.nz
+                    and self.obstacle[ni, nj, nk] == 0
+                ):
+                    if self.hibm_pressure_outlet_reachable[i, j, k] == 0:
+                        ti.atomic_or(
+                            self.hibm_unreached_interface_cell_hit[i, j, k],
+                            1,
+                        )
+                        self._flag_unreached_interface_component_hit(
+                            i,
+                            j,
+                            k,
+                            component_count,
+                        )
+                    if self.hibm_pressure_outlet_reachable[ni, nj, nk] == 0:
+                        ti.atomic_or(
+                            self.hibm_unreached_interface_cell_hit[ni, nj, nk],
+                            1,
+                        )
+                        self._flag_unreached_interface_component_hit(
+                            ni,
+                            nj,
+                            nk,
+                            component_count,
+                        )
+        for i, j, k in self.obstacle:
+            if self.hibm_unreached_interface_cell_hit[i, j, k] != 0:
+                ti.atomic_add(
+                    self.report_hibm_unreached_interface_coupling_cells[None],
+                    1,
+                )
+        for c in range(32):
+            if self.hibm_unreached_interface_component_hit[c] != 0:
+                ti.atomic_add(
+                    self.report_hibm_unreached_interface_component_hits[None],
+                    1,
+                )
+
+    def _record_unreached_interface_hit_diagnostics(self) -> None:
+        """Run the device scan and read back the three scalar counters."""
+        self._scan_hibm_unreached_interface_hits_kernel(
+            int(self._hibm_pressure_unreached_component_count)
+        )
+        self.last_hibm_unreached_cells_with_interface_diagonal = int(
+            self.report_hibm_unreached_interface_diagonal_cells[None]
+        )
+        self.last_hibm_unreached_cells_with_interface_coupling = int(
+            self.report_hibm_unreached_interface_coupling_cells[None]
+        )
+        self.last_hibm_unreached_components_with_interface_hits = int(
+            self.report_hibm_unreached_interface_component_hits[None]
+        )
+
     @ti.kernel
     def _mg_prepare_level0_kernel(
         self,
@@ -4564,6 +4740,15 @@ class CartesianFluidSolver:
         anchor_unreached = bool(pressure_outlet_zmin) and (
             int(self._hibm_pressure_unreached_count) > 0
         )
+        self.last_hibm_unreached_cells_with_interface_diagonal = 0
+        self.last_hibm_unreached_cells_with_interface_coupling = 0
+        self.last_hibm_unreached_components_with_interface_hits = 0
+        if anchor_unreached:
+            # R2-H1: before the unreached-set mean subtraction anchors the
+            # flood-disconnected components, measure how much of that set the
+            # interface matrix terms already anchor/connect. Overlap here means
+            # the zero-mean projection perturbs a non-singular subsystem.
+            self._record_unreached_interface_hit_diagnostics()
 
         self._prepare_fv_multigrid_rhs(rhs_scale)
         self._fv_diagonal_kernel(self.fv_diag, outlet)
@@ -5234,6 +5419,21 @@ class CartesianFluidSolver:
             ),
             "cg_unreached_component_overflow": bool(
                 self.last_hibm_pressure_unreached_component_overflow
+            ),
+            "unreached_cells_with_interface_diagonal": int(
+                self.last_hibm_unreached_cells_with_interface_diagonal
+            ),
+            "unreached_cells_with_interface_coupling": int(
+                self.last_hibm_unreached_cells_with_interface_coupling
+            ),
+            "unreached_components_with_interface_hits": int(
+                self.last_hibm_unreached_components_with_interface_hits
+            ),
+            "hibm_pressure_component_labels_converged": bool(
+                self.last_hibm_pressure_component_labels_converged
+            ),
+            "hibm_solid_band_last_marked_increment": int(
+                self.last_hibm_solid_band_marked_increment
             ),
             "cg_restart_count": int(self.last_project_cg_restart_count),
             "cg_restart_count_measured": bool(
