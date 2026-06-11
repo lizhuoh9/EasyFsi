@@ -3916,6 +3916,99 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         # traction = (p_far_air - p_outside_water) * n = (10 - 2) * +z
         self.assertAlmostEqual(traction[2], 8.0, delta=1.0e-4)
 
+    def test_extended_inside_walk_closes_marker_behind_thick_band(self) -> None:
+        # 16^3 unit box: cell width 1/16 = 0.0625, cell center z_c(k) = (k + 0.5) / 16.
+        # Marker x = y = 0.53125 is exactly cell-center index 8, so trilinear
+        # sampling reduces to the single x = y = 8 column; z = 0.5 is the face
+        # between cells 7 and 8 (grid coordinate 7.5, k_near = 8), so the
+        # normal-aligned probe distance is exactly one cell width (0.0625).
+        #
+        # z layout (cell indices: centers -> role):
+        #   8..15: 0.53125..0.96875 -> air side, obstacle = 1
+        #   4..7 : 0.28125..0.46875 -> solid band + membrane thickness, obstacle = 1
+        #   0..3 : 0.03125..0.21875 -> water, obstacle = 0, pressure = 2.0
+        #
+        # Standard inside (-n) candidates probe z = 0.5 - {1.0, 1.5, 2.0, 2.5, 3.0}
+        # * 0.0625 = {0.4375, 0.40625, 0.375, 0.34375, 0.3125}; their trilinear
+        # supports {6,7}, {6}, {5,6}, {5}, {4,5} are all obstacle cells, so the
+        # standard ladder can never reach water. The first extended candidate at
+        # 3.6 * 0.0625 = 0.225 probes z = 0.275 (grid coordinate 3.9, support
+        # {3: 0.1, 4: 0.9}) and reaches water cell 3, i.e. the first water
+        # contact needs > 3x and <= 6x the normal grid spacing.
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(16, 16, 16),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((16, 16, 16), 2.0, dtype=np.float32)
+        fluid.pressure.from_numpy(pressure)
+        obstacle = np.zeros((16, 16, 16), dtype=np.int32)
+        obstacle[:, :, 8:] = 1
+        obstacle[:, :, 4:8] = 1
+        fluid.obstacle.from_numpy(obstacle)
+
+        default_report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+
+        self.assertEqual(default_report.valid_marker_count, 0)
+        self.assertEqual(default_report.invalid_marker_count, 1)
+        self.assertEqual(default_report.far_pressure_closed_marker_count, 0)
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            far_pressure_inside_probe_max_multiplier=6.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        self.assertEqual(report.far_pressure_closed_extended_marker_count, 1)
+        traction = markers.marker_traction_pa(0)
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        # traction = (p_inside_water - p_far_air) * n = (2 - 10) * +z
+        self.assertAlmostEqual(traction[2], -8.0, delta=1.0e-4)
+
+    def test_extended_walk_does_not_change_standard_reach_markers(self) -> None:
+        markers, fluid = self._water_below_air_above_fixture()
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            far_pressure_inside_probe_max_multiplier=6.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        self.assertEqual(report.far_pressure_closed_extended_marker_count, 0)
+        traction = markers.marker_traction_pa(0)
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        # Identical to test_far_pressure_closes_water_air_marker_with_known_
+        # outside_pressure: (2 - 10) * +z, untouched by the opt-in extended
+        # multiplier because the standard 1x candidate already reaches water.
+        self.assertAlmostEqual(traction[2], -8.0, delta=1.0e-4)
+
 
 if __name__ == "__main__":
     unittest.main()
