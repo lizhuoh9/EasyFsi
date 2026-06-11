@@ -4067,6 +4067,136 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         # = (2 - 2) * +z = 0.
         self.assertAlmostEqual(traction[2], 8.0, delta=1.0e-4)
 
+    def test_closure_survives_incomplete_viscous_gradient_stencil(self) -> None:
+        # S2-A4 red test. Production viscosity is nonzero, and the squid
+        # band obstacle slabs leave only 1-3 cell wide water gaps behind the
+        # membranes at the 2.5 mm grid: trilinear pressure is samplable
+        # inside such a gap, but _sample_velocity_gradient requires complete
+        # fluid neighbor pairs on all three axes, which a 1-cell gap can
+        # never provide along the gap normal. The merged per-candidate gate
+        # (weight AND gradient_valid) therefore rejects every candidate and
+        # silently drops the O(1e3 Pa) pressure drive because the O(0.1 Pa)
+        # viscous term is unsamplable - 4 orders of magnitude of signal lost
+        # to its own gate. In far-pressure closure regions the pressure
+        # "found" decision must survive an incomplete gradient stencil.
+        #
+        # 16^3 unit box: cell width 1/16 = 0.0625, centers z_c(k) = (k+0.5)/16.
+        # x = y = 0.53125 is exactly cell-center column 8 (single-column
+        # trilinear support, mirroring the extended-walk test). Water exists
+        # only in the 1-cell slab z index 7 (obstacle below: 0..6, above:
+        # 8..15). The marker sits one cell above the slab center, at
+        # z = 0.53125 (center of obstacle cell 8), normal +z (air side up):
+        #   outside (+n) candidates z = 0.59375..0.71875 are all obstacle ->
+        #     never found on either semantics;
+        #   inside (-n) 1.0x candidate z = 0.46875 = center of water cell 7 ->
+        #     pressure weight 1.0 (samplable), but the gradient z-axis pair
+        #     samples grid coordinates 7.0 and 8.0 and the 8.0 plane is fully
+        #     obstacle -> stencil incomplete -> the merged gate rejects it;
+        #   deeper candidates (1.5x..3x: z = 0.4375, 0.40625, 0.375, 0.34375)
+        #     sit half or fully inside the lower obstacle block (pressure
+        #     weight 0.5 then 0) and never complete a stencil either.
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.53125),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(16, 16, 16),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((16, 16, 16), 3.0, dtype=np.float32)
+        fluid.pressure.from_numpy(pressure)
+        obstacle = np.zeros((16, 16, 16), dtype=np.int32)
+        obstacle[:, :, :7] = 1
+        obstacle[:, :, 8:] = 1
+        fluid.obstacle.from_numpy(obstacle)
+
+        report = markers.sample_fluid_stress_to_marker_tractions(
+            fluid.velocity,
+            fluid.pressure,
+            fluid.obstacle,
+            fluid.cell_face_x_m,
+            fluid.cell_face_y_m,
+            fluid.cell_face_z_m,
+            fluid.cell_center_x_m,
+            fluid.cell_center_y_m,
+            fluid.cell_center_z_m,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            fluid.grid.grid_nodes,
+            viscosity_pa_s=2.0,
+            two_sided_pressure=True,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        self.assertEqual(report.far_pressure_closed_extended_marker_count, 0)
+        self.assertEqual(report.closure_gradient_missing_marker_count, 1)
+        traction = markers.marker_traction_pa(0)
+        # Pure pressure closure: (p_gap_water - p_far_air) * n = (3 - 10) * +z.
+        # The viscous term contributes exactly zero because no complete
+        # gradient stencil exists anywhere in the 1-cell gap (the unfound
+        # sides keep zero gradient matrices).
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[2], -7.0, delta=1.0e-4)
+
+    def test_closure_gradient_missing_is_zero_when_stencil_complete(self) -> None:
+        # Guard for the S2-A4 decoupling: deep water must NOT report a
+        # missing gradient. Same geometry as the basic closure test but with
+        # nonzero viscosity (the _sample helper hardcodes viscosity 0.0, so
+        # the call is written out in full). Paper check of the 8^3 fixture
+        # (cell width 0.125, water cells z 0..3 i.e. 4 cells deep, marker at
+        # z = 0.5, normal +z): the inside 1.0x candidate probes z = 0.375,
+        # grid coordinate (4.5, 4.5, 2.5); the gradient axis pairs sample at
+        # x in {4.0, 5.0}, y in {4.0, 5.0}, z in {2.0, 3.0}, and every
+        # trilinear support cell of those six samples lies inside water
+        # z 0..3 -> the stencil is complete, so pressure and gradient are
+        # both found at the first candidate and nothing is "missing".
+        markers, fluid = self._water_below_air_above_fixture()
+
+        report = markers.sample_fluid_stress_to_marker_tractions(
+            fluid.velocity,
+            fluid.pressure,
+            fluid.obstacle,
+            fluid.cell_face_x_m,
+            fluid.cell_face_y_m,
+            fluid.cell_face_z_m,
+            fluid.cell_center_x_m,
+            fluid.cell_center_y_m,
+            fluid.cell_center_z_m,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            fluid.grid.grid_nodes,
+            viscosity_pa_s=2.0,
+            two_sided_pressure=True,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        self.assertEqual(report.closure_gradient_missing_marker_count, 0)
+        traction = markers.marker_traction_pa(0)
+        # The velocity field is identically zero, so the (complete) gradient
+        # is the zero matrix and the traction equals the inviscid closure
+        # value (p_water - p_far_air) * n = (2 - 10) * +z.
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[2], -8.0, delta=1.0e-4)
+
 
 if __name__ == "__main__":
     unittest.main()
