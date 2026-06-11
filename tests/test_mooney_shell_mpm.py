@@ -1581,5 +1581,73 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
         self.assertLess(report.transfer_relative_error, 1.0e-4)
 
 
+class MooneyShellFullOutOfBoundsGuardTests(unittest.TestCase):
+    def test_tri_full_out_of_bounds_particle_set_raises_instead_of_zombie_zeroing(self) -> None:
+        mesh = SurfaceMesh(
+            vertices=np.array(
+                [
+                    [-0.004, -0.004, 0.0],
+                    [0.004, -0.004, 0.0],
+                    [-0.004, 0.004, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+            faces=np.array([[0, 1, 2]], dtype=np.int32),
+        )
+        state = TriMooneyShellMpmState(
+            mesh,
+            thickness_m=0.003,
+            density_kgm3=1040.0,
+            c1_pa=20.0,
+            c2_pa=10.0,
+            face_region_id=np.array([7], dtype=np.int32),
+            primary_region_id=7,
+            secondary_region_id=8,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.0025,
+            grid_nodes=(16, 16, 16),
+            bounds_padding_fraction=1.0,
+        )
+        positions = state.x.to_numpy()
+        positions[:, 0] += float(
+            state.bounds_max[0] - state.bounds_min[0] + 2.0 * state.dx[0]
+        )
+        state.x.from_numpy(positions.astype(np.float32))
+
+        skipped = state.advance_region_loads(
+            dt_s=1.0e-4,
+            primary_region_id=7,
+            secondary_region_id=8,
+            primary_area_load_npm2=(0.0, 0.0, -1000.0),
+            primary_interface_reaction_n=(0.0, 0.0, 0.0),
+            secondary_interface_reaction_n=(0.0, 0.0, 0.0),
+            read_report=False,
+        )
+
+        self.assertIsNone(skipped)
+        with self.assertRaisesRegex(RuntimeError, "outside the background grid"):
+            state.report()
+
+    def test_uv_full_out_of_bounds_particle_set_raises_instead_of_zombie_zeroing(self) -> None:
+        resolution = UvSphereResolution(latitude_bands=4, longitude_segments=8)
+        state = UvMooneyShellMpmState(
+            resolution,
+            radius_m=1.0,
+            thickness_m=0.05,
+            density_kgm3=1.0,
+            c1_pa=20.0,
+            c2_pa=10.0,
+            grid_nodes=(16, 16, 16),
+        )
+        positions = state.x.to_numpy()
+        positions[:, 0] += float(
+            state.bounds_max[0] - state.bounds_min[0] + 2.0 * state.dx[0]
+        )
+        state.x.from_numpy(positions.astype(np.float32))
+
+        with self.assertRaisesRegex(RuntimeError, "outside the background grid"):
+            state.step(dt_s=0.0, pressure_pa=0.0, velocity_damping=1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -884,5 +884,64 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
         self.assertLess(report.primary_mean_velocity_mps[2], 0.0)
 
 
+class NeoHookeanFullOutOfBoundsGuardTests(unittest.TestCase):
+    def test_full_out_of_bounds_particle_set_raises_instead_of_zombie_zeroing(self) -> None:
+        material = ecoflex_0010_material()
+        state = NeoHookeanMpmState(
+            particle_capacity=8,
+            bounds_min_m=(-1.0, -1.0, 0.5),
+            bounds_max_m=(1.0, 1.0, 2.0),
+            grid_nodes=(16, 16, 16),
+        )
+        state.initialize_box(
+            particle_counts=(2, 2, 2),
+            box_min_m=(-0.05, -0.05, 1.0),
+            box_max_m=(0.05, 0.05, 1.1),
+            density_kgm3=material.density_kgm3,
+        )
+        translated = state.x.to_numpy()
+        translated[:, 0] = float(state.bounds_max[0] + 2.0 * state.dx[0])
+        state.x.from_numpy(translated.astype(np.float32))
+
+        with self.assertRaisesRegex(RuntimeError, "outside the background grid"):
+            state.step(
+                dt_s=1.0e-5,
+                mu_pa=material.shear_modulus_pa,
+                lambda_pa=material.lame_lambda_pa,
+                primary_region_id=1,
+                secondary_region_id=2,
+            )
+
+    def test_partial_out_of_bounds_remains_a_counted_diagnostic(self) -> None:
+        material = ecoflex_0010_material()
+        state = NeoHookeanMpmState(
+            particle_capacity=8,
+            bounds_min_m=(-1.0, -1.0, 0.5),
+            bounds_max_m=(1.0, 1.0, 2.0),
+            grid_nodes=(16, 16, 16),
+        )
+        state.initialize_box(
+            particle_counts=(2, 2, 2),
+            box_min_m=(-0.05, -0.05, 1.0),
+            box_max_m=(0.05, 0.05, 1.1),
+            density_kgm3=material.density_kgm3,
+        )
+        translated = state.x.to_numpy()
+        translated[0, 0] = float(state.bounds_max[0] + 2.0 * state.dx[0])
+        state.x.from_numpy(translated.astype(np.float32))
+
+        report = state.step(
+            dt_s=1.0e-5,
+            mu_pa=material.shear_modulus_pa,
+            lambda_pa=material.lame_lambda_pa,
+            primary_region_id=1,
+            secondary_region_id=2,
+        )
+
+        self.assertIsNotNone(report)
+        self.assertEqual(report.particle_count, 8)
+        self.assertEqual(report.grid_out_of_bounds_particle_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
