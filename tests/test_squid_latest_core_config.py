@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import math
+import os
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from cases.squid_soft_robot import (
     CHECKPOINT_ARG_FINGERPRINT_FIELDS,
     DEFAULT_SOURCE_CONFIG,
     FINITE_REQUIRED_ROW_FIELDS,
+    RUN_CHECKPOINT_VERSION,
     ReducedSquidFSI,
     SquidReducedSpec,
     effective_fluid_substeps_for_grid,
@@ -4797,6 +4799,266 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             args = parse_args()
 
         self.assertTrue(args.interface_reaction_passivity_limit)
+
+
+class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
+    """C1/H1/H2/M1-M3 (2026-06-11): run checkpoints must carry the dynamic HIBM
+    sharp marker state, reject stale formats, write history atomically, persist
+    a closing checkpoint at loop exit, and guard solid out-of-bounds particles.
+    """
+
+    MARKER_STATE_FIELD_NAMES = ("x_gamma_m", "v_gamma_mps", "n_gamma", "A_gamma_m2")
+
+    @staticmethod
+    def _sharp_checkpoint_fixture():
+        runtime = TaichiRuntimeConfig(arch="cuda")
+        spec = SquidReducedSpec(
+            source_config_path="dummy.json",
+            fluid_bounds_min_m=(-0.01, -0.01, -0.01),
+            fluid_bounds_max_m=(0.01, 0.01, 0.01),
+            grid_nodes=(6, 6, 6),
+            dt_s=1.0e-4,
+            water_density_kgm3=1000.0,
+            water_viscosity_pa_s=1.0e-3,
+        )
+        simulator = ReducedSquidFSI(spec, runtime=runtime)
+        solid = NeoHookeanMpmState(
+            particle_capacity=1,
+            bounds_min_m=spec.fluid_bounds_min_m,
+            bounds_max_m=spec.fluid_bounds_max_m,
+            grid_nodes=spec.grid_nodes,
+            runtime=runtime,
+        )
+        solid.initialize_box(
+            particle_counts=(1, 1, 1),
+            box_min_m=(-0.001, -0.001, -0.001),
+            box_max_m=(0.001, 0.001, 0.001),
+            density_kgm3=1000.0,
+        )
+        solid.surface_normal[0] = (0.0, 0.0, 1.0)
+        solid.area_weight_m2[0] = 4.0e-6
+        solid.region_id[0] = 7
+        return runtime, simulator, solid
+
+    def test_run_checkpoint_version_is_3(self) -> None:
+        # H1: S2 changed the drive physics in a way the arg fingerprint cannot
+        # see, so pre-S2 checkpoints must be hard-rejected via a version bump.
+        self.assertEqual(RUN_CHECKPOINT_VERSION, 3)
+
+    def test_checkpoint_fingerprint_includes_diagnostic_neumann_rows_and_arch(
+        self,
+    ) -> None:
+        # H2: both are real argparse dests that change the numerical trajectory.
+        self.assertIn(
+            "diagnostic_disable_pressure_neumann_matrix_rows",
+            CHECKPOINT_ARG_FINGERPRINT_FIELDS,
+        )
+        self.assertIn("arch", CHECKPOINT_ARG_FINGERPRINT_FIELDS)
+
+    def test_checkpoint_roundtrip_preserves_sharp_marker_state(self) -> None:
+        # C1: markers advance by dt*v feedback and never re-converge to the
+        # solid after a bad resume, so the checkpoint must carry their state.
+        runtime, simulator, solid = self._sharp_checkpoint_fixture()
+        coupling = build_hibm_mpm_sharp_coupling_state(
+            fluid=simulator.fluid,
+            solid_mpm=solid,
+            runtime=runtime,
+        )
+        rest_position = coupling.markers.x_gamma_m.to_numpy()[:1].copy()
+        deformed_position = rest_position + np.asarray(
+            [[2.5e-3, -1.5e-3, 3.5e-3]], dtype=np.float32
+        )
+        deformed_velocity = np.asarray([[0.11, -0.07, 0.05]], dtype=np.float32)
+        deformed_normal = np.asarray([[0.0, 1.0, 0.0]], dtype=np.float32)
+        deformed_area = np.asarray([6.0e-6], dtype=np.float32)
+        coupling.markers.x_gamma_m.from_numpy(deformed_position)
+        coupling.markers.v_gamma_mps.from_numpy(deformed_velocity)
+        coupling.markers.n_gamma.from_numpy(deformed_normal)
+        coupling.markers.A_gamma_m2.from_numpy(deformed_area)
+        state = InterfaceReactionRelaxationState(relaxation=1.0)
+        args = SimpleNamespace(solid_model="neo_hookean_mpm")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_path = Path(temp_dir) / "restart.npz"
+            write_run_checkpoint(
+                checkpoint_path,
+                completed_step=5,
+                step_count=100,
+                full_pressure_waveform_steps=4000,
+                args=args,
+                simulator=simulator,
+                solid_mpm=solid,
+                interface_reaction_state=state,
+                sharp_coupling_state=coupling,
+            )
+            with np.load(checkpoint_path, allow_pickle=False) as payload:
+                for name in self.MARKER_STATE_FIELD_NAMES:
+                    self.assertIn(f"marker_{name}", payload)
+                self.assertTrue(bool(payload["has_marker_state"]))
+
+            resumed_coupling = build_hibm_mpm_sharp_coupling_state(
+                fluid=simulator.fluid,
+                solid_mpm=solid,
+                runtime=runtime,
+            )
+            completed_step, _ = load_run_checkpoint(
+                checkpoint_path,
+                args=args,
+                simulator=simulator,
+                solid_mpm=solid,
+                sharp_coupling_state=resumed_coupling,
+            )
+
+        self.assertEqual(completed_step, 5)
+        self.assertGreater(
+            float(np.abs(deformed_position - rest_position).max()), 1.0e-4
+        )
+        np.testing.assert_allclose(
+            resumed_coupling.markers.x_gamma_m.to_numpy()[:1],
+            deformed_position,
+            atol=1.0e-7,
+        )
+        np.testing.assert_allclose(
+            resumed_coupling.markers.v_gamma_mps.to_numpy()[:1],
+            deformed_velocity,
+            atol=1.0e-7,
+        )
+        np.testing.assert_allclose(
+            resumed_coupling.markers.n_gamma.to_numpy()[:1],
+            deformed_normal,
+            atol=1.0e-7,
+        )
+        np.testing.assert_allclose(
+            resumed_coupling.markers.A_gamma_m2.to_numpy()[:1],
+            deformed_area,
+            atol=1.0e-12,
+        )
+
+    def test_load_run_checkpoint_rejects_checkpoint_without_sharp_marker_state(
+        self,
+    ) -> None:
+        # C1 double insurance behind the H1 version bump: a checkpoint written
+        # without marker state must not silently resume a sharp-coupling run.
+        runtime, simulator, solid = self._sharp_checkpoint_fixture()
+        state = InterfaceReactionRelaxationState(relaxation=1.0)
+        args = SimpleNamespace(solid_model="neo_hookean_mpm")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_path = Path(temp_dir) / "restart.npz"
+            write_run_checkpoint(
+                checkpoint_path,
+                completed_step=5,
+                step_count=100,
+                full_pressure_waveform_steps=4000,
+                args=args,
+                simulator=simulator,
+                solid_mpm=solid,
+                interface_reaction_state=state,
+            )
+            coupling = build_hibm_mpm_sharp_coupling_state(
+                fluid=simulator.fluid,
+                solid_mpm=solid,
+                runtime=runtime,
+            )
+            with self.assertRaisesRegex(ValueError, "marker state"):
+                load_run_checkpoint(
+                    checkpoint_path,
+                    args=args,
+                    simulator=simulator,
+                    solid_mpm=solid,
+                    sharp_coupling_state=coupling,
+                )
+
+    def test_write_csv_is_atomic(self) -> None:
+        # M2: history.csv must be written tmp-then-replace like the checkpoint
+        # itself so a kill mid-write cannot truncate the resume history.
+        rows: list[dict[str, object]] = [
+            {"step": 1, "value": 0.5},
+            {"step": 2, "value": 1.5, "extra": "x"},
+        ]
+        replace_calls: list[tuple[str, str]] = []
+        real_replace = os.replace
+
+        def recording_replace(src, dst, *replace_args, **replace_kwargs):
+            replace_calls.append((str(src), str(dst)))
+            return real_replace(src, dst, *replace_args, **replace_kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "history.csv"
+            with patch("os.replace", side_effect=recording_replace):
+                write_csv(target, rows)
+
+            self.assertTrue(target.exists())
+            loaded = read_csv_rows(target)
+            self.assertEqual([path for path in Path(temp_dir).iterdir()], [target])
+
+        self.assertEqual(len(loaded), 2)
+        self.assertEqual(int(loaded[0]["step"]), 1)
+        self.assertEqual(loaded[1]["extra"], "x")
+        self.assertEqual(len(replace_calls), 1)
+        source_path, destination_path = replace_calls[0]
+        self.assertTrue(source_path.endswith(".tmp"))
+        self.assertEqual(destination_path, str(target))
+
+    def test_step_guard_rejects_solid_out_of_bounds_particles(self) -> None:
+        # M3: solid particles leaving the solid MPM grid must hard-stop the
+        # step instead of silently logging a nonzero count to history.csv.
+        from cases.squid_soft_robot import _raise_for_step_solid_out_of_bounds_guard
+
+        _raise_for_step_solid_out_of_bounds_guard({"step": 4})
+        _raise_for_step_solid_out_of_bounds_guard(
+            {"step": 4, "solid_mpm_grid_out_of_bounds_particle_count": 0}
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"solid_mpm_grid_out_of_bounds_particle_count=3",
+        ):
+            _raise_for_step_solid_out_of_bounds_guard(
+                {"step": 4, "solid_mpm_grid_out_of_bounds_particle_count": 3}
+            )
+
+    def test_step_guard_blocks_check_solid_out_of_bounds_particles(self) -> None:
+        # M3 wiring: both per-step guard blocks (sharp + legacy) must call the
+        # out-of-bounds guard inside the failure-artifact try block.
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _raise_for_step_solid_out_of_bounds_guard(", source)
+        guard_call_segments = source.split("cfl_limit=0.5,")[1:]
+        self.assertEqual(
+            len(guard_call_segments),
+            2,
+            msg="expected exactly the sharp and legacy per-step guard blocks",
+        )
+        for guard_call_segment in guard_call_segments:
+            guard_block = guard_call_segment.split("except Exception as exc:", 1)[0]
+            self.assertIn(
+                "_raise_for_step_solid_out_of_bounds_guard(row)",
+                guard_block,
+            )
+
+    def test_run_loop_exit_and_resume_wire_sharp_marker_checkpoint_state(self) -> None:
+        # C1 wiring + M1: the in-loop checkpoint writes and the resume load
+        # must pass the sharp coupling state, and the loop exit (wall-time
+        # break or normal completion) must persist a closing checkpoint.
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+
+        resume_block = source.split("if args.resume_from_checkpoint:", 1)[1].split(
+            "first_step = completed_step + 1",
+            1,
+        )[0]
+        self.assertIn("sharp_coupling_state=sharp_coupling_state", resume_block)
+
+        closing_block = source.split(
+            'partial_run_reason = "max_wall_time_s"',
+            2,
+        )[2].split("if sharp_case_runner_enabled:", 1)[0]
+        self.assertIn("write_run_checkpoint(", closing_block)
+        self.assertIn("sharp_coupling_state=sharp_coupling_state", closing_block)
+        self.assertIn('completed_step=int(rows[-1]["step"])', closing_block)
+
+        self.assertEqual(source.count("sharp_coupling_state=sharp_coupling_state"), 4)
+
 
 if __name__ == "__main__":
     unittest.main()
