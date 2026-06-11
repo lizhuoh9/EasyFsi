@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import unittest
 from types import MethodType
@@ -3645,6 +3645,21 @@ class UnreachedSetInterfaceHitObservabilityTests(unittest.TestCase):
             int(solver.last_hibm_unreached_components_with_interface_hits), 0
         )
         self.assertEqual(int(solver.last_hibm_solid_band_marked_increment), 0)
+
+class DivergenceFinalReportStagingShapeTests(unittest.TestCase):
+    def test_staging_arrays_cover_all_eighteen_report_slots(self) -> None:
+        # The final divergence report kernel statically iterates 18 slots
+        # (16 partition slots + 2 anchored-unreached slots added by the
+        # guard-split round). Staging arrays declared narrower than the
+        # static slot range are written and read out of bounds on every
+        # reported projection - undefined behavior in release kernels that
+        # pollutes the max/count lanes the long-run divergence guards read.
+        spec = FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3)
+        solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
+
+        self.assertEqual(tuple(solver.divergence_combined_sum.shape), (18,))
+        self.assertEqual(tuple(solver.divergence_combined_max.shape), (18,))
+        self.assertEqual(tuple(solver.divergence_combined_count.shape), (18,))
 
 
 if __name__ == "__main__":
