@@ -3880,7 +3880,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn("far_pressure_region_id=7", sharp_advance_call)
         self.assertIn("far_pressure_pa=pressure_pa", sharp_advance_call)
         self.assertIn(
-            "far_pressure_inside_probe_max_multiplier=6.0", sharp_advance_call
+            "far_pressure_inside_probe_max_multiplier=12.0", sharp_advance_call
         )
         sharp_pressure_setup = source.split("if sharp_case_runner_enabled:", 1)[
             1
