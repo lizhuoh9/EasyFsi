@@ -3872,6 +3872,50 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         self.assertEqual(report.invalid_marker_count, 1)
         self.assertEqual(report.far_pressure_closed_marker_count, 0)
 
+    def test_far_pressure_closure_is_orientation_agnostic(self) -> None:
+        # Mirrored fixture: water ABOVE the marker plane, dry side BELOW.
+        # The marker normal still points +z (into the water), so the dry side
+        # is now the INSIDE (-n) walk. The covariant two-sided formula
+        # (p_inside - p_outside) * n must close with p_inside := p_far and
+        # produce traction (p_far - p_water) * n, independent of which side
+        # of the CAD winding the fluid happens to be on.
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(8, 8, 8),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((8, 8, 8), 2.0, dtype=np.float32)
+        fluid.pressure.from_numpy(pressure)
+        obstacle = np.zeros((8, 8, 8), dtype=np.int32)
+        obstacle[:, :, :4] = 1
+        fluid.obstacle.from_numpy(obstacle)
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        traction = markers.marker_traction_pa(0)
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        # traction = (p_far_air - p_outside_water) * n = (10 - 2) * +z
+        self.assertAlmostEqual(traction[2], 8.0, delta=1.0e-4)
+
 
 if __name__ == "__main__":
     unittest.main()
