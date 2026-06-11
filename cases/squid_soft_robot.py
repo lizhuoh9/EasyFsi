@@ -5720,10 +5720,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             def advance_sharp_solid_substeps():
                 nonlocal solid_advance_wall_time_s
                 solid_wall_started_at = time.perf_counter()
-                solid_mpm.add_region_area_load(
-                    region_id=7,
-                    area_load_npm2=(0.0, 0.0, -pressure_pa),
-                )
+                # The waveform drive enters through the far-pressure closure in
+                # the marker traction sampling (region 7 below), so no direct
+                # solid area load is added here: the membrane feels
+                # (p_water - p_air) through scattered marker forces, which
+                # restores the added-mass back-pressure that a direct area
+                # load bypassed.
                 report = None
                 for _ in range(solid_mpm_substeps):
                     if args.solid_model == "tri_mooney_shell_mpm":
@@ -5774,6 +5776,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     ),
                     primary_region_id=7,
                     secondary_region_id=8,
+                    far_pressure_region_id=7,
+                    far_pressure_pa=pressure_pa,
                     fluid_dt_s=spec.dt_s,
                     fluid_substeps=effective_fluid_substeps,
                     projection_iterations=int(args.projection_iterations),

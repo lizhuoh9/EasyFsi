@@ -3850,19 +3850,33 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             atol=1.0e-6,
         )
 
-    def test_sharp_case_adds_axis_pressure_without_replacing_marker_traction(
+    def test_sharp_case_drives_main_membrane_via_far_pressure_closure(
         self,
     ) -> None:
+        # Contract updated 2026-06-11 (S2-A wiring): the old contract pinned a
+        # direct solid area load `(0, 0, -pressure_pa)` as the waveform drive.
+        # The 2-second run forensics proved that drive path is structurally
+        # one-way (the air side of the main membrane is outside the water
+        # domain, so two-sided marker sampling never validates and the solid
+        # free-falls without added-mass back-pressure). The waveform now
+        # enters as the known far-side pressure of the marker traction
+        # closure, and the direct area load is forbidden to prevent double
+        # counting the air pressure.
         source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
         sharp_solid_step = source.split("def advance_sharp_solid_substeps():", 1)[
             1
         ].split("fluid_wall_started_at", 1)[0]
 
-        self.assertIn("solid_mpm.add_region_area_load(", sharp_solid_step)
-        self.assertIn("area_load_npm2=(0.0, 0.0, -pressure_pa)", sharp_solid_step)
+        self.assertNotIn("solid_mpm.add_region_area_load(", sharp_solid_step)
         self.assertIn("solid_mpm.advance_with_external_forces(", sharp_solid_step)
         self.assertNotIn("solid_mpm.add_region_normal_pressure(", sharp_solid_step)
         self.assertNotIn("hibm_mpm_sharp case runner currently requires", source)
+        sharp_advance_call = source.split(
+            "sharp_report = sharp_coupling_state.advance_mpm_step(",
+            1,
+        )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
+        self.assertIn("far_pressure_region_id=7", sharp_advance_call)
+        self.assertIn("far_pressure_pa=pressure_pa", sharp_advance_call)
         sharp_pressure_setup = source.split("if sharp_case_runner_enabled:", 1)[
             1
         ].split("def advance_sharp_solid_substeps():", 1)[0]
