@@ -3771,6 +3771,108 @@ class HibmMpmSharpPathFailFastTests(unittest.TestCase):
                     primitive()
 
 
+class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
+    """S2-A red tests: known far-side pressure closure for water-air markers.
+
+    The squid main membrane has water on its inside (-n) and pressurized air
+    on its outside (+n); the air side is outside the fluid domain by
+    construction, so the strict both-sides rule can never validate those
+    markers at any grid resolution. The closure must be explicit opt-in per
+    region: assuming p_far on an unresolved thin WATER gap would inject
+    O(waveform) spurious force.
+    """
+
+    def _water_below_air_above_fixture(self):
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(8, 8, 8),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((8, 8, 8), 2.0, dtype=np.float32)
+        fluid.pressure.from_numpy(pressure)
+        obstacle = np.zeros((8, 8, 8), dtype=np.int32)
+        obstacle[:, :, 4:] = 1
+        fluid.obstacle.from_numpy(obstacle)
+        return markers, fluid
+
+    def _sample(self, markers, fluid, **far_pressure_kwargs):
+        return markers.sample_fluid_stress_to_marker_tractions(
+            fluid.velocity,
+            fluid.pressure,
+            fluid.obstacle,
+            fluid.cell_face_x_m,
+            fluid.cell_face_y_m,
+            fluid.cell_face_z_m,
+            fluid.cell_center_x_m,
+            fluid.cell_center_y_m,
+            fluid.cell_center_z_m,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            fluid.grid.grid_nodes,
+            viscosity_pa_s=0.0,
+            two_sided_pressure=True,
+            **far_pressure_kwargs,
+        )
+
+    def test_far_pressure_closes_water_air_marker_with_known_outside_pressure(self) -> None:
+        markers, fluid = self._water_below_air_above_fixture()
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        traction = markers.marker_traction_pa(0)
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        # traction = (p_inside_water - p_far_air) * n = (2 - 10) * +z
+        self.assertAlmostEqual(traction[2], -8.0, delta=1.0e-4)
+
+    def test_far_pressure_closure_is_opt_in_per_region_not_automatic(self) -> None:
+        markers, fluid = self._water_below_air_above_fixture()
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=-1,
+            far_pressure_pa=0.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 0)
+        self.assertEqual(report.invalid_marker_count, 1)
+        self.assertEqual(report.far_pressure_closed_marker_count, 0)
+
+    def test_far_pressure_does_not_relax_other_regions(self) -> None:
+        markers, fluid = self._water_below_air_above_fixture()
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=8,
+            far_pressure_pa=10.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 0)
+        self.assertEqual(report.invalid_marker_count, 1)
+        self.assertEqual(report.far_pressure_closed_marker_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
 
