@@ -15,6 +15,17 @@ def _vector3(value: tuple[float, float, float], name: str) -> tuple[float, float
     return (float(value[0]), float(value[1]), float(value[2]))
 
 
+def _raise_if_all_particles_out_of_bounds(
+    particle_count: int,
+    grid_out_of_bounds_particle_count: int,
+) -> None:
+    if particle_count > 0 and grid_out_of_bounds_particle_count == particle_count:
+        raise RuntimeError(
+            f"all {particle_count} MPM particles are outside the background grid; "
+            "the solid has left the simulation domain"
+        )
+
+
 @dataclass(frozen=True)
 class NeoHookeanMpmReport:
     particle_count: int
@@ -919,6 +930,7 @@ class NeoHookeanMpmState:
         values = snapshot[:28]
         counts = snapshot[28:34]
         self.last_report_host_reads = 1
+        _raise_if_all_particles_out_of_bounds(int(self.particle_count), int(counts[1]))
         total_volume_m3 = float(values[1])
         particle_spacing_m = 0.0
         if total_volume_m3 > 0.0 and self.particle_count > 0:

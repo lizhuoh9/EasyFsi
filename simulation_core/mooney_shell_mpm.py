@@ -90,6 +90,17 @@ def _vector3(value: tuple[float, float, float], name: str) -> tuple[float, float
     return (float(value[0]), float(value[1]), float(value[2]))
 
 
+def _raise_if_all_particles_out_of_bounds(
+    particle_count: int,
+    grid_out_of_bounds_particle_count: int,
+) -> None:
+    if particle_count > 0 and grid_out_of_bounds_particle_count == particle_count:
+        raise RuntimeError(
+            f"all {particle_count} MPM particles are outside the background grid; "
+            "the solid has left the simulation domain"
+        )
+
+
 @ti.data_oriented
 class TriMooneyShellMpmState:
     """Paper-style Mooney membrane MPM on an explicit triangle surface mesh."""
@@ -1245,6 +1256,7 @@ class TriMooneyShellMpmState:
         values = snapshot[:32]
         counts = snapshot[32:37]
         self.last_report_host_reads = 1
+        _raise_if_all_particles_out_of_bounds(int(self.particle_count), int(counts[1]))
         force_l2 = float(values[0]) ** 0.5
         total_area_m2 = float(values[4])
         particle_spacing_m = 0.0
@@ -2028,6 +2040,7 @@ class UvMooneyShellMpmState:
         values = snapshot[:10]
         counts = snapshot[10:14]
         self.last_report_host_reads = 1
+        _raise_if_all_particles_out_of_bounds(int(self.particle_count), int(counts[2]))
         force_l2 = float(values[0]) ** 0.5
         return UvMooneyShellMpmReport(
             particle_count=self.particle_count,
