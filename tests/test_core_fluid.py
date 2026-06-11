@@ -3489,5 +3489,163 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
                     )
 
 
+class UnreachedSetInterfaceHitObservabilityTests(unittest.TestCase):
+    """R2-H1: the flood-unreachable set used for nullspace anchoring can overlap
+    rows that the pressure-interface matrix terms actually anchor/connect. The
+    projection report must count those overlaps so the mean-subtraction policy
+    can be audited before any numerical-semantics change."""
+
+    def test_fv_cg_reports_unreached_set_interface_hit_diagnostics(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(9, 4, 9), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((9, 4, 9), dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        obstacle[2, 2, 4] = 0
+        obstacle[2, 2, 5] = 0
+        obstacle[6, 2, 6] = 0
+        solver.obstacle.from_numpy(obstacle)
+        unreached = solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        self.assertEqual(unreached, 3)
+        self.assertEqual(solver.last_hibm_pressure_unreached_component_count, 2)
+        # Pocket component A = {(2,2,4), (2,2,5)}; pocket component B = {(6,2,6)}.
+        # Interface diagonal anchors one cell of component A directly.
+        solver.pressure_interface_matrix_diagonal[2, 2, 4] = 4.0
+        # Interface coupling edge owned by a reachable outlet-layer cell points
+        # into pocket component B, so B is matrix-connected to the reachable
+        # region even though the 6-neighbor flood cannot see the edge.
+        cell_volume_m3 = float(solver.dx * solver.dy * solver.dz)
+        transmissibility = 0.25
+        solver.pressure_interface_coupling_active[3, 2, 0] = 1
+        solver.pressure_interface_coupling_neighbor[3, 2, 0] = (6, 2, 6)
+        solver.pressure_interface_coupling_coefficient[3, 2, 0] = transmissibility
+        solver.pressure_interface_matrix_diagonal[3, 2, 0] = (
+            transmissibility / cell_volume_m3
+        )
+        solver.pressure_interface_matrix_diagonal[6, 2, 6] = (
+            transmissibility / cell_volume_m3
+        )
+
+        report = solver.project(
+            iterations=200,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+        )
+
+        # (2,2,4) and (6,2,6) carry interface diagonal terms while unreached.
+        self.assertEqual(int(report["unreached_cells_with_interface_diagonal"]), 2)
+        # (6,2,6) is the target row of an active interface coupling edge.
+        self.assertEqual(int(report["unreached_cells_with_interface_coupling"]), 1)
+        # Both pocket components are hit; each is counted exactly once.
+        self.assertEqual(int(report["unreached_components_with_interface_hits"]), 2)
+        self.assertEqual(
+            int(solver.last_hibm_unreached_cells_with_interface_diagonal), 2
+        )
+        self.assertEqual(
+            int(solver.last_hibm_unreached_cells_with_interface_coupling), 1
+        )
+        self.assertEqual(
+            int(solver.last_hibm_unreached_components_with_interface_hits), 2
+        )
+
+    def test_fv_cg_reports_zero_interface_hits_for_purely_disconnected_pockets(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(9, 4, 9), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((9, 4, 9), dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        obstacle[2, 2, 4] = 0
+        obstacle[2, 2, 5] = 0
+        solver.obstacle.from_numpy(obstacle)
+        unreached = solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        self.assertEqual(unreached, 2)
+
+        report = solver.project(
+            iterations=200,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+        )
+
+        self.assertEqual(int(report["unreached_cells_with_interface_diagonal"]), 0)
+        self.assertEqual(int(report["unreached_cells_with_interface_coupling"]), 0)
+        self.assertEqual(int(report["unreached_components_with_interface_hits"]), 0)
+
+    def test_projection_report_exposes_band_and_label_budget_flags(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        solver.velocity_dirichlet_boundary_active[0, 2, 2] = 1
+        solver.velocity_dirichlet_boundary_active[1, 2, 2] = 1
+        solver.velocity_dirichlet_boundary_active[0, 3, 2] = 1
+        solver.velocity_dirichlet_boundary_active[0, 2, 3] = 1
+        masked = solver.mark_hibm_solid_band_nonprojectable_cells(
+            pressure_outlet_zmin=False,
+        )
+        self.assertEqual(masked, 1)
+        self.assertEqual(int(solver.last_hibm_solid_band_marked_increment), 1)
+        unreached = solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        self.assertEqual(unreached, 0)
+        self.assertTrue(solver.last_hibm_pressure_reachability_converged)
+        self.assertTrue(solver.last_hibm_pressure_component_labels_converged)
+
+        report = solver.project(
+            iterations=60,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+        )
+
+        self.assertEqual(int(report["hibm_solid_band_last_marked_increment"]), 1)
+        self.assertTrue(bool(report["hibm_pressure_component_labels_converged"]))
+        self.assertTrue(bool(report["hibm_pressure_reachability_converged"]))
+
+    def test_restore_state_resets_reachability_and_interface_hit_flags(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        solver.save_state()
+        solver.last_hibm_pressure_unreached_component_overflow = True
+        solver.last_hibm_pressure_reachability_converged = False
+        solver.last_hibm_pressure_reachability_sweeps = 7
+        solver.last_hibm_pressure_reachability_reused = True
+        solver.last_hibm_pressure_component_labels_converged = False
+        solver.last_hibm_unreached_cells_with_interface_diagonal = 3
+        solver.last_hibm_unreached_cells_with_interface_coupling = 2
+        solver.last_hibm_unreached_components_with_interface_hits = 1
+        solver.last_hibm_solid_band_marked_increment = 4
+
+        solver.restore_state()
+
+        self.assertFalse(solver.last_hibm_pressure_unreached_component_overflow)
+        self.assertTrue(solver.last_hibm_pressure_reachability_converged)
+        self.assertEqual(int(solver.last_hibm_pressure_reachability_sweeps), 0)
+        self.assertFalse(solver.last_hibm_pressure_reachability_reused)
+        self.assertTrue(solver.last_hibm_pressure_component_labels_converged)
+        self.assertEqual(
+            int(solver.last_hibm_unreached_cells_with_interface_diagonal), 0
+        )
+        self.assertEqual(
+            int(solver.last_hibm_unreached_cells_with_interface_coupling), 0
+        )
+        self.assertEqual(
+            int(solver.last_hibm_unreached_components_with_interface_hits), 0
+        )
+        self.assertEqual(int(solver.last_hibm_solid_band_marked_increment), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
