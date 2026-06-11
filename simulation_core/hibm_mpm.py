@@ -45,6 +45,7 @@ class HibmMpmFluidStressSampleReport:
     two_sided_pressure_marker_count: int = 0
     viscous_gradient_invalid_marker_count: int = 0
     far_pressure_closed_marker_count: int = 0
+    far_pressure_closed_extended_marker_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,10 @@ class HibmMpmSurfaceMarkers:
             shape=(),
         )
         self.report_stress_far_pressure_closed_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_stress_far_pressure_closed_extended_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -965,6 +970,7 @@ class HibmMpmSurfaceMarkers:
         two_sided_pressure: ti.i32,
         far_pressure_region_id: ti.i32,
         far_pressure_pa: ti.f32,
+        far_pressure_inside_probe_max_multiplier: ti.f32,
     ):
         self.report_stress_valid_marker_count[None] = 0
         self.report_stress_invalid_marker_count[None] = 0
@@ -972,6 +978,7 @@ class HibmMpmSurfaceMarkers:
         self.report_stress_two_sided_pressure_marker_count[None] = 0
         self.report_stress_viscous_gradient_invalid_marker_count[None] = 0
         self.report_stress_far_pressure_closed_marker_count[None] = 0
+        self.report_stress_far_pressure_closed_extended_marker_count[None] = 0
         for marker in range(marker_count):
             position = self.x_gamma_m[marker]
             normal = self.n_gamma[marker]
@@ -1017,6 +1024,7 @@ class HibmMpmSurfaceMarkers:
                 inside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
                 outside_found = 0
                 inside_found = 0
+                inside_found_extended = 0
                 for probe_index in ti.static(range(5)):
                     probe_distance = probe_distance_m * (
                         1.0 + 0.5 * ti.cast(probe_index, ti.f32)
@@ -1113,6 +1121,71 @@ class HibmMpmSurfaceMarkers:
                             inside_pressure = sample_pressure
                             inside_gradient = sample_gradient
                             inside_found = 1
+                # S2-A3 extended inside (-n) walk: opt-in, far-pressure
+                # closure regions only. It runs strictly after the standard
+                # ladder above failed to find inside water within 3x, and
+                # extends the reach uniformly to the requested multiplier.
+                # The outside (+n) walk is intentionally never extended.
+                if (
+                    far_pressure_region_id != -1
+                    and self.region_id[marker] == far_pressure_region_id
+                    and inside_found == 0
+                    and far_pressure_inside_probe_max_multiplier > 3.0
+                ):
+                    for probe_index in ti.static(range(5)):
+                        probe_distance = probe_distance_m * (
+                            3.0
+                            + (far_pressure_inside_probe_max_multiplier - 3.0)
+                            * (ti.cast(probe_index, ti.f32) + 1.0)
+                            / 5.0
+                        )
+                        if inside_found == 0:
+                            inside_position = position - normal * probe_distance
+                            inside_coordinate = self._grid_coordinate_from_fields(
+                                inside_position,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            sample_pressure, sample_weight = self._sample_pressure_trilinear(
+                                pressure_field,
+                                obstacle_field,
+                                inside_coordinate.x,
+                                inside_coordinate.y,
+                                inside_coordinate.z,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            sample_gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                            sample_gradient_valid = 1
+                            if viscosity_pa_s > 0.0:
+                                sample_gradient, sample_gradient_valid = (
+                                    self._sample_velocity_gradient(
+                                        velocity_field,
+                                        obstacle_field,
+                                        inside_coordinate.x,
+                                        inside_coordinate.y,
+                                        inside_coordinate.z,
+                                        nx,
+                                        ny,
+                                        nz,
+                                        cell_center_x_m,
+                                        cell_center_y_m,
+                                        cell_center_z_m,
+                                    )
+                                )
+                            if sample_weight > 1.0e-12 and sample_gradient_valid == 1:
+                                inside_pressure = sample_pressure
+                                inside_gradient = sample_gradient
+                                inside_found = 1
+                                inside_found_extended = 1
                 if outside_found == 1 and inside_found == 1:
                     pressure_traction = (inside_pressure - outside_pressure) * normal
                     pressure_sample_valid = True
@@ -1135,6 +1208,11 @@ class HibmMpmSurfaceMarkers:
                         self.report_stress_far_pressure_closed_marker_count[None],
                         1,
                     )
+                    if inside_found_extended == 1:
+                        ti.atomic_add(
+                            self.report_stress_far_pressure_closed_extended_marker_count[None],
+                            1,
+                        )
                 elif (
                     far_pressure_region_id != -1
                     and self.region_id[marker] == far_pressure_region_id
@@ -1210,6 +1288,7 @@ class HibmMpmSurfaceMarkers:
         two_sided_pressure: bool = False,
         far_pressure_region_id: int = -1,
         far_pressure_pa: float = 0.0,
+        far_pressure_inside_probe_max_multiplier: float = 3.0,
     ) -> HibmMpmFluidStressSampleReport:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
@@ -1221,6 +1300,11 @@ class HibmMpmSurfaceMarkers:
         far_pressure = float(far_pressure_pa)
         if not math.isfinite(far_pressure):
             raise ValueError("far_pressure_pa must be a finite number")
+        far_inside_probe_max = float(far_pressure_inside_probe_max_multiplier)
+        if not math.isfinite(far_inside_probe_max) or far_inside_probe_max < 3.0:
+            raise ValueError(
+                "far_pressure_inside_probe_max_multiplier must be finite and >= 3.0"
+            )
         self._sample_fluid_stress_to_marker_tractions_kernel(
             velocity_field,
             pressure_field,
@@ -1242,6 +1326,7 @@ class HibmMpmSurfaceMarkers:
             1 if bool(two_sided_pressure) else 0,
             far_region_id,
             far_pressure,
+            far_inside_probe_max,
         )
         return HibmMpmFluidStressSampleReport(
             valid_marker_count=int(self.report_stress_valid_marker_count[None]),
@@ -1257,6 +1342,9 @@ class HibmMpmSurfaceMarkers:
             ),
             far_pressure_closed_marker_count=int(
                 self.report_stress_far_pressure_closed_marker_count[None]
+            ),
+            far_pressure_closed_extended_marker_count=int(
+                self.report_stress_far_pressure_closed_extended_marker_count[None]
             ),
         )
 
@@ -4452,6 +4540,7 @@ class HibmMpmSharpCouplingState:
         secondary_region_id: int = 0,
         far_pressure_region_id: int = -1,
         far_pressure_pa: float = 0.0,
+        far_pressure_inside_probe_max_multiplier: float = 3.0,
         fluid_dt_s: float | None = None,
         fluid_substeps: int = 1,
         projection_iterations: int = 40,
@@ -4494,6 +4583,9 @@ class HibmMpmSharpCouplingState:
             secondary_region_id=int(secondary_region_id),
             far_pressure_region_id=int(far_pressure_region_id),
             far_pressure_pa=float(far_pressure_pa),
+            far_pressure_inside_probe_max_multiplier=float(
+                far_pressure_inside_probe_max_multiplier
+            ),
             fluid_dt_s=fluid_dt_s,
             fluid_substeps=int(fluid_substeps),
             projection_iterations=int(projection_iterations),
@@ -4532,6 +4624,7 @@ class HibmMpmSharpCouplingState:
         secondary_region_id: int,
         far_pressure_region_id: int = -1,
         far_pressure_pa: float = 0.0,
+        far_pressure_inside_probe_max_multiplier: float = 3.0,
         fluid_dt_s: float | None = None,
         fluid_substeps: int = 1,
         projection_iterations: int = 40,
@@ -4572,6 +4665,9 @@ class HibmMpmSharpCouplingState:
             secondary_region_id=int(secondary_region_id),
             far_pressure_region_id=int(far_pressure_region_id),
             far_pressure_pa=float(far_pressure_pa),
+            far_pressure_inside_probe_max_multiplier=float(
+                far_pressure_inside_probe_max_multiplier
+            ),
             fluid_dt_s=fluid_dt_s,
             fluid_substeps=int(fluid_substeps),
             projection_iterations=int(projection_iterations),
@@ -4614,6 +4710,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     secondary_region_id: int = 0,
     far_pressure_region_id: int = -1,
     far_pressure_pa: float = 0.0,
+    far_pressure_inside_probe_max_multiplier: float = 3.0,
     dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -5106,6 +5203,9 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         two_sided_pressure=True,
         far_pressure_region_id=int(far_pressure_region_id),
         far_pressure_pa=float(far_pressure_pa),
+        far_pressure_inside_probe_max_multiplier=float(
+            far_pressure_inside_probe_max_multiplier
+        ),
     )
     markers.compute_marker_forces()
     marker_force_report = markers.aggregate_region_forces(
@@ -5164,6 +5264,7 @@ def advance_hibm_mpm_sharp_mpm_step(
     secondary_region_id: int = 0,
     far_pressure_region_id: int = -1,
     far_pressure_pa: float = 0.0,
+    far_pressure_inside_probe_max_multiplier: float = 3.0,
     fluid_dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -5228,6 +5329,9 @@ def advance_hibm_mpm_sharp_mpm_step(
         secondary_region_id=int(secondary_region_id),
         far_pressure_region_id=int(far_pressure_region_id),
         far_pressure_pa=float(far_pressure_pa),
+        far_pressure_inside_probe_max_multiplier=float(
+            far_pressure_inside_probe_max_multiplier
+        ),
         dt_s=fluid_dt_s,
         fluid_substeps=int(fluid_substeps),
         projection_iterations=int(projection_iterations),
@@ -5620,6 +5724,9 @@ def hibm_mpm_sharp_step_summary(
         "hibm_full_stress_far_pressure_closed_marker_count": (
             load.fluid_stress.far_pressure_closed_marker_count
         ),
+        "hibm_full_stress_far_pressure_closed_extended_marker_count": (
+            load.fluid_stress.far_pressure_closed_extended_marker_count
+        ),
         "hibm_marker_primary_count": marker_forces.primary_marker_count,
         "hibm_marker_secondary_count": marker_forces.secondary_marker_count,
         "hibm_marker_total_count": marker_forces.total_marker_count,
@@ -5743,6 +5850,7 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
     secondary_region_id: int,
     far_pressure_region_id: int = -1,
     far_pressure_pa: float = 0.0,
+    far_pressure_inside_probe_max_multiplier: float = 3.0,
     fluid_dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -5799,6 +5907,9 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
         secondary_region_id=int(secondary_region_id),
         far_pressure_region_id=int(far_pressure_region_id),
         far_pressure_pa=float(far_pressure_pa),
+        far_pressure_inside_probe_max_multiplier=float(
+            far_pressure_inside_probe_max_multiplier
+        ),
         fluid_dt_s=fluid_dt_s,
         fluid_substeps=int(fluid_substeps),
         projection_iterations=int(projection_iterations),
