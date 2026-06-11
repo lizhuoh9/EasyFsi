@@ -4009,6 +4009,64 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         # multiplier because the standard 1x candidate already reaches water.
         self.assertAlmostEqual(traction[2], -8.0, delta=1.0e-4)
 
+    def test_extended_walk_must_not_bypass_mirrored_closure_through_thin_solid(
+        self,
+    ) -> None:
+        # Mirrored orientation (water OUTSIDE on +n, structurally dry side on
+        # the INSIDE walk) with deep unrelated water beyond the dry band.
+        # 16^3 unit box, spacing 0.0625; marker at z=0.5, normal +z.
+        #   cells z 8..15  : water above (outside walk finds it at 1.0x)
+        #   cells z 4..7   : dry band (standard inside ladder, supports
+        #                    {6,7}/{6}/{5,6}/{5}/{4,5}, never reaches water)
+        #   cells z 0..3   : deep unrelated water, first reachable by the
+        #                    extended candidate 3.6x (z=0.275, support
+        #                    {3: 0.1, 4: 0.9})
+        # Without the outside_found == 0 gate the extended walk "tunnels" to
+        # the deep water and silently migrates the marker from the mirrored
+        # closure (p_far - p_water) * n to a spurious two-sided sample
+        # (p_deep - p_water) * n, dropping the drive pressure entirely. The
+        # marker must stay on the mirrored closure branch instead.
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(16, 16, 16),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((16, 16, 16), 2.0, dtype=np.float32)
+        fluid.pressure.from_numpy(pressure)
+        obstacle = np.zeros((16, 16, 16), dtype=np.int32)
+        obstacle[:, :, 4:8] = 1
+        fluid.obstacle.from_numpy(obstacle)
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            far_pressure_inside_probe_max_multiplier=6.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        self.assertEqual(report.far_pressure_closed_extended_marker_count, 0)
+        traction = markers.marker_traction_pa(0)
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        # Mirrored closure: (p_far_air - p_outside_water) * n = (10 - 2) * +z.
+        # The buggy tunneling path would instead give (p_deep - p_outside) * n
+        # = (2 - 2) * +z = 0.
+        self.assertAlmostEqual(traction[2], 8.0, delta=1.0e-4)
+
 
 if __name__ == "__main__":
     unittest.main()
