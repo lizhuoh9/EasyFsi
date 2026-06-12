@@ -50,6 +50,7 @@ class HibmMpmFluidStressSampleReport:
     far_pressure_node_anchor_closed_marker_count: int = 0
     closure_gradient_missing_marker_count: int = 0
     far_pressure_outside_suppressed_marker_count: int = 0
+    two_sided_extended_marker_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -317,6 +318,10 @@ class HibmMpmSurfaceMarkers:
             shape=(),
         )
         self.report_stress_far_pressure_outside_suppressed_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_stress_two_sided_extended_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -1161,6 +1166,7 @@ class HibmMpmSurfaceMarkers:
         far_pressure_region_id: ti.i32,
         far_pressure_pa: ti.f32,
         far_pressure_inside_probe_max_multiplier: ti.f32,
+        two_sided_probe_max_multiplier: ti.f32,
         use_pressure_anchor_fallback: ti.i32,
         node_anchor_available: ti.i32,
         use_sampling_obstacle: ti.i32,
@@ -1176,6 +1182,7 @@ class HibmMpmSurfaceMarkers:
         self.report_stress_far_pressure_node_anchor_closed_marker_count[None] = 0
         self.report_stress_closure_gradient_missing_marker_count[None] = 0
         self.report_stress_far_pressure_outside_suppressed_marker_count[None] = 0
+        self.report_stress_two_sided_extended_marker_count[None] = 0
         for marker in range(marker_count):
             position = self.x_gamma_m[marker]
             normal = self.n_gamma[marker]
@@ -1240,6 +1247,7 @@ class HibmMpmSurfaceMarkers:
                 inside_pressure_found = 0
                 inside_gradient_found = 0
                 inside_found_extended = 0
+                two_sided_found_extended = 0
                 closure_region_marker = 0
                 if (
                     far_pressure_region_id != -1
@@ -1502,6 +1510,164 @@ class HibmMpmSurfaceMarkers:
                             ):
                                 inside_gradient = sample_gradient
                                 inside_gradient_found = 1
+                # S2-A10 two-sided extended walk: opt-in, NON-closure
+                # markers only - closure regions keep their dedicated
+                # extension above and their branch priority below. The
+                # S2-A8'' dedicated sampling view starves genuinely thin
+                # features: a thin tail fin sits entirely inside its own
+                # row-cloud envelope, so BOTH standard walks (max 3.0x)
+                # run dry and the marker silently drops to zero traction
+                # (two-sided valid population 171-1017 avg 210 before
+                # A8'' -> ~0 after; tail_marker_participates True ->
+                # False). When armed (two_sided_probe_max_multiplier >
+                # 3.0; the case wires 12.0) and ONLY when the standard
+                # ladder found nothing on EITHER side, re-walk BOTH sides
+                # out to the requested multiplier with the same
+                # 5-candidate ladder spacing, the same sampling view and
+                # the S2-A4 decoupled acceptance the closure extension
+                # uses. H1-type crossing guard, applied per side: an
+                # extension rung whose nearest cell is a projection-view
+                # obstacle has crossed foreign solid - water beyond it
+                # belongs to the opposite side / another compartment and
+                # is never accepted (the closure extension's
+                # outside_found gate carries the same do-not-tunnel
+                # semantics; here both sides walk, so the guard is per
+                # side). The marker's own sub-envelope feature (<= 3.0x,
+                # e.g. the fin's own thickness) can never set the flag:
+                # only extension rungs are tested. Both sides share one
+                # fused runtime rung loop (S2-A5 single-copy style: the
+                # trilinear / gradient sampling bodies are inlined once,
+                # not once per side; even rung indices walk +n, odd walk
+                # -n, preserving the standard walk's outside-then-inside
+                # serial order and its carried-flag determinism).
+                if (
+                    closure_region_marker == 0
+                    and inside_pressure_found == 0
+                    and outside_pressure_found == 0
+                    and two_sided_probe_max_multiplier > 3.0
+                ):
+                    outside_crossed_solid = 0
+                    inside_crossed_solid = 0
+                    for extension_index in range(10):
+                        rung_distance = probe_distance_m * (
+                            3.0
+                            + (two_sided_probe_max_multiplier - 3.0)
+                            * (ti.cast(extension_index // 2, ti.f32) + 1.0)
+                            / 5.0
+                        )
+                        side_is_inside = extension_index % 2
+                        side_sign = 1.0
+                        side_crossed = outside_crossed_solid
+                        side_pressure_found = outside_pressure_found
+                        side_gradient_found = outside_gradient_found
+                        if side_is_inside == 1:
+                            side_sign = -1.0
+                            side_crossed = inside_crossed_solid
+                            side_pressure_found = inside_pressure_found
+                            side_gradient_found = inside_gradient_found
+                        if side_crossed == 0 and (
+                            side_pressure_found == 0 or side_gradient_found == 0
+                        ):
+                            extension_position = position + normal * (
+                                side_sign * rung_distance
+                            )
+                            extension_coordinate = self._grid_coordinate_from_fields(
+                                extension_position,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            near_extension_i = ti.min(
+                                ti.max(
+                                    ti.floor(extension_coordinate.x + 0.5, ti.i32),
+                                    0,
+                                ),
+                                nx - 1,
+                            )
+                            near_extension_j = ti.min(
+                                ti.max(
+                                    ti.floor(extension_coordinate.y + 0.5, ti.i32),
+                                    0,
+                                ),
+                                ny - 1,
+                            )
+                            near_extension_k = ti.min(
+                                ti.max(
+                                    ti.floor(extension_coordinate.z + 0.5, ti.i32),
+                                    0,
+                                ),
+                                nz - 1,
+                            )
+                            if (
+                                obstacle_field[
+                                    near_extension_i,
+                                    near_extension_j,
+                                    near_extension_k,
+                                ]
+                                != 0
+                            ):
+                                if side_is_inside == 1:
+                                    inside_crossed_solid = 1
+                                else:
+                                    outside_crossed_solid = 1
+                            else:
+                                sample_pressure, sample_weight = self._sample_pressure_trilinear_sampling_view(
+                                    pressure_field,
+                                    obstacle_field,
+                                    sampling_obstacle_field,
+                                    use_sampling_obstacle,
+                                    extension_coordinate.x,
+                                    extension_coordinate.y,
+                                    extension_coordinate.z,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                                sample_gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                                sample_gradient_valid = 1
+                                if viscosity_pa_s > 0.0:
+                                    sample_gradient, sample_gradient_valid = (
+                                        self._sample_velocity_gradient_sampling_view(
+                                            velocity_field,
+                                            obstacle_field,
+                                            sampling_obstacle_field,
+                                            use_sampling_obstacle,
+                                            extension_coordinate.x,
+                                            extension_coordinate.y,
+                                            extension_coordinate.z,
+                                            nx,
+                                            ny,
+                                            nz,
+                                            cell_center_x_m,
+                                            cell_center_y_m,
+                                            cell_center_z_m,
+                                        )
+                                    )
+                                if sample_weight > 1.0e-12 and side_pressure_found == 0:
+                                    if side_is_inside == 1:
+                                        inside_pressure = sample_pressure
+                                        inside_pressure_found = 1
+                                    else:
+                                        outside_pressure = sample_pressure
+                                        outside_pressure_found = 1
+                                    two_sided_found_extended = 1
+                                if (
+                                    sample_weight > 1.0e-12
+                                    and sample_gradient_valid == 1
+                                    and side_gradient_found == 0
+                                ):
+                                    if side_is_inside == 1:
+                                        inside_gradient = sample_gradient
+                                        inside_gradient_found = 1
+                                    else:
+                                        outside_gradient = sample_gradient
+                                        outside_gradient_found = 1
                 # S2-A9 declared air-backed interface: a far-pressure
                 # closure region DECLARES its outside (+n) to be the known
                 # far pressure - that is the region's physical meaning, not
@@ -1534,6 +1700,11 @@ class HibmMpmSurfaceMarkers:
                         self.report_stress_two_sided_pressure_marker_count[None],
                         1,
                     )
+                    if two_sided_found_extended == 1:
+                        ti.atomic_add(
+                            self.report_stress_two_sided_extended_marker_count[None],
+                            1,
+                        )
                 elif closure_region_marker == 1 and inside_pressure_found == 1:
                     outside_pressure = far_pressure_pa
                     # The declared air side carries no fluid: any gradient
@@ -1819,6 +1990,7 @@ class HibmMpmSurfaceMarkers:
         far_pressure_region_id: int = -1,
         far_pressure_pa: float = 0.0,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
+        two_sided_probe_max_multiplier: float = 3.0,
         use_pressure_anchor_fallback: bool = False,
         node_anchor_cell=None,
         sampling_obstacle_field=None,
@@ -1868,6 +2040,11 @@ class HibmMpmSurfaceMarkers:
             raise ValueError(
                 "far_pressure_inside_probe_max_multiplier must be finite and >= 3.0"
             )
+        two_sided_probe_max = float(two_sided_probe_max_multiplier)
+        if not math.isfinite(two_sided_probe_max) or two_sided_probe_max < 3.0:
+            raise ValueError(
+                "two_sided_probe_max_multiplier must be finite and >= 3.0"
+            )
         self._sample_fluid_stress_to_marker_tractions_kernel(
             velocity_field,
             pressure_field,
@@ -1893,6 +2070,7 @@ class HibmMpmSurfaceMarkers:
             far_region_id,
             far_pressure,
             far_inside_probe_max,
+            two_sided_probe_max,
             1 if bool(use_pressure_anchor_fallback) else 0,
             node_anchor_available,
             use_sampling_obstacle,
@@ -1930,6 +2108,9 @@ class HibmMpmSurfaceMarkers:
                 self.report_stress_far_pressure_outside_suppressed_marker_count[
                     None
                 ]
+            ),
+            two_sided_extended_marker_count=int(
+                self.report_stress_two_sided_extended_marker_count[None]
             ),
         )
 
@@ -5339,6 +5520,7 @@ class HibmMpmSharpCouplingState:
         far_pressure_region_id: int = -1,
         far_pressure_pa: float = 0.0,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
+        two_sided_probe_max_multiplier: float = 3.0,
         fluid_dt_s: float | None = None,
         fluid_substeps: int = 1,
         projection_iterations: int = 40,
@@ -5384,6 +5566,9 @@ class HibmMpmSharpCouplingState:
             far_pressure_inside_probe_max_multiplier=float(
                 far_pressure_inside_probe_max_multiplier
             ),
+            two_sided_probe_max_multiplier=float(
+                two_sided_probe_max_multiplier
+            ),
             fluid_dt_s=fluid_dt_s,
             fluid_substeps=int(fluid_substeps),
             projection_iterations=int(projection_iterations),
@@ -5423,6 +5608,7 @@ class HibmMpmSharpCouplingState:
         far_pressure_region_id: int = -1,
         far_pressure_pa: float = 0.0,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
+        two_sided_probe_max_multiplier: float = 3.0,
         fluid_dt_s: float | None = None,
         fluid_substeps: int = 1,
         projection_iterations: int = 40,
@@ -5465,6 +5651,9 @@ class HibmMpmSharpCouplingState:
             far_pressure_pa=float(far_pressure_pa),
             far_pressure_inside_probe_max_multiplier=float(
                 far_pressure_inside_probe_max_multiplier
+            ),
+            two_sided_probe_max_multiplier=float(
+                two_sided_probe_max_multiplier
             ),
             fluid_dt_s=fluid_dt_s,
             fluid_substeps=int(fluid_substeps),
@@ -5509,6 +5698,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     far_pressure_region_id: int = -1,
     far_pressure_pa: float = 0.0,
     far_pressure_inside_probe_max_multiplier: float = 3.0,
+    two_sided_probe_max_multiplier: float = 3.0,
     dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -6045,6 +6235,9 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         far_pressure_inside_probe_max_multiplier=float(
             far_pressure_inside_probe_max_multiplier
         ),
+        two_sided_probe_max_multiplier=float(
+            two_sided_probe_max_multiplier
+        ),
         # S2-A6: the anchor fallback rides the closure opt-in. It is only
         # armed when this very call also assembled the pressure-Neumann
         # rows (anchors are captured there, strictly before this sampling
@@ -6122,6 +6315,7 @@ def advance_hibm_mpm_sharp_mpm_step(
     far_pressure_region_id: int = -1,
     far_pressure_pa: float = 0.0,
     far_pressure_inside_probe_max_multiplier: float = 3.0,
+    two_sided_probe_max_multiplier: float = 3.0,
     fluid_dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -6188,6 +6382,9 @@ def advance_hibm_mpm_sharp_mpm_step(
         far_pressure_pa=float(far_pressure_pa),
         far_pressure_inside_probe_max_multiplier=float(
             far_pressure_inside_probe_max_multiplier
+        ),
+        two_sided_probe_max_multiplier=float(
+            two_sided_probe_max_multiplier
         ),
         dt_s=fluid_dt_s,
         fluid_substeps=int(fluid_substeps),
@@ -6618,6 +6815,9 @@ def hibm_mpm_sharp_step_summary(
         "hibm_full_stress_far_pressure_outside_suppressed_marker_count": (
             load.fluid_stress.far_pressure_outside_suppressed_marker_count
         ),
+        "hibm_full_stress_two_sided_extended_marker_count": (
+            load.fluid_stress.two_sided_extended_marker_count
+        ),
         "hibm_marker_primary_count": marker_forces.primary_marker_count,
         "hibm_marker_secondary_count": marker_forces.secondary_marker_count,
         "hibm_marker_total_count": marker_forces.total_marker_count,
@@ -6748,6 +6948,7 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
     far_pressure_region_id: int = -1,
     far_pressure_pa: float = 0.0,
     far_pressure_inside_probe_max_multiplier: float = 3.0,
+    two_sided_probe_max_multiplier: float = 3.0,
     fluid_dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -6806,6 +7007,9 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
         far_pressure_pa=float(far_pressure_pa),
         far_pressure_inside_probe_max_multiplier=float(
             far_pressure_inside_probe_max_multiplier
+        ),
+        two_sided_probe_max_multiplier=float(
+            two_sided_probe_max_multiplier
         ),
         fluid_dt_s=fluid_dt_s,
         fluid_substeps=int(fluid_substeps),
