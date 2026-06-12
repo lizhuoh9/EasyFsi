@@ -5060,5 +5060,32 @@ class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
         self.assertEqual(source.count("sharp_coupling_state=sharp_coupling_state"), 4)
 
 
+class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
+    def test_sharp_case_wires_two_sided_extended_walk_multiplier(self) -> None:
+        # S2-A10 contract: the A8'' dedicated sampling view starved thin
+        # features (the tail fin sits entirely inside its own row-cloud
+        # envelope; per-step two-sided valid population 171-1017 avg 210
+        # before A8'' -> ~0 after; tail_marker_participates True -> False),
+        # so the case must arm the two-sided extended walk at the same 12.0
+        # reach as the far-pressure closure multiplier on its sharp advance
+        # call. Imitates test_sharp_case_drives_main_membrane_via_far_
+        # pressure_closure, which pins the closure 12.0 on the same call
+        # slice (the case's single sharp advance site; the checkpoint-resume
+        # path re-enters the same loop).
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        sharp_advance_call = source.split(
+            "sharp_report = sharp_coupling_state.advance_mpm_step(",
+            1,
+        )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
+        self.assertIn(
+            "two_sided_probe_max_multiplier=12.0", sharp_advance_call
+        )
+        # The closure multiplier stays wired alongside it (the extension
+        # complements the closure, it does not replace it).
+        self.assertIn(
+            "far_pressure_inside_probe_max_multiplier=12.0", sharp_advance_call
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

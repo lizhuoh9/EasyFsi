@@ -4988,6 +4988,298 @@ class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
         self.assertIn('"hibm_next_solid_band_enclosed_water_cell_count"', source)
 
 
+class HibmMpmTwoSidedExtendedWalkTests(unittest.TestCase):
+    """S2-A10 red tests: closure-style extended walk for two-sided markers.
+
+    The S2-A8'' dedicated sampling view (base geometry UNION row-cloud
+    envelope) starves genuinely thin features: a thin tail fin sits entirely
+    inside its own row-cloud envelope, so BOTH standard two-sided walks
+    (max 3.0x local spacing) run dry and the marker silently drops to zero
+    traction (per-step two-sided valid population 171-1017 avg 210 before
+    A8'' -> ~0 after; the case check tail_marker_participates flipped
+    True -> False at exactly that change). The fix is opt-in: a new
+    two_sided_probe_max_multiplier (default 3.0 = bitwise status quo,
+    activation gate strictly > 3.0 mirroring the closure multiplier) lets
+    NON-closure markers whose standard ladder found nothing on EITHER side
+    re-walk both sides out to the requested multiplier with the same
+    5-candidate ladder spacing, the same sampling view, and a per-side
+    H1-type crossing guard (never tunnel through projection-view solid into
+    another compartment's water).
+    """
+
+    def _thin_slab_fixture(self, *, wall_inside: bool):
+        # 16^3 unit box: cell width 1/16 = 0.0625, centers z_c(k) = (k+0.5)/16.
+        # Marker x = y = 0.53125 is exactly cell-center column 8 (single-column
+        # trilinear support); z = 0.5 is the face between cells 7 and 8 (grid
+        # z-coordinate 7.5, k_near = 8), normal +z, so the normal-aligned
+        # probe distance is exactly one cell width (0.0625). The marker's
+        # region is 3 while the run arms far_pressure_region_id=7, proving
+        # the new walk keys on the closure_region_marker conjunct being
+        # FALSE, not merely on the closure being disabled.
+        #
+        # Sampling view (the dedicated A8'' view, hand-built): z 4..11 dry -
+        # the thin feature's own row-cloud envelope, covering the standard
+        # ladder's full reach on both sides plus margin:
+        #   outside (+n) standard candidates z = 0.5 + {1.0, 1.5, 2.0, 2.5,
+        #   3.0} * 0.0625 -> grid z {8.5, 9.0, 9.5, 10.0, 10.5} -> supports
+        #   {8,9}, {9}, {9,10}, {10}, {10,11};
+        #   inside (-n) standard candidates -> grid z {6.5, 6.0, 5.5, 5.0,
+        #   4.5} -> supports {6,7}, {6}, {5,6}, {5}, {4,5};
+        # every support cell lies in the dry band 4..11, so the standard walk
+        # finds NOTHING on either side and the marker is invalid today.
+        #
+        # Genuine water sits just beyond the envelope on both sides:
+        #   z >= 12 at pressure 5.0 (outside) and z <= 3 at pressure 2.0
+        #   (inside) - first reachable at 4.8x (the first extended rung of
+        #   the 5-candidate ladder 3 + (12-3)*(r+1)/5 = {4.8, 6.6, 8.4,
+        #   10.2, 12.0}):
+        #   outside rung 0: z = 0.5 + 4.8*0.0625 = 0.8 -> grid z 12.3 ->
+        #     support {12: 0.7, 13: 0.3}, all water -> pressure 5.0;
+        #   inside rung 0: z = 0.5 - 0.3 = 0.2 -> grid z 2.7 -> support
+        #     {2: 0.3, 3: 0.7}, all water -> pressure 2.0.
+        #
+        # wall_inside=True adds the H1 mirror geometry: a thin BASE-solid
+        # wall in cells z {2, 3} (mirrored into the sampling view, since the
+        # view is base UNION envelope) with different-pressure water behind
+        # it in cells z {0, 1} at 7.0. The inside extension's rung 0 nearest
+        # cell is floor(2.7 + 0.5) = 3 = wall -> the per-side crossing guard
+        # latches; rung 1 (z = 0.5 - 6.6*0.0625 = 0.0875 -> grid z 0.9 ->
+        # support {0: 0.1, 1: 0.9}, weight 1.0, pressure 7.0) WOULD close
+        # the marker with the tunneled spurious traction (7 - 5) * n =
+        # (0, 0, +2) if the guard were missing.
+        import taichi as ti
+
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(3,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(16, 16, 16),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((16, 16, 16), 2.0, dtype=np.float32)
+        pressure[:, :, 12:] = 5.0
+        obstacle = np.zeros((16, 16, 16), dtype=np.int32)
+        view = np.zeros((16, 16, 16), dtype=np.int32)
+        view[:, :, 4:12] = 1
+        if wall_inside:
+            pressure[:, :, :2] = 7.0
+            obstacle[:, :, 2:4] = 1
+            view[:, :, 2:4] = 1
+        fluid.pressure.from_numpy(pressure)
+        fluid.obstacle.from_numpy(obstacle)
+        sampling_view = ti.field(dtype=ti.i32, shape=(16, 16, 16))
+        sampling_view.from_numpy(view)
+        return markers, fluid, sampling_view
+
+    def _sample(self, markers, fluid, **kwargs):
+        return markers.sample_fluid_stress_to_marker_tractions(
+            fluid.velocity,
+            fluid.pressure,
+            fluid.obstacle,
+            fluid.cell_face_x_m,
+            fluid.cell_face_y_m,
+            fluid.cell_face_z_m,
+            fluid.cell_center_x_m,
+            fluid.cell_center_y_m,
+            fluid.cell_center_z_m,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            fluid.grid.grid_nodes,
+            viscosity_pa_s=0.0,
+            two_sided_pressure=True,
+            **kwargs,
+        )
+
+    def test_thin_slab_marker_closes_two_sided_via_extended_walk(self) -> None:
+        # Red fixture (a). Both standard walks are fully inside the sampling
+        # envelope (see _thin_slab_fixture paper walk); genuine water sits at
+        # 4.8x on both sides at different pressures. With the extension armed
+        # at 12.0 the marker must become a VALID two-sided sample through the
+        # EXISTING covariant branch:
+        #   traction = (p_inside - p_outside) * n = (2.0 - 5.0) * (0, 0, 1)
+        #            = (0, 0, -3.0),
+        # and the new counter must report exactly this one marker (it is a
+        # subset of two_sided_pressure_marker_count, the family convention of
+        # far_pressure_closed_extended ⊂ far_pressure_closed).
+        markers, fluid, sampling_view = self._thin_slab_fixture(wall_inside=False)
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            sampling_obstacle_field=sampling_view,
+            two_sided_probe_max_multiplier=12.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.two_sided_pressure_marker_count, 1)
+        self.assertEqual(report.two_sided_extended_marker_count, 1)
+        self.assertEqual(report.far_pressure_closed_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_extended_marker_count, 0)
+        self.assertEqual(report.far_pressure_outside_suppressed_marker_count, 0)
+        traction = markers.marker_traction_pa(0)
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        # traction = (p_inside - p_outside) * n = (2 - 5) * +z
+        self.assertAlmostEqual(traction[2], -3.0, delta=1.0e-4)
+
+    def test_extended_walk_must_not_tunnel_through_thin_solid_wall(self) -> None:
+        # Red fixture (b), the H1 mirror. Same thin-slab geometry, but the
+        # inside (-n) far water (7.0 in cells z {0, 1}) is only reachable by
+        # crossing the BASE-solid wall in cells z {2, 3}: the inside
+        # extension's rung 0 (grid z 2.7) has nearest cell 3 = wall, latching
+        # the per-side crossing guard, so the genuinely wet rung 1 (grid z
+        # 0.9, weight 1.0, pressure 7.0) must NOT be accepted - without the
+        # guard the marker would close with the spurious tunneled traction
+        # (7 - 5) * n = (0, 0, +2). The outside extension still finds its
+        # genuine 5.0 water, so the marker ends ONE-sided and must stay
+        # invalid with zero traction, exactly today's behavior.
+        markers, fluid, sampling_view = self._thin_slab_fixture(wall_inside=True)
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            sampling_obstacle_field=sampling_view,
+            two_sided_probe_max_multiplier=12.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 0)
+        self.assertEqual(report.invalid_marker_count, 1)
+        self.assertEqual(report.two_sided_pressure_marker_count, 0)
+        self.assertEqual(report.two_sided_extended_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 0)
+        self.assertEqual(report.max_abs_traction_pa, 0.0)
+        traction = markers.marker_traction_pa(0)
+        self.assertEqual(tuple(traction), (0.0, 0.0, 0.0))
+
+    def test_default_multiplier_keeps_thin_slab_marker_invalid_as_today(
+        self,
+    ) -> None:
+        # Red fixture (c), backward compatibility. Same thin-slab fixture,
+        # multiplier left at its default (omitted) and then passed explicitly
+        # as 3.0: the activation gate is strictly > 3.0 (mirroring the
+        # closure multiplier), so the extension must never run, the marker
+        # stays invalid exactly as today (both standard walks dry inside the
+        # envelope), the new counter stays 0, and the two calls produce
+        # bitwise-identical reports.
+        markers, fluid, sampling_view = self._thin_slab_fixture(wall_inside=False)
+
+        omitted = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            sampling_obstacle_field=sampling_view,
+        )
+
+        self.assertEqual(omitted.valid_marker_count, 0)
+        self.assertEqual(omitted.invalid_marker_count, 1)
+        self.assertEqual(omitted.two_sided_pressure_marker_count, 0)
+        self.assertEqual(omitted.two_sided_extended_marker_count, 0)
+        self.assertEqual(omitted.max_abs_traction_pa, 0.0)
+        omitted_traction = markers.marker_traction_pa(0)
+        self.assertEqual(tuple(omitted_traction), (0.0, 0.0, 0.0))
+
+        explicit_default = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            sampling_obstacle_field=sampling_view,
+            two_sided_probe_max_multiplier=3.0,
+        )
+        explicit_traction = markers.marker_traction_pa(0)
+
+        self.assertEqual(omitted, explicit_default)
+        self.assertEqual(tuple(omitted_traction), tuple(explicit_traction))
+
+    def test_closure_region_marker_is_unaffected_by_two_sided_multiplier(
+        self,
+    ) -> None:
+        # Red fixture (d), non-interference. The thick-band closure-extension
+        # fixture of test_extended_inside_walk_closes_marker_behind_thick_band
+        # verbatim (16^3, spacing 0.0625; marker at the cell-center column
+        # i = j = 8, z = 0.5 face, normal +z, REGION 7 = the closure region;
+        # obstacle z 8..15 = air side, z 4..7 = band; water z 0..3 at 2.0;
+        # far pressure 10.0). With the closure multiplier at 6.0 the closure
+        # extension closes the marker at its first extended rung 3.6x
+        # (z = 0.275, grid z 3.9, support {3: 0.1, 4: 0.9}, masked fluid
+        # weight 0.1 -> pressure 2.0) with
+        #   traction = (p_inside_water - p_far_air) * n = (2 - 10) * +z
+        #            = (0, 0, -8).
+        # Arming two_sided_probe_max_multiplier=12.0 on top must change
+        # NOTHING: the A10 walk requires closure_region_marker == 0, so the
+        # closure branch keeps absolute priority - the two reports must be
+        # equal field for field (closure counters unchanged) and the new
+        # counter must stay 0 in both.
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(16, 16, 16),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((16, 16, 16), 2.0, dtype=np.float32)
+        fluid.pressure.from_numpy(pressure)
+        obstacle = np.zeros((16, 16, 16), dtype=np.int32)
+        obstacle[:, :, 8:] = 1
+        obstacle[:, :, 4:8] = 1
+        fluid.obstacle.from_numpy(obstacle)
+
+        baseline = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            far_pressure_inside_probe_max_multiplier=6.0,
+        )
+        baseline_traction = markers.marker_traction_pa(0)
+
+        extended = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            far_pressure_inside_probe_max_multiplier=6.0,
+            two_sided_probe_max_multiplier=12.0,
+        )
+        extended_traction = markers.marker_traction_pa(0)
+
+        self.assertEqual(baseline, extended)
+        self.assertEqual(tuple(baseline_traction), tuple(extended_traction))
+        self.assertEqual(extended.valid_marker_count, 1)
+        self.assertEqual(extended.far_pressure_closed_marker_count, 1)
+        self.assertEqual(extended.far_pressure_closed_extended_marker_count, 1)
+        self.assertEqual(extended.two_sided_pressure_marker_count, 0)
+        self.assertEqual(extended.two_sided_extended_marker_count, 0)
+        self.assertAlmostEqual(extended_traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(extended_traction[1], 0.0, delta=1.0e-4)
+        # Mirrors the closure-extension test: (2 - 10) * +z, untouched by
+        # the two-sided multiplier.
+        self.assertAlmostEqual(extended_traction[2], -8.0, delta=1.0e-4)
+
+
 if __name__ == "__main__":
     unittest.main()
 
