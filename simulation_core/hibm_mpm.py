@@ -49,6 +49,7 @@ class HibmMpmFluidStressSampleReport:
     far_pressure_anchor_closed_marker_count: int = 0
     far_pressure_node_anchor_closed_marker_count: int = 0
     closure_gradient_missing_marker_count: int = 0
+    far_pressure_outside_suppressed_marker_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -312,6 +313,10 @@ class HibmMpmSurfaceMarkers:
             shape=(),
         )
         self.report_stress_closure_gradient_missing_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_stress_far_pressure_outside_suppressed_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -1170,6 +1175,7 @@ class HibmMpmSurfaceMarkers:
         self.report_stress_far_pressure_anchor_closed_marker_count[None] = 0
         self.report_stress_far_pressure_node_anchor_closed_marker_count[None] = 0
         self.report_stress_closure_gradient_missing_marker_count[None] = 0
+        self.report_stress_far_pressure_outside_suppressed_marker_count[None] = 0
         for marker in range(marker_count):
             position = self.x_gamma_m[marker]
             normal = self.n_gamma[marker]
@@ -1496,7 +1502,31 @@ class HibmMpmSurfaceMarkers:
                             ):
                                 inside_gradient = sample_gradient
                                 inside_gradient_found = 1
-                if outside_pressure_found == 1 and inside_pressure_found == 1:
+                # S2-A9 declared air-backed interface: a far-pressure
+                # closure region DECLARES its outside (+n) to be the known
+                # far pressure - that is the region's physical meaning, not
+                # a fallback for when the outside walk finds nothing. When
+                # the membrane vacates space (production probe: ~17 mm
+                # whole-membrane sink), the carve model fills that space
+                # with WATER (there is no air phase), the outside walk
+                # samples it, and the two-sided branch silently replaces
+                # the O(kPa) declared drive with a spurious
+                # (real water - vacated-zone water) ~ 0 jump - the closed
+                # count collapsing 7782 -> 0 intermittently and the drive
+                # rerouting. The decision order is therefore keyed on
+                # closure_region_marker (S2-A5 single-copy style: only the
+                # if-chain conditions are reordered, no sampling body is
+                # duplicated): closure markers never enter the two-sided
+                # branch; the closure branch fires whenever the inside
+                # found water, regardless of the outside flag, and the
+                # suppressed spurious outside water is counted for
+                # observability. Non-closure markers keep the original
+                # chain bit for bit.
+                if (
+                    closure_region_marker == 0
+                    and outside_pressure_found == 1
+                    and inside_pressure_found == 1
+                ):
                     pressure_traction = (inside_pressure - outside_pressure) * normal
                     pressure_sample_valid = True
                     gradient = outside_gradient - inside_gradient
@@ -1504,13 +1534,17 @@ class HibmMpmSurfaceMarkers:
                         self.report_stress_two_sided_pressure_marker_count[None],
                         1,
                     )
-                elif (
-                    far_pressure_region_id != -1
-                    and self.region_id[marker] == far_pressure_region_id
-                    and inside_pressure_found == 1
-                    and outside_pressure_found == 0
-                ):
+                elif closure_region_marker == 1 and inside_pressure_found == 1:
                     outside_pressure = far_pressure_pa
+                    # The declared air side carries no fluid: any gradient
+                    # the outside walk may have stored came from the same
+                    # spurious water as the suppressed pressure and is
+                    # discarded with it. On the legacy outside-not-found
+                    # population this rewrites the still-zero matrix with
+                    # the same zero (a gradient can only be found at a
+                    # candidate whose fluid weight also sets the pressure
+                    # flag), keeping that population bit for bit.
+                    outside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
                     pressure_traction = (inside_pressure - outside_pressure) * normal
                     pressure_sample_valid = True
                     gradient = outside_gradient - inside_gradient
@@ -1523,20 +1557,23 @@ class HibmMpmSurfaceMarkers:
                             self.report_stress_far_pressure_closed_extended_marker_count[None],
                             1,
                         )
-                elif (
-                    far_pressure_region_id != -1
-                    and self.region_id[marker] == far_pressure_region_id
-                    and outside_pressure_found == 1
-                    and inside_pressure_found == 0
-                ):
+                    if outside_pressure_found == 1:
+                        ti.atomic_add(
+                            self.report_stress_far_pressure_outside_suppressed_marker_count[None],
+                            1,
+                        )
+                elif closure_region_marker == 1 and outside_pressure_found == 1:
                     # Mirrored closure: the structurally dry side sits on the
-                    # inside (-n) walk because of the CAD winding. The same
-                    # covariant formula applies with the known far pressure
-                    # substituted on the dry side; inside_gradient is provably
-                    # zero here (it is only written when inside_gradient_found
-                    # is set, and a gradient can only be found at a candidate
-                    # whose fluid weight also sets the pressure flag, which is
-                    # 0 on this branch).
+                    # inside (-n) walk because of the CAD winding (the chain
+                    # position guarantees inside_pressure_found == 0 here).
+                    # The same covariant formula applies with the known far
+                    # pressure substituted on the dry side; inside_gradient
+                    # is provably zero (it is only written when
+                    # inside_gradient_found is set, and a gradient can only
+                    # be found at a candidate whose fluid weight also sets
+                    # the pressure flag, which is 0 on this branch). The
+                    # outside water is the genuine water side of the
+                    # interface here, so nothing is suppressed.
                     inside_pressure = far_pressure_pa
                     pressure_traction = (inside_pressure - outside_pressure) * normal
                     pressure_sample_valid = True
@@ -1888,6 +1925,11 @@ class HibmMpmSurfaceMarkers:
             ),
             closure_gradient_missing_marker_count=int(
                 self.report_stress_closure_gradient_missing_marker_count[None]
+            ),
+            far_pressure_outside_suppressed_marker_count=int(
+                self.report_stress_far_pressure_outside_suppressed_marker_count[
+                    None
+                ]
             ),
         )
 
@@ -6572,6 +6614,9 @@ def hibm_mpm_sharp_step_summary(
         ),
         "hibm_full_stress_closure_gradient_missing_marker_count": (
             load.fluid_stress.closure_gradient_missing_marker_count
+        ),
+        "hibm_full_stress_far_pressure_outside_suppressed_marker_count": (
+            load.fluid_stress.far_pressure_outside_suppressed_marker_count
         ),
         "hibm_marker_primary_count": marker_forces.primary_marker_count,
         "hibm_marker_secondary_count": marker_forces.secondary_marker_count,
