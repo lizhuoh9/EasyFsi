@@ -3662,5 +3662,268 @@ class DivergenceFinalReportStagingShapeTests(unittest.TestCase):
         self.assertEqual(tuple(solver.divergence_combined_count.shape), (18,))
 
 
+class HibmSolidBandPopulationSplitTests(unittest.TestCase):
+    """S2-A8': split the solid band by population.
+
+    The legacy band kernel converts every zero-correctable active cell to
+    an obstacle, which confuses two populations: membrane-interior sliver
+    cells (quasi-solid cells the IB node search classified near the marker
+    surface) and real enclosed water (cells with no marker within the
+    search radius, sealed off only by the velocity-Dirichlet row cloud).
+    The split keeps the enclosed water active so the per-component
+    anchoring chain solves its pressure, while slivers still convert.
+
+    Mode table (environment gates read per call, A8 pattern):
+
+    - default (both gates unset): convert every candidate, bitwise-
+      unchanged legacy band; the population mirrors stay -1 (unmeasured).
+    - ``HIBM_BAND_INTERIOR_ONLY=1``: convert classified slivers only;
+      requires the node classification field; the returned increment only
+      covers conversions so the caller's fixed-round loop still saturates.
+    - ``HIBM_BAND_COUNT_ONLY=1``: convert nothing (A8 diagnostic, wins
+      over the interior-only gate); with a classification field the two
+      populations are still counted.
+    """
+
+    # Cell-shaped IB node classification codes (HibmMpmIbNodeSearch
+    # publishes _NODE_NONE=0 for "no marker within the search radius";
+    # any other code means the search classified the cell near the
+    # marker surface).
+    _NODE_NONE = 0
+    _NODE_CLASSIFIED = 1
+
+    @staticmethod
+    def _solver_with_two_band_candidates():
+        # (2, 2, 2): zero-correctable candidate sealed by velocity-
+        # Dirichlet rows on all six stencil faces (same construction as
+        # the legacy band test). (0, 0, 0): zero-correctable candidate
+        # sealed by the domain boundary on the minus faces and Dirichlet
+        # rows on the plus faces. No other cell loses every correctable
+        # face.
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        solver.velocity_dirichlet_boundary_active[2, 2, 2] = 1
+        solver.velocity_dirichlet_boundary_active[3, 2, 2] = 1
+        solver.velocity_dirichlet_boundary_active[2, 3, 2] = 1
+        solver.velocity_dirichlet_boundary_active[2, 2, 3] = 1
+        solver.velocity[2, 2, 2] = (1.0, -2.0, 3.0)
+        solver.velocity_prev[2, 2, 2] = (4.0, -5.0, 6.0)
+        solver.volume_source_s[2, 2, 2] = 7.0
+        solver.velocity_dirichlet_boundary_active[1, 0, 0] = 1
+        solver.velocity_dirichlet_boundary_active[0, 1, 0] = 1
+        solver.velocity_dirichlet_boundary_active[0, 0, 1] = 1
+        solver.velocity[0, 0, 0] = (1.0, -2.0, 3.0)
+        solver.velocity_prev[0, 0, 0] = (4.0, -5.0, 6.0)
+        solver.volume_source_s[0, 0, 0] = 7.0
+        node_kind_code = ti.field(dtype=ti.i32, shape=(5, 5, 5))
+        # The sliver candidate sits inside the search-classified band
+        # around the marker surface; the enclosed-water candidate keeps
+        # the unclassified code (no marker within the search radius).
+        node_kind_code[2, 2, 2] = HibmSolidBandPopulationSplitTests._NODE_CLASSIFIED
+        return solver, node_kind_code
+
+    def test_interior_only_band_split_converts_slivers_and_keeps_enclosed_water(
+        self,
+    ) -> None:
+        import os
+        from unittest import mock
+
+        solver, node_kind_code = self._solver_with_two_band_candidates()
+        with mock.patch.dict(os.environ, {"HIBM_BAND_INTERIOR_ONLY": "1"}):
+            os.environ.pop("HIBM_BAND_COUNT_ONLY", None)
+            marked = solver.mark_hibm_solid_band_nonprojectable_cells(
+                pressure_outlet_zmin=False,
+                node_kind_code=node_kind_code,
+                unclassified_node_code=self._NODE_NONE,
+            )
+
+            self.assertEqual(marked, 1)
+            self.assertEqual(int(solver.last_hibm_solid_band_marked_increment), 1)
+            self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), 1)
+            self.assertEqual(
+                int(solver.last_hibm_solid_band_enclosed_water_cells), 1
+            )
+            # The membrane-interior sliver converts exactly like the
+            # legacy band cell.
+            self.assertEqual(int(solver.obstacle[2, 2, 2]), 1)
+            self.assertEqual(
+                tuple(float(solver.velocity[2, 2, 2][axis]) for axis in range(3)),
+                (0.0, 0.0, 0.0),
+            )
+            self.assertEqual(
+                tuple(
+                    float(solver.velocity_prev[2, 2, 2][axis]) for axis in range(3)
+                ),
+                (0.0, 0.0, 0.0),
+            )
+            self.assertAlmostEqual(float(solver.volume_source_s[2, 2, 2]), 0.0)
+            # The enclosed-water cell stays active fluid with its state
+            # intact, left for the per-component anchoring chain.
+            self.assertEqual(int(solver.obstacle[0, 0, 0]), 0)
+            self.assertEqual(
+                tuple(float(solver.velocity[0, 0, 0][axis]) for axis in range(3)),
+                (1.0, -2.0, 3.0),
+            )
+            self.assertEqual(
+                tuple(
+                    float(solver.velocity_prev[0, 0, 0][axis]) for axis in range(3)
+                ),
+                (4.0, -5.0, 6.0),
+            )
+            self.assertAlmostEqual(float(solver.volume_source_s[0, 0, 0]), 7.0)
+
+            # Second sweep: conversions are monotone and the sliver set
+            # saturates, so the increment the caller's fixed-round band
+            # loop breaks on reaches zero while the enclosed-water
+            # population stays observable.
+            marked_again = solver.mark_hibm_solid_band_nonprojectable_cells(
+                pressure_outlet_zmin=False,
+                node_kind_code=node_kind_code,
+                unclassified_node_code=self._NODE_NONE,
+            )
+            self.assertEqual(marked_again, 0)
+            self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), 0)
+            self.assertEqual(
+                int(solver.last_hibm_solid_band_enclosed_water_cells), 1
+            )
+            self.assertEqual(int(solver.obstacle[0, 0, 0]), 0)
+
+    def test_interior_only_band_split_requires_node_classification_field(
+        self,
+    ) -> None:
+        import os
+        from unittest import mock
+
+        solver, _ = self._solver_with_two_band_candidates()
+        with mock.patch.dict(os.environ, {"HIBM_BAND_INTERIOR_ONLY": "1"}):
+            os.environ.pop("HIBM_BAND_COUNT_ONLY", None)
+            with self.assertRaises(ValueError):
+                solver.mark_hibm_solid_band_nonprojectable_cells(
+                    pressure_outlet_zmin=False,
+                )
+
+    def test_interior_only_band_split_rejects_mismatched_classification_shape(
+        self,
+    ) -> None:
+        import os
+        from unittest import mock
+
+        solver, _ = self._solver_with_two_band_candidates()
+        wrong_shape = ti.field(dtype=ti.i32, shape=(4, 4, 4))
+        with mock.patch.dict(os.environ, {"HIBM_BAND_INTERIOR_ONLY": "1"}):
+            os.environ.pop("HIBM_BAND_COUNT_ONLY", None)
+            with self.assertRaises(ValueError):
+                solver.mark_hibm_solid_band_nonprojectable_cells(
+                    pressure_outlet_zmin=False,
+                    node_kind_code=wrong_shape,
+                    unclassified_node_code=self._NODE_NONE,
+                )
+
+    def test_count_only_with_classification_reports_population_split(self) -> None:
+        import os
+        from unittest import mock
+
+        solver, node_kind_code = self._solver_with_two_band_candidates()
+        with mock.patch.dict(os.environ, {"HIBM_BAND_COUNT_ONLY": "1"}):
+            os.environ.pop("HIBM_BAND_INTERIOR_ONLY", None)
+            marked = solver.mark_hibm_solid_band_nonprojectable_cells(
+                pressure_outlet_zmin=False,
+                node_kind_code=node_kind_code,
+                unclassified_node_code=self._NODE_NONE,
+            )
+
+        # A8 semantics preserved: every candidate is counted, nothing
+        # converts - and the two populations are now observable.
+        self.assertEqual(marked, 2)
+        self.assertEqual(int(solver.last_hibm_solid_band_marked_increment), 2)
+        self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), 1)
+        self.assertEqual(int(solver.last_hibm_solid_band_enclosed_water_cells), 1)
+        self.assertEqual(int(solver.obstacle[2, 2, 2]), 0)
+        self.assertEqual(int(solver.obstacle[0, 0, 0]), 0)
+        self.assertEqual(
+            tuple(float(solver.velocity[2, 2, 2][axis]) for axis in range(3)),
+            (1.0, -2.0, 3.0),
+        )
+        self.assertAlmostEqual(float(solver.volume_source_s[2, 2, 2]), 7.0)
+
+    def test_default_band_mode_ignores_classification_and_converts_all(
+        self,
+    ) -> None:
+        import os
+        from unittest import mock
+
+        solver, node_kind_code = self._solver_with_two_band_candidates()
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HIBM_BAND_COUNT_ONLY", None)
+            os.environ.pop("HIBM_BAND_INTERIOR_ONLY", None)
+            marked = solver.mark_hibm_solid_band_nonprojectable_cells(
+                pressure_outlet_zmin=False,
+                node_kind_code=node_kind_code,
+                unclassified_node_code=self._NODE_NONE,
+            )
+
+        # Bitwise-unchanged default: the classification is ignored, both
+        # candidates convert through the legacy kernel, and the split
+        # mirrors report "not measured".
+        self.assertEqual(marked, 2)
+        self.assertEqual(int(solver.obstacle[2, 2, 2]), 1)
+        self.assertEqual(int(solver.obstacle[0, 0, 0]), 1)
+        self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), -1)
+        self.assertEqual(int(solver.last_hibm_solid_band_enclosed_water_cells), -1)
+
+    def test_projection_report_exposes_band_population_split_mirrors(self) -> None:
+        import os
+        from unittest import mock
+
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        solver.velocity_dirichlet_boundary_active[0, 2, 2] = 1
+        solver.velocity_dirichlet_boundary_active[1, 2, 2] = 1
+        solver.velocity_dirichlet_boundary_active[0, 3, 2] = 1
+        solver.velocity_dirichlet_boundary_active[0, 2, 3] = 1
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HIBM_BAND_COUNT_ONLY", None)
+            os.environ.pop("HIBM_BAND_INTERIOR_ONLY", None)
+            masked = solver.mark_hibm_solid_band_nonprojectable_cells(
+                pressure_outlet_zmin=False,
+            )
+        self.assertEqual(masked, 1)
+        unreached = solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        self.assertEqual(unreached, 0)
+
+        report = solver.project(
+            iterations=60,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+        )
+
+        self.assertEqual(int(report["hibm_solid_band_last_marked_increment"]), 1)
+        # The unclassified legacy sweep reports the populations as
+        # unmeasured rather than as misleading zeros.
+        self.assertEqual(int(report["hibm_solid_band_interior_cells"]), -1)
+        self.assertEqual(int(report["hibm_solid_band_enclosed_water_cells"]), -1)
+
+    def test_restore_state_resets_band_population_split_mirrors(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        solver.save_state()
+        solver.last_hibm_solid_band_interior_cells = 5
+        solver.last_hibm_solid_band_enclosed_water_cells = 6
+
+        solver.restore_state()
+
+        self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), -1)
+        self.assertEqual(int(solver.last_hibm_solid_band_enclosed_water_cells), -1)
+
+
 if __name__ == "__main__":
     unittest.main()

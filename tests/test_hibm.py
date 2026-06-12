@@ -4569,6 +4569,82 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         self.assertEqual(untouched, (-1, -1, -1))
 
 
+class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
+    """S2-A8' contracts on the hibm_mpm side of the band split.
+
+    The assemble chain must feed the IB node-search classification to
+    every solid-band call so the env-gated interior-only mode can split
+    membrane-interior slivers (classified cells, convert) from enclosed
+    water (unclassified cells, stay active for the per-component
+    anchoring chain), and the reports must expose both populations.
+    """
+
+    def test_sharp_reports_carry_band_population_split_fields(self) -> None:
+        import dataclasses
+
+        from simulation_core.hibm_mpm import (
+            HibmMpmSharpFluidToMpmLoadReport,
+            HibmMpmSharpMpmStepReport,
+        )
+
+        load_fields = {
+            field.name: field
+            for field in dataclasses.fields(HibmMpmSharpFluidToMpmLoadReport)
+        }
+        self.assertIn("solid_band_interior_cell_count", load_fields)
+        self.assertIn("solid_band_enclosed_water_cell_count", load_fields)
+        # -1 means "the band ran without a classification split"; the
+        # default keeps legacy constructions honest instead of reporting
+        # a misleading zero population.
+        self.assertEqual(load_fields["solid_band_interior_cell_count"].default, -1)
+        self.assertEqual(
+            load_fields["solid_band_enclosed_water_cell_count"].default, -1
+        )
+
+        step_fields = {
+            field.name: field
+            for field in dataclasses.fields(HibmMpmSharpMpmStepReport)
+        }
+        self.assertIn("next_solid_band_interior_cell_count", step_fields)
+        self.assertIn("next_solid_band_enclosed_water_cell_count", step_fields)
+        self.assertEqual(
+            step_fields["next_solid_band_interior_cell_count"].default, -1
+        )
+        self.assertEqual(
+            step_fields["next_solid_band_enclosed_water_cell_count"].default, -1
+        )
+
+    def test_every_band_call_site_passes_node_classification(self) -> None:
+        import inspect
+
+        import simulation_core.hibm_mpm as hibm_mpm_module
+
+        source = inspect.getsource(hibm_mpm_module)
+        fragments = source.split(
+            "fluid.mark_hibm_solid_band_nonprojectable_cells("
+        )[1:]
+        # The assemble band loop plus the two post-step band calls.
+        self.assertGreaterEqual(len(fragments), 3)
+        for fragment in fragments:
+            window = fragment[:400]
+            self.assertIn("node_kind_code=ib_search.node_kind_code", window)
+            self.assertIn(
+                "unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE",
+                window,
+            )
+
+    def test_step_summary_exposes_band_population_split_counts(self) -> None:
+        import inspect
+
+        import simulation_core.hibm_mpm as hibm_mpm_module
+
+        source = inspect.getsource(hibm_mpm_module)
+        self.assertIn('"hibm_solid_band_interior_cell_count"', source)
+        self.assertIn('"hibm_solid_band_enclosed_water_cell_count"', source)
+        self.assertIn('"hibm_next_solid_band_interior_cell_count"', source)
+        self.assertIn('"hibm_next_solid_band_enclosed_water_cell_count"', source)
+
+
 if __name__ == "__main__":
     unittest.main()
 
