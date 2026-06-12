@@ -5275,5 +5275,33 @@ class SquidNeoSolidSubsetContractTests(unittest.TestCase):
         self.assertIn("fixed_region_id=5", window)
 
 
+class SquidSharpAirBackedClosureContractTests(unittest.TestCase):
+    def test_sharp_case_declares_air_backed_far_pressure_closure(self) -> None:
+        # S2-A12 contract: the squid's far-pressure closure region 7 is the
+        # pressurized air chamber above the main membrane, but the carve
+        # model fills it with fake incompressible water - a flood-sealed
+        # ~7000-cell pocket that accrued the vacated-zone divergence debt
+        # for 1000 steps and killed run #2 at step 1017 on reconnection
+        # (run_2s_20260613b), while its numerical compliance swallowed the
+        # pump's displaced volume (outlet ~1e-12 m3/s all eras). The case
+        # must therefore arm the fluid-side air zone on its sharp advance
+        # call: far_pressure_air_backed=True alongside the closure wiring
+        # (region 7 + waveform p_far + the 12.0 reach the seed ladder
+        # reuses). Imitates the A10 contract: the case's single sharp
+        # advance site; the checkpoint-resume path re-enters the same loop.
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        sharp_advance_call = source.split(
+            "sharp_report = sharp_coupling_state.advance_mpm_step(",
+            1,
+        )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
+        self.assertIn("far_pressure_air_backed=True", sharp_advance_call)
+        # The closure wiring the air zone rides on stays in place.
+        self.assertIn("far_pressure_region_id=7", sharp_advance_call)
+        self.assertIn("far_pressure_pa=pressure_pa", sharp_advance_call)
+        self.assertIn(
+            "far_pressure_inside_probe_max_multiplier=12.0", sharp_advance_call
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

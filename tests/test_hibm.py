@@ -5280,6 +5280,440 @@ class HibmMpmTwoSidedExtendedWalkTests(unittest.TestCase):
         self.assertAlmostEqual(extended_traction[2], -8.0, delta=1.0e-4)
 
 
+class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
+    """S2-A12: fluid-side air zone for declared air-backed closure regions.
+
+    Forensic anchor (run_2s_20260613b): the carve model's air chamber above
+    the main membrane is fake incompressible water, flood-disconnected from
+    the outlet from step 1 (unreach_n 7654); the anchored projection parks
+    the membrane's vacated-volume debt there (unreached_divergence_l2 0.04
+    -> 0.7 over 1000 steps, excluded from the interior guard), and the
+    step-1015 band-flicker reconnection dumped it into the correctable
+    interior (interior_divergence_l2 9.4e-7 -> 2.8e-2 in 3 steps, guard
+    kill). A12 classifies the enclosed far-side pocket per step (closure
+    markers seed flood-unreached components on their +n side) and converts
+    it to obstacle-like air cells stamped with p_far.
+
+    Shared fixture: 16^3 unit box (spacing h = 1/16 = 0.0625), full
+    obstacle slab at z = 8, pressure outlet at z-min. Below the slab
+    (z 0..7) is outlet-connected water; above it (z 9..15) is a sealed
+    pocket of 16*16*7 = 1792 cells with exactly one flood component and
+    volume 1792 * 0.0625^3 = 0.4375 m^3 (binary-exact). The closure marker
+    (region 7) sits at the cell-center column i = j = 8 (x = y = 0.53125)
+    on the slab's upper face z = 9/16 = 0.5625 with normal +z, so its
+    far-side ladder rung 0 (1.0x, probe distance = h) lands at z = 0.625 =
+    grid coordinate 9.5 -> nearest cell (8, 8, 10): active, unreached,
+    labeled -> seed.
+    """
+
+    def _solver(self):
+        return CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(16, 16, 16), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+
+    def _sealed_chamber_fixture(self):
+        fluid = self._solver()
+        obstacle = np.zeros((16, 16, 16), dtype=np.int32)
+        obstacle[:, :, 8] = 1
+        fluid.obstacle.from_numpy(obstacle)
+        # The seed walk's crossing guard reads the base snapshot; in
+        # production apply_hibm_internal_obstacles takes it before any
+        # band/air conversion - unit fixtures must do it explicitly.
+        fluid.snapshot_hibm_base_obstacle()
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.5625),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        return fluid, markers
+
+    def _seed(self, markers, fluid, *, multiplier=12.0, region_id=7):
+        return markers.mark_far_pressure_air_backed_seed_components(
+            fluid.obstacle,
+            fluid.hibm_base_obstacle,
+            fluid.hibm_pressure_outlet_reachable,
+            fluid.hibm_pressure_unreached_component_label,
+            fluid.hibm_air_component_selected,
+            fluid.cell_face_x_m,
+            fluid.cell_face_y_m,
+            fluid.cell_face_z_m,
+            fluid.cell_center_x_m,
+            fluid.cell_center_y_m,
+            fluid.cell_center_z_m,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            (16, 16, 16),
+            far_pressure_region_id=region_id,
+            far_pressure_inside_probe_max_multiplier=multiplier,
+        )
+
+    def test_air_seed_selects_far_side_unreached_component_and_converts(
+        self,
+    ) -> None:
+        # (a) The happy path, paper-walked: flood finds the 1792-cell
+        # pocket as ONE component; the marker's rung-0 far probe lands in
+        # cell (8, 8, 10) and selects it; conversion turns exactly the
+        # 1792 pocket cells into obstacle-like air cells (band write set +
+        # air tag) with volume 0.4375 m^3; the p_far stamp then writes the
+        # declared chamber pressure for the sampling view; a re-flood sees
+        # the pocket as wall -> unreached drops to ZERO (the debt channel
+        # is structurally gone). Outlet-side water is untouched.
+        fluid, markers = self._sealed_chamber_fixture()
+        unreached = fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        self.assertEqual(unreached, 1792)
+        self.assertEqual(fluid.last_hibm_pressure_unreached_component_count, 1)
+
+        seeded, missed = self._seed(markers, fluid)
+        self.assertEqual((seeded, missed), (1, 0))
+
+        converted = fluid.convert_hibm_air_backed_cells()
+
+        self.assertEqual(converted, 1792)
+        self.assertEqual(fluid.last_hibm_air_backed_cell_count, 1792)
+        self.assertEqual(fluid.last_hibm_air_backed_component_count, 1)
+        self.assertAlmostEqual(
+            fluid.last_hibm_air_backed_cell_volume_m3,
+            0.4375,
+            delta=1.0e-9,
+        )
+        self.assertEqual(int(fluid.obstacle[8, 8, 12]), 1)
+        self.assertEqual(int(fluid.hibm_air_cell[8, 8, 12]), 1)
+        self.assertEqual(int(fluid.hibm_air_cell[8, 8, 4]), 0)
+        self.assertEqual(int(fluid.obstacle[8, 8, 4]), 0)
+        self.assertEqual(
+            tuple(float(fluid.velocity[8, 8, 12][axis]) for axis in range(3)),
+            (0.0, 0.0, 0.0),
+        )
+
+        fluid.write_hibm_air_backed_cell_pressures(123.0)
+        self.assertAlmostEqual(float(fluid.pressure[8, 8, 12]), 123.0, delta=1.0e-6)
+        self.assertAlmostEqual(float(fluid.pressure[8, 8, 4]), 0.0, delta=1.0e-6)
+
+        unreached_after = (
+            fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=True,
+            )
+        )
+        self.assertEqual(unreached_after, 0)
+
+    def test_air_seed_never_selects_outlet_reachable_water_or_crosses_base(
+        self,
+    ) -> None:
+        # (b) The structural veto, two ways. (b1) A mis-oriented marker
+        # whose far walk points INTO the outlet-connected water (lower
+        # slab face, n = -z) finds only reachable cells on every rung ->
+        # no seed, counted missed, zero conversion: outlet-reachable water
+        # is NEVER classified, by construction (air is a subset of the
+        # flood-unreached set). (b2) The H1-style crossing guard: a marker
+        # BELOW the slab pointing +z hits the base-obstacle slab at rung 0
+        # (z = 0.5 -> grid 7.5 -> nearest cell 8) and the walk ENDS - the
+        # pocket beyond the wall is not seeded through base geometry even
+        # though rungs 2+ would land in it geometrically.
+        fluid, markers = self._sealed_chamber_fixture()
+        fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, -1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        seeded, missed = self._seed(markers, fluid)
+        self.assertEqual((seeded, missed), (0, 1))
+        self.assertEqual(fluid.convert_hibm_air_backed_cells(), 0)
+        self.assertEqual(int(fluid.obstacle[8, 8, 4]), 0)
+        self.assertEqual(int(fluid.obstacle[8, 8, 12]), 0)
+
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.4375),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        seeded, missed = self._seed(markers, fluid)
+        self.assertEqual((seeded, missed), (0, 1))
+        self.assertEqual(fluid.convert_hibm_air_backed_cells(), 0)
+        self.assertEqual(int(fluid.obstacle[8, 8, 12]), 0)
+
+    def test_air_backed_state_defaults_inert_with_anchoring_status_quo(
+        self,
+    ) -> None:
+        # (c) Default-off contract at the fluid level: when nothing ever
+        # invokes the mechanism, the air state is the -1/0 sentinel set and
+        # the sealed pocket keeps today's per-component zero-mean anchoring
+        # path through the projection (cg_unreached_set_mean_projection_
+        # count >= 1, the established fixture assertion family). The
+        # assemble-level gate (`if bool(far_pressure_air_backed) and ...`)
+        # is pinned by the wiring test below; the legacy noise-floor smoke
+        # at apply time carries the bitwise claim for the production path.
+        fluid, _ = self._sealed_chamber_fixture()
+        unreached = fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        self.assertEqual(unreached, 1792)
+
+        report = fluid.project(
+            iterations=200,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+        )
+
+        self.assertTrue(report["cg_converged_all"])
+        self.assertGreaterEqual(
+            int(report.get("cg_unreached_set_mean_projection_count", 0)),
+            1,
+        )
+        self.assertEqual(fluid.last_hibm_air_backed_cell_count, -1)
+        self.assertEqual(fluid.last_hibm_air_backed_component_count, -1)
+        self.assertEqual(fluid.last_hibm_air_backed_cell_volume_m3, -1.0)
+        self.assertEqual(int(fluid.hibm_air_cell[8, 8, 12]), 0)
+        self.assertEqual(int(fluid.hibm_air_component_selected[0]), 0)
+
+    def test_air_backed_clears_sealed_pocket_divergence_debt(self) -> None:
+        # (d) THE MONEY TEST, paper-walked. A volume source S = 4.0 1/s in
+        # pocket cell (8, 8, 12) stands in for the membrane's vacated-zone
+        # demand (the production pocket has no water supply, so continuity
+        # is unsatisfiable there by exactly the source magnitude).
+        #
+        # WITHOUT A12 (today): the anchored projection can satisfy
+        # everything EXCEPT the component mean - sum(div * V) over a sealed
+        # component is invariant (every boundary face is blocked), so the
+        # post-projection residual (div - vol_src) settles at the constant
+        #   -S * V_cell / V_pocket = -(4.0 * 0.0625^3) / 0.4375
+        #                          = -4.0 / 1792 = -2.2321e-3 1/s
+        # per pocket cell; the RMS-style unreached_l2 equals |that| =
+        # 2.2321e-3 and STAYS there on every further projection (the debt
+        # is never absorbed - it is the per-step accrual run #2 integrated
+        # for 1000 steps before the step-1015 reconnection dumped it).
+        # The pocket also carries nonzero projected velocity - the debt
+        # lives in the velocity field; the interior guard never sees it.
+        #
+        # WITH A12: the seed/convert pass removes the pocket AND its
+        # forcing from the solve (vol_src is cleared by the band-cell
+        # write set), the re-flood reports ZERO unreached cells, the
+        # unreached divergence channel reads exactly 0 with count 0, the
+        # pocket velocity is exactly zero (obstacle), and punching the
+        # step-1015-style hole in the slab afterwards reconnects NOTHING
+        # (air cells are walls): unreached stays 0 and the post-hole
+        # projection's interior residual stays clean. The reconnection
+        # bomb's precondition - fake water carrying inherited divergence -
+        # is structurally absent. (The 1000-step growth curve itself is
+        # gate-probe evidence, not unit-fixture material.)
+        expected_residual = 4.0 / 1792.0
+
+        fluid_without, _ = self._sealed_chamber_fixture()
+        unreached = (
+            fluid_without.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=True,
+            )
+        )
+        self.assertEqual(unreached, 1792)
+        fluid_without.volume_source_s[8, 8, 12] = 4.0
+        for _ in range(3):
+            report = fluid_without.project(
+                iterations=400,
+                pressure_outlet_zmin=True,
+                pressure_solver="fv_cg",
+                cg_tolerance=1.0e-6,
+            )
+            self.assertTrue(report["cg_converged_all"])
+            fluid_without.compute_divergence(pressure_outlet_zmin=True)
+            fluid_without.final_divergence_report_stats(pressure_outlet_zmin=True)
+            stats = fluid_without.last_unreached_divergence_stats
+            self.assertEqual(int(stats["count"]), 1792)
+            self.assertGreater(float(stats["l2"]), 1.0e-3)
+            self.assertAlmostEqual(
+                float(stats["l2"]),
+                expected_residual,
+                delta=0.02 * expected_residual,
+            )
+            self.assertAlmostEqual(
+                float(stats["max_abs"]),
+                expected_residual,
+                delta=0.10 * expected_residual,
+            )
+        velocity_without = fluid_without.velocity.to_numpy()
+        self.assertGreater(float(np.abs(velocity_without[:, :, 9:]).max()), 0.0)
+
+        fluid_with, markers = self._sealed_chamber_fixture()
+        unreached = (
+            fluid_with.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=True,
+            )
+        )
+        self.assertEqual(unreached, 1792)
+        fluid_with.volume_source_s[8, 8, 12] = 4.0
+        seeded, missed = self._seed(markers, fluid_with)
+        self.assertEqual((seeded, missed), (1, 0))
+        self.assertEqual(fluid_with.convert_hibm_air_backed_cells(), 1792)
+        self.assertAlmostEqual(
+            float(fluid_with.volume_source_s[8, 8, 12]), 0.0, delta=0.0
+        )
+        self.assertEqual(
+            fluid_with.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=True,
+            ),
+            0,
+        )
+        report = fluid_with.project(
+            iterations=400,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+        )
+        self.assertTrue(report["cg_converged_all"])
+        fluid_with.compute_divergence(pressure_outlet_zmin=True)
+        fluid_with.final_divergence_report_stats(pressure_outlet_zmin=True)
+        stats = fluid_with.last_unreached_divergence_stats
+        self.assertEqual(int(stats["count"]), 0)
+        self.assertEqual(float(stats["l2"]), 0.0)
+        velocity_with = fluid_with.velocity.to_numpy()
+        self.assertEqual(float(np.abs(velocity_with[:, :, 9:]).max()), 0.0)
+
+        # The step-1015 scenario: punch a 1-cell hole in the slab. The
+        # flood enters the hole cell and stops at the air walls - there is
+        # no fake-water pocket left to reconnect.
+        fluid_with.obstacle[8, 8, 8] = 0
+        self.assertEqual(
+            fluid_with.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=True,
+            ),
+            0,
+        )
+        report = fluid_with.project(
+            iterations=400,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+        )
+        self.assertTrue(report["cg_converged_all"])
+        fluid_with.compute_divergence(pressure_outlet_zmin=True)
+        fluid_with.final_divergence_report_stats(pressure_outlet_zmin=True)
+        self.assertLess(
+            float(fluid_with.last_unreached_divergence_stats["l2"]), 1.0e-12
+        )
+
+    def test_air_backed_cells_rewet_via_fresh_fluid_reconstruction(
+        self,
+    ) -> None:
+        # (e) Statelessness + re-wetting, the per-step cycle: conversion at
+        # step N; step N+1's apply_hibm_internal_obstacles resets obstacle
+        # to base, detects every ex-air cell as fresh fluid (old obstacle,
+        # base fluid) and reconstructs velocities - the pocket interior is
+        # an all-fresh neighborhood, so the reconstruction finds no donor
+        # and keeps the conversion's exact zeros (the right initial state
+        # for water entering a region that physically held air; on the
+        # production rebound the band/rows hand it real boundary data).
+        # The re-flood then re-finds the 1792-cell pocket and the
+        # classification reconverts it identically - the steady cycle the
+        # checkpoint/resume path replays from any step.
+        import taichi as ti
+
+        fluid, markers = self._sealed_chamber_fixture()
+        fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        seeded, missed = self._seed(markers, fluid)
+        self.assertEqual((seeded, missed), (1, 0))
+        self.assertEqual(fluid.convert_hibm_air_backed_cells(), 1792)
+        self.assertEqual(int(fluid.obstacle[8, 8, 12]), 1)
+
+        node_kind = ti.field(dtype=ti.i32, shape=(16, 16, 16))
+        node_kind.fill(HibmMpmIbNodeSearch._NODE_NONE)
+        internal_count = fluid.apply_hibm_internal_obstacles(
+            node_kind,
+            internal_node_code=HibmMpmIbNodeSearch._NODE_INTERNAL,
+        )
+
+        self.assertEqual(internal_count, 0)
+        self.assertEqual(int(fluid.report_hibm_fresh_fluid_cells[None]), 1792)
+        self.assertEqual(int(fluid.obstacle[8, 8, 12]), 0)
+        self.assertEqual(int(fluid.obstacle[8, 8, 8]), 1)
+        self.assertEqual(
+            tuple(float(fluid.velocity[8, 8, 12][axis]) for axis in range(3)),
+            (0.0, 0.0, 0.0),
+        )
+
+        self.assertEqual(
+            fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=True,
+            ),
+            1792,
+        )
+        seeded, missed = self._seed(markers, fluid)
+        self.assertEqual((seeded, missed), (1, 0))
+        self.assertEqual(fluid.convert_hibm_air_backed_cells(), 1792)
+
+    def test_assemble_wires_air_backed_classification_order_and_gate(
+        self,
+    ) -> None:
+        # (f) Wiring contract on the assemble chain (the A8'' fill/view
+        # ordering-test pattern): the classification consumes THIS step's
+        # flood + component labels (strictly after the first disconnected-
+        # cells call, strictly before the substep loop whose rows+flood
+        # rebuilds see air as obstacle); any conversion re-assembles rows
+        # and reruns the band fixed point (the S2-A8' zero-row lesson);
+        # the p_far stamp sits strictly between the A8'' fill and the
+        # sampling-view build; everything rides the per-closure-region
+        # opt-in gate, default False = the block is dead code.
+        import inspect
+
+        import simulation_core.hibm_mpm as hibm_mpm_module
+
+        source = inspect.getsource(
+            hibm_mpm_module.assemble_hibm_mpm_sharp_fluid_to_mpm_loads
+        )
+        self.assertIn("far_pressure_air_backed: bool = False,", source)
+        self.assertIn(
+            "if bool(far_pressure_air_backed) and int(far_pressure_region_id) != -1:",
+            source,
+        )
+        self.assertIn("markers.mark_far_pressure_air_backed_seed_components(", source)
+        self.assertIn("fluid.convert_hibm_air_backed_cells()", source)
+        self.assertIn("for _air_band_pass in range(8):", source)
+        self.assertIn("fluid.write_hibm_air_backed_cell_pressures(", source)
+
+        first_flood = source.index(
+            "fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells("
+        )
+        seed_call = source.index(
+            "markers.mark_far_pressure_air_backed_seed_components("
+        )
+        convert_call = source.index("fluid.convert_hibm_air_backed_cells()")
+        air_band_loop = source.index("for _air_band_pass in range(8):")
+        substep_loop = source.index("for _ in range(substeps):")
+        fill_call = source.index("fluid.fill_hibm_converted_cell_pressures(")
+        stamp_call = source.index("fluid.write_hibm_air_backed_cell_pressures(")
+        view_call = source.index("fluid.build_hibm_sampling_obstacle(")
+        stress_call = source.index("sample_fluid_stress_to_marker_tractions(")
+        self.assertLess(first_flood, seed_call)
+        self.assertLess(seed_call, convert_call)
+        self.assertLess(convert_call, air_band_loop)
+        self.assertLess(air_band_loop, substep_loop)
+        self.assertLess(fill_call, stamp_call)
+        self.assertLess(stamp_call, view_call)
+        self.assertLess(view_call, stress_call)
+
+        # The stamp is double-gated: armed AND converted (no kernel launch
+        # on inert steps - flicker/partial-enclosure steps stay cheap).
+        stamp_gate_window = source[max(0, stamp_call - 600):stamp_call]
+        self.assertIn(
+            "bool(far_pressure_air_backed) and int(hibm_air_backed_cell_count) > 0",
+            stamp_gate_window,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 
