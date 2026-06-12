@@ -1053,7 +1053,15 @@ class HibmMpmSurfaceMarkers:
                     and self.region_id[marker] == far_pressure_region_id
                 ):
                     closure_region_marker = 1
-                for probe_index in ti.static(range(5)):
+                # S2-A5: runtime range(5) instead of ti.static. The body only
+                # consumes probe_index through ti.cast(..., ti.f32) (exact for
+                # 0..4), the per-thread serial loop runs the iterations in the
+                # same order with the same carried flag state, so every float
+                # is produced by the identical expression tree in the
+                # identical order - bitwise-preserving - while the JIT stops
+                # cloning the inlined trilinear/gradient sampling bodies five
+                # times per side.
+                for probe_index in range(5):
                     probe_distance = probe_distance_m * (
                         1.0 + 0.5 * ti.cast(probe_index, ti.f32)
                     )
@@ -1105,29 +1113,37 @@ class HibmMpmSurfaceMarkers:
                                     cell_center_z_m,
                                 )
                             )
+                        # S2-A5 single-copy acceptance: the accept decision is
+                        # split from the stores so each store exists once in
+                        # the IR. Closure regions keep the S2-A4 decoupled
+                        # guards (pressure needs trilinear fluid weight; the
+                        # gradient additionally needs its complete one-sided
+                        # stencil, so a farther candidate can still supply
+                        # it). Outside closure regions the original merged
+                        # gate applies atomically: pressure and gradient are
+                        # accepted together from the same candidate or not at
+                        # all, so a nearer pressure can never pair with a
+                        # farther gradient - bit for bit the original gate.
+                        candidate_merged_ok = 0
+                        if sample_weight > 1.0e-12 and sample_gradient_valid == 1:
+                            candidate_merged_ok = 1
+                        accept_pressure = 0
+                        accept_gradient = 0
                         if closure_region_marker == 1:
-                            # S2-A4 decoupled acceptance (closure regions
-                            # only): pressure needs trilinear fluid weight;
-                            # the gradient additionally needs its complete
-                            # one-sided stencil. Two independent guards so a
-                            # farther candidate can still supply the gradient.
                             if sample_weight > 1.0e-12 and outside_pressure_found == 0:
-                                outside_pressure = sample_pressure
-                                outside_pressure_found = 1
-                            if (
-                                sample_weight > 1.0e-12
-                                and sample_gradient_valid == 1
-                                and outside_gradient_found == 0
-                            ):
-                                outside_gradient = sample_gradient
-                                outside_gradient_found = 1
+                                accept_pressure = 1
+                            if candidate_merged_ok == 1 and outside_gradient_found == 0:
+                                accept_gradient = 1
                         else:
-                            # Original merged gate, bit for bit.
-                            if sample_weight > 1.0e-12 and sample_gradient_valid == 1:
-                                outside_pressure = sample_pressure
-                                outside_gradient = sample_gradient
-                                outside_pressure_found = 1
-                                outside_gradient_found = 1
+                            if candidate_merged_ok == 1:
+                                accept_pressure = 1
+                                accept_gradient = 1
+                        if accept_pressure == 1:
+                            outside_pressure = sample_pressure
+                            outside_pressure_found = 1
+                        if accept_gradient == 1:
+                            outside_gradient = sample_gradient
+                            outside_gradient_found = 1
                     if inside_pressure_found == 0 or (
                         closure_region_marker == 1 and inside_gradient_found == 0
                     ):
@@ -1172,26 +1188,28 @@ class HibmMpmSurfaceMarkers:
                                     cell_center_z_m,
                                 )
                             )
+                        # S2-A5 single-copy acceptance, symmetric to the
+                        # outside (+n) walk above.
+                        candidate_merged_ok = 0
+                        if sample_weight > 1.0e-12 and sample_gradient_valid == 1:
+                            candidate_merged_ok = 1
+                        accept_pressure = 0
+                        accept_gradient = 0
                         if closure_region_marker == 1:
-                            # S2-A4 decoupled acceptance, symmetric to the
-                            # outside (+n) walk above.
                             if sample_weight > 1.0e-12 and inside_pressure_found == 0:
-                                inside_pressure = sample_pressure
-                                inside_pressure_found = 1
-                            if (
-                                sample_weight > 1.0e-12
-                                and sample_gradient_valid == 1
-                                and inside_gradient_found == 0
-                            ):
-                                inside_gradient = sample_gradient
-                                inside_gradient_found = 1
+                                accept_pressure = 1
+                            if candidate_merged_ok == 1 and inside_gradient_found == 0:
+                                accept_gradient = 1
                         else:
-                            # Original merged gate, bit for bit.
-                            if sample_weight > 1.0e-12 and sample_gradient_valid == 1:
-                                inside_pressure = sample_pressure
-                                inside_gradient = sample_gradient
-                                inside_pressure_found = 1
-                                inside_gradient_found = 1
+                            if candidate_merged_ok == 1:
+                                accept_pressure = 1
+                                accept_gradient = 1
+                        if accept_pressure == 1:
+                            inside_pressure = sample_pressure
+                            inside_pressure_found = 1
+                        if accept_gradient == 1:
+                            inside_gradient = sample_gradient
+                            inside_gradient_found = 1
                 # S2-A3 extended inside (-n) walk: opt-in, far-pressure
                 # closure regions only. It runs strictly after the standard
                 # ladder above failed to find inside water within 3x, and
@@ -1214,7 +1232,9 @@ class HibmMpmSurfaceMarkers:
                     and outside_pressure_found == 0
                     and far_pressure_inside_probe_max_multiplier > 3.0
                 ):
-                    for probe_index in ti.static(range(5)):
+                    # S2-A5: runtime loop, same bitwise-preservation argument
+                    # as the standard walk above.
+                    for probe_index in range(5):
                         probe_distance = probe_distance_m * (
                             3.0
                             + (far_pressure_inside_probe_max_multiplier - 3.0)
