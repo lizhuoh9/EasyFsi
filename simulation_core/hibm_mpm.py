@@ -266,6 +266,17 @@ class HibmMpmSurfaceMarkers:
             dtype=ti.i32,
             shape=(1, 1, 1),
         )
+        # S2-A8'': 1x1x1 stand-in bound to the sampler kernel's
+        # sampling_obstacle_field template slot when the caller supplies
+        # no dedicated sampling view. Guarded by use_sampling_obstacle ==
+        # 0 at every sample site (same anti-instantiation pattern as
+        # _node_anchor_cell_unset), it is never indexed at runtime; it
+        # only keeps the template parameter bindable, so omitting the
+        # kwarg and passing None share one stable kernel instantiation.
+        self._sampling_obstacle_unset = ti.field(
+            dtype=ti.i32,
+            shape=(1, 1, 1),
+        )
 
         self.report_primary_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_secondary_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
@@ -1018,12 +1029,113 @@ class HibmMpmSurfaceMarkers:
             gradient_valid,
         )
 
+    @ti.func
+    def _sample_pressure_trilinear_sampling_view(
+        self,
+        pressure_field: ti.template(),
+        obstacle_field: ti.template(),
+        sampling_obstacle_field: ti.template(),
+        use_sampling_obstacle: ti.i32,
+        gx,
+        gy,
+        gz,
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+    ):
+        # S2-A8'' view switch: with the runtime gate off the else branch
+        # executes the exact original expression tree against the
+        # projection obstacle view (bit for bit the status quo); with the
+        # gate on, the same masked trilinear body reads the dedicated
+        # sampling view instead, so the classified row-cloud envelope
+        # stays dry while back-filled converted sealed water is
+        # samplable. The gate is a uniform runtime i32, so the kernel is
+        # not re-instantiated per call - only per bound field pair (the
+        # A6/A7 stand-in pattern keeps the no-view binding stable).
+        pressure = 0.0
+        pressure_weight = 0.0
+        if use_sampling_obstacle != 0:
+            pressure, pressure_weight = self._sample_pressure_trilinear(
+                pressure_field,
+                sampling_obstacle_field,
+                gx,
+                gy,
+                gz,
+                nx,
+                ny,
+                nz,
+            )
+        else:
+            pressure, pressure_weight = self._sample_pressure_trilinear(
+                pressure_field,
+                obstacle_field,
+                gx,
+                gy,
+                gz,
+                nx,
+                ny,
+                nz,
+            )
+        return pressure, pressure_weight
+
+    @ti.func
+    def _sample_velocity_gradient_sampling_view(
+        self,
+        velocity_field: ti.template(),
+        obstacle_field: ti.template(),
+        sampling_obstacle_field: ti.template(),
+        use_sampling_obstacle: ti.i32,
+        gx,
+        gy,
+        gz,
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+    ):
+        # S2-A8'' view switch for the one-sided viscous gradient stencil;
+        # same gate semantics as _sample_pressure_trilinear_sampling_view.
+        gradient = ti.Matrix.zero(ti.f32, 3, 3)
+        gradient_valid = 1
+        if use_sampling_obstacle != 0:
+            gradient, gradient_valid = self._sample_velocity_gradient(
+                velocity_field,
+                sampling_obstacle_field,
+                gx,
+                gy,
+                gz,
+                nx,
+                ny,
+                nz,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+            )
+        else:
+            gradient, gradient_valid = self._sample_velocity_gradient(
+                velocity_field,
+                obstacle_field,
+                gx,
+                gy,
+                gz,
+                nx,
+                ny,
+                nz,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+            )
+        return gradient, gradient_valid
+
     @ti.kernel
     def _sample_fluid_stress_to_marker_tractions_kernel(
         self,
         velocity_field: ti.template(),
         pressure_field: ti.template(),
         obstacle_field: ti.template(),
+        sampling_obstacle_field: ti.template(),
         cell_face_x_m: ti.template(),
         cell_face_y_m: ti.template(),
         cell_face_z_m: ti.template(),
@@ -1046,6 +1158,7 @@ class HibmMpmSurfaceMarkers:
         far_pressure_inside_probe_max_multiplier: ti.f32,
         use_pressure_anchor_fallback: ti.i32,
         node_anchor_available: ti.i32,
+        use_sampling_obstacle: ti.i32,
     ):
         self.report_stress_valid_marker_count[None] = 0
         self.report_stress_invalid_marker_count[None] = 0
@@ -1075,9 +1188,11 @@ class HibmMpmSurfaceMarkers:
             i_near = ti.min(ti.max(ti.floor(grid_coordinate.x + 0.5, ti.i32), 0), nx - 1)
             j_near = ti.min(ti.max(ti.floor(grid_coordinate.y + 0.5, ti.i32), 0), ny - 1)
             k_near = ti.min(ti.max(ti.floor(grid_coordinate.z + 0.5, ti.i32), 0), nz - 1)
-            pressure, pressure_weight = self._sample_pressure_trilinear(
+            pressure, pressure_weight = self._sample_pressure_trilinear_sampling_view(
                 pressure_field,
                 obstacle_field,
+                sampling_obstacle_field,
+                use_sampling_obstacle,
                 grid_coordinate.x,
                 grid_coordinate.y,
                 grid_coordinate.z,
@@ -1157,9 +1272,11 @@ class HibmMpmSurfaceMarkers:
                             ny,
                             nz,
                         )
-                        sample_pressure, sample_weight = self._sample_pressure_trilinear(
+                        sample_pressure, sample_weight = self._sample_pressure_trilinear_sampling_view(
                             pressure_field,
                             obstacle_field,
+                            sampling_obstacle_field,
+                            use_sampling_obstacle,
                             outside_coordinate.x,
                             outside_coordinate.y,
                             outside_coordinate.z,
@@ -1171,9 +1288,11 @@ class HibmMpmSurfaceMarkers:
                         sample_gradient_valid = 1
                         if viscosity_pa_s > 0.0:
                             sample_gradient, sample_gradient_valid = (
-                                self._sample_velocity_gradient(
+                                self._sample_velocity_gradient_sampling_view(
                                     velocity_field,
                                     obstacle_field,
+                                    sampling_obstacle_field,
+                                    use_sampling_obstacle,
                                     outside_coordinate.x,
                                     outside_coordinate.y,
                                     outside_coordinate.z,
@@ -1232,9 +1351,11 @@ class HibmMpmSurfaceMarkers:
                             ny,
                             nz,
                         )
-                        sample_pressure, sample_weight = self._sample_pressure_trilinear(
+                        sample_pressure, sample_weight = self._sample_pressure_trilinear_sampling_view(
                             pressure_field,
                             obstacle_field,
+                            sampling_obstacle_field,
+                            use_sampling_obstacle,
                             inside_coordinate.x,
                             inside_coordinate.y,
                             inside_coordinate.z,
@@ -1246,9 +1367,11 @@ class HibmMpmSurfaceMarkers:
                         sample_gradient_valid = 1
                         if viscosity_pa_s > 0.0:
                             sample_gradient, sample_gradient_valid = (
-                                self._sample_velocity_gradient(
+                                self._sample_velocity_gradient_sampling_view(
                                     velocity_field,
                                     obstacle_field,
+                                    sampling_obstacle_field,
+                                    use_sampling_obstacle,
                                     inside_coordinate.x,
                                     inside_coordinate.y,
                                     inside_coordinate.z,
@@ -1330,9 +1453,11 @@ class HibmMpmSurfaceMarkers:
                                 ny,
                                 nz,
                             )
-                            sample_pressure, sample_weight = self._sample_pressure_trilinear(
+                            sample_pressure, sample_weight = self._sample_pressure_trilinear_sampling_view(
                                 pressure_field,
                                 obstacle_field,
+                                sampling_obstacle_field,
+                                use_sampling_obstacle,
                                 inside_coordinate.x,
                                 inside_coordinate.y,
                                 inside_coordinate.z,
@@ -1344,9 +1469,11 @@ class HibmMpmSurfaceMarkers:
                             sample_gradient_valid = 1
                             if viscosity_pa_s > 0.0:
                                 sample_gradient, sample_gradient_valid = (
-                                    self._sample_velocity_gradient(
+                                    self._sample_velocity_gradient_sampling_view(
                                         velocity_field,
                                         obstacle_field,
+                                        sampling_obstacle_field,
+                                        use_sampling_obstacle,
                                         inside_coordinate.x,
                                         inside_coordinate.y,
                                         inside_coordinate.z,
@@ -1599,9 +1726,11 @@ class HibmMpmSurfaceMarkers:
                             1,
                         )
             else:
-                gradient, gradient_valid = self._sample_velocity_gradient(
+                gradient, gradient_valid = self._sample_velocity_gradient_sampling_view(
                     velocity_field,
                     obstacle_field,
+                    sampling_obstacle_field,
+                    use_sampling_obstacle,
                     grid_coordinate.x,
                     grid_coordinate.y,
                     grid_coordinate.z,
@@ -1655,6 +1784,7 @@ class HibmMpmSurfaceMarkers:
         far_pressure_inside_probe_max_multiplier: float = 3.0,
         use_pressure_anchor_fallback: bool = False,
         node_anchor_cell=None,
+        sampling_obstacle_field=None,
     ) -> HibmMpmFluidStressSampleReport:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
@@ -1669,6 +1799,26 @@ class HibmMpmSurfaceMarkers:
         if node_anchor_field is None:
             node_anchor_field = self._node_anchor_cell_unset
             node_anchor_available = 0
+        # S2-A8'': the dedicated sampling view is optional. None (the
+        # default) binds the never-indexed 1x1x1 stand-in with the
+        # runtime gate off, so every pressure / velocity-gradient sample
+        # reads the projection obstacle view exactly as before (bit for
+        # bit). A provided view replaces the obstacle argument of every
+        # _sample_pressure_trilinear / _sample_velocity_gradient site in
+        # the stress kernel - and ONLY there; the no-slip residual, the
+        # Neumann gradient sampling and all other consumers keep the
+        # projection obstacle view.
+        sampling_obstacle = sampling_obstacle_field
+        use_sampling_obstacle = 1
+        if sampling_obstacle is None:
+            sampling_obstacle = self._sampling_obstacle_unset
+            use_sampling_obstacle = 0
+        elif tuple(sampling_obstacle.shape) != nodes:
+            raise ValueError(
+                "sampling_obstacle_field shape "
+                f"{tuple(sampling_obstacle.shape)} does not match grid_nodes "
+                f"{nodes}"
+            )
         viscosity = float(viscosity_pa_s)
         if not math.isfinite(viscosity) or viscosity < 0.0:
             raise ValueError("viscosity_pa_s must be a finite non-negative number")
@@ -1685,6 +1835,7 @@ class HibmMpmSurfaceMarkers:
             velocity_field,
             pressure_field,
             obstacle_field,
+            sampling_obstacle,
             cell_face_x_m,
             cell_face_y_m,
             cell_face_z_m,
@@ -1707,6 +1858,7 @@ class HibmMpmSurfaceMarkers:
             far_inside_probe_max,
             1 if bool(use_pressure_anchor_fallback) else 0,
             node_anchor_available,
+            use_sampling_obstacle,
         )
         return HibmMpmFluidStressSampleReport(
             valid_marker_count=int(self.report_stress_valid_marker_count[None]),
@@ -5801,6 +5953,32 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         fluid.cell_center_z_m,
         fluid.grid.grid_nodes,
     )
+    # S2-A8'' closure sampling preparation, strictly after the LAST
+    # fluid.project(...) (including the post-Dirichlet consistency
+    # projection) and strictly before the stress sampling, and only when
+    # the far-pressure closure is enabled - the default path runs neither
+    # call and passes None below (bitwise-unchanged sampling).
+    #
+    # (a) Back-fill the stale pressures of band/internal-converted cells
+    #     (obstacle != 0, hibm_base_obstacle == 0) by iterative neighbor
+    #     averaging from the solved water - they dropped out of the
+    #     pressure solve when the band correctly converted them (the
+    #     A4->A8' chain established the conversion itself must not
+    #     change: zero-correctable cells are zero matrix rows).
+    # (b) Build the dedicated sampling view: base geometry plus the
+    #     row-cloud envelope (every cell the IB node search classified,
+    #     node_kind_code != _NODE_NONE) stays dry - the A8 experiment
+    #     proved opening the envelope kills the drive - while the
+    #     NONE-classified converted sealed water becomes samplable with
+    #     its back-filled pressure.
+    stress_sampling_obstacle_field = None
+    if int(far_pressure_region_id) != -1:
+        fluid.fill_hibm_converted_cell_pressures()
+        fluid.build_hibm_sampling_obstacle(
+            ib_search.node_kind_code,
+            unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+        )
+        stress_sampling_obstacle_field = fluid.sampling_obstacle
     stress_report = markers.sample_fluid_stress_to_marker_tractions(
         fluid.velocity,
         fluid.pressure,
@@ -5817,6 +5995,9 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         fluid.grid.grid_nodes,
         viscosity_pa_s=fluid.mu,
         two_sided_pressure=True,
+        # S2-A8'': None when the closure is disabled (the default
+        # bitwise path); the dedicated view otherwise.
+        sampling_obstacle_field=stress_sampling_obstacle_field,
         far_pressure_region_id=int(far_pressure_region_id),
         far_pressure_pa=float(far_pressure_pa),
         far_pressure_inside_probe_max_multiplier=float(

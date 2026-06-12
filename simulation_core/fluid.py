@@ -917,6 +917,16 @@ class CartesianFluidSolver:
             dtype=ti.i32,
             shape=(),
         )
+        # S2-A8'' post-projection pressure fill into hibm-converted cells
+        # (obstacle != 0 and hibm_base_obstacle == 0): Jacobi double
+        # buffers (filled flag + pressure) and the dedicated stress
+        # sampling view (base geometry + classified row-cloud envelope
+        # dry; converted sealed water samplable).
+        self.hibm_pressure_filled = ti.field(dtype=ti.i32, shape=shape)
+        self.hibm_pressure_filled_next = ti.field(dtype=ti.i32, shape=shape)
+        self.hibm_pressure_fill_next = ti.field(dtype=ti.f32, shape=shape)
+        self.sampling_obstacle = ti.field(dtype=ti.i32, shape=shape)
+        self.report_hibm_pressure_filled_cells = ti.field(dtype=ti.i32, shape=())
         self._hibm_base_obstacle_initialized = False
         self.cell_width_x_m = ti.field(dtype=ti.f32, shape=self.nx)
         self.cell_width_y_m = ti.field(dtype=ti.f32, shape=self.ny)
@@ -1015,6 +1025,12 @@ class CartesianFluidSolver:
         # populations (S2-A8').
         self.last_hibm_solid_band_interior_cells = -1
         self.last_hibm_solid_band_enclosed_water_cells = -1
+        # -1 means "the post-projection converted-cell pressure fill has
+        # not run since construction / restore_state" (S2-A8''). The fill
+        # is never mounted inside project(): the HIBM assemble calls it
+        # explicitly after the projection returns and before stress
+        # sampling, so project()'s report key mirrors the PREVIOUS fill.
+        self.last_hibm_pressure_filled_cell_count = -1
         self.last_unreached_divergence_raw_stats = {
             "max_abs": 0.0,
             "l2": 0.0,
@@ -1120,6 +1136,10 @@ class CartesianFluidSolver:
             self.hibm_pressure_outlet_reachable[i, j, k] = 0
             self.hibm_pressure_outlet_reachable_next[i, j, k] = 0
             self.hibm_fresh_fluid_cell[i, j, k] = 0
+            self.hibm_pressure_filled[i, j, k] = 0
+            self.hibm_pressure_filled_next[i, j, k] = 0
+            self.hibm_pressure_fill_next[i, j, k] = 0.0
+            self.sampling_obstacle[i, j, k] = 0
             self.velocity_constraint_sum[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.velocity_constraint_weight[i, j, k] = 0.0
             self.velocity_constraint_primary_sum[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
@@ -1177,6 +1197,7 @@ class CartesianFluidSolver:
         self.report_hibm_solid_band_interior_cells[None] = 0
         self.report_hibm_solid_band_enclosed_water_cells[None] = 0
         self.report_hibm_pressure_disconnected_nonprojectable_cells[None] = 0
+        self.report_hibm_pressure_filled_cells[None] = 0
 
     def clear(self) -> None:
         self._clear_kernel()
@@ -1671,6 +1692,182 @@ class CartesianFluidSolver:
         return unreached
 
     @ti.kernel
+    def _init_hibm_converted_cell_pressure_fill_kernel(self):
+        for i, j, k in self.hibm_pressure_filled:
+            self.hibm_pressure_filled[i, j, k] = 0
+            self.hibm_pressure_filled_next[i, j, k] = 0
+            self.hibm_pressure_fill_next[i, j, k] = self.pressure[i, j, k]
+
+    @ti.kernel
+    def _expand_hibm_converted_cell_pressure_fill_kernel(self):
+        # One Jacobi sweep (read pressure / filled, write the *_next
+        # buffers): every hibm-converted non-base cell with at least one
+        # available neighbor recomputes pressure = mean(available
+        # neighbor pressures) and is marked filled. Available = a
+        # 6-neighbor that is solved water (obstacle == 0) or a converted
+        # cell already marked in a PREVIOUS sweep, so the fill front
+        # advances exactly one cell layer per sweep from the solved
+        # water into the sealed interior. Cells with no available
+        # neighbor keep their value and stay unmarked. Non-converted
+        # cells are exact copy-through.
+        for i, j, k in self.obstacle:
+            next_pressure = self.pressure[i, j, k]
+            next_filled = self.hibm_pressure_filled[i, j, k]
+            if (
+                self.obstacle[i, j, k] != 0
+                and self.hibm_base_obstacle[i, j, k] == 0
+            ):
+                neighbor_sum = 0.0
+                neighbor_count = 0
+                for offset in ti.static(
+                    (
+                        (-1, 0, 0),
+                        (1, 0, 0),
+                        (0, -1, 0),
+                        (0, 1, 0),
+                        (0, 0, -1),
+                        (0, 0, 1),
+                    )
+                ):
+                    ni = i + offset[0]
+                    nj = j + offset[1]
+                    nk = k + offset[2]
+                    if (
+                        0 <= ni
+                        and ni < self.nx
+                        and 0 <= nj
+                        and nj < self.ny
+                        and 0 <= nk
+                        and nk < self.nz
+                    ):
+                        if self.obstacle[ni, nj, nk] == 0:
+                            neighbor_sum += self.pressure[ni, nj, nk]
+                            neighbor_count += 1
+                        elif (
+                            self.hibm_base_obstacle[ni, nj, nk] == 0
+                            and self.hibm_pressure_filled[ni, nj, nk] != 0
+                        ):
+                            neighbor_sum += self.pressure[ni, nj, nk]
+                            neighbor_count += 1
+                if neighbor_count > 0:
+                    next_pressure = neighbor_sum / ti.cast(
+                        neighbor_count,
+                        ti.f32,
+                    )
+                    next_filled = 1
+            self.hibm_pressure_fill_next[i, j, k] = next_pressure
+            self.hibm_pressure_filled_next[i, j, k] = next_filled
+
+    @ti.kernel
+    def _commit_hibm_converted_cell_pressure_fill_kernel(self):
+        for i, j, k in self.pressure:
+            self.pressure[i, j, k] = self.hibm_pressure_fill_next[i, j, k]
+            self.hibm_pressure_filled[i, j, k] = self.hibm_pressure_filled_next[
+                i,
+                j,
+                k,
+            ]
+
+    @ti.kernel
+    def _count_hibm_pressure_filled_cells_kernel(self):
+        self.report_hibm_pressure_filled_cells[None] = 0
+        for i, j, k in self.hibm_pressure_filled:
+            if self.hibm_pressure_filled[i, j, k] != 0:
+                ti.atomic_add(self.report_hibm_pressure_filled_cells[None], 1)
+
+    def fill_hibm_converted_cell_pressures(self, sweeps: int = 8) -> int:
+        """Back-fill stale pressures of hibm-converted cells (S2-A8'').
+
+        The band's full conversion is the correct projection behavior
+        (zero-correctable cells are zero matrix rows), but converted
+        cells drop out of the pressure solve, so their ``pressure``
+        values go stale exactly where the dedicated sampling view
+        (:meth:`build_hibm_sampling_obstacle`) re-exposes sealed water to
+        the closure stress sampler. This iterative 6-neighbor average
+        (Jacobi expand/commit double buffer, one cell layer per sweep
+        from the solved water inward) replaces the stale values with a
+        diffused estimate of the adjacent solved-water pressure.
+
+        Targets exactly the hibm-converted non-base population
+        (``obstacle != 0 and hibm_base_obstacle == 0``): solved water and
+        base geometry obstacles are exact copy-through. Cells never
+        reached within ``sweeps`` (no available neighbor chain to solved
+        water) keep their value and stay unmarked.
+
+        Returns the number of filled cells and mirrors it host-side in
+        ``last_hibm_pressure_filled_cell_count`` (-1 until the first
+        call; reset by :meth:`restore_state`). NOT mounted inside
+        :meth:`project` - the HIBM assemble calls it explicitly after
+        the projection returns and before stress sampling, only when the
+        far-pressure closure is enabled, so the default projection path
+        stays bitwise-unchanged.
+        """
+        sweep_count = int(sweeps)
+        if sweep_count <= 0:
+            raise ValueError("sweeps must be positive")
+        self._ensure_hibm_base_obstacle()
+        self._init_hibm_converted_cell_pressure_fill_kernel()
+        for _ in range(sweep_count):
+            self._expand_hibm_converted_cell_pressure_fill_kernel()
+            self._commit_hibm_converted_cell_pressure_fill_kernel()
+        self._count_hibm_pressure_filled_cells_kernel()
+        filled = int(self.report_hibm_pressure_filled_cells[None])
+        self.last_hibm_pressure_filled_cell_count = filled
+        return filled
+
+    @ti.kernel
+    def _build_hibm_sampling_obstacle_kernel(
+        self,
+        node_kind_code: ti.template(),
+        unclassified_node_code: ti.i32,
+    ):
+        for i, j, k in self.sampling_obstacle:
+            sampling_dry = 0
+            if (
+                self.hibm_base_obstacle[i, j, k] != 0
+                or node_kind_code[i, j, k] != unclassified_node_code
+            ):
+                sampling_dry = 1
+            self.sampling_obstacle[i, j, k] = sampling_dry
+
+    def build_hibm_sampling_obstacle(
+        self,
+        node_kind_code,
+        *,
+        unclassified_node_code: int = 0,
+    ) -> None:
+        """Build the dedicated closure stress-sampling view (S2-A8'').
+
+        Truth table (``sampling_obstacle = 1`` means dry for sampling):
+
+        - base geometry obstacle (``hibm_base_obstacle != 0``): dry;
+        - classified row-cloud envelope (``node_kind_code !=
+          unclassified_node_code``, regardless of conversion state): dry
+          - the A8 experiment proved opening the envelope makes every
+          marker sample zero-pressure dead water on both sides;
+        - everything else (free solved water AND NONE-classified
+          hibm-converted sealed water): samplable water - the converted
+          population carries the back-filled pressure from
+          :meth:`fill_hibm_converted_cell_pressures`.
+
+        The view is consumed only by the closure stress sampling
+        (``sampling_obstacle_field`` keyword); the projection, no-slip
+        residual, Neumann gradient sampling and every other consumer
+        keep reading ``obstacle``.
+        """
+        if tuple(node_kind_code.shape) != tuple(self.obstacle.shape):
+            raise ValueError(
+                "node_kind_code shape "
+                f"{tuple(node_kind_code.shape)} does not match the fluid "
+                f"cell grid {tuple(self.obstacle.shape)}"
+            )
+        self._ensure_hibm_base_obstacle()
+        self._build_hibm_sampling_obstacle_kernel(
+            node_kind_code,
+            int(unclassified_node_code),
+        )
+
+    @ti.kernel
     def _save_state_kernel(self):
         for i, j, k in self.velocity:
             self.saved_velocity[i, j, k] = self.velocity[i, j, k]
@@ -1721,6 +1918,7 @@ class CartesianFluidSolver:
         self.last_hibm_solid_band_marked_increment = 0
         self.last_hibm_solid_band_interior_cells = -1
         self.last_hibm_solid_band_enclosed_water_cells = -1
+        self.last_hibm_pressure_filled_cell_count = -1
         self._hibm_reachability_checksum = None
 
     @ti.kernel
@@ -5583,6 +5781,14 @@ class CartesianFluidSolver:
             ),
             "hibm_solid_band_enclosed_water_cells": int(
                 self.last_hibm_solid_band_enclosed_water_cells
+            ),
+            # S2-A8'' host-mirror passthrough: -1 = the converted-cell
+            # pressure fill never ran; otherwise the count from the most
+            # recent fill_hibm_converted_cell_pressures() call. The fill
+            # runs post-projection (HIBM assemble), so within one
+            # assemble step this key shows the PREVIOUS step's fill.
+            "hibm_pressure_filled_cell_count": int(
+                self.last_hibm_pressure_filled_cell_count
             ),
             "cg_restart_count": int(self.last_project_cg_restart_count),
             "cg_restart_count_measured": bool(
