@@ -4365,6 +4365,209 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
             1,
         )
 
+    def test_node_anchor_fallback_closes_sealed_marker_without_marker_anchor(
+        self,
+    ) -> None:
+        # S2-A7 red test: the S2-A6 marker-level anchor is sourced from the
+        # pressure-Neumann row assembly, but the 25-step production probe
+        # measured pressure_neumann_active_rows == 0 (every near-boundary
+        # fluid cell carries a velocity-Dirichlet row instead, which the
+        # Neumann assembly skips), so that anchor source is structurally
+        # EMPTY in the squid geometry. The node-level anchor field
+        # node_anchor_cell on HibmMpmIbNodeSearch - populated by the
+        # velocity-Dirichlet row assembly (row write-out + relocation
+        # success paths) and by the interior-fluid-point prefill - must
+        # close the marker instead.
+        #
+        # Same fully sealed 16^3 fixture as
+        # test_anchor_fallback_closes_fully_sealed_marker: marker at the
+        # cell-center column i = j = 8, z = 0.5 (face between cells 7 and
+        # 8), normal +z; every cell obstacle except the lone water cell
+        # (8, 8, 2) OFF the normal line, so both +/-n walks miss at every
+        # reach. The marker-level anchor is left at its (-1, -1, -1)
+        # sentinel. The sampler must take the 8 corner nodes of the
+        # marker's cell base floor(grid_coord) = (8, 8, 7) (z-fastest
+        # traversal, indices clamped to the node grid), find the manually
+        # pinned node anchor (8, 8, 7) -> water cell (8, 8, 2), read that
+        # cell-center pressure directly, orient the covariant formula from
+        # the anchor center's normal projection (z_c(2) = 0.15625 < 0.5 ->
+        # water on -n) and close with traction = (p_anchor - p_far) * n.
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        # Precondition: the marker-level Neumann anchor stays unset, so
+        # the S2-A6 first-stage fallback cannot fire and its counter must
+        # stay 0 below.
+        marker_anchor = tuple(
+            int(markers.marker_pressure_anchor_cell[0][axis])
+            for axis in range(3)
+        )
+        self.assertEqual(marker_anchor, (-1, -1, -1))
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(16, 16, 16),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((16, 16, 16), 5.0, dtype=np.float32)
+        fluid.pressure.from_numpy(pressure)
+        obstacle = np.ones((16, 16, 16), dtype=np.int32)
+        obstacle[8, 8, 2] = 0
+        fluid.obstacle.from_numpy(obstacle)
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(16, 16, 16),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=1,
+        )
+        # Pin the node-level anchor directly (the assembly-capture path
+        # has its own unit test below): only the corner node (8, 8, 7) of
+        # the marker's cell points at the lone water cell. (8, 8, 7) is
+        # reached from the nominal corner base (8, 8, 7) at offset
+        # (0, 0, 0) and from a one-ulp-low base (7, 7, 7) at offset
+        # (1, 1, 0), so the test is robust to f32 floor jitter.
+        node_anchor = np.full((16, 16, 16, 3), -1, dtype=np.int32)
+        node_anchor[8, 8, 7] = (8, 8, 2)
+        search.node_anchor_cell.from_numpy(node_anchor)
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            use_pressure_anchor_fallback=True,
+            node_anchor_cell=search.node_anchor_cell,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        self.assertEqual(report.far_pressure_node_anchor_closed_marker_count, 1)
+        # First-stage (marker-level) anchor never fired: its source is
+        # empty here, exactly the S2-A7 production gap.
+        self.assertEqual(report.far_pressure_anchor_closed_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_extended_marker_count, 0)
+        traction = markers.marker_traction_pa(0)
+        # traction = (p_anchor_water - p_far_air) * n = (5 - 10) * +z
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[2], -5.0, delta=1.0e-4)
+
+        # The node anchor must never fire on its own: with the runtime
+        # switch left at its default (False) the same sealed marker stays
+        # invalid even though the node anchor field is populated and
+        # passed in.
+        default_report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            node_anchor_cell=search.node_anchor_cell,
+        )
+
+        self.assertEqual(default_report.valid_marker_count, 0)
+        self.assertEqual(default_report.invalid_marker_count, 1)
+        self.assertEqual(default_report.far_pressure_closed_marker_count, 0)
+        self.assertEqual(
+            default_report.far_pressure_node_anchor_closed_marker_count,
+            0,
+        )
+        self.assertEqual(
+            default_report.far_pressure_anchor_closed_marker_count,
+            0,
+        )
+
+    def test_velocity_dirichlet_row_assembly_records_node_anchor_cell(self) -> None:
+        # S2-A7 red test (capture side): the velocity-Dirichlet
+        # reconstructed row assembly must publish, for the IB node that
+        # received a row, an interior-fluid anchor cell in
+        # search.node_anchor_cell, and the field must read (-1, -1, -1)
+        # before any assembly ran. Same minimal 4^3 fixture as
+        # test_no_slip_dirichlet_rows_reconstruct_along_surface_normal:
+        # exactly one reconstructed row at node (2, 2, 2).
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.1),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(0.04,),
+            region_ids=(7,),
+        )
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(4, 4, 4),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=1,
+        )
+        anchor_before = tuple(
+            int(search.node_anchor_cell[2, 2, 2][axis]) for axis in range(3)
+        )
+        self.assertEqual(anchor_before, (-1, -1, -1))
+        search.search_and_classify(
+            markers,
+            search_radius_m=0.13,
+            interior_probe_distance_m=0.125,
+        )
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(4, 4, 4),
+            marker_capacity=1,
+        )
+        boundary.build_from_search(
+            search,
+            markers,
+            marker_pressure_neumann_gradient_pa_per_m=(0.0,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        fluid.velocity.fill((0.0, 0.0, 0.4))
+
+        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
+            fluid.velocity_dirichlet_boundary_active,
+            fluid.velocity_dirichlet_boundary_value_mps,
+            fluid.velocity_dirichlet_boundary_projection_weight,
+            fluid.obstacle,
+            fluid.velocity,
+            search,
+            cell_face_x_m=fluid.cell_face_x_m,
+            cell_face_y_m=fluid.cell_face_y_m,
+            cell_face_z_m=fluid.cell_face_z_m,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            grid_nodes=fluid.grid.grid_nodes,
+        )
+
+        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
+        anchor = tuple(
+            int(search.node_anchor_cell[2, 2, 2][axis]) for axis in range(3)
+        )
+        # The anchor is the containing cell of the row's interior fluid
+        # sample: a non-obstacle cell that participates in the pressure
+        # solve. (Exact cell index is not pinned: the sample sits on the
+        # face between cells 2 and 3 along z, so f32 rounding may resolve
+        # the containing cell to either side - both are fluid.)
+        self.assertGreaterEqual(anchor[0], 0)
+        self.assertGreaterEqual(anchor[1], 0)
+        self.assertGreaterEqual(anchor[2], 0)
+        self.assertLess(anchor[0], 4)
+        self.assertLess(anchor[1], 4)
+        self.assertLess(anchor[2], 4)
+        self.assertEqual(int(fluid.obstacle[anchor[0], anchor[1], anchor[2]]), 0)
+        # A node that never was an IB node keeps the sentinel after the
+        # assembly-time reset + prefill + capture sequence.
+        untouched = tuple(
+            int(search.node_anchor_cell[0, 0, 0][axis]) for axis in range(3)
+        )
+        self.assertEqual(untouched, (-1, -1, -1))
+
 
 if __name__ == "__main__":
     unittest.main()
