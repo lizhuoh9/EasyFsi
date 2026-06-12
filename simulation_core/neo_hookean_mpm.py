@@ -95,6 +95,7 @@ class NeoHookeanMpmState:
         self.area_weight_m2 = ti.field(dtype=ti.f32, shape=self.particle_capacity)
         self.rest_area_weight_m2 = ti.field(dtype=ti.f32, shape=self.particle_capacity)
         self.region_id = ti.field(dtype=ti.i32, shape=self.particle_capacity)
+        self.fixed_particle = ti.field(dtype=ti.i32, shape=self.particle_capacity)
         self.surface_normal = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
         self.rest_surface_normal = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
         self.external_force_n = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
@@ -174,6 +175,7 @@ class NeoHookeanMpmState:
                 self.area_weight_m2[p] = 0.0
                 self.rest_area_weight_m2[p] = 0.0
                 self.region_id[p] = 0
+                self.fixed_particle[p] = 0
                 self.surface_normal[p] = ti.Vector([0.0, 0.0, 0.0])
                 self.rest_surface_normal[p] = ti.Vector([0.0, 0.0, 0.0])
                 self.mass_kg[p] = density_kgm3 * particle_volume
@@ -237,6 +239,7 @@ class NeoHookeanMpmState:
         layer_count: ti.i32,
         primary_region_id: ti.i32,
         secondary_region_id: ti.i32,
+        fixed_region_id: ti.i32,
         density_kgm3: ti.f32,
         primary_thickness_m: ti.f32,
         secondary_thickness_m: ti.f32,
@@ -253,6 +256,8 @@ class NeoHookeanMpmState:
                     thickness = primary_thickness_m
                 elif region == secondary_region_id:
                     thickness = secondary_thickness_m
+                elif fixed_region_id >= 0 and region == fixed_region_id:
+                    thickness = primary_thickness_m
                 layer_fraction = (
                     (ti.cast(layer, ti.f32) + 0.5) / ti.cast(layer_count, ti.f32)
                     - 0.5
@@ -271,6 +276,10 @@ class NeoHookeanMpmState:
                 self.rest_area_weight_m2[p] = area_weight
                 self.mass_kg[p] = mass
                 self.region_id[p] = region
+                fixed = 0
+                if fixed_region_id >= 0 and region == fixed_region_id:
+                    fixed = 1
+                self.fixed_particle[p] = fixed
                 self.surface_normal[p] = normal[face]
                 self.rest_surface_normal[p] = normal[face]
                 self.external_force_n[p] = ti.Vector([0.0, 0.0, 0.0])
@@ -286,6 +295,7 @@ class NeoHookeanMpmState:
         layer_count: int,
         primary_region_id: int,
         secondary_region_id: int,
+        fixed_region_id: int = -1,
         density_kgm3: float,
         primary_thickness_m: float,
         secondary_thickness_m: float,
@@ -299,6 +309,10 @@ class NeoHookeanMpmState:
             for region in tri_surface.region_id.to_numpy()[: int(tri_surface.face_count)]
         )
         supported_regions = {int(primary_region_id), int(secondary_region_id)}
+        fixed_region_clause = ""
+        if int(fixed_region_id) >= 0:
+            supported_regions.add(int(fixed_region_id))
+            fixed_region_clause = f" and fixed_region_id={int(fixed_region_id)}"
         unsupported_regions = sorted(active_regions - supported_regions)
         if unsupported_regions:
             raise ValueError(
@@ -306,6 +320,7 @@ class NeoHookeanMpmState:
                 f"NeoHookeanMpmState: {unsupported_regions}; expected only "
                 f"primary_region_id={int(primary_region_id)} and "
                 f"secondary_region_id={int(secondary_region_id)}"
+                f"{fixed_region_clause}"
             )
         particle_count = int(tri_surface.face_count) * int(layer_count)
         if particle_count > self.particle_capacity:
@@ -320,6 +335,7 @@ class NeoHookeanMpmState:
             int(layer_count),
             int(primary_region_id),
             int(secondary_region_id),
+            int(fixed_region_id),
             float(density_kgm3),
             float(primary_thickness_m),
             float(secondary_thickness_m),
@@ -686,8 +702,16 @@ class NeoHookeanMpmState:
                 stress = -dt_s * self.volume_m3[p] * ((P @ Fp.transpose()) @ inv_dx2)
                 affine = stress + self.mass_kg[p] * self.C[p]
                 particle_momentum = self.mass_kg[p] * self.v[p]
+                particle_external_force = self.external_force_n[p]
+                if self.fixed_particle[p] != 0:
+                    # Fixed particles anchor the grid with their mass but
+                    # carry zero momentum, zero affine/stress contribution,
+                    # and an inert external force.
+                    particle_momentum = ti.Vector([0.0, 0.0, 0.0])
+                    affine = ti.Matrix.zero(ti.f32, 3, 3)
+                    particle_external_force = ti.Vector([0.0, 0.0, 0.0])
                 self._atomic_add_vector(self.report_particle_momentum_kg_mps, particle_momentum)
-                self._atomic_add_vector(self.report_external_force_n, self.external_force_n[p])
+                self._atomic_add_vector(self.report_external_force_n, particle_external_force)
                 ti.atomic_add(self.report_total_mass_kg[None], self.mass_kg[p])
                 ti.atomic_add(self.report_total_volume_m3[None], self.volume_m3[p])
                 ti.atomic_add(
@@ -710,7 +734,7 @@ class NeoHookeanMpmState:
                             ]
                         )
                         momentum = weight * (particle_momentum + affine @ dpos)
-                        force = weight * self.external_force_n[p]
+                        force = weight * particle_external_force
                         ti.atomic_add(self.grid_mass_kg[node], weight * self.mass_kg[p])
                         ti.atomic_add(self.grid_velocity_mps[node].x, momentum.x)
                         ti.atomic_add(self.grid_velocity_mps[node].y, momentum.y)
@@ -769,10 +793,17 @@ class NeoHookeanMpmState:
                                 )
                             )
                         )
-                    self.v[p] = new_v
-                    self.C[p] = new_C
-                    self.x[p] += dt_s * new_v
-                    self.F[p] = (self._identity() + dt_s * new_C) @ self.F[p]
+                    if self.fixed_particle[p] == 0:
+                        self.v[p] = new_v
+                        self.C[p] = new_C
+                        self.x[p] += dt_s * new_v
+                        self.F[p] = (self._identity() + dt_s * new_C) @ self.F[p]
+                if self.fixed_particle[p] != 0:
+                    # Fixed particles stay frozen: zero velocity, frozen
+                    # position, rest-identity deformation, no affine state.
+                    self.v[p] = ti.Vector([0.0, 0.0, 0.0])
+                    self.C[p] = ti.Matrix.zero(ti.f32, 3, 3)
+                    self.F[p] = self._identity()
                 self._update_surface_geometry_from_deformation(p)
                 report_coord = self._particle_grid_coordinate(p)
                 if self._particle_grid_stencil_out_of_bounds(report_coord) == 0:

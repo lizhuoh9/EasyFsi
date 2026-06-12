@@ -1159,10 +1159,14 @@ class NeoHookeanFixedRegionConstraintTests(unittest.TestCase):
         that of an identical particle with no anchor in stencil range. Here a
         4x-mass anchor sits one cell away sharing 2/3 of the stencil; direct
         weight arithmetic on the first substep gives a velocity ratio of
-        ~0.58, so the displacement must land well below the 0.9 gate. This
-        grid-mediated mass coupling is the mechanism by which a fixed rim
-        region clamps neighboring free membrane material in the layered neo
-        path."""
+        ~0.58, so the displacement must land well below the 0.9 gate. Unlike
+        the isolated fixtures (uniform field, C = 0, F = I exactly), the
+        coupled state has a nonuniform grid velocity field, so F evolves and
+        real near-incompressible Ecoflex stress acts: dt must sit inside the
+        material's explicit elastic CFL (~3.0e-5 s at this spacing), hence
+        dt = 1e-5 s. This grid-mediated mass coupling is the mechanism by
+        which a fixed rim region clamps neighboring free membrane material in
+        the layered neo path."""
         material = ecoflex_0010_material()
         bounds_min = (-0.02, -0.02, -0.02)
         bounds_max = (0.02, 0.02, 0.02)
@@ -1219,9 +1223,9 @@ class NeoHookeanFixedRegionConstraintTests(unittest.TestCase):
                 region_id=7,
                 area_load_npm2=(500.0, 0.0, 0.0),
             )
-            for _ in range(8):
+            for _ in range(30):
                 state.step(
-                    dt_s=1.0e-4,
+                    dt_s=1.0e-5,
                     mu_pa=material.shear_modulus_pa,
                     lambda_pa=material.lame_lambda_pa,
                     primary_region_id=7,

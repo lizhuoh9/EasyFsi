@@ -4170,6 +4170,43 @@ def _raise_for_step_solid_out_of_bounds_guard(row: dict[str, object]) -> None:
         )
 
 
+def _raise_for_closure_coverage_floor(
+    rows: list[dict[str, object]],
+    floor: int,
+    patience: int,
+) -> None:
+    """Loud early failure when far-pressure closure coverage stays below a
+    floor for `patience` consecutive steps (S2-A11b). The 2s production run
+    bled closed markers at 16.2/step for ~110 steps while marching toward an
+    unrecoverable state; a healthy run holds the closed count steady. floor=0
+    disables the guard (default, bitwise-compatible). A single recovered step
+    inside the window resets the streak."""
+    if int(floor) <= 0 or int(patience) <= 0:
+        return
+    if len(rows) < int(patience):
+        return
+    field = "hibm_full_stress_far_pressure_closed_marker_count"
+    recent = rows[-int(patience):]
+    last_value = 0.0
+    for row in recent:
+        if field not in row:
+            return
+        value = _required_finite_row_number(
+            row,
+            field,
+            context=f"step {row.get('step')} closure coverage floor guard",
+        )
+        if value >= float(floor):
+            return
+        last_value = value
+    step = recent[-1].get("step")
+    raise RuntimeError(
+        f"step {step} closure coverage floor guard failed: "
+        f"{field}={last_value:.0f} stayed below floor={int(floor)} for the "
+        f"last {int(patience)} consecutive steps"
+    )
+
+
 def _ascii_vtk_numbers(values: np.ndarray, *, precision: int = 9) -> str:
     flat = np.asarray(values).reshape(-1)
     return " ".join(f"{float(value):.{precision}g}" for value in flat)
@@ -5135,6 +5172,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             layer_count=args.solid_mpm_layers,
             primary_region_id=7,
             secondary_region_id=8,
+            fixed_region_id=5,
             density_kgm3=material.density_kgm3,
             primary_thickness_m=spec.main_membrane_thickness_m,
             secondary_thickness_m=spec.tail_membrane_thickness_m,
@@ -6018,6 +6056,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     divergence_l2_limit=float(args.projection_divergence_tolerance),
                 )
                 _raise_for_step_solid_out_of_bounds_guard(row)
+                _raise_for_closure_coverage_floor(
+                    rows,
+                    int(args.closure_coverage_floor),
+                    int(args.closure_coverage_floor_patience),
+                )
             except Exception as exc:
                 _write_step_failure_artifacts(
                     process_path=process_path,
@@ -9278,6 +9321,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1.0e-2,
         help="Validation gate for post-projection divergence L2.",
+    )
+    parser.add_argument(
+        "--closure-coverage-floor",
+        type=int,
+        default=0,
+        help=(
+            "Fail fast when hibm_full_stress_far_pressure_closed_marker_count "
+            "stays below this floor for --closure-coverage-floor-patience "
+            "consecutive steps. 0 disables the guard."
+        ),
+    )
+    parser.add_argument(
+        "--closure-coverage-floor-patience",
+        type=int,
+        default=10,
+        help=(
+            "Consecutive steps below --closure-coverage-floor before the "
+            "closure coverage floor guard raises."
+        ),
     )
     parser.add_argument("--grid-scale", type=float, default=1.0)
     parser.add_argument(
