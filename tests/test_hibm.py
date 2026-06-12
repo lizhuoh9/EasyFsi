@@ -4741,6 +4741,176 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         stress_window = source[stress_call:stress_call + 2400]
         self.assertIn("sampling_obstacle_field=", stress_window)
 
+    def test_closure_region_suppresses_spurious_outside_water(self) -> None:
+        # S2-A9 red test. Production probe at the 2 s campaign: the main
+        # membrane sinks ~17 mm as a whole and the vacated space above it
+        # is WATER in the carve model (there is no air phase), so the
+        # region-7 markers' outside (+n) walk samples spurious water
+        # there. The genuine two-sided branch then takes over with
+        # Delta-p = (real water - spurious water) ~ 0 and the closed
+        # count collapses 7782 -> 0 intermittently, redirecting the
+        # drive. The declared semantics of a far-pressure region is an
+        # AIR-BACKED interface: the outside is ALWAYS the known far
+        # pressure, regardless of what the geometry happens to sample
+        # there, so for closure-region markers the closure branch must
+        # take priority over the two-sided branch.
+        #
+        # Fixture: _water_below_air_above_fixture variant with water on
+        # BOTH sides (whole domain fluid, no obstacle). 8^3 unit box,
+        # cell width 0.125, centers z_c(k) = (k + 0.5) / 8: pressure 3.0
+        # in the lower half (cells z 0..3) and 9.0 in the upper half
+        # (cells z 4..7). Marker at z = 0.5 (the face between cells 3
+        # and 4), normal +z, region 7, far pressure 10. Both walks find
+        # water at the first 1.0x candidate: inside probe z = 0.375 ->
+        # support cells z {2, 3} -> 3.0; outside probe z = 0.625 ->
+        # support cells z {4, 5} -> 9.0.
+        #
+        # Status quo (two-sided wins): traction = (3 - 9) * +z = -6.
+        # Declared closure semantics: outside := p_far = 10, traction =
+        # (3 - 10) * +z = -7, the marker still counts as closed, and the
+        # suppressed spurious outside water is directly observable in
+        # the new far_pressure_outside_suppressed_marker_count.
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(8, 8, 8),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((8, 8, 8), 3.0, dtype=np.float32)
+        pressure[:, :, 4:] = 9.0
+        fluid.pressure.from_numpy(pressure)
+        # The whole domain is fluid: the obstacle field stays all zero.
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        self.assertEqual(
+            report.far_pressure_outside_suppressed_marker_count,
+            1,
+        )
+        self.assertEqual(report.two_sided_pressure_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_extended_marker_count, 0)
+        self.assertEqual(report.closure_gradient_missing_marker_count, 0)
+        traction = markers.marker_traction_pa(0)
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        # Declared closure: (p_inside_water - p_far_air) * n =
+        # (3 - 10) * +z = -7, NOT the spurious two-sided
+        # (3 - 9) * +z = -6.
+        self.assertAlmostEqual(traction[2], -7.0, delta=1.0e-4)
+
+        # Contrast leg: the same both-sides-water fixture with the
+        # marker in a NON-closure region (marker region 8, far region 7)
+        # must keep the genuine two-sided branch bit for bit:
+        # traction = (3 - 9) * +z = -6, no closure, no suppression.
+        contrast_markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        contrast_markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(8,),
+        )
+
+        contrast_report = self._sample(
+            contrast_markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+
+        self.assertEqual(contrast_report.valid_marker_count, 1)
+        self.assertEqual(contrast_report.invalid_marker_count, 0)
+        self.assertEqual(contrast_report.two_sided_pressure_marker_count, 1)
+        self.assertEqual(contrast_report.far_pressure_closed_marker_count, 0)
+        self.assertEqual(
+            contrast_report.far_pressure_outside_suppressed_marker_count,
+            0,
+        )
+        contrast_traction = contrast_markers.marker_traction_pa(0)
+        self.assertAlmostEqual(contrast_traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(contrast_traction[1], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(contrast_traction[2], -6.0, delta=1.0e-4)
+
+    def test_suppression_keeps_mirrored_closure_for_inside_dry(self) -> None:
+        # S2-A9 guard: the declared closure priority must NOT over-fire
+        # on mirrored-orientation markers. Mirrored fixture (water ONLY
+        # above the marker plane, structurally dry below): 8^3 unit box,
+        # pressure 9.0 everywhere, obstacle in cells z 0..3. Marker at
+        # z = 0.5, normal +z, region 7, far pressure 10. The inside (-n)
+        # candidates (probe z = 0.375, 0.3125, 0.25, 0.1875, 0.125 ->
+        # supports within cells 0..3) are all obstacle and never find
+        # water; the outside (+n) walk finds the REAL water at the first
+        # 1.0x candidate (probe z = 0.625 -> support cells z {4, 5},
+        # both fluid at 9.0).
+        #
+        # The closure-priority branch keys on inside_pressure_found == 1
+        # and must not swallow this marker; the mirrored closure stays
+        # in charge and substitutes the far pressure on the dry INSIDE.
+        # Paper check of the mirrored body:
+        #   traction = (p_inside - p_outside) * n
+        #            = (p_far_air - p_water_above) * n
+        #            = (10 - 9) * +z = +1.
+        # The outside water is the genuine water side of the interface
+        # here, not spurious, so the suppressed counter must stay 0.
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(8, 8, 8),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((8, 8, 8), 9.0, dtype=np.float32)
+        fluid.pressure.from_numpy(pressure)
+        obstacle = np.zeros((8, 8, 8), dtype=np.int32)
+        obstacle[:, :, :4] = 1
+        fluid.obstacle.from_numpy(obstacle)
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        self.assertEqual(
+            report.far_pressure_outside_suppressed_marker_count,
+            0,
+        )
+        self.assertEqual(report.two_sided_pressure_marker_count, 0)
+        traction = markers.marker_traction_pa(0)
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        # Mirrored closure: (10 - 9) * +z = +1.
+        self.assertAlmostEqual(traction[2], 1.0, delta=1.0e-4)
+
 
 class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
     """S2-A8' contracts on the hibm_mpm side of the band split.
