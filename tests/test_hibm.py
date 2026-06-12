@@ -4568,6 +4568,179 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         )
         self.assertEqual(untouched, (-1, -1, -1))
 
+    def test_sampling_view_lets_closure_fire_through_converted_sealed_water(
+        self,
+    ) -> None:
+        # S2-A8'' red test (corrected A8 deadlock fixture). The full band
+        # conversion is the CORRECT projection behavior (zero-correctable
+        # cells are zero matrix rows; A8' interior-only measured a CG
+        # residual floor of 0.518) - but the stress sampler shares the
+        # projection's obstacle view, so the converted sealed water under
+        # the membrane is invisible and the closure starves. The fix is a
+        # dedicated sampling view: base geometry and the classified row
+        # cloud envelope stay DRY (the A8 experiment proved opening the
+        # envelope makes every marker sample zero-pressure dead water on
+        # both sides, Delta-p = 0, drive dead), while the NONE-classified
+        # converted cells become samplable water carrying their
+        # back-filled pressure.
+        #
+        # 16^3 unit box, spacing 0.0625; marker at the cell-center column
+        # i = j = 8 (x = y = 0.53125 -> single-column trilinear support),
+        # z = 0.5 (the face between cells 7 and 8), normal +z, so the
+        # normal-aligned probe distance is exactly one cell width.
+        #
+        # REAL obstacle view (the projection's view): every cell is
+        # obstacle - membrane envelope and the sealed water below it were
+        # all band-converted; the air side z >= 8 is base obstacle. The
+        # control call without the sampling view must therefore walk
+        # completely dry on both sides and stay invalid (the A8 deadlock).
+        #
+        # SAMPLING view (artificial field, passed directly; the
+        # fluid-side builder has its own unit test in test_core_fluid):
+        #   z <= 6 : 0 - converted sealed water, NONE-classified
+        #   z == 7 : 1 - 1-cell membrane envelope below the marker
+        #            (classified by the IB node search -> dry)
+        #   z >= 8 : 1 - envelope above the marker + base air obstacle
+        #
+        # The sealed water carries the back-filled pressure 3.0. The
+        # envelope cell z = 7 carries the poison value 100.0: if the view
+        # wrongly admitted it, the first inside candidate (grid z = 6.5,
+        # support {6: 0.5, 7: 0.5}) would read (0.5*3 + 0.5*100) / 1.0 =
+        # 51.5 and the traction would flip to (51.5 - 10) * n = +41.5;
+        # with the correct view the masked trilinear mean over water-only
+        # corners is exactly 3.0.
+        import taichi as ti
+
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(16, 16, 16),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((16, 16, 16), 3.0, dtype=np.float32)
+        pressure[:, :, 7] = 100.0
+        fluid.pressure.from_numpy(pressure)
+        obstacle = np.ones((16, 16, 16), dtype=np.int32)
+        fluid.obstacle.from_numpy(obstacle)
+        sampling_view = ti.field(dtype=ti.i32, shape=(16, 16, 16))
+        view = np.ones((16, 16, 16), dtype=np.int32)
+        view[:, :, :7] = 0
+        sampling_view.from_numpy(view)
+
+        # Control (the A8 deadlock): without the sampling view the walks
+        # share the projection obstacle view and find nothing on either
+        # side -> invalid, no closure.
+        control_report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+        self.assertEqual(control_report.valid_marker_count, 0)
+        self.assertEqual(control_report.invalid_marker_count, 1)
+        self.assertEqual(control_report.far_pressure_closed_marker_count, 0)
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            sampling_obstacle_field=sampling_view,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        self.assertEqual(report.two_sided_pressure_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_extended_marker_count, 0)
+        self.assertEqual(report.far_pressure_anchor_closed_marker_count, 0)
+        traction = markers.marker_traction_pa(0)
+        # Closure fires through the back-filled sealed water:
+        # traction = (p_filled_water - p_far_air) * n = (3 - 10) * +z.
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[2], -7.0, delta=1.0e-4)
+
+    def test_sampling_view_default_is_bitwise_status_quo(self) -> None:
+        # S2-A8'' default contract: omitting the new kwarg and passing
+        # sampling_obstacle_field=None must be the same call - both bind
+        # the never-indexed stand-in with the runtime gate off, so every
+        # sample reads the projection obstacle view exactly as before.
+        markers, fluid = self._water_below_air_above_fixture()
+
+        baseline = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+        baseline_traction = markers.marker_traction_pa(0)
+
+        explicit_none = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            sampling_obstacle_field=None,
+        )
+        explicit_none_traction = markers.marker_traction_pa(0)
+
+        self.assertEqual(baseline, explicit_none)
+        self.assertEqual(tuple(baseline_traction), tuple(explicit_none_traction))
+
+    def test_assemble_orders_fill_and_view_between_projection_and_sampling(
+        self,
+    ) -> None:
+        # S2-A8'' wiring contract on the assemble chain: the converted-
+        # cell pressure fill and the sampling-view build run strictly
+        # after the LAST fluid.project(...) (including the post-Dirichlet
+        # consistency projection) and strictly before the stress
+        # sampling, and only when the far-pressure closure is enabled
+        # (far_pressure_region_id != -1). The default path must stay
+        # bitwise-unchanged: no closure, no fill, no view.
+        import inspect
+
+        import simulation_core.hibm_mpm as hibm_mpm_module
+
+        source = inspect.getsource(
+            hibm_mpm_module.assemble_hibm_mpm_sharp_fluid_to_mpm_loads
+        )
+        self.assertIn("fluid.fill_hibm_converted_cell_pressures(", source)
+        self.assertIn("fluid.build_hibm_sampling_obstacle(", source)
+
+        last_project = source.rindex("fluid.project(")
+        fill_call = source.index("fluid.fill_hibm_converted_cell_pressures(")
+        build_call = source.index("fluid.build_hibm_sampling_obstacle(")
+        stress_call = source.index("sample_fluid_stress_to_marker_tractions(")
+        self.assertLess(last_project, fill_call)
+        self.assertLess(fill_call, build_call)
+        self.assertLess(build_call, stress_call)
+
+        # The fill block is gated on the closure opt-in.
+        gate_window = source[max(0, fill_call - 600):fill_call]
+        self.assertIn("far_pressure_region_id) != -1", gate_window)
+        # The view build consumes the same frozen classification the band
+        # conversion consumed.
+        build_window = source[build_call:build_call + 400]
+        self.assertIn("ib_search.node_kind_code", build_window)
+        self.assertIn(
+            "unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE",
+            build_window,
+        )
+        # The stress sampling call receives the view (None when the
+        # closure is disabled - the default bitwise path).
+        stress_window = source[stress_call:stress_call + 2400]
+        self.assertIn("sampling_obstacle_field=", stress_window)
+
 
 class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
     """S2-A8' contracts on the hibm_mpm side of the band split.

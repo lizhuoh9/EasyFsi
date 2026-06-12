@@ -3925,5 +3925,233 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
         self.assertEqual(int(solver.last_hibm_solid_band_enclosed_water_cells), -1)
 
 
+class HibmConvertedCellPressureFillTests(unittest.TestCase):
+    """S2-A8'' red tests: post-projection pressure fill + sampling view.
+
+    The A4->A8' experiment chain established that the band's full
+    conversion is the CORRECT projection behavior (zero-correctable cells
+    are zero matrix rows; A8' interior-only measured a CG residual floor
+    of 0.518), and that the closure starvation instead comes from two
+    sampling-side defects: (a) the stress sampler shares the projection's
+    obstacle view, so sealed water that was converted under the membrane
+    is invisible to it, and (b) the ``pressure`` value of converted cells
+    is stale (they do not participate in the solve).
+
+    Fix under test (fluid side):
+
+    - ``fill_hibm_converted_cell_pressures(sweeps=8)``: Jacobi-style
+      (read-old / write-new, expand+commit double buffer) iterative
+      6-neighbor averaging over "hibm-converted non-base" cells
+      (``obstacle != 0 and hibm_base_obstacle == 0``). Per sweep, every
+      such cell with at least one AVAILABLE neighbor recomputes
+      ``pressure = mean(available neighbor pressures)`` and is marked in
+      the i32 flag field ``hibm_pressure_filled``; available = a
+      6-neighbor that is solved water (``obstacle == 0``) OR a converted
+      cell already marked in a PREVIOUS sweep. A cell with no available
+      neighbor keeps its value and stays unmarked, so the fill front
+      advances exactly one cell layer per sweep from the solved water
+      into the sealed interior.
+    - ``last_hibm_pressure_filled_cell_count`` host mirror: -1 means
+      "fill never ran since construction / restore_state"; project()
+      report key ``hibm_pressure_filled_cell_count`` is a pure mirror
+      passthrough (the fill is NOT mounted inside project() - the HIBM
+      assemble calls it explicitly after the projection returns, so
+      within one assemble step the projection report shows the previous
+      step's fill count).
+    - ``build_hibm_sampling_obstacle(node_kind_code,
+      unclassified_node_code)``: dedicated sampling view
+      ``sampling_obstacle`` with the S2-A8'' truth table
+      ``view = 1 iff hibm_base_obstacle != 0 OR node_kind_code !=
+      unclassified_node_code`` - base geometry and the classified row
+      cloud envelope stay dry for sampling (the A8 lesson: opening the
+      envelope made every marker sample zero-pressure dead water on both
+      sides, killing the drive), while NONE-classified converted sealed
+      water becomes samplable with its back-filled pressure.
+    """
+
+    @staticmethod
+    def _solver_with_converted_chain():
+        # 8^3 unit box. 1D chain along x at (y, z) = (4, 4):
+        #   W  = (1,4,4): solved water (obstacle 0), pressure 2.0
+        #   C1 = (2,4,4), C2 = (3,4,4), C3 = (4,4,4): originally water in
+        #        the base snapshot, then hibm-converted (obstacle 1,
+        #        base 0) with stale pressures 50 / 60 / 70
+        #   everything else: base obstacle (dry in the base snapshot),
+        #        so the chain's only available contact is W at the C1 end
+        #        and the (5,4,4) end is a base-obstacle wall.
+        # Plus one isolated converted cell I = (6,6,6) (base 0, converted)
+        # whose 6 neighbors are all base obstacles: it must never fill.
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(8, 8, 8), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        base = np.ones((8, 8, 8), dtype=np.int32)
+        base[1, 4, 4] = 0
+        base[2, 4, 4] = 0
+        base[3, 4, 4] = 0
+        base[4, 4, 4] = 0
+        base[6, 6, 6] = 0
+        solver.obstacle.from_numpy(base)
+        solver.snapshot_hibm_base_obstacle()
+        # hibm conversion: the chain and the isolated cell become
+        # obstacles while the base snapshot still remembers them as water.
+        solver.obstacle[2, 4, 4] = 1
+        solver.obstacle[3, 4, 4] = 1
+        solver.obstacle[4, 4, 4] = 1
+        solver.obstacle[6, 6, 6] = 1
+        pressure = np.zeros((8, 8, 8), dtype=np.float32)
+        pressure[1, 4, 4] = 2.0
+        pressure[2, 4, 4] = 50.0
+        pressure[3, 4, 4] = 60.0
+        pressure[4, 4, 4] = 70.0
+        pressure[6, 6, 6] = 9.0
+        solver.pressure.from_numpy(pressure)
+        return solver
+
+    def test_pressure_fill_diffuses_one_layer_per_sweep_into_converted_chain(
+        self,
+    ) -> None:
+        solver = self._solver_with_converted_chain()
+
+        # Sweep-by-sweep hand calculation (Jacobi: availability and
+        # neighbor pressures are read from the PREVIOUS sweep's state):
+        #
+        # fill(sweeps=1), from stale (C1, C2, C3) = (50, 60, 70):
+        #   sweep 1: C1 sees solved water W (filled flags all old=0, so
+        #            C2 is not available) -> C1 = mean(2.0) = 2.0, marked;
+        #            C2 sees no available neighbor (C1 and C3 both
+        #            converted and unmarked in the previous state) ->
+        #            keeps 60.0, unmarked; C3 likewise keeps 70.0.
+        filled = solver.fill_hibm_converted_cell_pressures(sweeps=1)
+        self.assertEqual(filled, 1)
+        self.assertEqual(int(solver.last_hibm_pressure_filled_cell_count), 1)
+        self.assertAlmostEqual(float(solver.pressure[2, 4, 4]), 2.0, delta=1.0e-6)
+        self.assertAlmostEqual(float(solver.pressure[3, 4, 4]), 60.0, delta=1.0e-6)
+        self.assertAlmostEqual(float(solver.pressure[4, 4, 4]), 70.0, delta=1.0e-6)
+        self.assertEqual(int(solver.hibm_pressure_filled[2, 4, 4]), 1)
+        self.assertEqual(int(solver.hibm_pressure_filled[3, 4, 4]), 0)
+        self.assertEqual(int(solver.hibm_pressure_filled[4, 4, 4]), 0)
+
+        # fill(sweeps=2) re-initializes the flags, then from
+        # (C1, C2, C3) = (2, 60, 70):
+        #   sweep 1: C1 = mean(W=2.0) = 2.0, marked; C2/C3 unmarked.
+        #   sweep 2: C1 = mean(W=2.0) = 2.0 (C2 still unmarked in the old
+        #            state); C2 = mean(C1_old=2.0) = 2.0, marked
+        #            (C1 was marked in sweep 1); C3 still has no
+        #            available neighbor -> keeps 70.0.
+        filled = solver.fill_hibm_converted_cell_pressures(sweeps=2)
+        self.assertEqual(filled, 2)
+        self.assertEqual(int(solver.last_hibm_pressure_filled_cell_count), 2)
+        self.assertAlmostEqual(float(solver.pressure[2, 4, 4]), 2.0, delta=1.0e-6)
+        self.assertAlmostEqual(float(solver.pressure[3, 4, 4]), 2.0, delta=1.0e-6)
+        self.assertAlmostEqual(float(solver.pressure[4, 4, 4]), 70.0, delta=1.0e-6)
+        self.assertEqual(int(solver.hibm_pressure_filled[4, 4, 4]), 0)
+
+        # fill(sweeps=8) (the production default), from (2, 2, 70):
+        #   sweep 1: C1 = mean(W) = 2.0 marked; C2/C3 hold (flags were
+        #            re-initialized, so C2's neighbors are unmarked).
+        #   sweep 2: C2 = mean(C1_old=2.0) = 2.0 marked.
+        #   sweep 3: C3 = mean(C2_old=2.0) = 2.0 marked; C2 now averages
+        #            its marked neighbor C1 (2.0) -> 2.0.
+        #   sweeps 4-8: stationary - every chain cell averages marked /
+        #            water neighbors that all read 2.0.
+        filled = solver.fill_hibm_converted_cell_pressures(sweeps=8)
+        self.assertEqual(filled, 3)
+        self.assertEqual(int(solver.last_hibm_pressure_filled_cell_count), 3)
+        self.assertAlmostEqual(float(solver.pressure[2, 4, 4]), 2.0, delta=1.0e-6)
+        self.assertAlmostEqual(float(solver.pressure[3, 4, 4]), 2.0, delta=1.0e-6)
+        self.assertAlmostEqual(float(solver.pressure[4, 4, 4]), 2.0, delta=1.0e-6)
+        self.assertEqual(int(solver.hibm_pressure_filled[2, 4, 4]), 1)
+        self.assertEqual(int(solver.hibm_pressure_filled[3, 4, 4]), 1)
+        self.assertEqual(int(solver.hibm_pressure_filled[4, 4, 4]), 1)
+
+        # The water-untouched isolated converted cell holds its stale
+        # value and stays unmarked through every call above.
+        self.assertAlmostEqual(float(solver.pressure[6, 6, 6]), 9.0, delta=1.0e-6)
+        self.assertEqual(int(solver.hibm_pressure_filled[6, 6, 6]), 0)
+        # Solved water and base obstacles are copy-through: the fill only
+        # rewrites converted cells.
+        self.assertAlmostEqual(float(solver.pressure[1, 4, 4]), 2.0, delta=1.0e-6)
+        self.assertEqual(int(solver.hibm_pressure_filled[1, 4, 4]), 0)
+        self.assertAlmostEqual(float(solver.pressure[0, 0, 0]), 0.0, delta=1.0e-6)
+
+    def test_pressure_fill_rejects_non_positive_sweeps(self) -> None:
+        solver = self._solver_with_converted_chain()
+        with self.assertRaises(ValueError):
+            solver.fill_hibm_converted_cell_pressures(sweeps=0)
+
+    def test_pressure_fill_is_not_mounted_in_project_and_mirrors_report_key(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        # -1 = "fill never ran"; a plain projection must keep it there
+        # (the fill is explicitly NOT mounted inside project(); the HIBM
+        # assemble calls it after the projection returns).
+        self.assertEqual(int(solver.last_hibm_pressure_filled_cell_count), -1)
+        report = solver.project(iterations=4)
+        self.assertIn("hibm_pressure_filled_cell_count", report)
+        self.assertEqual(int(report["hibm_pressure_filled_cell_count"]), -1)
+
+        # The report key is a pure host-mirror passthrough: within one
+        # HIBM assemble step the projection report therefore shows the
+        # PREVIOUS step's fill count (the fill runs post-projection).
+        solver.last_hibm_pressure_filled_cell_count = 7
+        report = solver.project(iterations=4)
+        self.assertEqual(int(report["hibm_pressure_filled_cell_count"]), 7)
+
+        solver.save_state()
+        solver.restore_state()
+        self.assertEqual(int(solver.last_hibm_pressure_filled_cell_count), -1)
+
+    def test_build_hibm_sampling_obstacle_truth_table(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        base = np.zeros((5, 5, 5), dtype=np.int32)
+        base[0, 0, 0] = 1
+        solver.obstacle.from_numpy(base)
+        solver.snapshot_hibm_base_obstacle()
+        # (1,1,1): hibm-converted sealed water (obstacle 1, base 0,
+        # unclassified) - the population the fill makes samplable.
+        solver.obstacle[1, 1, 1] = 1
+        node_kind_code = ti.field(dtype=ti.i32, shape=(5, 5, 5))
+        # (2,2,2): row-cloud envelope - ACTIVE fluid the IB node search
+        # classified near the marker surface. (0,0,0): base obstacle that
+        # also got classified (both conditions hold).
+        node_kind_code[2, 2, 2] = 1
+        node_kind_code[0, 0, 0] = 2
+
+        solver.build_hibm_sampling_obstacle(
+            node_kind_code,
+            unclassified_node_code=0,
+        )
+
+        # Truth table (view = 1 iff base != 0 OR classified):
+        #   base obstacle (+ classified)        -> dry
+        self.assertEqual(int(solver.sampling_obstacle[0, 0, 0]), 1)
+        #   classified envelope (active fluid)  -> dry (A8 lesson)
+        self.assertEqual(int(solver.sampling_obstacle[2, 2, 2]), 1)
+        #   converted sealed water (NONE class) -> water (samplable)
+        self.assertEqual(int(solver.sampling_obstacle[1, 1, 1]), 0)
+        #   free solved water                   -> water
+        self.assertEqual(int(solver.sampling_obstacle[3, 3, 3]), 0)
+
+    def test_build_hibm_sampling_obstacle_rejects_mismatched_shape(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        wrong_shape = ti.field(dtype=ti.i32, shape=(4, 4, 4))
+        with self.assertRaises(ValueError):
+            solver.build_hibm_sampling_obstacle(
+                wrong_shape,
+                unclassified_node_code=0,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
