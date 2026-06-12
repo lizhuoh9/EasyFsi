@@ -1347,5 +1347,46 @@ class NeoHookeanFixedRegionConstraintTests(unittest.TestCase):
         )
 
 
+class NeoHookeanVacuousFixedRegionGuardTests(unittest.TestCase):
+    """S2-A11c: the first A11 wiring passed fixed_region_id=5 while the neo
+    solid mesh subset contained regions (7, 8) only - the constraint matched
+    ZERO faces and was silently vacuous (the membrane stayed an untethered
+    free disc; only a source review caught it, every synthetic-fixture test
+    passed). A requested fixed region that matches no faces of the supplied
+    mesh must fail loudly at init time instead of pretending to constrain.
+    """
+
+    def test_layered_init_rejects_fixed_region_matching_no_faces(self) -> None:
+        tri_surface = TriSurfaceRegionDiagnostics(face_capacity=2)
+        tri_surface.load_faces(
+            centroid_m=np.array(
+                [[0.0, 0.0, 0.0], [0.008, 0.0, 0.0]], dtype=np.float32
+            ),
+            normal=np.array(
+                [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=np.float32
+            ),
+            area_m2=np.array([2.0e-6, 2.0e-6], dtype=np.float32),
+            region_id=np.array([7, 8], dtype=np.int32),
+        )
+        state = NeoHookeanMpmState(
+            particle_capacity=4,
+            bounds_min_m=(-0.02, -0.02, -0.02),
+            bounds_max_m=(0.02, 0.02, 0.02),
+            grid_nodes=(12, 12, 12),
+        )
+
+        with self.assertRaisesRegex(ValueError, "fixed_region_id=5"):
+            state.initialize_layered_tri_surface(
+                tri_surface,
+                layer_count=2,
+                primary_region_id=7,
+                secondary_region_id=8,
+                fixed_region_id=5,
+                density_kgm3=1000.0,
+                primary_thickness_m=1.5e-3,
+                secondary_thickness_m=1.0e-3,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

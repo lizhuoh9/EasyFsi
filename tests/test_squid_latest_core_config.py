@@ -5243,5 +5243,32 @@ class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
         self.assertIn("fixed_region_id=5,", neo_construction)
 
 
+class SquidNeoSolidSubsetContractTests(unittest.TestCase):
+    def test_neo_solid_path_consumes_solid_region_subset(self) -> None:
+        # S2-A11c: build_tri_surface_diagnostics builds TWO subsets - the FSI
+        # diagnostic object from regions (7, 8) and the solid mesh from
+        # (7, 8, 5) including the 878 rim faces ("Main membrane rim fixed to
+        # chamber surface 6"). The first A11 wiring fed the neo path the
+        # (7, 8) diagnostics object, so fixed_region_id=5 matched zero faces
+        # and the rim constraint was VACUOUS - the membrane stayed a free
+        # disc AND the 7.25 mm rim annulus stayed an open leak path around
+        # the membrane edge. The neo construction must consume a solid-subset
+        # diagnostics object (rim faces present: the constraint binds, and
+        # the rim markers' velocity-Dirichlet rows seal the annulus).
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+
+        builder = source.split("def build_tri_surface_diagnostics(", 1)[1]
+        builder = builder.split("\ndef ", 1)[0]
+        self.assertIn("solid_diagnostics", builder)
+
+        window = source.split(
+            'elif args.solid_model == "neo_hookean_mpm":', 1
+        )[1]
+        window = window.split("\n    else:", 1)[0]
+        self.assertIn("solid_diagnostics", window)
+        self.assertNotIn("tri_diagnostics", window)
+        self.assertIn("fixed_region_id=5", window)
+
+
 if __name__ == "__main__":
     unittest.main()
