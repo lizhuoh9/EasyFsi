@@ -162,6 +162,12 @@ class HibmMpmSharpFluidToMpmLoadReport:
     marker_forces: HibmMpmSurfaceMarkerForceReport
     mpm_external_force_clear: HibmMpmExternalForceClearReport
     mpm_force_scatter: HibmMpmMpmForceScatterReport
+    # S2-A8' band population split, sampled from the final band sweep:
+    # interior slivers (classified candidates) vs enclosed water
+    # (unclassified candidates). -1 means the band ran without a split
+    # (default bitwise-unchanged mode).
+    solid_band_interior_cell_count: int = -1
+    solid_band_enclosed_water_cell_count: int = -1
 
 
 @dataclass(frozen=True)
@@ -177,6 +183,8 @@ class HibmMpmSharpMpmStepReport:
     next_velocity_dirichlet: HibmMpmVelocityDirichletBoundaryReport
     next_pressure_neumann: HibmMpmPressureNeumannMatrixReport
     next_pressure_neumann_gradient: HibmMpmPressureNeumannGradientReport | None = None
+    next_solid_band_interior_cell_count: int = -1
+    next_solid_band_enclosed_water_cell_count: int = -1
 
 
 @dataclass(frozen=True)
@@ -5483,11 +5491,23 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     for _band_pass in range(8):
         band_increment = fluid.mark_hibm_solid_band_nonprojectable_cells(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
+            node_kind_code=ib_search.node_kind_code,
+            unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
         )
         if int(band_increment) <= 0:
             break
         solid_band_nonprojectable_cell_count += int(band_increment)
         velocity_report = assemble_velocity_dirichlet_rows()
+    # Final-sweep band populations (S2-A8'): in interior-only mode the
+    # sliver count saturates to zero while the enclosed-water count is the
+    # surviving sealed real-water population; -1 means the sweep ran
+    # without a split (default mode).
+    solid_band_interior_cell_count = int(
+        getattr(fluid, "last_hibm_solid_band_interior_cells", -1)
+    )
+    solid_band_enclosed_water_cell_count = int(
+        getattr(fluid, "last_hibm_solid_band_enclosed_water_cells", -1)
+    )
     pressure_disconnected_nonprojectable_cell_count = (
         fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
@@ -5838,6 +5858,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         ib_node_search=ib_report,
         internal_obstacle_cell_count=internal_obstacle_cell_count,
         solid_band_nonprojectable_cell_count=solid_band_nonprojectable_cell_count,
+        solid_band_interior_cell_count=solid_band_interior_cell_count,
+        solid_band_enclosed_water_cell_count=solid_band_enclosed_water_cell_count,
         pressure_disconnected_nonprojectable_cell_count=(
             pressure_disconnected_nonprojectable_cell_count
         ),
@@ -6033,6 +6055,8 @@ def advance_hibm_mpm_sharp_mpm_step(
     next_solid_band_nonprojectable_cell_count = (
         fluid.mark_hibm_solid_band_nonprojectable_cells(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
+            node_kind_code=ib_search.node_kind_code,
+            unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
         )
     )
     next_pressure_disconnected_nonprojectable_cell_count = (
@@ -6063,6 +6087,8 @@ def advance_hibm_mpm_sharp_mpm_step(
             next_band_increment = (
                 fluid.mark_hibm_solid_band_nonprojectable_cells(
                     pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                    node_kind_code=ib_search.node_kind_code,
+                    unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
                 )
             )
             if int(next_band_increment) <= 0:
@@ -6090,6 +6116,14 @@ def advance_hibm_mpm_sharp_mpm_step(
                 pressure_outlet_zmin=bool(pressure_outlet_zmin),
             )
         )
+    # Final-sweep band populations for the post-step rebuild (S2-A8'):
+    # -1 when the band ran without a split (default mode).
+    next_solid_band_interior_cell_count = int(
+        getattr(fluid, "last_hibm_solid_band_interior_cells", -1)
+    )
+    next_solid_band_enclosed_water_cell_count = int(
+        getattr(fluid, "last_hibm_solid_band_enclosed_water_cells", -1)
+    )
     next_pressure_report = ib_boundary.assemble_pressure_neumann_matrix_rows(
         fluid.pressure_interface_matrix_diagonal,
         fluid.pressure_interface_matrix_rhs,
@@ -6118,6 +6152,10 @@ def advance_hibm_mpm_sharp_mpm_step(
         next_ib_node_search=next_ib_report,
         next_internal_obstacle_cell_count=next_internal_obstacle_cell_count,
         next_solid_band_nonprojectable_cell_count=next_solid_band_nonprojectable_cell_count,
+        next_solid_band_interior_cell_count=next_solid_band_interior_cell_count,
+        next_solid_band_enclosed_water_cell_count=(
+            next_solid_band_enclosed_water_cell_count
+        ),
         next_pressure_disconnected_nonprojectable_cell_count=(
             next_pressure_disconnected_nonprojectable_cell_count
         ),
@@ -6150,6 +6188,12 @@ def hibm_mpm_sharp_step_summary(
         "hibm_internal_obstacle_cell_count": load.internal_obstacle_cell_count,
         "hibm_solid_band_nonprojectable_cell_count": (
             load.solid_band_nonprojectable_cell_count
+        ),
+        "hibm_solid_band_interior_cell_count": (
+            load.solid_band_interior_cell_count
+        ),
+        "hibm_solid_band_enclosed_water_cell_count": (
+            load.solid_band_enclosed_water_cell_count
         ),
         "hibm_pressure_disconnected_nonprojectable_cell_count": (
             load.pressure_disconnected_nonprojectable_cell_count
@@ -6390,6 +6434,12 @@ def hibm_mpm_sharp_step_summary(
         "hibm_next_solid_band_nonprojectable_cell_count": (
             report.next_solid_band_nonprojectable_cell_count
         ),
+        "hibm_next_solid_band_interior_cell_count": (
+            report.next_solid_band_interior_cell_count
+        ),
+        "hibm_next_solid_band_enclosed_water_cell_count": (
+            report.next_solid_band_enclosed_water_cell_count
+        ),
         "hibm_next_pressure_disconnected_nonprojectable_cell_count": (
             report.next_pressure_disconnected_nonprojectable_cell_count
         ),
@@ -6563,6 +6613,12 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
         next_internal_obstacle_cell_count=report.next_internal_obstacle_cell_count,
         next_solid_band_nonprojectable_cell_count=(
             report.next_solid_band_nonprojectable_cell_count
+        ),
+        next_solid_band_interior_cell_count=(
+            report.next_solid_band_interior_cell_count
+        ),
+        next_solid_band_enclosed_water_cell_count=(
+            report.next_solid_band_enclosed_water_cell_count
         ),
         next_pressure_disconnected_nonprojectable_cell_count=(
             report.next_pressure_disconnected_nonprojectable_cell_count

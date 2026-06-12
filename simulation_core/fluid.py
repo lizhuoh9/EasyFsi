@@ -908,6 +908,11 @@ class CartesianFluidSolver:
         self.report_hibm_internal_obstacle_cells = ti.field(dtype=ti.i32, shape=())
         self.report_hibm_fresh_fluid_cells = ti.field(dtype=ti.i32, shape=())
         self.report_hibm_solid_band_nonprojectable_cells = ti.field(dtype=ti.i32, shape=())
+        self.report_hibm_solid_band_interior_cells = ti.field(dtype=ti.i32, shape=())
+        self.report_hibm_solid_band_enclosed_water_cells = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.report_hibm_pressure_disconnected_nonprojectable_cells = ti.field(
             dtype=ti.i32,
             shape=(),
@@ -1005,6 +1010,11 @@ class CartesianFluidSolver:
         self.last_hibm_unreached_cells_with_interface_coupling = 0
         self.last_hibm_unreached_components_with_interface_hits = 0
         self.last_hibm_solid_band_marked_increment = 0
+        # -1 means "the last band sweep ran without a population split"
+        # (legacy unclassified sweep); >= 0 are measured per-sweep
+        # populations (S2-A8').
+        self.last_hibm_solid_band_interior_cells = -1
+        self.last_hibm_solid_band_enclosed_water_cells = -1
         self.last_unreached_divergence_raw_stats = {
             "max_abs": 0.0,
             "l2": 0.0,
@@ -1164,6 +1174,8 @@ class CartesianFluidSolver:
         self.report_hibm_internal_obstacle_cells[None] = 0
         self.report_hibm_fresh_fluid_cells[None] = 0
         self.report_hibm_solid_band_nonprojectable_cells[None] = 0
+        self.report_hibm_solid_band_interior_cells[None] = 0
+        self.report_hibm_solid_band_enclosed_water_cells[None] = 0
         self.report_hibm_pressure_disconnected_nonprojectable_cells[None] = 0
 
     def clear(self) -> None:
@@ -1292,10 +1304,67 @@ class CartesianFluidSolver:
                     self.divergence[i, j, k] = 0.0
                 ti.atomic_add(self.report_hibm_solid_band_nonprojectable_cells[None], 1)
 
+    @ti.kernel
+    def _mark_hibm_solid_band_population_split_kernel(
+        self,
+        node_kind_code: ti.template(),
+        unclassified_node_code: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        convert_to_obstacle: ti.i32,
+        interior_only: ti.i32,
+    ):
+        self.report_hibm_solid_band_nonprojectable_cells[None] = 0
+        self.report_hibm_solid_band_interior_cells[None] = 0
+        self.report_hibm_solid_band_enclosed_water_cells[None] = 0
+        for i, j, k in self.obstacle:
+            if (
+                self.obstacle[i, j, k] == 0
+                and not self._divergence_stencil_has_pressure_correctable_face(
+                    i,
+                    j,
+                    k,
+                    pressure_outlet_zmin,
+                )
+            ):
+                # Population split (S2-A8'): a candidate the IB node
+                # search classified (any code other than the unclassified
+                # sentinel) lies inside the near-surface band - a
+                # membrane-interior sliver. An unclassified candidate has
+                # no marker within the search radius: real enclosed water
+                # sealed off only by the Dirichlet row cloud.
+                is_interior_sliver = 0
+                if node_kind_code[i, j, k] != unclassified_node_code:
+                    is_interior_sliver = 1
+                if is_interior_sliver == 1:
+                    ti.atomic_add(
+                        self.report_hibm_solid_band_interior_cells[None],
+                        1,
+                    )
+                else:
+                    ti.atomic_add(
+                        self.report_hibm_solid_band_enclosed_water_cells[None],
+                        1,
+                    )
+                if convert_to_obstacle == 1 and (
+                    interior_only == 0 or is_interior_sliver == 1
+                ):
+                    self.obstacle[i, j, k] = 1
+                    self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+                    self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+                    self.volume_source_s[i, j, k] = 0.0
+                    self.divergence[i, j, k] = 0.0
+                if interior_only == 0 or is_interior_sliver == 1:
+                    ti.atomic_add(
+                        self.report_hibm_solid_band_nonprojectable_cells[None],
+                        1,
+                    )
+
     def mark_hibm_solid_band_nonprojectable_cells(
         self,
         *,
         pressure_outlet_zmin: bool = False,
+        node_kind_code=None,
+        unclassified_node_code: int = 0,
     ) -> int:
         """Mark one band sweep and return the newly marked cell count.
 
@@ -1305,20 +1374,77 @@ class CartesianFluidSolver:
         increment host-side (R2-M3): a non-zero value at projection-report
         time means the caller's band budget was exhausted before saturation.
 
-        Diagnostic gate (default OFF = bitwise-unchanged): setting the
-        environment variable ``HIBM_BAND_COUNT_ONLY=1`` keeps the band cells
-        as ACTIVE fluid (count only; no obstacle conversion, no velocity
-        zeroing). Zero-correctable active cells are then fully enclosed by
-        Dirichlet-blocked faces, fall into the outlet-unreached set and are
-        handled by the per-component zero-mean anchoring chain - the
-        machinery that superseded the band mask's original CG-stability
-        motivation.
+        Population split (S2-A8'): when ``node_kind_code`` (the IB node
+        search classification field, cell-shaped) is provided, band
+        candidates split into two populations:
+
+        - interior slivers: candidates the search classified near the
+          marker surface (``node_kind_code != unclassified_node_code``) -
+          membrane-interior quasi-solid cells inside the row cloud;
+        - enclosed water: unclassified candidates (no marker within the
+          search radius) - real water sealed off by the Dirichlet row
+          cloud, solvable by the per-component zero-mean anchoring chain.
+
+        Mode table (environment gates read per call; default OFF =
+        bitwise-unchanged legacy band):
+
+        - both gates unset: convert every candidate through the legacy
+          kernel; the population mirrors stay -1 (not measured) even when
+          a classification field is supplied.
+        - ``HIBM_BAND_INTERIOR_ONLY=1`` (diagnostic): convert interior
+          slivers only; enclosed water stays ACTIVE fluid for the
+          anchoring chain. Requires ``node_kind_code`` (raises
+          ``ValueError`` otherwise). The return value and the legacy
+          counter then cover conversions only, so the caller's fixed-round
+          loop still saturates monotonically: conversions never revert
+          during the loop and the candidate test only consumes the frozen
+          classification plus the growing obstacle set.
+        - ``HIBM_BAND_COUNT_ONLY=1`` (A8 diagnostic, wins over the
+          interior-only gate): convert nothing; the legacy counter covers
+          every candidate. With ``node_kind_code`` the two populations are
+          still counted.
+
+        ``last_hibm_solid_band_interior_cells`` /
+        ``last_hibm_solid_band_enclosed_water_cells`` mirror the per-sweep
+        populations host-side (-1 when the sweep ran without a split).
         """
-        convert = 0 if os.environ.get("HIBM_BAND_COUNT_ONLY") == "1" else 1
-        self._mark_hibm_solid_band_nonprojectable_cells_kernel(
-            1 if pressure_outlet_zmin else 0,
-            convert,
+        count_only = os.environ.get("HIBM_BAND_COUNT_ONLY") == "1"
+        interior_only = (
+            not count_only and os.environ.get("HIBM_BAND_INTERIOR_ONLY") == "1"
         )
+        if interior_only and node_kind_code is None:
+            raise ValueError(
+                "HIBM_BAND_INTERIOR_ONLY=1 requires the IB node classification "
+                "field (node_kind_code) so the band can split interior slivers "
+                "from enclosed water"
+            )
+        self.last_hibm_solid_band_interior_cells = -1
+        self.last_hibm_solid_band_enclosed_water_cells = -1
+        if node_kind_code is not None and (interior_only or count_only):
+            if tuple(node_kind_code.shape) != tuple(self.obstacle.shape):
+                raise ValueError(
+                    "node_kind_code shape "
+                    f"{tuple(node_kind_code.shape)} does not match the fluid "
+                    f"cell grid {tuple(self.obstacle.shape)}"
+                )
+            self._mark_hibm_solid_band_population_split_kernel(
+                node_kind_code,
+                int(unclassified_node_code),
+                1 if pressure_outlet_zmin else 0,
+                0 if count_only else 1,
+                1 if interior_only else 0,
+            )
+            self.last_hibm_solid_band_interior_cells = int(
+                self.report_hibm_solid_band_interior_cells[None]
+            )
+            self.last_hibm_solid_band_enclosed_water_cells = int(
+                self.report_hibm_solid_band_enclosed_water_cells[None]
+            )
+        else:
+            self._mark_hibm_solid_band_nonprojectable_cells_kernel(
+                1 if pressure_outlet_zmin else 0,
+                0 if count_only else 1,
+            )
         marked = int(self.report_hibm_solid_band_nonprojectable_cells[None])
         self.last_hibm_solid_band_marked_increment = marked
         return marked
@@ -1593,6 +1719,8 @@ class CartesianFluidSolver:
         self.last_hibm_unreached_cells_with_interface_coupling = 0
         self.last_hibm_unreached_components_with_interface_hits = 0
         self.last_hibm_solid_band_marked_increment = 0
+        self.last_hibm_solid_band_interior_cells = -1
+        self.last_hibm_solid_band_enclosed_water_cells = -1
         self._hibm_reachability_checksum = None
 
     @ti.kernel
@@ -5449,6 +5577,12 @@ class CartesianFluidSolver:
             ),
             "hibm_solid_band_last_marked_increment": int(
                 self.last_hibm_solid_band_marked_increment
+            ),
+            "hibm_solid_band_interior_cells": int(
+                self.last_hibm_solid_band_interior_cells
+            ),
+            "hibm_solid_band_enclosed_water_cells": int(
+                self.last_hibm_solid_band_enclosed_water_cells
             ),
             "cg_restart_count": int(self.last_project_cg_restart_count),
             "cg_restart_count_measured": bool(
