@@ -3578,6 +3578,16 @@ def shell_surface_mass_budget(
     }
 
 
+# Windows MoveFileEx(REPLACE_EXISTING) fails with EACCES while ANY external
+# process (a monitor, Excel, antivirus, an indexer) holds the destination
+# open without FILE_SHARE_DELETE. 2026-06-13 incident: a monitoring reader
+# killed the 4000-step production run at step 506 through exactly this
+# window. Transient holders are absorbed by retrying; a persistent holder
+# still raises after the budget (5 s) - never hang, never silently drop.
+WRITE_CSV_REPLACE_ATTEMPTS = 20
+WRITE_CSV_REPLACE_BACKOFF_S = 0.25
+
+
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     if not rows:
         return
@@ -3594,7 +3604,15 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    os.replace(temp_path, path)
+    last_error: PermissionError | None = None
+    for _ in range(WRITE_CSV_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temp_path, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(WRITE_CSV_REPLACE_BACKOFF_S)
+    raise last_error
 
 
 def read_csv_rows(path: Path) -> list[dict[str, object]]:
