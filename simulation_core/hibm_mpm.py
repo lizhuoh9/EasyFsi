@@ -47,6 +47,7 @@ class HibmMpmFluidStressSampleReport:
     far_pressure_closed_marker_count: int = 0
     far_pressure_closed_extended_marker_count: int = 0
     far_pressure_anchor_closed_marker_count: int = 0
+    far_pressure_node_anchor_closed_marker_count: int = 0
     closure_gradient_missing_marker_count: int = 0
 
 
@@ -247,6 +248,16 @@ class HibmMpmSurfaceMarkers:
             dtype=ti.i32,
             shape=self.marker_capacity,
         )
+        # S2-A7: 1x1x1 stand-in bound to the sampler kernel's
+        # node_anchor_cell template slot when the caller supplies no
+        # node-level anchor field. Guarded by node_anchor_available == 0
+        # in the kernel, it is never indexed at runtime; it only keeps
+        # the template parameter bindable.
+        self._node_anchor_cell_unset = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=(1, 1, 1),
+        )
 
         self.report_primary_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_secondary_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
@@ -274,6 +285,10 @@ class HibmMpmSurfaceMarkers:
             shape=(),
         )
         self.report_stress_far_pressure_anchor_closed_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_stress_far_pressure_node_anchor_closed_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -370,11 +385,20 @@ class HibmMpmSurfaceMarkers:
         # Taichi zero-initializes fields, and (0, 0, 0) is a real cell
         # index: establish the unset sentinel before anyone can sample.
         self.reset_pressure_anchor_cells()
+        self._reset_node_anchor_cell_unset_kernel()
 
     @ti.kernel
     def _reset_pressure_anchor_cells_kernel(self):
         for marker in self.marker_pressure_anchor_cell:
             self.marker_pressure_anchor_cell[marker] = ti.Vector([-1, -1, -1])
+
+    @ti.kernel
+    def _reset_node_anchor_cell_unset_kernel(self):
+        # S2-A7: keep the never-read stand-in on the unset sentinel too,
+        # purely for self-consistency (it is shielded by
+        # node_anchor_available == 0 at every read site).
+        for node in ti.grouped(self._node_anchor_cell_unset):
+            self._node_anchor_cell_unset[node] = ti.Vector([-1, -1, -1])
 
     def reset_pressure_anchor_cells(self) -> None:
         """Reset every marker's pressure-Neumann anchor cell to unset.
@@ -1002,6 +1026,7 @@ class HibmMpmSurfaceMarkers:
         cell_width_y_m: ti.template(),
         cell_width_z_m: ti.template(),
         marker_pressure_anchor_cell: ti.template(),
+        node_anchor_cell: ti.template(),
         marker_count: ti.i32,
         nx: ti.i32,
         ny: ti.i32,
@@ -1012,6 +1037,7 @@ class HibmMpmSurfaceMarkers:
         far_pressure_pa: ti.f32,
         far_pressure_inside_probe_max_multiplier: ti.f32,
         use_pressure_anchor_fallback: ti.i32,
+        node_anchor_available: ti.i32,
     ):
         self.report_stress_valid_marker_count[None] = 0
         self.report_stress_invalid_marker_count[None] = 0
@@ -1021,6 +1047,7 @@ class HibmMpmSurfaceMarkers:
         self.report_stress_far_pressure_closed_marker_count[None] = 0
         self.report_stress_far_pressure_closed_extended_marker_count[None] = 0
         self.report_stress_far_pressure_anchor_closed_marker_count[None] = 0
+        self.report_stress_far_pressure_node_anchor_closed_marker_count[None] = 0
         self.report_stress_closure_gradient_missing_marker_count[None] = 0
         for marker in range(marker_count):
             position = self.x_gamma_m[marker]
@@ -1442,6 +1469,107 @@ class HibmMpmSurfaceMarkers:
                             ],
                             1,
                         )
+                    # S2-A7 second-stage fallback: the marker-level anchor
+                    # above is sourced from the pressure-Neumann row
+                    # assembly, but in geometries where every near-boundary
+                    # fluid cell carries a velocity-Dirichlet row the
+                    # Neumann assembly produces zero rows and that source
+                    # is structurally empty. The node-level anchor field
+                    # (owned by the IB node search, populated by the
+                    # velocity-Dirichlet row assembly's interior-fluid
+                    # sample / relocated claim and by the interior-point
+                    # prefill) decouples the closure from marker-row
+                    # existence: take the 8 corner nodes of the marker's
+                    # cell base floor(grid_coord) in fixed z-fastest order
+                    # (indices clamped to the node grid) and use the first
+                    # node whose anchor is set. The anchor cell is a
+                    # non-obstacle, solve-participating cell by
+                    # construction, so the same direct cell-center read
+                    # and orientation-covariant formula apply; only the
+                    # dedicated node-anchor counter (plus the shared
+                    # closed counter) advances. The marker-level anchor
+                    # keeps priority: where Neumann rows exist it stays
+                    # the more precise source.
+                    elif (
+                        use_pressure_anchor_fallback != 0
+                        and node_anchor_available != 0
+                        and closure_region_marker == 1
+                    ):
+                        corner_base_i = ti.floor(grid_coordinate.x, ti.i32)
+                        corner_base_j = ti.floor(grid_coordinate.y, ti.i32)
+                        corner_base_k = ti.floor(grid_coordinate.z, ti.i32)
+                        node_anchor_found = 0
+                        node_anchor_i = 0
+                        node_anchor_j = 0
+                        node_anchor_k = 0
+                        for corner_index in range(8):
+                            if node_anchor_found == 0:
+                                corner_i = ti.min(
+                                    ti.max(
+                                        corner_base_i + corner_index // 4,
+                                        0,
+                                    ),
+                                    nx - 1,
+                                )
+                                corner_j = ti.min(
+                                    ti.max(
+                                        corner_base_j + (corner_index // 2) % 2,
+                                        0,
+                                    ),
+                                    ny - 1,
+                                )
+                                corner_k = ti.min(
+                                    ti.max(
+                                        corner_base_k + corner_index % 2,
+                                        0,
+                                    ),
+                                    nz - 1,
+                                )
+                                corner_anchor = node_anchor_cell[
+                                    corner_i,
+                                    corner_j,
+                                    corner_k,
+                                ]
+                                if corner_anchor.x >= 0:
+                                    node_anchor_found = 1
+                                    node_anchor_i = corner_anchor.x
+                                    node_anchor_j = corner_anchor.y
+                                    node_anchor_k = corner_anchor.z
+                        if node_anchor_found == 1:
+                            anchor_pressure = pressure_field[
+                                node_anchor_i,
+                                node_anchor_j,
+                                node_anchor_k,
+                            ]
+                            anchor_center = ti.Vector(
+                                [
+                                    cell_center_x_m[node_anchor_i],
+                                    cell_center_y_m[node_anchor_j],
+                                    cell_center_z_m[node_anchor_k],
+                                ]
+                            )
+                            inside_pressure = far_pressure_pa
+                            outside_pressure = anchor_pressure
+                            if (anchor_center - position).dot(normal) < 0.0:
+                                inside_pressure = anchor_pressure
+                                outside_pressure = far_pressure_pa
+                            pressure_traction = (
+                                inside_pressure - outside_pressure
+                            ) * normal
+                            pressure_sample_valid = True
+                            gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                            ti.atomic_add(
+                                self.report_stress_far_pressure_closed_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                            ti.atomic_add(
+                                self.report_stress_far_pressure_node_anchor_closed_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
                 # S2-A4 diagnostic: the marker closes on pressure while at
                 # least one pressure-found side never completed a viscous
                 # gradient stencil (that side's gradient contribution is
@@ -1518,10 +1646,21 @@ class HibmMpmSurfaceMarkers:
         far_pressure_pa: float = 0.0,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
         use_pressure_anchor_fallback: bool = False,
+        node_anchor_cell=None,
     ) -> HibmMpmFluidStressSampleReport:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
             raise ValueError("grid_nodes must contain three values >= 2")
+        # S2-A7: the node-level anchor field is optional. Callers without
+        # one (or callers that never arm use_pressure_anchor_fallback)
+        # get the never-indexed 1x1x1 stand-in plus a hard availability
+        # gate, so the second-stage fallback branch short-circuits and
+        # the existing paths are reproduced bit for bit.
+        node_anchor_field = node_anchor_cell
+        node_anchor_available = 1
+        if node_anchor_field is None:
+            node_anchor_field = self._node_anchor_cell_unset
+            node_anchor_available = 0
         viscosity = float(viscosity_pa_s)
         if not math.isfinite(viscosity) or viscosity < 0.0:
             raise ValueError("viscosity_pa_s must be a finite non-negative number")
@@ -1548,6 +1687,7 @@ class HibmMpmSurfaceMarkers:
             cell_width_y_m,
             cell_width_z_m,
             self.marker_pressure_anchor_cell,
+            node_anchor_field,
             int(self.marker_count),
             int(nodes[0]),
             int(nodes[1]),
@@ -1558,6 +1698,7 @@ class HibmMpmSurfaceMarkers:
             far_pressure,
             far_inside_probe_max,
             1 if bool(use_pressure_anchor_fallback) else 0,
+            node_anchor_available,
         )
         return HibmMpmFluidStressSampleReport(
             valid_marker_count=int(self.report_stress_valid_marker_count[None]),
@@ -1579,6 +1720,11 @@ class HibmMpmSurfaceMarkers:
             ),
             far_pressure_anchor_closed_marker_count=int(
                 self.report_stress_far_pressure_anchor_closed_marker_count[None]
+            ),
+            far_pressure_node_anchor_closed_marker_count=int(
+                self.report_stress_far_pressure_node_anchor_closed_marker_count[
+                    None
+                ]
             ),
             closure_gradient_missing_marker_count=int(
                 self.report_stress_closure_gradient_missing_marker_count[None]
@@ -2198,11 +2344,47 @@ class HibmMpmIbNodeSearch:
             dtype=ti.f32,
             shape=nodes,
         )
+        # S2-A7: per-node interior-fluid anchor cell. The velocity-Dirichlet
+        # row assembly publishes, for every active IB node, the (i, j, k)
+        # of a non-obstacle, solve-participating fluid cell: prefilled from
+        # the containing cell of node_interior_fluid_point_m, then refined
+        # by the row's accepted interior velocity sample (row write-out
+        # success path) or the relocated row's claimed fluid cell
+        # (relocation success path). (-1, -1, -1) means "no fluid anchor".
+        # The stress sampler reads it as a second-stage closure fallback
+        # for markers whose marker-level pressure-Neumann anchor source is
+        # empty (geometries where the Neumann assembly produced zero rows
+        # because every near-boundary fluid cell carries a
+        # velocity-Dirichlet row).
+        self.node_anchor_cell = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=nodes,
+        )
 
         self.report_near_boundary_node_count = ti.field(dtype=ti.i32, shape=())
         self.report_external_ib_node_count = ti.field(dtype=ti.i32, shape=())
         self.report_internal_node_count = ti.field(dtype=ti.i32, shape=())
         self.report_invalid_projection_count = ti.field(dtype=ti.i32, shape=())
+        # Taichi zero-initializes fields, and (0, 0, 0) is a real cell
+        # index: establish the unset sentinel before anyone can read the
+        # anchors (the velocity-Dirichlet assembly re-resets the full
+        # field before every capture pass).
+        self.reset_node_anchor_cells()
+
+    @ti.kernel
+    def _reset_node_anchor_cells_kernel(self):
+        for node in ti.grouped(self.node_anchor_cell):
+            self.node_anchor_cell[node] = ti.Vector([-1, -1, -1])
+
+    def reset_node_anchor_cells(self) -> None:
+        """Reset every node's interior-fluid anchor cell to unset.
+
+        Runs over the full node grid so nodes that never receive a
+        velocity-Dirichlet row (and never prefill) keep the (-1, -1, -1)
+        sentinel and stay invisible to the sampler's corner-node scan.
+        """
+        self._reset_node_anchor_cells_kernel()
 
     def _default_sign_tolerance_m(self) -> float:
         min_spacing_m = max(min(self.spacing_m), 1.0e-12)
@@ -3509,6 +3691,7 @@ class HibmMpmIbBoundaryConditions:
         velocity_field: ti.template(),
         node_boundary_point_m: ti.template(),
         node_interior_fluid_point_m: ti.template(),
+        node_anchor_cell: ti.template(),
         cell_face_x_m: ti.template(),
         cell_face_y_m: ti.template(),
         cell_face_z_m: ti.template(),
@@ -3599,6 +3782,64 @@ class HibmMpmIbBoundaryConditions:
                         velocity_dirichlet_projection_weight[node] = (
                             reconstruction_alpha
                         )
+                        # S2-A7 row write-out success path: refine this
+                        # node's interior-fluid anchor with the containing
+                        # cell of the accepted walk sample (the point the
+                        # row's reconstruction actually consumed). Only a
+                        # non-obstacle containing cell overwrites the
+                        # prefill, preserving the field invariant that a
+                        # set anchor is always a fluid cell.
+                        sample_point = (
+                            boundary_point + normal * sample_denominator
+                        )
+                        sample_coordinate = self._grid_coordinate_from_fields(
+                            sample_point,
+                            cell_face_x_m,
+                            cell_face_y_m,
+                            cell_face_z_m,
+                            cell_center_x_m,
+                            cell_center_y_m,
+                            cell_center_z_m,
+                            nx,
+                            ny,
+                            nz,
+                        )
+                        sample_anchor_i = ti.min(
+                            ti.max(
+                                ti.floor(sample_coordinate.x + 0.5, ti.i32),
+                                0,
+                            ),
+                            nx - 1,
+                        )
+                        sample_anchor_j = ti.min(
+                            ti.max(
+                                ti.floor(sample_coordinate.y + 0.5, ti.i32),
+                                0,
+                            ),
+                            ny - 1,
+                        )
+                        sample_anchor_k = ti.min(
+                            ti.max(
+                                ti.floor(sample_coordinate.z + 0.5, ti.i32),
+                                0,
+                            ),
+                            nz - 1,
+                        )
+                        if (
+                            obstacle_field[
+                                sample_anchor_i,
+                                sample_anchor_j,
+                                sample_anchor_k,
+                            ]
+                            == 0
+                        ):
+                            node_anchor_cell[node] = ti.Vector(
+                                [
+                                    sample_anchor_i,
+                                    sample_anchor_j,
+                                    sample_anchor_k,
+                                ]
+                            )
                         ti.atomic_add(
                             self.report_velocity_dirichlet_boundary_rows[None],
                             1,
@@ -3722,6 +3963,7 @@ class HibmMpmIbBoundaryConditions:
         obstacle_field: ti.template(),
         velocity_field: ti.template(),
         node_boundary_point_m: ti.template(),
+        node_anchor_cell: ti.template(),
         cell_face_x_m: ti.template(),
         cell_face_y_m: ti.template(),
         cell_face_z_m: ti.template(),
@@ -3868,6 +4110,13 @@ class HibmMpmIbBoundaryConditions:
                         velocity_dirichlet_projection_weight[
                             target_i, target_j, target_k
                         ] = reconstruction_alpha
+                        # S2-A7 relocation success path: the claimed cell
+                        # was obstacle-checked at claim time, so it is a
+                        # fluid cell by construction; publish it as the
+                        # masked owner node's interior-fluid anchor.
+                        node_anchor_cell[node] = ti.Vector(
+                            [target_i, target_j, target_k]
+                        )
                         ti.atomic_add(
                             self.report_velocity_dirichlet_relocated_rows[None],
                             1,
@@ -3907,6 +4156,73 @@ class HibmMpmIbBoundaryConditions:
                         1,
                     )
 
+    @ti.kernel
+    def _reset_and_prefill_node_anchor_cells_kernel(
+        self,
+        node_anchor_cell: ti.template(),
+        node_interior_fluid_point_m: ti.template(),
+        obstacle_field: ti.template(),
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+    ):
+        # S2-A7 prefill layer: before each velocity-Dirichlet assembly the
+        # whole anchor field is reset to the unset sentinel, then every
+        # active IB node whose interior-fluid probe point lands in a
+        # non-obstacle containing cell is pre-anchored to that cell. This
+        # extends anchor coverage to ALL active IB nodes with a wet
+        # interior probe - including narrow-gap and invalid-reconstruction
+        # rows - independent of whether the row write-out below succeeds;
+        # the assembly success paths then overwrite with the refined
+        # sample/claim cell.
+        for node in ti.grouped(self.active_ib_node):
+            node_anchor_cell[node] = ti.Vector([-1, -1, -1])
+            if self.active_ib_node[node] == 1:
+                interior_point = node_interior_fluid_point_m[node]
+                interior_coordinate = self._grid_coordinate_from_fields(
+                    interior_point,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    nx,
+                    ny,
+                    nz,
+                )
+                prefill_i = ti.min(
+                    ti.max(
+                        ti.floor(interior_coordinate.x + 0.5, ti.i32),
+                        0,
+                    ),
+                    nx - 1,
+                )
+                prefill_j = ti.min(
+                    ti.max(
+                        ti.floor(interior_coordinate.y + 0.5, ti.i32),
+                        0,
+                    ),
+                    ny - 1,
+                )
+                prefill_k = ti.min(
+                    ti.max(
+                        ti.floor(interior_coordinate.z + 0.5, ti.i32),
+                        0,
+                    ),
+                    nz - 1,
+                )
+                if obstacle_field[prefill_i, prefill_j, prefill_k] == 0:
+                    node_anchor_cell[node] = ti.Vector(
+                        [prefill_i, prefill_j, prefill_k]
+                    )
+
     def assemble_velocity_dirichlet_reconstructed_boundary_rows(
         self,
         velocity_dirichlet_active,
@@ -3929,6 +4245,23 @@ class HibmMpmIbBoundaryConditions:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
             raise ValueError("grid_nodes must contain three values >= 2")
+        # S2-A7: full-field sentinel reset + interior-point prefill,
+        # strictly before the row assembly so the success paths overwrite
+        # the prefill with the row's own fluid sample/claim cell.
+        self._reset_and_prefill_node_anchor_cells_kernel(
+            search.node_anchor_cell,
+            search.node_interior_fluid_point_m,
+            obstacle_field,
+            cell_face_x_m,
+            cell_face_y_m,
+            cell_face_z_m,
+            cell_center_x_m,
+            cell_center_y_m,
+            cell_center_z_m,
+            int(nodes[0]),
+            int(nodes[1]),
+            int(nodes[2]),
+        )
         self._assemble_velocity_dirichlet_reconstructed_boundary_rows_kernel(
             velocity_dirichlet_active,
             velocity_dirichlet_value_mps,
@@ -3937,6 +4270,7 @@ class HibmMpmIbBoundaryConditions:
             velocity_field,
             search.node_boundary_point_m,
             search.node_interior_fluid_point_m,
+            search.node_anchor_cell,
             cell_face_x_m,
             cell_face_y_m,
             cell_face_z_m,
@@ -3954,6 +4288,7 @@ class HibmMpmIbBoundaryConditions:
             obstacle_field,
             velocity_field,
             search.node_boundary_point_m,
+            search.node_anchor_cell,
             cell_face_x_m,
             cell_face_y_m,
             cell_face_z_m,
@@ -5477,6 +5812,12 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             int(far_pressure_region_id) != -1
             and not bool(diagnostic_disable_pressure_neumann_matrix_rows)
         ),
+        # S2-A7: node-level anchors ride the same switch. They were
+        # captured by the LAST velocity-Dirichlet assembly above (reset +
+        # prefill + row capture), strictly before the projection(s) that
+        # solved fluid.pressure and before this sampling, so every set
+        # anchor points at a solved, non-obstacle cell.
+        node_anchor_cell=ib_search.node_anchor_cell,
     )
     markers.compute_marker_forces()
     marker_force_report = markers.aggregate_region_forces(
@@ -6000,6 +6341,9 @@ def hibm_mpm_sharp_step_summary(
         ),
         "hibm_full_stress_far_pressure_anchor_closed_marker_count": (
             load.fluid_stress.far_pressure_anchor_closed_marker_count
+        ),
+        "hibm_full_stress_far_pressure_node_anchor_closed_marker_count": (
+            load.fluid_stress.far_pressure_node_anchor_closed_marker_count
         ),
         "hibm_full_stress_closure_gradient_missing_marker_count": (
             load.fluid_stress.closure_gradient_missing_marker_count
