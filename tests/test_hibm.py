@@ -4197,6 +4197,174 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
         self.assertAlmostEqual(traction[2], -8.0, delta=1.0e-4)
 
+    def test_anchor_fallback_closes_fully_sealed_marker(self) -> None:
+        # S2-A6 red test: a closure-region marker whose +/-n normal walks
+        # are FULLY sealed (no standard candidate ever samples even a
+        # pressure weight) must still close when the pressure-Neumann row
+        # assembly has anchored it to a fluid cell that participates in
+        # the pressure solve.
+        #
+        # 16^3 unit box, spacing 0.0625. Marker at x = y = 0.53125 (the
+        # cell-center column i = j = 8) and z = 0.5 (face between cells 7
+        # and 8), normal +z, so the normal-aligned probe distance is
+        # exactly one cell width. Every cell is obstacle except the single
+        # water cell (8, 8, 2), deliberately OFF the marker's normal line:
+        #   outside (+n) candidates probe z grid coords {8.5, 9, 9.5, 10,
+        #   10.5} -> supports within cells 8..11, all obstacle;
+        #   inside (-n) candidates probe z grid coords {6.5, 6, 5.5, 5,
+        #   4.5} -> supports within cells 4..7, all obstacle.
+        # Both closure branches therefore miss and, without the anchor
+        # fallback, the marker is invalid (asserted at the end with the
+        # default flag). With use_pressure_anchor_fallback=True the
+        # sampler must read the anchor cell-center pressure directly (no
+        # interpolation), decide the water side from the anchor center's
+        # normal projection (z_c(2) = 0.15625 < 0.5 -> water on -n), and
+        # close with traction = (p_anchor - p_far) * n.
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(16, 16, 16),
+                dt_s=1.0e-3,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.full((16, 16, 16), 5.0, dtype=np.float32)
+        fluid.pressure.from_numpy(pressure)
+        obstacle = np.ones((16, 16, 16), dtype=np.int32)
+        obstacle[8, 8, 2] = 0
+        fluid.obstacle.from_numpy(obstacle)
+        # Pin the anchor directly (the assembly-capture path has its own
+        # unit test below): marker 0 is anchored to the lone water cell.
+        markers.marker_pressure_anchor_cell.from_numpy(
+            np.array([[8, 8, 2]], dtype=np.int32)
+        )
+
+        report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+            use_pressure_anchor_fallback=True,
+        )
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertEqual(report.far_pressure_closed_marker_count, 1)
+        self.assertEqual(report.far_pressure_anchor_closed_marker_count, 1)
+        self.assertEqual(report.far_pressure_closed_extended_marker_count, 0)
+        traction = markers.marker_traction_pa(0)
+        # traction = (p_anchor_water - p_far_air) * n = (5 - 10) * +z
+        self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
+        self.assertAlmostEqual(traction[2], -5.0, delta=1.0e-4)
+
+        # The anchor must never fire on its own: with the flag left at its
+        # default (False) the same sealed marker stays invalid even though
+        # the anchor field is populated.
+        default_report = self._sample(
+            markers,
+            fluid,
+            far_pressure_region_id=7,
+            far_pressure_pa=10.0,
+        )
+
+        self.assertEqual(default_report.valid_marker_count, 0)
+        self.assertEqual(default_report.invalid_marker_count, 1)
+        self.assertEqual(default_report.far_pressure_closed_marker_count, 0)
+        self.assertEqual(
+            default_report.far_pressure_anchor_closed_marker_count,
+            0,
+        )
+
+    def test_pressure_neumann_row_assembly_records_marker_anchor_cell(self) -> None:
+        # S2-A6 red test (capture side): the pressure-Neumann row assembly
+        # must publish, for every marker that received at least one matrix
+        # row, the (i, j, k) of the row-owning fluid cell, and the anchor
+        # field must read (-1, -1, -1) before any assembly ran. Same
+        # minimal 4^3 fixture as
+        # test_pressure_neumann_reconstruction_enters_fv_cg_matrix_row:
+        # exactly one row, owned by fluid cell (2, 2, 2).
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(0.04,),
+            region_ids=(7,),
+        )
+        anchor_before = tuple(
+            int(markers.marker_pressure_anchor_cell[0][axis])
+            for axis in range(3)
+        )
+        self.assertEqual(anchor_before, (-1, -1, -1))
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(4, 4, 4),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=1,
+        )
+        search.search_and_classify(
+            markers,
+            search_radius_m=0.13,
+            interior_probe_distance_m=0.125,
+        )
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(4, 4, 4),
+            marker_capacity=1,
+        )
+        boundary.build_from_search(
+            search,
+            markers,
+            marker_pressure_neumann_gradient_pa_per_m=(25.0,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+
+        report = boundary.assemble_pressure_neumann_matrix_rows(
+            fluid.pressure_interface_matrix_diagonal,
+            fluid.pressure_interface_matrix_rhs,
+            fluid.pressure_interface_coupling_active,
+            fluid.pressure_interface_coupling_neighbor,
+            fluid.pressure_interface_coupling_coefficient,
+            fluid.obstacle,
+            fluid.velocity_dirichlet_boundary_active,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            search,
+            markers,
+            cell_face_x_m=fluid.cell_face_x_m,
+            cell_face_y_m=fluid.cell_face_y_m,
+            cell_face_z_m=fluid.cell_face_z_m,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            grid_nodes=fluid.grid.grid_nodes,
+        )
+
+        self.assertEqual(report.active_pressure_neumann_rows, 1)
+        anchor = tuple(
+            int(markers.marker_pressure_anchor_cell[0][axis])
+            for axis in range(3)
+        )
+        self.assertGreaterEqual(anchor[0], 0)
+        # The anchor is the row-owning fluid cell: the same cell whose
+        # pressure_interface_coupling_active flag the assembly raised.
+        self.assertEqual(anchor, (2, 2, 2))
+        self.assertEqual(
+            int(fluid.pressure_interface_coupling_active[2, 2, 2]),
+            1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
