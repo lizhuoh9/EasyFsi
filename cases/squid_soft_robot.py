@@ -2003,7 +2003,13 @@ def build_tri_surface_diagnostics(
     probe_distance_m: float | None = None,
     region_ids: tuple[int, ...] = (7, 8),
     solid_region_ids: tuple[int, ...] = (7, 8, 5),
-) -> tuple[TriSurfaceRegionDiagnostics, dict[str, object], SurfaceMesh, np.ndarray]:
+) -> tuple[
+    TriSurfaceRegionDiagnostics,
+    dict[str, object],
+    SurfaceMesh,
+    np.ndarray,
+    TriSurfaceRegionDiagnostics,
+]:
     import trimesh
 
     mesh_path = _surface_mesh_path(config)
@@ -2064,9 +2070,23 @@ def build_tri_surface_diagnostics(
             spec,
             float(probe_distance_m),
         )
-    solid_faces, solid_centroids, solid_areas, _, solid_region_array, solid_region_face_counts = (
+    solid_faces, solid_centroids, solid_areas, solid_normals, solid_region_array, solid_region_face_counts = (
         build_region_subset(solid_region_ids, "solid MPM")
     )
+    solid_normal_orientation: dict[str, object] = {
+        "method": "mesh_face_winding",
+        "probe_distance_m": None,
+        "flipped_count": 0,
+        "face_count": int(len(solid_region_array)),
+    }
+    if spec is not None and probe_distance_m is not None:
+        solid_normals, solid_normal_orientation = _orient_normals_to_reduced_water(
+            solid_centroids,
+            solid_normals,
+            solid_region_array,
+            spec,
+            float(probe_distance_m),
+        )
     unique_vertex_ids, inverse_vertex_ids = np.unique(
         solid_faces.reshape(-1),
         return_inverse=True,
@@ -2082,6 +2102,20 @@ def build_tri_surface_diagnostics(
         normal=normals.astype(np.float32),
         area_m2=areas.astype(np.float32),
         region_id=region_array,
+    )
+    # S2-A11c: the solid subset (FSI regions + the fixed rim) gets its own
+    # diagnostics object so the layered solid path can bind the rim
+    # constraint (fixed_region_id) AND represent the rim as markers whose
+    # velocity-Dirichlet rows seal the membrane-edge annulus.
+    solid_diagnostics = TriSurfaceRegionDiagnostics(
+        face_capacity=int(len(solid_areas)),
+        runtime=runtime,
+    )
+    solid_diagnostics.load_faces(
+        centroid_m=solid_centroids.astype(np.float32),
+        normal=solid_normals.astype(np.float32),
+        area_m2=solid_areas.astype(np.float32),
+        region_id=solid_region_array,
     )
     metadata = {
         "mesh_path": str(mesh_path),
@@ -2106,8 +2140,9 @@ def build_tri_surface_diagnostics(
         "solid_centroid_bounds_min_m": [float(value) for value in np.min(solid_centroids, axis=0)],
         "solid_centroid_bounds_max_m": [float(value) for value in np.max(solid_centroids, axis=0)],
         "normal_orientation": normal_orientation,
+        "solid_normal_orientation": solid_normal_orientation,
     }
-    return diagnostics, metadata, tri_surface_mesh, solid_region_array
+    return diagnostics, metadata, tri_surface_mesh, solid_region_array, solid_diagnostics
 
 
 def compute_region_geometry_stats(
@@ -5082,7 +5117,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     fluid_probe_distance_m = min(fluid_grid_axis_min_spacing_m)
     if not args.disable_reduced_obstacles:
         simulator.mark_reduced_squid_water_domain()
-    tri_diagnostics, tri_metadata, tri_surface_mesh, tri_surface_region_ids = (
+    tri_diagnostics, tri_metadata, tri_surface_mesh, tri_surface_region_ids, solid_diagnostics = (
         build_tri_surface_diagnostics(
             source_config,
             runtime,
@@ -5161,14 +5196,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
     elif args.solid_model == "neo_hookean_mpm":
         solid_mpm = NeoHookeanMpmState(
-            particle_capacity=tri_diagnostics.face_count * args.solid_mpm_layers,
+            particle_capacity=solid_diagnostics.face_count * args.solid_mpm_layers,
             bounds_min_m=solid_mpm_bounds_min_m,
             bounds_max_m=solid_mpm_bounds_max_m,
             grid_nodes=solid_mpm_grid_nodes,
             runtime=runtime,
         )
         solid_mpm.initialize_layered_tri_surface(
-            tri_diagnostics,
+            solid_diagnostics,
             layer_count=args.solid_mpm_layers,
             primary_region_id=7,
             secondary_region_id=8,

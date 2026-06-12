@@ -322,6 +322,17 @@ class NeoHookeanMpmState:
                 f"secondary_region_id={int(secondary_region_id)}"
                 f"{fixed_region_clause}"
             )
+        if int(fixed_region_id) >= 0 and int(fixed_region_id) not in active_regions:
+            # S2-A11c: a fixed region that matches no faces would be a
+            # silently vacuous constraint (the 2s run died exactly this way:
+            # fixed_region_id=5 wired against a mesh subset without the rim).
+            raise ValueError(
+                "initialize_layered_tri_surface: "
+                f"fixed_region_id={int(fixed_region_id)} matched no faces of "
+                "the supplied surface - the fixed-region constraint would be "
+                "silently vacuous; supply the mesh subset containing the "
+                "fixed region or disable the constraint"
+            )
         particle_count = int(tri_surface.face_count) * int(layer_count)
         if particle_count > self.particle_capacity:
             raise ValueError("particle count exceeds capacity")

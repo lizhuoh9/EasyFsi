@@ -5261,8 +5261,13 @@ class SquidNeoSolidSubsetContractTests(unittest.TestCase):
         builder = builder.split("\ndef ", 1)[0]
         self.assertIn("solid_diagnostics", builder)
 
+        # Anchor on the CONSTRUCTION occurrence specifically (the string
+        # `elif args.solid_model == "neo_hookean_mpm":` also appears in the
+        # checkpoint writer earlier in the file).
         window = source.split(
-            'elif args.solid_model == "neo_hookean_mpm":', 1
+            'elif args.solid_model == "neo_hookean_mpm":\n'
+            "        solid_mpm = NeoHookeanMpmState(",
+            1,
         )[1]
         window = window.split("\n    else:", 1)[0]
         self.assertIn("solid_diagnostics", window)
