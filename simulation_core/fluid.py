@@ -1271,6 +1271,7 @@ class CartesianFluidSolver:
     def _mark_hibm_solid_band_nonprojectable_cells_kernel(
         self,
         pressure_outlet_zmin: ti.i32,
+        convert_to_obstacle: ti.i32,
     ):
         self.report_hibm_solid_band_nonprojectable_cells[None] = 0
         for i, j, k in self.obstacle:
@@ -1283,11 +1284,12 @@ class CartesianFluidSolver:
                     pressure_outlet_zmin,
                 )
             ):
-                self.obstacle[i, j, k] = 1
-                self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
-                self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
-                self.volume_source_s[i, j, k] = 0.0
-                self.divergence[i, j, k] = 0.0
+                if convert_to_obstacle == 1:
+                    self.obstacle[i, j, k] = 1
+                    self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+                    self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+                    self.volume_source_s[i, j, k] = 0.0
+                    self.divergence[i, j, k] = 0.0
                 ti.atomic_add(self.report_hibm_solid_band_nonprojectable_cells[None], 1)
 
     def mark_hibm_solid_band_nonprojectable_cells(
@@ -1302,9 +1304,20 @@ class CartesianFluidSolver:
         ``last_hibm_solid_band_marked_increment`` keeps the most recent
         increment host-side (R2-M3): a non-zero value at projection-report
         time means the caller's band budget was exhausted before saturation.
+
+        Diagnostic gate (default OFF = bitwise-unchanged): setting the
+        environment variable ``HIBM_BAND_COUNT_ONLY=1`` keeps the band cells
+        as ACTIVE fluid (count only; no obstacle conversion, no velocity
+        zeroing). Zero-correctable active cells are then fully enclosed by
+        Dirichlet-blocked faces, fall into the outlet-unreached set and are
+        handled by the per-component zero-mean anchoring chain - the
+        machinery that superseded the band mask's original CG-stability
+        motivation.
         """
+        convert = 0 if os.environ.get("HIBM_BAND_COUNT_ONLY") == "1" else 1
         self._mark_hibm_solid_band_nonprojectable_cells_kernel(
             1 if pressure_outlet_zmin else 0,
+            convert,
         )
         marked = int(self.report_hibm_solid_band_nonprojectable_cells[None])
         self.last_hibm_solid_band_marked_increment = marked
