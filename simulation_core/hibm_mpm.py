@@ -46,6 +46,7 @@ class HibmMpmFluidStressSampleReport:
     viscous_gradient_invalid_marker_count: int = 0
     far_pressure_closed_marker_count: int = 0
     far_pressure_closed_extended_marker_count: int = 0
+    far_pressure_anchor_closed_marker_count: int = 0
     closure_gradient_missing_marker_count: int = 0
 
 
@@ -234,6 +235,18 @@ class HibmMpmSurfaceMarkers:
             dtype=ti.i32,
             shape=self.projection_triangle_capacity,
         )
+        # S2-A6: per-marker pressure-Neumann anchor cell. The pressure
+        # matrix row assembly records, for every marker that received at
+        # least one row, the (i, j, k) of the row-owning fluid cell (a
+        # solve-participating, non-obstacle cell by construction);
+        # (-1, -1, -1) means "no row / unset". The stress sampler may use
+        # it as a last-resort water-side pressure probe for closure-region
+        # markers whose normal walks are fully sealed by band obstacles.
+        self.marker_pressure_anchor_cell = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
 
         self.report_primary_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_secondary_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
@@ -257,6 +270,10 @@ class HibmMpmSurfaceMarkers:
             shape=(),
         )
         self.report_stress_far_pressure_closed_extended_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_stress_far_pressure_anchor_closed_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -350,6 +367,23 @@ class HibmMpmSurfaceMarkers:
             dtype=ti.i32,
             shape=(),
         )
+        # Taichi zero-initializes fields, and (0, 0, 0) is a real cell
+        # index: establish the unset sentinel before anyone can sample.
+        self.reset_pressure_anchor_cells()
+
+    @ti.kernel
+    def _reset_pressure_anchor_cells_kernel(self):
+        for marker in self.marker_pressure_anchor_cell:
+            self.marker_pressure_anchor_cell[marker] = ti.Vector([-1, -1, -1])
+
+    def reset_pressure_anchor_cells(self) -> None:
+        """Reset every marker's pressure-Neumann anchor cell to unset.
+
+        Runs over the full capacity so markers that never receive a
+        pressure matrix row (including slots beyond marker_count) keep the
+        (-1, -1, -1) sentinel and stay on the invalid path in the sampler.
+        """
+        self._reset_pressure_anchor_cells_kernel()
 
     def load_markers(
         self,
@@ -967,6 +1001,7 @@ class HibmMpmSurfaceMarkers:
         cell_width_x_m: ti.template(),
         cell_width_y_m: ti.template(),
         cell_width_z_m: ti.template(),
+        marker_pressure_anchor_cell: ti.template(),
         marker_count: ti.i32,
         nx: ti.i32,
         ny: ti.i32,
@@ -976,6 +1011,7 @@ class HibmMpmSurfaceMarkers:
         far_pressure_region_id: ti.i32,
         far_pressure_pa: ti.f32,
         far_pressure_inside_probe_max_multiplier: ti.f32,
+        use_pressure_anchor_fallback: ti.i32,
     ):
         self.report_stress_valid_marker_count[None] = 0
         self.report_stress_invalid_marker_count[None] = 0
@@ -984,6 +1020,7 @@ class HibmMpmSurfaceMarkers:
         self.report_stress_viscous_gradient_invalid_marker_count[None] = 0
         self.report_stress_far_pressure_closed_marker_count[None] = 0
         self.report_stress_far_pressure_closed_extended_marker_count[None] = 0
+        self.report_stress_far_pressure_anchor_closed_marker_count[None] = 0
         self.report_stress_closure_gradient_missing_marker_count[None] = 0
         for marker in range(marker_count):
             position = self.x_gamma_m[marker]
@@ -1348,6 +1385,63 @@ class HibmMpmSurfaceMarkers:
                     )
                 else:
                     pressure_sample_valid = False
+                    # S2-A6 anchor fallback: both closure branches missed
+                    # because the normal walk never sampled even a pressure
+                    # weight on either side (the band obstacle slabs seal
+                    # the whole 12x reach in some cavity columns). If the
+                    # pressure-Neumann row assembly anchored this marker to
+                    # a row-owning fluid cell, read that cell-center
+                    # pressure directly (no interpolation - the anchor
+                    # participates in the pressure solve by construction,
+                    # never a band/stale cell) as the water side and the
+                    # known far pressure as the dry side. The water side
+                    # follows from the anchor center's normal projection:
+                    # anchor on -n means water inside, so the covariant
+                    # two-sided formula gives (p_anchor - p_far) * n;
+                    # otherwise the mirrored orientation gives
+                    # (p_far - p_anchor) * n. The viscous gradient stays
+                    # the zero matrix: no walk candidate had fluid weight,
+                    # so no one-sided gradient was ever found either.
+                    if (
+                        use_pressure_anchor_fallback != 0
+                        and closure_region_marker == 1
+                        and marker_pressure_anchor_cell[marker].x >= 0
+                    ):
+                        anchor_cell = marker_pressure_anchor_cell[marker]
+                        anchor_pressure = pressure_field[
+                            anchor_cell.x,
+                            anchor_cell.y,
+                            anchor_cell.z,
+                        ]
+                        anchor_center = ti.Vector(
+                            [
+                                cell_center_x_m[anchor_cell.x],
+                                cell_center_y_m[anchor_cell.y],
+                                cell_center_z_m[anchor_cell.z],
+                            ]
+                        )
+                        inside_pressure = far_pressure_pa
+                        outside_pressure = anchor_pressure
+                        if (anchor_center - position).dot(normal) < 0.0:
+                            inside_pressure = anchor_pressure
+                            outside_pressure = far_pressure_pa
+                        pressure_traction = (
+                            inside_pressure - outside_pressure
+                        ) * normal
+                        pressure_sample_valid = True
+                        gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                        ti.atomic_add(
+                            self.report_stress_far_pressure_closed_marker_count[
+                                None
+                            ],
+                            1,
+                        )
+                        ti.atomic_add(
+                            self.report_stress_far_pressure_anchor_closed_marker_count[
+                                None
+                            ],
+                            1,
+                        )
                 # S2-A4 diagnostic: the marker closes on pressure while at
                 # least one pressure-found side never completed a viscous
                 # gradient stencil (that side's gradient contribution is
@@ -1423,6 +1517,7 @@ class HibmMpmSurfaceMarkers:
         far_pressure_region_id: int = -1,
         far_pressure_pa: float = 0.0,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
+        use_pressure_anchor_fallback: bool = False,
     ) -> HibmMpmFluidStressSampleReport:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
@@ -1452,6 +1547,7 @@ class HibmMpmSurfaceMarkers:
             cell_width_x_m,
             cell_width_y_m,
             cell_width_z_m,
+            self.marker_pressure_anchor_cell,
             int(self.marker_count),
             int(nodes[0]),
             int(nodes[1]),
@@ -1461,6 +1557,7 @@ class HibmMpmSurfaceMarkers:
             far_region_id,
             far_pressure,
             far_inside_probe_max,
+            1 if bool(use_pressure_anchor_fallback) else 0,
         )
         return HibmMpmFluidStressSampleReport(
             valid_marker_count=int(self.report_stress_valid_marker_count[None]),
@@ -1479,6 +1576,9 @@ class HibmMpmSurfaceMarkers:
             ),
             far_pressure_closed_extended_marker_count=int(
                 self.report_stress_far_pressure_closed_extended_marker_count[None]
+            ),
+            far_pressure_anchor_closed_marker_count=int(
+                self.report_stress_far_pressure_anchor_closed_marker_count[None]
             ),
             closure_gradient_missing_marker_count=int(
                 self.report_stress_closure_gradient_missing_marker_count[None]
@@ -3960,6 +4060,7 @@ class HibmMpmIbBoundaryConditions:
         cell_center_y_m: ti.template(),
         cell_center_z_m: ti.template(),
         nearest_marker: ti.template(),
+        marker_pressure_anchor_cell: ti.template(),
         marker_count: ti.i32,
         nx: ti.i32,
         ny: ti.i32,
@@ -4248,10 +4349,28 @@ class HibmMpmIbBoundaryConditions:
                                 self.report_pressure_neumann_matrix_rows[None],
                                 1,
                             )
-                            ti.atomic_add(
+                            previous_marker_row_count = ti.atomic_add(
                                 self.marker_pressure_neumann_row_count[marker],
                                 1,
                             )
+                            if previous_marker_row_count == 0:
+                                # S2-A6: anchor the marker to its first
+                                # row-owning fluid cell. All acceptance
+                                # paths (direct interior-point walk, the
+                                # bounds-relocated axial fallback and the
+                                # obstacle-alternate axial fallback)
+                                # converge on this row-write block, so
+                                # every row writer is covered; the 0 -> 1
+                                # transition of the per-marker row counter
+                                # elects exactly one writer per marker,
+                                # keeping the 3-component store tear-free
+                                # without a second guard field. The node is
+                                # obstacle-free and receives diagonal/rhs
+                                # terms above, i.e. it participates in the
+                                # pressure solve by construction.
+                                marker_pressure_anchor_cell[marker] = ti.Vector(
+                                    [node[0], node[1], node[2]]
+                                )
                             self.report_pressure_neumann_rhs_integral[None] += (
                                 ti.cast(node_rhs_density * volume_m3, ti.f64)
                                 + ti.cast(
@@ -4350,6 +4469,10 @@ class HibmMpmIbBoundaryConditions:
         self._clear_pressure_neumann_rows_by_marker_kernel(
             int(markers.marker_count),
         )
+        # S2-A6: full-capacity sentinel reset before assembly so markers
+        # that fail to produce a row (invalid reconstruction paths) keep
+        # (-1, -1, -1) and stay on the sampler's invalid path.
+        markers.reset_pressure_anchor_cells()
         self._assemble_pressure_neumann_matrix_rows_kernel(
             pressure_matrix_diagonal,
             pressure_matrix_rhs,
@@ -4370,6 +4493,7 @@ class HibmMpmIbBoundaryConditions:
             cell_center_y_m,
             cell_center_z_m,
             search.nearest_marker,
+            markers.marker_pressure_anchor_cell,
             int(markers.marker_count),
             int(nodes[0]),
             int(nodes[1]),
@@ -5343,6 +5467,16 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         far_pressure_inside_probe_max_multiplier=float(
             far_pressure_inside_probe_max_multiplier
         ),
+        # S2-A6: the anchor fallback rides the closure opt-in. It is only
+        # armed when this very call also assembled the pressure-Neumann
+        # rows (anchors are captured there, strictly before this sampling
+        # and before the projection that solved fluid.pressure); with the
+        # diagnostic row disable the anchors would be stale, so keep the
+        # fallback off.
+        use_pressure_anchor_fallback=(
+            int(far_pressure_region_id) != -1
+            and not bool(diagnostic_disable_pressure_neumann_matrix_rows)
+        ),
     )
     markers.compute_marker_forces()
     marker_force_report = markers.aggregate_region_forces(
@@ -5863,6 +5997,9 @@ def hibm_mpm_sharp_step_summary(
         ),
         "hibm_full_stress_far_pressure_closed_extended_marker_count": (
             load.fluid_stress.far_pressure_closed_extended_marker_count
+        ),
+        "hibm_full_stress_far_pressure_anchor_closed_marker_count": (
+            load.fluid_stress.far_pressure_anchor_closed_marker_count
         ),
         "hibm_full_stress_closure_gradient_missing_marker_count": (
             load.fluid_stress.closure_gradient_missing_marker_count
