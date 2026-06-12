@@ -943,5 +943,405 @@ class NeoHookeanFullOutOfBoundsGuardTests(unittest.TestCase):
         self.assertEqual(report.grid_out_of_bounds_particle_count, 1)
 
 
+class NeoHookeanFixedRegionConstraintTests(unittest.TestCase):
+    """S2-A11: the 2s production run died because the neo layered path has no
+    fixed-region concept: the case's Fixed Support rim (region 5) was honored
+    by the tri_mooney_shell_mpm path (fixed_particle machinery) but silently
+    dropped by NeoHookeanMpmState, leaving the main membrane an untethered
+    rigid disc that drifted laterally (zero-stiffness neutral mode), tunneled
+    into the chamber wall, and bled closure coverage (deficit vs wall-overlap
+    Pearson r = 0.9999). These tests pin the generic solver capability:
+    initialize_layered_tri_surface(fixed_region_id=...) marks the particles
+    of that region, and every substep enforces v = 0, frozen x, rest-identity
+    F in-kernel while the fixed mass still anchors the grid in P2G.
+    """
+
+    @staticmethod
+    def _two_face_surface(
+        *,
+        free_centroid_m: tuple[float, float, float],
+        fixed_centroid_m: tuple[float, float, float],
+        free_area_m2: float,
+        fixed_area_m2: float,
+    ) -> TriSurfaceRegionDiagnostics:
+        tri_surface = TriSurfaceRegionDiagnostics(face_capacity=2)
+        tri_surface.load_faces(
+            centroid_m=np.array(
+                [free_centroid_m, fixed_centroid_m], dtype=np.float32
+            ),
+            normal=np.array(
+                [
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            area_m2=np.array([free_area_m2, fixed_area_m2], dtype=np.float32),
+            region_id=np.array([7, 5], dtype=np.int32),
+        )
+        return tri_surface
+
+    def test_layered_init_marks_exactly_fixed_region_particles(self) -> None:
+        """(a) Membership: fixed_region_id marks all particles generated from
+        faces of that region and nothing else, fixed faces carry real anchor
+        mass (primary thickness fallback, mirroring the mooney shell path),
+        and the default fixed_region_id=-1 marks no particle."""
+        material = ecoflex_0010_material()
+        tri_surface = TriSurfaceRegionDiagnostics(face_capacity=3)
+        tri_surface.load_faces(
+            centroid_m=np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.008, 0.0, 0.0],
+                    [-0.008, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            ),
+            normal=np.array(
+                [
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            area_m2=np.array([2.0e-6, 2.0e-6, 8.0e-6], dtype=np.float32),
+            region_id=np.array([7, 5, 8], dtype=np.int32),
+        )
+        state = NeoHookeanMpmState(
+            particle_capacity=6,
+            bounds_min_m=(-0.02, -0.02, -0.02),
+            bounds_max_m=(0.02, 0.02, 0.02),
+            grid_nodes=(12, 12, 12),
+        )
+        state.initialize_layered_tri_surface(
+            tri_surface,
+            layer_count=2,
+            primary_region_id=7,
+            secondary_region_id=8,
+            fixed_region_id=5,
+            density_kgm3=material.density_kgm3,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.0025,
+        )
+        fixed = state.fixed_particle.to_numpy()[: state.particle_count]
+        regions = state.region_id.to_numpy()[: state.particle_count]
+        masses = state.mass_kg.to_numpy()[: state.particle_count]
+
+        self.assertEqual(state.particle_count, 6)
+        np.testing.assert_array_equal(fixed, (regions == 5).astype(np.int32))
+        self.assertEqual(int(np.sum(fixed)), 2)
+        # Fixed faces get the primary thickness (mooney shell mirror), so the
+        # anchors have real mass: rho * (area / layer_count) * thickness.
+        expected_fixed_mass = material.density_kgm3 * (2.0e-6 / 2.0) * 0.003
+        for mass in masses[fixed == 1]:
+            self.assertAlmostEqual(float(mass), expected_fixed_mass, delta=1.0e-9)
+
+        default_state = NeoHookeanMpmState(
+            particle_capacity=4,
+            bounds_min_m=(-0.02, -0.02, -0.02),
+            bounds_max_m=(0.02, 0.02, 0.02),
+            grid_nodes=(12, 12, 12),
+        )
+        default_surface = TriSurfaceRegionDiagnostics(face_capacity=2)
+        default_surface.load_faces(
+            centroid_m=np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.008, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            ),
+            normal=np.array(
+                [
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            area_m2=np.array([2.0e-6, 8.0e-6], dtype=np.float32),
+            region_id=np.array([7, 8], dtype=np.int32),
+        )
+        default_state.initialize_layered_tri_surface(
+            default_surface,
+            layer_count=2,
+            primary_region_id=7,
+            secondary_region_id=8,
+            density_kgm3=material.density_kgm3,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.0025,
+        )
+
+        np.testing.assert_array_equal(
+            default_state.fixed_particle.to_numpy()[: default_state.particle_count],
+            np.zeros(default_state.particle_count, dtype=np.int32),
+        )
+
+    def test_fixed_particle_ignores_external_force_while_free_particle_moves(
+        self,
+    ) -> None:
+        """(b) Paper-walk (single isolated particle, quadratic B-spline APIC):
+        each substep the particle's stencil nodes receive momentum w*(m*v) and
+        force w*f, so every touched node carries velocity v + dt*f/m and G2P
+        returns exactly v_k = k*dt*f/m with zero affine C (uniform field, the
+        first weight moment vanishes). After n substeps the free particle has
+        moved sum_k v_k*dt = n*(n+1)/2 * dt^2 * f/m. Here m = rho*A*h
+        ~= 1043 * 1e-4 * 0.003 ~= 3.1e-4 kg, f = 0.05 N, dt = 1e-4 s, n = 5:
+        ~2.4e-5 m, i.e. order 1e-5 m. The fixed particle sees the same
+        external force but must stay bitwise frozen with v = 0, and the
+        momentum-transfer diagnostic must stay consistent because the inert
+        force is excluded from both the grid spread and the report."""
+        material = ecoflex_0010_material()
+        # 12 mm separation = 3.6 cells of dx = 40/12 mm: quadratic stencils
+        # (reach 1.5 cells) cannot overlap, so the two particles are isolated.
+        tri_surface = self._two_face_surface(
+            free_centroid_m=(-0.006, 0.0, 0.0),
+            fixed_centroid_m=(0.006, 0.0, 0.0),
+            free_area_m2=1.0e-4,
+            fixed_area_m2=1.0e-4,
+        )
+        state = NeoHookeanMpmState(
+            particle_capacity=2,
+            bounds_min_m=(-0.02, -0.02, -0.02),
+            bounds_max_m=(0.02, 0.02, 0.02),
+            grid_nodes=(12, 12, 12),
+        )
+        state.initialize_layered_tri_surface(
+            tri_surface,
+            layer_count=1,
+            primary_region_id=7,
+            secondary_region_id=8,
+            fixed_region_id=5,
+            density_kgm3=material.density_kgm3,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.003,
+        )
+        initial_x = state.x.to_numpy()[:2].copy()
+        force_n = 0.05
+        dt_s = 1.0e-4
+        substeps = 5
+        state.set_uniform_external_force((force_n, 0.0, 0.0))
+
+        report = None
+        for _ in range(substeps):
+            report = state.step(
+                dt_s=dt_s,
+                mu_pa=material.shear_modulus_pa,
+                lambda_pa=material.lame_lambda_pa,
+                primary_region_id=7,
+                secondary_region_id=8,
+            )
+        final_x = state.x.to_numpy()[:2]
+        final_v = state.v.to_numpy()[:2]
+        free_mass = float(state.mass_kg.to_numpy()[0])
+        expected_free_displacement_m = (
+            0.5 * substeps * (substeps + 1) * dt_s * dt_s * force_n / free_mass
+        )
+
+        self.assertAlmostEqual(
+            float(final_x[0, 0] - initial_x[0, 0]),
+            expected_free_displacement_m,
+            delta=0.02 * expected_free_displacement_m,
+        )
+        # The fixed particle is never advected: bitwise frozen, v exactly 0.
+        np.testing.assert_array_equal(final_x[1], initial_x[1])
+        np.testing.assert_array_equal(final_v[1], np.zeros(3, dtype=np.float32))
+        # Only the free particle's force changes momentum, and the report
+        # bookkeeping must agree with what was actually spread to the grid.
+        self.assertAlmostEqual(report.external_force_n[0], force_n, delta=1.0e-6)
+        self.assertLess(report.transfer_relative_error, 2.0e-5)
+
+    def test_fixed_anchor_mass_resists_grid_coupled_free_particle(self) -> None:
+        """(c) The anchor (fixed_particle=1) contributes its mass with ZERO
+        momentum in P2G. Grid nodes shared by a free particle and the anchor
+        divide the free particle's momentum by the combined node mass, so the
+        gathered G2P velocity of the coupled particle is strictly smaller than
+        that of an identical particle with no anchor in stencil range. Here a
+        4x-mass anchor sits one cell away sharing 2/3 of the stencil; direct
+        weight arithmetic on the first substep gives a velocity ratio of
+        ~0.58, so the displacement must land well below the 0.9 gate. This
+        grid-mediated mass coupling is the mechanism by which a fixed rim
+        region clamps neighboring free membrane material in the layered neo
+        path."""
+        material = ecoflex_0010_material()
+        bounds_min = (-0.02, -0.02, -0.02)
+        bounds_max = (0.02, 0.02, 0.02)
+        grid_nodes = (12, 12, 12)
+        dx = (bounds_max[0] - bounds_min[0]) / grid_nodes[0]
+        coupled_surface = self._two_face_surface(
+            free_centroid_m=(0.0, 0.0, 0.0),
+            fixed_centroid_m=(dx, 0.0, 0.0),
+            free_area_m2=1.0e-4,
+            fixed_area_m2=4.0e-4,
+        )
+        coupled = NeoHookeanMpmState(
+            particle_capacity=2,
+            bounds_min_m=bounds_min,
+            bounds_max_m=bounds_max,
+            grid_nodes=grid_nodes,
+        )
+        coupled.initialize_layered_tri_surface(
+            coupled_surface,
+            layer_count=1,
+            primary_region_id=7,
+            secondary_region_id=8,
+            fixed_region_id=5,
+            density_kgm3=material.density_kgm3,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.003,
+        )
+        reference_surface = TriSurfaceRegionDiagnostics(face_capacity=1)
+        reference_surface.load_faces(
+            centroid_m=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+            normal=np.array([[0.0, 0.0, 1.0]], dtype=np.float32),
+            area_m2=np.array([1.0e-4], dtype=np.float32),
+            region_id=np.array([7], dtype=np.int32),
+        )
+        reference = NeoHookeanMpmState(
+            particle_capacity=1,
+            bounds_min_m=bounds_min,
+            bounds_max_m=bounds_max,
+            grid_nodes=grid_nodes,
+        )
+        reference.initialize_layered_tri_surface(
+            reference_surface,
+            layer_count=1,
+            primary_region_id=7,
+            secondary_region_id=8,
+            density_kgm3=material.density_kgm3,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.003,
+        )
+        # The same area load on the same region-7 face area applies the same
+        # external force to both free particles; the anchor receives nothing.
+        for state in (coupled, reference):
+            state.add_region_area_load(
+                region_id=7,
+                area_load_npm2=(500.0, 0.0, 0.0),
+            )
+            for _ in range(8):
+                state.step(
+                    dt_s=1.0e-4,
+                    mu_pa=material.shear_modulus_pa,
+                    lambda_pa=material.lame_lambda_pa,
+                    primary_region_id=7,
+                    secondary_region_id=8,
+                )
+        coupled_displacement_m = float(
+            coupled.x.to_numpy()[0, 0] - coupled.rest_x.to_numpy()[0, 0]
+        )
+        reference_displacement_m = float(
+            reference.x.to_numpy()[0, 0] - reference.rest_x.to_numpy()[0, 0]
+        )
+        anchor_displacement_m = float(
+            np.abs(coupled.x.to_numpy()[1] - coupled.rest_x.to_numpy()[1]).max()
+        )
+
+        self.assertGreater(reference_displacement_m, 0.0)
+        self.assertGreater(coupled_displacement_m, 0.0)
+        self.assertLess(coupled_displacement_m, 0.9 * reference_displacement_m)
+        self.assertEqual(anchor_displacement_m, 0.0)
+
+    def test_save_restore_and_reinit_keep_constraint_active(self) -> None:
+        """(d) The constraint is derived state: save_state/restore_state never
+        touch fixed_particle, and the checkpoint-resume order (initialize, the
+        marks are rebuilt from region ids, then x/v/C/F overwritten from the
+        payload) keeps the constraint active in-kernel even when the loaded
+        payload carries a stale nonzero velocity or deformation on a fixed
+        particle (e.g. a checkpoint written by a pre-constraint build)."""
+        material = ecoflex_0010_material()
+        tri_surface = self._two_face_surface(
+            free_centroid_m=(-0.006, 0.0, 0.0),
+            fixed_centroid_m=(0.006, 0.0, 0.0),
+            free_area_m2=1.0e-4,
+            fixed_area_m2=1.0e-4,
+        )
+        state = NeoHookeanMpmState(
+            particle_capacity=2,
+            bounds_min_m=(-0.02, -0.02, -0.02),
+            bounds_max_m=(0.02, 0.02, 0.02),
+            grid_nodes=(12, 12, 12),
+        )
+
+        def initialize() -> None:
+            state.initialize_layered_tri_surface(
+                tri_surface,
+                layer_count=1,
+                primary_region_id=7,
+                secondary_region_id=8,
+                fixed_region_id=5,
+                density_kgm3=material.density_kgm3,
+                primary_thickness_m=0.003,
+                secondary_thickness_m=0.003,
+            )
+
+        def step_n(count: int) -> None:
+            for _ in range(count):
+                state.step(
+                    dt_s=1.0e-4,
+                    mu_pa=material.shear_modulus_pa,
+                    lambda_pa=material.lame_lambda_pa,
+                    primary_region_id=7,
+                    secondary_region_id=8,
+                )
+
+        initialize()
+        base_x = state.x.to_numpy()[:2].copy()
+        state.save_state()
+        state.set_uniform_external_force((0.05, 0.0, 0.0))
+        step_n(3)
+        moved_x = state.x.to_numpy()[:2].copy()
+        self.assertGreater(float(moved_x[0, 0] - base_x[0, 0]), 0.0)
+        np.testing.assert_array_equal(moved_x[1], base_x[1])
+
+        state.restore_state()
+        np.testing.assert_array_equal(state.x.to_numpy()[:2], base_x)
+        np.testing.assert_array_equal(
+            state.fixed_particle.to_numpy()[:2],
+            np.array([0, 1], dtype=np.int32),
+        )
+        state.set_uniform_external_force((0.05, 0.0, 0.0))
+        step_n(3)
+        after_restore_x = state.x.to_numpy()[:2]
+        after_restore_v = state.v.to_numpy()[:2]
+        self.assertGreater(float(after_restore_x[0, 0] - base_x[0, 0]), 0.0)
+        np.testing.assert_array_equal(after_restore_x[1], base_x[1])
+        np.testing.assert_array_equal(
+            after_restore_v[1], np.zeros(3, dtype=np.float32)
+        )
+
+        # Checkpoint-resume shape: re-init rebuilds the marks from region ids,
+        # then the solid payload (x/v/C/F) is loaded over the fields. A stale
+        # payload from a pre-constraint build may carry nonzero velocity and
+        # deformation on the fixed particle; the in-kernel enforcement must
+        # zero v, freeze x at the loaded position, and reset F to identity.
+        initialize()
+        np.testing.assert_array_equal(
+            state.fixed_particle.to_numpy()[:2],
+            np.array([0, 1], dtype=np.int32),
+        )
+        loaded_x = base_x.copy()
+        loaded_x[1] += np.array([1.0e-3, -5.0e-4, 2.0e-4], dtype=np.float32)
+        loaded_v = np.zeros((2, 3), dtype=np.float32)
+        loaded_v[1] = np.array([0.2, -0.1, 0.05], dtype=np.float32)
+        loaded_f = np.tile(np.eye(3, dtype=np.float32), (2, 1, 1))
+        loaded_f[1, 0, 1] = 0.25
+        state.x.from_numpy(loaded_x)
+        state.v.from_numpy(loaded_v)
+        state.C.from_numpy(np.zeros((2, 3, 3), dtype=np.float32))
+        state.F.from_numpy(loaded_f)
+
+        step_n(1)
+
+        resumed_x = state.x.to_numpy()[:2]
+        resumed_v = state.v.to_numpy()[:2]
+        resumed_f = state.F.to_numpy()[:2]
+        np.testing.assert_array_equal(resumed_x[1], loaded_x[1])
+        np.testing.assert_array_equal(resumed_v[1], np.zeros(3, dtype=np.float32))
+        np.testing.assert_allclose(
+            resumed_f[1], np.eye(3, dtype=np.float32), atol=0.0
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5149,5 +5149,99 @@ class SquidHistoryWriteRobustnessTests(unittest.TestCase):
         self.assertLessEqual(len(attempts), 100)
 
 
+class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
+    """S2-A11b: the 2s production run lost far-pressure closure coverage
+    monotonically for ~110 steps (16.2 markers/step, from 7782 down to 6104)
+    while the run kept marching toward an unrecoverable state; the forensic
+    deficit-vs-wall-overlap law (Pearson r = 0.9999) shows the decline was a
+    faithful geometric symptom. The case needs a loud early failure: a
+    closure-coverage floor guard inside the sharp per-step guard block (the
+    same failure-artifact try as the solid out-of-bounds guard), default-off
+    for bitwise compatibility.
+    """
+
+    FIELD = "hibm_full_stress_far_pressure_closed_marker_count"
+
+    @classmethod
+    def _rows(cls, values: list[int]) -> list[dict[str, object]]:
+        return [
+            {"step": index + 1, cls.FIELD: value}
+            for index, value in enumerate(values)
+        ]
+
+    def test_raises_after_patience_consecutive_rows_below_floor(self) -> None:
+        from cases.squid_soft_robot import _raise_for_closure_coverage_floor
+
+        rows = self._rows([7782, 7782, 6500, 6400, 6300])
+
+        with self.assertRaises(RuntimeError) as raised:
+            _raise_for_closure_coverage_floor(rows, 7000, 3)
+
+        message = str(raised.exception)
+        self.assertIn(self.FIELD, message)
+        self.assertIn("7000", message)
+        self.assertIn("3", message)
+        self.assertIn("6300", message)
+
+    def test_below_floor_for_patience_minus_one_is_silent(self) -> None:
+        from cases.squid_soft_robot import _raise_for_closure_coverage_floor
+
+        rows = self._rows([7782, 7782, 7782, 6400, 6300])
+
+        _raise_for_closure_coverage_floor(rows, 7000, 3)
+        # Fewer rows than the patience window can never establish a streak.
+        _raise_for_closure_coverage_floor(self._rows([6400, 6300]), 7000, 3)
+
+    def test_disabled_floor_zero_is_silent(self) -> None:
+        from cases.squid_soft_robot import _raise_for_closure_coverage_floor
+
+        rows = self._rows([0, 0, 0, 0, 0])
+
+        _raise_for_closure_coverage_floor(rows, 0, 3)
+
+    def test_recovery_resets_the_streak(self) -> None:
+        from cases.squid_soft_robot import _raise_for_closure_coverage_floor
+
+        recovered = self._rows([6300, 6300, 7782, 6400, 6300])
+
+        _raise_for_closure_coverage_floor(recovered, 7000, 3)
+
+        relapsed = recovered + self._rows([6200])
+        with self.assertRaises(RuntimeError):
+            _raise_for_closure_coverage_floor(relapsed, 7000, 3)
+
+    def test_sharp_guard_block_wires_floor_guard_and_neo_passes_fixed_rim(
+        self,
+    ) -> None:
+        # Source-slicing contract, in the style of
+        # SquidSharpTwoSidedExtendedWalkContractTests: the closure floor guard
+        # must run inside the sharp per-step failure-artifact try block (so a
+        # trip still writes step failure artifacts), and the neo_hookean_mpm
+        # construction must honor the case's Fixed Support rim region the way
+        # the tri_mooney_shell_mpm construction already does.
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        sharp_step_tail = source.split(
+            "sharp_report = sharp_coupling_state.advance_mpm_step(",
+            1,
+        )[1].split("reused_fluid_step_report = None", 1)[0]
+        sharp_guard_try = sharp_step_tail.split("try:", 1)[1].split(
+            "except Exception as exc:",
+            1,
+        )[0]
+        self.assertIn("_raise_for_step_solid_out_of_bounds_guard(row)", sharp_guard_try)
+        self.assertIn("_raise_for_closure_coverage_floor(", sharp_guard_try)
+        self.assertIn("args.closure_coverage_floor", sharp_guard_try)
+        self.assertIn("args.closure_coverage_floor_patience", sharp_guard_try)
+        self.assertIn("_write_step_failure_artifacts(", sharp_step_tail)
+        self.assertIn('"--closure-coverage-floor"', source)
+        self.assertIn('"--closure-coverage-floor-patience"', source)
+
+        neo_construction = source.split(
+            "solid_mpm.initialize_layered_tri_surface(",
+            1,
+        )[1].split("raise ValueError", 1)[0]
+        self.assertIn("fixed_region_id=5,", neo_construction)
+
+
 if __name__ == "__main__":
     unittest.main()
