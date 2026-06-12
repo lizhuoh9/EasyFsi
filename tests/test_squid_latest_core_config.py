@@ -5087,5 +5087,67 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
         )
 
 
+class SquidHistoryWriteRobustnessTests(unittest.TestCase):
+    """2026-06-13 production incident: an external reader (a monitoring
+    Import-Csv) held history.csv open at the instant of write_csv's atomic
+    os.replace -> WinError 5 PermissionError -> the 4000-step production run
+    died at step 506. Windows MoveFileEx(REPLACE_EXISTING) fails while ANY
+    process holds the destination without FILE_SHARE_DELETE (monitors, Excel,
+    antivirus, indexers). The atomic history write must absorb transient
+    destination locks by retrying with backoff, and still raise once a
+    persistent holder exhausts the budget (never hang, never drop the write
+    silently).
+    """
+
+    def test_write_csv_retries_transient_replace_lock(self) -> None:
+        rows: list[dict[str, object]] = [{"step": 1, "value": 0.5}]
+        real_replace = os.replace
+        calls: list[tuple[str, str]] = []
+
+        def flaky_replace(src, dst, *args, **kwargs):
+            calls.append((str(src), str(dst)))
+            if len(calls) <= 2:
+                raise PermissionError(5, "Access is denied", str(dst))
+            return real_replace(src, dst, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "history.csv"
+            with patch("os.replace", side_effect=flaky_replace), patch(
+                "time.sleep"
+            ) as sleep_mock:
+                write_csv(target, rows)
+
+            loaded = read_csv_rows(target)
+            self.assertEqual(
+                [entry for entry in Path(temp_dir).iterdir()], [target]
+            )
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(int(loaded[0]["step"]), 1)
+        # Backoff must separate the attempts (patched out for test speed).
+        self.assertGreaterEqual(sleep_mock.call_count, 2)
+
+    def test_write_csv_raises_after_replace_retry_budget(self) -> None:
+        rows: list[dict[str, object]] = [{"step": 1}]
+        attempts: list[int] = []
+
+        def always_locked(src, dst, *args, **kwargs):
+            attempts.append(1)
+            raise PermissionError(5, "Access is denied", str(dst))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "history.csv"
+            with patch("os.replace", side_effect=always_locked), patch(
+                "time.sleep"
+            ):
+                with self.assertRaises(PermissionError):
+                    write_csv(target, rows)
+
+        # A real retry budget (not a one-shot), but finite (no hang).
+        self.assertGreaterEqual(len(attempts), 8)
+        self.assertLessEqual(len(attempts), 100)
+
+
 if __name__ == "__main__":
     unittest.main()
