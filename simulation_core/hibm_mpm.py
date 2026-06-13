@@ -170,6 +170,13 @@ class HibmMpmSharpFluidToMpmLoadReport:
     # (default bitwise-unchanged mode).
     solid_band_interior_cell_count: int = -1
     solid_band_enclosed_water_cell_count: int = -1
+    # S2-A12 air-backed closure region (default off => -1 sentinels):
+    # selected-component conversion census + far-side seeding health.
+    air_backed_cell_count: int = -1
+    air_backed_component_count: int = -1
+    air_backed_cell_volume_m3: float = -1.0
+    air_backed_seed_marker_count: int = -1
+    air_backed_seed_missed_marker_count: int = -1
 
 
 @dataclass(frozen=True)
@@ -322,6 +329,11 @@ class HibmMpmSurfaceMarkers:
             shape=(),
         )
         self.report_stress_two_sided_extended_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_air_backed_seed_marker_count = ti.field(dtype=ti.i32, shape=())
+        self.report_air_backed_seed_missed_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -2112,6 +2124,228 @@ class HibmMpmSurfaceMarkers:
             two_sided_extended_marker_count=int(
                 self.report_stress_two_sided_extended_marker_count[None]
             ),
+        )
+
+    @ti.kernel
+    def _mark_far_pressure_air_backed_seed_components_kernel(
+        self,
+        obstacle_field: ti.template(),
+        base_obstacle_field: ti.template(),
+        outlet_reachable_field: ti.template(),
+        unreached_component_label_field: ti.template(),
+        air_component_selected_field: ti.template(),
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+        cell_width_x_m: ti.template(),
+        cell_width_y_m: ti.template(),
+        cell_width_z_m: ti.template(),
+        marker_count: ti.i32,
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+        far_pressure_region_id: ti.i32,
+        far_probe_max_multiplier: ti.f32,
+    ):
+        self.report_air_backed_seed_marker_count[None] = 0
+        self.report_air_backed_seed_missed_marker_count[None] = 0
+        for slot in air_component_selected_field:
+            air_component_selected_field[slot] = 0
+        for marker in range(marker_count):
+            if self.region_id[marker] == far_pressure_region_id:
+                position = self.x_gamma_m[marker]
+                normal = self.n_gamma[marker]
+                grid_coordinate = self._grid_coordinate_from_fields(
+                    position,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    nx,
+                    ny,
+                    nz,
+                )
+                i_near = ti.min(
+                    ti.max(ti.floor(grid_coordinate.x + 0.5, ti.i32), 0),
+                    nx - 1,
+                )
+                j_near = ti.min(
+                    ti.max(ti.floor(grid_coordinate.y + 0.5, ti.i32), 0),
+                    ny - 1,
+                )
+                k_near = ti.min(
+                    ti.max(ti.floor(grid_coordinate.z + 0.5, ti.i32), 0),
+                    nz - 1,
+                )
+                normal_spacing_inv = (
+                    ti.abs(normal.x) / cell_width_x_m[i_near]
+                    + ti.abs(normal.y) / cell_width_y_m[j_near]
+                    + ti.abs(normal.z) / cell_width_z_m[k_near]
+                )
+                probe_distance_m = 1.0 / ti.max(normal_spacing_inv, 1.0e-12)
+                seed_found = 0
+                crossed_base = 0
+                # 10-rung far-side ladder: the standard sampler rungs
+                # (1.0 + 0.5*k, k = 0..4) then the closure-extension rungs
+                # (3 + (mult - 3) * (k+1)/5) - runtime range per the
+                # S2-A5 no-unroll rule.
+                for probe_index in range(10):
+                    if seed_found == 0 and crossed_base == 0:
+                        multiplier = 1.0 + 0.5 * ti.cast(probe_index, ti.f32)
+                        if probe_index >= 5:
+                            multiplier = 3.0 + (
+                                far_probe_max_multiplier - 3.0
+                            ) * (ti.cast(probe_index - 4, ti.f32) / 5.0)
+                        probe_position = position + normal * (
+                            probe_distance_m * multiplier
+                        )
+                        probe_coordinate = self._grid_coordinate_from_fields(
+                            probe_position,
+                            cell_face_x_m,
+                            cell_face_y_m,
+                            cell_face_z_m,
+                            cell_center_x_m,
+                            cell_center_y_m,
+                            cell_center_z_m,
+                            nx,
+                            ny,
+                            nz,
+                        )
+                        pi = ti.min(
+                            ti.max(
+                                ti.floor(probe_coordinate.x + 0.5, ti.i32),
+                                0,
+                            ),
+                            nx - 1,
+                        )
+                        pj = ti.min(
+                            ti.max(
+                                ti.floor(probe_coordinate.y + 0.5, ti.i32),
+                                0,
+                            ),
+                            ny - 1,
+                        )
+                        pk = ti.min(
+                            ti.max(
+                                ti.floor(probe_coordinate.z + 0.5, ti.i32),
+                                0,
+                            ),
+                            nz - 1,
+                        )
+                        if base_obstacle_field[pi, pj, pk] != 0:
+                            # H1-style crossing guard: base geometry ends
+                            # the physical air column - never seed another
+                            # compartment through the chamber wall.
+                            crossed_base = 1
+                        elif (
+                            obstacle_field[pi, pj, pk] == 0
+                            and outlet_reachable_field[pi, pj, pk] == 0
+                        ):
+                            label = unreached_component_label_field[
+                                pi,
+                                pj,
+                                pk,
+                            ]
+                            if label >= -32 and label <= -1:
+                                air_component_selected_field[-label - 1] = 1
+                                seed_found = 1
+                if seed_found == 1:
+                    ti.atomic_add(
+                        self.report_air_backed_seed_marker_count[None],
+                        1,
+                    )
+                else:
+                    ti.atomic_add(
+                        self.report_air_backed_seed_missed_marker_count[None],
+                        1,
+                    )
+
+    def mark_far_pressure_air_backed_seed_components(
+        self,
+        obstacle_field,
+        base_obstacle_field,
+        outlet_reachable_field,
+        unreached_component_label_field,
+        air_component_selected_field,
+        cell_face_x_m,
+        cell_face_y_m,
+        cell_face_z_m,
+        cell_center_x_m,
+        cell_center_y_m,
+        cell_center_z_m,
+        cell_width_x_m,
+        cell_width_y_m,
+        cell_width_z_m,
+        grid_nodes,
+        *,
+        far_pressure_region_id: int,
+        far_pressure_inside_probe_max_multiplier: float = 3.0,
+    ) -> tuple[int, int]:
+        """Select unreached components on closure markers' far side (S2-A12).
+
+        For every marker of the declared closure region the far (+n) side is
+        walked with the 10-rung ladder (standard sampler rungs then the
+        closure-extension rungs up to
+        ``far_pressure_inside_probe_max_multiplier``); the first rung whose
+        nearest cell is active, flood-unreached and component-labeled
+        selects that component in the fluid-owned 32-slot mask. Walks stop
+        at base geometry (H1 crossing-guard semantics). Returns
+        ``(seeded_marker_count, missed_marker_count)``; a fully missed scan
+        with a large unreached set is the partial-enclosure signature
+        (mechanism inert, debt returns) and must be visible in history.
+        Outlet-reachable cells never seed: legitimate water is structurally
+        unselectable, and non-closure regions (e.g. the squid tail) are
+        untouched because only closure markers walk.
+        """
+        nodes = tuple(int(value) for value in grid_nodes)
+        if len(nodes) != 3 or any(value < 2 for value in nodes):
+            raise ValueError("grid_nodes must contain three values >= 2")
+        far_region_id = int(far_pressure_region_id)
+        if far_region_id == -1:
+            raise ValueError(
+                "far_pressure_region_id must name a closure region "
+                "(air-backed classification is closure-gated)"
+            )
+        far_probe_max = float(far_pressure_inside_probe_max_multiplier)
+        if not math.isfinite(far_probe_max) or far_probe_max < 3.0:
+            raise ValueError(
+                "far_pressure_inside_probe_max_multiplier must be finite "
+                "and >= 3.0"
+            )
+        if tuple(air_component_selected_field.shape) != (32,):
+            raise ValueError(
+                "air_component_selected_field must have shape (32,)"
+            )
+        self._mark_far_pressure_air_backed_seed_components_kernel(
+            obstacle_field,
+            base_obstacle_field,
+            outlet_reachable_field,
+            unreached_component_label_field,
+            air_component_selected_field,
+            cell_face_x_m,
+            cell_face_y_m,
+            cell_face_z_m,
+            cell_center_x_m,
+            cell_center_y_m,
+            cell_center_z_m,
+            cell_width_x_m,
+            cell_width_y_m,
+            cell_width_z_m,
+            int(self.marker_count),
+            int(nodes[0]),
+            int(nodes[1]),
+            int(nodes[2]),
+            far_region_id,
+            far_probe_max,
+        )
+        return (
+            int(self.report_air_backed_seed_marker_count[None]),
+            int(self.report_air_backed_seed_missed_marker_count[None]),
         )
 
     @ti.kernel
@@ -5521,6 +5755,7 @@ class HibmMpmSharpCouplingState:
         far_pressure_pa: float = 0.0,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
         two_sided_probe_max_multiplier: float = 3.0,
+        far_pressure_air_backed: bool = False,
         fluid_dt_s: float | None = None,
         fluid_substeps: int = 1,
         projection_iterations: int = 40,
@@ -5569,6 +5804,7 @@ class HibmMpmSharpCouplingState:
             two_sided_probe_max_multiplier=float(
                 two_sided_probe_max_multiplier
             ),
+            far_pressure_air_backed=bool(far_pressure_air_backed),
             fluid_dt_s=fluid_dt_s,
             fluid_substeps=int(fluid_substeps),
             projection_iterations=int(projection_iterations),
@@ -5609,6 +5845,7 @@ class HibmMpmSharpCouplingState:
         far_pressure_pa: float = 0.0,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
         two_sided_probe_max_multiplier: float = 3.0,
+        far_pressure_air_backed: bool = False,
         fluid_dt_s: float | None = None,
         fluid_substeps: int = 1,
         projection_iterations: int = 40,
@@ -5655,6 +5892,7 @@ class HibmMpmSharpCouplingState:
             two_sided_probe_max_multiplier=float(
                 two_sided_probe_max_multiplier
             ),
+            far_pressure_air_backed=bool(far_pressure_air_backed),
             fluid_dt_s=fluid_dt_s,
             fluid_substeps=int(fluid_substeps),
             projection_iterations=int(projection_iterations),
@@ -5699,6 +5937,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     far_pressure_pa: float = 0.0,
     far_pressure_inside_probe_max_multiplier: float = 3.0,
     two_sided_probe_max_multiplier: float = 3.0,
+    far_pressure_air_backed: bool = False,
     dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -5897,6 +6136,78 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
         )
     )
+    hibm_air_backed_cell_count = -1
+    hibm_air_backed_component_count = -1
+    hibm_air_backed_cell_volume_m3 = -1.0
+    hibm_air_backed_seed_marker_count = -1
+    hibm_air_backed_seed_missed_marker_count = -1
+    if bool(far_pressure_air_backed) and int(far_pressure_region_id) != -1:
+        # S2-A12: the declared air-backed closure region gets a fluid-side
+        # air zone. The flood + per-component labels above are this step's
+        # classification input: closure markers walk their far (+n) side
+        # and select the unreached component(s) they land in; the selected
+        # components convert to obstacle-like air cells, so the carve
+        # model's vacated-zone fake water leaves the incompressible solve
+        # and the anchored volume-creation debt (run_2s_20260613b: 0.04 ->
+        # 0.7 over 1000 steps, reconnection kill at step 1017) is
+        # structurally impossible. Stateless per step; outlet-reachable
+        # water is structurally unselectable (air is a subset of the
+        # unreached set).
+        (
+            hibm_air_backed_seed_marker_count,
+            hibm_air_backed_seed_missed_marker_count,
+        ) = markers.mark_far_pressure_air_backed_seed_components(
+            fluid.obstacle,
+            fluid.hibm_base_obstacle,
+            fluid.hibm_pressure_outlet_reachable,
+            fluid.hibm_pressure_unreached_component_label,
+            fluid.hibm_air_component_selected,
+            fluid.cell_face_x_m,
+            fluid.cell_face_y_m,
+            fluid.cell_face_z_m,
+            fluid.cell_center_x_m,
+            fluid.cell_center_y_m,
+            fluid.cell_center_z_m,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            fluid.grid.grid_nodes,
+            far_pressure_region_id=int(far_pressure_region_id),
+            far_pressure_inside_probe_max_multiplier=float(
+                far_pressure_inside_probe_max_multiplier
+            ),
+        )
+        hibm_air_backed_cell_count = fluid.convert_hibm_air_backed_cells()
+        hibm_air_backed_component_count = int(
+            fluid.last_hibm_air_backed_component_count
+        )
+        hibm_air_backed_cell_volume_m3 = float(
+            fluid.last_hibm_air_backed_cell_volume_m3
+        )
+        if int(hibm_air_backed_cell_count) > 0:
+            # Conversion can orphan relocated rows that owned ex-pocket
+            # cells and, through row-owned faces, leave new
+            # zero-correctable candidates: re-assemble rows and rerun the
+            # band fixed point so no all-blocked active row reaches the CG
+            # (the S2-A8' zero-row lesson). Monotone like the original
+            # loop - conversion only adds obstacle.
+            velocity_report = assemble_velocity_dirichlet_rows()
+            for _air_band_pass in range(8):
+                band_increment = fluid.mark_hibm_solid_band_nonprojectable_cells(
+                    pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                    node_kind_code=ib_search.node_kind_code,
+                    unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+                )
+                if int(band_increment) <= 0:
+                    break
+                solid_band_nonprojectable_cell_count += int(band_increment)
+                velocity_report = assemble_velocity_dirichlet_rows()
+            solid_band_interior_cell_count = int(
+                getattr(fluid, "last_hibm_solid_band_interior_cells", -1)
+            )
+            solid_band_enclosed_water_cell_count = int(
+                getattr(fluid, "last_hibm_solid_band_enclosed_water_cells", -1)
+            )
     pressure_gradient_report = None
     pressure_report = HibmMpmPressureNeumannMatrixReport(
         active_pressure_neumann_rows=0,
@@ -6206,6 +6517,12 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     stress_sampling_obstacle_field = None
     if int(far_pressure_region_id) != -1:
         fluid.fill_hibm_converted_cell_pressures()
+        if bool(far_pressure_air_backed) and int(hibm_air_backed_cell_count) > 0:
+            # S2-A12: stamp the declared chamber pressure into air cells
+            # strictly AFTER the converted-cell fill and strictly BEFORE
+            # the stress sampling, so the dedicated sampling view reads
+            # exactly p_far in the pocket.
+            fluid.write_hibm_air_backed_cell_pressures(float(far_pressure_pa))
         fluid.build_hibm_sampling_obstacle(
             ib_search.node_kind_code,
             unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
@@ -6279,6 +6596,13 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         pressure_disconnected_nonprojectable_cell_count=(
             pressure_disconnected_nonprojectable_cell_count
         ),
+        air_backed_cell_count=int(hibm_air_backed_cell_count),
+        air_backed_component_count=int(hibm_air_backed_component_count),
+        air_backed_cell_volume_m3=float(hibm_air_backed_cell_volume_m3),
+        air_backed_seed_marker_count=int(hibm_air_backed_seed_marker_count),
+        air_backed_seed_missed_marker_count=int(
+            hibm_air_backed_seed_missed_marker_count
+        ),
         boundary_conditions=boundary_report,
         pressure_neumann_gradient=pressure_gradient_report,
         velocity_dirichlet=velocity_report,
@@ -6316,6 +6640,7 @@ def advance_hibm_mpm_sharp_mpm_step(
     far_pressure_pa: float = 0.0,
     far_pressure_inside_probe_max_multiplier: float = 3.0,
     two_sided_probe_max_multiplier: float = 3.0,
+    far_pressure_air_backed: bool = False,
     fluid_dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -6386,6 +6711,7 @@ def advance_hibm_mpm_sharp_mpm_step(
         two_sided_probe_max_multiplier=float(
             two_sided_probe_max_multiplier
         ),
+        far_pressure_air_backed=bool(far_pressure_air_backed),
         dt_s=fluid_dt_s,
         fluid_substeps=int(fluid_substeps),
         projection_iterations=int(projection_iterations),
@@ -6617,6 +6943,15 @@ def hibm_mpm_sharp_step_summary(
         ),
         "hibm_pressure_disconnected_nonprojectable_cell_count": (
             load.pressure_disconnected_nonprojectable_cell_count
+        ),
+        "hibm_air_backed_cell_count": load.air_backed_cell_count,
+        "hibm_air_backed_component_count": load.air_backed_component_count,
+        "hibm_air_backed_cell_volume_m3": load.air_backed_cell_volume_m3,
+        "hibm_air_backed_seed_marker_count": (
+            load.air_backed_seed_marker_count
+        ),
+        "hibm_air_backed_seed_missed_marker_count": (
+            load.air_backed_seed_missed_marker_count
         ),
         "hibm_ib_invalid_projection_count": (
             load.ib_node_search.invalid_projection_count
@@ -6949,6 +7284,7 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
     far_pressure_pa: float = 0.0,
     far_pressure_inside_probe_max_multiplier: float = 3.0,
     two_sided_probe_max_multiplier: float = 3.0,
+    far_pressure_air_backed: bool = False,
     fluid_dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -7011,6 +7347,7 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
         two_sided_probe_max_multiplier=float(
             two_sided_probe_max_multiplier
         ),
+        far_pressure_air_backed=bool(far_pressure_air_backed),
         fluid_dt_s=fluid_dt_s,
         fluid_substeps=int(fluid_substeps),
         projection_iterations=int(projection_iterations),

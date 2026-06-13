@@ -5970,6 +5970,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     far_pressure_pa=pressure_pa,
                     far_pressure_inside_probe_max_multiplier=12.0,
                     two_sided_probe_max_multiplier=12.0,
+                    far_pressure_air_backed=True,
                     fluid_dt_s=spec.dt_s,
                     fluid_substeps=effective_fluid_substeps,
                     projection_iterations=int(args.projection_iterations),

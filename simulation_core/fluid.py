@@ -779,6 +779,17 @@ class CartesianFluidSolver:
         self.cg_unreached_component_sum = ti.field(dtype=ti.f64, shape=32)
         self.cg_unreached_component_volume = ti.field(dtype=ti.f64, shape=32)
         self.cg_unreached_component_scan = ti.field(dtype=ti.i32, shape=())
+        # S2-A12 declared air-backed closure regions: per-cell air tag,
+        # 32-slot unreached-component selection mask (written by the
+        # marker-side far-side seed scan), and conversion reports.
+        self.hibm_air_cell = ti.field(dtype=ti.i32, shape=shape)
+        self.hibm_air_component_selected = ti.field(dtype=ti.i32, shape=32)
+        self.report_hibm_air_backed_cells = ti.field(dtype=ti.i32, shape=())
+        self.report_hibm_air_backed_components = ti.field(dtype=ti.i32, shape=())
+        self.report_hibm_air_backed_cell_volume_m3 = ti.field(
+            dtype=ti.f64,
+            shape=(),
+        )
         # R2-H1 observability: overlap between the flood-unreachable anchoring
         # set and rows touched by pressure-interface matrix terms. The cell-hit
         # grid deduplicates coupling-edge hits (a row can be the target of
@@ -1031,6 +1042,12 @@ class CartesianFluidSolver:
         # explicitly after the projection returns and before stress
         # sampling, so project()'s report key mirrors the PREVIOUS fill.
         self.last_hibm_pressure_filled_cell_count = -1
+        # -1 means "the air-backed classification has not run since
+        # construction / restore_state" (S2-A12, armed per closure region
+        # by the HIBM assemble; default off).
+        self.last_hibm_air_backed_cell_count = -1
+        self.last_hibm_air_backed_component_count = -1
+        self.last_hibm_air_backed_cell_volume_m3 = -1.0
         self.last_unreached_divergence_raw_stats = {
             "max_abs": 0.0,
             "l2": 0.0,
@@ -1136,6 +1153,7 @@ class CartesianFluidSolver:
             self.hibm_pressure_outlet_reachable[i, j, k] = 0
             self.hibm_pressure_outlet_reachable_next[i, j, k] = 0
             self.hibm_fresh_fluid_cell[i, j, k] = 0
+            self.hibm_air_cell[i, j, k] = 0
             self.hibm_pressure_filled[i, j, k] = 0
             self.hibm_pressure_filled_next[i, j, k] = 0
             self.hibm_pressure_fill_next[i, j, k] = 0.0
@@ -1198,6 +1216,11 @@ class CartesianFluidSolver:
         self.report_hibm_solid_band_enclosed_water_cells[None] = 0
         self.report_hibm_pressure_disconnected_nonprojectable_cells[None] = 0
         self.report_hibm_pressure_filled_cells[None] = 0
+        self.report_hibm_air_backed_cells[None] = 0
+        self.report_hibm_air_backed_components[None] = 0
+        self.report_hibm_air_backed_cell_volume_m3[None] = 0.0
+        for slot in self.hibm_air_component_selected:
+            self.hibm_air_component_selected[slot] = 0
 
     def clear(self) -> None:
         self._clear_kernel()
@@ -1692,6 +1715,96 @@ class CartesianFluidSolver:
         return unreached
 
     @ti.kernel
+    def _mark_hibm_air_backed_cells_kernel(self):
+        self.report_hibm_air_backed_cells[None] = 0
+        self.report_hibm_air_backed_components[None] = 0
+        self.report_hibm_air_backed_cell_volume_m3[None] = ti.cast(0.0, ti.f64)
+        for slot in self.hibm_air_component_selected:
+            if self.hibm_air_component_selected[slot] != 0:
+                ti.atomic_add(self.report_hibm_air_backed_components[None], 1)
+        for i, j, k in self.obstacle:
+            self.hibm_air_cell[i, j, k] = 0
+            if (
+                self.obstacle[i, j, k] == 0
+                and self.hibm_pressure_outlet_reachable[i, j, k] == 0
+            ):
+                label = self.hibm_pressure_unreached_component_label[i, j, k]
+                if (
+                    label >= -32
+                    and label <= -1
+                    and self.hibm_air_component_selected[-label - 1] != 0
+                ):
+                    self.obstacle[i, j, k] = 1
+                    self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+                    self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+                    self.volume_source_s[i, j, k] = 0.0
+                    self.divergence[i, j, k] = 0.0
+                    self.hibm_air_cell[i, j, k] = 1
+                    ti.atomic_add(self.report_hibm_air_backed_cells[None], 1)
+                    ti.atomic_add(
+                        self.report_hibm_air_backed_cell_volume_m3[None],
+                        ti.cast(self._cell_volume_m3(i, j, k), ti.f64),
+                    )
+
+    def convert_hibm_air_backed_cells(self) -> int:
+        """Convert seed-selected unreached components into air cells (S2-A12).
+
+        Consumes this step's outlet-reachability flood and per-component
+        labels (the last ``mark_hibm_pressure_outlet_disconnected_
+        nonprojectable_cells`` call) plus the 32-slot selection mask written
+        by the marker-side far-side seed scan. Every active unreached cell
+        of a selected component converts exactly like a band cell (obstacle,
+        velocity/velocity_prev zeroed, volume source and divergence cleared)
+        and is tagged in ``hibm_air_cell``: the declared air chamber leaves
+        the incompressible solve entirely, so the vacated-zone
+        volume-creation debt (the anchored unreached residual) becomes
+        structurally impossible. Pressure is NOT written here - the HIBM
+        assemble stamps the declared chamber pressure via
+        :meth:`write_hibm_air_backed_cell_pressures` strictly after the
+        A8'' converted-cell fill, so the sampling view reads exactly p_far.
+
+        Stateless per step: the caller reruns classification each assemble
+        (checkpoints carry no obstacle/air state); cells that leave the
+        classification re-wet through the hibm fresh-fluid reconstruction
+        on the next ``apply_hibm_internal_obstacles``. Outlet-reachable
+        water is structurally unselectable (air is a subset of the
+        unreached set).
+        """
+        self._ensure_hibm_base_obstacle()
+        self._mark_hibm_air_backed_cells_kernel()
+        converted = int(self.report_hibm_air_backed_cells[None])
+        self.last_hibm_air_backed_cell_count = converted
+        self.last_hibm_air_backed_component_count = int(
+            self.report_hibm_air_backed_components[None]
+        )
+        self.last_hibm_air_backed_cell_volume_m3 = float(
+            self.report_hibm_air_backed_cell_volume_m3[None]
+        )
+        return converted
+
+    @ti.kernel
+    def _write_hibm_air_backed_cell_pressures_kernel(self, pressure_pa: ti.f32):
+        for i, j, k in self.pressure:
+            if self.hibm_air_cell[i, j, k] != 0:
+                self.pressure[i, j, k] = pressure_pa
+
+    def write_hibm_air_backed_cell_pressures(self, pressure_pa: float) -> int:
+        """Stamp the declared chamber pressure into air cells (S2-A12).
+
+        Called by the HIBM assemble strictly AFTER
+        :meth:`fill_hibm_converted_cell_pressures` (the fill treats air
+        cells as ordinary converted cells and would leave water-diffused
+        values in the pocket) and strictly BEFORE the stress sampling, so
+        the dedicated sampling view reads exactly the declared far pressure
+        there. Returns the air-cell count of the last conversion.
+        """
+        value = float(pressure_pa)
+        if not math.isfinite(value):
+            raise ValueError("pressure_pa must be a finite number")
+        self._write_hibm_air_backed_cell_pressures_kernel(value)
+        return int(self.last_hibm_air_backed_cell_count)
+
+    @ti.kernel
     def _init_hibm_converted_cell_pressure_fill_kernel(self):
         for i, j, k in self.hibm_pressure_filled:
             self.hibm_pressure_filled[i, j, k] = 0
@@ -1897,6 +2010,7 @@ class CartesianFluidSolver:
             self.velocity_dirichlet_boundary_active[i, j, k] = 0
             self.velocity_dirichlet_boundary_value_mps[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.velocity_dirichlet_boundary_projection_weight[i, j, k] = 0.0
+            self.hibm_air_cell[i, j, k] = 0
 
     def save_state(self) -> None:
         self._save_state_kernel()
@@ -1919,6 +2033,9 @@ class CartesianFluidSolver:
         self.last_hibm_solid_band_interior_cells = -1
         self.last_hibm_solid_band_enclosed_water_cells = -1
         self.last_hibm_pressure_filled_cell_count = -1
+        self.last_hibm_air_backed_cell_count = -1
+        self.last_hibm_air_backed_component_count = -1
+        self.last_hibm_air_backed_cell_volume_m3 = -1.0
         self._hibm_reachability_checksum = None
 
     @ti.kernel
