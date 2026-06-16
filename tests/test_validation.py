@@ -4,6 +4,7 @@ import math
 import unittest
 
 from simulation_core.validation import (
+    ReferenceCurve,
     boundary_drive_compliance_report,
     checks_passed,
     finite_field_diagnostics,
@@ -13,6 +14,30 @@ from simulation_core.validation import (
 
 
 class ValidationHelperTests(unittest.TestCase):
+    def test_reference_curve_interpolates_and_reports_relative_error(self) -> None:
+        curve = ReferenceCurve(
+            name="speed",
+            units="m/s",
+            source="unit test",
+            points=((0.0, 0.0), (1.0, 2.0), (2.0, 4.0)),
+        )
+
+        self.assertEqual(curve.value_at(0.0), 0.0)
+        self.assertEqual(curve.value_at(1.5), 3.0)
+        self.assertAlmostEqual(
+            curve.relative_error_at(time_s=2.0, computed_value=4.2),
+            0.05,
+        )
+
+    def test_reference_curve_rejects_non_monotone_times(self) -> None:
+        with self.assertRaises(ValueError):
+            ReferenceCurve(
+                name="bad",
+                units="m",
+                source="unit test",
+                points=((0.0, 0.0), (0.0, 1.0)),
+            )
+
     def test_vector_norm_uses_all_components(self) -> None:
         self.assertAlmostEqual(vector_norm((2.0, -3.0, 6.0)), 7.0)
 

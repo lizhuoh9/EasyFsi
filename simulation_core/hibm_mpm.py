@@ -1,10 +1,16 @@
 import math
+import os
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
 import taichi as ti
 
+from .pressure_interface import (
+    PRESSURE_INTERFACE_COUPLING_EXTRA_SLOTS,
+    PRESSURE_INTERFACE_COUPLING_SLOT_COUNT,
+)
 from .runtime import TaichiRuntimeConfig, init_taichi
 
 
@@ -14,6 +20,21 @@ FSI_COUPLING_MODE_CHOICES = (
     FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
     FSI_COUPLING_MODE_HIBM_MPM_SHARP,
 )
+HIBM_OWNER_RELOCATION_WALK_STEPS = 24
+PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY = 1024
+PRESSURE_NEUMANN_INVALID_REASON_UNRECONSTRUCTABLE = 1
+PRESSURE_NEUMANN_INVALID_REASON_BAD_MARKER = 2
+PRESSURE_NEUMANN_INVALID_REASON_NONPOSITIVE_VOLUME = 3
+PRESSURE_NEUMANN_INVALID_REASON_NAMES = {
+    PRESSURE_NEUMANN_INVALID_REASON_UNRECONSTRUCTABLE: "unreconstructable",
+    PRESSURE_NEUMANN_INVALID_REASON_BAD_MARKER: "bad_marker",
+    PRESSURE_NEUMANN_INVALID_REASON_NONPOSITIVE_VOLUME: "nonpositive_volume",
+}
+
+
+def _debug_stage_progress(message: str) -> None:
+    if os.environ.get("HIBM_DEBUG_STAGE_PROGRESS") == "1":
+        print(f"[hibm-stage {time.perf_counter():.6f}] {message}", flush=True)
 
 
 @dataclass(frozen=True)
@@ -35,6 +56,16 @@ class HibmMpmSurfaceMarkerForceReport:
     total_marker_count: int
     fluid_reaction_force_n: tuple[float, float, float]
     action_reaction_residual_n: float
+    primary_stress_valid_marker_count: int = 0
+    primary_stress_invalid_marker_count: int = 0
+    secondary_stress_valid_marker_count: int = 0
+    secondary_stress_invalid_marker_count: int = 0
+    primary_marker_force_norm_sum_n: float = 0.0
+    secondary_marker_force_norm_sum_n: float = 0.0
+    total_marker_force_norm_sum_n: float = 0.0
+    primary_marker_force_norm_max_n: float = 0.0
+    secondary_marker_force_norm_max_n: float = 0.0
+    total_marker_force_norm_max_n: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -51,6 +82,9 @@ class HibmMpmFluidStressSampleReport:
     closure_gradient_missing_marker_count: int = 0
     far_pressure_outside_suppressed_marker_count: int = 0
     two_sided_extended_marker_count: int = 0
+    one_sided_pressure_marker_count: int = 0
+    one_sided_extended_marker_count: int = 0
+    one_sided_gradient_missing_marker_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -102,6 +136,7 @@ class HibmMpmIbBoundaryConditionReport:
     no_slip_dirichlet_count: int
     pressure_neumann_count: int
     inactive_internal_node_count: int
+    max_abs_velocity_mps: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -128,10 +163,20 @@ class HibmMpmPressureNeumannMatrixReport:
     rhs_integral: float
     max_abs_rhs: float
     skipped_velocity_dirichlet_row_count: int = 0
+    skipped_pressure_boundary_adjacent_row_count: int = 0
     skipped_obstacle_owner_row_count: int = 0
+    relocated_obstacle_owner_row_count: int = 0
+    duplicate_owner_row_count: int = 0
+    overflow_owner_row_count: int = 0
+    max_owner_slot_count: int = 0
+    pressure_interface_row_list_enabled: bool = False
+    pressure_interface_row_list_count: int = 0
     active_pressure_neumann_marker_count: int = 0
     max_pressure_neumann_rows_per_marker: int = 0
     invalid_reconstruction_row_count: int = 0
+    invalid_unreconstructable_row_count: int = 0
+    invalid_bad_marker_row_count: int = 0
+    invalid_nonpositive_volume_row_count: int = 0
     min_reconstruction_gap_m: float = 0.0
     max_reconstruction_gap_m: float = 0.0
     max_transmissibility_m: float = 0.0
@@ -145,6 +190,8 @@ class HibmMpmPressureNeumannMatrixReport:
 class HibmMpmPressureNeumannGradientReport:
     active_marker_count: int
     max_abs_gradient_pa_per_m: float
+    max_raw_abs_gradient_pa_per_m: float = 0.0
+    limited_gradient_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -164,6 +211,7 @@ class HibmMpmSharpFluidToMpmLoadReport:
     marker_forces: HibmMpmSurfaceMarkerForceReport
     mpm_external_force_clear: HibmMpmExternalForceClearReport
     mpm_force_scatter: HibmMpmMpmForceScatterReport
+    pressure_neumann_invalid_diagnostic_rows: tuple[dict[str, Any], ...] = ()
     # S2-A8' band population split, sampled from the final band sweep:
     # interior slivers (classified candidates) vs enclosed water
     # (unclassified candidates). -1 means the band ran without a split
@@ -177,6 +225,8 @@ class HibmMpmSharpFluidToMpmLoadReport:
     air_backed_cell_volume_m3: float = -1.0
     air_backed_seed_marker_count: int = -1
     air_backed_seed_missed_marker_count: int = -1
+    air_backed_seed_fallback_cell_count: int = -1
+    air_backed_reachability_barrier_cell_count: int = -1
 
 
 @dataclass(frozen=True)
@@ -192,8 +242,12 @@ class HibmMpmSharpMpmStepReport:
     next_velocity_dirichlet: HibmMpmVelocityDirichletBoundaryReport
     next_pressure_neumann: HibmMpmPressureNeumannMatrixReport
     next_pressure_neumann_gradient: HibmMpmPressureNeumannGradientReport | None = None
+    next_pressure_neumann_invalid_diagnostic_rows: tuple[dict[str, Any], ...] = ()
     next_solid_band_interior_cell_count: int = -1
     next_solid_band_enclosed_water_cell_count: int = -1
+    post_solid_kinematic_projection_applied: bool = False
+    post_solid_fluid_projection: dict[str, Any] | None = None
+    post_solid_no_slip_residual: HibmMpmNoSlipResidualReport | None = None
 
 
 @dataclass(frozen=True)
@@ -246,8 +300,16 @@ class HibmMpmSurfaceMarkers:
         self.n_gamma = ti.Vector.field(3, dtype=ti.f32, shape=self.marker_capacity)
         self.A_gamma_m2 = ti.field(dtype=ti.f32, shape=self.marker_capacity)
         self.region_id = ti.field(dtype=ti.i32, shape=self.marker_capacity)
-        self.t_gamma_pa = ti.Vector.field(3, dtype=ti.f32, shape=self.marker_capacity)
-        self.F_gamma_n = ti.Vector.field(3, dtype=ti.f32, shape=self.marker_capacity)
+        self.t_gamma_pa = ti.Vector.field(3, dtype=ti.f64, shape=self.marker_capacity)
+        self._stress_pressure_valid = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_viscous_mode = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self.F_gamma_n = ti.Vector.field(3, dtype=ti.f64, shape=self.marker_capacity)
         self.projection_triangle_indices = ti.Vector.field(
             3,
             dtype=ti.i32,
@@ -287,15 +349,37 @@ class HibmMpmSurfaceMarkers:
             shape=(1, 1, 1),
         )
 
-        self.report_primary_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_secondary_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_total_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.report_primary_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_secondary_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_total_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_primary_force_norm_sum_n = ti.field(dtype=ti.f64, shape=())
+        self.report_secondary_force_norm_sum_n = ti.field(dtype=ti.f64, shape=())
+        self.report_total_force_norm_sum_n = ti.field(dtype=ti.f64, shape=())
+        self.report_primary_force_norm_max_n = ti.field(dtype=ti.f64, shape=())
+        self.report_secondary_force_norm_max_n = ti.field(dtype=ti.f64, shape=())
+        self.report_total_force_norm_max_n = ti.field(dtype=ti.f64, shape=())
         self.report_primary_marker_count = ti.field(dtype=ti.i32, shape=())
         self.report_secondary_marker_count = ti.field(dtype=ti.i32, shape=())
         self.report_total_marker_count = ti.field(dtype=ti.i32, shape=())
+        self.report_primary_stress_valid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_primary_stress_invalid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_secondary_stress_valid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_secondary_stress_invalid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.report_stress_valid_marker_count = ti.field(dtype=ti.i32, shape=())
         self.report_stress_invalid_marker_count = ti.field(dtype=ti.i32, shape=())
-        self.report_stress_max_abs_traction_pa = ti.field(dtype=ti.f32, shape=())
+        self.report_stress_max_abs_traction_pa = ti.field(dtype=ti.f64, shape=())
         self.report_stress_two_sided_pressure_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
@@ -332,8 +416,24 @@ class HibmMpmSurfaceMarkers:
             dtype=ti.i32,
             shape=(),
         )
+        self.report_stress_one_sided_pressure_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_stress_one_sided_extended_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_stress_one_sided_gradient_missing_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.report_air_backed_seed_marker_count = ti.field(dtype=ti.i32, shape=())
         self.report_air_backed_seed_missed_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_air_backed_seed_fallback_cell_count = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -343,12 +443,12 @@ class HibmMpmSurfaceMarkers:
         self.report_no_slip_sum_residual2_mps2 = ti.field(dtype=ti.f64, shape=())
         self.report_mpm_scatter_marker_force_n = ti.Vector.field(
             3,
-            dtype=ti.f32,
+            dtype=ti.f64,
             shape=(),
         )
         self.report_mpm_scatter_external_force_n = ti.Vector.field(
             3,
-            dtype=ti.f32,
+            dtype=ti.f64,
             shape=(),
         )
         self.report_mpm_scatter_active_marker_count = ti.field(
@@ -894,8 +994,8 @@ class HibmMpmSurfaceMarkers:
         tx = ti.min(ti.max(gx - ti.cast(i0, ti.f32), 0.0), 1.0)
         ty = ti.min(ti.max(gy - ti.cast(j0, ti.f32), 0.0), 1.0)
         tz = ti.min(ti.max(gz - ti.cast(k0, ti.f32), 0.0), 1.0)
-        value = 0.0
-        fluid_weight = 0.0
+        value = ti.cast(0.0, ti.f64)
+        fluid_weight = ti.cast(0.0, ti.f64)
         for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
             wx = 1.0 - tx if oi == 0 else tx
             wy = 1.0 - ty if oj == 0 else ty
@@ -1074,8 +1174,8 @@ class HibmMpmSurfaceMarkers:
         # samplable. The gate is a uniform runtime i32, so the kernel is
         # not re-instantiated per call - only per bound field pair (the
         # A6/A7 stand-in pattern keeps the no-view binding stable).
-        pressure = 0.0
-        pressure_weight = 0.0
+        pressure = ti.cast(0.0, ti.f64)
+        pressure_weight = ti.cast(0.0, ti.f64)
         if use_sampling_obstacle != 0:
             pressure, pressure_weight = self._sample_pressure_trilinear(
                 pressure_field,
@@ -1173,12 +1273,16 @@ class HibmMpmSurfaceMarkers:
         nx: ti.i32,
         ny: ti.i32,
         nz: ti.i32,
-        viscosity_pa_s: ti.f32,
+        viscosity_pa_s: ti.template(),
         two_sided_pressure: ti.i32,
         far_pressure_region_id: ti.i32,
         far_pressure_pa: ti.f32,
+        far_pressure_side_normal_sign: ti.f32,
         far_pressure_inside_probe_max_multiplier: ti.f32,
         two_sided_probe_max_multiplier: ti.f32,
+        one_sided_pressure_region_id: ti.i32,
+        one_sided_reference_pressure_pa: ti.f32,
+        one_sided_probe_max_multiplier: ti.f32,
         use_pressure_anchor_fallback: ti.i32,
         node_anchor_available: ti.i32,
         use_sampling_obstacle: ti.i32,
@@ -1195,6 +1299,9 @@ class HibmMpmSurfaceMarkers:
         self.report_stress_closure_gradient_missing_marker_count[None] = 0
         self.report_stress_far_pressure_outside_suppressed_marker_count[None] = 0
         self.report_stress_two_sided_extended_marker_count[None] = 0
+        self.report_stress_one_sided_pressure_marker_count[None] = 0
+        self.report_stress_one_sided_extended_marker_count[None] = 0
+        self.report_stress_one_sided_gradient_missing_marker_count[None] = 0
         for marker in range(marker_count):
             position = self.x_gamma_m[marker]
             normal = self.n_gamma[marker]
@@ -1229,21 +1336,23 @@ class HibmMpmSurfaceMarkers:
             pressure_sample_valid = pressure_weight > 1.0e-12
             gradient = ti.Matrix.zero(ti.f32, 3, 3)
             gradient_valid = 1
+            viscous_mode = 1
             if two_sided_pressure != 0:
+                viscous_mode = 0
                 normal_spacing_inv = (
                     ti.abs(normal.x) / cell_width_x_m[i_near]
                     + ti.abs(normal.y) / cell_width_y_m[j_near]
                     + ti.abs(normal.z) / cell_width_z_m[k_near]
                 )
                 probe_distance_m = 1.0 / ti.max(normal_spacing_inv, 1.0e-12)
-                outside_pressure = 0.0
-                inside_pressure = 0.0
+                outside_pressure = ti.cast(0.0, ti.f64)
+                inside_pressure = ti.cast(0.0, ti.f64)
                 outside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
                 inside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
                 # S2-A4: per-side "found" is split into pressure-found and
-                # gradient-found. In far-pressure closure regions the squid
-                # band obstacle slabs leave only 1-3 cell wide water gaps
-                # behind the membranes at production grids: trilinear
+                # gradient-found. In far-pressure closure regions narrow
+                # obstacle slabs can leave only 1-3 cell wide water gaps
+                # behind membranes at production grids: trilinear
                 # pressure is samplable inside such a gap, but the one-sided
                 # viscous gradient stencil (complete fluid neighbor pairs on
                 # all three axes) almost never is, and the merged acceptance
@@ -1266,6 +1375,12 @@ class HibmMpmSurfaceMarkers:
                     and self.region_id[marker] == far_pressure_region_id
                 ):
                     closure_region_marker = 1
+                one_sided_region_marker = 0
+                if (
+                    one_sided_pressure_region_id != -1
+                    and self.region_id[marker] == one_sided_pressure_region_id
+                ):
+                    one_sided_region_marker = 1
                 # S2-A5: runtime range(5) instead of ti.static. The body only
                 # consumes probe_index through ti.cast(..., ti.f32) (exact for
                 # 0..4), the per-thread serial loop runs the iterations in the
@@ -1312,7 +1427,7 @@ class HibmMpmSurfaceMarkers:
                         )
                         sample_gradient = ti.Matrix.zero(ti.f32, 3, 3)
                         sample_gradient_valid = 1
-                        if viscosity_pa_s > 0.0:
+                        if ti.static(viscosity_pa_s > 0.0):
                             sample_gradient, sample_gradient_valid = (
                                 self._sample_velocity_gradient_sampling_view(
                                     velocity_field,
@@ -1391,7 +1506,7 @@ class HibmMpmSurfaceMarkers:
                         )
                         sample_gradient = ti.Matrix.zero(ti.f32, 3, 3)
                         sample_gradient_valid = 1
-                        if viscosity_pa_s > 0.0:
+                        if ti.static(viscosity_pa_s > 0.0):
                             sample_gradient, sample_gradient_valid = (
                                 self._sample_velocity_gradient_sampling_view(
                                     velocity_field,
@@ -1493,7 +1608,7 @@ class HibmMpmSurfaceMarkers:
                             )
                             sample_gradient = ti.Matrix.zero(ti.f32, 3, 3)
                             sample_gradient_valid = 1
-                            if viscosity_pa_s > 0.0:
+                            if ti.static(viscosity_pa_s > 0.0):
                                 sample_gradient, sample_gradient_valid = (
                                     self._sample_velocity_gradient_sampling_view(
                                         velocity_field,
@@ -1525,14 +1640,12 @@ class HibmMpmSurfaceMarkers:
                 # S2-A10 two-sided extended walk: opt-in, NON-closure
                 # markers only - closure regions keep their dedicated
                 # extension above and their branch priority below. The
-                # S2-A8'' dedicated sampling view starves genuinely thin
-                # features: a thin tail fin sits entirely inside its own
-                # row-cloud envelope, so BOTH standard walks (max 3.0x)
-                # run dry and the marker silently drops to zero traction
-                # (two-sided valid population 171-1017 avg 210 before
-                # A8'' -> ~0 after; tail_marker_participates True ->
-                # False). When armed (two_sided_probe_max_multiplier >
-                # 3.0; the case wires 12.0) and ONLY when the standard
+                # S2-A8'' dedicated sampling view can starve genuinely thin
+                # features that sit entirely inside their own row-cloud
+                # envelope, so BOTH standard walks (max 3.0x) run dry and
+                # the marker silently drops to zero traction. When armed
+                # (two_sided_probe_max_multiplier > 3.0) and ONLY when the
+                # standard
                 # ladder found nothing on EITHER side, re-walk BOTH sides
                 # out to the requested multiplier with the same
                 # 5-candidate ladder spacing, the same sampling view and
@@ -1552,18 +1665,25 @@ class HibmMpmSurfaceMarkers:
                 # not once per side; even rung indices walk +n, odd walk
                 # -n, preserving the standard walk's outside-then-inside
                 # serial order and its carried-flag determinism).
+                extended_probe_max_multiplier = two_sided_probe_max_multiplier
+                if (
+                    one_sided_region_marker == 1
+                    and one_sided_probe_max_multiplier
+                    > extended_probe_max_multiplier
+                ):
+                    extended_probe_max_multiplier = one_sided_probe_max_multiplier
                 if (
                     closure_region_marker == 0
                     and inside_pressure_found == 0
                     and outside_pressure_found == 0
-                    and two_sided_probe_max_multiplier > 3.0
+                    and extended_probe_max_multiplier > 3.0
                 ):
                     outside_crossed_solid = 0
                     inside_crossed_solid = 0
                     for extension_index in range(10):
                         rung_distance = probe_distance_m * (
                             3.0
-                            + (two_sided_probe_max_multiplier - 3.0)
+                            + (extended_probe_max_multiplier - 3.0)
                             * (ti.cast(extension_index // 2, ti.f32) + 1.0)
                             / 5.0
                         )
@@ -1643,7 +1763,7 @@ class HibmMpmSurfaceMarkers:
                                 )
                                 sample_gradient = ti.Matrix.zero(ti.f32, 3, 3)
                                 sample_gradient_valid = 1
-                                if viscosity_pa_s > 0.0:
+                                if ti.static(viscosity_pa_s > 0.0):
                                     sample_gradient, sample_gradient_valid = (
                                         self._sample_velocity_gradient_sampling_view(
                                             velocity_field,
@@ -1681,17 +1801,10 @@ class HibmMpmSurfaceMarkers:
                                         outside_gradient = sample_gradient
                                         outside_gradient_found = 1
                 # S2-A9 declared air-backed interface: a far-pressure
-                # closure region DECLARES its outside (+n) to be the known
-                # far pressure - that is the region's physical meaning, not
-                # a fallback for when the outside walk finds nothing. When
-                # the membrane vacates space (production probe: ~17 mm
-                # whole-membrane sink), the carve model fills that space
-                # with WATER (there is no air phase), the outside walk
-                # samples it, and the two-sided branch silently replaces
-                # the O(kPa) declared drive with a spurious
-                # (real water - vacated-zone water) ~ 0 jump - the closed
-                # count collapsing 7782 -> 0 intermittently and the drive
-                # rerouting. The decision order is therefore keyed on
+                # closure region declares its dry side to be the configured
+                # far pressure. That is the region's physical meaning, not a
+                # fallback for when the opposite-side walk finds nothing. The
+                # decision order is therefore keyed on
                 # closure_region_marker (S2-A5 single-copy style: only the
                 # if-chain conditions are reordered, no sampling body is
                 # duplicated): closure markers never enter the two-sided
@@ -1702,12 +1815,67 @@ class HibmMpmSurfaceMarkers:
                 # chain bit for bit.
                 if (
                     closure_region_marker == 0
+                    and one_sided_region_marker == 1
+                    and inside_pressure_found == 1
+                ):
+                    outside_pressure = one_sided_reference_pressure_pa
+                    outside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                    pressure_traction = (inside_pressure - outside_pressure) * normal
+                    pressure_sample_valid = True
+                    gradient = outside_gradient - inside_gradient
+                    viscous_mode = 5
+                    ti.atomic_add(
+                        self.report_stress_one_sided_pressure_marker_count[None],
+                        1,
+                    )
+                    if two_sided_found_extended == 1:
+                        ti.atomic_add(
+                            self.report_stress_one_sided_extended_marker_count[None],
+                            1,
+                        )
+                    if inside_gradient_found == 0:
+                        ti.atomic_add(
+                            self.report_stress_one_sided_gradient_missing_marker_count[
+                                None
+                            ],
+                            1,
+                        )
+                elif (
+                    closure_region_marker == 0
+                    and one_sided_region_marker == 1
+                    and outside_pressure_found == 1
+                ):
+                    inside_pressure = one_sided_reference_pressure_pa
+                    inside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                    pressure_traction = (inside_pressure - outside_pressure) * normal
+                    pressure_sample_valid = True
+                    gradient = outside_gradient - inside_gradient
+                    viscous_mode = 6
+                    ti.atomic_add(
+                        self.report_stress_one_sided_pressure_marker_count[None],
+                        1,
+                    )
+                    if two_sided_found_extended == 1:
+                        ti.atomic_add(
+                            self.report_stress_one_sided_extended_marker_count[None],
+                            1,
+                        )
+                    if outside_gradient_found == 0:
+                        ti.atomic_add(
+                            self.report_stress_one_sided_gradient_missing_marker_count[
+                                None
+                            ],
+                            1,
+                        )
+                elif (
+                    closure_region_marker == 0
                     and outside_pressure_found == 1
                     and inside_pressure_found == 1
                 ):
                     pressure_traction = (inside_pressure - outside_pressure) * normal
                     pressure_sample_valid = True
                     gradient = outside_gradient - inside_gradient
+                    viscous_mode = 2
                     ti.atomic_add(
                         self.report_stress_two_sided_pressure_marker_count[None],
                         1,
@@ -1717,7 +1885,11 @@ class HibmMpmSurfaceMarkers:
                             self.report_stress_two_sided_extended_marker_count[None],
                             1,
                         )
-                elif closure_region_marker == 1 and inside_pressure_found == 1:
+                elif (
+                    closure_region_marker == 1
+                    and inside_pressure_found == 1
+                    and far_pressure_side_normal_sign >= -0.5
+                ):
                     outside_pressure = far_pressure_pa
                     # The declared air side carries no fluid: any gradient
                     # the outside walk may have stored came from the same
@@ -1731,6 +1903,7 @@ class HibmMpmSurfaceMarkers:
                     pressure_traction = (inside_pressure - outside_pressure) * normal
                     pressure_sample_valid = True
                     gradient = outside_gradient - inside_gradient
+                    viscous_mode = 3
                     ti.atomic_add(
                         self.report_stress_far_pressure_closed_marker_count[None],
                         1,
@@ -1745,7 +1918,11 @@ class HibmMpmSurfaceMarkers:
                             self.report_stress_far_pressure_outside_suppressed_marker_count[None],
                             1,
                         )
-                elif closure_region_marker == 1 and outside_pressure_found == 1:
+                elif (
+                    closure_region_marker == 1
+                    and outside_pressure_found == 1
+                    and far_pressure_side_normal_sign <= 0.5
+                ):
                     # Mirrored closure: the structurally dry side sits on the
                     # inside (-n) walk because of the CAD winding (the chain
                     # position guarantees inside_pressure_found == 0 here).
@@ -1761,6 +1938,7 @@ class HibmMpmSurfaceMarkers:
                     pressure_traction = (inside_pressure - outside_pressure) * normal
                     pressure_sample_valid = True
                     gradient = outside_gradient - inside_gradient
+                    viscous_mode = 4
                     ti.atomic_add(
                         self.report_stress_far_pressure_closed_marker_count[None],
                         1,
@@ -1786,7 +1964,13 @@ class HibmMpmSurfaceMarkers:
                     # so no one-sided gradient was ever found either.
                     if (
                         use_pressure_anchor_fallback != 0
-                        and closure_region_marker == 1
+                        and (
+                            closure_region_marker == 1
+                            or (
+                                closure_region_marker == 0
+                                and one_sided_region_marker == 1
+                            )
+                        )
                         and marker_pressure_anchor_cell[marker].x >= 0
                     ):
                         anchor_cell = marker_pressure_anchor_cell[marker]
@@ -1802,28 +1986,59 @@ class HibmMpmSurfaceMarkers:
                                 cell_center_z_m[anchor_cell.z],
                             ]
                         )
-                        inside_pressure = far_pressure_pa
+                        reference_pressure = ti.cast(far_pressure_pa, ti.f64)
+                        if closure_region_marker == 0 and one_sided_region_marker == 1:
+                            reference_pressure = ti.cast(
+                                one_sided_reference_pressure_pa,
+                                ti.f64,
+                            )
+                        inside_pressure = reference_pressure
                         outside_pressure = anchor_pressure
-                        if (anchor_center - position).dot(normal) < 0.0:
+                        if (
+                            closure_region_marker == 1
+                            and far_pressure_side_normal_sign > 0.5
+                        ):
                             inside_pressure = anchor_pressure
-                            outside_pressure = far_pressure_pa
+                            outside_pressure = reference_pressure
+                        elif (
+                            closure_region_marker == 1
+                            and far_pressure_side_normal_sign < -0.5
+                        ):
+                            inside_pressure = reference_pressure
+                            outside_pressure = anchor_pressure
+                        elif (anchor_center - position).dot(normal) < 0.0:
+                            inside_pressure = anchor_pressure
+                            outside_pressure = reference_pressure
                         pressure_traction = (
                             inside_pressure - outside_pressure
                         ) * normal
                         pressure_sample_valid = True
                         gradient = ti.Matrix.zero(ti.f32, 3, 3)
-                        ti.atomic_add(
-                            self.report_stress_far_pressure_closed_marker_count[
-                                None
-                            ],
-                            1,
-                        )
-                        ti.atomic_add(
-                            self.report_stress_far_pressure_anchor_closed_marker_count[
-                                None
-                            ],
-                            1,
-                        )
+                        viscous_mode = 7
+                        if closure_region_marker == 1:
+                            ti.atomic_add(
+                                self.report_stress_far_pressure_closed_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                            ti.atomic_add(
+                                self.report_stress_far_pressure_anchor_closed_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                        else:
+                            ti.atomic_add(
+                                self.report_stress_one_sided_pressure_marker_count[None],
+                                1,
+                            )
+                            ti.atomic_add(
+                                self.report_stress_one_sided_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
                     # S2-A7 second-stage fallback: the marker-level anchor
                     # above is sourced from the pressure-Neumann row
                     # assembly, but in geometries where every near-boundary
@@ -1848,7 +2063,13 @@ class HibmMpmSurfaceMarkers:
                     elif (
                         use_pressure_anchor_fallback != 0
                         and node_anchor_available != 0
-                        and closure_region_marker == 1
+                        and (
+                            closure_region_marker == 1
+                            or (
+                                closure_region_marker == 0
+                                and one_sided_region_marker == 1
+                            )
+                        )
                     ):
                         corner_base_i = ti.floor(grid_coordinate.x, ti.i32)
                         corner_base_j = ti.floor(grid_coordinate.y, ti.i32)
@@ -1903,28 +2124,64 @@ class HibmMpmSurfaceMarkers:
                                     cell_center_z_m[node_anchor_k],
                                 ]
                             )
-                            inside_pressure = far_pressure_pa
+                            reference_pressure = ti.cast(far_pressure_pa, ti.f64)
+                            if (
+                                closure_region_marker == 0
+                                and one_sided_region_marker == 1
+                            ):
+                                reference_pressure = ti.cast(
+                                    one_sided_reference_pressure_pa,
+                                    ti.f64,
+                                )
+                            inside_pressure = reference_pressure
                             outside_pressure = anchor_pressure
-                            if (anchor_center - position).dot(normal) < 0.0:
+                            if (
+                                closure_region_marker == 1
+                                and far_pressure_side_normal_sign > 0.5
+                            ):
                                 inside_pressure = anchor_pressure
-                                outside_pressure = far_pressure_pa
+                                outside_pressure = reference_pressure
+                            elif (
+                                closure_region_marker == 1
+                                and far_pressure_side_normal_sign < -0.5
+                            ):
+                                inside_pressure = reference_pressure
+                                outside_pressure = anchor_pressure
+                            elif (anchor_center - position).dot(normal) < 0.0:
+                                inside_pressure = anchor_pressure
+                                outside_pressure = reference_pressure
                             pressure_traction = (
                                 inside_pressure - outside_pressure
                             ) * normal
                             pressure_sample_valid = True
                             gradient = ti.Matrix.zero(ti.f32, 3, 3)
-                            ti.atomic_add(
-                                self.report_stress_far_pressure_closed_marker_count[
-                                    None
-                                ],
-                                1,
-                            )
-                            ti.atomic_add(
-                                self.report_stress_far_pressure_node_anchor_closed_marker_count[
-                                    None
-                                ],
-                                1,
-                            )
+                            viscous_mode = 7
+                            if closure_region_marker == 1:
+                                ti.atomic_add(
+                                    self.report_stress_far_pressure_closed_marker_count[
+                                        None
+                                    ],
+                                    1,
+                                )
+                                ti.atomic_add(
+                                    self.report_stress_far_pressure_node_anchor_closed_marker_count[
+                                        None
+                                    ],
+                                    1,
+                                )
+                            else:
+                                ti.atomic_add(
+                                    self.report_stress_one_sided_pressure_marker_count[
+                                        None
+                                    ],
+                                    1,
+                                )
+                                ti.atomic_add(
+                                    self.report_stress_one_sided_gradient_missing_marker_count[
+                                        None
+                                    ],
+                                    1,
+                                )
                 # S2-A4 diagnostic: the marker closes on pressure while at
                 # least one pressure-found side never completed a viscous
                 # gradient stencil (that side's gradient contribution is
@@ -1946,32 +2203,41 @@ class HibmMpmSurfaceMarkers:
                             1,
                         )
             else:
-                gradient, gradient_valid = self._sample_velocity_gradient_sampling_view(
-                    velocity_field,
-                    obstacle_field,
-                    sampling_obstacle_field,
-                    use_sampling_obstacle,
-                    grid_coordinate.x,
-                    grid_coordinate.y,
-                    grid_coordinate.z,
-                    nx,
-                    ny,
-                    nz,
-                    cell_center_x_m,
-                    cell_center_y_m,
-                    cell_center_z_m,
-                )
+                if ti.static(viscosity_pa_s <= 0.0):
+                    gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                    gradient_valid = 1
+                else:
+                    gradient, gradient_valid = self._sample_velocity_gradient_sampling_view(
+                        velocity_field,
+                        obstacle_field,
+                        sampling_obstacle_field,
+                        use_sampling_obstacle,
+                        grid_coordinate.x,
+                        grid_coordinate.y,
+                        grid_coordinate.z,
+                        nx,
+                        ny,
+                        nz,
+                        cell_center_x_m,
+                        cell_center_y_m,
+                        cell_center_z_m,
+                    )
             stress_sample_valid = pressure_sample_valid
-            if viscosity_pa_s > 0.0 and gradient_valid == 0:
-                stress_sample_valid = False
-                ti.atomic_add(
-                    self.report_stress_viscous_gradient_invalid_marker_count[None],
-                    1,
-                )
+            if ti.static(viscosity_pa_s > 0.0):
+                if gradient_valid == 0:
+                    stress_sample_valid = False
+                    ti.atomic_add(
+                        self.report_stress_viscous_gradient_invalid_marker_count[None],
+                        1,
+                    )
             if stress_sample_valid:
-                viscous_stress = viscosity_pa_s * (gradient + gradient.transpose())
-                traction = pressure_traction + viscous_stress @ normal
+                traction = pressure_traction
+                if ti.static(viscosity_pa_s > 0.0):
+                    viscous_stress = viscosity_pa_s * (gradient + gradient.transpose())
+                    traction = pressure_traction + viscous_stress @ normal
                 self.t_gamma_pa[marker] = traction
+                self._stress_pressure_valid[marker] = 1
+                self._stress_viscous_mode[marker] = viscous_mode
                 self.report_stress_valid_marker_count[None] += 1
                 ti.atomic_max(
                     self.report_stress_max_abs_traction_pa[None],
@@ -1979,7 +2245,1467 @@ class HibmMpmSurfaceMarkers:
                 )
             else:
                 self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                self._stress_pressure_valid[marker] = 0
+                self._stress_viscous_mode[marker] = 0
                 self.report_stress_invalid_marker_count[None] += 1
+
+    @ti.kernel
+    def _sample_pressure_only_marker_tractions_kernel(
+        self,
+        pressure_field: ti.template(),
+        obstacle_field: ti.template(),
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+        cell_width_x_m: ti.template(),
+        cell_width_y_m: ti.template(),
+        cell_width_z_m: ti.template(),
+        marker_count: ti.i32,
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+        two_sided_pressure: ti.i32,
+        one_sided_pressure_region_id: ti.i32,
+        one_sided_reference_pressure_pa: ti.f32,
+    ):
+        self.report_stress_valid_marker_count[None] = 0
+        self.report_stress_invalid_marker_count[None] = 0
+        self.report_stress_max_abs_traction_pa[None] = 0.0
+        self.report_stress_two_sided_pressure_marker_count[None] = 0
+        self.report_stress_viscous_gradient_invalid_marker_count[None] = 0
+        self.report_stress_far_pressure_closed_marker_count[None] = 0
+        self.report_stress_far_pressure_closed_extended_marker_count[None] = 0
+        self.report_stress_far_pressure_anchor_closed_marker_count[None] = 0
+        self.report_stress_far_pressure_node_anchor_closed_marker_count[None] = 0
+        self.report_stress_closure_gradient_missing_marker_count[None] = 0
+        self.report_stress_far_pressure_outside_suppressed_marker_count[None] = 0
+        self.report_stress_two_sided_extended_marker_count[None] = 0
+        self.report_stress_one_sided_pressure_marker_count[None] = 0
+        self.report_stress_one_sided_extended_marker_count[None] = 0
+        self.report_stress_one_sided_gradient_missing_marker_count[None] = 0
+        for marker in range(marker_count):
+            position = self.x_gamma_m[marker]
+            normal = self.n_gamma[marker]
+            grid_coordinate = self._grid_coordinate_from_fields(
+                position,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+                nx,
+                ny,
+                nz,
+            )
+            pressure, pressure_weight = self._sample_pressure_trilinear(
+                pressure_field,
+                obstacle_field,
+                grid_coordinate.x,
+                grid_coordinate.y,
+                grid_coordinate.z,
+                nx,
+                ny,
+                nz,
+            )
+            traction = -pressure * normal
+            pressure_sample_valid = pressure_weight > 1.0e-12
+            if two_sided_pressure != 0:
+                i_near = ti.min(ti.max(ti.floor(grid_coordinate.x, ti.i32), 0), nx - 1)
+                j_near = ti.min(ti.max(ti.floor(grid_coordinate.y, ti.i32), 0), ny - 1)
+                k_near = ti.min(ti.max(ti.floor(grid_coordinate.z, ti.i32), 0), nz - 1)
+                normal_spacing_inv = (
+                    ti.abs(normal.x) / cell_width_x_m[i_near]
+                    + ti.abs(normal.y) / cell_width_y_m[j_near]
+                    + ti.abs(normal.z) / cell_width_z_m[k_near]
+                )
+                probe_distance_m = 1.0 / ti.max(normal_spacing_inv, 1.0e-12)
+                outside_pressure = ti.cast(0.0, ti.f64)
+                inside_pressure = ti.cast(0.0, ti.f64)
+                outside_found = 0
+                inside_found = 0
+                for probe_index in ti.static(range(3)):
+                    multiplier = ti.cast(probe_index + 1, ti.f32)
+                    outside_position = position + multiplier * probe_distance_m * normal
+                    outside_grid = self._grid_coordinate_from_fields(
+                        outside_position,
+                        cell_face_x_m,
+                        cell_face_y_m,
+                        cell_face_z_m,
+                        cell_center_x_m,
+                        cell_center_y_m,
+                        cell_center_z_m,
+                        nx,
+                        ny,
+                        nz,
+                    )
+                    sampled_outside, outside_weight = self._sample_pressure_trilinear(
+                        pressure_field,
+                        obstacle_field,
+                        outside_grid.x,
+                        outside_grid.y,
+                        outside_grid.z,
+                        nx,
+                        ny,
+                        nz,
+                    )
+                    if outside_found == 0 and outside_weight > 1.0e-12:
+                        outside_pressure = sampled_outside
+                        outside_found = 1
+                    inside_position = position - multiplier * probe_distance_m * normal
+                    inside_grid = self._grid_coordinate_from_fields(
+                        inside_position,
+                        cell_face_x_m,
+                        cell_face_y_m,
+                        cell_face_z_m,
+                        cell_center_x_m,
+                        cell_center_y_m,
+                        cell_center_z_m,
+                        nx,
+                        ny,
+                        nz,
+                    )
+                    sampled_inside, inside_weight = self._sample_pressure_trilinear(
+                        pressure_field,
+                        obstacle_field,
+                        inside_grid.x,
+                        inside_grid.y,
+                        inside_grid.z,
+                        nx,
+                        ny,
+                        nz,
+                    )
+                    if inside_found == 0 and inside_weight > 1.0e-12:
+                        inside_pressure = sampled_inside
+                        inside_found = 1
+                if (
+                    one_sided_pressure_region_id != -1
+                    and self.region_id[marker] == one_sided_pressure_region_id
+                    and inside_found != 0
+                ):
+                    traction = (
+                        inside_pressure - one_sided_reference_pressure_pa
+                    ) * normal
+                    pressure_sample_valid = True
+                    ti.atomic_add(
+                        self.report_stress_one_sided_pressure_marker_count[None],
+                        1,
+                    )
+                elif (
+                    one_sided_pressure_region_id != -1
+                    and self.region_id[marker] == one_sided_pressure_region_id
+                    and outside_found != 0
+                ):
+                    traction = (
+                        one_sided_reference_pressure_pa - outside_pressure
+                    ) * normal
+                    pressure_sample_valid = True
+                    ti.atomic_add(
+                        self.report_stress_one_sided_pressure_marker_count[None],
+                        1,
+                    )
+                elif outside_found != 0 and inside_found != 0:
+                    traction = (inside_pressure - outside_pressure) * normal
+                    pressure_sample_valid = True
+                    ti.atomic_add(
+                        self.report_stress_two_sided_pressure_marker_count[None],
+                        1,
+                    )
+                else:
+                    pressure_sample_valid = False
+            if pressure_sample_valid:
+                self.t_gamma_pa[marker] = traction
+                self._stress_pressure_valid[marker] = 1
+                self._stress_viscous_mode[marker] = 0
+                self.report_stress_valid_marker_count[None] += 1
+                ti.atomic_max(
+                    self.report_stress_max_abs_traction_pa[None],
+                    traction.norm(),
+                )
+            else:
+                self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                self._stress_pressure_valid[marker] = 0
+                self._stress_viscous_mode[marker] = 0
+                self.report_stress_invalid_marker_count[None] += 1
+
+    @ti.kernel
+    def _add_viscous_marker_tractions_kernel(
+        self,
+        velocity_field: ti.template(),
+        pressure_field: ti.template(),
+        obstacle_field: ti.template(),
+        sampling_obstacle_field: ti.template(),
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+        cell_width_x_m: ti.template(),
+        cell_width_y_m: ti.template(),
+        cell_width_z_m: ti.template(),
+        marker_count: ti.i32,
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+        viscosity_pa_s: ti.f32,
+        two_sided_pressure: ti.i32,
+        far_pressure_region_id: ti.i32,
+        far_pressure_inside_probe_max_multiplier: ti.f32,
+        two_sided_probe_max_multiplier: ti.f32,
+        one_sided_pressure_region_id: ti.i32,
+        one_sided_probe_max_multiplier: ti.f32,
+        use_sampling_obstacle: ti.i32,
+    ):
+        self.report_stress_max_abs_traction_pa[None] = 0.0
+        self.report_stress_viscous_gradient_invalid_marker_count[None] = 0
+        self.report_stress_closure_gradient_missing_marker_count[None] = 0
+        self.report_stress_one_sided_gradient_missing_marker_count[None] = 0
+        for marker in range(marker_count):
+            if self._stress_pressure_valid[marker] != 0:
+                position = self.x_gamma_m[marker]
+                normal = self.n_gamma[marker]
+                grid_coordinate = self._grid_coordinate_from_fields(
+                    position,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    nx,
+                    ny,
+                    nz,
+                )
+                gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                gradient_valid = 1
+                if two_sided_pressure != 0:
+                    i_near = ti.min(
+                        ti.max(ti.floor(grid_coordinate.x + 0.5, ti.i32), 0),
+                        nx - 1,
+                    )
+                    j_near = ti.min(
+                        ti.max(ti.floor(grid_coordinate.y + 0.5, ti.i32), 0),
+                        ny - 1,
+                    )
+                    k_near = ti.min(
+                        ti.max(ti.floor(grid_coordinate.z + 0.5, ti.i32), 0),
+                        nz - 1,
+                    )
+                    normal_spacing_inv = (
+                        ti.abs(normal.x) / cell_width_x_m[i_near]
+                        + ti.abs(normal.y) / cell_width_y_m[j_near]
+                        + ti.abs(normal.z) / cell_width_z_m[k_near]
+                    )
+                    probe_distance_m = 1.0 / ti.max(normal_spacing_inv, 1.0e-12)
+                    outside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                    inside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                    outside_pressure_found = 0
+                    outside_gradient_found = 0
+                    inside_pressure_found = 0
+                    inside_gradient_found = 0
+                    closure_region_marker = 0
+                    if (
+                        far_pressure_region_id != -1
+                        and self.region_id[marker] == far_pressure_region_id
+                    ):
+                        closure_region_marker = 1
+                    one_sided_region_marker = 0
+                    if (
+                        one_sided_pressure_region_id != -1
+                        and self.region_id[marker] == one_sided_pressure_region_id
+                    ):
+                        one_sided_region_marker = 1
+
+                    for probe_index in range(5):
+                        probe_distance = probe_distance_m * (
+                            1.0 + 0.5 * ti.cast(probe_index, ti.f32)
+                        )
+                        if outside_pressure_found == 0 or outside_gradient_found == 0:
+                            outside_position = position + normal * probe_distance
+                            outside_coordinate = self._grid_coordinate_from_fields(
+                                outside_position,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            _, sample_weight = self._sample_pressure_trilinear_sampling_view(
+                                pressure_field,
+                                obstacle_field,
+                                sampling_obstacle_field,
+                                use_sampling_obstacle,
+                                outside_coordinate.x,
+                                outside_coordinate.y,
+                                outside_coordinate.z,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            sample_gradient, sample_gradient_valid = (
+                                self._sample_velocity_gradient_sampling_view(
+                                    velocity_field,
+                                    obstacle_field,
+                                    sampling_obstacle_field,
+                                    use_sampling_obstacle,
+                                    outside_coordinate.x,
+                                    outside_coordinate.y,
+                                    outside_coordinate.z,
+                                    nx,
+                                    ny,
+                                    nz,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                )
+                            )
+                            if sample_weight > 1.0e-12:
+                                if outside_pressure_found == 0:
+                                    outside_pressure_found = 1
+                                if (
+                                    sample_gradient_valid == 1
+                                    and outside_gradient_found == 0
+                                ):
+                                    outside_gradient = sample_gradient
+                                    outside_gradient_found = 1
+                        if inside_pressure_found == 0 or inside_gradient_found == 0:
+                            inside_position = position - normal * probe_distance
+                            inside_coordinate = self._grid_coordinate_from_fields(
+                                inside_position,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            _, sample_weight = self._sample_pressure_trilinear_sampling_view(
+                                pressure_field,
+                                obstacle_field,
+                                sampling_obstacle_field,
+                                use_sampling_obstacle,
+                                inside_coordinate.x,
+                                inside_coordinate.y,
+                                inside_coordinate.z,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            sample_gradient, sample_gradient_valid = (
+                                self._sample_velocity_gradient_sampling_view(
+                                    velocity_field,
+                                    obstacle_field,
+                                    sampling_obstacle_field,
+                                    use_sampling_obstacle,
+                                    inside_coordinate.x,
+                                    inside_coordinate.y,
+                                    inside_coordinate.z,
+                                    nx,
+                                    ny,
+                                    nz,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                )
+                            )
+                            if sample_weight > 1.0e-12:
+                                if inside_pressure_found == 0:
+                                    inside_pressure_found = 1
+                                if (
+                                    sample_gradient_valid == 1
+                                    and inside_gradient_found == 0
+                                ):
+                                    inside_gradient = sample_gradient
+                                    inside_gradient_found = 1
+
+                    if (
+                        closure_region_marker == 1
+                        and inside_pressure_found == 0
+                        and outside_pressure_found == 0
+                        and far_pressure_inside_probe_max_multiplier > 3.0
+                    ):
+                        for probe_index in range(5):
+                            probe_distance = probe_distance_m * (
+                                3.0
+                                + (far_pressure_inside_probe_max_multiplier - 3.0)
+                                * (ti.cast(probe_index, ti.f32) + 1.0)
+                                / 5.0
+                            )
+                            if inside_pressure_found == 0 or inside_gradient_found == 0:
+                                inside_position = position - normal * probe_distance
+                                inside_coordinate = self._grid_coordinate_from_fields(
+                                    inside_position,
+                                    cell_face_x_m,
+                                    cell_face_y_m,
+                                    cell_face_z_m,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                                _, sample_weight = self._sample_pressure_trilinear_sampling_view(
+                                    pressure_field,
+                                    obstacle_field,
+                                    sampling_obstacle_field,
+                                    use_sampling_obstacle,
+                                    inside_coordinate.x,
+                                    inside_coordinate.y,
+                                    inside_coordinate.z,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                                sample_gradient, sample_gradient_valid = (
+                                    self._sample_velocity_gradient_sampling_view(
+                                        velocity_field,
+                                        obstacle_field,
+                                        sampling_obstacle_field,
+                                        use_sampling_obstacle,
+                                        inside_coordinate.x,
+                                        inside_coordinate.y,
+                                        inside_coordinate.z,
+                                        nx,
+                                        ny,
+                                        nz,
+                                        cell_center_x_m,
+                                        cell_center_y_m,
+                                        cell_center_z_m,
+                                    )
+                                )
+                                if sample_weight > 1.0e-12:
+                                    if inside_pressure_found == 0:
+                                        inside_pressure_found = 1
+                                    if (
+                                        sample_gradient_valid == 1
+                                        and inside_gradient_found == 0
+                                    ):
+                                        inside_gradient = sample_gradient
+                                        inside_gradient_found = 1
+
+                    extended_probe_max_multiplier = two_sided_probe_max_multiplier
+                    if (
+                        one_sided_region_marker == 1
+                        and one_sided_probe_max_multiplier
+                        > extended_probe_max_multiplier
+                    ):
+                        extended_probe_max_multiplier = one_sided_probe_max_multiplier
+                    if (
+                        closure_region_marker == 0
+                        and inside_pressure_found == 0
+                        and outside_pressure_found == 0
+                        and extended_probe_max_multiplier > 3.0
+                    ):
+                        outside_crossed_solid = 0
+                        inside_crossed_solid = 0
+                        for extension_index in range(10):
+                            rung_distance = probe_distance_m * (
+                                3.0
+                                + (extended_probe_max_multiplier - 3.0)
+                                * (ti.cast(extension_index // 2, ti.f32) + 1.0)
+                                / 5.0
+                            )
+                            side_is_inside = extension_index % 2
+                            side_sign = 1.0
+                            side_crossed = outside_crossed_solid
+                            side_pressure_found = outside_pressure_found
+                            side_gradient_found = outside_gradient_found
+                            if side_is_inside == 1:
+                                side_sign = -1.0
+                                side_crossed = inside_crossed_solid
+                                side_pressure_found = inside_pressure_found
+                                side_gradient_found = inside_gradient_found
+                            if side_crossed == 0 and (
+                                side_pressure_found == 0 or side_gradient_found == 0
+                            ):
+                                extension_position = position + normal * (
+                                    side_sign * rung_distance
+                                )
+                                extension_coordinate = self._grid_coordinate_from_fields(
+                                    extension_position,
+                                    cell_face_x_m,
+                                    cell_face_y_m,
+                                    cell_face_z_m,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                                near_extension_i = ti.min(
+                                    ti.max(
+                                        ti.floor(extension_coordinate.x + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    nx - 1,
+                                )
+                                near_extension_j = ti.min(
+                                    ti.max(
+                                        ti.floor(extension_coordinate.y + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    ny - 1,
+                                )
+                                near_extension_k = ti.min(
+                                    ti.max(
+                                        ti.floor(extension_coordinate.z + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    nz - 1,
+                                )
+                                if (
+                                    obstacle_field[
+                                        near_extension_i,
+                                        near_extension_j,
+                                        near_extension_k,
+                                    ]
+                                    != 0
+                                ):
+                                    if side_is_inside == 1:
+                                        inside_crossed_solid = 1
+                                    else:
+                                        outside_crossed_solid = 1
+                                else:
+                                    _, sample_weight = self._sample_pressure_trilinear_sampling_view(
+                                        pressure_field,
+                                        obstacle_field,
+                                        sampling_obstacle_field,
+                                        use_sampling_obstacle,
+                                        extension_coordinate.x,
+                                        extension_coordinate.y,
+                                        extension_coordinate.z,
+                                        nx,
+                                        ny,
+                                        nz,
+                                    )
+                                    sample_gradient, sample_gradient_valid = (
+                                        self._sample_velocity_gradient_sampling_view(
+                                            velocity_field,
+                                            obstacle_field,
+                                            sampling_obstacle_field,
+                                            use_sampling_obstacle,
+                                            extension_coordinate.x,
+                                            extension_coordinate.y,
+                                            extension_coordinate.z,
+                                            nx,
+                                            ny,
+                                            nz,
+                                            cell_center_x_m,
+                                            cell_center_y_m,
+                                            cell_center_z_m,
+                                        )
+                                    )
+                                    if sample_weight > 1.0e-12:
+                                        if side_is_inside == 1:
+                                            if inside_pressure_found == 0:
+                                                inside_pressure_found = 1
+                                            if (
+                                                sample_gradient_valid == 1
+                                                and inside_gradient_found == 0
+                                            ):
+                                                inside_gradient = sample_gradient
+                                                inside_gradient_found = 1
+                                        else:
+                                            if outside_pressure_found == 0:
+                                                outside_pressure_found = 1
+                                            if (
+                                                sample_gradient_valid == 1
+                                                and outside_gradient_found == 0
+                                            ):
+                                                outside_gradient = sample_gradient
+                                                outside_gradient_found = 1
+
+                    if (
+                        closure_region_marker == 0
+                        and one_sided_region_marker == 1
+                        and inside_pressure_found == 1
+                    ):
+                        gradient = -inside_gradient
+                        if inside_gradient_found == 0:
+                            ti.atomic_add(
+                                self.report_stress_one_sided_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                    elif (
+                        closure_region_marker == 0
+                        and one_sided_region_marker == 1
+                        and outside_pressure_found == 1
+                    ):
+                        gradient = outside_gradient
+                        if outside_gradient_found == 0:
+                            ti.atomic_add(
+                                self.report_stress_one_sided_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                    elif (
+                        closure_region_marker == 0
+                        and outside_pressure_found == 1
+                        and inside_pressure_found == 1
+                    ):
+                        gradient = outside_gradient - inside_gradient
+                    elif closure_region_marker == 1 and inside_pressure_found == 1:
+                        gradient = -inside_gradient
+                        if (
+                            (
+                                inside_pressure_found == 1
+                                and inside_gradient_found == 0
+                            )
+                            or (
+                                outside_pressure_found == 1
+                                and outside_gradient_found == 0
+                            )
+                        ):
+                            ti.atomic_add(
+                                self.report_stress_closure_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                    elif closure_region_marker == 1 and outside_pressure_found == 1:
+                        gradient = outside_gradient
+                        if (
+                            (
+                                inside_pressure_found == 1
+                                and inside_gradient_found == 0
+                            )
+                            or (
+                                outside_pressure_found == 1
+                                and outside_gradient_found == 0
+                            )
+                        ):
+                            ti.atomic_add(
+                                self.report_stress_closure_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                    else:
+                        gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                else:
+                    gradient, gradient_valid = self._sample_velocity_gradient_sampling_view(
+                        velocity_field,
+                        obstacle_field,
+                        sampling_obstacle_field,
+                        use_sampling_obstacle,
+                        grid_coordinate.x,
+                        grid_coordinate.y,
+                        grid_coordinate.z,
+                        nx,
+                        ny,
+                        nz,
+                        cell_center_x_m,
+                        cell_center_y_m,
+                        cell_center_z_m,
+                    )
+                    if gradient_valid == 0:
+                        self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                        self._stress_pressure_valid[marker] = 0
+                        ti.atomic_add(
+                            self.report_stress_valid_marker_count[None],
+                            -1,
+                        )
+                        ti.atomic_add(
+                            self.report_stress_invalid_marker_count[None],
+                            1,
+                        )
+                        ti.atomic_add(
+                            self.report_stress_viscous_gradient_invalid_marker_count[
+                                None
+                            ],
+                            1,
+                        )
+
+                if self._stress_pressure_valid[marker] != 0:
+                    viscous_stress = viscosity_pa_s * (
+                        gradient + gradient.transpose()
+                    )
+                    traction = self.t_gamma_pa[marker] + viscous_stress @ normal
+                    self.t_gamma_pa[marker] = traction
+                    ti.atomic_max(
+                        self.report_stress_max_abs_traction_pa[None],
+                        traction.norm(),
+                    )
+
+    @ti.kernel
+    def _add_split_viscous_marker_tractions_kernel(
+        self,
+        velocity_field: ti.template(),
+        obstacle_field: ti.template(),
+        sampling_obstacle_field: ti.template(),
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+        cell_width_x_m: ti.template(),
+        cell_width_y_m: ti.template(),
+        cell_width_z_m: ti.template(),
+        marker_count: ti.i32,
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+        viscosity_pa_s: ti.f32,
+        far_pressure_inside_probe_max_multiplier: ti.f32,
+        two_sided_probe_max_multiplier: ti.f32,
+        one_sided_probe_max_multiplier: ti.f32,
+        use_sampling_obstacle: ti.i32,
+    ):
+        self.report_stress_max_abs_traction_pa[None] = 0.0
+        self.report_stress_viscous_gradient_invalid_marker_count[None] = 0
+        self.report_stress_closure_gradient_missing_marker_count[None] = 0
+        self.report_stress_one_sided_gradient_missing_marker_count[None] = 0
+        for marker in range(marker_count):
+            if self._stress_pressure_valid[marker] != 0:
+                position = self.x_gamma_m[marker]
+                normal = self.n_gamma[marker]
+                grid_coordinate = self._grid_coordinate_from_fields(
+                    position,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    nx,
+                    ny,
+                    nz,
+                )
+                mode = self._stress_viscous_mode[marker]
+                gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                gradient_valid = 1
+                if mode == 1:
+                    gradient, gradient_valid = self._sample_velocity_gradient_sampling_view(
+                        velocity_field,
+                        obstacle_field,
+                        sampling_obstacle_field,
+                        use_sampling_obstacle,
+                        grid_coordinate.x,
+                        grid_coordinate.y,
+                        grid_coordinate.z,
+                        nx,
+                        ny,
+                        nz,
+                        cell_center_x_m,
+                        cell_center_y_m,
+                        cell_center_z_m,
+                    )
+                    if gradient_valid == 0:
+                        self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                        self._stress_pressure_valid[marker] = 0
+                        ti.atomic_add(self.report_stress_valid_marker_count[None], -1)
+                        ti.atomic_add(self.report_stress_invalid_marker_count[None], 1)
+                        ti.atomic_add(
+                            self.report_stress_viscous_gradient_invalid_marker_count[
+                                None
+                            ],
+                            1,
+                        )
+                elif mode >= 2 and mode <= 6:
+                    i_near = ti.min(
+                        ti.max(ti.floor(grid_coordinate.x + 0.5, ti.i32), 0),
+                        nx - 1,
+                    )
+                    j_near = ti.min(
+                        ti.max(ti.floor(grid_coordinate.y + 0.5, ti.i32), 0),
+                        ny - 1,
+                    )
+                    k_near = ti.min(
+                        ti.max(ti.floor(grid_coordinate.z + 0.5, ti.i32), 0),
+                        nz - 1,
+                    )
+                    normal_spacing_inv = (
+                        ti.abs(normal.x) / cell_width_x_m[i_near]
+                        + ti.abs(normal.y) / cell_width_y_m[j_near]
+                        + ti.abs(normal.z) / cell_width_z_m[k_near]
+                    )
+                    probe_distance_m = 1.0 / ti.max(normal_spacing_inv, 1.0e-12)
+                    outside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                    inside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                    outside_gradient_found = 0
+                    inside_gradient_found = 0
+                    need_outside = mode == 2 or mode == 4 or mode == 6
+                    need_inside = mode == 2 or mode == 3 or mode == 5
+
+                    for probe_index in range(5):
+                        probe_distance = probe_distance_m * (
+                            1.0 + 0.5 * ti.cast(probe_index, ti.f32)
+                        )
+                        if need_outside and outside_gradient_found == 0:
+                            outside_coordinate = self._grid_coordinate_from_fields(
+                                position + normal * probe_distance,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            sample_gradient, sample_gradient_valid = (
+                                self._sample_velocity_gradient_sampling_view(
+                                    velocity_field,
+                                    obstacle_field,
+                                    sampling_obstacle_field,
+                                    use_sampling_obstacle,
+                                    outside_coordinate.x,
+                                    outside_coordinate.y,
+                                    outside_coordinate.z,
+                                    nx,
+                                    ny,
+                                    nz,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                )
+                            )
+                            if sample_gradient_valid == 1:
+                                outside_gradient = sample_gradient
+                                outside_gradient_found = 1
+                        if need_inside and inside_gradient_found == 0:
+                            inside_coordinate = self._grid_coordinate_from_fields(
+                                position - normal * probe_distance,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            sample_gradient, sample_gradient_valid = (
+                                self._sample_velocity_gradient_sampling_view(
+                                    velocity_field,
+                                    obstacle_field,
+                                    sampling_obstacle_field,
+                                    use_sampling_obstacle,
+                                    inside_coordinate.x,
+                                    inside_coordinate.y,
+                                    inside_coordinate.z,
+                                    nx,
+                                    ny,
+                                    nz,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                )
+                            )
+                            if sample_gradient_valid == 1:
+                                inside_gradient = sample_gradient
+                                inside_gradient_found = 1
+
+                    if (
+                        mode == 3
+                        and inside_gradient_found == 0
+                        and far_pressure_inside_probe_max_multiplier > 3.0
+                    ):
+                        for probe_index in range(5):
+                            if inside_gradient_found == 0:
+                                probe_distance = probe_distance_m * (
+                                    3.0
+                                    + (
+                                        far_pressure_inside_probe_max_multiplier
+                                        - 3.0
+                                    )
+                                    * (ti.cast(probe_index, ti.f32) + 1.0)
+                                    / 5.0
+                                )
+                                inside_coordinate = self._grid_coordinate_from_fields(
+                                    position - normal * probe_distance,
+                                    cell_face_x_m,
+                                    cell_face_y_m,
+                                    cell_face_z_m,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                                sample_gradient, sample_gradient_valid = (
+                                    self._sample_velocity_gradient_sampling_view(
+                                        velocity_field,
+                                        obstacle_field,
+                                        sampling_obstacle_field,
+                                        use_sampling_obstacle,
+                                        inside_coordinate.x,
+                                        inside_coordinate.y,
+                                        inside_coordinate.z,
+                                        nx,
+                                        ny,
+                                        nz,
+                                        cell_center_x_m,
+                                        cell_center_y_m,
+                                        cell_center_z_m,
+                                    )
+                                )
+                                if sample_gradient_valid == 1:
+                                    inside_gradient = sample_gradient
+                                    inside_gradient_found = 1
+
+                    extended_probe_max_multiplier = two_sided_probe_max_multiplier
+                    if (
+                        (mode == 5 or mode == 6)
+                        and one_sided_probe_max_multiplier
+                        > extended_probe_max_multiplier
+                    ):
+                        extended_probe_max_multiplier = one_sided_probe_max_multiplier
+                    if (
+                        (mode == 2 or mode == 5 or mode == 6)
+                        and extended_probe_max_multiplier > 3.0
+                    ):
+                        outside_crossed_solid = 0
+                        inside_crossed_solid = 0
+                        for extension_index in range(10):
+                            rung_distance = probe_distance_m * (
+                                3.0
+                                + (extended_probe_max_multiplier - 3.0)
+                                * (ti.cast(extension_index // 2, ti.f32) + 1.0)
+                                / 5.0
+                            )
+                            side_is_inside = extension_index % 2
+                            side_sign = 1.0
+                            side_crossed = outside_crossed_solid
+                            side_needed = need_outside
+                            side_found = outside_gradient_found
+                            if side_is_inside == 1:
+                                side_sign = -1.0
+                                side_crossed = inside_crossed_solid
+                                side_needed = need_inside
+                                side_found = inside_gradient_found
+                            if side_needed and side_found == 0 and side_crossed == 0:
+                                extension_position = position + normal * (
+                                    side_sign * rung_distance
+                                )
+                                extension_coordinate = self._grid_coordinate_from_fields(
+                                    extension_position,
+                                    cell_face_x_m,
+                                    cell_face_y_m,
+                                    cell_face_z_m,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                                near_i = ti.min(
+                                    ti.max(
+                                        ti.floor(extension_coordinate.x + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    nx - 1,
+                                )
+                                near_j = ti.min(
+                                    ti.max(
+                                        ti.floor(extension_coordinate.y + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    ny - 1,
+                                )
+                                near_k = ti.min(
+                                    ti.max(
+                                        ti.floor(extension_coordinate.z + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    nz - 1,
+                                )
+                                if obstacle_field[near_i, near_j, near_k] != 0:
+                                    if side_is_inside == 1:
+                                        inside_crossed_solid = 1
+                                    else:
+                                        outside_crossed_solid = 1
+                                else:
+                                    sample_gradient, sample_gradient_valid = (
+                                        self._sample_velocity_gradient_sampling_view(
+                                            velocity_field,
+                                            obstacle_field,
+                                            sampling_obstacle_field,
+                                            use_sampling_obstacle,
+                                            extension_coordinate.x,
+                                            extension_coordinate.y,
+                                            extension_coordinate.z,
+                                            nx,
+                                            ny,
+                                            nz,
+                                            cell_center_x_m,
+                                            cell_center_y_m,
+                                            cell_center_z_m,
+                                        )
+                                    )
+                                    if sample_gradient_valid == 1:
+                                        if side_is_inside == 1:
+                                            inside_gradient = sample_gradient
+                                            inside_gradient_found = 1
+                                        else:
+                                            outside_gradient = sample_gradient
+                                            outside_gradient_found = 1
+
+                    if mode == 2:
+                        gradient = outside_gradient - inside_gradient
+                    elif mode == 3:
+                        gradient = -inside_gradient
+                        if inside_gradient_found == 0:
+                            ti.atomic_add(
+                                self.report_stress_closure_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                    elif mode == 4:
+                        gradient = outside_gradient
+                        if outside_gradient_found == 0:
+                            ti.atomic_add(
+                                self.report_stress_closure_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                    elif mode == 5:
+                        gradient = -inside_gradient
+                        if inside_gradient_found == 0:
+                            ti.atomic_add(
+                                self.report_stress_one_sided_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                    elif mode == 6:
+                        gradient = outside_gradient
+                        if outside_gradient_found == 0:
+                            ti.atomic_add(
+                                self.report_stress_one_sided_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+
+                if self._stress_pressure_valid[marker] != 0:
+                    viscous_stress = viscosity_pa_s * (
+                        gradient + gradient.transpose()
+                    )
+                    traction = self.t_gamma_pa[marker] + viscous_stress @ normal
+                    self.t_gamma_pa[marker] = traction
+                    ti.atomic_max(
+                        self.report_stress_max_abs_traction_pa[None],
+                        traction.norm(),
+                    )
+
+    @ti.kernel
+    def _reset_split_viscous_marker_traction_reports_kernel(self):
+        self.report_stress_max_abs_traction_pa[None] = 0.0
+        self.report_stress_viscous_gradient_invalid_marker_count[None] = 0
+        self.report_stress_closure_gradient_missing_marker_count[None] = 0
+        self.report_stress_one_sided_gradient_missing_marker_count[None] = 0
+
+    @ti.kernel
+    def _add_split_viscous_mode_marker_tractions_kernel(
+        self,
+        velocity_field: ti.template(),
+        obstacle_field: ti.template(),
+        sampling_obstacle_field: ti.template(),
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+        cell_width_x_m: ti.template(),
+        cell_width_y_m: ti.template(),
+        cell_width_z_m: ti.template(),
+        marker_count: ti.i32,
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+        viscosity_pa_s: ti.f32,
+        far_pressure_inside_probe_max_multiplier: ti.f32,
+        two_sided_probe_max_multiplier: ti.f32,
+        one_sided_probe_max_multiplier: ti.f32,
+        use_sampling_obstacle: ti.i32,
+        mode_filter: ti.template(),
+    ):
+        for marker in range(marker_count):
+            if (
+                self._stress_pressure_valid[marker] != 0
+                and self._stress_viscous_mode[marker] == mode_filter
+            ):
+                position = self.x_gamma_m[marker]
+                normal = self.n_gamma[marker]
+                grid_coordinate = self._grid_coordinate_from_fields(
+                    position,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    nx,
+                    ny,
+                    nz,
+                )
+                gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                gradient_valid = 1
+                if ti.static(mode_filter == 1):
+                    gradient, gradient_valid = self._sample_velocity_gradient_sampling_view(
+                        velocity_field,
+                        obstacle_field,
+                        sampling_obstacle_field,
+                        use_sampling_obstacle,
+                        grid_coordinate.x,
+                        grid_coordinate.y,
+                        grid_coordinate.z,
+                        nx,
+                        ny,
+                        nz,
+                        cell_center_x_m,
+                        cell_center_y_m,
+                        cell_center_z_m,
+                    )
+                    if gradient_valid == 0:
+                        self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                        self._stress_pressure_valid[marker] = 0
+                        ti.atomic_add(self.report_stress_valid_marker_count[None], -1)
+                        ti.atomic_add(self.report_stress_invalid_marker_count[None], 1)
+                        ti.atomic_add(
+                            self.report_stress_viscous_gradient_invalid_marker_count[
+                                None
+                            ],
+                            1,
+                        )
+                elif ti.static(mode_filter >= 2 and mode_filter <= 6):
+                    i_near = ti.min(
+                        ti.max(ti.floor(grid_coordinate.x + 0.5, ti.i32), 0),
+                        nx - 1,
+                    )
+                    j_near = ti.min(
+                        ti.max(ti.floor(grid_coordinate.y + 0.5, ti.i32), 0),
+                        ny - 1,
+                    )
+                    k_near = ti.min(
+                        ti.max(ti.floor(grid_coordinate.z + 0.5, ti.i32), 0),
+                        nz - 1,
+                    )
+                    normal_spacing_inv = (
+                        ti.abs(normal.x) / cell_width_x_m[i_near]
+                        + ti.abs(normal.y) / cell_width_y_m[j_near]
+                        + ti.abs(normal.z) / cell_width_z_m[k_near]
+                    )
+                    probe_distance_m = 1.0 / ti.max(normal_spacing_inv, 1.0e-12)
+                    outside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                    inside_gradient = ti.Matrix.zero(ti.f32, 3, 3)
+                    outside_gradient_found = 0
+                    inside_gradient_found = 0
+                    for probe_index in range(5):
+                        probe_distance = probe_distance_m * (
+                            1.0 + 0.5 * ti.cast(probe_index, ti.f32)
+                        )
+                        if ti.static(
+                            mode_filter == 2
+                            or mode_filter == 4
+                            or mode_filter == 6
+                        ):
+                            if outside_gradient_found == 0:
+                                outside_coordinate = self._grid_coordinate_from_fields(
+                                    position + normal * probe_distance,
+                                    cell_face_x_m,
+                                    cell_face_y_m,
+                                    cell_face_z_m,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                                sample_gradient, sample_gradient_valid = (
+                                    self._sample_velocity_gradient_sampling_view(
+                                        velocity_field,
+                                        obstacle_field,
+                                        sampling_obstacle_field,
+                                        use_sampling_obstacle,
+                                        outside_coordinate.x,
+                                        outside_coordinate.y,
+                                        outside_coordinate.z,
+                                        nx,
+                                        ny,
+                                        nz,
+                                        cell_center_x_m,
+                                        cell_center_y_m,
+                                        cell_center_z_m,
+                                    )
+                                )
+                                if sample_gradient_valid == 1:
+                                    outside_gradient = sample_gradient
+                                    outside_gradient_found = 1
+                        if ti.static(
+                            mode_filter == 2
+                            or mode_filter == 3
+                            or mode_filter == 5
+                        ):
+                            if inside_gradient_found == 0:
+                                inside_coordinate = self._grid_coordinate_from_fields(
+                                    position - normal * probe_distance,
+                                    cell_face_x_m,
+                                    cell_face_y_m,
+                                    cell_face_z_m,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                                sample_gradient, sample_gradient_valid = (
+                                    self._sample_velocity_gradient_sampling_view(
+                                        velocity_field,
+                                        obstacle_field,
+                                        sampling_obstacle_field,
+                                        use_sampling_obstacle,
+                                        inside_coordinate.x,
+                                        inside_coordinate.y,
+                                        inside_coordinate.z,
+                                        nx,
+                                        ny,
+                                        nz,
+                                        cell_center_x_m,
+                                        cell_center_y_m,
+                                        cell_center_z_m,
+                                    )
+                                )
+                                if sample_gradient_valid == 1:
+                                    inside_gradient = sample_gradient
+                                    inside_gradient_found = 1
+
+                    if ti.static(mode_filter == 3):
+                        if (
+                            inside_gradient_found == 0
+                            and far_pressure_inside_probe_max_multiplier > 3.0
+                        ):
+                            for probe_index in range(5):
+                                if inside_gradient_found == 0:
+                                    probe_distance = probe_distance_m * (
+                                        3.0
+                                        + (
+                                            far_pressure_inside_probe_max_multiplier
+                                            - 3.0
+                                        )
+                                        * (ti.cast(probe_index, ti.f32) + 1.0)
+                                        / 5.0
+                                    )
+                                    inside_coordinate = self._grid_coordinate_from_fields(
+                                        position - normal * probe_distance,
+                                        cell_face_x_m,
+                                        cell_face_y_m,
+                                        cell_face_z_m,
+                                        cell_center_x_m,
+                                        cell_center_y_m,
+                                        cell_center_z_m,
+                                        nx,
+                                        ny,
+                                        nz,
+                                    )
+                                    sample_gradient, sample_gradient_valid = (
+                                        self._sample_velocity_gradient_sampling_view(
+                                            velocity_field,
+                                            obstacle_field,
+                                            sampling_obstacle_field,
+                                            use_sampling_obstacle,
+                                            inside_coordinate.x,
+                                            inside_coordinate.y,
+                                            inside_coordinate.z,
+                                            nx,
+                                            ny,
+                                            nz,
+                                            cell_center_x_m,
+                                            cell_center_y_m,
+                                            cell_center_z_m,
+                                        )
+                                    )
+                                    if sample_gradient_valid == 1:
+                                        inside_gradient = sample_gradient
+                                        inside_gradient_found = 1
+
+                    if ti.static(
+                        mode_filter == 2
+                        or mode_filter == 5
+                        or mode_filter == 6
+                    ):
+                        extended_probe_max_multiplier = two_sided_probe_max_multiplier
+                        if (
+                            ti.static(mode_filter == 5 or mode_filter == 6)
+                            and one_sided_probe_max_multiplier
+                            > extended_probe_max_multiplier
+                        ):
+                            extended_probe_max_multiplier = (
+                                one_sided_probe_max_multiplier
+                            )
+                        if extended_probe_max_multiplier > 3.0:
+                            outside_crossed_solid = 0
+                            inside_crossed_solid = 0
+                            for extension_index in range(10):
+                                rung_distance = probe_distance_m * (
+                                    3.0
+                                    + (extended_probe_max_multiplier - 3.0)
+                                    * (ti.cast(extension_index // 2, ti.f32) + 1.0)
+                                    / 5.0
+                                )
+                                side_is_inside = extension_index % 2
+                                side_sign = 1.0
+                                side_crossed = outside_crossed_solid
+                                side_found = outside_gradient_found
+                                if side_is_inside == 1:
+                                    side_sign = -1.0
+                                    side_crossed = inside_crossed_solid
+                                    side_found = inside_gradient_found
+                                if side_crossed == 0 and side_found == 0:
+                                    extension_position = position + normal * (
+                                        side_sign * rung_distance
+                                    )
+                                    extension_coordinate = (
+                                        self._grid_coordinate_from_fields(
+                                            extension_position,
+                                            cell_face_x_m,
+                                            cell_face_y_m,
+                                            cell_face_z_m,
+                                            cell_center_x_m,
+                                            cell_center_y_m,
+                                            cell_center_z_m,
+                                            nx,
+                                            ny,
+                                            nz,
+                                        )
+                                    )
+                                    near_i = ti.min(
+                                        ti.max(
+                                            ti.floor(
+                                                extension_coordinate.x + 0.5,
+                                                ti.i32,
+                                            ),
+                                            0,
+                                        ),
+                                        nx - 1,
+                                    )
+                                    near_j = ti.min(
+                                        ti.max(
+                                            ti.floor(
+                                                extension_coordinate.y + 0.5,
+                                                ti.i32,
+                                            ),
+                                            0,
+                                        ),
+                                        ny - 1,
+                                    )
+                                    near_k = ti.min(
+                                        ti.max(
+                                            ti.floor(
+                                                extension_coordinate.z + 0.5,
+                                                ti.i32,
+                                            ),
+                                            0,
+                                        ),
+                                        nz - 1,
+                                    )
+                                    if obstacle_field[near_i, near_j, near_k] != 0:
+                                        if side_is_inside == 1:
+                                            inside_crossed_solid = 1
+                                        else:
+                                            outside_crossed_solid = 1
+                                    else:
+                                        sample_gradient, sample_gradient_valid = (
+                                            self._sample_velocity_gradient_sampling_view(
+                                                velocity_field,
+                                                obstacle_field,
+                                                sampling_obstacle_field,
+                                                use_sampling_obstacle,
+                                                extension_coordinate.x,
+                                                extension_coordinate.y,
+                                                extension_coordinate.z,
+                                                nx,
+                                                ny,
+                                                nz,
+                                                cell_center_x_m,
+                                                cell_center_y_m,
+                                                cell_center_z_m,
+                                            )
+                                        )
+                                        if sample_gradient_valid == 1:
+                                            if side_is_inside == 1:
+                                                inside_gradient = sample_gradient
+                                                inside_gradient_found = 1
+                                            else:
+                                                outside_gradient = sample_gradient
+                                                outside_gradient_found = 1
+
+                    if ti.static(mode_filter == 2):
+                        gradient = outside_gradient - inside_gradient
+                    elif ti.static(mode_filter == 3):
+                        gradient = -inside_gradient
+                        if inside_gradient_found == 0:
+                            ti.atomic_add(
+                                self.report_stress_closure_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                    elif ti.static(mode_filter == 4):
+                        gradient = outside_gradient
+                        if outside_gradient_found == 0:
+                            ti.atomic_add(
+                                self.report_stress_closure_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                    elif ti.static(mode_filter == 5):
+                        gradient = -inside_gradient
+                        if inside_gradient_found == 0:
+                            ti.atomic_add(
+                                self.report_stress_one_sided_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+                    elif ti.static(mode_filter == 6):
+                        gradient = outside_gradient
+                        if outside_gradient_found == 0:
+                            ti.atomic_add(
+                                self.report_stress_one_sided_gradient_missing_marker_count[
+                                    None
+                                ],
+                                1,
+                            )
+
+                if self._stress_pressure_valid[marker] != 0:
+                    viscous_stress = viscosity_pa_s * (
+                        gradient + gradient.transpose()
+                    )
+                    traction = self.t_gamma_pa[marker] + viscous_stress @ normal
+                    self.t_gamma_pa[marker] = traction
+                    ti.atomic_max(
+                        self.report_stress_max_abs_traction_pa[None],
+                        traction.norm(),
+                    )
 
     def sample_fluid_stress_to_marker_tractions(
         self,
@@ -2001,8 +3727,12 @@ class HibmMpmSurfaceMarkers:
         two_sided_pressure: bool = False,
         far_pressure_region_id: int = -1,
         far_pressure_pa: float = 0.0,
+        far_pressure_side_normal_sign: float = 0.0,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
         two_sided_probe_max_multiplier: float = 3.0,
+        one_sided_pressure_region_id: int = -1,
+        one_sided_reference_pressure_pa: float = 0.0,
+        one_sided_probe_max_multiplier: float = 3.0,
         use_pressure_anchor_fallback: bool = False,
         node_anchor_cell=None,
         sampling_obstacle_field=None,
@@ -2010,6 +3740,8 @@ class HibmMpmSurfaceMarkers:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
             raise ValueError("grid_nodes must contain three values >= 2")
+        node_anchor_was_none = node_anchor_cell is None
+        sampling_obstacle_was_none = sampling_obstacle_field is None
         # S2-A7: the node-level anchor field is optional. Callers without
         # one (or callers that never arm use_pressure_anchor_fallback)
         # get the never-indexed 1x1x1 stand-in plus a hard availability
@@ -2047,6 +3779,11 @@ class HibmMpmSurfaceMarkers:
         far_pressure = float(far_pressure_pa)
         if not math.isfinite(far_pressure):
             raise ValueError("far_pressure_pa must be a finite number")
+        far_pressure_side = float(far_pressure_side_normal_sign)
+        if far_pressure_side not in (-1.0, 0.0, 1.0):
+            raise ValueError(
+                "far_pressure_side_normal_sign must be -1.0, 0.0, or 1.0"
+            )
         far_inside_probe_max = float(far_pressure_inside_probe_max_multiplier)
         if not math.isfinite(far_inside_probe_max) or far_inside_probe_max < 3.0:
             raise ValueError(
@@ -2057,36 +3794,263 @@ class HibmMpmSurfaceMarkers:
             raise ValueError(
                 "two_sided_probe_max_multiplier must be finite and >= 3.0"
             )
-        self._sample_fluid_stress_to_marker_tractions_kernel(
-            velocity_field,
-            pressure_field,
-            obstacle_field,
-            sampling_obstacle,
-            cell_face_x_m,
-            cell_face_y_m,
-            cell_face_z_m,
-            cell_center_x_m,
-            cell_center_y_m,
-            cell_center_z_m,
-            cell_width_x_m,
-            cell_width_y_m,
-            cell_width_z_m,
-            self.marker_pressure_anchor_cell,
-            node_anchor_field,
-            int(self.marker_count),
-            int(nodes[0]),
-            int(nodes[1]),
-            int(nodes[2]),
-            viscosity,
-            1 if bool(two_sided_pressure) else 0,
-            far_region_id,
-            far_pressure,
-            far_inside_probe_max,
-            two_sided_probe_max,
-            1 if bool(use_pressure_anchor_fallback) else 0,
-            node_anchor_available,
-            use_sampling_obstacle,
+        one_sided_region_id = int(one_sided_pressure_region_id)
+        one_sided_reference_pressure = float(one_sided_reference_pressure_pa)
+        if not math.isfinite(one_sided_reference_pressure):
+            raise ValueError("one_sided_reference_pressure_pa must be a finite number")
+        one_sided_probe_max = float(one_sided_probe_max_multiplier)
+        if not math.isfinite(one_sided_probe_max) or one_sided_probe_max < 3.0:
+            raise ValueError(
+                "one_sided_probe_max_multiplier must be finite and >= 3.0"
+            )
+        pressure_only_fast_path = (
+            viscosity == 0.0
+            and
+            far_region_id < 0
+            and not bool(use_pressure_anchor_fallback)
+            and node_anchor_was_none
+            and sampling_obstacle_was_none
         )
+        split_viscous_path = viscosity > 0.0 and bool(two_sided_pressure)
+        if pressure_only_fast_path:
+            self._sample_pressure_only_marker_tractions_kernel(
+                pressure_field,
+                obstacle_field,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+                cell_width_x_m,
+                cell_width_y_m,
+                cell_width_z_m,
+                int(self.marker_count),
+                int(nodes[0]),
+                int(nodes[1]),
+                int(nodes[2]),
+                1 if bool(two_sided_pressure) else 0,
+                one_sided_region_id,
+                one_sided_reference_pressure,
+            )
+        elif split_viscous_path:
+            self._sample_fluid_stress_to_marker_tractions_kernel(
+                velocity_field,
+                pressure_field,
+                obstacle_field,
+                sampling_obstacle,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+                cell_width_x_m,
+                cell_width_y_m,
+                cell_width_z_m,
+                self.marker_pressure_anchor_cell,
+                node_anchor_field,
+                int(self.marker_count),
+                int(nodes[0]),
+                int(nodes[1]),
+                int(nodes[2]),
+                0.0,
+                1,
+                far_region_id,
+                far_pressure,
+                far_pressure_side,
+                far_inside_probe_max,
+                two_sided_probe_max,
+                one_sided_region_id,
+                one_sided_reference_pressure,
+                one_sided_probe_max,
+                1 if bool(use_pressure_anchor_fallback) else 0,
+                node_anchor_available,
+                use_sampling_obstacle,
+            )
+            self._reset_split_viscous_marker_traction_reports_kernel()
+            self._add_split_viscous_mode_marker_tractions_kernel(
+                velocity_field,
+                obstacle_field,
+                sampling_obstacle,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+                cell_width_x_m,
+                cell_width_y_m,
+                cell_width_z_m,
+                int(self.marker_count),
+                int(nodes[0]),
+                int(nodes[1]),
+                int(nodes[2]),
+                viscosity,
+                far_inside_probe_max,
+                two_sided_probe_max,
+                one_sided_probe_max,
+                use_sampling_obstacle,
+                2,
+            )
+            if far_region_id != -1:
+                self._add_split_viscous_mode_marker_tractions_kernel(
+                    velocity_field,
+                    obstacle_field,
+                    sampling_obstacle,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    cell_width_x_m,
+                    cell_width_y_m,
+                    cell_width_z_m,
+                    int(self.marker_count),
+                    int(nodes[0]),
+                    int(nodes[1]),
+                    int(nodes[2]),
+                    viscosity,
+                    far_inside_probe_max,
+                    two_sided_probe_max,
+                    one_sided_probe_max,
+                    use_sampling_obstacle,
+                    3,
+                )
+                self._add_split_viscous_mode_marker_tractions_kernel(
+                    velocity_field,
+                    obstacle_field,
+                    sampling_obstacle,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    cell_width_x_m,
+                    cell_width_y_m,
+                    cell_width_z_m,
+                    int(self.marker_count),
+                    int(nodes[0]),
+                    int(nodes[1]),
+                    int(nodes[2]),
+                    viscosity,
+                    far_inside_probe_max,
+                    two_sided_probe_max,
+                    one_sided_probe_max,
+                    use_sampling_obstacle,
+                    4,
+                )
+            if one_sided_region_id != -1:
+                self._add_split_viscous_mode_marker_tractions_kernel(
+                    velocity_field,
+                    obstacle_field,
+                    sampling_obstacle,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    cell_width_x_m,
+                    cell_width_y_m,
+                    cell_width_z_m,
+                    int(self.marker_count),
+                    int(nodes[0]),
+                    int(nodes[1]),
+                    int(nodes[2]),
+                    viscosity,
+                    far_inside_probe_max,
+                    two_sided_probe_max,
+                    one_sided_probe_max,
+                    use_sampling_obstacle,
+                    5,
+                )
+                self._add_split_viscous_mode_marker_tractions_kernel(
+                    velocity_field,
+                    obstacle_field,
+                    sampling_obstacle,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    cell_width_x_m,
+                    cell_width_y_m,
+                    cell_width_z_m,
+                    int(self.marker_count),
+                    int(nodes[0]),
+                    int(nodes[1]),
+                    int(nodes[2]),
+                    viscosity,
+                    far_inside_probe_max,
+                    two_sided_probe_max,
+                    one_sided_probe_max,
+                    use_sampling_obstacle,
+                    6,
+                )
+            if bool(use_pressure_anchor_fallback):
+                self._add_split_viscous_mode_marker_tractions_kernel(
+                    velocity_field,
+                    obstacle_field,
+                    sampling_obstacle,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    cell_width_x_m,
+                    cell_width_y_m,
+                    cell_width_z_m,
+                    int(self.marker_count),
+                    int(nodes[0]),
+                    int(nodes[1]),
+                    int(nodes[2]),
+                    viscosity,
+                    far_inside_probe_max,
+                    two_sided_probe_max,
+                    one_sided_probe_max,
+                    use_sampling_obstacle,
+                    7,
+                )
+        else:
+            self._sample_fluid_stress_to_marker_tractions_kernel(
+                velocity_field,
+                pressure_field,
+                obstacle_field,
+                sampling_obstacle,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+                cell_width_x_m,
+                cell_width_y_m,
+                cell_width_z_m,
+                self.marker_pressure_anchor_cell,
+                node_anchor_field,
+                int(self.marker_count),
+                int(nodes[0]),
+                int(nodes[1]),
+                int(nodes[2]),
+                viscosity,
+                1 if bool(two_sided_pressure) else 0,
+                far_region_id,
+                far_pressure,
+                far_pressure_side,
+                far_inside_probe_max,
+                two_sided_probe_max,
+                one_sided_region_id,
+                one_sided_reference_pressure,
+                one_sided_probe_max,
+                1 if bool(use_pressure_anchor_fallback) else 0,
+                node_anchor_available,
+                use_sampling_obstacle,
+            )
         return HibmMpmFluidStressSampleReport(
             valid_marker_count=int(self.report_stress_valid_marker_count[None]),
             invalid_marker_count=int(self.report_stress_invalid_marker_count[None]),
@@ -2124,6 +4088,15 @@ class HibmMpmSurfaceMarkers:
             two_sided_extended_marker_count=int(
                 self.report_stress_two_sided_extended_marker_count[None]
             ),
+            one_sided_pressure_marker_count=int(
+                self.report_stress_one_sided_pressure_marker_count[None]
+            ),
+            one_sided_extended_marker_count=int(
+                self.report_stress_one_sided_extended_marker_count[None]
+            ),
+            one_sided_gradient_missing_marker_count=int(
+                self.report_stress_one_sided_gradient_missing_marker_count[None]
+            ),
         )
 
     @ti.kernel
@@ -2149,9 +4122,12 @@ class HibmMpmSurfaceMarkers:
         nz: ti.i32,
         far_pressure_region_id: ti.i32,
         far_probe_max_multiplier: ti.f32,
+        air_probe_normal_sign: ti.f32,
     ):
         self.report_air_backed_seed_marker_count[None] = 0
         self.report_air_backed_seed_missed_marker_count[None] = 0
+        self.report_air_backed_seed_fallback_cell_count[None] = 0
+        component_capacity = air_component_selected_field.shape[0]
         for slot in air_component_selected_field:
             air_component_selected_field[slot] = 0
         for marker in range(marker_count):
@@ -2189,71 +4165,85 @@ class HibmMpmSurfaceMarkers:
                 )
                 probe_distance_m = 1.0 / ti.max(normal_spacing_inv, 1.0e-12)
                 seed_found = 0
-                crossed_base = 0
-                # 10-rung far-side ladder: the standard sampler rungs
-                # (1.0 + 0.5*k, k = 0..4) then the closure-extension rungs
-                # (3 + (mult - 3) * (k+1)/5) - runtime range per the
-                # S2-A5 no-unroll rule.
-                for probe_index in range(10):
-                    if seed_found == 0 and crossed_base == 0:
-                        multiplier = 1.0 + 0.5 * ti.cast(probe_index, ti.f32)
-                        if probe_index >= 5:
-                            multiplier = 3.0 + (
-                                far_probe_max_multiplier - 3.0
-                            ) * (ti.cast(probe_index - 4, ti.f32) / 5.0)
-                        probe_position = position + normal * (
-                            probe_distance_m * multiplier
-                        )
-                        probe_coordinate = self._grid_coordinate_from_fields(
-                            probe_position,
-                            cell_face_x_m,
-                            cell_face_y_m,
-                            cell_face_z_m,
-                            cell_center_x_m,
-                            cell_center_y_m,
-                            cell_center_z_m,
-                            nx,
-                            ny,
-                            nz,
-                        )
-                        pi = ti.min(
-                            ti.max(
-                                ti.floor(probe_coordinate.x + 0.5, ti.i32),
-                                0,
-                            ),
-                            nx - 1,
-                        )
-                        pj = ti.min(
-                            ti.max(
-                                ti.floor(probe_coordinate.y + 0.5, ti.i32),
-                                0,
-                            ),
-                            ny - 1,
-                        )
-                        pk = ti.min(
-                            ti.max(
-                                ti.floor(probe_coordinate.z + 0.5, ti.i32),
-                                0,
-                            ),
-                            nz - 1,
-                        )
-                        if base_obstacle_field[pi, pj, pk] != 0:
-                            # H1-style crossing guard: base geometry ends
-                            # the physical air column - never seed another
-                            # compartment through the chamber wall.
-                            crossed_base = 1
-                        elif (
-                            obstacle_field[pi, pj, pk] == 0
-                            and outlet_reachable_field[pi, pj, pk] == 0
-                        ):
-                            label = unreached_component_label_field[
-                                pi,
-                                pj,
-                                pk,
-                            ]
-                            if label >= -32 and label <= -1:
-                                air_component_selected_field[-label - 1] = 1
-                                seed_found = 1
+                # Mirrored CAD windings are valid. By default the seed scans
+                # both normal directions and accepts only outlet-unreachable
+                # components; cases with known interface orientation may pin a
+                # single normal side to avoid selecting isolated water pockets.
+                for side in range(2):
+                    crossed_base = 0
+                    direction = 1.0
+                    scan_side = 1
+                    if ti.abs(air_probe_normal_sign) > 0.5:
+                        if side == 0:
+                            direction = air_probe_normal_sign
+                        else:
+                            scan_side = 0
+                    elif side == 1:
+                        direction = -1.0
+                    # 10-rung ladder: the standard sampler rungs
+                    # (1.0 + 0.5*k, k = 0..4) then the closure-extension rungs
+                    # (3 + (mult - 3) * (k+1)/5) - runtime range per the
+                    # S2-A5 no-unroll rule.
+                    for probe_index in range(10):
+                        if scan_side != 0 and seed_found == 0 and crossed_base == 0:
+                            multiplier = 1.0 + 0.5 * ti.cast(probe_index, ti.f32)
+                            if probe_index >= 5:
+                                multiplier = 3.0 + (
+                                    far_probe_max_multiplier - 3.0
+                                ) * (ti.cast(probe_index - 4, ti.f32) / 5.0)
+                            probe_position = position + normal * (
+                                direction * probe_distance_m * multiplier
+                            )
+                            probe_coordinate = self._grid_coordinate_from_fields(
+                                probe_position,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            pi = ti.min(
+                                ti.max(
+                                    ti.floor(probe_coordinate.x + 0.5, ti.i32),
+                                    0,
+                                ),
+                                nx - 1,
+                            )
+                            pj = ti.min(
+                                ti.max(
+                                    ti.floor(probe_coordinate.y + 0.5, ti.i32),
+                                    0,
+                                ),
+                                ny - 1,
+                            )
+                            pk = ti.min(
+                                ti.max(
+                                    ti.floor(probe_coordinate.z + 0.5, ti.i32),
+                                    0,
+                                ),
+                                nz - 1,
+                            )
+                            if base_obstacle_field[pi, pj, pk] != 0:
+                                # H1-style crossing guard: base geometry ends
+                                # the physical air column - never seed another
+                                # compartment through the chamber wall.
+                                crossed_base = 1
+                            elif (
+                                obstacle_field[pi, pj, pk] == 0
+                                and outlet_reachable_field[pi, pj, pk] == 0
+                            ):
+                                label = unreached_component_label_field[
+                                    pi,
+                                    pj,
+                                    pk,
+                                ]
+                                if label >= -component_capacity and label <= -1:
+                                    air_component_selected_field[-label - 1] = 1
+                                    seed_found = 1
                 if seed_found == 1:
                     ti.atomic_add(
                         self.report_air_backed_seed_marker_count[None],
@@ -2264,6 +4254,191 @@ class HibmMpmSurfaceMarkers:
                         self.report_air_backed_seed_missed_marker_count[None],
                         1,
                     )
+
+    @ti.func
+    def _select_far_pressure_air_component_if_unreached(
+        self,
+        obstacle_field: ti.template(),
+        outlet_reachable_field: ti.template(),
+        unreached_component_label_field: ti.template(),
+        air_component_selected_field: ti.template(),
+        i: ti.i32,
+        j: ti.i32,
+        k: ti.i32,
+    ):
+        if obstacle_field[i, j, k] == 0 and outlet_reachable_field[i, j, k] == 0:
+            component_capacity = air_component_selected_field.shape[0]
+            label = unreached_component_label_field[i, j, k]
+            if label >= -component_capacity and label <= -1:
+                air_component_selected_field[-label - 1] = 1
+                ti.atomic_add(
+                    self.report_air_backed_seed_fallback_cell_count[None],
+                    1,
+                )
+
+    @ti.kernel
+    def _mark_far_pressure_air_backed_region_adjacent_components_kernel(
+        self,
+        obstacle_field: ti.template(),
+        outlet_reachable_field: ti.template(),
+        unreached_component_label_field: ti.template(),
+        air_component_selected_field: ti.template(),
+        node_kind_code: ti.template(),
+        nearest_marker: ti.template(),
+        marker_count: ti.i32,
+        far_pressure_region_id: ti.i32,
+    ):
+        self.report_air_backed_seed_fallback_cell_count[None] = 0
+        component_capacity = air_component_selected_field.shape[0]
+        for i, j, k in obstacle_field:
+            if obstacle_field[i, j, k] != 0 or outlet_reachable_field[i, j, k] != 0:
+                continue
+            label = unreached_component_label_field[i, j, k]
+            if label < -component_capacity or label > -1:
+                continue
+            marker = nearest_marker[i, j, k]
+            if marker < 0 or marker >= marker_count:
+                continue
+            if self.region_id[marker] == far_pressure_region_id:
+                air_component_selected_field[-label - 1] = 1
+                ti.atomic_add(
+                    self.report_air_backed_seed_fallback_cell_count[None],
+                    1,
+                )
+        for i, j, k in obstacle_field:
+            if node_kind_code[i, j, k] == HibmMpmIbNodeSearch._NODE_NONE:
+                continue
+            marker = nearest_marker[i, j, k]
+            if marker < 0 or marker >= marker_count:
+                continue
+            if self.region_id[marker] != far_pressure_region_id:
+                continue
+            if i > 0:
+                self._select_far_pressure_air_component_if_unreached(
+                    obstacle_field,
+                    outlet_reachable_field,
+                    unreached_component_label_field,
+                    air_component_selected_field,
+                    i - 1,
+                    j,
+                    k,
+                )
+            if i < obstacle_field.shape[0] - 1:
+                self._select_far_pressure_air_component_if_unreached(
+                    obstacle_field,
+                    outlet_reachable_field,
+                    unreached_component_label_field,
+                    air_component_selected_field,
+                    i + 1,
+                    j,
+                    k,
+                )
+            if j > 0:
+                self._select_far_pressure_air_component_if_unreached(
+                    obstacle_field,
+                    outlet_reachable_field,
+                    unreached_component_label_field,
+                    air_component_selected_field,
+                    i,
+                    j - 1,
+                    k,
+                )
+            if j < obstacle_field.shape[1] - 1:
+                self._select_far_pressure_air_component_if_unreached(
+                    obstacle_field,
+                    outlet_reachable_field,
+                    unreached_component_label_field,
+                    air_component_selected_field,
+                    i,
+                    j + 1,
+                    k,
+                )
+            if k > 0:
+                self._select_far_pressure_air_component_if_unreached(
+                    obstacle_field,
+                    outlet_reachable_field,
+                    unreached_component_label_field,
+                    air_component_selected_field,
+                    i,
+                    j,
+                    k - 1,
+                )
+            if k < obstacle_field.shape[2] - 1:
+                self._select_far_pressure_air_component_if_unreached(
+                    obstacle_field,
+                    outlet_reachable_field,
+                    unreached_component_label_field,
+                    air_component_selected_field,
+                    i,
+                    j,
+                    k + 1,
+                )
+
+    @ti.kernel
+    def _mark_far_pressure_air_backed_anchor_cell_components_kernel(
+        self,
+        obstacle_field: ti.template(),
+        outlet_reachable_field: ti.template(),
+        unreached_component_label_field: ti.template(),
+        air_component_selected_field: ti.template(),
+        node_kind_code: ti.template(),
+        nearest_marker: ti.template(),
+        node_anchor_cell: ti.template(),
+        marker_count: ti.i32,
+        far_pressure_region_id: ti.i32,
+    ):
+        for i, j, k in obstacle_field:
+            if node_kind_code[i, j, k] == HibmMpmIbNodeSearch._NODE_NONE:
+                continue
+            marker = nearest_marker[i, j, k]
+            if marker < 0 or marker >= marker_count:
+                continue
+            if self.region_id[marker] != far_pressure_region_id:
+                continue
+            anchor = node_anchor_cell[i, j, k]
+            anchor_i = anchor.x
+            anchor_j = anchor.y
+            anchor_k = anchor.z
+            if (
+                anchor_i >= 0
+                and anchor_i < obstacle_field.shape[0]
+                and anchor_j >= 0
+                and anchor_j < obstacle_field.shape[1]
+                and anchor_k >= 0
+                and anchor_k < obstacle_field.shape[2]
+            ):
+                self._select_far_pressure_air_component_if_unreached(
+                    obstacle_field,
+                    outlet_reachable_field,
+                    unreached_component_label_field,
+                    air_component_selected_field,
+                    anchor_i,
+                    anchor_j,
+                    anchor_k,
+                )
+
+    @ti.kernel
+    def _mark_far_pressure_air_backed_dirichlet_region_components_kernel(
+        self,
+        obstacle_field: ti.template(),
+        outlet_reachable_field: ti.template(),
+        unreached_component_label_field: ti.template(),
+        air_component_selected_field: ti.template(),
+        velocity_dirichlet_marker_region_id: ti.template(),
+        far_pressure_region_id: ti.i32,
+    ):
+        for i, j, k in obstacle_field:
+            if velocity_dirichlet_marker_region_id[i, j, k] != far_pressure_region_id:
+                continue
+            self._select_far_pressure_air_component_if_unreached(
+                obstacle_field,
+                outlet_reachable_field,
+                unreached_component_label_field,
+                air_component_selected_field,
+                i,
+                j,
+                k,
+            )
 
     def mark_far_pressure_air_backed_seed_components(
         self,
@@ -2285,22 +4460,46 @@ class HibmMpmSurfaceMarkers:
         *,
         far_pressure_region_id: int,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
+        far_pressure_air_backed_probe_normal_sign: float = 0.0,
+        fallback_to_bidirectional_if_all_missed: bool = False,
+        fallback_to_region_adjacency_if_all_missed: bool = False,
+        node_kind_code=None,
+        nearest_marker=None,
+        node_anchor_cell=None,
+        velocity_dirichlet_marker_region_id=None,
     ) -> tuple[int, int]:
-        """Select unreached components on closure markers' far side (S2-A12).
+        """Select unreached components on closure markers' air side (S2-A12).
 
-        For every marker of the declared closure region the far (+n) side is
-        walked with the 10-rung ladder (standard sampler rungs then the
+        For every marker of the declared closure region the configured normal
+        side is walked with the 10-rung ladder (standard sampler rungs then the
         closure-extension rungs up to
         ``far_pressure_inside_probe_max_multiplier``); the first rung whose
         nearest cell is active, flood-unreached and component-labeled
-        selects that component in the fluid-owned 32-slot mask. Walks stop
-        at base geometry (H1 crossing-guard semantics). Returns
+        selects that component in the fluid-owned fixed-capacity mask. Walks
+        stop at base geometry (H1 crossing-guard semantics). Returns
         ``(seeded_marker_count, missed_marker_count)``; a fully missed scan
         with a large unreached set is the partial-enclosure signature
         (mechanism inert, debt returns) and must be visible in history.
+        A zero normal-side sign scans both sides for backward compatibility;
+        +1 or -1 scans only that marker-normal side.
         Outlet-reachable cells never seed: legitimate water is structurally
-        unselectable, and non-closure regions (e.g. the squid tail) are
+        unselectable, and non-closure regions are
         untouched because only closure markers walk.
+        When ``fallback_to_bidirectional_if_all_missed`` is true, a pinned
+        single-side scan that finds no component retries the bidirectional
+        scan. The retry is still outlet-unreachable-only, so it cannot mark
+        normal outlet-connected water as air.
+        When ``fallback_to_region_adjacency_if_all_missed`` is true and any
+        closure marker still misses after the normal/bidirectional scan, the
+        selector marks unreached components containing cells whose nearest
+        HIBM marker is in the declared closure region. This is a conservative
+        CAD fallback for row clouds where the normal ladder only partially
+        reaches the labeled component set. If ``node_anchor_cell`` is
+        provided, the fallback also checks classified closure nodes'
+        velocity-Dirichlet owner/anchor cells. If
+        ``velocity_dirichlet_marker_region_id`` is provided, it also selects
+        components containing row-owner cells stamped as coming from the
+        closure region.
         """
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
@@ -2317,10 +4516,49 @@ class HibmMpmSurfaceMarkers:
                 "far_pressure_inside_probe_max_multiplier must be finite "
                 "and >= 3.0"
             )
-        if tuple(air_component_selected_field.shape) != (32,):
+        probe_normal_sign = float(far_pressure_air_backed_probe_normal_sign)
+        if probe_normal_sign not in (-1.0, 0.0, 1.0):
             raise ValueError(
-                "air_component_selected_field must have shape (32,)"
+                "far_pressure_air_backed_probe_normal_sign must be -1.0, 0.0, or 1.0"
             )
+        air_component_shape = tuple(
+            int(value) for value in air_component_selected_field.shape
+        )
+        if len(air_component_shape) != 1 or air_component_shape[0] <= 0:
+            raise ValueError(
+                "air_component_selected_field must be a positive one-dimensional field"
+            )
+        if bool(fallback_to_region_adjacency_if_all_missed):
+            if nearest_marker is None:
+                raise ValueError(
+                    "fallback_to_region_adjacency_if_all_missed requires "
+                    "nearest_marker"
+                )
+            if tuple(nearest_marker.shape) != tuple(obstacle_field.shape):
+                raise ValueError(
+                    "nearest_marker shape must match the fluid cell grid"
+                )
+            if node_kind_code is not None and tuple(node_kind_code.shape) != tuple(
+                obstacle_field.shape
+            ):
+                raise ValueError(
+                    "node_kind_code shape must match the fluid cell grid"
+                )
+            if node_anchor_cell is not None and tuple(node_anchor_cell.shape) != tuple(
+                obstacle_field.shape
+            ):
+                raise ValueError(
+                    "node_anchor_cell shape must match the fluid cell grid"
+                )
+            if (
+                velocity_dirichlet_marker_region_id is not None
+                and tuple(velocity_dirichlet_marker_region_id.shape)
+                != tuple(obstacle_field.shape)
+            ):
+                raise ValueError(
+                    "velocity_dirichlet_marker_region_id shape must match "
+                    "the fluid cell grid"
+                )
         self._mark_far_pressure_air_backed_seed_components_kernel(
             obstacle_field,
             base_obstacle_field,
@@ -2342,10 +4580,157 @@ class HibmMpmSurfaceMarkers:
             int(nodes[2]),
             far_region_id,
             far_probe_max,
+            probe_normal_sign,
         )
+        seeded = int(self.report_air_backed_seed_marker_count[None])
+        missed = int(self.report_air_backed_seed_missed_marker_count[None])
+        if (
+            bool(fallback_to_bidirectional_if_all_missed)
+            and probe_normal_sign != 0.0
+            and seeded == 0
+            and missed > 0
+        ):
+            self._mark_far_pressure_air_backed_seed_components_kernel(
+                obstacle_field,
+                base_obstacle_field,
+                outlet_reachable_field,
+                unreached_component_label_field,
+                air_component_selected_field,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+                cell_width_x_m,
+                cell_width_y_m,
+                cell_width_z_m,
+                int(self.marker_count),
+                int(nodes[0]),
+                int(nodes[1]),
+                int(nodes[2]),
+                far_region_id,
+                far_probe_max,
+                0.0,
+            )
+            seeded = int(self.report_air_backed_seed_marker_count[None])
+            missed = int(self.report_air_backed_seed_missed_marker_count[None])
+        if (
+            bool(fallback_to_region_adjacency_if_all_missed)
+            and missed > 0
+        ):
+            self._mark_far_pressure_air_backed_region_adjacent_components_kernel(
+                obstacle_field,
+                outlet_reachable_field,
+                unreached_component_label_field,
+                air_component_selected_field,
+                node_kind_code,
+                nearest_marker,
+                int(self.marker_count),
+                far_region_id,
+            )
+            if node_anchor_cell is not None:
+                self._mark_far_pressure_air_backed_anchor_cell_components_kernel(
+                    obstacle_field,
+                    outlet_reachable_field,
+                    unreached_component_label_field,
+                    air_component_selected_field,
+                    node_kind_code,
+                    nearest_marker,
+                    node_anchor_cell,
+                    int(self.marker_count),
+                    far_region_id,
+                )
+            if velocity_dirichlet_marker_region_id is not None:
+                self._mark_far_pressure_air_backed_dirichlet_region_components_kernel(
+                    obstacle_field,
+                    outlet_reachable_field,
+                    unreached_component_label_field,
+                    air_component_selected_field,
+                    velocity_dirichlet_marker_region_id,
+                    far_region_id,
+                )
         return (
-            int(self.report_air_backed_seed_marker_count[None]),
-            int(self.report_air_backed_seed_missed_marker_count[None]),
+            seeded,
+            missed,
+        )
+
+    @ti.kernel
+    def _write_region_pressure_reachability_barrier_kernel(
+        self,
+        barrier_field: ti.template(),
+        node_kind_code: ti.template(),
+        nearest_marker: ti.template(),
+        marker_count: ti.i32,
+        barrier_node_code: ti.i32,
+        barrier_region_id: ti.i32,
+        secondary_barrier_region_id: ti.i32,
+        tertiary_barrier_region_id: ti.i32,
+        include_all_classified_region_nodes: ti.i32,
+    ) -> ti.i32:
+        count = 0
+        for node in ti.grouped(barrier_field):
+            value = 0
+            marker = nearest_marker[node]
+            node_matches = node_kind_code[node] == barrier_node_code
+            if include_all_classified_region_nodes != 0:
+                node_matches = node_kind_code[node] != HibmMpmIbNodeSearch._NODE_NONE
+            region_matches = False
+            if 0 <= marker and marker < marker_count:
+                region = self.region_id[marker]
+                if region == barrier_region_id or (
+                    secondary_barrier_region_id != -1
+                    and region == secondary_barrier_region_id
+                ) or (
+                    tertiary_barrier_region_id != -1
+                    and region == tertiary_barrier_region_id
+                ):
+                    region_matches = True
+            if (
+                node_matches
+                and region_matches
+            ):
+                value = 1
+                count += 1
+            barrier_field[node] = value
+        return count
+
+    def write_region_pressure_reachability_barrier(
+        self,
+        barrier_field,
+        node_kind_code,
+        nearest_marker,
+        *,
+        barrier_node_code: int,
+        barrier_region_id: int,
+        secondary_barrier_region_id: int = -1,
+        tertiary_barrier_region_id: int = -1,
+        include_all_classified_region_nodes: bool = False,
+    ) -> int:
+        if tuple(barrier_field.shape) != tuple(node_kind_code.shape):
+            raise ValueError(
+                "barrier_field shape "
+                f"{tuple(barrier_field.shape)} does not match node_kind_code "
+                f"shape {tuple(node_kind_code.shape)}"
+            )
+        if tuple(barrier_field.shape) != tuple(nearest_marker.shape):
+            raise ValueError(
+                "barrier_field shape "
+                f"{tuple(barrier_field.shape)} does not match nearest_marker "
+                f"shape {tuple(nearest_marker.shape)}"
+            )
+        return int(
+            self._write_region_pressure_reachability_barrier_kernel(
+                barrier_field,
+                node_kind_code,
+                nearest_marker,
+                int(self.marker_count),
+                int(barrier_node_code),
+                int(barrier_region_id),
+                int(secondary_barrier_region_id),
+                int(tertiary_barrier_region_id),
+                1 if bool(include_all_classified_region_nodes) else 0,
+            )
         )
 
     @ti.kernel
@@ -2462,6 +4847,17 @@ class HibmMpmSurfaceMarkers:
         wz = ti.max(1.0 - ti.abs(relative.z) / support_radius_m, 0.0)
         return wx * wy * wz
 
+    @ti.func
+    def _vector3_is_finite(self, value):
+        finite = 1
+        if ti.math.isnan(value.x) or ti.math.isinf(value.x):
+            finite = 0
+        if ti.math.isnan(value.y) or ti.math.isinf(value.y):
+            finite = 0
+        if ti.math.isnan(value.z) or ti.math.isinf(value.z):
+            finite = 0
+        return finite
+
     @ti.kernel
     def _clear_mpm_external_forces_kernel(
         self,
@@ -2518,26 +4914,45 @@ class HibmMpmSurfaceMarkers:
             marker_position = self.x_gamma_m[marker]
             marker_force = self.F_gamma_n[marker]
             weight_sum = 0.0
-            for particle in range(particle_count):
-                weight_sum += self._marker_particle_shape_weight(
-                    marker_position,
-                    particle_position_m[particle],
-                    support_radius_m,
-                )
-            if weight_sum > 1.0e-12:
+            marker_valid = (
+                self._vector3_is_finite(marker_position)
+                * self._vector3_is_finite(marker_force)
+            )
+            if marker_valid != 0:
+                for particle in range(particle_count):
+                    particle_position = particle_position_m[particle]
+                    if self._vector3_is_finite(particle_position) != 0:
+                        weight_sum += self._marker_particle_shape_weight(
+                            marker_position,
+                            particle_position,
+                            support_radius_m,
+                        )
+            if marker_valid != 0 and weight_sum > 1.0e-12:
                 self.report_mpm_scatter_active_marker_count[None] += 1
                 self.report_mpm_scatter_marker_force_n[None] += marker_force
                 for particle in range(particle_count):
-                    weight = self._marker_particle_shape_weight(
-                        marker_position,
-                        particle_position_m[particle],
-                        support_radius_m,
-                    )
+                    particle_position = particle_position_m[particle]
+                    weight = 0.0
+                    if self._vector3_is_finite(particle_position) != 0:
+                        weight = self._marker_particle_shape_weight(
+                            marker_position,
+                            particle_position,
+                            support_radius_m,
+                        )
                     if weight > 0.0:
                         force_contribution = marker_force * (weight / weight_sum)
-                        external_force_n[particle] += force_contribution
+                        # The current MPM particle/grid dynamics are f32; keep
+                        # this adapter cast explicit and report the applied load.
+                        force_contribution_for_external = ti.Vector(
+                            [
+                                ti.cast(force_contribution.x, ti.f32),
+                                ti.cast(force_contribution.y, ti.f32),
+                                ti.cast(force_contribution.z, ti.f32),
+                            ]
+                        )
+                        external_force_n[particle] += force_contribution_for_external
                         self.report_mpm_scatter_external_force_n[None] += (
-                            force_contribution
+                            force_contribution_for_external
                         )
                         self.report_mpm_scatter_active_particle_count[None] += 1
             else:
@@ -2831,19 +5246,47 @@ class HibmMpmSurfaceMarkers:
         self.report_primary_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_secondary_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_total_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
+        self.report_primary_force_norm_sum_n[None] = 0.0
+        self.report_secondary_force_norm_sum_n[None] = 0.0
+        self.report_total_force_norm_sum_n[None] = 0.0
+        self.report_primary_force_norm_max_n[None] = 0.0
+        self.report_secondary_force_norm_max_n[None] = 0.0
+        self.report_total_force_norm_max_n[None] = 0.0
         self.report_primary_marker_count[None] = 0
         self.report_secondary_marker_count[None] = 0
         self.report_total_marker_count[None] = 0
+        self.report_primary_stress_valid_marker_count[None] = 0
+        self.report_primary_stress_invalid_marker_count[None] = 0
+        self.report_secondary_stress_valid_marker_count[None] = 0
+        self.report_secondary_stress_invalid_marker_count[None] = 0
         for marker in range(marker_count):
             force = self.F_gamma_n[marker]
+            force_norm = force.norm()
             self.report_total_force_n[None] += force
+            self.report_total_force_norm_sum_n[None] += force_norm
+            ti.atomic_max(self.report_total_force_norm_max_n[None], force_norm)
             self.report_total_marker_count[None] += 1
             if self.region_id[marker] == primary_region_id:
                 self.report_primary_force_n[None] += force
+                self.report_primary_force_norm_sum_n[None] += force_norm
+                ti.atomic_max(self.report_primary_force_norm_max_n[None], force_norm)
                 self.report_primary_marker_count[None] += 1
+                if self._stress_pressure_valid[marker] != 0:
+                    self.report_primary_stress_valid_marker_count[None] += 1
+                else:
+                    self.report_primary_stress_invalid_marker_count[None] += 1
             if self.region_id[marker] == secondary_region_id:
                 self.report_secondary_force_n[None] += force
+                self.report_secondary_force_norm_sum_n[None] += force_norm
+                ti.atomic_max(
+                    self.report_secondary_force_norm_max_n[None],
+                    force_norm,
+                )
                 self.report_secondary_marker_count[None] += 1
+                if self._stress_pressure_valid[marker] != 0:
+                    self.report_secondary_stress_valid_marker_count[None] += 1
+                else:
+                    self.report_secondary_stress_invalid_marker_count[None] += 1
 
     def aggregate_region_forces(
         self,
@@ -2862,6 +5305,24 @@ class HibmMpmSurfaceMarkers:
         primary_count = int(self.report_primary_marker_count[None])
         secondary_count = int(self.report_secondary_marker_count[None])
         total_count = int(self.report_total_marker_count[None])
+        primary_norm_sum = float(self.report_primary_force_norm_sum_n[None])
+        secondary_norm_sum = float(self.report_secondary_force_norm_sum_n[None])
+        total_norm_sum = float(self.report_total_force_norm_sum_n[None])
+        primary_norm_max = float(self.report_primary_force_norm_max_n[None])
+        secondary_norm_max = float(self.report_secondary_force_norm_max_n[None])
+        total_norm_max = float(self.report_total_force_norm_max_n[None])
+        primary_stress_valid_count = int(
+            self.report_primary_stress_valid_marker_count[None]
+        )
+        primary_stress_invalid_count = int(
+            self.report_primary_stress_invalid_marker_count[None]
+        )
+        secondary_stress_valid_count = int(
+            self.report_secondary_stress_valid_marker_count[None]
+        )
+        secondary_stress_invalid_count = int(
+            self.report_secondary_stress_invalid_marker_count[None]
+        )
         fluid_reaction = tuple(-component for component in total)
         residual = math.sqrt(
             sum(
@@ -2883,6 +5344,16 @@ class HibmMpmSurfaceMarkers:
             total_marker_count=total_count,
             fluid_reaction_force_n=fluid_reaction,
             action_reaction_residual_n=residual,
+            primary_stress_valid_marker_count=primary_stress_valid_count,
+            primary_stress_invalid_marker_count=primary_stress_invalid_count,
+            secondary_stress_valid_marker_count=secondary_stress_valid_count,
+            secondary_stress_invalid_marker_count=secondary_stress_invalid_count,
+            primary_marker_force_norm_sum_n=primary_norm_sum,
+            secondary_marker_force_norm_sum_n=secondary_norm_sum,
+            total_marker_force_norm_sum_n=total_norm_sum,
+            primary_marker_force_norm_max_n=primary_norm_max,
+            secondary_marker_force_norm_max_n=secondary_norm_max,
+            total_marker_force_norm_max_n=total_norm_max,
         )
 
     def marker_force_n(self, marker_index: int) -> tuple[float, float, float]:
@@ -3788,14 +6259,62 @@ class HibmMpmIbBoundaryConditions:
             dtype=ti.i32,
             shape=self.marker_capacity,
         )
+        self.marker_pressure_neumann_candidate_node_count = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        extra_coupling_shape = nodes + (PRESSURE_INTERFACE_COUPLING_EXTRA_SLOTS,)
+        self._fallback_pressure_coupling_extra_neighbor = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=extra_coupling_shape,
+        )
+        self._fallback_pressure_coupling_extra_coefficient = ti.field(
+            dtype=ti.f32,
+            shape=extra_coupling_shape,
+        )
+        self._fallback_pressure_interface_row_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self._fallback_pressure_interface_row_owner = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=1,
+        )
+        self._fallback_pressure_interface_row_neighbor = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=1,
+        )
+        self._fallback_pressure_interface_row_transmissibility = ti.field(
+            dtype=ti.f32,
+            shape=1,
+        )
 
         self.report_no_slip_dirichlet_count = ti.field(dtype=ti.i32, shape=())
         self.report_pressure_neumann_count = ti.field(dtype=ti.i32, shape=())
         self.report_inactive_internal_node_count = ti.field(dtype=ti.i32, shape=())
+        self.report_boundary_condition_max_abs_velocity = ti.field(
+            dtype=ti.f32,
+            shape=(),
+        )
         self.report_pressure_neumann_matrix_rows = ti.field(dtype=ti.i32, shape=())
         self.report_pressure_neumann_rhs_integral = ti.field(dtype=ti.f64, shape=())
         self.report_pressure_neumann_max_abs_rhs = ti.field(dtype=ti.f32, shape=())
         self.report_pressure_neumann_invalid_reconstruction_rows = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_pressure_neumann_invalid_unreconstructable_rows = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_pressure_neumann_invalid_bad_marker_rows = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_pressure_neumann_invalid_nonpositive_volume_rows = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -3831,6 +6350,10 @@ class HibmMpmIbBoundaryConditions:
             dtype=ti.i32,
             shape=(),
         )
+        self.report_pressure_neumann_skipped_pressure_boundary_adjacent_rows = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.report_pressure_neumann_active_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
@@ -3845,6 +6368,14 @@ class HibmMpmIbBoundaryConditions:
         )
         self.report_pressure_neumann_gradient_max_abs = ti.field(
             dtype=ti.f32,
+            shape=(),
+        )
+        self.report_pressure_neumann_gradient_raw_max_abs = ti.field(
+            dtype=ti.f32,
+            shape=(),
+        )
+        self.report_pressure_neumann_gradient_limited_count = ti.field(
+            dtype=ti.i32,
             shape=(),
         )
         self.report_velocity_dirichlet_boundary_rows = ti.field(
@@ -3891,6 +6422,66 @@ class HibmMpmIbBoundaryConditions:
             dtype=ti.i32,
             shape=(),
         )
+        self.report_pressure_neumann_relocated_obstacle_owner_rows = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_pressure_neumann_duplicate_owner_rows = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_pressure_neumann_overflow_owner_rows = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_pressure_neumann_max_owner_slot_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.pressure_neumann_invalid_diag_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.pressure_neumann_invalid_diag_reason = ti.field(
+            dtype=ti.i32,
+            shape=PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY,
+        )
+        self.pressure_neumann_invalid_diag_marker = ti.field(
+            dtype=ti.i32,
+            shape=PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY,
+        )
+        self.pressure_neumann_invalid_diag_node = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY,
+        )
+        self.pressure_neumann_invalid_diag_owner = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY,
+        )
+        self.pressure_neumann_invalid_diag_neighbor = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY,
+        )
+        self.pressure_neumann_invalid_diag_anchor = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY,
+        )
+        self.pressure_neumann_invalid_diag_node_distance_m = ti.field(
+            dtype=ti.f32,
+            shape=PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY,
+        )
+        self.pressure_neumann_invalid_diag_normal_denominator_m = ti.field(
+            dtype=ti.f32,
+            shape=PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY,
+        )
+        self.pressure_neumann_invalid_diag_reconstruction_gap_m = ti.field(
+            dtype=ti.f32,
+            shape=PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY,
+        )
         self.report_velocity_dirichlet_invalid_node_beyond_interior_rows = ti.field(
             dtype=ti.i32,
             shape=(),
@@ -3919,6 +6510,7 @@ class HibmMpmIbBoundaryConditions:
         self.report_no_slip_dirichlet_count[None] = 0
         self.report_pressure_neumann_count[None] = 0
         self.report_inactive_internal_node_count[None] = 0
+        self.report_boundary_condition_max_abs_velocity[None] = 0.0
         for node in ti.grouped(self.active_ib_node):
             self.active_ib_node[node] = 0
             self.velocity_dirichlet_mps_field[node] = ti.Vector([0.0, 0.0, 0.0])
@@ -3974,6 +6566,13 @@ class HibmMpmIbBoundaryConditions:
                     self.pressure_neumann_gradient_field[node] = target_gradient
                     self.report_no_slip_dirichlet_count[None] += 1
                     self.report_pressure_neumann_count[None] += 1
+                    ti.atomic_max(
+                        self.report_boundary_condition_max_abs_velocity[None],
+                        ti.max(
+                            ti.max(ti.abs(target_velocity.x), ti.abs(target_velocity.y)),
+                            ti.abs(target_velocity.z),
+                        ),
+                    )
             elif node_kind_code[node] == self._NODE_INTERNAL:
                 self.report_inactive_internal_node_count[None] += 1
 
@@ -4028,6 +6627,9 @@ class HibmMpmIbBoundaryConditions:
             pressure_neumann_count=int(self.report_pressure_neumann_count[None]),
             inactive_internal_node_count=int(
                 self.report_inactive_internal_node_count[None]
+            ),
+            max_abs_velocity_mps=float(
+                self.report_boundary_condition_max_abs_velocity[None]
             ),
         )
 
@@ -4226,8 +6828,8 @@ class HibmMpmIbBoundaryConditions:
         tx = ti.min(ti.max(gx - ti.cast(i0, ti.f32), 0.0), 1.0)
         ty = ti.min(ti.max(gy - ti.cast(j0, ti.f32), 0.0), 1.0)
         tz = ti.min(ti.max(gz - ti.cast(k0, ti.f32), 0.0), 1.0)
-        value = 0.0
-        fluid_weight = 0.0
+        value = ti.cast(0.0, ti.f64)
+        fluid_weight = ti.cast(0.0, ti.f64)
         for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
             wx = 1.0 - tx if oi == 0 else tx
             wy = 1.0 - ty if oj == 0 else ty
@@ -4377,14 +6979,133 @@ class HibmMpmIbBoundaryConditions:
                             nz,
                         )
                     )
-                    target_velocity = boundary_velocity
-                    reconstruction_alpha = 0.0
+                    fallback_velocity = interior_velocity
+                    fallback_denominator = sample_denominator
+                    fallback_alpha = 0.0
+                    fallback_anchor_i = -1
+                    fallback_anchor_j = -1
+                    fallback_anchor_k = -1
+                    normal_segment_reconstructable = 0
                     if (
                         fluid_weight > 1.0e-12
                         and sample_denominator > 1.0e-12
                         and normal_distance >= 0.0
                         and normal_distance <= sample_denominator
                     ):
+                        normal_segment_reconstructable = 1
+                    fallback_reconstructable = 0
+                    if (
+                        normal_segment_reconstructable == 0
+                        and fluid_weight > 1.0e-12
+                        and sample_denominator > 1.0e-12
+                        and normal_denominator > 1.0e-12
+                    ):
+                        node_offset = node_position - boundary_point
+                        node_line_distance = ti.sqrt(
+                            ti.max(node_offset.dot(node_offset), 0.0)
+                        )
+                        if node_line_distance > 1.0e-12:
+                            fallback_normal = node_offset / node_line_distance
+                            fallback_walk_step_m = 0.5 / ti.max(
+                                ti.abs(fallback_normal.x) / ti.max(node_width_x, 1.0e-12)
+                                + ti.abs(fallback_normal.y) / ti.max(node_width_y, 1.0e-12)
+                                + ti.abs(fallback_normal.z) / ti.max(node_width_z, 1.0e-12),
+                                1.0e-12,
+                            )
+                            (
+                                fallback_velocity,
+                                fallback_weight,
+                                fallback_denominator,
+                            ) = self._walk_interior_velocity_sample(
+                                velocity_field,
+                                obstacle_field,
+                                boundary_point,
+                                fallback_normal,
+                                node_line_distance + fallback_walk_step_m,
+                                fallback_walk_step_m,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            if (
+                                fallback_weight > 1.0e-12
+                                and fallback_denominator
+                                > node_line_distance + 1.0e-12
+                            ):
+                                fallback_alpha = ti.min(
+                                    ti.max(
+                                        node_line_distance
+                                        / ti.max(fallback_denominator, 1.0e-12),
+                                        0.0,
+                                    ),
+                                    1.0,
+                                )
+                                fallback_sample_point = (
+                                    boundary_point
+                                    + fallback_normal * fallback_denominator
+                                )
+                                fallback_sample_coordinate = (
+                                    self._grid_coordinate_from_fields(
+                                        fallback_sample_point,
+                                        cell_face_x_m,
+                                        cell_face_y_m,
+                                        cell_face_z_m,
+                                        cell_center_x_m,
+                                        cell_center_y_m,
+                                        cell_center_z_m,
+                                        nx,
+                                        ny,
+                                        nz,
+                                    )
+                                )
+                                fallback_anchor_i = ti.min(
+                                    ti.max(
+                                        ti.floor(
+                                            fallback_sample_coordinate.x + 0.5,
+                                            ti.i32,
+                                        ),
+                                        0,
+                                    ),
+                                    nx - 1,
+                                )
+                                fallback_anchor_j = ti.min(
+                                    ti.max(
+                                        ti.floor(
+                                            fallback_sample_coordinate.y + 0.5,
+                                            ti.i32,
+                                        ),
+                                        0,
+                                    ),
+                                    ny - 1,
+                                )
+                                fallback_anchor_k = ti.min(
+                                    ti.max(
+                                        ti.floor(
+                                            fallback_sample_coordinate.z + 0.5,
+                                            ti.i32,
+                                        ),
+                                        0,
+                                    ),
+                                    nz - 1,
+                                )
+                                if (
+                                    obstacle_field[
+                                        fallback_anchor_i,
+                                        fallback_anchor_j,
+                                        fallback_anchor_k,
+                                    ]
+                                    == 0
+                                ):
+                                    fallback_reconstructable = 1
+                    target_velocity = boundary_velocity
+                    reconstruction_alpha = 0.0
+                    if normal_segment_reconstructable != 0:
                         alpha = ti.min(
                             ti.max(normal_distance / sample_denominator, 0.0),
                             1.0,
@@ -4457,6 +7178,47 @@ class HibmMpmIbBoundaryConditions:
                                     sample_anchor_k,
                                 ]
                             )
+                        ti.atomic_add(
+                            self.report_velocity_dirichlet_boundary_rows[None],
+                            1,
+                        )
+                        ti.atomic_min(
+                            self.report_velocity_dirichlet_min_projection_weight[None],
+                            reconstruction_alpha,
+                        )
+                        ti.atomic_max(
+                            self.report_velocity_dirichlet_max_projection_weight[None],
+                            reconstruction_alpha,
+                        )
+                        ti.atomic_max(
+                            self.report_velocity_dirichlet_max_abs_velocity[None],
+                            ti.max(
+                                ti.max(
+                                    ti.abs(target_velocity.x),
+                                    ti.abs(target_velocity.y),
+                                ),
+                                ti.abs(target_velocity.z),
+                            ),
+                        )
+                    elif fallback_reconstructable != 0:
+                        reconstruction_alpha = fallback_alpha
+                        target_velocity = (
+                            boundary_velocity
+                            + (fallback_velocity - boundary_velocity)
+                            * reconstruction_alpha
+                        )
+                        velocity_dirichlet_active[node] = 1
+                        velocity_dirichlet_value_mps[node] = target_velocity
+                        velocity_dirichlet_projection_weight[node] = (
+                            reconstruction_alpha
+                        )
+                        node_anchor_cell[node] = ti.Vector(
+                            [
+                                fallback_anchor_i,
+                                fallback_anchor_j,
+                                fallback_anchor_k,
+                            ]
+                        )
                         ti.atomic_add(
                             self.report_velocity_dirichlet_boundary_rows[None],
                             1,
@@ -4607,31 +7369,40 @@ class HibmMpmIbBoundaryConditions:
                     ]
                 )
                 side = (node_position - boundary_point).dot(normal)
-                walk_normal = normal
+                primary_walk_normal = normal
                 if side < 0.0:
-                    walk_normal = -normal
-                node_width_x = cell_face_x_m[node[0] + 1] - cell_face_x_m[node[0]]
-                node_width_y = cell_face_y_m[node[1] + 1] - cell_face_y_m[node[1]]
-                node_width_z = cell_face_z_m[node[2] + 1] - cell_face_z_m[node[2]]
-                walk_step_m = 0.5 / ti.max(
-                    ti.abs(walk_normal.x) / ti.max(node_width_x, 1.0e-12)
-                    + ti.abs(walk_normal.y) / ti.max(node_width_y, 1.0e-12)
-                    + ti.abs(walk_normal.z) / ti.max(node_width_z, 1.0e-12),
-                    1.0e-12,
-                )
+                    primary_walk_normal = -normal
                 node_distance = ti.abs(side)
                 target_i = -1
                 target_j = -1
                 target_k = -1
                 target_distance = 0.0
-                for step_index in ti.static(range(8)):
-                    if target_i < 0:
-                        candidate_distance = node_distance + walk_step_m * ti.cast(
+                target_walk_normal = primary_walk_normal
+                target_walk_step_m = 0.0
+                node_width_x = cell_face_x_m[node[0] + 1] - cell_face_x_m[node[0]]
+                node_width_y = cell_face_y_m[node[1] + 1] - cell_face_y_m[node[1]]
+                node_width_z = cell_face_z_m[node[2] + 1] - cell_face_z_m[node[2]]
+                for side_index in ti.static(range(2)):
+                    walk_normal = primary_walk_normal
+                    start_distance = node_distance
+                    if side_index == 1:
+                        walk_normal = -primary_walk_normal
+                        start_distance = 0.0
+                    walk_step_m = 0.5 / ti.max(
+                        ti.abs(walk_normal.x) / ti.max(node_width_x, 1.0e-12)
+                        + ti.abs(walk_normal.y) / ti.max(node_width_y, 1.0e-12)
+                        + ti.abs(walk_normal.z) / ti.max(node_width_z, 1.0e-12),
+                        1.0e-12,
+                    )
+                    step_index = 0
+                    while (
+                        step_index < HIBM_OWNER_RELOCATION_WALK_STEPS
+                        and target_i < 0
+                    ):
+                        candidate_distance = start_distance + walk_step_m * ti.cast(
                             step_index + 1, ti.f32
                         )
-                        candidate_point = (
-                            boundary_point + walk_normal * candidate_distance
-                        )
+                        candidate_point = boundary_point + walk_normal * candidate_distance
                         candidate_coordinate = self._grid_coordinate_from_fields(
                             candidate_point,
                             cell_face_x_m,
@@ -4681,6 +7452,9 @@ class HibmMpmIbBoundaryConditions:
                                 target_j = candidate_j
                                 target_k = candidate_k
                                 target_distance = candidate_center_distance
+                                target_walk_normal = walk_normal
+                                target_walk_step_m = walk_step_m
+                        step_index += 1
                 if target_i >= 0:
                     previous = ti.atomic_or(
                         velocity_dirichlet_active[target_i, target_j, target_k],
@@ -4692,9 +7466,9 @@ class HibmMpmIbBoundaryConditions:
                                 velocity_field,
                                 obstacle_field,
                                 boundary_point,
-                                walk_normal,
-                                target_distance + 2.0 * walk_step_m,
-                                walk_step_m,
+                                target_walk_normal,
+                                target_distance + 2.0 * target_walk_step_m,
+                                target_walk_step_m,
                                 cell_face_x_m,
                                 cell_face_y_m,
                                 cell_face_z_m,
@@ -4840,6 +7614,44 @@ class HibmMpmIbBoundaryConditions:
                         [prefill_i, prefill_j, prefill_k]
                     )
 
+    @ti.kernel
+    def _stamp_velocity_dirichlet_marker_regions_kernel(
+        self,
+        velocity_dirichlet_active: ti.template(),
+        velocity_dirichlet_marker_region_id: ti.template(),
+        nearest_marker: ti.template(),
+        node_anchor_cell: ti.template(),
+        marker_region_id: ti.template(),
+        marker_count: ti.i32,
+    ):
+        for node in ti.grouped(self.active_ib_node):
+            if self.active_ib_node[node] != 1:
+                continue
+            marker = nearest_marker[node]
+            if marker < 0 or marker >= marker_count:
+                continue
+            region = marker_region_id[marker]
+            if velocity_dirichlet_active[node] != 0:
+                velocity_dirichlet_marker_region_id[node] = region
+            anchor = node_anchor_cell[node]
+            anchor_i = anchor.x
+            anchor_j = anchor.y
+            anchor_k = anchor.z
+            if (
+                anchor_i >= 0
+                and anchor_i < velocity_dirichlet_active.shape[0]
+                and anchor_j >= 0
+                and anchor_j < velocity_dirichlet_active.shape[1]
+                and anchor_k >= 0
+                and anchor_k < velocity_dirichlet_active.shape[2]
+                and velocity_dirichlet_active[anchor_i, anchor_j, anchor_k] != 0
+            ):
+                velocity_dirichlet_marker_region_id[
+                    anchor_i,
+                    anchor_j,
+                    anchor_k,
+                ] = region
+
     def assemble_velocity_dirichlet_reconstructed_boundary_rows(
         self,
         velocity_dirichlet_active,
@@ -4856,6 +7668,8 @@ class HibmMpmIbBoundaryConditions:
         cell_center_y_m,
         cell_center_z_m,
         grid_nodes: tuple[int, int, int],
+        velocity_dirichlet_marker_region_id=None,
+        marker_region_id=None,
     ) -> HibmMpmVelocityDirichletBoundaryReport:
         if tuple(search.grid_nodes) != self.grid_nodes:
             raise ValueError("search.grid_nodes must match boundary grid_nodes")
@@ -4916,6 +7730,27 @@ class HibmMpmIbBoundaryConditions:
             int(nodes[1]),
             int(nodes[2]),
         )
+        if velocity_dirichlet_marker_region_id is not None or marker_region_id is not None:
+            if velocity_dirichlet_marker_region_id is None or marker_region_id is None:
+                raise ValueError(
+                    "velocity_dirichlet_marker_region_id and marker_region_id "
+                    "must be provided together"
+                )
+            if tuple(velocity_dirichlet_marker_region_id.shape) != tuple(
+                velocity_dirichlet_active.shape
+            ):
+                raise ValueError(
+                    "velocity_dirichlet_marker_region_id shape must match "
+                    "velocity_dirichlet_active"
+                )
+            self._stamp_velocity_dirichlet_marker_regions_kernel(
+                velocity_dirichlet_active,
+                velocity_dirichlet_marker_region_id,
+                search.nearest_marker,
+                search.node_anchor_cell,
+                marker_region_id,
+                int(marker_region_id.shape[0]),
+            )
         active_rows = int(self.report_velocity_dirichlet_boundary_rows[None])
         min_projection_weight = 0.0
         if active_rows > 0:
@@ -4970,6 +7805,22 @@ class HibmMpmIbBoundaryConditions:
     ):
         for marker in range(marker_count):
             self.marker_pressure_neumann_row_count[marker] = 0
+            self.marker_pressure_neumann_candidate_node_count[marker] = 0
+
+    @ti.kernel
+    def _count_pressure_neumann_candidate_nodes_by_marker_kernel(
+        self,
+        nearest_marker: ti.template(),
+        marker_count: ti.i32,
+    ):
+        for node in ti.grouped(self.active_ib_node):
+            if self.active_ib_node[node] == 1:
+                marker = nearest_marker[node]
+                if 0 <= marker < marker_count:
+                    ti.atomic_add(
+                        self.marker_pressure_neumann_candidate_node_count[marker],
+                        1,
+                    )
 
     @ti.kernel
     def _summarize_pressure_neumann_rows_by_marker_kernel(
@@ -4990,6 +7841,69 @@ class HibmMpmIbBoundaryConditions:
                     row_count,
                 )
 
+    @ti.func
+    def _pressure_neumann_cell_touches_velocity_dirichlet_projection_face(
+        self,
+        velocity_dirichlet_active: ti.template(),
+        i: ti.i32,
+        j: ti.i32,
+        k: ti.i32,
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+    ):
+        touches = velocity_dirichlet_active[i, j, k] != 0
+        if i < nx - 1 and velocity_dirichlet_active[i + 1, j, k] != 0:
+            touches = True
+        if j < ny - 1 and velocity_dirichlet_active[i, j + 1, k] != 0:
+            touches = True
+        if k < nz - 1 and velocity_dirichlet_active[i, j, k + 1] != 0:
+            touches = True
+        return touches
+
+    @ti.func
+    def _record_pressure_neumann_invalid_diagnostic_row(
+        self,
+        node: ti.template(),
+        owner_i: ti.i32,
+        owner_j: ti.i32,
+        owner_k: ti.i32,
+        neighbor_i: ti.i32,
+        neighbor_j: ti.i32,
+        neighbor_k: ti.i32,
+        anchor_i: ti.i32,
+        anchor_j: ti.i32,
+        anchor_k: ti.i32,
+        marker: ti.i32,
+        reason_code: ti.i32,
+        node_distance_m: ti.f32,
+        normal_denominator_m: ti.f32,
+        reconstruction_gap_m: ti.f32,
+    ):
+        row_index = ti.atomic_add(self.pressure_neumann_invalid_diag_count[None], 1)
+        if row_index < PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY:
+            self.pressure_neumann_invalid_diag_node[row_index] = node
+            self.pressure_neumann_invalid_diag_owner[row_index] = ti.Vector(
+                [owner_i, owner_j, owner_k]
+            )
+            self.pressure_neumann_invalid_diag_neighbor[row_index] = ti.Vector(
+                [neighbor_i, neighbor_j, neighbor_k]
+            )
+            self.pressure_neumann_invalid_diag_anchor[row_index] = ti.Vector(
+                [anchor_i, anchor_j, anchor_k]
+            )
+            self.pressure_neumann_invalid_diag_marker[row_index] = marker
+            self.pressure_neumann_invalid_diag_reason[row_index] = reason_code
+            self.pressure_neumann_invalid_diag_node_distance_m[row_index] = (
+                node_distance_m
+            )
+            self.pressure_neumann_invalid_diag_normal_denominator_m[row_index] = (
+                normal_denominator_m
+            )
+            self.pressure_neumann_invalid_diag_reconstruction_gap_m[row_index] = (
+                reconstruction_gap_m
+            )
+
     @ti.kernel
     def _assemble_pressure_neumann_matrix_rows_kernel(
         self,
@@ -4998,6 +7912,12 @@ class HibmMpmIbBoundaryConditions:
         pressure_coupling_active: ti.template(),
         pressure_coupling_neighbor: ti.template(),
         pressure_coupling_coefficient: ti.template(),
+        pressure_coupling_extra_neighbor: ti.template(),
+        pressure_coupling_extra_coefficient: ti.template(),
+        pressure_interface_row_count: ti.template(),
+        pressure_interface_row_owner: ti.template(),
+        pressure_interface_row_neighbor: ti.template(),
+        pressure_interface_row_transmissibility: ti.template(),
         obstacle_field: ti.template(),
         velocity_dirichlet_active: ti.template(),
         cell_width_x_m: ti.template(),
@@ -5005,6 +7925,7 @@ class HibmMpmIbBoundaryConditions:
         cell_width_z_m: ti.template(),
         node_boundary_point_m: ti.template(),
         node_interior_fluid_point_m: ti.template(),
+        node_anchor_cell: ti.template(),
         cell_face_x_m: ti.template(),
         cell_face_y_m: ti.template(),
         cell_face_z_m: ti.template(),
@@ -5012,8 +7933,13 @@ class HibmMpmIbBoundaryConditions:
         cell_center_y_m: ti.template(),
         cell_center_z_m: ti.template(),
         nearest_marker: ti.template(),
+        marker_surface_area_m2: ti.template(),
+        marker_pressure_neumann_candidate_node_count: ti.template(),
         marker_pressure_anchor_cell: ti.template(),
         marker_count: ti.i32,
+        max_pressure_coupling_slots: ti.i32,
+        pressure_interface_row_list_enabled: ti.i32,
+        pressure_interface_row_capacity: ti.i32,
         nx: ti.i32,
         ny: ti.i32,
         nz: ti.i32,
@@ -5022,6 +7948,9 @@ class HibmMpmIbBoundaryConditions:
         self.report_pressure_neumann_rhs_integral[None] = ti.cast(0.0, ti.f64)
         self.report_pressure_neumann_max_abs_rhs[None] = 0.0
         self.report_pressure_neumann_invalid_reconstruction_rows[None] = 0
+        self.report_pressure_neumann_invalid_unreconstructable_rows[None] = 0
+        self.report_pressure_neumann_invalid_bad_marker_rows[None] = 0
+        self.report_pressure_neumann_invalid_nonpositive_volume_rows[None] = 0
         self.report_pressure_neumann_min_reconstruction_gap_m[None] = 1.0e30
         self.report_pressure_neumann_max_reconstruction_gap_m[None] = 0.0
         self.report_pressure_neumann_max_transmissibility_m[None] = 0.0
@@ -5030,43 +7959,274 @@ class HibmMpmIbBoundaryConditions:
         self.report_pressure_neumann_transmissibility_capped_rows[None] = 0
         self.report_pressure_neumann_max_diagonal_per_m2[None] = 0.0
         self.report_pressure_neumann_skipped_velocity_dirichlet_rows[None] = 0
+        self.report_pressure_neumann_skipped_pressure_boundary_adjacent_rows[None] = 0
         self.report_pressure_neumann_skipped_obstacle_owner_rows[None] = 0
+        self.report_pressure_neumann_relocated_obstacle_owner_rows[None] = 0
+        self.report_pressure_neumann_duplicate_owner_rows[None] = 0
+        self.report_pressure_neumann_overflow_owner_rows[None] = 0
+        self.report_pressure_neumann_max_owner_slot_count[None] = 0
+        self.pressure_neumann_invalid_diag_count[None] = 0
         for node in ti.grouped(self.active_ib_node):
-            if self.active_ib_node[node] == 1 and obstacle_field[node] != 0:
-                ti.atomic_add(
-                    self.report_pressure_neumann_skipped_obstacle_owner_rows[None],
-                    1,
-                )
-            if (
-                self.active_ib_node[node] == 1
-                and obstacle_field[node] == 0
-                and velocity_dirichlet_active[node] != 0
-            ):
-                ti.atomic_add(
-                    self.report_pressure_neumann_skipped_velocity_dirichlet_rows[None],
-                    1,
-                )
-            if (
-                self.active_ib_node[node] == 1
-                and obstacle_field[node] == 0
-                and velocity_dirichlet_active[node] == 0
-            ):
-                marker = nearest_marker[node]
-                if 0 <= marker < marker_count:
-                    volume_m3 = (
-                        cell_width_x_m[node[0]]
-                        * cell_width_y_m[node[1]]
-                        * cell_width_z_m[node[2]]
-                    )
-                    if volume_m3 > 0.0:
-                        normal = self.pressure_neumann_normal_field[node]
-                        boundary_point = node_boundary_point_m[node]
-                        interior_point = node_interior_fluid_point_m[node]
-                        node_position = ti.Vector(
+            owner_i = node[0]
+            owner_j = node[1]
+            owner_k = node[2]
+            row_owner_is_fluid = 0
+            relocated_obstacle_owner = 0
+            normal = self.pressure_neumann_normal_field[node]
+            boundary_point = node_boundary_point_m[node]
+            if self.active_ib_node[node] == 1:
+                if obstacle_field[owner_i, owner_j, owner_k] == 0:
+                    row_owner_is_fluid = 1
+                else:
+                    anchor_cell = node_anchor_cell[node]
+                    anchor_i = anchor_cell.x
+                    anchor_j = anchor_cell.y
+                    anchor_k = anchor_cell.z
+                    if (
+                        anchor_i >= 0
+                        and anchor_i < nx
+                        and anchor_j >= 0
+                        and anchor_j < ny
+                        and anchor_k >= 0
+                        and anchor_k < nz
+                        and obstacle_field[anchor_i, anchor_j, anchor_k] == 0
+                    ):
+                        owner_i = anchor_i
+                        owner_j = anchor_j
+                        owner_k = anchor_k
+                        row_owner_is_fluid = 1
+                        relocated_obstacle_owner = 1
+                    if row_owner_is_fluid == 0:
+                        original_position = ti.Vector(
                             [
                                 cell_center_x_m[node[0]],
                                 cell_center_y_m[node[1]],
                                 cell_center_z_m[node[2]],
+                            ]
+                        )
+                        side = (original_position - boundary_point).dot(normal)
+                        primary_walk_normal = normal
+                        if side < 0.0:
+                            primary_walk_normal = -normal
+                        node_width_x = (
+                            cell_face_x_m[node[0] + 1] - cell_face_x_m[node[0]]
+                        )
+                        node_width_y = (
+                            cell_face_y_m[node[1] + 1] - cell_face_y_m[node[1]]
+                        )
+                        node_width_z = (
+                            cell_face_z_m[node[2] + 1] - cell_face_z_m[node[2]]
+                        )
+                        node_distance = ti.abs(side)
+                        target_i = -1
+                        target_j = -1
+                        target_k = -1
+                        for side_index in ti.static(range(2)):
+                            walk_normal = primary_walk_normal
+                            start_distance = node_distance
+                            if side_index == 1:
+                                walk_normal = -primary_walk_normal
+                                start_distance = 0.0
+                            walk_step_m = 0.5 / ti.max(
+                                ti.abs(walk_normal.x)
+                                / ti.max(node_width_x, 1.0e-12)
+                                + ti.abs(walk_normal.y)
+                                / ti.max(node_width_y, 1.0e-12)
+                                + ti.abs(walk_normal.z)
+                                / ti.max(node_width_z, 1.0e-12),
+                                1.0e-12,
+                            )
+                            step_index = 0
+                            while (
+                                step_index < HIBM_OWNER_RELOCATION_WALK_STEPS
+                                and target_i < 0
+                            ):
+                                candidate_distance = (
+                                    start_distance
+                                    + walk_step_m
+                                    * ti.cast(step_index + 1, ti.f32)
+                                )
+                                candidate_point = (
+                                    boundary_point
+                                    + walk_normal * candidate_distance
+                                )
+                                candidate_coordinate = (
+                                    self._grid_coordinate_from_fields(
+                                        candidate_point,
+                                        cell_face_x_m,
+                                        cell_face_y_m,
+                                        cell_face_z_m,
+                                        cell_center_x_m,
+                                        cell_center_y_m,
+                                        cell_center_z_m,
+                                        nx,
+                                        ny,
+                                        nz,
+                                    )
+                                )
+                                candidate_i = ti.min(
+                                    ti.max(
+                                        ti.floor(
+                                            candidate_coordinate.x + 0.5,
+                                            ti.i32,
+                                        ),
+                                        0,
+                                    ),
+                                    nx - 1,
+                                )
+                                candidate_j = ti.min(
+                                    ti.max(
+                                        ti.floor(
+                                            candidate_coordinate.y + 0.5,
+                                            ti.i32,
+                                        ),
+                                        0,
+                                    ),
+                                    ny - 1,
+                                )
+                                candidate_k = ti.min(
+                                    ti.max(
+                                        ti.floor(
+                                            candidate_coordinate.z + 0.5,
+                                            ti.i32,
+                                        ),
+                                        0,
+                                    ),
+                                    nz - 1,
+                                )
+                                if (
+                                    obstacle_field[
+                                        candidate_i,
+                                        candidate_j,
+                                        candidate_k,
+                                    ]
+                                    == 0
+                                ):
+                                    candidate_center = ti.Vector(
+                                        [
+                                            cell_center_x_m[candidate_i],
+                                            cell_center_y_m[candidate_j],
+                                            cell_center_z_m[candidate_k],
+                                        ]
+                                    )
+                                    candidate_center_distance = (
+                                        candidate_center - boundary_point
+                                    ).dot(walk_normal)
+                                    if candidate_center_distance > 1.0e-12:
+                                        target_i = candidate_i
+                                        target_j = candidate_j
+                                        target_k = candidate_k
+                                step_index += 1
+                        if target_i >= 0:
+                            owner_i = target_i
+                            owner_j = target_j
+                            owner_k = target_k
+                            row_owner_is_fluid = 1
+                            relocated_obstacle_owner = 1
+                if row_owner_is_fluid == 0:
+                    ti.atomic_add(
+                        self.report_pressure_neumann_skipped_obstacle_owner_rows[None],
+                        1,
+                    )
+                if (
+                    row_owner_is_fluid != 0
+                    and velocity_dirichlet_active[owner_i, owner_j, owner_k] != 0
+                ):
+                    target_i = -1
+                    target_j = -1
+                    target_k = -1
+                    anchor_cell = node_anchor_cell[node]
+                    anchor_i = anchor_cell.x
+                    anchor_j = anchor_cell.y
+                    anchor_k = anchor_cell.z
+                    if (
+                        anchor_i >= 0
+                        and anchor_i < nx
+                        and anchor_j >= 0
+                        and anchor_j < ny
+                        and anchor_k >= 0
+                        and anchor_k < nz
+                        and obstacle_field[anchor_i, anchor_j, anchor_k] == 0
+                        and velocity_dirichlet_active[anchor_i, anchor_j, anchor_k]
+                        == 0
+                    ):
+                        target_i = anchor_i
+                        target_j = anchor_j
+                        target_k = anchor_k
+                    if target_i < 0:
+                        for offset in ti.static(
+                            (
+                                (-1, 0, 0),
+                                (1, 0, 0),
+                                (0, -1, 0),
+                                (0, 1, 0),
+                                (0, 0, -1),
+                                (0, 0, 1),
+                            )
+                        ):
+                            if target_i < 0:
+                                candidate_i = owner_i + offset[0]
+                                candidate_j = owner_j + offset[1]
+                                candidate_k = owner_k + offset[2]
+                                if (
+                                    0 <= candidate_i
+                                    and candidate_i < nx
+                                    and 0 <= candidate_j
+                                    and candidate_j < ny
+                                    and 0 <= candidate_k
+                                    and candidate_k < nz
+                                ):
+                                    if (
+                                        obstacle_field[
+                                            candidate_i,
+                                            candidate_j,
+                                            candidate_k,
+                                        ]
+                                        == 0
+                                        and velocity_dirichlet_active[
+                                            candidate_i,
+                                            candidate_j,
+                                            candidate_k,
+                                        ]
+                                        == 0
+                                    ):
+                                        target_i = candidate_i
+                                        target_j = candidate_j
+                                        target_k = candidate_k
+                    if target_i >= 0:
+                        owner_i = target_i
+                        owner_j = target_j
+                        owner_k = target_k
+                    else:
+                        row_owner_is_fluid = 0
+                        ti.atomic_add(
+                            self.report_pressure_neumann_skipped_velocity_dirichlet_rows[
+                                None
+                            ],
+                            1,
+                        )
+            if (
+                self.active_ib_node[node] == 1
+                and row_owner_is_fluid != 0
+            ):
+                marker = nearest_marker[node]
+                diagnostic_anchor_cell = node_anchor_cell[node]
+                diagnostic_anchor_i = diagnostic_anchor_cell.x
+                diagnostic_anchor_j = diagnostic_anchor_cell.y
+                diagnostic_anchor_k = diagnostic_anchor_cell.z
+                if 0 <= marker < marker_count:
+                    volume_m3 = (
+                        cell_width_x_m[owner_i]
+                        * cell_width_y_m[owner_j]
+                        * cell_width_z_m[owner_k]
+                    )
+                    if volume_m3 > 0.0:
+                        interior_point = node_interior_fluid_point_m[node]
+                        node_position = ti.Vector(
+                            [
+                                cell_center_x_m[owner_i],
+                                cell_center_y_m[owner_j],
+                                cell_center_z_m[owner_k],
                             ]
                         )
                         grid_coordinate = self._grid_coordinate_from_fields(
@@ -5109,9 +8269,9 @@ class HibmMpmIbBoundaryConditions:
                         )
                         reconstruction_gap = ti.abs(neighbor_distance - node_distance)
                         node_spacing_inv = (
-                            ti.abs(normal.x) / cell_width_x_m[node[0]]
-                            + ti.abs(normal.y) / cell_width_y_m[node[1]]
-                            + ti.abs(normal.z) / cell_width_z_m[node[2]]
+                            ti.abs(normal.x) / cell_width_x_m[owner_i]
+                            + ti.abs(normal.y) / cell_width_y_m[owner_j]
+                            + ti.abs(normal.z) / cell_width_z_m[owner_k]
                         )
                         neighbor_spacing_inv = (
                             ti.abs(normal.x) / cell_width_x_m[neighbor_i]
@@ -5141,50 +8301,107 @@ class HibmMpmIbBoundaryConditions:
                             and node_distance >= 0.0
                             and node_distance <= normal_denominator
                             and obstacle_field[neighbor_i, neighbor_j, neighbor_k] == 0
+                            and velocity_dirichlet_active[
+                                neighbor_i,
+                                neighbor_j,
+                                neighbor_k,
+                            ]
+                            == 0
                         ):
                             row_reconstructable = 1
                         else:
                             abs_x = ti.abs(normal.x)
                             abs_y = ti.abs(normal.y)
                             abs_z = ti.abs(normal.z)
-                            fallback_i = node[0]
-                            fallback_j = node[1]
-                            fallback_k = node[2]
+                            fallback_i = owner_i
+                            fallback_j = owner_j
+                            fallback_k = owner_k
                             if abs_x >= abs_y and abs_x >= abs_z:
                                 step = 1
                                 if normal.x < 0.0:
                                     step = -1
-                                fallback_i = node[0] + step
+                                fallback_i = owner_i + step
                                 if fallback_i < 0 or fallback_i >= nx:
-                                    fallback_i = node[0] - step
+                                    fallback_i = owner_i - step
                                 fallback_i = ti.min(ti.max(fallback_i, 0), nx - 1)
-                                if obstacle_field[fallback_i, fallback_j, fallback_k] != 0:
-                                    alternate_i = ti.min(ti.max(node[0] - step, 0), nx - 1)
-                                    if obstacle_field[alternate_i, fallback_j, fallback_k] == 0:
+                                if (
+                                    obstacle_field[fallback_i, fallback_j, fallback_k] != 0
+                                    or velocity_dirichlet_active[
+                                        fallback_i,
+                                        fallback_j,
+                                        fallback_k,
+                                    ]
+                                    != 0
+                                ):
+                                    alternate_i = ti.min(ti.max(owner_i - step, 0), nx - 1)
+                                    if (
+                                        obstacle_field[alternate_i, fallback_j, fallback_k]
+                                        == 0
+                                        and velocity_dirichlet_active[
+                                            alternate_i,
+                                            fallback_j,
+                                            fallback_k,
+                                        ]
+                                        == 0
+                                    ):
                                         fallback_i = alternate_i
                             elif abs_y >= abs_x and abs_y >= abs_z:
                                 step = 1
                                 if normal.y < 0.0:
                                     step = -1
-                                fallback_j = node[1] + step
+                                fallback_j = owner_j + step
                                 if fallback_j < 0 or fallback_j >= ny:
-                                    fallback_j = node[1] - step
+                                    fallback_j = owner_j - step
                                 fallback_j = ti.min(ti.max(fallback_j, 0), ny - 1)
-                                if obstacle_field[fallback_i, fallback_j, fallback_k] != 0:
-                                    alternate_j = ti.min(ti.max(node[1] - step, 0), ny - 1)
-                                    if obstacle_field[fallback_i, alternate_j, fallback_k] == 0:
+                                if (
+                                    obstacle_field[fallback_i, fallback_j, fallback_k] != 0
+                                    or velocity_dirichlet_active[
+                                        fallback_i,
+                                        fallback_j,
+                                        fallback_k,
+                                    ]
+                                    != 0
+                                ):
+                                    alternate_j = ti.min(ti.max(owner_j - step, 0), ny - 1)
+                                    if (
+                                        obstacle_field[fallback_i, alternate_j, fallback_k]
+                                        == 0
+                                        and velocity_dirichlet_active[
+                                            fallback_i,
+                                            alternate_j,
+                                            fallback_k,
+                                        ]
+                                        == 0
+                                    ):
                                         fallback_j = alternate_j
                             else:
                                 step = 1
                                 if normal.z < 0.0:
                                     step = -1
-                                fallback_k = node[2] + step
+                                fallback_k = owner_k + step
                                 if fallback_k < 0 or fallback_k >= nz:
-                                    fallback_k = node[2] - step
+                                    fallback_k = owner_k - step
                                 fallback_k = ti.min(ti.max(fallback_k, 0), nz - 1)
-                                if obstacle_field[fallback_i, fallback_j, fallback_k] != 0:
-                                    alternate_k = ti.min(ti.max(node[2] - step, 0), nz - 1)
-                                    if obstacle_field[fallback_i, fallback_j, alternate_k] == 0:
+                                if (
+                                    obstacle_field[fallback_i, fallback_j, fallback_k] != 0
+                                    or velocity_dirichlet_active[
+                                        fallback_i,
+                                        fallback_j,
+                                        fallback_k,
+                                    ]
+                                    != 0
+                                ):
+                                    alternate_k = ti.min(ti.max(owner_k - step, 0), nz - 1)
+                                    if (
+                                        obstacle_field[fallback_i, fallback_j, alternate_k]
+                                        == 0
+                                        and velocity_dirichlet_active[
+                                            fallback_i,
+                                            fallback_j,
+                                            alternate_k,
+                                        ]
+                                        == 0
+                                    ):
                                         fallback_k = alternate_k
                             neighbor_i = fallback_i
                             neighbor_j = fallback_j
@@ -5222,23 +8439,405 @@ class HibmMpmIbBoundaryConditions:
                             if (
                                 reconstruction_gap > reconstruction_gap_floor
                                 and obstacle_field[neighbor_i, neighbor_j, neighbor_k] == 0
+                                and velocity_dirichlet_active[
+                                    neighbor_i,
+                                    neighbor_j,
+                                    neighbor_k,
+                                ]
+                                == 0
                                 and (
-                                    neighbor_i != node[0]
-                                    or neighbor_j != node[1]
-                                    or neighbor_k != node[2]
+                                    neighbor_i != owner_i
+                                    or neighbor_j != owner_j
+                                    or neighbor_k != owner_k
                                 )
                             ):
                                 row_reconstructable = 1
+                            if row_reconstructable == 0:
+                                best_i = -1
+                                best_j = -1
+                                best_k = -1
+                                best_gap = 0.0
+                                best_neighbor_distance = 0.0
+                                best_neighbor_normal_width = 0.0
+                                best_min_normal_width = 0.0
+                                best_gap_floor = 0.0
+                                for offset in ti.static(
+                                    (
+                                        (-1, 0, 0),
+                                        (1, 0, 0),
+                                        (0, -1, 0),
+                                        (0, 1, 0),
+                                        (0, 0, -1),
+                                        (0, 0, 1),
+                                    )
+                                ):
+                                    candidate_i = owner_i + offset[0]
+                                    candidate_j = owner_j + offset[1]
+                                    candidate_k = owner_k + offset[2]
+                                    if (
+                                        0 <= candidate_i
+                                        and candidate_i < nx
+                                        and 0 <= candidate_j
+                                        and candidate_j < ny
+                                        and 0 <= candidate_k
+                                        and candidate_k < nz
+                                        and obstacle_field[
+                                            candidate_i,
+                                            candidate_j,
+                                            candidate_k,
+                                        ]
+                                        == 0
+                                        and velocity_dirichlet_active[
+                                            candidate_i,
+                                            candidate_j,
+                                            candidate_k,
+                                        ]
+                                        == 0
+                                    ):
+                                        candidate_position = ti.Vector(
+                                            [
+                                                cell_center_x_m[candidate_i],
+                                                cell_center_y_m[candidate_j],
+                                                cell_center_z_m[candidate_k],
+                                            ]
+                                        )
+                                        candidate_distance = (
+                                            candidate_position - boundary_point
+                                        ).dot(normal)
+                                        candidate_gap = ti.abs(
+                                            candidate_distance - node_distance
+                                        )
+                                        candidate_spacing_inv = (
+                                            ti.abs(normal.x)
+                                            / cell_width_x_m[candidate_i]
+                                            + ti.abs(normal.y)
+                                            / cell_width_y_m[candidate_j]
+                                            + ti.abs(normal.z)
+                                            / cell_width_z_m[candidate_k]
+                                        )
+                                        candidate_normal_width = 1.0 / ti.max(
+                                            candidate_spacing_inv,
+                                            1.0e-12,
+                                        )
+                                        candidate_min_width = ti.min(
+                                            node_normal_width,
+                                            candidate_normal_width,
+                                        )
+                                        candidate_gap_floor = ti.max(
+                                            1.0e-12,
+                                            1.0e-3 * candidate_min_width,
+                                        )
+                                        if (
+                                            candidate_gap > candidate_gap_floor
+                                            and candidate_gap > best_gap
+                                        ):
+                                            best_i = candidate_i
+                                            best_j = candidate_j
+                                            best_k = candidate_k
+                                            best_gap = candidate_gap
+                                            best_neighbor_distance = candidate_distance
+                                            best_neighbor_normal_width = (
+                                                candidate_normal_width
+                                            )
+                                            best_min_normal_width = candidate_min_width
+                                            best_gap_floor = candidate_gap_floor
+                                if best_i >= 0:
+                                    neighbor_i = best_i
+                                    neighbor_j = best_j
+                                    neighbor_k = best_k
+                                    neighbor_distance = best_neighbor_distance
+                                    reconstruction_gap = best_gap
+                                    neighbor_normal_width = best_neighbor_normal_width
+                                    min_normal_width = best_min_normal_width
+                                    reconstruction_gap_floor = best_gap_floor
+                                    row_reconstructable = 1
+                            if row_reconstructable == 0:
+                                anchor_cell = node_anchor_cell[node]
+                                anchor_i = anchor_cell.x
+                                anchor_j = anchor_cell.y
+                                anchor_k = anchor_cell.z
+                                if (
+                                    anchor_i >= 0
+                                    and anchor_i < nx
+                                    and anchor_j >= 0
+                                    and anchor_j < ny
+                                    and anchor_k >= 0
+                                    and anchor_k < nz
+                                    and (
+                                        anchor_i != owner_i
+                                        or anchor_j != owner_j
+                                        or anchor_k != owner_k
+                                    )
+                                    and obstacle_field[anchor_i, anchor_j, anchor_k] == 0
+                                    and velocity_dirichlet_active[
+                                        anchor_i,
+                                        anchor_j,
+                                        anchor_k,
+                                    ]
+                                    == 0
+                                ):
+                                    anchor_position = ti.Vector(
+                                        [
+                                            cell_center_x_m[anchor_i],
+                                            cell_center_y_m[anchor_j],
+                                            cell_center_z_m[anchor_k],
+                                        ]
+                                    )
+                                    anchor_distance = (
+                                        anchor_position - boundary_point
+                                    ).dot(normal)
+                                    anchor_gap = ti.abs(
+                                        anchor_distance - node_distance
+                                    )
+                                    anchor_spacing_inv = (
+                                        ti.abs(normal.x) / cell_width_x_m[anchor_i]
+                                        + ti.abs(normal.y) / cell_width_y_m[anchor_j]
+                                        + ti.abs(normal.z) / cell_width_z_m[anchor_k]
+                                    )
+                                    anchor_normal_width = 1.0 / ti.max(
+                                        anchor_spacing_inv,
+                                        1.0e-12,
+                                    )
+                                    anchor_min_width = ti.min(
+                                        node_normal_width,
+                                        anchor_normal_width,
+                                    )
+                                    anchor_gap_floor = ti.max(
+                                        1.0e-12,
+                                        1.0e-3 * anchor_min_width,
+                                    )
+                                    if (
+                                        anchor_gap > anchor_gap_floor
+                                        and anchor_distance >= 0.0
+                                    ):
+                                        neighbor_i = anchor_i
+                                        neighbor_j = anchor_j
+                                        neighbor_k = anchor_k
+                                        neighbor_distance = anchor_distance
+                                        reconstruction_gap = anchor_gap
+                                        neighbor_normal_width = anchor_normal_width
+                                        min_normal_width = anchor_min_width
+                                        reconstruction_gap_floor = anchor_gap_floor
+                                        row_reconstructable = 1
+                            if row_reconstructable == 0:
+                                normal_line_i = -1
+                                normal_line_j = -1
+                                normal_line_k = -1
+                                normal_line_distance = 0.0
+                                normal_line_gap = 0.0
+                                normal_line_normal_width = 0.0
+                                normal_line_min_width = 0.0
+                                normal_line_gap_floor = 0.0
+                                primary_walk_normal = normal
+                                if normal_denominator < 0.0:
+                                    primary_walk_normal = -normal
+                                for side_index in ti.static(range(2)):
+                                    walk_normal = primary_walk_normal
+                                    if side_index == 1:
+                                        walk_normal = -primary_walk_normal
+                                    walk_step_m = 0.5 / ti.max(
+                                        ti.abs(walk_normal.x)
+                                        / ti.max(cell_width_x_m[owner_i], 1.0e-12)
+                                        + ti.abs(walk_normal.y)
+                                        / ti.max(cell_width_y_m[owner_j], 1.0e-12)
+                                        + ti.abs(walk_normal.z)
+                                        / ti.max(cell_width_z_m[owner_k], 1.0e-12),
+                                        1.0e-12,
+                                    )
+                                    step_index = 0
+                                    while (
+                                        step_index
+                                        < HIBM_OWNER_RELOCATION_WALK_STEPS
+                                        and normal_line_i < 0
+                                    ):
+                                        candidate_distance_from_boundary = (
+                                            walk_step_m
+                                            * ti.cast(step_index + 1, ti.f32)
+                                        )
+                                        candidate_point = (
+                                            boundary_point
+                                            + walk_normal
+                                            * candidate_distance_from_boundary
+                                        )
+                                        candidate_coordinate = (
+                                            self._grid_coordinate_from_fields(
+                                                candidate_point,
+                                                cell_face_x_m,
+                                                cell_face_y_m,
+                                                cell_face_z_m,
+                                                cell_center_x_m,
+                                                cell_center_y_m,
+                                                cell_center_z_m,
+                                                nx,
+                                                ny,
+                                                nz,
+                                            )
+                                        )
+                                        candidate_i = ti.min(
+                                            ti.max(
+                                                ti.floor(
+                                                    candidate_coordinate.x + 0.5,
+                                                    ti.i32,
+                                                ),
+                                                0,
+                                            ),
+                                            nx - 1,
+                                        )
+                                        candidate_j = ti.min(
+                                            ti.max(
+                                                ti.floor(
+                                                    candidate_coordinate.y + 0.5,
+                                                    ti.i32,
+                                                ),
+                                                0,
+                                            ),
+                                            ny - 1,
+                                        )
+                                        candidate_k = ti.min(
+                                            ti.max(
+                                                ti.floor(
+                                                    candidate_coordinate.z + 0.5,
+                                                    ti.i32,
+                                                ),
+                                                0,
+                                            ),
+                                            nz - 1,
+                                        )
+                                        if (
+                                            obstacle_field[
+                                                candidate_i,
+                                                candidate_j,
+                                                candidate_k,
+                                            ]
+                                            == 0
+                                            and velocity_dirichlet_active[
+                                                candidate_i,
+                                                candidate_j,
+                                                candidate_k,
+                                            ]
+                                            == 0
+                                            and (
+                                                candidate_i != owner_i
+                                                or candidate_j != owner_j
+                                                or candidate_k != owner_k
+                                            )
+                                        ):
+                                            candidate_center = ti.Vector(
+                                                [
+                                                    cell_center_x_m[candidate_i],
+                                                    cell_center_y_m[candidate_j],
+                                                    cell_center_z_m[candidate_k],
+                                                ]
+                                            )
+                                            candidate_normal_distance = (
+                                                candidate_center - boundary_point
+                                            ).dot(normal)
+                                            candidate_gap = ti.abs(
+                                                candidate_normal_distance
+                                                - node_distance
+                                            )
+                                            candidate_spacing_inv = (
+                                                ti.abs(normal.x)
+                                                / cell_width_x_m[candidate_i]
+                                                + ti.abs(normal.y)
+                                                / cell_width_y_m[candidate_j]
+                                                + ti.abs(normal.z)
+                                                / cell_width_z_m[candidate_k]
+                                            )
+                                            candidate_normal_width = 1.0 / ti.max(
+                                                candidate_spacing_inv,
+                                                1.0e-12,
+                                            )
+                                            candidate_min_width = ti.min(
+                                                node_normal_width,
+                                                candidate_normal_width,
+                                            )
+                                            candidate_gap_floor = ti.max(
+                                                1.0e-12,
+                                                1.0e-3 * candidate_min_width,
+                                            )
+                                            if candidate_gap > candidate_gap_floor:
+                                                normal_line_i = candidate_i
+                                                normal_line_j = candidate_j
+                                                normal_line_k = candidate_k
+                                                normal_line_distance = (
+                                                    candidate_normal_distance
+                                                )
+                                                normal_line_gap = candidate_gap
+                                                normal_line_normal_width = (
+                                                    candidate_normal_width
+                                                )
+                                                normal_line_min_width = (
+                                                    candidate_min_width
+                                                )
+                                                normal_line_gap_floor = (
+                                                    candidate_gap_floor
+                                                )
+                                        step_index += 1
+                                if normal_line_i >= 0:
+                                    neighbor_i = normal_line_i
+                                    neighbor_j = normal_line_j
+                                    neighbor_k = normal_line_k
+                                    neighbor_distance = normal_line_distance
+                                    reconstruction_gap = normal_line_gap
+                                    neighbor_normal_width = normal_line_normal_width
+                                    min_normal_width = normal_line_min_width
+                                    reconstruction_gap_floor = normal_line_gap_floor
+                                    row_reconstructable = 1
+                        row_rejected_by_pressure_boundary = 0
+                        if (
+                            row_reconstructable != 0
+                            and (
+                                self._pressure_neumann_cell_touches_velocity_dirichlet_projection_face(
+                                    velocity_dirichlet_active,
+                                    owner_i,
+                                    owner_j,
+                                    owner_k,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                                or self._pressure_neumann_cell_touches_velocity_dirichlet_projection_face(
+                                    velocity_dirichlet_active,
+                                    neighbor_i,
+                                    neighbor_j,
+                                    neighbor_k,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                            )
+                        ):
+                            row_reconstructable = 0
+                            row_rejected_by_pressure_boundary = 1
+                            ti.atomic_add(
+                                self.report_pressure_neumann_skipped_pressure_boundary_adjacent_rows[
+                                    None
+                                ],
+                                1,
+                            )
                         if row_reconstructable != 0:
                             neighbor_volume_m3 = (
                                 cell_width_x_m[neighbor_i]
                                 * cell_width_y_m[neighbor_j]
                                 * cell_width_z_m[neighbor_k]
                             )
-                            interface_area_m2 = 0.5 * (
+                            cell_interface_area_m2 = 0.5 * (
                                 volume_m3 / ti.max(node_normal_width, 1.0e-12)
                                 + neighbor_volume_m3
                                 / ti.max(neighbor_normal_width, 1.0e-12)
+                            )
+                            candidate_count = ti.max(
+                                marker_pressure_neumann_candidate_node_count[marker],
+                                1,
+                            )
+                            marker_area_per_candidate_m2 = (
+                                ti.max(marker_surface_area_m2[marker], 0.0)
+                                / ti.cast(candidate_count, ti.f32)
+                            )
+                            interface_area_m2 = ti.min(
+                                cell_interface_area_m2,
+                                marker_area_per_candidate_m2,
                             )
                             raw_transmissibility = (
                                 interface_area_m2 / reconstruction_gap
@@ -5271,112 +8870,295 @@ class HibmMpmIbBoundaryConditions:
                             neighbor_rhs_density = (
                                 -neighbor_coefficient * pressure_jump
                             )
-                            ti.atomic_add(
-                                pressure_matrix_diagonal[node],
-                                node_coefficient,
-                            )
-                            ti.atomic_add(
-                                pressure_matrix_diagonal[
-                                    neighbor_i,
-                                    neighbor_j,
-                                    neighbor_k,
-                                ],
-                                neighbor_coefficient,
-                            )
-                            ti.atomic_add(pressure_matrix_rhs[node], node_rhs_density)
-                            ti.atomic_add(
-                                pressure_matrix_rhs[
-                                    neighbor_i,
-                                    neighbor_j,
-                                    neighbor_k,
-                                ],
-                                neighbor_rhs_density,
-                            )
-                            pressure_coupling_active[node] = 1
-                            pressure_coupling_neighbor[node] = ti.Vector(
-                                [neighbor_i, neighbor_j, neighbor_k]
-                            )
-                            pressure_coupling_coefficient[node] = transmissibility
-                            ti.atomic_add(
-                                self.report_pressure_neumann_matrix_rows[None],
-                                1,
-                            )
-                            previous_marker_row_count = ti.atomic_add(
-                                self.marker_pressure_neumann_row_count[marker],
-                                1,
-                            )
-                            if previous_marker_row_count == 0:
-                                # S2-A6: anchor the marker to its first
-                                # row-owning fluid cell. All acceptance
-                                # paths (direct interior-point walk, the
-                                # bounds-relocated axial fallback and the
-                                # obstacle-alternate axial fallback)
-                                # converge on this row-write block, so
-                                # every row writer is covered; the 0 -> 1
-                                # transition of the per-marker row counter
-                                # elects exactly one writer per marker,
-                                # keeping the 3-component store tear-free
-                                # without a second guard field. The node is
-                                # obstacle-free and receives diagonal/rhs
-                                # terms above, i.e. it participates in the
-                                # pressure solve by construction.
-                                marker_pressure_anchor_cell[marker] = ti.Vector(
-                                    [node[0], node[1], node[2]]
+                            slot_index = 0
+                            if max_pressure_coupling_slots > 1:
+                                slot_index = ti.atomic_add(
+                                    pressure_coupling_active[
+                                        owner_i,
+                                        owner_j,
+                                        owner_k,
+                                    ],
+                                    1,
                                 )
-                            self.report_pressure_neumann_rhs_integral[None] += (
-                                ti.cast(node_rhs_density * volume_m3, ti.f64)
-                                + ti.cast(
-                                    neighbor_rhs_density * neighbor_volume_m3,
-                                    ti.f64,
+                            else:
+                                slot_index = ti.atomic_or(
+                                    pressure_coupling_active[
+                                        owner_i,
+                                        owner_j,
+                                        owner_k,
+                                    ],
+                                    1,
                                 )
-                            )
                             ti.atomic_max(
-                                self.report_pressure_neumann_max_abs_rhs[None],
-                                ti.max(
-                                    ti.abs(node_rhs_density),
-                                    ti.abs(neighbor_rhs_density),
-                                ),
-                            )
-                            ti.atomic_min(
-                                self.report_pressure_neumann_min_reconstruction_gap_m[
+                                self.report_pressure_neumann_max_owner_slot_count[
                                     None
                                 ],
-                                reconstruction_gap,
+                                slot_index + 1,
                             )
-                            ti.atomic_max(
-                                self.report_pressure_neumann_max_reconstruction_gap_m[
-                                    None
-                                ],
-                                reconstruction_gap,
-                            )
-                            ti.atomic_max(
-                                self.report_pressure_neumann_max_transmissibility_m[
-                                    None
-                                ],
-                                transmissibility,
-                            )
-                            ti.atomic_max(
-                                self.report_pressure_neumann_max_raw_transmissibility_m[
-                                    None
-                                ],
-                                raw_transmissibility,
-                            )
-                            ti.atomic_max(
-                                self.report_pressure_neumann_max_transmissibility_limit_m[
-                                    None
-                                ],
-                                transmissibility_limit,
-                            )
-                            ti.atomic_max(
-                                self.report_pressure_neumann_max_diagonal_per_m2[None],
-                                ti.max(node_coefficient, neighbor_coefficient),
-                            )
-                        else:
+                            if slot_index > 0:
+                                ti.atomic_add(
+                                    self.report_pressure_neumann_duplicate_owner_rows[
+                                        None
+                                    ],
+                                    1,
+                                )
+                            row_enters_pressure_matrix = 0
+                            if slot_index < max_pressure_coupling_slots:
+                                if slot_index == 0:
+                                    pressure_coupling_neighbor[
+                                        owner_i,
+                                        owner_j,
+                                        owner_k,
+                                    ] = ti.Vector([neighbor_i, neighbor_j, neighbor_k])
+                                    pressure_coupling_coefficient[
+                                        owner_i,
+                                        owner_j,
+                                        owner_k,
+                                    ] = transmissibility
+                                else:
+                                    extra_slot = slot_index - 1
+                                    pressure_coupling_extra_neighbor[
+                                        owner_i,
+                                        owner_j,
+                                        owner_k,
+                                        extra_slot,
+                                    ] = ti.Vector([neighbor_i, neighbor_j, neighbor_k])
+                                    pressure_coupling_extra_coefficient[
+                                        owner_i,
+                                        owner_j,
+                                        owner_k,
+                                        extra_slot,
+                                    ] = transmissibility
+                                row_enters_pressure_matrix = 1
+                            else:
+                                merge_slot = -1
+                                primary_neighbor = pressure_coupling_neighbor[
+                                    owner_i,
+                                    owner_j,
+                                    owner_k,
+                                ]
+                                if (
+                                    primary_neighbor[0] == neighbor_i
+                                    and primary_neighbor[1] == neighbor_j
+                                    and primary_neighbor[2] == neighbor_k
+                                ):
+                                    merge_slot = 0
+                                for candidate_extra_slot in ti.static(
+                                    range(PRESSURE_INTERFACE_COUPLING_EXTRA_SLOTS)
+                                ):
+                                    if (
+                                        merge_slot < 0
+                                        and candidate_extra_slot + 1
+                                        < max_pressure_coupling_slots
+                                    ):
+                                        extra_neighbor = (
+                                            pressure_coupling_extra_neighbor[
+                                                owner_i,
+                                                owner_j,
+                                                owner_k,
+                                                candidate_extra_slot,
+                                            ]
+                                        )
+                                        if (
+                                            extra_neighbor[0] == neighbor_i
+                                            and extra_neighbor[1] == neighbor_j
+                                            and extra_neighbor[2] == neighbor_k
+                                        ):
+                                            merge_slot = candidate_extra_slot + 1
+                                if merge_slot == 0:
+                                    ti.atomic_add(
+                                        pressure_coupling_coefficient[
+                                            owner_i,
+                                            owner_j,
+                                            owner_k,
+                                        ],
+                                        transmissibility,
+                                    )
+                                    row_enters_pressure_matrix = 1
+                                elif merge_slot > 0:
+                                    ti.atomic_add(
+                                        pressure_coupling_extra_coefficient[
+                                            owner_i,
+                                            owner_j,
+                                            owner_k,
+                                            merge_slot - 1,
+                                        ],
+                                        transmissibility,
+                                    )
+                                    row_enters_pressure_matrix = 1
+                                else:
+                                    if pressure_interface_row_list_enabled == 0:
+                                        ti.atomic_add(
+                                            self.report_pressure_neumann_overflow_owner_rows[
+                                                None
+                                            ],
+                                            1,
+                                        )
+                            if pressure_interface_row_list_enabled != 0:
+                                row_enters_pressure_matrix = 0
+                                row_index = ti.atomic_add(
+                                    pressure_interface_row_count[None],
+                                    1,
+                                )
+                                if row_index < pressure_interface_row_capacity:
+                                    pressure_interface_row_owner[row_index] = ti.Vector(
+                                        [owner_i, owner_j, owner_k]
+                                    )
+                                    pressure_interface_row_neighbor[row_index] = (
+                                        ti.Vector([neighbor_i, neighbor_j, neighbor_k])
+                                    )
+                                    pressure_interface_row_transmissibility[
+                                        row_index
+                                    ] = transmissibility
+                                    row_enters_pressure_matrix = 1
+                                else:
+                                    ti.atomic_add(
+                                        self.report_pressure_neumann_overflow_owner_rows[
+                                            None
+                                        ],
+                                        1,
+                                    )
+                            if row_enters_pressure_matrix != 0:
+                                if relocated_obstacle_owner != 0:
+                                    ti.atomic_add(
+                                        self.report_pressure_neumann_relocated_obstacle_owner_rows[
+                                            None
+                                        ],
+                                        1,
+                                    )
+                                ti.atomic_add(
+                                    pressure_matrix_diagonal[
+                                        owner_i,
+                                        owner_j,
+                                        owner_k,
+                                    ],
+                                    node_coefficient,
+                                )
+                                ti.atomic_add(
+                                    pressure_matrix_diagonal[
+                                        neighbor_i,
+                                        neighbor_j,
+                                        neighbor_k,
+                                    ],
+                                    neighbor_coefficient,
+                                )
+                                ti.atomic_add(
+                                    pressure_matrix_rhs[owner_i, owner_j, owner_k],
+                                    node_rhs_density,
+                                )
+                                ti.atomic_add(
+                                    pressure_matrix_rhs[
+                                        neighbor_i,
+                                        neighbor_j,
+                                        neighbor_k,
+                                    ],
+                                    neighbor_rhs_density,
+                                )
+                                ti.atomic_add(
+                                    self.report_pressure_neumann_matrix_rows[None],
+                                    1,
+                                )
+                                previous_marker_row_count = ti.atomic_add(
+                                    self.marker_pressure_neumann_row_count[marker],
+                                    1,
+                                )
+                                if previous_marker_row_count == 0:
+                                    # S2-A6: anchor the marker to its first
+                                    # row-owning fluid cell. All acceptance
+                                    # paths (direct interior-point walk, the
+                                    # bounds-relocated axial fallback and the
+                                    # obstacle-alternate axial fallback)
+                                    # converge on this row-write block, so
+                                    # every row writer is covered; the 0 -> 1
+                                    # transition of the per-marker row counter
+                                    # elects exactly one writer per marker,
+                                    # keeping the 3-component store tear-free
+                                    # without a second guard field. The node is
+                                    # obstacle-free and receives diagonal/rhs
+                                    # terms above, i.e. it participates in the
+                                    # pressure solve by construction.
+                                    marker_pressure_anchor_cell[marker] = ti.Vector(
+                                        [owner_i, owner_j, owner_k]
+                                    )
+                                self.report_pressure_neumann_rhs_integral[None] += (
+                                    ti.cast(node_rhs_density * volume_m3, ti.f64)
+                                    + ti.cast(
+                                        neighbor_rhs_density * neighbor_volume_m3,
+                                        ti.f64,
+                                    )
+                                )
+                                ti.atomic_max(
+                                    self.report_pressure_neumann_max_abs_rhs[None],
+                                    ti.max(
+                                        ti.abs(node_rhs_density),
+                                        ti.abs(neighbor_rhs_density),
+                                    ),
+                                )
+                                ti.atomic_min(
+                                    self.report_pressure_neumann_min_reconstruction_gap_m[
+                                        None
+                                    ],
+                                    reconstruction_gap,
+                                )
+                                ti.atomic_max(
+                                    self.report_pressure_neumann_max_reconstruction_gap_m[
+                                        None
+                                    ],
+                                    reconstruction_gap,
+                                )
+                                ti.atomic_max(
+                                    self.report_pressure_neumann_max_transmissibility_m[
+                                        None
+                                    ],
+                                    transmissibility,
+                                )
+                                ti.atomic_max(
+                                    self.report_pressure_neumann_max_raw_transmissibility_m[
+                                        None
+                                    ],
+                                    raw_transmissibility,
+                                )
+                                ti.atomic_max(
+                                    self.report_pressure_neumann_max_transmissibility_limit_m[
+                                        None
+                                    ],
+                                    transmissibility_limit,
+                                )
+                                ti.atomic_max(
+                                    self.report_pressure_neumann_max_diagonal_per_m2[
+                                        None
+                                    ],
+                                    ti.max(node_coefficient, neighbor_coefficient),
+                                )
+                        elif row_rejected_by_pressure_boundary == 0:
                             ti.atomic_add(
                                 self.report_pressure_neumann_invalid_reconstruction_rows[
                                     None
                                 ],
                                 1,
+                            )
+                            ti.atomic_add(
+                                self.report_pressure_neumann_invalid_unreconstructable_rows[
+                                    None
+                                ],
+                                1,
+                            )
+                            self._record_pressure_neumann_invalid_diagnostic_row(
+                                node,
+                                owner_i,
+                                owner_j,
+                                owner_k,
+                                neighbor_i,
+                                neighbor_j,
+                                neighbor_k,
+                                diagnostic_anchor_i,
+                                diagnostic_anchor_j,
+                                diagnostic_anchor_k,
+                                marker,
+                                PRESSURE_NEUMANN_INVALID_REASON_UNRECONSTRUCTABLE,
+                                node_distance,
+                                normal_denominator,
+                                reconstruction_gap,
                             )
                     else:
                         ti.atomic_add(
@@ -5385,10 +9167,54 @@ class HibmMpmIbBoundaryConditions:
                             ],
                             1,
                         )
+                        ti.atomic_add(
+                            self.report_pressure_neumann_invalid_nonpositive_volume_rows[
+                                None
+                            ],
+                            1,
+                        )
+                        self._record_pressure_neumann_invalid_diagnostic_row(
+                            node,
+                            owner_i,
+                            owner_j,
+                            owner_k,
+                            -1,
+                            -1,
+                            -1,
+                            diagnostic_anchor_i,
+                            diagnostic_anchor_j,
+                            diagnostic_anchor_k,
+                            marker,
+                            PRESSURE_NEUMANN_INVALID_REASON_NONPOSITIVE_VOLUME,
+                            0.0,
+                            0.0,
+                            0.0,
+                        )
                 else:
                     ti.atomic_add(
                         self.report_pressure_neumann_invalid_reconstruction_rows[None],
                         1,
+                    )
+                    ti.atomic_add(
+                        self.report_pressure_neumann_invalid_bad_marker_rows[None],
+                        1,
+                    )
+                    self._record_pressure_neumann_invalid_diagnostic_row(
+                        node,
+                        owner_i,
+                        owner_j,
+                        owner_k,
+                        -1,
+                        -1,
+                        -1,
+                        diagnostic_anchor_i,
+                        diagnostic_anchor_j,
+                        diagnostic_anchor_k,
+                        marker,
+                        PRESSURE_NEUMANN_INVALID_REASON_BAD_MARKER,
+                        0.0,
+                        0.0,
+                        0.0,
                     )
 
     def assemble_pressure_neumann_matrix_rows(
@@ -5406,6 +9232,13 @@ class HibmMpmIbBoundaryConditions:
         search: HibmMpmIbNodeSearch,
         markers: HibmMpmSurfaceMarkers,
         *,
+        pressure_coupling_extra_neighbor=None,
+        pressure_coupling_extra_coefficient=None,
+        pressure_interface_row_count=None,
+        pressure_interface_row_owner=None,
+        pressure_interface_row_neighbor=None,
+        pressure_interface_row_transmissibility=None,
+        pressure_interface_row_capacity: int = 0,
         cell_face_x_m,
         cell_face_y_m,
         cell_face_z_m,
@@ -5413,6 +9246,8 @@ class HibmMpmIbBoundaryConditions:
         cell_center_y_m,
         cell_center_z_m,
         grid_nodes: tuple[int, int, int],
+        velocity_dirichlet_marker_region_id=None,
+        marker_region_id=None,
     ) -> HibmMpmPressureNeumannMatrixReport:
         self._validate_search_and_markers(search, markers)
         nodes = tuple(int(value) for value in grid_nodes)
@@ -5421,6 +9256,53 @@ class HibmMpmIbBoundaryConditions:
         self._clear_pressure_neumann_rows_by_marker_kernel(
             int(markers.marker_count),
         )
+        self._count_pressure_neumann_candidate_nodes_by_marker_kernel(
+            search.nearest_marker,
+            int(markers.marker_count),
+        )
+        extra_slots_available = (
+            pressure_coupling_extra_neighbor is not None
+            and pressure_coupling_extra_coefficient is not None
+        )
+        if (
+            pressure_coupling_extra_neighbor is None
+            and pressure_coupling_extra_coefficient is not None
+        ) or (
+            pressure_coupling_extra_neighbor is not None
+            and pressure_coupling_extra_coefficient is None
+        ):
+            raise ValueError(
+                "pressure_coupling_extra_neighbor and "
+                "pressure_coupling_extra_coefficient must be provided together"
+            )
+        max_pressure_coupling_slots = 1
+        if extra_slots_available:
+            max_pressure_coupling_slots = PRESSURE_INTERFACE_COUPLING_SLOT_COUNT
+        if pressure_coupling_extra_neighbor is None:
+            pressure_coupling_extra_neighbor = (
+                self._fallback_pressure_coupling_extra_neighbor
+            )
+        if pressure_coupling_extra_coefficient is None:
+            pressure_coupling_extra_coefficient = (
+                self._fallback_pressure_coupling_extra_coefficient
+            )
+        row_list_enabled = (
+            pressure_interface_row_count is not None
+            and pressure_interface_row_owner is not None
+            and pressure_interface_row_neighbor is not None
+            and pressure_interface_row_transmissibility is not None
+            and int(pressure_interface_row_capacity) > 0
+        )
+        if not row_list_enabled:
+            pressure_interface_row_count = self._fallback_pressure_interface_row_count
+            pressure_interface_row_owner = self._fallback_pressure_interface_row_owner
+            pressure_interface_row_neighbor = (
+                self._fallback_pressure_interface_row_neighbor
+            )
+            pressure_interface_row_transmissibility = (
+                self._fallback_pressure_interface_row_transmissibility
+            )
+            pressure_interface_row_capacity = 0
         # S2-A6: full-capacity sentinel reset before assembly so markers
         # that fail to produce a row (invalid reconstruction paths) keep
         # (-1, -1, -1) and stay on the sampler's invalid path.
@@ -5431,6 +9313,12 @@ class HibmMpmIbBoundaryConditions:
             pressure_coupling_active,
             pressure_coupling_neighbor,
             pressure_coupling_coefficient,
+            pressure_coupling_extra_neighbor,
+            pressure_coupling_extra_coefficient,
+            pressure_interface_row_count,
+            pressure_interface_row_owner,
+            pressure_interface_row_neighbor,
+            pressure_interface_row_transmissibility,
             obstacle_field,
             velocity_dirichlet_active,
             cell_width_x_m,
@@ -5438,6 +9326,7 @@ class HibmMpmIbBoundaryConditions:
             cell_width_z_m,
             search.node_boundary_point_m,
             search.node_interior_fluid_point_m,
+            search.node_anchor_cell,
             cell_face_x_m,
             cell_face_y_m,
             cell_face_z_m,
@@ -5445,8 +9334,13 @@ class HibmMpmIbBoundaryConditions:
             cell_center_y_m,
             cell_center_z_m,
             search.nearest_marker,
+            markers.A_gamma_m2,
+            self.marker_pressure_neumann_candidate_node_count,
             markers.marker_pressure_anchor_cell,
             int(markers.marker_count),
+            int(max_pressure_coupling_slots),
+            1 if bool(row_list_enabled) else 0,
+            int(pressure_interface_row_capacity),
             int(nodes[0]),
             int(nodes[1]),
             int(nodes[2]),
@@ -5467,8 +9361,31 @@ class HibmMpmIbBoundaryConditions:
             skipped_velocity_dirichlet_row_count=int(
                 self.report_pressure_neumann_skipped_velocity_dirichlet_rows[None]
             ),
+            skipped_pressure_boundary_adjacent_row_count=int(
+                self.report_pressure_neumann_skipped_pressure_boundary_adjacent_rows[
+                    None
+                ]
+            ),
             skipped_obstacle_owner_row_count=int(
                 self.report_pressure_neumann_skipped_obstacle_owner_rows[None]
+            ),
+            relocated_obstacle_owner_row_count=int(
+                self.report_pressure_neumann_relocated_obstacle_owner_rows[None]
+            ),
+            duplicate_owner_row_count=int(
+                self.report_pressure_neumann_duplicate_owner_rows[None]
+            ),
+            overflow_owner_row_count=int(
+                self.report_pressure_neumann_overflow_owner_rows[None]
+            ),
+            max_owner_slot_count=int(
+                self.report_pressure_neumann_max_owner_slot_count[None]
+            ),
+            pressure_interface_row_list_enabled=bool(row_list_enabled),
+            pressure_interface_row_list_count=(
+                int(pressure_interface_row_count[None])
+                if bool(row_list_enabled)
+                else 0
             ),
             active_pressure_neumann_marker_count=int(
                 self.report_pressure_neumann_active_marker_count[None]
@@ -5478,6 +9395,15 @@ class HibmMpmIbBoundaryConditions:
             ),
             invalid_reconstruction_row_count=int(
                 self.report_pressure_neumann_invalid_reconstruction_rows[None]
+            ),
+            invalid_unreconstructable_row_count=int(
+                self.report_pressure_neumann_invalid_unreconstructable_rows[None]
+            ),
+            invalid_bad_marker_row_count=int(
+                self.report_pressure_neumann_invalid_bad_marker_rows[None]
+            ),
+            invalid_nonpositive_volume_row_count=int(
+                self.report_pressure_neumann_invalid_nonpositive_volume_rows[None]
             ),
             min_reconstruction_gap_m=min_reconstruction_gap_m,
             max_reconstruction_gap_m=float(
@@ -5529,6 +9455,205 @@ class HibmMpmIbBoundaryConditions:
             self.pressure_neumann_gradient_field[self._node_index(node_index)]
         )
 
+    def pressure_neumann_invalid_diagnostic_rows(
+        self,
+        *,
+        search=None,
+        markers=None,
+        fluid=None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return captured pressure-Neumann invalid-row diagnostics.
+
+        The Taichi assembly kernel records only the first fixed-capacity slice;
+        the scalar report count remains the authoritative total invalid count.
+        """
+
+        total_count = int(self.pressure_neumann_invalid_diag_count[None])
+        captured_count = min(
+            total_count,
+            PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY,
+        )
+        if limit is not None:
+            captured_count = min(captured_count, max(0, int(limit)))
+        if captured_count <= 0:
+            return []
+
+        reasons = self.pressure_neumann_invalid_diag_reason.to_numpy()
+        markers_idx = self.pressure_neumann_invalid_diag_marker.to_numpy()
+        nodes = self.pressure_neumann_invalid_diag_node.to_numpy()
+        owners = self.pressure_neumann_invalid_diag_owner.to_numpy()
+        neighbors = self.pressure_neumann_invalid_diag_neighbor.to_numpy()
+        anchors = self.pressure_neumann_invalid_diag_anchor.to_numpy()
+        node_distances = (
+            self.pressure_neumann_invalid_diag_node_distance_m.to_numpy()
+        )
+        normal_denominators = (
+            self.pressure_neumann_invalid_diag_normal_denominator_m.to_numpy()
+        )
+        reconstruction_gaps = (
+            self.pressure_neumann_invalid_diag_reconstruction_gap_m.to_numpy()
+        )
+        normals = self.pressure_neumann_normal_field.to_numpy()
+        gradients = self.pressure_neumann_gradient_field.to_numpy()
+
+        boundary_points = None
+        interior_points = None
+        nearest_marker = None
+        if search is not None:
+            boundary_points = search.node_boundary_point_m.to_numpy()
+            interior_points = search.node_interior_fluid_point_m.to_numpy()
+            nearest_marker = search.nearest_marker.to_numpy()
+
+        marker_count = 0
+        marker_regions = None
+        if markers is not None:
+            marker_count = int(markers.marker_count)
+            marker_regions = markers.region_id.to_numpy()
+
+        cell_center_x = None
+        cell_center_y = None
+        cell_center_z = None
+        obstacle = None
+        velocity_dirichlet_active = None
+        if fluid is not None:
+            cell_center_x = fluid.cell_center_x_m.to_numpy()
+            cell_center_y = fluid.cell_center_y_m.to_numpy()
+            cell_center_z = fluid.cell_center_z_m.to_numpy()
+            obstacle = fluid.obstacle.to_numpy()
+            velocity_dirichlet_active = (
+                fluid.velocity_dirichlet_boundary_active.to_numpy()
+            )
+
+        def _triple(values) -> tuple[int, int, int]:
+            return (int(values[0]), int(values[1]), int(values[2]))
+
+        def _valid(index: tuple[int, int, int]) -> bool:
+            return all(
+                0 <= value < limit
+                for value, limit in zip(index, self.grid_nodes, strict=True)
+            )
+
+        def _point_from_grid(index: tuple[int, int, int]) -> tuple[float, float, float]:
+            if (
+                cell_center_x is None
+                or cell_center_y is None
+                or cell_center_z is None
+                or not _valid(index)
+            ):
+                return (math.nan, math.nan, math.nan)
+            return (
+                float(cell_center_x[index[0]]),
+                float(cell_center_y[index[1]]),
+                float(cell_center_z[index[2]]),
+            )
+
+        def _point_from_field(field, index: tuple[int, int, int]) -> tuple[float, float, float]:
+            if field is None or not _valid(index):
+                return (math.nan, math.nan, math.nan)
+            value = field[index]
+            return (float(value[0]), float(value[1]), float(value[2]))
+
+        def _cell_flag(field, index: tuple[int, int, int]) -> int:
+            if field is None or not _valid(index):
+                return -1
+            return int(field[index])
+
+        rows: list[dict[str, Any]] = []
+        for row_index in range(captured_count):
+            node = _triple(nodes[row_index])
+            owner = _triple(owners[row_index])
+            neighbor = _triple(neighbors[row_index])
+            anchor = _triple(anchors[row_index])
+            marker = int(markers_idx[row_index])
+            reason_code = int(reasons[row_index])
+            node_center = _point_from_grid(node)
+            owner_center = _point_from_grid(owner)
+            neighbor_center = _point_from_grid(neighbor)
+            anchor_center = _point_from_grid(anchor)
+            boundary_point = _point_from_field(boundary_points, node)
+            interior_point = _point_from_field(interior_points, node)
+            row = {
+                "row_index": row_index,
+                "reason_code": reason_code,
+                "reason": PRESSURE_NEUMANN_INVALID_REASON_NAMES.get(
+                    reason_code,
+                    "unknown",
+                ),
+                "node_i": node[0],
+                "node_j": node[1],
+                "node_k": node[2],
+                "owner_i": owner[0],
+                "owner_j": owner[1],
+                "owner_k": owner[2],
+                "neighbor_i": neighbor[0],
+                "neighbor_j": neighbor[1],
+                "neighbor_k": neighbor[2],
+                "anchor_i": anchor[0],
+                "anchor_j": anchor[1],
+                "anchor_k": anchor[2],
+                "marker_index": marker,
+                "marker_region_id": (
+                    int(marker_regions[marker])
+                    if marker_regions is not None and 0 <= marker < marker_count
+                    else -1
+                ),
+                "nearest_marker_index": (
+                    int(nearest_marker[node])
+                    if nearest_marker is not None and _valid(node)
+                    else -1
+                ),
+                "node_distance_m": float(node_distances[row_index]),
+                "normal_denominator_m": float(normal_denominators[row_index]),
+                "reconstruction_gap_m": float(reconstruction_gaps[row_index]),
+                "pressure_neumann_gradient_pa_per_m": (
+                    float(gradients[node]) if _valid(node) else math.nan
+                ),
+                "normal_x": float(normals[node][0]) if _valid(node) else math.nan,
+                "normal_y": float(normals[node][1]) if _valid(node) else math.nan,
+                "normal_z": float(normals[node][2]) if _valid(node) else math.nan,
+                "node_obstacle": _cell_flag(obstacle, node),
+                "owner_obstacle": _cell_flag(obstacle, owner),
+                "neighbor_obstacle": _cell_flag(obstacle, neighbor),
+                "anchor_obstacle": _cell_flag(obstacle, anchor),
+                "node_velocity_dirichlet_active": _cell_flag(
+                    velocity_dirichlet_active,
+                    node,
+                ),
+                "owner_velocity_dirichlet_active": _cell_flag(
+                    velocity_dirichlet_active,
+                    owner,
+                ),
+                "neighbor_velocity_dirichlet_active": _cell_flag(
+                    velocity_dirichlet_active,
+                    neighbor,
+                ),
+                "anchor_velocity_dirichlet_active": _cell_flag(
+                    velocity_dirichlet_active,
+                    anchor,
+                ),
+                "node_x_m": node_center[0],
+                "node_y_m": node_center[1],
+                "node_z_m": node_center[2],
+                "owner_x_m": owner_center[0],
+                "owner_y_m": owner_center[1],
+                "owner_z_m": owner_center[2],
+                "neighbor_x_m": neighbor_center[0],
+                "neighbor_y_m": neighbor_center[1],
+                "neighbor_z_m": neighbor_center[2],
+                "anchor_x_m": anchor_center[0],
+                "anchor_y_m": anchor_center[1],
+                "anchor_z_m": anchor_center[2],
+                "boundary_x_m": boundary_point[0],
+                "boundary_y_m": boundary_point[1],
+                "boundary_z_m": boundary_point[2],
+                "interior_x_m": interior_point[0],
+                "interior_y_m": interior_point[1],
+                "interior_z_m": interior_point[2],
+            }
+            rows.append(row)
+        return rows
+
     @ti.kernel
     def _update_pressure_neumann_gradient_from_ib_nodes_kernel(
         self,
@@ -5549,9 +9674,13 @@ class HibmMpmIbBoundaryConditions:
     ):
         self.report_pressure_neumann_gradient_node_count[None] = 0
         self.report_pressure_neumann_gradient_max_abs[None] = 0.0
+        self.report_pressure_neumann_gradient_raw_max_abs[None] = 0.0
+        self.report_pressure_neumann_gradient_limited_count[None] = 0
         for node in ti.grouped(self.active_ib_node):
-            self.pressure_neumann_gradient_field[node] = 0.0
-            if self.active_ib_node[node] == 1 and obstacle_field[node] == 0:
+            if self.active_ib_node[node] != 1:
+                self.pressure_neumann_gradient_field[node] = 0.0
+            if self.active_ib_node[node] == 1:
+                self.pressure_neumann_gradient_field[node] = 0.0
                 interior_point = node_interior_fluid_point_m[node]
                 grid_coordinate = self._grid_coordinate_from_fields(
                     interior_point,
@@ -5587,6 +9716,10 @@ class HibmMpmIbBoundaryConditions:
                     ti.atomic_add(
                         self.report_pressure_neumann_gradient_node_count[None],
                         1,
+                    )
+                    ti.atomic_max(
+                        self.report_pressure_neumann_gradient_raw_max_abs[None],
+                        ti.abs(normal_gradient),
                     )
                     ti.atomic_max(
                         self.report_pressure_neumann_gradient_max_abs[None],
@@ -5642,6 +9775,12 @@ class HibmMpmIbBoundaryConditions:
             ),
             max_abs_gradient_pa_per_m=float(
                 self.report_pressure_neumann_gradient_max_abs[None]
+            ),
+            max_raw_abs_gradient_pa_per_m=float(
+                self.report_pressure_neumann_gradient_raw_max_abs[None]
+            ),
+            limited_gradient_count=int(
+                self.report_pressure_neumann_gradient_limited_count[None]
             ),
         )
 
@@ -5752,10 +9891,16 @@ class HibmMpmSharpCouplingState:
         primary_region_id: int = 0,
         secondary_region_id: int = 0,
         far_pressure_region_id: int = -1,
+        far_pressure_barrier_region_id: int = -1,
         far_pressure_pa: float = 0.0,
+        far_pressure_side_normal_sign: float = 0.0,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
         two_sided_probe_max_multiplier: float = 3.0,
+        one_sided_pressure_region_id: int = -1,
+        one_sided_reference_pressure_pa: float = 0.0,
+        one_sided_probe_max_multiplier: float = 3.0,
         far_pressure_air_backed: bool = False,
+        far_pressure_air_backed_probe_normal_sign: float = 0.0,
         fluid_dt_s: float | None = None,
         fluid_substeps: int = 1,
         projection_iterations: int = 40,
@@ -5764,7 +9909,7 @@ class HibmMpmSharpCouplingState:
         pressure_neumann_density_kgm3: float | None = None,
         pressure_neumann_dt_s: float | None = None,
         pressure_outlet_zmin: bool = False,
-        reset_pressure: bool = True,
+        reset_pressure: bool = False,
         pressure_solver: str = "fv_cg",
         pressure_solve_failure_policy: str = "raise",
         multigrid_cycles: int | None = None,
@@ -5774,6 +9919,8 @@ class HibmMpmSharpCouplingState:
         divergence_cleanup_iterations: int = 0,
         divergence_cleanup_relaxation: float = 0.7,
         classify_far_internal_nodes: bool = False,
+        convert_internal_nodes_to_obstacles: bool = True,
+        post_dirichlet_consistency_projection_iterations: int = 3,
         diagnostic_disable_pressure_neumann_matrix_rows: bool = False,
     ) -> HibmMpmSharpMpmStepReport:
         return advance_hibm_mpm_sharp_mpm_step(
@@ -5797,14 +9944,22 @@ class HibmMpmSharpCouplingState:
             primary_region_id=int(primary_region_id),
             secondary_region_id=int(secondary_region_id),
             far_pressure_region_id=int(far_pressure_region_id),
+            far_pressure_barrier_region_id=int(far_pressure_barrier_region_id),
             far_pressure_pa=float(far_pressure_pa),
+            far_pressure_side_normal_sign=float(far_pressure_side_normal_sign),
             far_pressure_inside_probe_max_multiplier=float(
                 far_pressure_inside_probe_max_multiplier
             ),
             two_sided_probe_max_multiplier=float(
                 two_sided_probe_max_multiplier
             ),
+            one_sided_pressure_region_id=int(one_sided_pressure_region_id),
+            one_sided_reference_pressure_pa=float(one_sided_reference_pressure_pa),
+            one_sided_probe_max_multiplier=float(one_sided_probe_max_multiplier),
             far_pressure_air_backed=bool(far_pressure_air_backed),
+            far_pressure_air_backed_probe_normal_sign=float(
+                far_pressure_air_backed_probe_normal_sign
+            ),
             fluid_dt_s=fluid_dt_s,
             fluid_substeps=int(fluid_substeps),
             projection_iterations=int(projection_iterations),
@@ -5823,6 +9978,12 @@ class HibmMpmSharpCouplingState:
             divergence_cleanup_iterations=int(divergence_cleanup_iterations),
             divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
             classify_far_internal_nodes=bool(classify_far_internal_nodes),
+            convert_internal_nodes_to_obstacles=bool(
+                convert_internal_nodes_to_obstacles
+            ),
+            post_dirichlet_consistency_projection_iterations=int(
+                post_dirichlet_consistency_projection_iterations
+            ),
             diagnostic_disable_pressure_neumann_matrix_rows=bool(
                 diagnostic_disable_pressure_neumann_matrix_rows
             ),
@@ -5842,10 +10003,16 @@ class HibmMpmSharpCouplingState:
         primary_region_id: int,
         secondary_region_id: int,
         far_pressure_region_id: int = -1,
+        far_pressure_barrier_region_id: int = -1,
         far_pressure_pa: float = 0.0,
+        far_pressure_side_normal_sign: float = 0.0,
         far_pressure_inside_probe_max_multiplier: float = 3.0,
         two_sided_probe_max_multiplier: float = 3.0,
+        one_sided_pressure_region_id: int = -1,
+        one_sided_reference_pressure_pa: float = 0.0,
+        one_sided_probe_max_multiplier: float = 3.0,
         far_pressure_air_backed: bool = False,
+        far_pressure_air_backed_probe_normal_sign: float = 0.0,
         fluid_dt_s: float | None = None,
         fluid_substeps: int = 1,
         projection_iterations: int = 40,
@@ -5854,7 +10021,7 @@ class HibmMpmSharpCouplingState:
         pressure_neumann_density_kgm3: float | None = None,
         pressure_neumann_dt_s: float | None = None,
         pressure_outlet_zmin: bool = False,
-        reset_pressure: bool = True,
+        reset_pressure: bool = False,
         pressure_solver: str = "fv_cg",
         pressure_solve_failure_policy: str = "raise",
         multigrid_cycles: int | None = None,
@@ -5865,6 +10032,7 @@ class HibmMpmSharpCouplingState:
         read_mpm_report: bool = True,
         solid_external_loads: Callable[[], None] | None = None,
         classify_far_internal_nodes: bool = False,
+        convert_internal_nodes_to_obstacles: bool = True,
         diagnostic_disable_pressure_neumann_matrix_rows: bool = False,
     ) -> HibmMpmSharpNeoHookeanStepReport:
         return advance_hibm_mpm_sharp_neo_hookean_step(
@@ -5885,14 +10053,22 @@ class HibmMpmSharpCouplingState:
             primary_region_id=int(primary_region_id),
             secondary_region_id=int(secondary_region_id),
             far_pressure_region_id=int(far_pressure_region_id),
+            far_pressure_barrier_region_id=int(far_pressure_barrier_region_id),
             far_pressure_pa=float(far_pressure_pa),
+            far_pressure_side_normal_sign=float(far_pressure_side_normal_sign),
             far_pressure_inside_probe_max_multiplier=float(
                 far_pressure_inside_probe_max_multiplier
             ),
             two_sided_probe_max_multiplier=float(
                 two_sided_probe_max_multiplier
             ),
+            one_sided_pressure_region_id=int(one_sided_pressure_region_id),
+            one_sided_reference_pressure_pa=float(one_sided_reference_pressure_pa),
+            one_sided_probe_max_multiplier=float(one_sided_probe_max_multiplier),
             far_pressure_air_backed=bool(far_pressure_air_backed),
+            far_pressure_air_backed_probe_normal_sign=float(
+                far_pressure_air_backed_probe_normal_sign
+            ),
             fluid_dt_s=fluid_dt_s,
             fluid_substeps=int(fluid_substeps),
             projection_iterations=int(projection_iterations),
@@ -5912,6 +10088,9 @@ class HibmMpmSharpCouplingState:
             read_mpm_report=bool(read_mpm_report),
             solid_external_loads=solid_external_loads,
             classify_far_internal_nodes=bool(classify_far_internal_nodes),
+            convert_internal_nodes_to_obstacles=bool(
+                convert_internal_nodes_to_obstacles
+            ),
             diagnostic_disable_pressure_neumann_matrix_rows=bool(
                 diagnostic_disable_pressure_neumann_matrix_rows
             ),
@@ -5934,10 +10113,16 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     primary_region_id: int = 0,
     secondary_region_id: int = 0,
     far_pressure_region_id: int = -1,
+    far_pressure_barrier_region_id: int = -1,
     far_pressure_pa: float = 0.0,
+    far_pressure_side_normal_sign: float = 0.0,
     far_pressure_inside_probe_max_multiplier: float = 3.0,
     two_sided_probe_max_multiplier: float = 3.0,
+    one_sided_pressure_region_id: int = -1,
+    one_sided_reference_pressure_pa: float = 0.0,
+    one_sided_probe_max_multiplier: float = 3.0,
     far_pressure_air_backed: bool = False,
+    far_pressure_air_backed_probe_normal_sign: float = 0.0,
     dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -5946,7 +10131,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     pressure_neumann_density_kgm3: float | None = None,
     pressure_neumann_dt_s: float | None = None,
     pressure_outlet_zmin: bool = False,
-    reset_pressure: bool = True,
+    reset_pressure: bool = False,
     pressure_solver: str = "fv_cg",
     pressure_solve_failure_policy: str = "raise",
     multigrid_cycles: int | None = None,
@@ -5955,6 +10140,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     divergence_cleanup_iterations: int = 0,
     divergence_cleanup_relaxation: float = 0.7,
     classify_far_internal_nodes: bool = False,
+    convert_internal_nodes_to_obstacles: bool = True,
+    post_dirichlet_consistency_projection_iterations: int = 3,
     diagnostic_disable_pressure_neumann_matrix_rows: bool = False,
 ) -> HibmMpmSharpFluidToMpmLoadReport:
     """Run the sharp-interface fluid solve up to marker traction MPM loading.
@@ -6019,6 +10206,53 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             cell_center_y_m=fluid.cell_center_y_m,
             cell_center_z_m=fluid.cell_center_z_m,
             grid_nodes=fluid.grid.grid_nodes,
+            velocity_dirichlet_marker_region_id=(
+                fluid.velocity_dirichlet_boundary_marker_region_id
+            ),
+            marker_region_id=markers.region_id,
+        )
+
+    def assemble_pressure_neumann_rows() -> HibmMpmPressureNeumannMatrixReport:
+        fluid.clear_pressure_interface_matrix_terms()
+        if diagnostic_disable_pressure_neumann_matrix_rows:
+            return HibmMpmPressureNeumannMatrixReport(
+                active_pressure_neumann_rows=0,
+                rhs_integral=0.0,
+                max_abs_rhs=0.0,
+            )
+        return ib_boundary.assemble_pressure_neumann_matrix_rows(
+            fluid.pressure_interface_matrix_diagonal,
+            fluid.pressure_interface_matrix_rhs,
+            fluid.pressure_interface_coupling_active,
+            fluid.pressure_interface_coupling_neighbor,
+            fluid.pressure_interface_coupling_coefficient,
+            fluid.obstacle,
+            fluid.velocity_dirichlet_boundary_active,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            ib_search,
+            markers,
+            pressure_coupling_extra_neighbor=(
+                fluid.pressure_interface_coupling_extra_neighbor
+            ),
+            pressure_coupling_extra_coefficient=(
+                fluid.pressure_interface_coupling_extra_coefficient
+            ),
+            pressure_interface_row_count=fluid.pressure_interface_row_count,
+            pressure_interface_row_owner=fluid.pressure_interface_row_owner,
+            pressure_interface_row_neighbor=fluid.pressure_interface_row_neighbor,
+            pressure_interface_row_transmissibility=(
+                fluid.pressure_interface_row_transmissibility
+            ),
+            pressure_interface_row_capacity=fluid.pressure_interface_row_capacity,
+            cell_face_x_m=fluid.cell_face_x_m,
+            cell_face_y_m=fluid.cell_face_y_m,
+            cell_face_z_m=fluid.cell_face_z_m,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            grid_nodes=fluid.grid.grid_nodes,
         )
 
     def combine_projection_reports(
@@ -6048,11 +10282,19 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             "cg_iterations_max",
             "cg_initial_relative_residual_max",
             "cg_relative_residual_max",
+            "hibm_unreached_component_rhs_mean_max_abs",
+            "hibm_unreached_component_rhs_integral_max_abs",
         )
         for key in max_keys:
             if any(key in report for report in projection_reports):
                 combined[key] = max(
                     float(report.get(key, 0.0)) for report in projection_reports
+                )
+        max_int_keys = ("hibm_unreached_incompatible_component_count",)
+        for key in max_int_keys:
+            if any(key in report for report in projection_reports):
+                combined[key] = max(
+                    int(report.get(key, 0)) for report in projection_reports
                 )
         if any("cg_converged_all" in report for report in projection_reports):
             combined["cg_converged_all"] = all(
@@ -6068,6 +10310,30 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             combined["pressure_solve_failure_action"] = (
                 "reported" if failed else "none"
             )
+        if any(
+            "pressure_projection_physical_failure" in report
+            for report in projection_reports
+        ):
+            physical_failed = any(
+                bool(report.get("pressure_projection_physical_failure", False))
+                for report in projection_reports
+            )
+            combined["pressure_projection_physical_failure"] = physical_failed
+            if physical_failed:
+                combined["pressure_projection_physical_failure_reason"] = next(
+                    str(
+                        report.get(
+                            "pressure_projection_physical_failure_reason",
+                            "",
+                        )
+                    )
+                    for report in projection_reports
+                    if bool(report.get("pressure_projection_physical_failure", False))
+                )
+                combined["pressure_projection_physical_failure_action"] = "reported"
+            else:
+                combined["pressure_projection_physical_failure_reason"] = ""
+                combined["pressure_projection_physical_failure_action"] = "none"
         if any(
             "hibm_post_dirichlet_consistency_projection_applied" in report
             for report in projection_reports
@@ -6089,6 +10355,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             combined["cg_breakdown"] = breakdown
         return combined
 
+    _debug_stage_progress("search_and_classify_grid_fields:start")
     ib_report = ib_search.search_and_classify_grid_fields(
         markers,
         cell_center_x_m=fluid.cell_center_x_m,
@@ -6098,10 +10365,15 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         interior_probe_distance_m=float(interior_probe_distance_m),
         classify_far_internal_nodes=bool(classify_far_internal_nodes),
     )
+    _debug_stage_progress("search_and_classify_grid_fields:done")
+    _debug_stage_progress("apply_hibm_internal_obstacles:start")
     internal_obstacle_cell_count = fluid.apply_hibm_internal_obstacles(
         ib_search.node_kind_code,
         internal_node_code=HibmMpmIbNodeSearch._NODE_INTERNAL,
+        convert_internal_nodes=bool(convert_internal_nodes_to_obstacles),
     )
+    _debug_stage_progress("apply_hibm_internal_obstacles:done")
+    _debug_stage_progress("build_boundary_conditions:start")
     boundary_report = ib_boundary.build_from_search_device_fields(
         ib_search,
         markers,
@@ -6109,8 +10381,12 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             marker_pressure_neumann_gradient_pa_per_m_field
         ),
     )
+    _debug_stage_progress("build_boundary_conditions:done")
+    _debug_stage_progress("assemble_velocity_dirichlet_rows:start")
     velocity_report = assemble_velocity_dirichlet_rows()
+    _debug_stage_progress("assemble_velocity_dirichlet_rows:done")
     solid_band_nonprojectable_cell_count = 0
+    _debug_stage_progress("solid_band_fixed_point:start")
     for _band_pass in range(8):
         band_increment = fluid.mark_hibm_solid_band_nonprojectable_cells(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
@@ -6121,6 +10397,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             break
         solid_band_nonprojectable_cell_count += int(band_increment)
         velocity_report = assemble_velocity_dirichlet_rows()
+    _debug_stage_progress("solid_band_fixed_point:done")
     # Final-sweep band populations (S2-A8'): in interior-only mode the
     # sliver count saturates to zero while the enclosed-water count is the
     # surviving sealed real-water population; -1 means the sweep ran
@@ -6131,28 +10408,48 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     solid_band_enclosed_water_cell_count = int(
         getattr(fluid, "last_hibm_solid_band_enclosed_water_cells", -1)
     )
+    hibm_air_backed_reachability_barrier_cell_count = -1
+    use_air_backed_reachability_barrier = (
+        bool(far_pressure_air_backed) and int(far_pressure_region_id) != -1
+    )
+    if use_air_backed_reachability_barrier:
+        _debug_stage_progress("write_region_pressure_reachability_barrier:start")
+        hibm_air_backed_reachability_barrier_cell_count = (
+            markers.write_region_pressure_reachability_barrier(
+                fluid.hibm_pressure_reachability_barrier,
+                ib_search.node_kind_code,
+                ib_search.nearest_marker,
+                barrier_node_code=HibmMpmIbNodeSearch._NODE_EXTERNAL_IB,
+                barrier_region_id=int(far_pressure_region_id),
+                secondary_barrier_region_id=int(far_pressure_barrier_region_id),
+                tertiary_barrier_region_id=int(one_sided_pressure_region_id),
+                include_all_classified_region_nodes=True,
+            )
+        )
+        _debug_stage_progress("write_region_pressure_reachability_barrier:done")
+    _debug_stage_progress("mark_pressure_outlet_disconnected:start")
     pressure_disconnected_nonprojectable_cell_count = (
         fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
+            use_existing_reachability_barrier=use_air_backed_reachability_barrier,
         )
     )
+    _debug_stage_progress("mark_pressure_outlet_disconnected:done")
     hibm_air_backed_cell_count = -1
     hibm_air_backed_component_count = -1
     hibm_air_backed_cell_volume_m3 = -1.0
     hibm_air_backed_seed_marker_count = -1
     hibm_air_backed_seed_missed_marker_count = -1
+    hibm_air_backed_seed_fallback_cell_count = -1
     if bool(far_pressure_air_backed) and int(far_pressure_region_id) != -1:
         # S2-A12: the declared air-backed closure region gets a fluid-side
         # air zone. The flood + per-component labels above are this step's
-        # classification input: closure markers walk their far (+n) side
-        # and select the unreached component(s) they land in; the selected
-        # components convert to obstacle-like air cells, so the carve
-        # model's vacated-zone fake water leaves the incompressible solve
-        # and the anchored volume-creation debt (run_2s_20260613b: 0.04 ->
-        # 0.7 over 1000 steps, reconnection kill at step 1017) is
-        # structurally impossible. Stateless per step; outlet-reachable
-        # water is structurally unselectable (air is a subset of the
-        # unreached set).
+        # classification input: closure markers walk the configured normal
+        # side and select the unreached component(s) they land in. Selected
+        # components convert to obstacle-like air cells, so dry-side volume
+        # does not participate in the incompressible water solve. Stateless
+        # per step; outlet-reachable water is structurally unselectable (air
+        # is a subset of the unreached set).
         (
             hibm_air_backed_seed_marker_count,
             hibm_air_backed_seed_missed_marker_count,
@@ -6176,8 +10473,23 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             far_pressure_inside_probe_max_multiplier=float(
                 far_pressure_inside_probe_max_multiplier
             ),
+            far_pressure_air_backed_probe_normal_sign=float(
+                far_pressure_air_backed_probe_normal_sign
+            ),
+            fallback_to_bidirectional_if_all_missed=True,
+            fallback_to_region_adjacency_if_all_missed=True,
+            node_kind_code=ib_search.node_kind_code,
+            nearest_marker=ib_search.nearest_marker,
+            velocity_dirichlet_marker_region_id=(
+                fluid.velocity_dirichlet_boundary_marker_region_id
+            ),
         )
+        hibm_air_backed_seed_fallback_cell_count = int(
+            markers.report_air_backed_seed_fallback_cell_count[None]
+        )
+        _debug_stage_progress("convert_hibm_air_backed_cells:start")
         hibm_air_backed_cell_count = fluid.convert_hibm_air_backed_cells()
+        _debug_stage_progress("convert_hibm_air_backed_cells:done")
         hibm_air_backed_component_count = int(
             fluid.last_hibm_air_backed_component_count
         )
@@ -6185,6 +10497,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             fluid.last_hibm_air_backed_cell_volume_m3
         )
         if int(hibm_air_backed_cell_count) > 0:
+            _debug_stage_progress("air_backed_post_convert_band:start")
             # Conversion can orphan relocated rows that owned ex-pocket
             # cells and, through row-owned faces, leave new
             # zero-correctable candidates: re-assemble rows and rerun the
@@ -6202,6 +10515,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                     break
                 solid_band_nonprojectable_cell_count += int(band_increment)
                 velocity_report = assemble_velocity_dirichlet_rows()
+            _debug_stage_progress("air_backed_post_convert_band:done")
             solid_band_interior_cell_count = int(
                 getattr(fluid, "last_hibm_solid_band_interior_cells", -1)
             )
@@ -6215,6 +10529,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         max_abs_rhs=0.0,
     )
     projection_reports: list[dict[str, Any]] = []
+    _debug_stage_progress("fluid_substeps:start")
     for _ in range(substeps):
         velocity_report = assemble_velocity_dirichlet_rows()
         pressure_disconnected_nonprojectable_cell_count = (
@@ -6222,6 +10537,18 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 pressure_outlet_zmin=bool(pressure_outlet_zmin),
             )
         )
+        for _row_cloud_orphan_pass in range(8):
+            row_cloud_orphan_count = fluid.convert_hibm_row_cloud_orphan_components(
+                max_component_cells=128,
+            )
+            if int(row_cloud_orphan_count) <= 0:
+                break
+            velocity_report = assemble_velocity_dirichlet_rows()
+            pressure_disconnected_nonprojectable_cell_count = (
+                fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                    pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                )
+            )
         if bool(run_fluid_predictor):
             fluid.predict(
                 dt_s=fluid_substep_dt,
@@ -6273,46 +10600,18 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 )
             )
 
-        fluid.clear_pressure_interface_matrix_terms()
-        if diagnostic_disable_pressure_neumann_matrix_rows:
-            pressure_report = HibmMpmPressureNeumannMatrixReport(
-                active_pressure_neumann_rows=0,
-                rhs_integral=0.0,
-                max_abs_rhs=0.0,
-            )
-        else:
-            pressure_report = ib_boundary.assemble_pressure_neumann_matrix_rows(
-                fluid.pressure_interface_matrix_diagonal,
-                fluid.pressure_interface_matrix_rhs,
-                fluid.pressure_interface_coupling_active,
-                fluid.pressure_interface_coupling_neighbor,
-                fluid.pressure_interface_coupling_coefficient,
-                fluid.obstacle,
-                fluid.velocity_dirichlet_boundary_active,
-                fluid.cell_width_x_m,
-                fluid.cell_width_y_m,
-                fluid.cell_width_z_m,
-                ib_search,
-                markers,
-                cell_face_x_m=fluid.cell_face_x_m,
-                cell_face_y_m=fluid.cell_face_y_m,
-                cell_face_z_m=fluid.cell_face_z_m,
-                cell_center_x_m=fluid.cell_center_x_m,
-                cell_center_y_m=fluid.cell_center_y_m,
-                cell_center_z_m=fluid.cell_center_z_m,
-                grid_nodes=fluid.grid.grid_nodes,
-            )
+        pressure_report = assemble_pressure_neumann_rows()
         requested_pressure_solver = str(pressure_solver)
         effective_pressure_solver = requested_pressure_solver
         pressure_solver_forced_to_fv_cg = False
         pressure_solver_force_reason = ""
         if (
             int(pressure_report.active_pressure_neumann_rows) > 0
-            and effective_pressure_solver != "fv_cg"
+            and effective_pressure_solver in {"jacobi", "compact_jacobi", "fv_multigrid"}
         ):
             effective_pressure_solver = "fv_cg"
             pressure_solver_forced_to_fv_cg = True
-            pressure_solver_force_reason = "hibm_pressure_neumann_interface_rows"
+            pressure_solver_force_reason = "hibm_pressure_neumann_requires_fv_solver"
         project_report = dict(
             fluid.project(
                 iterations=iterations,
@@ -6342,25 +10641,34 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             }
         )
         projection_reports.append(project_report)
+    _debug_stage_progress("fluid_substeps:done")
     projection_report = combine_projection_reports(projection_reports)
-    velocity_report = assemble_velocity_dirichlet_rows()
-    pressure_disconnected_nonprojectable_cell_count = (
-        fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
-            pressure_outlet_zmin=bool(pressure_outlet_zmin),
-        )
+    _debug_stage_progress("post_substep_velocity_rows_and_reachability:start")
+    consistency_projection_iterations = max(
+        0,
+        int(post_dirichlet_consistency_projection_iterations),
     )
-    if int(velocity_report.active_velocity_dirichlet_rows) > 0:
+    for consistency_projection_index in range(consistency_projection_iterations):
+        velocity_report = assemble_velocity_dirichlet_rows()
+        pressure_disconnected_nonprojectable_cell_count = (
+            fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=bool(pressure_outlet_zmin),
+            )
+        )
+        if int(velocity_report.active_velocity_dirichlet_rows) <= 0:
+            break
+        pressure_report = assemble_pressure_neumann_rows()
         requested_pressure_solver = str(pressure_solver)
         effective_pressure_solver = requested_pressure_solver
         pressure_solver_forced_to_fv_cg = False
         pressure_solver_force_reason = ""
         if (
             int(pressure_report.active_pressure_neumann_rows) > 0
-            and effective_pressure_solver != "fv_cg"
+            and effective_pressure_solver in {"jacobi", "compact_jacobi", "fv_multigrid"}
         ):
             effective_pressure_solver = "fv_cg"
             pressure_solver_forced_to_fv_cg = True
-            pressure_solver_force_reason = "hibm_pressure_neumann_interface_rows"
+            pressure_solver_force_reason = "hibm_pressure_neumann_requires_fv_solver"
         consistency_project_report = dict(
             fluid.project(
                 iterations=iterations,
@@ -6388,12 +10696,17 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                     pressure_report.active_pressure_neumann_rows
                 ),
                 "hibm_projection_stage": "post_dirichlet_reconstruction_consistency",
+                "hibm_post_dirichlet_consistency_projection_index": (
+                    int(consistency_projection_index) + 1
+                ),
                 "hibm_post_dirichlet_consistency_projection_applied": True,
                 "hibm_post_dirichlet_consistency_projection_count": 1,
             }
         )
         projection_reports.append(consistency_project_report)
         projection_report = combine_projection_reports(projection_reports)
+    _debug_stage_progress("post_substep_velocity_rows_and_reachability:done")
+    _debug_stage_progress("final_divergence_and_partition_stats:start")
     fluid.compute_divergence(pressure_outlet_zmin=bool(pressure_outlet_zmin))
     (
         final_raw_stats,
@@ -6485,6 +10798,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             interior_pressure_fixed_raw_stats["max_abs"]
         ),
     }
+    _debug_stage_progress("final_divergence_and_partition_stats:done")
+    _debug_stage_progress("sample_no_slip_residual:start")
     no_slip_report = markers.sample_no_slip_residual(
         fluid.velocity,
         fluid.obstacle,
@@ -6496,6 +10811,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         fluid.cell_center_z_m,
         fluid.grid.grid_nodes,
     )
+    _debug_stage_progress("sample_no_slip_residual:done")
     # S2-A8'' closure sampling preparation, strictly after the LAST
     # fluid.project(...) (including the post-Dirichlet consistency
     # projection) and strictly before the stress sampling, and only when
@@ -6516,6 +10832,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     #     its back-filled pressure.
     stress_sampling_obstacle_field = None
     if int(far_pressure_region_id) != -1:
+        _debug_stage_progress("sampling_obstacle_and_pressure_fill:start")
         fluid.fill_hibm_converted_cell_pressures()
         if bool(far_pressure_air_backed) and int(hibm_air_backed_cell_count) > 0:
             # S2-A12: stamp the declared chamber pressure into air cells
@@ -6528,6 +10845,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
         )
         stress_sampling_obstacle_field = fluid.sampling_obstacle
+        _debug_stage_progress("sampling_obstacle_and_pressure_fill:done")
+    _debug_stage_progress("sample_fluid_stress_to_marker_tractions:start")
     stress_report = markers.sample_fluid_stress_to_marker_tractions(
         fluid.velocity,
         fluid.pressure,
@@ -6549,12 +10868,16 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         sampling_obstacle_field=stress_sampling_obstacle_field,
         far_pressure_region_id=int(far_pressure_region_id),
         far_pressure_pa=float(far_pressure_pa),
+        far_pressure_side_normal_sign=float(far_pressure_side_normal_sign),
         far_pressure_inside_probe_max_multiplier=float(
             far_pressure_inside_probe_max_multiplier
         ),
         two_sided_probe_max_multiplier=float(
             two_sided_probe_max_multiplier
         ),
+        one_sided_pressure_region_id=int(one_sided_pressure_region_id),
+        one_sided_reference_pressure_pa=float(one_sided_reference_pressure_pa),
+        one_sided_probe_max_multiplier=float(one_sided_probe_max_multiplier),
         # S2-A6: the anchor fallback rides the closure opt-in. It is only
         # armed when this very call also assembled the pressure-Neumann
         # rows (anchors are captured there, strictly before this sampling
@@ -6572,6 +10895,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         # anchor points at a solved, non-obstacle cell.
         node_anchor_cell=ib_search.node_anchor_cell,
     )
+    _debug_stage_progress("sample_fluid_stress_to_marker_tractions:done")
+    _debug_stage_progress("marker_force_scatter:start")
     markers.compute_marker_forces()
     marker_force_report = markers.aggregate_region_forces(
         primary_region_id=int(primary_region_id),
@@ -6586,6 +10911,14 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         mpm_particle_position_m,
         particle_count=particles,
         support_radius_m=float(mpm_support_radius_m),
+    )
+    _debug_stage_progress("marker_force_scatter:done")
+    pressure_neumann_invalid_diagnostic_rows = tuple(
+        ib_boundary.pressure_neumann_invalid_diagnostic_rows(
+            search=ib_search,
+            markers=markers,
+            fluid=fluid,
+        )
     )
     return HibmMpmSharpFluidToMpmLoadReport(
         ib_node_search=ib_report,
@@ -6603,6 +10936,12 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         air_backed_seed_missed_marker_count=int(
             hibm_air_backed_seed_missed_marker_count
         ),
+        air_backed_seed_fallback_cell_count=int(
+            hibm_air_backed_seed_fallback_cell_count
+        ),
+        air_backed_reachability_barrier_cell_count=int(
+            hibm_air_backed_reachability_barrier_cell_count
+        ),
         boundary_conditions=boundary_report,
         pressure_neumann_gradient=pressure_gradient_report,
         velocity_dirichlet=velocity_report,
@@ -6614,6 +10953,9 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         marker_forces=marker_force_report,
         mpm_external_force_clear=clear_report,
         mpm_force_scatter=scatter_report,
+        pressure_neumann_invalid_diagnostic_rows=(
+            pressure_neumann_invalid_diagnostic_rows
+        ),
     )
 
 
@@ -6637,10 +10979,16 @@ def advance_hibm_mpm_sharp_mpm_step(
     primary_region_id: int = 0,
     secondary_region_id: int = 0,
     far_pressure_region_id: int = -1,
+    far_pressure_barrier_region_id: int = -1,
     far_pressure_pa: float = 0.0,
+    far_pressure_side_normal_sign: float = 0.0,
     far_pressure_inside_probe_max_multiplier: float = 3.0,
     two_sided_probe_max_multiplier: float = 3.0,
+    one_sided_pressure_region_id: int = -1,
+    one_sided_reference_pressure_pa: float = 0.0,
+    one_sided_probe_max_multiplier: float = 3.0,
     far_pressure_air_backed: bool = False,
+    far_pressure_air_backed_probe_normal_sign: float = 0.0,
     fluid_dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -6649,7 +10997,7 @@ def advance_hibm_mpm_sharp_mpm_step(
     pressure_neumann_density_kgm3: float | None = None,
     pressure_neumann_dt_s: float | None = None,
     pressure_outlet_zmin: bool = False,
-    reset_pressure: bool = True,
+    reset_pressure: bool = False,
     pressure_solver: str = "fv_cg",
     pressure_solve_failure_policy: str = "raise",
     multigrid_cycles: int | None = None,
@@ -6659,6 +11007,8 @@ def advance_hibm_mpm_sharp_mpm_step(
     divergence_cleanup_iterations: int = 0,
     divergence_cleanup_relaxation: float = 0.7,
     classify_far_internal_nodes: bool = False,
+    convert_internal_nodes_to_obstacles: bool = True,
+    post_dirichlet_consistency_projection_iterations: int = 3,
     diagnostic_disable_pressure_neumann_matrix_rows: bool = False,
 ) -> HibmMpmSharpMpmStepReport:
     if not callable(solid_step):
@@ -6670,6 +11020,11 @@ def advance_hibm_mpm_sharp_mpm_step(
         feedback_dt = float(surface_feedback_dt_s)
     if not math.isfinite(feedback_dt) or feedback_dt <= 0.0:
         raise ValueError("surface_feedback_dt_s must be finite and positive")
+    post_solid_fluid_substeps = max(1, int(fluid_substeps))
+    if fluid_dt_s is not None:
+        post_solid_project_dt = float(fluid_dt_s) / float(post_solid_fluid_substeps)
+    else:
+        post_solid_project_dt = float(fluid.dt) / float(post_solid_fluid_substeps)
     pressure_neumann_density = None
     pressure_neumann_dt = None
     if pressure_neumann_density_kgm3 is not None:
@@ -6704,14 +11059,22 @@ def advance_hibm_mpm_sharp_mpm_step(
         primary_region_id=int(primary_region_id),
         secondary_region_id=int(secondary_region_id),
         far_pressure_region_id=int(far_pressure_region_id),
+        far_pressure_barrier_region_id=int(far_pressure_barrier_region_id),
         far_pressure_pa=float(far_pressure_pa),
+        far_pressure_side_normal_sign=float(far_pressure_side_normal_sign),
         far_pressure_inside_probe_max_multiplier=float(
             far_pressure_inside_probe_max_multiplier
         ),
         two_sided_probe_max_multiplier=float(
             two_sided_probe_max_multiplier
         ),
+        one_sided_pressure_region_id=int(one_sided_pressure_region_id),
+        one_sided_reference_pressure_pa=float(one_sided_reference_pressure_pa),
+        one_sided_probe_max_multiplier=float(one_sided_probe_max_multiplier),
         far_pressure_air_backed=bool(far_pressure_air_backed),
+        far_pressure_air_backed_probe_normal_sign=float(
+            far_pressure_air_backed_probe_normal_sign
+        ),
         dt_s=fluid_dt_s,
         fluid_substeps=int(fluid_substeps),
         projection_iterations=int(projection_iterations),
@@ -6729,6 +11092,10 @@ def advance_hibm_mpm_sharp_mpm_step(
         divergence_cleanup_iterations=int(divergence_cleanup_iterations),
         divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
         classify_far_internal_nodes=bool(classify_far_internal_nodes),
+        convert_internal_nodes_to_obstacles=bool(convert_internal_nodes_to_obstacles),
+        post_dirichlet_consistency_projection_iterations=int(
+            post_dirichlet_consistency_projection_iterations
+        ),
         diagnostic_disable_pressure_neumann_matrix_rows=bool(
             diagnostic_disable_pressure_neumann_matrix_rows
         ),
@@ -6773,6 +11140,7 @@ def advance_hibm_mpm_sharp_mpm_step(
     next_internal_obstacle_cell_count = fluid.apply_hibm_internal_obstacles(
         ib_search.node_kind_code,
         internal_node_code=HibmMpmIbNodeSearch._NODE_INTERNAL,
+        convert_internal_nodes=bool(convert_internal_nodes_to_obstacles),
     )
     next_boundary_report = ib_boundary.build_from_search_device_fields(
         ib_search,
@@ -6797,6 +11165,10 @@ def advance_hibm_mpm_sharp_mpm_step(
         cell_center_y_m=fluid.cell_center_y_m,
         cell_center_z_m=fluid.cell_center_z_m,
         grid_nodes=fluid.grid.grid_nodes,
+        velocity_dirichlet_marker_region_id=(
+            fluid.velocity_dirichlet_boundary_marker_region_id
+        ),
+        marker_region_id=markers.region_id,
     )
     next_solid_band_nonprojectable_cell_count = (
         fluid.mark_hibm_solid_band_nonprojectable_cells(
@@ -6828,6 +11200,10 @@ def advance_hibm_mpm_sharp_mpm_step(
             cell_center_y_m=fluid.cell_center_y_m,
             cell_center_z_m=fluid.cell_center_z_m,
             grid_nodes=fluid.grid.grid_nodes,
+            velocity_dirichlet_marker_region_id=(
+                fluid.velocity_dirichlet_boundary_marker_region_id
+            ),
+            marker_region_id=markers.region_id,
         )
         for _next_band_pass in range(8):
             next_band_increment = (
@@ -6856,12 +11232,102 @@ def advance_hibm_mpm_sharp_mpm_step(
                 cell_center_y_m=fluid.cell_center_y_m,
                 cell_center_z_m=fluid.cell_center_z_m,
                 grid_nodes=fluid.grid.grid_nodes,
+                velocity_dirichlet_marker_region_id=(
+                    fluid.velocity_dirichlet_boundary_marker_region_id
+                ),
+                marker_region_id=markers.region_id,
             )
         next_pressure_disconnected_nonprojectable_cell_count = (
             fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
                 pressure_outlet_zmin=bool(pressure_outlet_zmin),
             )
         )
+    use_next_air_backed_reachability_barrier = (
+        bool(far_pressure_air_backed) and int(far_pressure_region_id) != -1
+    )
+    if use_next_air_backed_reachability_barrier:
+        markers.write_region_pressure_reachability_barrier(
+            fluid.hibm_pressure_reachability_barrier,
+            ib_search.node_kind_code,
+            ib_search.nearest_marker,
+            barrier_node_code=HibmMpmIbNodeSearch._NODE_EXTERNAL_IB,
+            barrier_region_id=int(far_pressure_region_id),
+            secondary_barrier_region_id=int(far_pressure_barrier_region_id),
+            tertiary_barrier_region_id=int(one_sided_pressure_region_id),
+            include_all_classified_region_nodes=True,
+        )
+    next_pressure_disconnected_nonprojectable_cell_count = (
+        fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=bool(pressure_outlet_zmin),
+            use_existing_reachability_barrier=use_next_air_backed_reachability_barrier,
+        )
+    )
+    if bool(far_pressure_air_backed) and int(far_pressure_region_id) != -1:
+        markers.mark_far_pressure_air_backed_seed_components(
+            fluid.obstacle,
+            fluid.hibm_base_obstacle,
+            fluid.hibm_pressure_outlet_reachable,
+            fluid.hibm_pressure_unreached_component_label,
+            fluid.hibm_air_component_selected,
+            fluid.cell_face_x_m,
+            fluid.cell_face_y_m,
+            fluid.cell_face_z_m,
+            fluid.cell_center_x_m,
+            fluid.cell_center_y_m,
+            fluid.cell_center_z_m,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            fluid.grid.grid_nodes,
+            far_pressure_region_id=int(far_pressure_region_id),
+            far_pressure_inside_probe_max_multiplier=float(
+                far_pressure_inside_probe_max_multiplier
+            ),
+            far_pressure_air_backed_probe_normal_sign=float(
+                far_pressure_air_backed_probe_normal_sign
+            ),
+            fallback_to_bidirectional_if_all_missed=True,
+            fallback_to_region_adjacency_if_all_missed=True,
+            node_kind_code=ib_search.node_kind_code,
+            nearest_marker=ib_search.nearest_marker,
+            velocity_dirichlet_marker_region_id=(
+                fluid.velocity_dirichlet_boundary_marker_region_id
+            ),
+        )
+        next_air_backed_cell_count = fluid.convert_hibm_air_backed_cells()
+        if int(next_air_backed_cell_count) > 0:
+            for _next_air_backed_band_pass in range(8):
+                next_band_increment = (
+                    fluid.mark_hibm_solid_band_nonprojectable_cells(
+                        pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                        node_kind_code=ib_search.node_kind_code,
+                        unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+                    )
+                )
+                if int(next_band_increment) <= 0:
+                    break
+                next_solid_band_nonprojectable_cell_count = int(
+                    next_solid_band_nonprojectable_cell_count
+                ) + int(next_band_increment)
+                next_velocity_report = ib_boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
+                    fluid.velocity_dirichlet_boundary_active,
+                    fluid.velocity_dirichlet_boundary_value_mps,
+                    fluid.velocity_dirichlet_boundary_projection_weight,
+                    fluid.obstacle,
+                    fluid.velocity,
+                    ib_search,
+                    cell_face_x_m=fluid.cell_face_x_m,
+                    cell_face_y_m=fluid.cell_face_y_m,
+                    cell_face_z_m=fluid.cell_face_z_m,
+                    cell_center_x_m=fluid.cell_center_x_m,
+                    cell_center_y_m=fluid.cell_center_y_m,
+                    cell_center_z_m=fluid.cell_center_z_m,
+                    grid_nodes=fluid.grid.grid_nodes,
+                    velocity_dirichlet_marker_region_id=(
+                        fluid.velocity_dirichlet_boundary_marker_region_id
+                    ),
+                    marker_region_id=markers.region_id,
+                )
     # Final-sweep band populations for the post-step rebuild (S2-A8'):
     # -1 when the band ran without a split (default mode).
     next_solid_band_interior_cell_count = int(
@@ -6883,6 +11349,19 @@ def advance_hibm_mpm_sharp_mpm_step(
         fluid.cell_width_z_m,
         ib_search,
         markers,
+        pressure_coupling_extra_neighbor=(
+            fluid.pressure_interface_coupling_extra_neighbor
+        ),
+        pressure_coupling_extra_coefficient=(
+            fluid.pressure_interface_coupling_extra_coefficient
+        ),
+        pressure_interface_row_count=fluid.pressure_interface_row_count,
+        pressure_interface_row_owner=fluid.pressure_interface_row_owner,
+        pressure_interface_row_neighbor=fluid.pressure_interface_row_neighbor,
+        pressure_interface_row_transmissibility=(
+            fluid.pressure_interface_row_transmissibility
+        ),
+        pressure_interface_row_capacity=fluid.pressure_interface_row_capacity,
         cell_face_x_m=fluid.cell_face_x_m,
         cell_face_y_m=fluid.cell_face_y_m,
         cell_face_z_m=fluid.cell_face_z_m,
@@ -6891,6 +11370,72 @@ def advance_hibm_mpm_sharp_mpm_step(
         cell_center_z_m=fluid.cell_center_z_m,
         grid_nodes=fluid.grid.grid_nodes,
     )
+    next_pressure_neumann_invalid_diagnostic_rows = tuple(
+        ib_boundary.pressure_neumann_invalid_diagnostic_rows(
+            search=ib_search,
+            markers=markers,
+            fluid=fluid,
+        )
+    )
+    post_solid_projection_applied = False
+    post_solid_project_report: dict[str, Any] | None = None
+    post_solid_no_slip_report: HibmMpmNoSlipResidualReport | None = None
+    if int(next_velocity_report.active_velocity_dirichlet_rows) > 0:
+        requested_pressure_solver = str(pressure_solver)
+        effective_pressure_solver = requested_pressure_solver
+        pressure_solver_forced_to_fv_cg = False
+        pressure_solver_force_reason = ""
+        if (
+            int(next_pressure_report.active_pressure_neumann_rows) > 0
+            and effective_pressure_solver
+            in {"jacobi", "compact_jacobi", "fv_multigrid"}
+        ):
+            effective_pressure_solver = "fv_cg"
+            pressure_solver_forced_to_fv_cg = True
+            pressure_solver_force_reason = "hibm_pressure_neumann_requires_fv_solver"
+        post_solid_project_report = dict(
+            fluid.project(
+                iterations=int(projection_iterations),
+                pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                dt_s=float(post_solid_project_dt),
+                preserve_velocity_constraints=False,
+                reset_pressure=False,
+                pressure_solver=effective_pressure_solver,
+                multigrid_cycles=multigrid_cycles,
+                cg_tolerance=float(cg_tolerance),
+                cg_preconditioner=str(cg_preconditioner),
+                pressure_solve_failure_policy=str(pressure_solve_failure_policy),
+                divergence_cleanup_iterations=int(divergence_cleanup_iterations),
+                divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
+                read_report=True,
+            )
+        )
+        post_solid_project_report.update(
+            {
+                "pressure_solver_requested": requested_pressure_solver,
+                "pressure_solver": effective_pressure_solver,
+                "pressure_solver_forced_to_fv_cg": pressure_solver_forced_to_fv_cg,
+                "pressure_solver_force_reason": pressure_solver_force_reason,
+                "pressure_interface_neumann_active_rows": int(
+                    next_pressure_report.active_pressure_neumann_rows
+                ),
+                "hibm_projection_stage": "post_solid_kinematic_consistency",
+                "hibm_post_solid_kinematic_projection_applied": True,
+                "hibm_post_solid_kinematic_projection_count": 1,
+            }
+        )
+        post_solid_projection_applied = True
+        post_solid_no_slip_report = markers.sample_no_slip_residual(
+            fluid.velocity,
+            fluid.obstacle,
+            fluid.cell_face_x_m,
+            fluid.cell_face_y_m,
+            fluid.cell_face_z_m,
+            fluid.cell_center_x_m,
+            fluid.cell_center_y_m,
+            fluid.cell_center_z_m,
+            fluid.grid.grid_nodes,
+        )
     return HibmMpmSharpMpmStepReport(
         fluid_to_mpm_loads=load_report,
         mpm=mpm_report,
@@ -6909,6 +11454,12 @@ def advance_hibm_mpm_sharp_mpm_step(
         next_velocity_dirichlet=next_velocity_report,
         next_pressure_neumann=next_pressure_report,
         next_pressure_neumann_gradient=next_pressure_neumann_gradient_report,
+        next_pressure_neumann_invalid_diagnostic_rows=(
+            next_pressure_neumann_invalid_diagnostic_rows
+        ),
+        post_solid_kinematic_projection_applied=post_solid_projection_applied,
+        post_solid_fluid_projection=post_solid_project_report,
+        post_solid_no_slip_residual=post_solid_no_slip_report,
     )
 
 
@@ -6921,6 +11472,8 @@ def hibm_mpm_sharp_step_summary(
     feedback = report.surface_feedback
     pressure_gradient = load.pressure_neumann_gradient
     next_gradient = report.next_pressure_neumann_gradient
+    post_projection = report.post_solid_fluid_projection or {}
+    post_no_slip = report.post_solid_no_slip_residual
     return {
         "hibm_coupling_scheme": "explicit_loose",
         "hibm_added_mass_stability_status": "unmeasured",
@@ -6953,6 +11506,12 @@ def hibm_mpm_sharp_step_summary(
         "hibm_air_backed_seed_missed_marker_count": (
             load.air_backed_seed_missed_marker_count
         ),
+        "hibm_air_backed_seed_fallback_cell_count": (
+            load.air_backed_seed_fallback_cell_count
+        ),
+        "hibm_air_backed_reachability_barrier_cell_count": (
+            load.air_backed_reachability_barrier_cell_count
+        ),
         "hibm_ib_invalid_projection_count": (
             load.ib_node_search.invalid_projection_count
         ),
@@ -6962,8 +11521,14 @@ def hibm_mpm_sharp_step_summary(
         "hibm_boundary_pressure_neumann_count": (
             load.boundary_conditions.pressure_neumann_count
         ),
+        "hibm_boundary_max_abs_velocity_mps": (
+            load.boundary_conditions.max_abs_velocity_mps
+        ),
         "hibm_velocity_dirichlet_active_rows": (
             load.velocity_dirichlet.active_velocity_dirichlet_rows
+        ),
+        "hibm_velocity_dirichlet_max_abs_velocity_mps": (
+            load.velocity_dirichlet.max_abs_velocity_mps
         ),
         "hibm_velocity_dirichlet_invalid_reconstruction_count": (
             load.velocity_dirichlet.invalid_reconstruction_row_count
@@ -7004,13 +11569,43 @@ def hibm_mpm_sharp_step_summary(
         "hibm_pressure_neumann_skipped_velocity_dirichlet_count": (
             load.pressure_neumann.skipped_velocity_dirichlet_row_count
         ),
+        "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count": (
+            load.pressure_neumann.skipped_pressure_boundary_adjacent_row_count
+        ),
         "hibm_pressure_neumann_skipped_obstacle_owner_count": (
             load.pressure_neumann.skipped_obstacle_owner_row_count
+        ),
+        "hibm_pressure_neumann_relocated_obstacle_owner_count": (
+            load.pressure_neumann.relocated_obstacle_owner_row_count
+        ),
+        "hibm_pressure_neumann_duplicate_owner_count": (
+            load.pressure_neumann.duplicate_owner_row_count
+        ),
+        "hibm_pressure_neumann_overflow_owner_count": (
+            load.pressure_neumann.overflow_owner_row_count
+        ),
+        "hibm_pressure_neumann_max_owner_slot_count": (
+            load.pressure_neumann.max_owner_slot_count
+        ),
+        "hibm_pressure_interface_row_list_enabled": (
+            load.pressure_neumann.pressure_interface_row_list_enabled
+        ),
+        "hibm_pressure_interface_row_list_count": (
+            load.pressure_neumann.pressure_interface_row_list_count
         ),
         "hibm_pressure_neumann_rhs_integral": load.pressure_neumann.rhs_integral,
         "hibm_pressure_neumann_max_abs_rhs": load.pressure_neumann.max_abs_rhs,
         "hibm_pressure_neumann_invalid_reconstruction_count": (
             load.pressure_neumann.invalid_reconstruction_row_count
+        ),
+        "hibm_pressure_neumann_invalid_unreconstructable_count": (
+            load.pressure_neumann.invalid_unreconstructable_row_count
+        ),
+        "hibm_pressure_neumann_invalid_bad_marker_count": (
+            load.pressure_neumann.invalid_bad_marker_row_count
+        ),
+        "hibm_pressure_neumann_invalid_nonpositive_volume_count": (
+            load.pressure_neumann.invalid_nonpositive_volume_row_count
         ),
         "hibm_pressure_neumann_min_reconstruction_gap_m": (
             load.pressure_neumann.min_reconstruction_gap_m
@@ -7048,6 +11643,14 @@ def hibm_mpm_sharp_step_summary(
             if pressure_gradient is None
             else pressure_gradient.max_abs_gradient_pa_per_m
         ),
+        "hibm_pressure_neumann_gradient_raw_max_abs_pa_per_m": (
+            0.0
+            if pressure_gradient is None
+            else pressure_gradient.max_raw_abs_gradient_pa_per_m
+        ),
+        "hibm_pressure_neumann_gradient_limited_count": (
+            0 if pressure_gradient is None else pressure_gradient.limited_gradient_count
+        ),
         "hibm_velocity_dirichlet_near_divergence_l2": load.fluid_projection.get(
             "velocity_dirichlet_near_l2",
             0.0,
@@ -7063,6 +11666,40 @@ def hibm_mpm_sharp_step_summary(
         "hibm_velocity_dirichlet_far_divergence_max_abs": load.fluid_projection.get(
             "velocity_dirichlet_far_max_abs",
             0.0,
+        ),
+        "hibm_velocity_dirichlet_apply_calls": load.fluid_projection.get(
+            "velocity_dirichlet_boundary_apply_calls",
+            0,
+        ),
+        "hibm_velocity_dirichlet_applied_active_cells_total": (
+            load.fluid_projection.get(
+                "velocity_dirichlet_boundary_active_cells_total",
+                0,
+            )
+        ),
+        "hibm_velocity_dirichlet_applied_active_cells_max": (
+            load.fluid_projection.get(
+                "velocity_dirichlet_boundary_active_cells_max",
+                0,
+            )
+        ),
+        "hibm_velocity_dirichlet_applied_max_delta_mps": (
+            load.fluid_projection.get(
+                "velocity_dirichlet_boundary_max_delta_mps",
+                0.0,
+            )
+        ),
+        "hibm_velocity_dirichlet_applied_mean_delta_mps": (
+            load.fluid_projection.get(
+                "velocity_dirichlet_boundary_mean_delta_mps",
+                0.0,
+            )
+        ),
+        "hibm_velocity_dirichlet_applied_momentum_delta_n_s": (
+            load.fluid_projection.get(
+                "velocity_dirichlet_boundary_momentum_delta_n_s",
+                (0.0, 0.0, 0.0),
+            )
         ),
         "hibm_pressure_correctable_divergence_l2": load.fluid_projection.get(
             "pressure_correctable_l2",
@@ -7122,6 +11759,46 @@ def hibm_mpm_sharp_step_summary(
         "hibm_no_slip_residual_l2_mps": (
             load.no_slip_residual.l2_no_slip_residual_mps
         ),
+        "hibm_post_solid_kinematic_projection_applied": (
+            report.post_solid_kinematic_projection_applied
+        ),
+        "hibm_post_solid_kinematic_projection_count": post_projection.get(
+            "hibm_post_solid_kinematic_projection_count",
+            0,
+        ),
+        "hibm_post_solid_pressure_projection_cg_converged_all": (
+            post_projection.get("cg_converged_all", True)
+        ),
+        "hibm_post_solid_pressure_projection_cg_breakdown_count": (
+            post_projection.get("cg_breakdown_count", 0)
+        ),
+        "hibm_post_solid_pressure_projection_cg_relative_residual_max": (
+            post_projection.get("cg_relative_residual_max", 0.0)
+        ),
+        "hibm_post_solid_velocity_dirichlet_apply_calls": (
+            post_projection.get("velocity_dirichlet_boundary_apply_calls", 0)
+        ),
+        "hibm_post_solid_velocity_dirichlet_applied_active_cells_total": (
+            post_projection.get(
+                "velocity_dirichlet_boundary_active_cells_total",
+                0,
+            )
+        ),
+        "hibm_post_solid_velocity_dirichlet_applied_max_delta_mps": (
+            post_projection.get("velocity_dirichlet_boundary_max_delta_mps", 0.0)
+        ),
+        "hibm_post_solid_no_slip_residual_valid_marker_count": (
+            0 if post_no_slip is None else post_no_slip.valid_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_invalid_marker_count": (
+            0 if post_no_slip is None else post_no_slip.invalid_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_max_mps": (
+            0.0 if post_no_slip is None else post_no_slip.max_no_slip_residual_mps
+        ),
+        "hibm_post_solid_no_slip_residual_l2_mps": (
+            0.0 if post_no_slip is None else post_no_slip.l2_no_slip_residual_mps
+        ),
         "hibm_full_stress_valid_marker_count": load.fluid_stress.valid_marker_count,
         "hibm_full_stress_invalid_marker_count": (
             load.fluid_stress.invalid_marker_count
@@ -7150,15 +11827,57 @@ def hibm_mpm_sharp_step_summary(
         "hibm_full_stress_far_pressure_outside_suppressed_marker_count": (
             load.fluid_stress.far_pressure_outside_suppressed_marker_count
         ),
+        "hibm_full_stress_two_sided_pressure_marker_count": (
+            load.fluid_stress.two_sided_pressure_marker_count
+        ),
         "hibm_full_stress_two_sided_extended_marker_count": (
             load.fluid_stress.two_sided_extended_marker_count
+        ),
+        "hibm_full_stress_one_sided_pressure_marker_count": (
+            load.fluid_stress.one_sided_pressure_marker_count
+        ),
+        "hibm_full_stress_one_sided_extended_marker_count": (
+            load.fluid_stress.one_sided_extended_marker_count
+        ),
+        "hibm_full_stress_one_sided_gradient_missing_marker_count": (
+            load.fluid_stress.one_sided_gradient_missing_marker_count
         ),
         "hibm_marker_primary_count": marker_forces.primary_marker_count,
         "hibm_marker_secondary_count": marker_forces.secondary_marker_count,
         "hibm_marker_total_count": marker_forces.total_marker_count,
+        "hibm_marker_primary_stress_valid_count": (
+            marker_forces.primary_stress_valid_marker_count
+        ),
+        "hibm_marker_primary_stress_invalid_count": (
+            marker_forces.primary_stress_invalid_marker_count
+        ),
+        "hibm_marker_secondary_stress_valid_count": (
+            marker_forces.secondary_stress_valid_marker_count
+        ),
+        "hibm_marker_secondary_stress_invalid_count": (
+            marker_forces.secondary_stress_invalid_marker_count
+        ),
         "hibm_marker_primary_force_n": marker_forces.primary_marker_force_n,
         "hibm_marker_secondary_force_n": marker_forces.secondary_marker_force_n,
         "hibm_marker_total_force_n": marker_forces.total_marker_force_n,
+        "hibm_marker_primary_force_norm_sum_n": (
+            marker_forces.primary_marker_force_norm_sum_n
+        ),
+        "hibm_marker_secondary_force_norm_sum_n": (
+            marker_forces.secondary_marker_force_norm_sum_n
+        ),
+        "hibm_marker_total_force_norm_sum_n": (
+            marker_forces.total_marker_force_norm_sum_n
+        ),
+        "hibm_marker_primary_force_norm_max_n": (
+            marker_forces.primary_marker_force_norm_max_n
+        ),
+        "hibm_marker_secondary_force_norm_max_n": (
+            marker_forces.secondary_marker_force_norm_max_n
+        ),
+        "hibm_marker_total_force_norm_max_n": (
+            marker_forces.total_marker_force_norm_max_n
+        ),
         "hibm_marker_fluid_reaction_force_n": marker_forces.fluid_reaction_force_n,
         "hibm_marker_action_reaction_residual_n": (
             marker_forces.action_reaction_residual_n
@@ -7213,6 +11932,15 @@ def hibm_mpm_sharp_step_summary(
         "hibm_next_boundary_pressure_neumann_count": (
             report.next_boundary_conditions.pressure_neumann_count
         ),
+        "hibm_next_boundary_max_abs_velocity_mps": (
+            report.next_boundary_conditions.max_abs_velocity_mps
+        ),
+        "hibm_next_velocity_dirichlet_active_rows": (
+            report.next_velocity_dirichlet.active_velocity_dirichlet_rows
+        ),
+        "hibm_next_velocity_dirichlet_max_abs_velocity_mps": (
+            report.next_velocity_dirichlet.max_abs_velocity_mps
+        ),
         "hibm_next_velocity_dirichlet_invalid_reconstruction_count": (
             report.next_velocity_dirichlet.invalid_reconstruction_row_count
         ),
@@ -7228,8 +11956,41 @@ def hibm_mpm_sharp_step_summary(
         "hibm_next_pressure_neumann_skipped_velocity_dirichlet_count": (
             report.next_pressure_neumann.skipped_velocity_dirichlet_row_count
         ),
+        "hibm_next_pressure_neumann_skipped_pressure_boundary_adjacent_count": (
+            report.next_pressure_neumann.skipped_pressure_boundary_adjacent_row_count
+        ),
+        "hibm_next_pressure_neumann_skipped_obstacle_owner_count": (
+            report.next_pressure_neumann.skipped_obstacle_owner_row_count
+        ),
+        "hibm_next_pressure_neumann_relocated_obstacle_owner_count": (
+            report.next_pressure_neumann.relocated_obstacle_owner_row_count
+        ),
+        "hibm_next_pressure_neumann_duplicate_owner_count": (
+            report.next_pressure_neumann.duplicate_owner_row_count
+        ),
+        "hibm_next_pressure_neumann_overflow_owner_count": (
+            report.next_pressure_neumann.overflow_owner_row_count
+        ),
+        "hibm_next_pressure_neumann_max_owner_slot_count": (
+            report.next_pressure_neumann.max_owner_slot_count
+        ),
+        "hibm_next_pressure_interface_row_list_enabled": (
+            report.next_pressure_neumann.pressure_interface_row_list_enabled
+        ),
+        "hibm_next_pressure_interface_row_list_count": (
+            report.next_pressure_neumann.pressure_interface_row_list_count
+        ),
         "hibm_next_pressure_neumann_invalid_reconstruction_count": (
             report.next_pressure_neumann.invalid_reconstruction_row_count
+        ),
+        "hibm_next_pressure_neumann_invalid_unreconstructable_count": (
+            report.next_pressure_neumann.invalid_unreconstructable_row_count
+        ),
+        "hibm_next_pressure_neumann_invalid_bad_marker_count": (
+            report.next_pressure_neumann.invalid_bad_marker_row_count
+        ),
+        "hibm_next_pressure_neumann_invalid_nonpositive_volume_count": (
+            report.next_pressure_neumann.invalid_nonpositive_volume_row_count
         ),
         "hibm_next_pressure_neumann_min_reconstruction_gap_m": (
             report.next_pressure_neumann.min_reconstruction_gap_m
@@ -7261,6 +12022,14 @@ def hibm_mpm_sharp_step_summary(
             if next_gradient is None
             else next_gradient.max_abs_gradient_pa_per_m
         ),
+        "hibm_next_pressure_neumann_gradient_raw_max_abs_pa_per_m": (
+            0.0
+            if next_gradient is None
+            else next_gradient.max_raw_abs_gradient_pa_per_m
+        ),
+        "hibm_next_pressure_neumann_gradient_limited_count": (
+            0 if next_gradient is None else next_gradient.limited_gradient_count
+        ),
     }
 
 
@@ -7278,13 +12047,19 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
     solid_dt_s: float,
     mu_pa: float,
     lambda_pa: float,
-    primary_region_id: int,
-    secondary_region_id: int,
-    far_pressure_region_id: int = -1,
-    far_pressure_pa: float = 0.0,
+        primary_region_id: int,
+        secondary_region_id: int,
+        far_pressure_region_id: int = -1,
+        far_pressure_barrier_region_id: int = -1,
+        far_pressure_pa: float = 0.0,
+    far_pressure_side_normal_sign: float = 0.0,
     far_pressure_inside_probe_max_multiplier: float = 3.0,
     two_sided_probe_max_multiplier: float = 3.0,
+    one_sided_pressure_region_id: int = -1,
+    one_sided_reference_pressure_pa: float = 0.0,
+    one_sided_probe_max_multiplier: float = 3.0,
     far_pressure_air_backed: bool = False,
+    far_pressure_air_backed_probe_normal_sign: float = 0.0,
     fluid_dt_s: float | None = None,
     fluid_substeps: int = 1,
     projection_iterations: int = 40,
@@ -7293,7 +12068,7 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
     pressure_neumann_density_kgm3: float | None = None,
     pressure_neumann_dt_s: float | None = None,
     pressure_outlet_zmin: bool = False,
-    reset_pressure: bool = True,
+    reset_pressure: bool = False,
     pressure_solver: str = "fv_cg",
     pressure_solve_failure_policy: str = "raise",
     multigrid_cycles: int | None = None,
@@ -7304,6 +12079,7 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
     read_mpm_report: bool = True,
     solid_external_loads: Callable[[], None] | None = None,
     classify_far_internal_nodes: bool = False,
+    convert_internal_nodes_to_obstacles: bool = True,
     diagnostic_disable_pressure_neumann_matrix_rows: bool = False,
 ) -> HibmMpmSharpNeoHookeanStepReport:
     def run_solid_step_with_external_loads() -> Any:
@@ -7337,17 +12113,25 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
         search_radius_m=float(search_radius_m),
         interior_probe_distance_m=float(interior_probe_distance_m),
         mpm_support_radius_m=float(mpm_support_radius_m),
-        primary_region_id=int(primary_region_id),
-        secondary_region_id=int(secondary_region_id),
-        far_pressure_region_id=int(far_pressure_region_id),
-        far_pressure_pa=float(far_pressure_pa),
+            primary_region_id=int(primary_region_id),
+            secondary_region_id=int(secondary_region_id),
+            far_pressure_region_id=int(far_pressure_region_id),
+            far_pressure_barrier_region_id=int(far_pressure_barrier_region_id),
+            far_pressure_pa=float(far_pressure_pa),
+        far_pressure_side_normal_sign=float(far_pressure_side_normal_sign),
         far_pressure_inside_probe_max_multiplier=float(
             far_pressure_inside_probe_max_multiplier
         ),
         two_sided_probe_max_multiplier=float(
             two_sided_probe_max_multiplier
         ),
+        one_sided_pressure_region_id=int(one_sided_pressure_region_id),
+        one_sided_reference_pressure_pa=float(one_sided_reference_pressure_pa),
+        one_sided_probe_max_multiplier=float(one_sided_probe_max_multiplier),
         far_pressure_air_backed=bool(far_pressure_air_backed),
+        far_pressure_air_backed_probe_normal_sign=float(
+            far_pressure_air_backed_probe_normal_sign
+        ),
         fluid_dt_s=fluid_dt_s,
         fluid_substeps=int(fluid_substeps),
         projection_iterations=int(projection_iterations),
@@ -7368,6 +12152,7 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
         divergence_cleanup_iterations=int(divergence_cleanup_iterations),
         divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
         classify_far_internal_nodes=bool(classify_far_internal_nodes),
+        convert_internal_nodes_to_obstacles=bool(convert_internal_nodes_to_obstacles),
         diagnostic_disable_pressure_neumann_matrix_rows=bool(
             diagnostic_disable_pressure_neumann_matrix_rows
         ),
@@ -7540,8 +12325,8 @@ _PAPER_REQUIREMENTS = (
 
 
 _SHARP_MISSING = tuple(item.requirement for item in _PAPER_REQUIREMENTS)
-_SHARP_CASE_MISSING = (
-    "Phase 5 fine-nozzle validation",
+_SHARP_VALIDATION_MISSING = (
+    "long-run validation",
 )
 
 
@@ -7563,10 +12348,10 @@ def fsi_coupling_mode_report(mode: str) -> dict[str, Any]:
             "paper_hibm_mpm": False,
             "sharp_interface": False,
             "primary_coupling_variable": (
-                "projected-IBM velocity residual plus reduced main/tail "
+                "projected-IBM velocity residual plus reduced primary/secondary "
                 "region-pair interface reaction"
             ),
-            "main_tail_region_reaction_diagnostic_only": True,
+            "region_pair_reaction_diagnostic_only": True,
             "legacy_projected_reduced": True,
             "not_paper_hibm_mpm": True,
             "missing": list(_SHARP_MISSING),
@@ -7583,10 +12368,10 @@ def fsi_coupling_mode_report(mode: str) -> dict[str, Any]:
             "paper_hibm_mpm": True,
             "sharp_interface": True,
             "primary_coupling_variable": "per-marker HIBM-MPM surface traction",
-            "main_tail_region_reaction_diagnostic_only": True,
+            "region_pair_reaction_diagnostic_only": False,
             "legacy_projected_reduced": False,
             "not_paper_hibm_mpm": False,
-            "missing": list(_SHARP_CASE_MISSING),
+            "missing": list(_SHARP_VALIDATION_MISSING),
         }
     choices = ", ".join(FSI_COUPLING_MODE_CHOICES)
     raise ValueError(f"fsi_coupling_mode must be one of: {choices}")

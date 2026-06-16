@@ -188,6 +188,92 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
         self.assertLess(report.grid_momentum_kg_mps[2], 0.0)
         self.assertLess(report.transfer_relative_error, 2.0e-5)
 
+    def test_rest_z_plane_constraint_removes_out_of_plane_state(self) -> None:
+        state = NeoHookeanMpmState(
+            particle_capacity=1,
+            bounds_min_m=(-0.02, -0.02, -0.02),
+            bounds_max_m=(0.02, 0.02, 0.02),
+            grid_nodes=(12, 12, 12),
+        )
+        state.initialize_box(
+            particle_counts=(1, 1, 1),
+            box_min_m=(-0.001, -0.001, -0.001),
+            box_max_m=(0.001, 0.001, 0.001),
+            density_kgm3=1000.0,
+        )
+        x = state.x.to_numpy()
+        v = state.v.to_numpy()
+        c = state.C.to_numpy()
+        f = state.F.to_numpy()
+        x[0, 2] += 0.01
+        v[0, 2] = 2.0
+        c[0, 0, 2] = 3.0
+        c[0, 2, 1] = -4.0
+        f[0, 0, 2] = 0.25
+        f[0, 2, 1] = -0.5
+        f[0, 2, 2] = 1.2
+        state.x.from_numpy(x)
+        state.v.from_numpy(v)
+        state.C.from_numpy(c)
+        state.F.from_numpy(f)
+
+        state.enforce_rest_z_plane()
+
+        actual_x = state.x.to_numpy()
+        actual_v = state.v.to_numpy()
+        actual_c = state.C.to_numpy()
+        actual_f = state.F.to_numpy()
+        self.assertAlmostEqual(actual_x[0, 2], state.rest_x.to_numpy()[0, 2])
+        self.assertEqual(actual_v[0, 2], 0.0)
+        self.assertEqual(actual_c[0, 0, 2], 0.0)
+        self.assertEqual(actual_c[0, 2, 1], 0.0)
+        self.assertEqual(actual_f[0, 0, 2], 0.0)
+        self.assertEqual(actual_f[0, 2, 1], 0.0)
+        self.assertEqual(actual_f[0, 2, 2], 1.0)
+
+    def test_rest_x_plane_constraint_removes_out_of_plane_state(self) -> None:
+        state = NeoHookeanMpmState(
+            particle_capacity=1,
+            bounds_min_m=(-0.02, -0.02, -0.02),
+            bounds_max_m=(0.02, 0.02, 0.02),
+            grid_nodes=(12, 12, 12),
+        )
+        state.initialize_box(
+            particle_counts=(1, 1, 1),
+            box_min_m=(-0.001, -0.001, -0.001),
+            box_max_m=(0.001, 0.001, 0.001),
+            density_kgm3=1000.0,
+        )
+        x = state.x.to_numpy()
+        v = state.v.to_numpy()
+        c = state.C.to_numpy()
+        f = state.F.to_numpy()
+        x[0, 0] += 0.01
+        v[0, 0] = 2.0
+        c[0, 0, 1] = 3.0
+        c[0, 2, 0] = -4.0
+        f[0, 0, 1] = 0.25
+        f[0, 2, 0] = -0.5
+        f[0, 0, 0] = 1.2
+        state.x.from_numpy(x)
+        state.v.from_numpy(v)
+        state.C.from_numpy(c)
+        state.F.from_numpy(f)
+
+        state.enforce_rest_x_plane()
+
+        actual_x = state.x.to_numpy()
+        actual_v = state.v.to_numpy()
+        actual_c = state.C.to_numpy()
+        actual_f = state.F.to_numpy()
+        self.assertAlmostEqual(actual_x[0, 0], state.rest_x.to_numpy()[0, 0])
+        self.assertEqual(actual_v[0, 0], 0.0)
+        self.assertEqual(actual_c[0, 0, 1], 0.0)
+        self.assertEqual(actual_c[0, 2, 0], 0.0)
+        self.assertEqual(actual_f[0, 0, 1], 0.0)
+        self.assertEqual(actual_f[0, 2, 0], 0.0)
+        self.assertEqual(actual_f[0, 0, 0], 1.0)
+
     def test_velocity_damping_does_not_pollute_transfer_diagnostic(self) -> None:
         material = ecoflex_0010_material()
         state = NeoHookeanMpmState(

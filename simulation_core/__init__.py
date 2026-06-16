@@ -30,6 +30,7 @@ from .fsi_coupling import (
     solve_interface_reaction_fixed_point,
     update_interface_reaction_for_next_step,
 )
+from .fluid_domain import AxisAlignedBoundary, BoundaryRegion, FluidDomain
 from .geometry import (
     PAPER_SPHERE_MESHES,
     REPRODUCTION_UV_SPHERE_MESHES,
@@ -38,6 +39,24 @@ from .geometry import (
     infer_uv_sphere_resolution,
     make_uv_sphere,
     orient_faces_outward,
+)
+from .cad_import import (
+    StepBrep,
+    StepCadSummary,
+    cad_provenance_report,
+    parse_step_cad_summary,
+)
+from .cad_tessellation import (
+    StepCurveEntity,
+    StepPartEntity,
+    StepSurfaceEntity,
+    StepTessellationResult,
+    StepTessellationSettings,
+    build_step_derived_source_config,
+    remap_step_named_selection_face_ids,
+    step_tessellation_report,
+    tessellate_step_cad,
+    write_step_surface_mesh_cache,
 )
 from .hyperelastic import (
     NeoHookeanMaterial,
@@ -90,6 +109,7 @@ from .projected_ibm import (
     advance_projected_ibm_region_pair_fluid_step,
 )
 from .runtime import TaichiRuntimeConfig, init_taichi
+from .time_stepping import CflSubstepController
 from .tri_surface import TriSurfaceDiagnosticReport, TriSurfaceRegionDiagnostics
 from .validation import (
     boundary_drive_compliance_report,
@@ -102,12 +122,16 @@ from .validation import (
 __all__ = [
     "CartesianFluidSolver",
     "CartesianGrid",
+    "CflSubstepController",
     "CG_PRECONDITIONER_CHOICES",
+    "AxisAlignedBoundary",
+    "BoundaryRegion",
     "FSI_COUPLING_MODE_CHOICES",
     "FSI_COUPLING_MODE_HIBM_MPM_SHARP",
     "FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED",
     "ForceBalanceReport",
     "FluidDomainSpec",
+    "FluidDomain",
     "GradedGridSpec",
     "HibmMpmExternalForceClearReport",
     "HibmMpmIbBoundaryConditionReport",
@@ -144,6 +168,13 @@ __all__ = [
     "REPRODUCTION_UV_SPHERE_MESHES",
     "RegionPairInterfaceReactionTarget",
     "RefinementRegion",
+    "StepBrep",
+    "StepCadSummary",
+    "StepCurveEntity",
+    "StepPartEntity",
+    "StepSurfaceEntity",
+    "StepTessellationResult",
+    "StepTessellationSettings",
     "SurfaceMesh",
     "TaichiRuntimeConfig",
     "TriSurfaceDiagnosticReport",
@@ -163,6 +194,8 @@ __all__ = [
     "advance_projected_ibm_region_pair_fluid_step",
     "boundary_drive_compliance_report",
     "build_graded_grid",
+    "build_step_derived_source_config",
+    "cad_provenance_report",
     "checks_passed",
     "ecoflex_0010_material",
     "finite_field_diagnostics",
@@ -176,15 +209,20 @@ __all__ = [
     "interface_reaction_force",
     "make_uv_sphere",
     "orient_faces_outward",
+    "parse_step_cad_summary",
     "psi_to_pa",
     "region_pair_interface_reaction_forces",
+    "remap_step_named_selection_face_ids",
     "relax_interface_reaction_forces",
     "require_implemented_fsi_coupling_mode",
     "robin_neumann_impedance_force",
     "solve_and_apply_interface_reaction_step",
     "solve_interface_reaction_fixed_point",
+    "step_tessellation_report",
+    "tessellate_step_cad",
     "update_interface_reaction_for_next_step",
     "vector_norm",
+    "write_step_surface_mesh_cache",
 ]
 
 __version__ = "0.2.0"

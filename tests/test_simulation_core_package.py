@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
 import numpy as np
 
 from simulation_core import (
+    AxisAlignedBoundary,
     CartesianGrid,
     FSI_COUPLING_MODE_HIBM_MPM_SHARP,
     FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
     FluidDomainSpec,
+    FluidDomain,
     GradedGridSpec,
     InterfaceReactionFixedPointResult,
     InterfaceReactionTargetEvaluation,
@@ -53,6 +56,9 @@ class SimulationCorePackageTests(unittest.TestCase):
 
         fluid = FluidDomainSpec.unit_box(grid_nodes=(8, 8, 8))
         self.assertEqual(fluid.grid_nodes, (8, 8, 8))
+        outlet = AxisAlignedBoundary.pressure_outlet(axis="z", side="min")
+        self.assertTrue(outlet.legacy_zmin_outlet)
+        self.assertEqual(outlet.as_boundary_region().selector, "z_min")
         grid = build_graded_grid(
             GradedGridSpec(
                 bounds_min_m=(0.0, 0.0, 0.0),
@@ -128,7 +134,9 @@ class SimulationCorePackageTests(unittest.TestCase):
 
         self.assertIn("assemble_velocity_dirichlet_boundary_rows", hibm_source)
         self.assertIn("velocity_dirichlet_boundary_active", fluid_source)
-        self.assertIn("_apply_velocity_dirichlet_boundary_rows_kernel(0)", fluid_source)
+        self.assertIn("_apply_velocity_dirichlet_boundary_rows_kernel(", fluid_source)
+        self.assertIn("preserve_projected_rows: bool = False", fluid_source)
+        self.assertIn("1 if preserve_projected_rows else 0", fluid_source)
         self.assertNotIn("velocity_constraint_blend", hibm_source)
         self.assertNotIn("solid_mobility_ratio", hibm_source)
 
@@ -223,7 +231,9 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertTrue(legacy_report["legacy"])
         self.assertTrue(legacy_report["implemented"])
         self.assertFalse(legacy_report["paper_hibm_mpm"])
-        self.assertTrue(legacy_report["main_tail_region_reaction_diagnostic_only"])
+        self.assertTrue(legacy_report["region_pair_reaction_diagnostic_only"])
+        self.assertNotIn("main/tail", legacy_report["primary_coupling_variable"])
+        self.assertNotIn("main_tail", json.dumps(legacy_report))
         self.assertEqual(legacy_report["solver_layer"], "simulation_core")
 
         self.assertFalse(sharp_report["legacy"])
@@ -232,7 +242,8 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertTrue(sharp_report["core_runner_available"])
         self.assertTrue(sharp_report["case_runner_available"])
         self.assertFalse(sharp_report["phase5_validation_complete"])
-        self.assertEqual(sharp_report["missing"], ["Phase 5 fine-nozzle validation"])
+        self.assertEqual(sharp_report["missing"], ["long-run validation"])
+        self.assertNotIn("nozzle", json.dumps(sharp_report).lower())
         self.assertNotIn("surface markers", sharp_report["missing"])
         self.assertNotIn("pressure Neumann matrix rows", sharp_report["missing"])
 

@@ -19,9 +19,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from simulation_core import (
+    AxisAlignedBoundary,
     CG_PRECONDITIONER_CHOICES,
     CartesianGrid,
     CartesianFluidSolver,
+    CflSubstepController,
     FSI_COUPLING_MODE_CHOICES,
     FSI_COUPLING_MODE_HIBM_MPM_SHARP,
     FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
@@ -42,6 +44,7 @@ from simulation_core import (
     advance_projected_ibm_region_pair_fluid_step,
     boundary_drive_compliance_report,
     build_graded_grid,
+    cad_provenance_report,
     checks_passed,
     finite_field_diagnostics,
     hibm_mpm_sharp_step_summary,
@@ -52,6 +55,9 @@ from simulation_core import (
     vector_norm,
 )
 from simulation_core.hyperelastic import ecoflex_0010_material
+from simulation_core.pressure_interface import (
+    far_pressure_side_normal_sign_from_direction,
+)
 from simulation_core.runtime import init_taichi
 
 
@@ -235,6 +241,13 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_internal_obstacle_cell_count",
     "hibm_solid_band_nonprojectable_cell_count",
     "hibm_pressure_disconnected_nonprojectable_cell_count",
+    "hibm_air_backed_cell_count",
+    "hibm_air_backed_component_count",
+    "hibm_air_backed_cell_volume_m3",
+    "hibm_air_backed_seed_marker_count",
+    "hibm_air_backed_seed_missed_marker_count",
+    "hibm_air_backed_seed_fallback_cell_count",
+    "hibm_air_backed_reachability_barrier_cell_count",
     "hibm_ib_invalid_projection_count",
     "hibm_boundary_no_slip_count",
     "hibm_boundary_pressure_neumann_count",
@@ -252,6 +265,7 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_velocity_dirichlet_max_projection_weight",
     "hibm_pressure_neumann_active_rows",
     "hibm_pressure_neumann_skipped_velocity_dirichlet_count",
+    "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count",
     "hibm_pressure_neumann_skipped_obstacle_owner_count",
     "hibm_pressure_neumann_rhs_integral",
     "hibm_pressure_neumann_max_abs_rhs",
@@ -268,6 +282,8 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_pressure_neumann_gradient_available",
     "hibm_pressure_neumann_gradient_active_marker_count",
     "hibm_pressure_neumann_gradient_max_abs_pa_per_m",
+    "hibm_pressure_neumann_gradient_raw_max_abs_pa_per_m",
+    "hibm_pressure_neumann_gradient_limited_count",
     "hibm_added_mass_stability_measured",
     "hibm_semi_implicit_coupling_enabled",
     "hibm_semi_implicit_coupling_matrix_active",
@@ -285,15 +301,32 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_interior_pressure_fixed_divergence_cell_count",
     "hibm_no_slip_residual_max_mps",
     "hibm_no_slip_residual_l2_mps",
+    "hibm_post_solid_kinematic_projection_applied",
+    "hibm_post_solid_no_slip_residual_max_mps",
+    "hibm_post_solid_no_slip_residual_l2_mps",
     "hibm_full_stress_valid_marker_count",
     "hibm_full_stress_invalid_marker_count",
     "hibm_full_stress_max_abs_traction_pa",
+    "hibm_full_stress_two_sided_pressure_marker_count",
+    "hibm_full_stress_one_sided_pressure_marker_count",
+    "hibm_full_stress_one_sided_extended_marker_count",
+    "hibm_full_stress_one_sided_gradient_missing_marker_count",
     "hibm_marker_primary_count",
     "hibm_marker_secondary_count",
     "hibm_marker_total_count",
+    "hibm_marker_primary_stress_valid_count",
+    "hibm_marker_primary_stress_invalid_count",
+    "hibm_marker_secondary_stress_valid_count",
+    "hibm_marker_secondary_stress_invalid_count",
     "hibm_marker_total_force_x_n",
     "hibm_marker_total_force_y_n",
     "hibm_marker_total_force_z_n",
+    "hibm_marker_primary_force_norm_sum_n",
+    "hibm_marker_secondary_force_norm_sum_n",
+    "hibm_marker_total_force_norm_sum_n",
+    "hibm_marker_primary_force_norm_max_n",
+    "hibm_marker_secondary_force_norm_max_n",
+    "hibm_marker_total_force_norm_max_n",
     "hibm_marker_action_reaction_residual_n",
     "hibm_mpm_scatter_action_reaction_residual_n",
     "hibm_surface_updated_marker_count",
@@ -315,11 +348,17 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "pressure_projection_cg_breakdown_code",
     "pressure_projection_cg_breakdown_dAd",
     "pressure_solve_failed",
+    "pressure_projection_physical_failure",
+    "hibm_unreached_incompatible_component_count",
+    "hibm_unreached_component_rhs_mean_max_abs",
+    "hibm_unreached_component_rhs_integral_max_abs",
     "fsi_added_mass_stability_measured",
     "fsi_semi_implicit_coupling_enabled",
     "fsi_semi_implicit_coupling_matrix_active",
     "fsi_action_reaction_residual_abs_n",
     "fsi_coupling_residual_norm_n",
+    "fsi_coupling_residual_norm_mps",
+    "fsi_coupling_residual_max_mps",
     "main_fsi_fluid_force_x_n",
     "main_fsi_fluid_force_y_n",
     "main_fsi_fluid_force_z_n",
@@ -335,6 +374,7 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "fsi_grid_force_x_n",
     "fsi_grid_force_y_n",
     "fsi_grid_force_z_n",
+    "fsi_volume_source_m3s",
     "solid_mpm_transfer_relative_error",
     "solid_mpm_max_speed_mps",
     "solid_mpm_grid_out_of_bounds_particle_count",
@@ -404,16 +444,28 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "min_outlet_to_main_volume_flux_ratio",
     "pressure_outlet_source_ratio_tolerance",
     "fluid_substeps",
+    "adaptive_fluid_substeps",
+    "adaptive_fluid_substeps_target_cfl",
+    "adaptive_fluid_substeps_max",
+    "adaptive_fluid_substeps_safety",
     "ibm_correction_iterations",
     "fsi_coupling_iterations",
     "fsi_coupling_tolerance_n",
     "disable_pressure_outlet_zmin",
     "disable_reduced_obstacles",
+    "source_config_intersect_reduced_water_domain",
     "use_region14_aperture_carve",
+    "disable_region14_aperture_carve",
     "open_downstream_farfield",
     "use_nozzle_taper",
     "nozzle_taper_length_m",
     "nozzle_taper_inlet_radius_m",
+    "pressure_t0_s",
+    "pressure_t1_s",
+    "pressure_t2_s",
+    "pressure_p0_pa",
+    "pressure_p1_pa",
+    "pressure_p2_pa",
     "diagnostic_disable_pressure_neumann_matrix_rows",
     "arch",
 )
@@ -803,8 +855,10 @@ class ReducedSquidFSI:
         nozzle_taper_inlet_radius_m: ti.f32,
         downstream_farfield_open_enabled: ti.i32,
         downstream_farfield_open_z_max_m: ti.f32,
+        preserve_existing_obstacles: ti.i32,
     ):
         for i, j, k in self.fluid.obstacle:
+            existing_obstacle = self.fluid.obstacle[i, j, k] != 0
             x = cell_center_x_m[i]
             y = cell_center_y_m[j]
             z = cell_center_z_m[k]
@@ -874,9 +928,17 @@ class ReducedSquidFSI:
                 downstream_farfield_open_enabled == 1
                 and cell_min_z_m <= downstream_farfield_open_z_max_m
             )
-            self.fluid.obstacle[i, j, k] = 0 if chamber or nozzle or outlet_plume or downstream_farfield else 1
+            reduced_water = chamber or nozzle or outlet_plume or downstream_farfield
+            if preserve_existing_obstacles == 1:
+                self.fluid.obstacle[i, j, k] = 0 if reduced_water and not existing_obstacle else 1
+            else:
+                self.fluid.obstacle[i, j, k] = 0 if reduced_water else 1
 
-    def mark_reduced_squid_water_domain(self) -> None:
+    def _apply_reduced_squid_water_domain(
+        self,
+        *,
+        preserve_existing_obstacles: bool,
+    ) -> None:
         spec = self.spec
         taper_start_z_m, taper_end_z_m, taper_inlet_radius_m = nozzle_taper_geometry(spec)
         self.mark_reduced_squid_water_domain_kernel(
@@ -902,7 +964,14 @@ class ReducedSquidFSI:
             float(taper_inlet_radius_m),
             1 if spec.downstream_farfield_open_enabled else 0,
             float(spec.downstream_farfield_open_z_max_m),
+            1 if preserve_existing_obstacles else 0,
         )
+
+    def mark_reduced_squid_water_domain(self) -> None:
+        self._apply_reduced_squid_water_domain(preserve_existing_obstacles=False)
+
+    def intersect_current_obstacles_with_reduced_squid_water_domain(self) -> None:
+        self._apply_reduced_squid_water_domain(preserve_existing_obstacles=True)
 
     @ti.func
     def _section_area_fraction(
@@ -1331,6 +1400,119 @@ def load_source_config(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
+def source_config_cad_provenance_report(
+    config: Mapping[str, object],
+    *,
+    source_config_path: Path | None,
+    cad_step_path: Path | None,
+) -> dict[str, object]:
+    return cad_provenance_report(
+        cad_step_path,
+        source_config=config,
+        source_config_path=source_config_path,
+    )
+
+
+def _selection_ids_contain_region(selection_ids: object, region_id: int) -> bool:
+    return int(region_id) in _selection_ids_as_int_tuple(selection_ids)
+
+
+def _selection_ids_as_int_tuple(selection_ids: object) -> tuple[int, ...]:
+    if isinstance(selection_ids, str):
+        candidates: Sequence[object] = tuple(
+            item
+            for item in selection_ids.replace(",", " ").split()
+            if item
+        )
+    elif isinstance(selection_ids, Mapping):
+        candidates = tuple(selection_ids.values())
+    elif isinstance(selection_ids, Sequence):
+        candidates = selection_ids
+    elif selection_ids is None:
+        candidates = ()
+    else:
+        candidates = (selection_ids,)
+    region_ids: list[int] = []
+    for candidate in candidates:
+        try:
+            region_ids.append(int(candidate))
+        except (TypeError, ValueError):
+            continue
+    return tuple(region_ids)
+
+
+def source_config_requests_region14_aperture_carve(
+    config: Mapping[str, object],
+) -> bool:
+    analysis = config.get("analysis_settings", {})
+    if not isinstance(analysis, Mapping):
+        return False
+    return bool(analysis.get("solid_obstacle_opening_carve_enabled", False)) and (
+        _selection_ids_contain_region(
+            analysis.get("solid_obstacle_opening_carve_selection_ids", ()),
+            14,
+        )
+    )
+
+
+def source_config_requests_fluid_active_mask(
+    config: Mapping[str, object],
+) -> bool:
+    analysis = config.get("analysis_settings", {})
+    if not isinstance(analysis, Mapping):
+        return False
+    return bool(analysis.get("fluid_active_mask_enabled", False))
+
+
+def source_config_requests_reduced_water_intersection(
+    config: Mapping[str, object],
+) -> bool:
+    analysis = config.get("analysis_settings", {})
+    if not isinstance(analysis, Mapping):
+        return False
+    return bool(
+        analysis.get("fluid_active_mask_intersect_reduced_water_domain", False)
+    )
+
+
+def source_config_volume_particle_cache_path(source_config_path: Path) -> Path:
+    pattern = f"{source_config_path.stem}.*.volume_particles.npz"
+    candidates = sorted(source_config_path.parent.glob(pattern))
+    if not candidates:
+        raise FileNotFoundError(
+            "source config requests a CAD-derived active mask, but no adjacent "
+            f"volume particle cache matched {pattern!r}"
+        )
+    if len(candidates) == 1:
+        return candidates[0]
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def source_config_solid_obstacle_particle_region_ids(
+    config: Mapping[str, object],
+    available_region_ids: Sequence[int],
+) -> tuple[int, ...]:
+    analysis = config.get("analysis_settings", {})
+    if not isinstance(analysis, Mapping):
+        return tuple(sorted({int(value) for value in available_region_ids}))
+    available = {int(value) for value in available_region_ids}
+    surface_only_region_ids = set(
+        _selection_ids_as_int_tuple(
+            analysis.get("solid_obstacle_surface_only_region_ids", ()),
+        )
+    )
+    if surface_only_region_ids:
+        return tuple(sorted(available & surface_only_region_ids))
+    selected = set(available)
+    if bool(analysis.get("solid_obstacle_exclude_fsi_contact_regions", False)):
+        selected -= set(
+            _selection_ids_as_int_tuple(
+                analysis.get("solid_obstacle_moving_fsi_contact_region_ids", ()),
+            )
+        )
+    return tuple(sorted(selected))
+
+
 def _mapping_config_float(
     mapping: Mapping[str, object],
     keys: Sequence[str],
@@ -1397,6 +1579,77 @@ def pressure_schedule_from_config(
     return schedule
 
 
+PRESSURE_SCHEDULE_FIELDS = (
+    "pressure_t0_s",
+    "pressure_t1_s",
+    "pressure_t2_s",
+    "pressure_p0_pa",
+    "pressure_p1_pa",
+    "pressure_p2_pa",
+)
+
+
+@dataclass(frozen=True)
+class PressureBoundaryShellMapping:
+    source_region_id: int
+    target_shell_region_id: int
+    primary_shell_region_id: int
+    secondary_shell_region_id: int
+    mapping_source: str
+    source_selection_name: str
+    target_selection_name: str
+    boundary_condition_input_only: bool = True
+
+
+def pressure_schedule_dict(spec: SquidReducedSpec) -> dict[str, float]:
+    return {field: float(getattr(spec, field)) for field in PRESSURE_SCHEDULE_FIELDS}
+
+
+def spec_with_pressure_schedule_overrides(
+    spec: SquidReducedSpec,
+    overrides: Mapping[str, object],
+) -> tuple[SquidReducedSpec, dict[str, object]]:
+    base_schedule = pressure_schedule_dict(spec)
+    applied: dict[str, float] = {}
+    for field in PRESSURE_SCHEDULE_FIELDS:
+        value = overrides.get(field)
+        if value is None:
+            continue
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(f"{field} must be finite")
+        applied[field] = parsed
+    if not applied:
+        return spec, {
+            "source": "source_config",
+            "cli_override_applied": False,
+            "schedule": base_schedule,
+            "overrides": {},
+            "boundary_condition_input_only": True,
+            "computed_response_fields": (
+                "tail force, fluid velocity, outlet flow, and jet diagnostics",
+            ),
+        }
+    schedule = {**base_schedule, **applied}
+    if not (
+        schedule["pressure_t0_s"]
+        < schedule["pressure_t1_s"]
+        < schedule["pressure_t2_s"]
+    ):
+        raise ValueError("pressure schedule times must satisfy t0 < t1 < t2")
+    return replace(spec, **schedule), {
+        "source": "source_config_plus_cli_override",
+        "cli_override_applied": True,
+        "schedule": schedule,
+        "base_source_config_schedule": base_schedule,
+        "overrides": applied,
+        "boundary_condition_input_only": True,
+        "computed_response_fields": (
+            "tail force, fluid velocity, outlet flow, and jet diagnostics",
+        ),
+    }
+
+
 def _face_ids_for_region(config: dict[str, object], region_id: int) -> list[int]:
     selections = config.get("named_selections", [])
     if not isinstance(selections, list):
@@ -1407,6 +1660,224 @@ def _face_ids_for_region(config: dict[str, object], region_id: int) -> list[int]
             if isinstance(values, list):
                 return [int(value) for value in values]
     return []
+
+
+def _source_config_named_selection(
+    config: Mapping[str, object],
+    region_id: int,
+) -> Mapping[str, object] | None:
+    selections = config.get("named_selections", [])
+    if not isinstance(selections, list):
+        return None
+    for selection in selections:
+        if not isinstance(selection, Mapping):
+            continue
+        try:
+            selection_id = int(selection.get("id", -1))
+        except (TypeError, ValueError):
+            continue
+        if selection_id == int(region_id):
+            return selection
+    return None
+
+
+def _source_config_selection_name(
+    config: Mapping[str, object],
+    region_id: int,
+) -> str:
+    selection = _source_config_named_selection(config, region_id)
+    if selection is None:
+        return ""
+    return str(selection.get("name", ""))
+
+
+def source_config_pressure_load_region_id(config: Mapping[str, object]) -> int:
+    """Return the CAD selection carrying the prescribed pressure boundary."""
+    selections = config.get("named_selections", [])
+    if not isinstance(selections, list):
+        return 7
+    pressure_region_ids: list[int] = []
+    for selection in selections:
+        if not isinstance(selection, Mapping):
+            continue
+        boundary_condition = selection.get("boundary_condition", {})
+        if not isinstance(boundary_condition, Mapping):
+            continue
+        if str(boundary_condition.get("type", "")).lower() != "pressure":
+            continue
+        region_id = int(selection.get("id", -1))
+        if region_id >= 0:
+            pressure_region_ids.append(region_id)
+    if len(pressure_region_ids) == 1:
+        return int(pressure_region_ids[0])
+    if len(pressure_region_ids) > 1:
+        raise ValueError(
+            "source-config contains multiple pressure boundary selections; "
+            "the squid case must name exactly one primary actuation pressure surface"
+        )
+    return 7
+
+
+def source_config_shell_region_pair(config: Mapping[str, object]) -> tuple[int, int]:
+    analysis = config.get("analysis_settings", {})
+    if isinstance(analysis, Mapping):
+        fsi_surface_ids = _selection_ids_as_int_tuple(
+            analysis.get("solid_obstacle_moving_fsi_contact_surface_region_ids", ()),
+        )
+        if len(fsi_surface_ids) >= 2:
+            return int(fsi_surface_ids[0]), int(fsi_surface_ids[1])
+    return 7, 8
+
+
+def _explicit_pressure_target_region_id(
+    analysis: Mapping[str, object],
+    source_region_id: int,
+) -> int | None:
+    map_keys = (
+        "pressure_boundary_to_fsi_shell_region_ids",
+        "pressure_load_region_map",
+        "pressure_boundary_target_region_map",
+    )
+    for key in map_keys:
+        raw_mapping = analysis.get(key)
+        if not isinstance(raw_mapping, Mapping):
+            continue
+        for raw_source, raw_target in raw_mapping.items():
+            try:
+                mapped_source = int(raw_source)
+                mapped_target = int(raw_target)
+            except (TypeError, ValueError):
+                continue
+            if mapped_source == int(source_region_id):
+                return mapped_target
+    scalar_keys = (
+        "pressure_load_target_region_id",
+        "pressure_boundary_target_fsi_region_id",
+        "actuation_pressure_fsi_region_id",
+        "primary_pressure_fsi_shell_region_id",
+    )
+    for key in scalar_keys:
+        if key not in analysis:
+            continue
+        try:
+            return int(analysis[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be an integer region id") from exc
+    return None
+
+
+def _selection_name_supports_pressure_side_mapping(
+    *,
+    source_selection_name: str,
+    target_selection_name: str,
+) -> bool:
+    source = source_selection_name.lower()
+    target = target_selection_name.lower()
+    source_pressure_side = "pressure" in source and (
+        "air" in source or "load" in source or "actuat" in source
+    )
+    target_fsi_side = "fsi" in target or "water" in target
+    return source_pressure_side and target_fsi_side
+
+
+def source_config_pressure_boundary_shell_mapping(
+    config: Mapping[str, object],
+) -> PressureBoundaryShellMapping:
+    source_region_id = source_config_pressure_load_region_id(config)
+    primary_shell_region_id, secondary_shell_region_id = source_config_shell_region_pair(
+        config,
+    )
+    source_name = _source_config_selection_name(config, source_region_id)
+    primary_name = _source_config_selection_name(config, primary_shell_region_id)
+    analysis = config.get("analysis_settings", {})
+    if not isinstance(analysis, Mapping):
+        analysis = {}
+    explicit_target = _explicit_pressure_target_region_id(
+        analysis,
+        source_region_id,
+    )
+    if explicit_target is not None:
+        if explicit_target != primary_shell_region_id:
+            raise ValueError(
+                "pressure boundary target region must match the primary FSI "
+                f"shell region {primary_shell_region_id}; got {explicit_target}"
+            )
+        mapping_source = "explicit_source_config_pressure_boundary_target"
+        target_region_id = int(explicit_target)
+    elif source_region_id == primary_shell_region_id:
+        mapping_source = "pressure_boundary_selection_is_primary_fsi_shell"
+        target_region_id = int(primary_shell_region_id)
+    else:
+        fsi_surface_ids = _selection_ids_as_int_tuple(
+            analysis.get("solid_obstacle_moving_fsi_contact_surface_region_ids", ()),
+        )
+        if not fsi_surface_ids or int(primary_shell_region_id) != int(fsi_surface_ids[0]):
+            raise ValueError(
+                "pressure boundary selection differs from the primary FSI shell, "
+                "but source_config does not declare ordered moving FSI contact "
+                "surface regions"
+            )
+        if int(source_region_id) in {int(region_id) for region_id in fsi_surface_ids}:
+            raise ValueError(
+                "pressure boundary selection must not also be an FSI contact "
+                "surface when it is mapped as a separate dry-side pressure face"
+            )
+        if not _selection_name_supports_pressure_side_mapping(
+            source_selection_name=source_name,
+            target_selection_name=primary_name,
+        ):
+            raise ValueError(
+                "pressure boundary selection differs from the primary FSI shell, "
+                "but named_selection names do not identify a pressure-side face "
+                "mapped to a water/FSI shell face"
+            )
+        mapping_source = (
+            "inferred_dry_pressure_side_to_primary_fsi_shell_from_source_config"
+        )
+        target_region_id = int(primary_shell_region_id)
+    return PressureBoundaryShellMapping(
+        source_region_id=int(source_region_id),
+        target_shell_region_id=int(target_region_id),
+        primary_shell_region_id=int(primary_shell_region_id),
+        secondary_shell_region_id=int(secondary_shell_region_id),
+        mapping_source=mapping_source,
+        source_selection_name=source_name,
+        target_selection_name=_source_config_selection_name(config, target_region_id),
+    )
+
+
+def _source_config_pressure_load_direction(
+    config: Mapping[str, object],
+) -> tuple[float, float, float]:
+    selections = config.get("named_selections", [])
+    if not isinstance(selections, list):
+        return (0.0, 0.0, -1.0)
+    for selection in selections:
+        if not isinstance(selection, Mapping):
+            continue
+        boundary_condition = selection.get("boundary_condition", {})
+        if not isinstance(boundary_condition, Mapping):
+            continue
+        if str(boundary_condition.get("type", "")).lower() != "pressure":
+            continue
+        params = boundary_condition.get("params", {})
+        if not isinstance(params, Mapping):
+            params = selection.get("params", {})
+        direction = str(params.get("Direction", "-z")).strip().lower()
+        if direction in {"-x", "negative_x", "x-"}:
+            return (-1.0, 0.0, 0.0)
+        if direction in {"+x", "x", "positive_x", "x+"}:
+            return (1.0, 0.0, 0.0)
+        if direction in {"-y", "negative_y", "y-"}:
+            return (0.0, -1.0, 0.0)
+        if direction in {"+y", "y", "positive_y", "y+"}:
+            return (0.0, 1.0, 0.0)
+        if direction in {"-z", "negative_z", "z-"}:
+            return (0.0, 0.0, -1.0)
+        if direction in {"+z", "z", "positive_z", "z+"}:
+            return (0.0, 0.0, 1.0)
+        raise ValueError(f"unsupported pressure load Direction: {direction!r}")
+    return (0.0, 0.0, -1.0)
 
 
 def _vector3(values: Sequence[float], *, name: str) -> tuple[float, float, float]:
@@ -1504,6 +1975,17 @@ def raise_for_unsupported_hibm_mpm_sharp_robin_options(
         )
 
 
+def raise_for_unsupported_hibm_mpm_sharp_iteration_options(
+    *,
+    fsi_coupling_mode: str,
+    fsi_coupling_iterations: int,
+) -> None:
+    if str(fsi_coupling_mode) != FSI_COUPLING_MODE_HIBM_MPM_SHARP:
+        return
+    if int(fsi_coupling_iterations) < 1:
+        raise ValueError("--fsi-coupling-iterations must be at least 1")
+
+
 def build_hibm_mpm_sharp_coupling_state(
     *,
     fluid,
@@ -1580,6 +2062,7 @@ def build_hibm_mpm_sharp_case_row(
     sample_report: Mapping[str, object],
     sharp_summary: Mapping[str, object],
     fluid_projection_report: Mapping[str, object],
+    pressure_outlet_report: Mapping[str, object],
     fluid_dt_s: float,
     solid_mpm_report,
     solid_model: str,
@@ -1607,10 +2090,51 @@ def build_hibm_mpm_sharp_case_row(
         solid_mpm_report,
         solid_model=solid_model,
     )
+    sharp_fsi_volume_source_m3s = _mapping_float(
+        pressure_outlet_report,
+        "source_volume_flux_m3s",
+    )
     scatter_force_residual_n = _mapping_float(
         sharp_summary,
         "hibm_mpm_scatter_action_reaction_residual_n",
     )
+    if "hibm_fsi_coupling_residual_l2_mps" in sharp_summary:
+        sharp_fsi_residual_source = str(
+            sharp_summary.get(
+                "hibm_fsi_coupling_residual_source",
+                "marker_surface_fixed_point_position_velocity_residual_l2_mps",
+            )
+        )
+        sharp_fsi_residual_l2_mps = _mapping_float(
+            sharp_summary,
+            "hibm_fsi_coupling_residual_l2_mps",
+        )
+        sharp_fsi_residual_max_mps = _mapping_float(
+            sharp_summary,
+            "hibm_fsi_coupling_residual_max_mps",
+        )
+    elif bool(sharp_summary.get("hibm_post_solid_kinematic_projection_applied", False)):
+        sharp_fsi_residual_source = (
+            "hibm_post_solid_no_slip_velocity_residual_l2_mps"
+        )
+        sharp_fsi_residual_l2_mps = _mapping_float(
+            sharp_summary,
+            "hibm_post_solid_no_slip_residual_l2_mps",
+        )
+        sharp_fsi_residual_max_mps = _mapping_float(
+            sharp_summary,
+            "hibm_post_solid_no_slip_residual_max_mps",
+        )
+    else:
+        sharp_fsi_residual_source = "hibm_no_slip_velocity_residual_l2_mps"
+        sharp_fsi_residual_l2_mps = _mapping_float(
+            sharp_summary,
+            "hibm_no_slip_residual_l2_mps",
+        )
+        sharp_fsi_residual_max_mps = _mapping_float(
+            sharp_summary,
+            "hibm_no_slip_residual_max_mps",
+        )
 
     row.update(
         {
@@ -1621,18 +2145,22 @@ def build_hibm_mpm_sharp_case_row(
             "fsi_coupling_mode_paper_hibm_mpm": bool(
                 fsi_coupling_mode_report["paper_hibm_mpm"]
             ),
-            "main_tail_region_reaction_diagnostic_only": bool(
-                fsi_coupling_mode_report[
-                    "main_tail_region_reaction_diagnostic_only"
-                ]
+            "region_pair_reaction_diagnostic_only": bool(
+                fsi_coupling_mode_report["region_pair_reaction_diagnostic_only"]
             ),
             "fsi_coupling_solver": "hibm_mpm_sharp",
             "fsi_coupling_scheme": str(
                 sharp_summary.get("hibm_coupling_scheme", "explicit_loose")
             ),
-            "fsi_coupling_iterations_used": 0,
+            "fsi_coupling_iterations_used": _mapping_int(
+                sharp_summary,
+                "hibm_fsi_coupling_iterations_used",
+                1,
+            ),
             "fsi_coupling_enabled": True,
-            "fsi_coupling_explicit_single_pass": True,
+            "fsi_coupling_explicit_single_pass": bool(
+                sharp_summary.get("hibm_fsi_coupling_explicit_single_pass", True)
+            ),
             "fsi_added_mass_stability_status": str(
                 sharp_summary.get("hibm_added_mass_stability_status", "unmeasured")
             ),
@@ -1652,17 +2180,20 @@ def build_hibm_mpm_sharp_case_row(
                 )
             ),
             "fsi_coupling_step_completed": True,
-            "fsi_coupling_convergence_measured": False,
-            "fsi_coupling_converged": False,
+            "fsi_coupling_convergence_measured": True,
+            "fsi_coupling_converged": bool(
+                sharp_summary.get("hibm_fsi_coupling_converged", False)
+            ),
             "fluid_substeps": actual_fluid_substeps,
             "fluid_substep_dt_s": float(fluid_dt_s) / float(actual_fluid_substeps),
             "fluid_advection_scheme": str(
                 fluid_projection_report.get("fluid_advection_scheme", "euler")
             ),
-            "fsi_coupling_residual_norm_n": scatter_force_residual_n,
-            "fsi_coupling_residual_source": (
-                "marker_to_mpm_scatter_force_conservation"
-            ),
+            "fsi_coupling_residual_norm_n": sharp_fsi_residual_l2_mps,
+            "fsi_coupling_residual_norm_mps": sharp_fsi_residual_l2_mps,
+            "fsi_coupling_residual_max_mps": sharp_fsi_residual_max_mps,
+            "fsi_coupling_residual_units": "m/s",
+            "fsi_coupling_residual_source": sharp_fsi_residual_source,
             "hibm_marker_total_force_x_n": total_force_n[0],
             "hibm_marker_total_force_y_n": total_force_n[1],
             "hibm_marker_total_force_z_n": total_force_n[2],
@@ -1693,6 +2224,46 @@ def build_hibm_mpm_sharp_case_row(
             "fsi_grid_force_x_n": total_force_n[0],
             "fsi_grid_force_y_n": total_force_n[1],
             "fsi_grid_force_z_n": total_force_n[2],
+            "fsi_volume_source_m3s": sharp_fsi_volume_source_m3s,
+            "fsi_volume_source_semantics": (
+                "computed_pressure_outlet_source_field_not_region_decomposed"
+            ),
+            "pressure_outlet_source_volume_flux_m3s": _mapping_float(
+                pressure_outlet_report,
+                "source_volume_flux_m3s",
+            ),
+            "pressure_outlet_velocity_flux_m3s": _mapping_float(
+                pressure_outlet_report,
+                "zmin_velocity_outlet_flux_m3s",
+            ),
+            "pressure_outlet_velocity_to_source_ratio": _mapping_float(
+                pressure_outlet_report,
+                "zmin_velocity_outlet_to_source_ratio",
+            ),
+            "pressure_outlet_pressure_flux_m3s": _mapping_float(
+                pressure_outlet_report,
+                "zmin_pressure_outlet_flux_m3s",
+            ),
+            "pressure_outlet_pressure_to_source_ratio": _mapping_float(
+                pressure_outlet_report,
+                "zmin_pressure_outlet_to_source_ratio",
+            ),
+            "pressure_outlet_projection_pre_velocity_flux_m3s": _mapping_float(
+                pressure_outlet_report,
+                "zmin_projection_pre_velocity_outlet_flux_m3s",
+            ),
+            "pressure_outlet_projection_post_pressure_velocity_flux_m3s": (
+                _mapping_float(
+                    pressure_outlet_report,
+                    "zmin_projection_post_pressure_velocity_outlet_flux_m3s",
+                )
+            ),
+            "pressure_outlet_projection_post_boundary_velocity_flux_m3s": (
+                _mapping_float(
+                    pressure_outlet_report,
+                    "zmin_projection_post_boundary_velocity_outlet_flux_m3s",
+                )
+            ),
             "pressure_projection_cg_project_calls": _mapping_int(
                 fluid_projection_report,
                 "cg_project_calls",
@@ -1753,6 +2324,36 @@ def build_hibm_mpm_sharp_case_row(
             "pressure_solve_failure_action": str(
                 fluid_projection_report.get("pressure_solve_failure_action", "")
             ),
+            "pressure_projection_physical_failure": bool(
+                fluid_projection_report.get(
+                    "pressure_projection_physical_failure",
+                    False,
+                )
+            ),
+            "pressure_projection_physical_failure_reason": str(
+                fluid_projection_report.get(
+                    "pressure_projection_physical_failure_reason",
+                    "",
+                )
+            ),
+            "pressure_projection_physical_failure_action": str(
+                fluid_projection_report.get(
+                    "pressure_projection_physical_failure_action",
+                    "",
+                )
+            ),
+            "hibm_unreached_incompatible_component_count": _mapping_int(
+                fluid_projection_report,
+                "hibm_unreached_incompatible_component_count",
+            ),
+            "hibm_unreached_component_rhs_mean_max_abs": _mapping_float(
+                fluid_projection_report,
+                "hibm_unreached_component_rhs_mean_max_abs",
+            ),
+            "hibm_unreached_component_rhs_integral_max_abs": _mapping_float(
+                fluid_projection_report,
+                "hibm_unreached_component_rhs_integral_max_abs",
+            ),
             "pressure_projection_cg_iterations_total": _mapping_int(
                 fluid_projection_report,
                 "cg_iterations_total",
@@ -1809,6 +2410,65 @@ def build_hibm_mpm_sharp_case_row(
             "pressure_interface_matrix_active_cells": _mapping_int(
                 sharp_summary,
                 "hibm_pressure_neumann_active_rows",
+            ),
+            "pressure_projection_interface_matrix_diagonal_integral": _mapping_float(
+                fluid_projection_report,
+                "pressure_interface_matrix_diagonal_integral",
+            ),
+            "pressure_projection_interface_matrix_rhs_integral": _mapping_float(
+                fluid_projection_report,
+                "pressure_interface_matrix_rhs_integral",
+            ),
+            "pressure_projection_interface_matrix_max_abs_diagonal": _mapping_float(
+                fluid_projection_report,
+                "pressure_interface_matrix_max_abs_diagonal",
+            ),
+            "pressure_projection_interface_matrix_active_cells": _mapping_int(
+                fluid_projection_report,
+                "pressure_interface_matrix_active_cells",
+            ),
+            "pressure_projection_interface_matrix_active": bool(
+                fluid_projection_report.get("pressure_interface_matrix_active", False)
+            ),
+            "pressure_projection_interface_matrix_row_count": _mapping_int(
+                fluid_projection_report,
+                "pressure_interface_matrix_row_count",
+            ),
+            "pressure_projection_interface_matrix_row_active_count": _mapping_int(
+                fluid_projection_report,
+                "pressure_interface_matrix_row_active_count",
+            ),
+            "pressure_projection_interface_matrix_row_invalid_count": _mapping_int(
+                fluid_projection_report,
+                "pressure_interface_matrix_row_invalid_count",
+            ),
+            "pressure_projection_interface_matrix_row_overflow_count": _mapping_int(
+                fluid_projection_report,
+                "pressure_interface_matrix_row_overflow_count",
+            ),
+            "pressure_projection_interface_matrix_row_diagonal_integral": (
+                _mapping_float(
+                    fluid_projection_report,
+                    "pressure_interface_matrix_row_diagonal_integral",
+                )
+            ),
+            "pressure_projection_interface_matrix_row_diagonal_abs_mismatch": (
+                _mapping_float(
+                    fluid_projection_report,
+                    "pressure_interface_matrix_row_diagonal_integral_abs_mismatch",
+                )
+            ),
+            "pressure_projection_interface_matrix_row_diagonal_max_abs_density_mismatch": (
+                _mapping_float(
+                    fluid_projection_report,
+                    "pressure_interface_matrix_row_diagonal_max_abs_density_mismatch",
+                )
+            ),
+            "pressure_projection_interface_matrix_row_max_transmissibility": (
+                _mapping_float(
+                    fluid_projection_report,
+                    "pressure_interface_matrix_row_max_transmissibility",
+                )
             ),
             "solid_mpm_particle_count": int(solid_mpm_report.particle_count),
             "solid_mpm_active_grid_nodes": int(solid_mpm_report.active_grid_nodes),
@@ -1878,6 +2538,554 @@ def _surface_mesh_path(config: dict[str, object]) -> Path:
     if not path.exists():
         raise FileNotFoundError(path)
     return path
+
+
+def _cell_indices_for_points(
+    points_m: np.ndarray,
+    grid: CartesianGrid,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    points = np.asarray(points_m, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("points_m must be an Nx3 array")
+    faces = (
+        np.asarray(grid.cell_faces_x_m, dtype=np.float64),
+        np.asarray(grid.cell_faces_y_m, dtype=np.float64),
+        np.asarray(grid.cell_faces_z_m, dtype=np.float64),
+    )
+    nodes = tuple(int(value) for value in grid.grid_nodes)
+    i = np.searchsorted(faces[0], points[:, 0], side="right") - 1
+    j = np.searchsorted(faces[1], points[:, 1], side="right") - 1
+    k = np.searchsorted(faces[2], points[:, 2], side="right") - 1
+    tolerance = 1.0e-12
+    on_x_max = np.isclose(points[:, 0], faces[0][-1], rtol=0.0, atol=tolerance)
+    on_y_max = np.isclose(points[:, 1], faces[1][-1], rtol=0.0, atol=tolerance)
+    on_z_max = np.isclose(points[:, 2], faces[2][-1], rtol=0.0, atol=tolerance)
+    i[on_x_max] = nodes[0] - 1
+    j[on_y_max] = nodes[1] - 1
+    k[on_z_max] = nodes[2] - 1
+    valid = (
+        (i >= 0)
+        & (i < nodes[0])
+        & (j >= 0)
+        & (j < nodes[1])
+        & (k >= 0)
+        & (k < nodes[2])
+    )
+    return i.astype(np.int64), j.astype(np.int64), k.astype(np.int64), valid
+
+
+def _surface_region_seed_mask(
+    *,
+    config: Mapping[str, object],
+    grid: CartesianGrid,
+    region_ids: Sequence[int],
+    radius_cells: int = 1,
+) -> tuple[np.ndarray, dict[str, object]]:
+    import trimesh
+
+    nodes = tuple(int(value) for value in grid.grid_nodes)
+    seed = np.zeros(nodes, dtype=bool)
+    unique_region_ids = tuple(sorted({int(value) for value in region_ids}))
+    selected_face_ids: list[int] = []
+    region_face_counts: dict[str, int] = {}
+    for region_id in unique_region_ids:
+        face_ids = _face_ids_for_region(dict(config), region_id)
+        region_face_counts[str(region_id)] = len(face_ids)
+        selected_face_ids.extend(face_ids)
+    radius = max(0, int(radius_cells))
+    if not selected_face_ids:
+        return seed, {
+            "fluid_active_mask_surface_seed_region_ids": unique_region_ids,
+            "fluid_active_mask_surface_seed_face_count": 0,
+            "fluid_active_mask_surface_seed_point_count": 0,
+            "fluid_active_mask_surface_seed_point_in_grid_count": 0,
+            "fluid_active_mask_surface_seed_cell_count": 0,
+            "fluid_active_mask_surface_seed_radius_cells": radius,
+            "fluid_active_mask_surface_seed_region_face_counts": region_face_counts,
+        }
+    mesh_path = _surface_mesh_path(dict(config))
+    mesh_scale_to_m = float(config.get("mesh_scale_to_m", 1.0))
+    mesh = trimesh.load_mesh(mesh_path, process=False)
+    vertices = np.asarray(mesh.vertices, dtype=np.float64) * mesh_scale_to_m
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    selected = faces[np.asarray(selected_face_ids, dtype=np.int64)]
+    tri = vertices[selected]
+    points = np.concatenate(
+        (
+            np.mean(tri, axis=1),
+            tri[:, 0, :],
+            tri[:, 1, :],
+            tri[:, 2, :],
+        ),
+        axis=0,
+    )
+    i, j, k, valid = _cell_indices_for_points(points, grid)
+    offsets = tuple(range(-radius, radius + 1))
+    for di in offsets:
+        ii = i[valid] + di
+        valid_i = (ii >= 0) & (ii < nodes[0])
+        for dj in offsets:
+            jj = j[valid] + dj
+            valid_j = (jj >= 0) & (jj < nodes[1])
+            for dk in offsets:
+                kk = k[valid] + dk
+                valid_k = (kk >= 0) & (kk < nodes[2])
+                valid_offset = valid_i & valid_j & valid_k
+                seed[
+                    ii[valid_offset],
+                    jj[valid_offset],
+                    kk[valid_offset],
+                ] = True
+    return seed, {
+        "fluid_active_mask_surface_seed_region_ids": unique_region_ids,
+        "fluid_active_mask_surface_seed_face_count": int(len(selected_face_ids)),
+        "fluid_active_mask_surface_seed_point_count": int(points.shape[0]),
+        "fluid_active_mask_surface_seed_point_in_grid_count": int(np.count_nonzero(valid)),
+        "fluid_active_mask_surface_seed_cell_count": int(np.count_nonzero(seed)),
+        "fluid_active_mask_surface_seed_radius_cells": radius,
+        "fluid_active_mask_surface_seed_region_face_counts": region_face_counts,
+    }
+
+
+def _mark_particle_obstacle_cells(
+    *,
+    grid: CartesianGrid,
+    particle_positions_m: np.ndarray,
+    particle_region_ids: np.ndarray,
+    obstacle_region_ids: Sequence[int],
+    dilation_cells: int = 0,
+) -> tuple[np.ndarray, dict[str, object]]:
+    nodes = tuple(int(value) for value in grid.grid_nodes)
+    obstacle = np.zeros(nodes, dtype=bool)
+    obstacle_regions = {int(value) for value in obstacle_region_ids}
+    selected = np.isin(
+        np.asarray(particle_region_ids, dtype=np.int32),
+        np.asarray(sorted(obstacle_regions), dtype=np.int32),
+    )
+    i, j, k, valid = _cell_indices_for_points(
+        np.asarray(particle_positions_m, dtype=np.float64)[selected],
+        grid,
+    )
+    selected_valid_count = int(np.count_nonzero(valid))
+    radius = max(0, int(dilation_cells))
+    offsets = tuple(range(-radius, radius + 1))
+    for di in offsets:
+        ii = i[valid] + di
+        valid_i = (ii >= 0) & (ii < nodes[0])
+        for dj in offsets:
+            jj = j[valid] + dj
+            valid_j = (jj >= 0) & (jj < nodes[1])
+            for dk in offsets:
+                kk = k[valid] + dk
+                valid_k = (kk >= 0) & (kk < nodes[2])
+                valid_offset = valid_i & valid_j & valid_k
+                obstacle[
+                    ii[valid_offset],
+                    jj[valid_offset],
+                    kk[valid_offset],
+                ] = True
+    return obstacle, {
+        "particle_obstacle_region_ids": tuple(sorted(obstacle_regions)),
+        "selected_particle_count": int(np.count_nonzero(selected)),
+        "selected_particle_in_grid_count": selected_valid_count,
+        "raw_solid_obstacle_cell_count": int(np.count_nonzero(obstacle)),
+        "particle_stamp_dilation_cells": radius,
+        "particle_stamp_method": "volume_particle_cell_stamp",
+    }
+
+
+def _mark_surface_obstacle_cells(
+    *,
+    config: Mapping[str, object],
+    grid: CartesianGrid,
+    surface_region_ids: Sequence[int],
+    dilation_cells: int = 0,
+) -> tuple[np.ndarray, dict[str, object]]:
+    import trimesh
+
+    nodes = tuple(int(value) for value in grid.grid_nodes)
+    obstacle = np.zeros(nodes, dtype=bool)
+    mesh_path = _surface_mesh_path(dict(config))
+    mesh_scale_to_m = float(config.get("mesh_scale_to_m", 1.0))
+    mesh = trimesh.load_mesh(mesh_path, process=False)
+    vertices = np.asarray(mesh.vertices, dtype=np.float64) * mesh_scale_to_m
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    selected_face_ids: list[int] = []
+    region_face_counts: dict[str, int] = {}
+    for region_id in surface_region_ids:
+        face_ids = _face_ids_for_region(dict(config), int(region_id))
+        region_face_counts[str(int(region_id))] = len(face_ids)
+        selected_face_ids.extend(face_ids)
+    if not selected_face_ids:
+        return obstacle, {
+            "surface_obstacle_region_ids": tuple(int(value) for value in surface_region_ids),
+            "selected_surface_face_count": 0,
+            "selected_surface_point_count": 0,
+            "selected_surface_point_in_grid_count": 0,
+            "raw_solid_obstacle_cell_count": 0,
+            "surface_stamp_dilation_cells": max(0, int(dilation_cells)),
+            "surface_stamp_method": "surface_triangle_centroid_and_vertex_cell_stamp",
+            "surface_region_face_counts": region_face_counts,
+        }
+    selected = faces[np.asarray(selected_face_ids, dtype=np.int64)]
+    tri = vertices[selected]
+    centroids = np.mean(tri, axis=1)
+    points = np.concatenate(
+        (
+            centroids,
+            tri[:, 0, :],
+            tri[:, 1, :],
+            tri[:, 2, :],
+        ),
+        axis=0,
+    )
+    i, j, k, valid = _cell_indices_for_points(points, grid)
+    radius = max(0, int(dilation_cells))
+    offsets = tuple(range(-radius, radius + 1))
+    for di in offsets:
+        ii = i[valid] + di
+        valid_i = (ii >= 0) & (ii < nodes[0])
+        for dj in offsets:
+            jj = j[valid] + dj
+            valid_j = (jj >= 0) & (jj < nodes[1])
+            for dk in offsets:
+                kk = k[valid] + dk
+                valid_k = (kk >= 0) & (kk < nodes[2])
+                valid_offset = valid_i & valid_j & valid_k
+                obstacle[
+                    ii[valid_offset],
+                    jj[valid_offset],
+                    kk[valid_offset],
+                ] = True
+    return obstacle, {
+        "surface_obstacle_region_ids": tuple(int(value) for value in surface_region_ids),
+        "surface_mesh_path": str(mesh_path),
+        "selected_surface_face_count": int(len(selected_face_ids)),
+        "selected_surface_point_count": int(points.shape[0]),
+        "selected_surface_point_in_grid_count": int(np.count_nonzero(valid)),
+        "raw_solid_obstacle_cell_count": int(np.count_nonzero(obstacle)),
+        "surface_stamp_dilation_cells": radius,
+        "surface_stamp_method": "surface_triangle_centroid_and_vertex_cell_stamp",
+        "surface_region_face_counts": region_face_counts,
+    }
+
+
+def _apply_region14_opening_carve_to_obstacle(
+    obstacle: np.ndarray,
+    grid: CartesianGrid,
+    *,
+    aperture_geometry: Mapping[str, object],
+    radius_cells: int,
+    depth_cells: int,
+) -> int:
+    if not bool(aperture_geometry.get("available", False)):
+        return 0
+    center = aperture_geometry.get("area_weighted_centroid_m", ())
+    if not isinstance(center, Sequence) or len(center) < 3:
+        return 0
+    radius_m = float(aperture_geometry.get("vertex_radius_p95_m", 0.0))
+    if not math.isfinite(radius_m) or radius_m <= 0.0:
+        return 0
+    center_x = float(center[0])
+    center_y = float(center[1])
+    center_z = float(center[2])
+    max_xy_spacing_m = max(
+        max(float(value) for value in grid.cell_widths_x_m),
+        max(float(value) for value in grid.cell_widths_y_m),
+    )
+    max_z_spacing_m = max(float(value) for value in grid.cell_widths_z_m)
+    carve_radius_m = radius_m + max(0, int(radius_cells)) * max_xy_spacing_m
+    carve_half_depth_m = max(1, int(depth_cells)) * max_z_spacing_m
+    x = np.asarray(grid.cell_centers_x_m, dtype=np.float64)
+    y = np.asarray(grid.cell_centers_y_m, dtype=np.float64)
+    z = np.asarray(grid.cell_centers_z_m, dtype=np.float64)
+    radial = (
+        (x[:, None, None] - center_x) ** 2
+        + (y[None, :, None] - center_y) ** 2
+    ) <= carve_radius_m * carve_radius_m
+    axial = np.abs(z[None, None, :] - center_z) <= carve_half_depth_m
+    carve = radial & axial
+    carved = int(np.count_nonzero(obstacle & carve))
+    obstacle[carve] = False
+    return carved
+
+
+def _z_min_connected_active_mask(
+    candidate_fluid_mask: np.ndarray,
+    *,
+    seed_radius_cells: int,
+) -> tuple[np.ndarray, int]:
+    active = np.asarray(candidate_fluid_mask, dtype=bool)
+    seed = np.zeros(active.shape, dtype=bool)
+    nz = active.shape[2]
+    seed_depth = max(1, int(seed_radius_cells))
+    seed_depth = min(seed_depth, nz)
+    seed[:, :, :seed_depth] = True
+    return _connected_active_mask(active, seed)
+
+
+def _connected_active_mask(
+    candidate_fluid_mask: np.ndarray,
+    seed_mask: np.ndarray,
+) -> tuple[np.ndarray, int]:
+    active = np.asarray(candidate_fluid_mask, dtype=bool)
+    seed = np.asarray(seed_mask, dtype=bool)
+    if seed.shape != active.shape:
+        raise ValueError("seed_mask shape must match candidate_fluid_mask")
+    visited = np.zeros(active.shape, dtype=bool)
+    nx, ny, nz = active.shape
+    stack: list[tuple[int, int, int]] = []
+    seed_indices = np.argwhere(active & seed)
+    for i, j, k in seed_indices:
+        index = (int(i), int(j), int(k))
+        visited[index] = True
+        stack.append(index)
+    seed_count = len(stack)
+    while stack:
+        i, j, k = stack.pop()
+        for ni, nj, nk in (
+            (i - 1, j, k),
+            (i + 1, j, k),
+            (i, j - 1, k),
+            (i, j + 1, k),
+            (i, j, k - 1),
+            (i, j, k + 1),
+        ):
+            if (
+                0 <= ni < nx
+                and 0 <= nj < ny
+                and 0 <= nk < nz
+                and active[ni, nj, nk]
+                and not visited[ni, nj, nk]
+            ):
+                visited[ni, nj, nk] = True
+                stack.append((ni, nj, nk))
+    return visited, seed_count
+
+
+def build_source_config_fluid_obstacle_mask(
+    *,
+    config: Mapping[str, object],
+    source_config_path: Path,
+    grid: CartesianGrid,
+    aperture_geometry: Mapping[str, object],
+) -> tuple[np.ndarray, dict[str, object]]:
+    analysis = config.get("analysis_settings", {})
+    if not isinstance(analysis, Mapping):
+        raise ValueError("source_config analysis_settings must be a mapping")
+    mode = str(analysis.get("fluid_active_mask_mode", ""))
+    if mode not in {"ibamr_like_connected_component", "fsi_connected_component"}:
+        raise ValueError(
+            "source_config fluid active mask mode must be "
+            "ibamr_like_connected_component or fsi_connected_component"
+        )
+    seed_sides = tuple(
+        str(value)
+        for value in analysis.get("fluid_active_mask_seed_boundary_sides", ("z_min",))
+    )
+    if "z_min" not in seed_sides:
+        raise ValueError("refactored squid source-config active mask currently requires z_min seeding")
+    surface_only_region_ids = tuple(
+        sorted(
+            set(
+                _selection_ids_as_int_tuple(
+                    analysis.get("solid_obstacle_surface_only_region_ids", ()),
+                )
+            )
+        )
+    )
+    cache_path: Path | None = None
+    available_region_ids: tuple[int, ...] = ()
+    obstacle_region_ids: tuple[int, ...] = ()
+    obstacle_report: dict[str, object]
+    if surface_only_region_ids:
+        obstacle, obstacle_report = _mark_surface_obstacle_cells(
+            config=config,
+            grid=grid,
+            surface_region_ids=surface_only_region_ids,
+            dilation_cells=int(analysis.get("solid_obstacle_mask_dilation_cells", 0) or 0),
+        )
+        obstacle_region_ids = surface_only_region_ids
+    else:
+        cache_path = source_config_volume_particle_cache_path(source_config_path)
+        particle_cache = np.load(cache_path)
+        positions = np.asarray(particle_cache["particle_rest_positions_m"], dtype=np.float64)
+        region_ids = np.asarray(particle_cache["particle_region_ids"], dtype=np.int32)
+        available_region_ids = tuple(
+            int(value) for value in np.unique(region_ids).astype(np.int32).tolist()
+        )
+        obstacle_region_ids = source_config_solid_obstacle_particle_region_ids(
+            config,
+            available_region_ids,
+        )
+        obstacle, obstacle_report = _mark_particle_obstacle_cells(
+            grid=grid,
+            particle_positions_m=positions,
+            particle_region_ids=region_ids,
+            obstacle_region_ids=obstacle_region_ids,
+            dilation_cells=int(analysis.get("solid_obstacle_mask_dilation_cells", 0) or 0),
+        )
+    carved_count = 0
+    if source_config_requests_region14_aperture_carve(config):
+        carved_count = _apply_region14_opening_carve_to_obstacle(
+            obstacle,
+            grid,
+            aperture_geometry=aperture_geometry,
+            radius_cells=int(
+                analysis.get("solid_obstacle_opening_carve_radius_cells", 1) or 1
+            ),
+            depth_cells=int(
+                analysis.get("solid_obstacle_opening_carve_depth_cells", 2) or 2
+            ),
+        )
+    candidate_fluid = ~obstacle
+    seed_radius_cells = int(analysis.get("fluid_active_mask_seed_radius_cells", 1) or 1)
+    boundary_seed = np.zeros(candidate_fluid.shape, dtype=bool)
+    if "z_min" in seed_sides:
+        seed_depth = min(max(1, seed_radius_cells), candidate_fluid.shape[2])
+        boundary_seed[:, :, :seed_depth] = True
+    seed_region_ids = set(
+        _selection_ids_as_int_tuple(
+            analysis.get("fluid_active_mask_seed_region_ids", ()),
+        )
+    )
+    seed_region_ids.update(
+        _selection_ids_as_int_tuple(
+            analysis.get("fluid_active_mask_seed_region_id", ()),
+        )
+    )
+    seed_region_ids.update(
+        _selection_ids_as_int_tuple(
+            analysis.get("fluid_active_mask_seed_surface_region_ids", ()),
+        )
+    )
+    if bool(analysis.get("fluid_active_mask_seed_fsi_contact_surfaces", True)):
+        seed_region_ids.update(
+            _selection_ids_as_int_tuple(
+                analysis.get("solid_obstacle_moving_fsi_contact_surface_region_ids", ()),
+            )
+        )
+    surface_seed_report: dict[str, object]
+    if seed_region_ids:
+        surface_seed, surface_seed_report = _surface_region_seed_mask(
+            config=config,
+            grid=grid,
+            region_ids=tuple(sorted(seed_region_ids)),
+            radius_cells=seed_radius_cells,
+        )
+    else:
+        surface_seed = np.zeros(candidate_fluid.shape, dtype=bool)
+        surface_seed_report = {
+            "fluid_active_mask_surface_seed_region_ids": (),
+            "fluid_active_mask_surface_seed_face_count": 0,
+            "fluid_active_mask_surface_seed_point_count": 0,
+            "fluid_active_mask_surface_seed_point_in_grid_count": 0,
+            "fluid_active_mask_surface_seed_cell_count": 0,
+            "fluid_active_mask_surface_seed_radius_cells": seed_radius_cells,
+            "fluid_active_mask_surface_seed_region_face_counts": {},
+        }
+    active_water, seed_cell_count = _connected_active_mask(
+        candidate_fluid,
+        boundary_seed | surface_seed,
+    )
+    final_obstacle = ~active_water
+    report = {
+        "enabled": True,
+        "method": "source_config_cad_obstacle_z_min_connected_component",
+        "mode": mode,
+        "source_config_path": str(source_config_path),
+        "volume_particle_cache_path": None if cache_path is None else str(cache_path),
+        "grid_nodes": tuple(int(value) for value in grid.grid_nodes),
+        "available_particle_region_ids": available_region_ids,
+        "obstacle_region_ids": obstacle_region_ids,
+        "solid_obstacle_opening_carved_cell_count": int(carved_count),
+        "fluid_active_mask_seed_boundary_sides": seed_sides,
+        "fluid_active_mask_seed_radius_cells": seed_radius_cells,
+        "fluid_active_mask_boundary_seed_cell_count": int(
+            np.count_nonzero(boundary_seed & candidate_fluid)
+        ),
+        "fluid_active_mask_surface_seed_candidate_cell_count": int(
+            np.count_nonzero(surface_seed & candidate_fluid)
+        ),
+        "fluid_active_mask_seed_cell_count": int(seed_cell_count),
+        "raw_solid_obstacle_cell_count": int(np.count_nonzero(obstacle)),
+        "candidate_fluid_cell_count": int(np.count_nonzero(candidate_fluid)),
+        "fluid_active_cell_count": int(np.count_nonzero(active_water)),
+        "fluid_inactive_cell_count": int(final_obstacle.size - np.count_nonzero(active_water)),
+        "final_obstacle_cell_count": int(np.count_nonzero(final_obstacle)),
+        "host_device_transfer_policy": "one_time_initial_obstacle_from_numpy_before_steps",
+        **obstacle_report,
+        **surface_seed_report,
+    }
+    return final_obstacle.astype(np.int32), report
+
+
+def _active_water_mask_for_points(
+    points_m: np.ndarray,
+    *,
+    grid: CartesianGrid,
+    obstacle_mask: np.ndarray,
+) -> np.ndarray:
+    mask = np.asarray(obstacle_mask, dtype=np.int32)
+    if mask.shape != tuple(grid.grid_nodes):
+        raise ValueError(
+            f"obstacle_mask shape {mask.shape!r} does not match grid_nodes {tuple(grid.grid_nodes)!r}"
+        )
+    i, j, k, valid = _cell_indices_for_points(points_m, grid)
+    active = np.zeros(valid.shape, dtype=bool)
+    active[valid] = mask[i[valid], j[valid], k[valid]] == 0
+    return active
+
+
+def _orient_normals_to_active_water_mask(
+    centroids_m: np.ndarray,
+    normals: np.ndarray,
+    region_ids: np.ndarray,
+    *,
+    grid: CartesianGrid,
+    obstacle_mask: np.ndarray,
+    probe_distance_m: float,
+) -> tuple[np.ndarray, dict[str, object]]:
+    plus_active = _active_water_mask_for_points(
+        centroids_m + normals * probe_distance_m,
+        grid=grid,
+        obstacle_mask=obstacle_mask,
+    )
+    minus_active = _active_water_mask_for_points(
+        centroids_m - normals * probe_distance_m,
+        grid=grid,
+        obstacle_mask=obstacle_mask,
+    )
+    flip = (~plus_active) & minus_active
+    oriented = np.array(normals, copy=True)
+    oriented[flip] *= -1.0
+    final_active = plus_active | flip
+    both_active = plus_active & minus_active
+    neither_active = (~plus_active) & (~minus_active)
+    by_region: dict[str, dict[str, int]] = {}
+    for region in sorted({int(value) for value in region_ids.tolist()}):
+        mask = region_ids == region
+        by_region[str(region)] = {
+            "face_count": int(np.count_nonzero(mask)),
+            "plus_active_count": int(np.count_nonzero(plus_active & mask)),
+            "minus_active_count": int(np.count_nonzero(minus_active & mask)),
+            "flipped_count": int(np.count_nonzero(flip & mask)),
+            "both_active_count": int(np.count_nonzero(both_active & mask)),
+            "neither_active_count": int(np.count_nonzero(neither_active & mask)),
+            "final_active_count": int(np.count_nonzero(final_active & mask)),
+        }
+    return oriented, {
+        "method": "source_config_active_water_mask_probe_orientation",
+        "probe_distance_m": float(probe_distance_m),
+        "flipped_count": int(np.count_nonzero(flip)),
+        "plus_active_count": int(np.count_nonzero(plus_active)),
+        "minus_active_count": int(np.count_nonzero(minus_active)),
+        "both_active_count": int(np.count_nonzero(both_active)),
+        "neither_active_count": int(np.count_nonzero(neither_active)),
+        "final_active_count": int(np.count_nonzero(final_active)),
+        "face_count": int(len(region_ids)),
+        "by_region": by_region,
+    }
 
 
 def nozzle_taper_geometry(spec: SquidReducedSpec) -> tuple[float, float, float]:
@@ -1995,12 +3203,34 @@ def _orient_normals_to_reduced_water(
     }
 
 
+def _area_weighted_normal_by_region(
+    normals: np.ndarray,
+    areas_m2: np.ndarray,
+    region_ids: np.ndarray,
+) -> dict[str, list[float]]:
+    result: dict[str, list[float]] = {}
+    for region in sorted({int(value) for value in region_ids.tolist()}):
+        mask = region_ids == region
+        if not np.any(mask):
+            continue
+        weighted_normal = np.sum(normals[mask] * areas_m2[mask, None], axis=0)
+        norm = float(np.linalg.norm(weighted_normal))
+        if norm <= 1.0e-30:
+            continue
+        result[str(region)] = [
+            float(value) for value in (weighted_normal / norm).tolist()
+        ]
+    return result
+
+
 def build_tri_surface_diagnostics(
     config: dict[str, object],
     runtime: TaichiRuntimeConfig,
     *,
     spec: SquidReducedSpec | None = None,
     probe_distance_m: float | None = None,
+    water_obstacle_mask: np.ndarray | None = None,
+    water_grid: CartesianGrid | None = None,
     region_ids: tuple[int, ...] = (7, 8),
     solid_region_ids: tuple[int, ...] = (7, 8, 5),
 ) -> tuple[
@@ -2062,7 +3292,20 @@ def build_tri_surface_diagnostics(
         "flipped_count": 0,
         "face_count": int(len(region_array)),
     }
-    if spec is not None and probe_distance_m is not None:
+    if (
+        water_obstacle_mask is not None
+        and water_grid is not None
+        and probe_distance_m is not None
+    ):
+        normals, normal_orientation = _orient_normals_to_active_water_mask(
+            centroids,
+            normals,
+            region_array,
+            grid=water_grid,
+            obstacle_mask=water_obstacle_mask,
+            probe_distance_m=float(probe_distance_m),
+        )
+    elif spec is not None and probe_distance_m is not None:
         normals, normal_orientation = _orient_normals_to_reduced_water(
             centroids,
             normals,
@@ -2079,7 +3322,20 @@ def build_tri_surface_diagnostics(
         "flipped_count": 0,
         "face_count": int(len(solid_region_array)),
     }
-    if spec is not None and probe_distance_m is not None:
+    if (
+        water_obstacle_mask is not None
+        and water_grid is not None
+        and probe_distance_m is not None
+    ):
+        solid_normals, solid_normal_orientation = _orient_normals_to_active_water_mask(
+            solid_centroids,
+            solid_normals,
+            solid_region_array,
+            grid=water_grid,
+            obstacle_mask=water_obstacle_mask,
+            probe_distance_m=float(probe_distance_m),
+        )
+    elif spec is not None and probe_distance_m is not None:
         solid_normals, solid_normal_orientation = _orient_normals_to_reduced_water(
             solid_centroids,
             solid_normals,
@@ -2127,11 +3383,21 @@ def build_tri_surface_diagnostics(
         "diagnostic_area_m2_by_region": {
             str(region): float(np.sum(areas[region_array == region])) for region in region_ids
         },
+        "diagnostic_area_weighted_normal_by_region": _area_weighted_normal_by_region(
+            normals,
+            areas,
+            region_array,
+        ),
         "solid_region_face_counts": solid_region_face_counts,
         "solid_area_m2_by_region": {
             str(region): float(np.sum(solid_areas[solid_region_array == region]))
             for region in solid_region_ids
         },
+        "solid_area_weighted_normal_by_region": _area_weighted_normal_by_region(
+            solid_normals,
+            solid_areas,
+            solid_region_array,
+        ),
         "solid_surface_vertex_count": int(tri_surface_mesh.vertex_count),
         "solid_surface_face_count": int(tri_surface_mesh.face_count),
         "solid_surface_edge_note": "deduplicated from FSI triangles plus fixed rim triangles for TriMooneyShellMpmState",
@@ -2416,6 +3682,22 @@ def cartesian_grid_axis_max_spacing_m(grid: CartesianGrid) -> tuple[float, float
         float(max(grid.cell_widths_y_m)),
         float(max(grid.cell_widths_z_m)),
     )
+
+
+def solid_mpm_bounds_padding_distance_m(
+    *,
+    fluid_grid_axis_max_spacing_m: Sequence[float],
+    estimated_solid_particle_spacing_m: float,
+) -> float:
+    fluid_axis_spacing = tuple(float(value) for value in fluid_grid_axis_max_spacing_m)
+    if len(fluid_axis_spacing) != 3:
+        raise ValueError("fluid_grid_axis_max_spacing_m must contain exactly 3 values")
+    if any(not math.isfinite(value) or value <= 0.0 for value in fluid_axis_spacing):
+        raise ValueError("fluid_grid_axis_max_spacing_m entries must be finite and positive")
+    solid_spacing = float(estimated_solid_particle_spacing_m)
+    if not math.isfinite(solid_spacing) or solid_spacing <= 0.0:
+        raise ValueError("estimated_solid_particle_spacing_m must be finite and positive")
+    return 3.0 * max(max(fluid_axis_spacing), solid_spacing)
 
 
 def cartesian_grid_uniform_spacing_m(grid: CartesianGrid) -> tuple[float, float, float] | None:
@@ -3761,6 +5043,14 @@ def checkpoint_run_fingerprint(
     return _checkpoint_normalized_value(payload)  # type: ignore[return-value]
 
 
+def _checkpoint_resume_physical_fingerprint(fingerprint: object) -> object:
+    if not isinstance(fingerprint, dict):
+        return fingerprint
+    comparable = dict(fingerprint)
+    comparable.pop("requested_steps", None)
+    return _checkpoint_normalized_value(comparable)
+
+
 def validate_checkpoint_run_fingerprint(
     metadata: dict[str, object],
     *,
@@ -3776,7 +5066,9 @@ def validate_checkpoint_run_fingerprint(
         step_count=step_count,
         full_pressure_waveform_steps=full_pressure_waveform_steps,
     )
-    if actual != expected:
+    if _checkpoint_resume_physical_fingerprint(
+        actual
+    ) != _checkpoint_resume_physical_fingerprint(expected):
         raise ValueError(
             "checkpoint run fingerprint does not match current configuration; "
             "restart with the same source config, pressure schedule, grid, solver, "
@@ -3875,7 +5167,7 @@ def _interface_state_from_checkpoint(data: object) -> InterfaceReactionRelaxatio
 def sharp_marker_state_arrays(markers) -> dict[str, np.ndarray]:
     """Export the dynamic HIBM sharp marker state for checkpointing.
 
-    Markers advance by dt*v surface feedback, so their state cannot be rebuilt
+    Markers advance by dt*v surface-state updates, so their state cannot be rebuilt
     from rest solid particles on resume. Checkpoint read/write is case-level
     host I/O, matching the existing fluid/solid checkpoint transfers.
     """
@@ -3884,6 +5176,178 @@ def sharp_marker_state_arrays(markers) -> dict[str, np.ndarray]:
     for name in CHECKPOINT_MARKER_STATE_FIELD_NAMES:
         state[name] = np.asarray(getattr(markers, name).to_numpy())[:count].copy()
     return state
+
+
+def sharp_pressure_neumann_gradient_state_array(sharp_coupling_state) -> np.ndarray:
+    """Export the active marker pressure-Neumann gradients for trial restore."""
+    count = int(sharp_coupling_state.markers.marker_count)
+    field = sharp_coupling_state.marker_pressure_neumann_gradient_pa_per_m
+    return np.asarray(field.to_numpy())[:count].copy()
+
+
+def restore_sharp_pressure_neumann_gradient_state_array(
+    sharp_coupling_state,
+    state: object,
+) -> None:
+    """Restore active marker pressure-Neumann gradients exported above."""
+    count = int(sharp_coupling_state.markers.marker_count)
+    field = sharp_coupling_state.marker_pressure_neumann_gradient_pa_per_m
+    full = field.to_numpy()
+    array = np.asarray(state, dtype=full.dtype)
+    expected_shape = tuple(full[:count].shape)
+    if tuple(array.shape) != expected_shape:
+        raise ValueError(
+            "sharp pressure-Neumann gradient state shape mismatch: "
+            f"{tuple(array.shape)} != {expected_shape}"
+        )
+    if not bool(np.all(np.isfinite(array))):
+        raise ValueError("sharp pressure-Neumann gradient state must be finite")
+    full[:count] = array
+    field.from_numpy(full)
+
+
+def _sharp_marker_state_array(
+    state: Mapping[str, object],
+    name: str,
+    *,
+    expected_shape: tuple[int, ...] | None = None,
+) -> np.ndarray:
+    if name not in state:
+        raise ValueError(f"sharp marker state is missing {name!r}")
+    array = np.asarray(state[name], dtype=np.float64)
+    if expected_shape is not None and tuple(array.shape) != expected_shape:
+        raise ValueError(
+            f"sharp marker state {name!r} shape mismatch: "
+            f"{tuple(array.shape)} != {expected_shape}"
+        )
+    if not bool(np.all(np.isfinite(array))):
+        raise ValueError(f"sharp marker state {name!r} must be finite")
+    return array
+
+
+def _sharp_marker_fixed_point_residual_vector_mps(
+    guess: Mapping[str, object],
+    candidate: Mapping[str, object],
+    *,
+    dt_s: float,
+) -> np.ndarray:
+    dt = float(dt_s)
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt_s must be finite and positive")
+    guess_x = _sharp_marker_state_array(guess, "x_gamma_m")
+    candidate_x = _sharp_marker_state_array(
+        candidate,
+        "x_gamma_m",
+        expected_shape=tuple(guess_x.shape),
+    )
+    guess_v = _sharp_marker_state_array(guess, "v_gamma_mps")
+    candidate_v = _sharp_marker_state_array(
+        candidate,
+        "v_gamma_mps",
+        expected_shape=tuple(guess_v.shape),
+    )
+    if guess_x.ndim != 2 or guess_x.shape[1] != 3:
+        raise ValueError("x_gamma_m must have shape (marker_count, 3)")
+    if guess_v.ndim != 2 or guess_v.shape[1] != 3:
+        raise ValueError("v_gamma_mps must have shape (marker_count, 3)")
+    if guess_x.shape[0] != guess_v.shape[0]:
+        raise ValueError("x_gamma_m and v_gamma_mps marker counts must match")
+    position_residual_mps = (candidate_x - guess_x) / dt
+    velocity_residual_mps = candidate_v - guess_v
+    return np.concatenate(
+        [position_residual_mps, velocity_residual_mps],
+        axis=1,
+    )
+
+
+def sharp_marker_fixed_point_residual_mps(
+    guess: Mapping[str, object],
+    candidate: Mapping[str, object],
+    *,
+    dt_s: float,
+) -> dict[str, float | int]:
+    """Measure marker fixed-point mismatch in velocity units.
+
+    The residual combines position mismatch divided by dt and velocity mismatch,
+    so it directly measures whether the marker boundary state used by the fluid
+    agrees with the MPM surface state returned by the solid response.
+    """
+    residual_vector = _sharp_marker_fixed_point_residual_vector_mps(
+        guess,
+        candidate,
+        dt_s=dt_s,
+    )
+    if residual_vector.shape[0] <= 0:
+        return {
+            "l2_mps": 0.0,
+            "max_mps": 0.0,
+            "sample_count": 0,
+        }
+    marker_norms = np.linalg.norm(residual_vector, axis=1)
+    return {
+        "l2_mps": float(np.sqrt(np.mean(marker_norms * marker_norms))),
+        "max_mps": float(np.max(marker_norms)),
+        "sample_count": int(marker_norms.shape[0]),
+    }
+
+
+def relaxed_sharp_marker_state_arrays(
+    guess: Mapping[str, object],
+    candidate: Mapping[str, object],
+    *,
+    relaxation: float,
+) -> dict[str, np.ndarray]:
+    """Return a relaxed marker state without mutating either input mapping."""
+    omega = float(relaxation)
+    if not math.isfinite(omega) or not 0.0 <= omega <= 1.5:
+        raise ValueError("relaxation must be finite and in [0, 1.5]")
+    relaxed: dict[str, np.ndarray] = {}
+    for name in CHECKPOINT_MARKER_STATE_FIELD_NAMES:
+        guess_array = _sharp_marker_state_array(guess, name)
+        candidate_array = _sharp_marker_state_array(
+            candidate,
+            name,
+            expected_shape=tuple(guess_array.shape),
+        )
+        if name == "A_gamma_m2":
+            next_array = guess_array + omega * (candidate_array - guess_array)
+            relaxed[name] = np.maximum(next_array, 0.0).astype(
+                np.asarray(guess[name]).dtype,
+                copy=False,
+            )
+            continue
+        next_array = guess_array + omega * (candidate_array - guess_array)
+        if name == "n_gamma":
+            norms = np.linalg.norm(next_array, axis=1)
+            invalid = norms <= 1.0e-12
+            safe_norms = np.where(invalid, 1.0, norms)
+            next_array = next_array / safe_norms[:, None]
+            if np.any(invalid):
+                next_array[invalid] = guess_array[invalid]
+        relaxed[name] = next_array.astype(np.asarray(guess[name]).dtype, copy=False)
+    return relaxed
+
+
+def _sharp_marker_aitken_relaxation(
+    *,
+    previous_relaxation: float,
+    previous_residual_mps: np.ndarray,
+    current_residual_mps: np.ndarray,
+    lower: float = 0.01,
+    upper: float = 1.0,
+) -> float:
+    previous = np.asarray(previous_residual_mps, dtype=np.float64).reshape(-1)
+    current = np.asarray(current_residual_mps, dtype=np.float64).reshape(-1)
+    if previous.shape != current.shape:
+        raise ValueError("Aitken residual vectors must have the same shape")
+    delta = current - previous
+    denominator = float(np.dot(delta, delta))
+    if denominator <= 1.0e-30:
+        return float(previous_relaxation)
+    raw = -float(previous_relaxation) * float(np.dot(previous, delta)) / denominator
+    if not math.isfinite(raw):
+        return float(previous_relaxation)
+    return max(float(lower), min(float(upper), raw))
 
 
 def restore_sharp_marker_state_arrays(
@@ -4375,6 +5839,8 @@ def _write_step_failure_artifacts(
     step: int,
     exc: Exception,
     fluid=None,
+    markers=None,
+    pressure_outlet_zmin: bool = True,
 ) -> Path:
     partial_history_path = output_dir / "history.csv"
     write_csv(partial_history_path, rows)
@@ -4383,6 +5849,25 @@ def _write_step_failure_artifacts(
         if fluid is not None
         else None
     )
+    high_residual_summary = None
+    pressure_interface_matrix_report = None
+    if fluid is not None:
+        try:
+            high_residual_summary = _write_hibm_high_residual_cell_dump(
+                output_dir=output_dir,
+                step=step,
+                fluid=fluid,
+                markers=markers,
+                pressure_outlet_zmin=bool(pressure_outlet_zmin),
+            )
+        except (AttributeError, OSError, ValueError, TypeError):
+            high_residual_summary = None
+        try:
+            pressure_interface_matrix_report = (
+                fluid.pressure_interface_matrix_terms_report()
+            )
+        except (AttributeError, OSError, ValueError, TypeError):
+            pressure_interface_matrix_report = None
     process_payload: dict[str, object] = {}
     if process_path.exists():
         try:
@@ -4404,6 +5889,12 @@ def _write_step_failure_artifacts(
     )
     if failure_fluid_vti is not None:
         process_payload["failure_fluid_vti"] = str(failure_fluid_vti)
+    if high_residual_summary is not None:
+        process_payload["failure_high_residual_cells"] = high_residual_summary
+    if pressure_interface_matrix_report is not None:
+        process_payload["failure_pressure_interface_matrix"] = (
+            pressure_interface_matrix_report
+        )
     process_path.write_text(
         json.dumps(process_payload, indent=2),
         encoding="utf-8",
@@ -4634,6 +6125,402 @@ def _write_hibm_zero_correctable_cell_dump(
     return summary
 
 
+def _write_hibm_pressure_neumann_invalid_row_dump(
+    *,
+    output_dir: Path,
+    step: int,
+    ib_boundary=None,
+    search=None,
+    markers=None,
+    fluid=None,
+    rows=None,
+    stage: str = "latest",
+    limit: int = 1024,
+) -> dict[str, object]:
+    rows_provided = rows is not None
+    if rows is None:
+        if ib_boundary is None:
+            raise ValueError("ib_boundary or rows must be provided")
+        rows = ib_boundary.pressure_neumann_invalid_diagnostic_rows(
+            search=search,
+            markers=markers,
+            fluid=fluid,
+            limit=limit,
+        )
+    else:
+        rows = list(rows)[: max(0, int(limit))]
+    dump_dir = output_dir / "hibm_pressure_neumann_invalid_rows"
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    safe_stage = "".join(
+        ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(stage)
+    )
+    csv_path = (
+        dump_dir
+        / f"step_{int(step):06d}_{safe_stage}_invalid_pressure_neumann_rows.csv"
+    )
+    fieldnames = tuple(rows[0].keys()) if rows else (
+        "row_index",
+        "reason_code",
+        "reason",
+        "node_i",
+        "node_j",
+        "node_k",
+        "owner_i",
+        "owner_j",
+        "owner_k",
+        "neighbor_i",
+        "neighbor_j",
+        "neighbor_k",
+        "anchor_i",
+        "anchor_j",
+        "anchor_k",
+        "marker_index",
+        "marker_region_id",
+    )
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+    total_count = len(rows)
+    count_field = getattr(ib_boundary, "pressure_neumann_invalid_diag_count", None)
+    if count_field is not None and not rows_provided:
+        try:
+            total_count = int(count_field[None])
+        except Exception:
+            total_count = len(rows)
+
+    reason_counts: dict[str, int] = {}
+    marker_region_counts: dict[str, int] = {}
+    for row in rows:
+        reason = str(row.get("reason", "unknown"))
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        region = str(int(row.get("marker_region_id", -1)))
+        marker_region_counts[region] = marker_region_counts.get(region, 0) + 1
+
+    summary = {
+        "step": int(step),
+        "stage": str(stage),
+        "captured_invalid_row_count": int(len(rows)),
+        "total_invalid_row_count": int(total_count),
+        "diagnostic_capacity": int(limit),
+        "reason_counts": reason_counts,
+        "marker_region_counts": marker_region_counts,
+        "csv_path": str(csv_path),
+    }
+    summary_path = dump_dir / f"step_{int(step):06d}_{safe_stage}_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
+
+
+def _write_hibm_high_residual_cell_dump(
+    *,
+    output_dir: Path,
+    step: int,
+    fluid,
+    markers=None,
+    pressure_outlet_zmin: bool,
+    limit: int = 256,
+) -> dict[str, object]:
+    obstacle = fluid.obstacle.to_numpy()
+    velocity_dirichlet_active = fluid.velocity_dirichlet_boundary_active.to_numpy()
+    velocity_dirichlet_value = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
+    velocity_dirichlet_projection_weight = (
+        fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+    )
+    correctable = _pressure_correctable_mask_from_host_fields(
+        obstacle=obstacle,
+        velocity_dirichlet_active=velocity_dirichlet_active,
+        pressure_outlet_zmin=pressure_outlet_zmin,
+    )
+    active_fluid = obstacle == 0
+    interior = np.zeros(active_fluid.shape, dtype=bool)
+    if all(axis_size > 2 for axis_size in active_fluid.shape):
+        interior[1:-1, 1:-1, 1:-1] = True
+    candidates = active_fluid & interior
+    indices = np.argwhere(candidates)
+
+    divergence = fluid.divergence.to_numpy()
+    volume_source = fluid.volume_source_s.to_numpy()
+    residual = divergence - volume_source
+    top_limit = max(0, int(limit))
+    if len(indices) > 0 and top_limit > 0:
+        candidate_abs = np.abs(residual[candidates])
+        selected = np.argpartition(
+            candidate_abs,
+            -min(top_limit, len(candidate_abs)),
+        )[-min(top_limit, len(candidate_abs)) :]
+        selected = selected[np.argsort(candidate_abs[selected])[::-1]]
+        indices = indices[selected]
+    else:
+        indices = np.empty((0, 3), dtype=np.int64)
+
+    x_centers = fluid.cell_center_x_m.to_numpy()
+    y_centers = fluid.cell_center_y_m.to_numpy()
+    z_centers = fluid.cell_center_z_m.to_numpy()
+    width_x = fluid.cell_width_x_m.to_numpy()
+    width_y = fluid.cell_width_y_m.to_numpy()
+    width_z = fluid.cell_width_z_m.to_numpy()
+    pressure = fluid.pressure.to_numpy()
+    pressure_diag = fluid.pressure_interface_matrix_diagonal.to_numpy()
+    pressure_rhs = fluid.pressure_interface_matrix_rhs.to_numpy()
+    pressure_outlet_reachable = fluid.hibm_pressure_outlet_reachable.to_numpy()
+    pressure_unreached_component_label = (
+        fluid.hibm_pressure_unreached_component_label.to_numpy()
+    )
+    velocity_dirichlet_marker_region = getattr(
+        fluid,
+        "velocity_dirichlet_boundary_marker_region_id",
+        None,
+    )
+    if velocity_dirichlet_marker_region is None:
+        velocity_dirichlet_marker_region_id = np.full(
+            obstacle.shape,
+            -1,
+            dtype=np.int32,
+        )
+    else:
+        velocity_dirichlet_marker_region_id = (
+            velocity_dirichlet_marker_region.to_numpy()
+        )
+
+    marker_count = 0 if markers is None else int(markers.marker_count)
+    nearest_index = np.full(indices.shape[0], -1, dtype=np.int64)
+    nearest_distance = np.full(indices.shape[0], math.nan, dtype=np.float64)
+    nearest_signed_distance = np.full(indices.shape[0], math.nan, dtype=np.float64)
+    nearest_region = np.full(indices.shape[0], -1, dtype=np.int64)
+    if marker_count > 0 and len(indices) > 0:
+        marker_positions = markers.x_gamma_m.to_numpy()[:marker_count]
+        marker_normals = markers.n_gamma.to_numpy()[:marker_count]
+        marker_regions = markers.region_id.to_numpy()[:marker_count]
+        positions = np.column_stack(
+            (
+                x_centers[indices[:, 0]],
+                y_centers[indices[:, 1]],
+                z_centers[indices[:, 2]],
+            )
+        )
+        for start in range(0, len(indices), 128):
+            end = min(start + 128, len(indices))
+            delta = positions[start:end, None, :] - marker_positions[None, :, :]
+            distance2 = np.einsum("cmq,cmq->cm", delta, delta)
+            local_index = np.argmin(distance2, axis=1)
+            global_index = local_index.astype(np.int64)
+            local_delta = delta[np.arange(end - start), local_index, :]
+            local_normals = marker_normals[global_index]
+            nearest_index[start:end] = global_index
+            nearest_distance[start:end] = np.sqrt(
+                distance2[np.arange(end - start), local_index]
+            )
+            nearest_signed_distance[start:end] = np.einsum(
+                "cq,cq->c",
+                local_delta,
+                local_normals,
+            )
+            nearest_region[start:end] = marker_regions[global_index]
+
+    dump_dir = output_dir / "hibm_high_residual_cells"
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = dump_dir / f"step_{int(step):06d}_top_residual_cells.csv"
+    fieldnames = (
+        "rank",
+        "i",
+        "j",
+        "k",
+        "x_m",
+        "y_m",
+        "z_m",
+        "divergence_s",
+        "volume_source_s",
+        "residual_s",
+        "abs_residual_s",
+        "pressure_pa",
+        "pressure_interface_diagonal_per_s2",
+        "pressure_interface_rhs_pa_per_m2",
+        "pressure_outlet_reachable",
+        "pressure_unreached_component_label",
+        "pressure_correctable",
+        "velocity_dirichlet_active",
+        "velocity_dirichlet_marker_region_id",
+        "velocity_dirichlet_projection_weight",
+        "velocity_dirichlet_value_x_mps",
+        "velocity_dirichlet_value_y_mps",
+        "velocity_dirichlet_value_z_mps",
+        "x_left_dirichlet",
+        "x_right_dirichlet",
+        "y_back_dirichlet",
+        "y_front_dirichlet",
+        "z_bottom_dirichlet",
+        "z_top_dirichlet",
+        "nearest_marker_index",
+        "nearest_marker_region_id",
+        "nearest_marker_distance_m",
+        "nearest_marker_signed_distance_m",
+        "local_cell_diagonal_m",
+    )
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for rank, (i, j, k) in enumerate(indices, start=1):
+            i = int(i)
+            j = int(j)
+            k = int(k)
+            cell_residual = float(residual[i, j, k])
+            velocity_target = velocity_dirichlet_value[i, j, k]
+            writer.writerow(
+                {
+                    "rank": int(rank),
+                    "i": i,
+                    "j": j,
+                    "k": k,
+                    "x_m": float(x_centers[i]),
+                    "y_m": float(y_centers[j]),
+                    "z_m": float(z_centers[k]),
+                    "divergence_s": float(divergence[i, j, k]),
+                    "volume_source_s": float(volume_source[i, j, k]),
+                    "residual_s": cell_residual,
+                    "abs_residual_s": abs(cell_residual),
+                    "pressure_pa": float(pressure[i, j, k]),
+                    "pressure_interface_diagonal_per_s2": float(pressure_diag[i, j, k]),
+                    "pressure_interface_rhs_pa_per_m2": float(pressure_rhs[i, j, k]),
+                    "pressure_outlet_reachable": int(
+                        pressure_outlet_reachable[i, j, k]
+                    ),
+                    "pressure_unreached_component_label": int(
+                        pressure_unreached_component_label[i, j, k]
+                    ),
+                    "pressure_correctable": int(correctable[i, j, k]),
+                    "velocity_dirichlet_active": int(velocity_dirichlet_active[i, j, k]),
+                    "velocity_dirichlet_marker_region_id": int(
+                        velocity_dirichlet_marker_region_id[i, j, k]
+                    ),
+                    "velocity_dirichlet_projection_weight": float(
+                        velocity_dirichlet_projection_weight[i, j, k]
+                    ),
+                    "velocity_dirichlet_value_x_mps": float(velocity_target[0]),
+                    "velocity_dirichlet_value_y_mps": float(velocity_target[1]),
+                    "velocity_dirichlet_value_z_mps": float(velocity_target[2]),
+                    "x_left_dirichlet": int(
+                        i > 0 and velocity_dirichlet_active[i, j, k] != 0
+                    ),
+                    "x_right_dirichlet": int(
+                        i < velocity_dirichlet_active.shape[0] - 1
+                        and velocity_dirichlet_active[i + 1, j, k] != 0
+                    ),
+                    "y_back_dirichlet": int(
+                        j > 0 and velocity_dirichlet_active[i, j, k] != 0
+                    ),
+                    "y_front_dirichlet": int(
+                        j < velocity_dirichlet_active.shape[1] - 1
+                        and velocity_dirichlet_active[i, j + 1, k] != 0
+                    ),
+                    "z_bottom_dirichlet": int(
+                        k > 0 and velocity_dirichlet_active[i, j, k] != 0
+                    ),
+                    "z_top_dirichlet": int(
+                        k < velocity_dirichlet_active.shape[2] - 1
+                        and velocity_dirichlet_active[i, j, k + 1] != 0
+                    ),
+                    "nearest_marker_index": int(nearest_index[rank - 1]),
+                    "nearest_marker_region_id": int(nearest_region[rank - 1]),
+                    "nearest_marker_distance_m": float(nearest_distance[rank - 1]),
+                    "nearest_marker_signed_distance_m": float(
+                        nearest_signed_distance[rank - 1]
+                    ),
+                    "local_cell_diagonal_m": math.sqrt(
+                        float(width_x[i]) ** 2
+                        + float(width_y[j]) ** 2
+                        + float(width_z[k]) ** 2
+                    ),
+                }
+            )
+
+    selected_abs_residual = np.abs(residual[tuple(indices.T)]) if len(indices) else np.array([])
+    selected_regions: dict[str, int] = {}
+    for region in nearest_region:
+        key = str(int(region))
+        selected_regions[key] = selected_regions.get(key, 0) + 1
+    selected_correctable = (
+        correctable[tuple(indices.T)] if len(indices) else np.array([], dtype=bool)
+    )
+    selected_dirichlet = (
+        velocity_dirichlet_active[tuple(indices.T)] != 0
+        if len(indices)
+        else np.array([], dtype=bool)
+    )
+    selected_pressure_diag = (
+        pressure_diag[tuple(indices.T)] if len(indices) else np.array([], dtype=np.float32)
+    )
+    selected_pressure_rhs = (
+        pressure_rhs[tuple(indices.T)] if len(indices) else np.array([], dtype=np.float32)
+    )
+    selected_reachable = (
+        pressure_outlet_reachable[tuple(indices.T)]
+        if len(indices)
+        else np.array([], dtype=np.int32)
+    )
+    selected_unreached_labels = (
+        pressure_unreached_component_label[tuple(indices.T)]
+        if len(indices)
+        else np.array([], dtype=np.int32)
+    )
+    selected_dirichlet_regions = (
+        velocity_dirichlet_marker_region_id[tuple(indices.T)]
+        if len(indices)
+        else np.array([], dtype=np.int32)
+    )
+    selected_dirichlet_region_counts: dict[str, int] = {}
+    for region in selected_dirichlet_regions:
+        key = str(int(region))
+        selected_dirichlet_region_counts[key] = (
+            selected_dirichlet_region_counts.get(key, 0) + 1
+        )
+    summary = {
+        "step": int(step),
+        "pressure_outlet_zmin": bool(pressure_outlet_zmin),
+        "candidate_interior_active_cell_count": int(np.count_nonzero(candidates)),
+        "dumped_cell_count": int(len(indices)),
+        "limit": int(top_limit),
+        "active_fluid_cell_count": int(np.count_nonzero(active_fluid)),
+        "pressure_correctable_cell_count": int(np.count_nonzero(active_fluid & correctable)),
+        "dumped_pressure_correctable_cell_count": int(np.count_nonzero(selected_correctable)),
+        "dumped_velocity_dirichlet_cell_count": int(np.count_nonzero(selected_dirichlet)),
+        "dumped_pressure_outlet_reachable_cell_count": int(
+            np.count_nonzero(selected_reachable != 0)
+        ),
+        "dumped_unreached_labeled_cell_count": int(
+            np.count_nonzero(
+                (selected_unreached_labels >= -32)
+                & (selected_unreached_labels <= -1)
+            )
+        ),
+        "dumped_pressure_interface_diagonal_cell_count": int(
+            np.count_nonzero(selected_pressure_diag != 0.0)
+        ),
+        "dumped_pressure_interface_rhs_cell_count": int(
+            np.count_nonzero(selected_pressure_rhs != 0.0)
+        ),
+        "max_abs_residual_s": (
+            float(np.max(selected_abs_residual)) if len(selected_abs_residual) else 0.0
+        ),
+        "nearest_marker_count": int(marker_count),
+        "nearest_marker_region_counts": selected_regions,
+        "velocity_dirichlet_marker_region_counts": selected_dirichlet_region_counts,
+        "csv_path": str(csv_path),
+    }
+    if len(indices) > 0:
+        summary["i_min"] = int(np.min(indices[:, 0]))
+        summary["i_max"] = int(np.max(indices[:, 0]))
+        summary["j_min"] = int(np.min(indices[:, 1]))
+        summary["j_max"] = int(np.max(indices[:, 1]))
+        summary["k_min"] = int(np.min(indices[:, 2]))
+        summary["k_max"] = int(np.max(indices[:, 2]))
+    summary_path = dump_dir / f"step_{int(step):06d}_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
+
+
 def reduced_active_water_connectivity(
     spec: SquidReducedSpec,
     obstacle_cell_count: int,
@@ -4700,7 +6587,7 @@ def reduced_active_water_connectivity(
         else:
             trapped_active_cells += component_size
     return {
-        "method": "latest_core_reduced_chamber_nozzle_obstacle_flood_fill_from_z_min",
+        "method": "latest_core_obstacle_flood_fill_from_z_min",
         "component_count": component_count,
         "seed_boundary": "z_min",
         "active_cell_count": active_cells,
@@ -4868,6 +6755,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             interface_reaction_robin_matrix_impedance_ns_m
         ),
     )
+    raise_for_unsupported_hibm_mpm_sharp_iteration_options(
+        fsi_coupling_mode=fsi_coupling_mode,
+        fsi_coupling_iterations=fsi_coupling_iterations,
+    )
     interface_reaction_aitken = bool(args.interface_reaction_aitken)
     max_wall_time_s = float(args.max_wall_time_s)
     if not math.isfinite(max_wall_time_s) or max_wall_time_s < 0.0:
@@ -4898,6 +6789,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         grid_scale=args.grid_scale,
         time_step_scale=args.time_step_scale,
     )
+    spec, pressure_schedule_input = spec_with_pressure_schedule_overrides(
+        spec,
+        {
+            field: getattr(args, field, None)
+            for field in PRESSURE_SCHEDULE_FIELDS
+        },
+    )
     baseline_spec = spec
     spec = spec_with_membrane_thickness_scale(spec, membrane_thickness_scale)
     baseline_material = ecoflex_0010_material(poissons_ratio=args.poissons_ratio)
@@ -4913,14 +6811,76 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         baseline_density_kgm3=baseline_material.density_kgm3,
     )
     source_config = load_source_config(source_config_path)
+    cad_step_arg = getattr(args, "cad_step_path", None)
+    cad_step_path = None if cad_step_arg in (None, "") else Path(cad_step_arg).resolve()
+    cad_provenance = source_config_cad_provenance_report(
+        source_config,
+        source_config_path=source_config_path,
+        cad_step_path=cad_step_path,
+    )
+    real_cad_step_binding = bool(
+        cad_provenance.get(
+            "real_cad_step_binding",
+            cad_provenance.get("direct_cad_step_binding", False),
+        )
+    )
+    if bool(getattr(args, "require_real_cad_step", False)) and not real_cad_step_binding:
+        raise ValueError(
+            "source config must provide a verified real STEP CAD binding when "
+            "--require-real-cad-step is set; cached STL files require matching "
+            "source STEP and surface-cache hashes, and unrelated mesh paths are "
+            "not accepted as the real CAD input"
+        )
+    pressure_boundary_mapping = source_config_pressure_boundary_shell_mapping(
+        source_config,
+    )
+    pressure_load_source_region_id = pressure_boundary_mapping.source_region_id
+    primary_shell_region_id = pressure_boundary_mapping.primary_shell_region_id
+    secondary_shell_region_id = pressure_boundary_mapping.secondary_shell_region_id
+    pressure_load_region_id = pressure_boundary_mapping.target_shell_region_id
+    pressure_load_direction = _source_config_pressure_load_direction(source_config)
     region14_aperture_geometry = compute_region_geometry_stats(source_config, 14)
+    source_config_fluid_active_mask_requested = (
+        source_config_requests_fluid_active_mask(source_config)
+    )
+    source_config_reduced_water_intersection_requested = (
+        source_config_requests_reduced_water_intersection(source_config)
+        or bool(getattr(args, "source_config_intersect_reduced_water_domain", False))
+    )
+    source_config_region14_aperture_requested = (
+        source_config_requests_region14_aperture_carve(source_config)
+    )
+    region14_aperture_carve_requested = (
+        bool(args.use_region14_aperture_carve)
+        or source_config_region14_aperture_requested
+    )
+    region14_aperture_geometry_available = bool(
+        region14_aperture_geometry.get("available", False)
+    )
+    region14_aperture_carve_enabled = (
+        region14_aperture_carve_requested
+        and not bool(args.disable_region14_aperture_carve)
+        and region14_aperture_geometry_available
+    )
+    if bool(args.disable_region14_aperture_carve):
+        region14_aperture_carve_source = "disabled_by_cli"
+    elif not region14_aperture_carve_requested:
+        region14_aperture_carve_source = "not_requested"
+    elif not region14_aperture_geometry_available:
+        region14_aperture_carve_source = "requested_but_unavailable"
+    elif bool(args.use_region14_aperture_carve) and source_config_region14_aperture_requested:
+        region14_aperture_carve_source = "source_config_and_cli"
+    elif source_config_region14_aperture_requested:
+        region14_aperture_carve_source = "source_config"
+    else:
+        region14_aperture_carve_source = "cli"
     tail_refinement_geometry: dict[str, object] = {
         "available": False,
         "region_id": 8,
         "reason": "not_requested",
     }
     tail_refinement_region: RefinementRegion | None = None
-    if args.use_region14_aperture_carve:
+    if region14_aperture_carve_enabled:
         spec = spec_with_region14_aperture(
             spec,
             region14_aperture_geometry,
@@ -5010,6 +6970,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         grid=grid_for_effective_cycles,
     )
     effective_fluid_substep_dt_s = float(spec.dt_s) / float(effective_fluid_substeps)
+    adaptive_fluid_substeps_enabled = bool(args.adaptive_fluid_substeps)
+    fluid_substep_controller = (
+        CflSubstepController(
+            base_substeps=effective_fluid_substeps,
+            target_cfl=float(args.adaptive_fluid_substeps_target_cfl),
+            max_substeps=int(args.adaptive_fluid_substeps_max),
+            growth_safety=float(args.adaptive_fluid_substeps_safety),
+        )
+        if adaptive_fluid_substeps_enabled
+        else None
+    )
     fluid_grid_resolution = fluid_grid_resolution_report(spec)
     pressure_projection_budget = pressure_projection_budget_report(
         fluid_substeps=effective_fluid_substeps,
@@ -5032,6 +7003,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "uses_generic_simulation_core": True,
             "summary_json": str(summary_path),
             "source_config_used_as_input_only": str(source_config_path),
+            "cad_provenance": cad_provenance,
+            "real_cad_step_path": cad_provenance.get("cad_step_path"),
+            "real_cad_step_direct_binding": bool(
+                cad_provenance.get("direct_cad_step_binding", False)
+            ),
+            "real_cad_step_derived_surface_mesh_binding": bool(
+                cad_provenance.get("step_derived_surface_mesh_binding", False)
+            ),
+            "real_cad_step_binding": real_cad_step_binding,
+            "pressure_schedule_input": pressure_schedule_input,
+            "pressure_boundary_shell_mapping": asdict(pressure_boundary_mapping),
+            "pressure_load_source_region_id": int(pressure_load_source_region_id),
+            "pressure_load_region_id": int(pressure_load_region_id),
+            "pressure_load_direction": tuple(float(v) for v in pressure_load_direction),
+            "shell_primary_region_id": int(primary_shell_region_id),
+            "shell_secondary_region_id": int(secondary_shell_region_id),
             "pressure_solver_requested": str(args.pressure_solver),
             "pressure_solver": pressure_solver_name,
             "pressure_solve_failure_policy": str(args.pressure_solve_failure_policy),
@@ -5051,6 +7038,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "solid_surface_mass_budget": solid_surface_mass_report,
             "fluid_substeps": effective_fluid_substeps,
             "fluid_substep_dt_s": effective_fluid_substep_dt_s,
+            "adaptive_fluid_substeps_enabled": adaptive_fluid_substeps_enabled,
+            "adaptive_fluid_substeps_target_cfl": float(
+                args.adaptive_fluid_substeps_target_cfl
+            ),
+            "adaptive_fluid_substeps_max": int(args.adaptive_fluid_substeps_max),
+            "adaptive_fluid_substeps_safety": float(
+                args.adaptive_fluid_substeps_safety
+            ),
             "pressure_projection_budget": pressure_projection_budget,
             "interface_reaction_passivity_limit": interface_reaction_passivity_limit,
             "interface_reaction_robin_impedance_ns_m": (
@@ -5085,7 +7080,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "tail_refinement_enabled": tail_refinement_region is not None,
             "tail_refinement_geometry": tail_refinement_geometry,
             "tail_refinement_region": refinement_region_summary(tail_refinement_region),
-            "region14_aperture_carve_enabled": bool(args.use_region14_aperture_carve),
+            "source_config_fluid_active_mask_requested": (
+                source_config_fluid_active_mask_requested
+            ),
+            "source_config_reduced_water_intersection_requested": (
+                source_config_reduced_water_intersection_requested
+            ),
+            "source_config_region14_aperture_requested": (
+                source_config_region14_aperture_requested
+            ),
+            "region14_aperture_carve_enabled": region14_aperture_carve_enabled,
+            "region14_aperture_carve_source": region14_aperture_carve_source,
             "open_downstream_farfield_enabled": bool(spec.downstream_farfield_open_enabled),
             "region14_aperture_geometry": region14_aperture_geometry,
             "reduced_water_geometry": reduced_water_geometry_report(spec),
@@ -5115,30 +7120,195 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     fluid_grid_axis_max_spacing_m = cartesian_grid_axis_max_spacing_m(fluid_grid)
     fluid_grid_uniform_spacing_m = cartesian_grid_uniform_spacing_m(fluid_grid)
     fluid_probe_distance_m = min(fluid_grid_axis_min_spacing_m)
+    initial_fluid_obstacle_mode = "disabled"
+    source_config_fluid_topology_report: dict[str, object] = {
+        "enabled": False,
+        "reason": "not_requested",
+    }
+    source_config_water_obstacle_mask: np.ndarray | None = None
     if not args.disable_reduced_obstacles:
-        simulator.mark_reduced_squid_water_domain()
-    tri_diagnostics, tri_metadata, tri_surface_mesh, tri_surface_region_ids, solid_diagnostics = (
-        build_tri_surface_diagnostics(
-            source_config,
-            runtime,
-            spec=spec,
-            probe_distance_m=fluid_probe_distance_m,
+        if source_config_fluid_active_mask_requested:
+            source_config_water_obstacle_mask, source_config_fluid_topology_report = (
+                build_source_config_fluid_obstacle_mask(
+                    config=source_config,
+                    source_config_path=source_config_path,
+                    grid=fluid_grid,
+                    aperture_geometry=region14_aperture_geometry,
+                )
+            )
+            simulator.fluid.obstacle.from_numpy(source_config_water_obstacle_mask)
+            pre_intersection_obstacle_cell_count = int(
+                source_config_fluid_topology_report.get("final_obstacle_cell_count", 0)
+                or 0
+            )
+            total_fluid_cell_count = int(np.prod(tuple(int(value) for value in fluid_grid.grid_nodes)))
+            if source_config_reduced_water_intersection_requested:
+                simulator.intersect_current_obstacles_with_reduced_squid_water_domain()
+                combined_obstacle_cell_count = simulator.fluid.obstacle_cell_count()
+                source_config_water_obstacle_mask = simulator.fluid.obstacle.to_numpy()
+                source_config_fluid_topology_report = {
+                    **source_config_fluid_topology_report,
+                    "source_config_active_mask_intersected_with_reduced_water_domain": True,
+                    "pre_reduced_intersection_final_obstacle_cell_count": (
+                        pre_intersection_obstacle_cell_count
+                    ),
+                    "pre_reduced_intersection_fluid_active_cell_count": (
+                        total_fluid_cell_count - pre_intersection_obstacle_cell_count
+                    ),
+                    "reduced_water_intersection_added_obstacle_cell_count": max(
+                        combined_obstacle_cell_count - pre_intersection_obstacle_cell_count,
+                        0,
+                    ),
+                    "fluid_active_cell_count": total_fluid_cell_count
+                    - combined_obstacle_cell_count,
+                    "fluid_inactive_cell_count": combined_obstacle_cell_count,
+                    "final_obstacle_cell_count": combined_obstacle_cell_count,
+                    "host_device_transfer_policy": (
+                        "one_time_initial_obstacle_upload_plus_combined_mask_snapshot"
+                    ),
+                }
+                initial_fluid_obstacle_mode = (
+                    "source_config_active_mask_intersected_reduced_analytic"
+                )
+            else:
+                source_config_fluid_topology_report = {
+                    **source_config_fluid_topology_report,
+                    "source_config_active_mask_intersected_with_reduced_water_domain": False,
+                    "pre_reduced_intersection_final_obstacle_cell_count": (
+                        pre_intersection_obstacle_cell_count
+                    ),
+                    "pre_reduced_intersection_fluid_active_cell_count": (
+                        total_fluid_cell_count - pre_intersection_obstacle_cell_count
+                    ),
+                    "reduced_water_intersection_added_obstacle_cell_count": 0,
+                    "source_config_active_mask_intersection_policy": (
+                        "cad_active_mask_authoritative"
+                    ),
+                }
+                initial_fluid_obstacle_mode = "source_config_active_mask"
+            simulator.fluid.snapshot_hibm_base_obstacle()
+        else:
+            simulator.mark_reduced_squid_water_domain()
+            initial_fluid_obstacle_mode = "reduced_analytic"
+            source_config_fluid_topology_report = {
+                "enabled": False,
+                "reason": "source_config_fluid_active_mask_not_requested",
+            }
+    elif source_config_fluid_active_mask_requested:
+        source_config_fluid_topology_report = {
+            "enabled": False,
+            "reason": "disabled_by_disable_reduced_obstacles",
+        }
+    tri_surface_result = build_tri_surface_diagnostics(
+        source_config,
+        runtime,
+        spec=spec,
+        probe_distance_m=fluid_probe_distance_m,
+        water_obstacle_mask=source_config_water_obstacle_mask,
+        water_grid=fluid_grid if source_config_water_obstacle_mask is not None else None,
+        region_ids=(primary_shell_region_id, secondary_shell_region_id),
+        solid_region_ids=tuple(
+            dict.fromkeys((primary_shell_region_id, secondary_shell_region_id, 5))
+        ),
+    )
+    if len(tri_surface_result) == 5:
+        (
+            tri_diagnostics,
+            tri_metadata,
+            tri_surface_mesh,
+            tri_surface_region_ids,
+            solid_diagnostics,
+        ) = tri_surface_result
+    elif len(tri_surface_result) == 4:
+        (
+            tri_diagnostics,
+            tri_metadata,
+            tri_surface_mesh,
+            tri_surface_region_ids,
+        ) = tri_surface_result
+        solid_diagnostics = tri_diagnostics
+    else:
+        raise ValueError(
+            "build_tri_surface_diagnostics must return 4 or 5 result entries"
         )
+    diagnostic_region_normals = tri_metadata.get(
+        "diagnostic_area_weighted_normal_by_region",
+        {},
+    )
+    if not isinstance(diagnostic_region_normals, Mapping):
+        raise ValueError("tri surface diagnostics did not report region normals")
+    pressure_closure_normal = diagnostic_region_normals.get(str(primary_shell_region_id))
+    if pressure_closure_normal is None:
+        raise ValueError(
+            "tri surface diagnostics did not report a pressure closure normal "
+            f"for region {primary_shell_region_id}"
+        )
+    pressure_closure_normal = _vector3(
+        pressure_closure_normal,
+        name="pressure_closure_normal",
+    )
+    pressure_far_side_normal_sign = far_pressure_side_normal_sign_from_direction(
+        pressure_direction=pressure_load_direction,
+        interface_normal=pressure_closure_normal,
+    )
+    pressure_outlet_boundary = (
+        None
+        if args.disable_pressure_outlet_zmin
+        else AxisAlignedBoundary.pressure_outlet(axis="z", side="min")
+    )
+    pressure_outlet_zmin_enabled = (
+        bool(pressure_outlet_boundary.legacy_zmin_outlet)
+        if pressure_outlet_boundary is not None
+        else False
+    )
+    pressure_outlet_boundary_report = (
+        None
+        if pressure_outlet_boundary is None
+        else {
+            **asdict(pressure_outlet_boundary),
+            "selector": pressure_outlet_boundary.selector,
+        }
     )
     total_fsi_face_area_m2 = (
-        float(tri_metadata["diagnostic_area_m2_by_region"].get("7", 0.0))
-        + float(tri_metadata["diagnostic_area_m2_by_region"].get("8", 0.0))
+        float(
+            tri_metadata["diagnostic_area_m2_by_region"].get(
+                str(primary_shell_region_id),
+                0.0,
+            )
+        )
+        + float(
+            tri_metadata["diagnostic_area_m2_by_region"].get(
+                str(secondary_shell_region_id),
+                0.0,
+            )
+        )
     )
     primary_fsi_face_area_m2 = float(
-        tri_metadata["diagnostic_area_m2_by_region"].get("7", 0.0)
+        tri_metadata["diagnostic_area_m2_by_region"].get(
+            str(primary_shell_region_id),
+            0.0,
+        )
     )
     secondary_fsi_face_area_m2 = float(
-        tri_metadata["diagnostic_area_m2_by_region"].get("8", 0.0)
+        tri_metadata["diagnostic_area_m2_by_region"].get(
+            str(secondary_shell_region_id),
+            0.0,
+        )
     )
     total_solid_volume_m3 = (
-        float(tri_metadata["diagnostic_area_m2_by_region"].get("7", 0.0))
+        float(
+            tri_metadata["diagnostic_area_m2_by_region"].get(
+                str(primary_shell_region_id),
+                0.0,
+            )
+        )
         * spec.main_membrane_thickness_m
-        + float(tri_metadata["diagnostic_area_m2_by_region"].get("8", 0.0))
+        + float(
+            tri_metadata["diagnostic_area_m2_by_region"].get(
+                str(secondary_shell_region_id),
+                0.0,
+            )
+        )
         * spec.tail_membrane_thickness_m
         + float(tri_metadata["solid_area_m2_by_region"].get("5", 0.0))
         * spec.main_membrane_thickness_m
@@ -5150,9 +7320,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     estimated_solid_particle_spacing_m = (
         total_solid_volume_m3 / float(estimated_solid_particle_count)
     ) ** (1.0 / 3.0)
-    solid_mpm_bounds_padding_m = 3.0 * max(
-        float(fluid_probe_distance_m),
-        float(estimated_solid_particle_spacing_m),
+    solid_mpm_bounds_padding_m = solid_mpm_bounds_padding_distance_m(
+        fluid_grid_axis_max_spacing_m=fluid_grid_axis_max_spacing_m,
+        estimated_solid_particle_spacing_m=estimated_solid_particle_spacing_m,
     )
     solid_mpm_bounds_min_m, solid_mpm_bounds_max_m = (
         solid_mpm_bounds_from_surface_metadata(
@@ -5187,8 +7357,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             grid_nodes=solid_mpm_grid_nodes,
             bounds_padding_fraction=0.05,
             face_region_id=tri_surface_region_ids,
-            primary_region_id=7,
-            secondary_region_id=8,
+            primary_region_id=primary_shell_region_id,
+            secondary_region_id=secondary_shell_region_id,
             fixed_region_id=5,
             primary_thickness_m=spec.main_membrane_thickness_m,
             secondary_thickness_m=spec.tail_membrane_thickness_m,
@@ -5205,8 +7375,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         solid_mpm.initialize_layered_tri_surface(
             solid_diagnostics,
             layer_count=args.solid_mpm_layers,
-            primary_region_id=7,
-            secondary_region_id=8,
+            primary_region_id=primary_shell_region_id,
+            secondary_region_id=secondary_shell_region_id,
             fixed_region_id=5,
             density_kgm3=material.density_kgm3,
             primary_thickness_m=spec.main_membrane_thickness_m,
@@ -5258,13 +7428,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             for substep in range(solid_mpm_substeps):
                 sub_time_s = current_time_s + float(substep) * solid_sub_dt_s
                 pressure_pa = pressure_schedule_pa(sub_time_s, spec)
+                pressure_area_load_npm2 = tuple(
+                    float(pressure_pa) * float(component)
+                    for component in pressure_load_direction
+                )
                 report = solid_mpm.advance_region_loads(
                     dt_s=solid_sub_dt_s,
-                    primary_region_id=7,
-                    secondary_region_id=8,
-                    primary_area_load_npm2=(0.0, 0.0, -pressure_pa),
+                    primary_region_id=primary_shell_region_id,
+                    secondary_region_id=secondary_shell_region_id,
+                    primary_area_load_npm2=pressure_area_load_npm2,
                     primary_interface_reaction_n=primary_reaction,
                     secondary_interface_reaction_n=secondary_reaction,
+                    primary_area_load_region_id=pressure_load_region_id,
                     velocity_damping=solid_substep_velocity_damping,
                     flip_blend=solid_mpm_flip_blend,
                     read_report=False,
@@ -5275,10 +7450,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             for substep in range(solid_mpm_substeps):
                 sub_time_s = current_time_s + float(substep) * solid_sub_dt_s
                 pressure_pa = pressure_schedule_pa(sub_time_s, spec)
+                pressure_area_load_npm2 = tuple(
+                    float(pressure_pa) * float(component)
+                    for component in pressure_load_direction
+                )
                 solid_mpm.set_layered_region_loads(
-                    primary_region_id=7,
-                    secondary_region_id=8,
-                    primary_area_load_npm2=(0.0, 0.0, -pressure_pa),
+                    primary_region_id=primary_shell_region_id,
+                    secondary_region_id=secondary_shell_region_id,
+                    primary_area_load_npm2=pressure_area_load_npm2,
                     primary_interface_reaction_n=primary_reaction,
                     secondary_interface_reaction_n=secondary_reaction,
                 )
@@ -5287,8 +7466,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     mu_pa=material.shear_modulus_pa,
                     lambda_pa=material.lame_lambda_pa,
                     velocity_damping=solid_substep_velocity_damping,
-                    primary_region_id=7,
-                    secondary_region_id=8,
+                    primary_region_id=primary_shell_region_id,
+                    secondary_region_id=secondary_shell_region_id,
                     read_report=False,
                 )
             report = solid_mpm.report()
@@ -5314,8 +7493,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         secondary_velocity_target_solid_mobility_ratio: float | None = None,
         primary_interface_impedance_force_n: tuple[float, float, float] = (0.0, 0.0, 0.0),
         secondary_interface_impedance_force_n: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        fluid_substeps: int | None = None,
         read_full_report: bool = True,
     ):
+        step_substeps = (
+            effective_fluid_substeps if fluid_substeps is None else int(fluid_substeps)
+        )
         primary_velocity = (
             z_velocity_vector(float(simulator.main_v_mps[None]))
             if primary_velocity_mps is None
@@ -5330,17 +7513,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             simulator.fluid,
             tri_diagnostics,
             ProjectedIbmRegionPairStepConfig(
-                primary_region_id=7,
-                secondary_region_id=8,
+                primary_region_id=primary_shell_region_id,
+                secondary_region_id=secondary_shell_region_id,
                 primary_velocity_mps=primary_velocity,
                 secondary_velocity_mps=secondary_velocity,
                 dt_s=spec.dt_s,
-                fluid_substeps=effective_fluid_substeps,
+                fluid_substeps=step_substeps,
                 ibm_correction_iterations=max(1, int(args.ibm_correction_iterations)),
                 projection_iterations=int(args.projection_iterations),
                 divergence_cleanup_iterations=projection_divergence_cleanup_iterations,
                 divergence_cleanup_relaxation=float(args.divergence_cleanup_relaxation),
-                pressure_outlet_zmin=not args.disable_pressure_outlet_zmin,
+                pressure_outlet_zmin=pressure_outlet_zmin_enabled,
                 pressure_solver=pressure_solver_name,
                 fluid_advection_scheme=str(args.fluid_advection_scheme),
                 multigrid_cycles=effective_multigrid_cycles,
@@ -5389,8 +7572,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             simulator.fluid.velocity,
             simulator.fluid.pressure,
             grid_fields=simulator.fluid,
-            primary_region_id=7,
-            secondary_region_id=8,
+            primary_region_id=primary_shell_region_id,
+            secondary_region_id=secondary_shell_region_id,
             primary_velocity_mps=z_velocity_vector(float(row["main_velocity_z_mps"])),
             secondary_velocity_mps=z_velocity_vector(float(row["tail_velocity_z_mps"])),
             probe_distance_m=fluid_probe_distance_m,
@@ -5438,8 +7621,30 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
         first_step = completed_step + 1
 
+    previous_step_cfl = None
+    previous_step_fluid_substeps = effective_fluid_substeps
+    if rows:
+        try:
+            previous_step_cfl = float(rows[-1]["cfl"])
+        except (KeyError, TypeError, ValueError):
+            previous_step_cfl = None
+        try:
+            previous_step_fluid_substeps = max(
+                effective_fluid_substeps,
+                int(float(rows[-1].get("fluid_substeps", effective_fluid_substeps))),
+            )
+        except (TypeError, ValueError):
+            previous_step_fluid_substeps = effective_fluid_substeps
+
     for step in range(first_step, step_count + 1):
         step_wall_started_at = time.perf_counter()
+        step_fluid_substeps = effective_fluid_substeps
+        if fluid_substep_controller is not None:
+            step_fluid_substeps = fluid_substep_controller.substeps_for_next_step(
+                previous_cfl=previous_step_cfl,
+                previous_substeps=previous_step_fluid_substeps,
+            )
+        step_fluid_substep_dt_s = float(spec.dt_s) / float(step_fluid_substeps)
         fsi_coupling_wall_time_s = 0.0
         solid_advance_wall_time_s = 0.0
         fluid_advance_wall_time_s = 0.0
@@ -5520,7 +7725,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 return 0.0, 0.0
             correction_dt_s = (
                 float(spec.dt_s)
-                / float(effective_fluid_substeps)
+                / float(step_fluid_substeps)
                 / float(max(1, int(args.ibm_correction_iterations)))
             )
             primary_ratio = solid_response_constraint_force_mobility_ratio(
@@ -5554,7 +7759,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 return base_ratio, base_ratio
             correction_dt_s = (
                 float(spec.dt_s)
-                / float(effective_fluid_substeps)
+                / float(step_fluid_substeps)
                 / float(max(1, int(args.ibm_correction_iterations)))
             )
             primary_ratio = base_ratio + solid_response_constraint_force_mobility_ratio(
@@ -5722,8 +7927,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     secondary_velocity_target_solid_mobility_ratio,
                 )
                 tri_diagnostics.update_region_offsets(
-                    primary_region_id=7,
-                    secondary_region_id=8,
+                    primary_region_id=primary_shell_region_id,
+                    secondary_region_id=secondary_shell_region_id,
                     primary_offset_m=z_displacement_vector(
                         0.5 * (step_start_main_displacement_z_m + float(simulator.main_w_m[None]))
                     ),
@@ -5748,6 +7953,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     ),
                     primary_interface_impedance_force_n=trial_primary_robin_impedance_force_n,
                     secondary_interface_impedance_force_n=trial_secondary_robin_impedance_force_n,
+                    fluid_substeps=step_fluid_substeps,
                     read_full_report=reuse_accepted_fsi_trial_state,
                 )
                 accumulate_fsi_trial_pressure_projection_stats(trial_fluid_report)
@@ -5921,8 +8127,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     if args.solid_model == "tri_mooney_shell_mpm":
                         report = solid_mpm.advance_with_external_forces(
                             dt_s=solid_sub_dt_s,
-                            primary_region_id=7,
-                            secondary_region_id=8,
+                            primary_region_id=primary_shell_region_id,
+                            secondary_region_id=secondary_shell_region_id,
                             velocity_damping=solid_substep_velocity_damping,
                             flip_blend=solid_mpm_flip_blend,
                             read_report=False,
@@ -5933,19 +8139,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                             mu_pa=material.shear_modulus_pa,
                             lambda_pa=material.lame_lambda_pa,
                             velocity_damping=solid_substep_velocity_damping,
-                            primary_region_id=7,
-                            secondary_region_id=8,
+                            primary_region_id=primary_shell_region_id,
+                            secondary_region_id=secondary_shell_region_id,
                             read_report=False,
                         )
                     else:
                         raise ValueError(f"Unsupported solid model: {args.solid_model}")
-                solid_advance_wall_time_s = (
+                solid_advance_wall_time_s += (
                     time.perf_counter() - solid_wall_started_at
                 )
                 return solid_mpm.report() if report is None else report
 
-            fluid_wall_started_at = time.perf_counter()
-            try:
+            def advance_sharp_trial_once():
                 sharp_report = sharp_coupling_state.advance_mpm_step(
                     fluid=simulator.fluid,
                     mpm_external_force_n=solid_mpm.external_force_n,
@@ -5964,20 +8169,26 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         2.0 * estimated_solid_particle_spacing_m,
                         fluid_probe_distance_m,
                     ),
-                    primary_region_id=7,
-                    secondary_region_id=8,
-                    far_pressure_region_id=7,
+                    primary_region_id=primary_shell_region_id,
+                    secondary_region_id=secondary_shell_region_id,
+                    far_pressure_region_id=pressure_load_region_id,
+                    far_pressure_barrier_region_id=5,
                     far_pressure_pa=pressure_pa,
+                    far_pressure_side_normal_sign=pressure_far_side_normal_sign,
                     far_pressure_inside_probe_max_multiplier=12.0,
                     two_sided_probe_max_multiplier=12.0,
+                    one_sided_pressure_region_id=secondary_shell_region_id,
+                    one_sided_reference_pressure_pa=0.0,
+                    one_sided_probe_max_multiplier=12.0,
                     far_pressure_air_backed=True,
+                    far_pressure_air_backed_probe_normal_sign=pressure_far_side_normal_sign,
                     fluid_dt_s=spec.dt_s,
-                    fluid_substeps=effective_fluid_substeps,
+                    fluid_substeps=step_fluid_substeps,
                     projection_iterations=int(args.projection_iterations),
                     run_fluid_predictor=True,
                     pressure_neumann_density_kgm3=spec.water_density_kgm3,
                     pressure_neumann_dt_s=spec.dt_s,
-                    pressure_outlet_zmin=not args.disable_pressure_outlet_zmin,
+                    pressure_outlet_zmin=pressure_outlet_zmin_enabled,
                     pressure_solver=pressure_solver_name,
                     pressure_solve_failure_policy=str(args.pressure_solve_failure_policy),
                     fluid_advection_scheme=str(args.fluid_advection_scheme),
@@ -5986,9 +8197,152 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     cg_preconditioner=cg_preconditioner,
                     divergence_cleanup_iterations=projection_divergence_cleanup_iterations,
                     divergence_cleanup_relaxation=float(args.divergence_cleanup_relaxation),
+                    convert_internal_nodes_to_obstacles=False,
+                    post_dirichlet_consistency_projection_iterations=int(
+                        args.hibm_post_dirichlet_consistency_projections
+                    ),
                     diagnostic_disable_pressure_neumann_matrix_rows=bool(
                         args.diagnostic_disable_pressure_neumann_matrix_rows
                     ),
+                )
+                return sharp_report
+
+            def restore_sharp_trial_state(
+                marker_state: Mapping[str, object],
+                pressure_gradient_state: object,
+            ) -> None:
+                simulator.restore_reduced_state()
+                simulator.fluid.restore_state()
+                solid_mpm.restore_state()
+                restore_sharp_marker_state_arrays(
+                    sharp_coupling_state.markers,
+                    marker_state,
+                )
+                restore_sharp_pressure_neumann_gradient_state_array(
+                    sharp_coupling_state,
+                    pressure_gradient_state,
+                )
+
+            def advance_sharp_marker_fixed_point_step():
+                nonlocal fsi_coupling_iterations_used
+                nonlocal fsi_coupling_converged
+                nonlocal fsi_coupling_residual_norm_n
+                nonlocal fsi_coupling_relaxation_effective
+                nonlocal fsi_coupling_iqn_ils_least_squares_update_count
+                nonlocal fsi_coupling_physical_interface_map_amplification
+                nonlocal fsi_coupling_physical_interface_map_amplification_sample_count
+
+                requested_iterations = max(1, int(fsi_coupling_iterations))
+                if requested_iterations <= 1:
+                    report = advance_sharp_trial_once()
+                    return report, {}
+
+                simulator.save_reduced_state()
+                simulator.fluid.save_state()
+                solid_mpm.save_state()
+                marker_guess = sharp_marker_state_arrays(sharp_coupling_state.markers)
+                pressure_gradient_state = (
+                    sharp_pressure_neumann_gradient_state_array(sharp_coupling_state)
+                )
+                previous_residual_vector: np.ndarray | None = None
+                residual_history: list[float] = []
+                residual_max_history: list[float] = []
+                relaxation_history: list[float] = []
+                relaxation = float(interface_reaction_relaxation)
+                converged = False
+                iterations_used = 0
+                aitken_update_count = 0
+                report = None
+                residual_norm_mps = math.inf
+                residual_max_mps = math.inf
+
+                for iteration in range(requested_iterations):
+                    restore_sharp_trial_state(marker_guess, pressure_gradient_state)
+                    report = advance_sharp_trial_once()
+                    marker_candidate = sharp_marker_state_arrays(
+                        sharp_coupling_state.markers
+                    )
+                    residual = sharp_marker_fixed_point_residual_mps(
+                        marker_guess,
+                        marker_candidate,
+                        dt_s=spec.dt_s,
+                    )
+                    residual_vector = _sharp_marker_fixed_point_residual_vector_mps(
+                        marker_guess,
+                        marker_candidate,
+                        dt_s=spec.dt_s,
+                    )
+                    residual_norm_mps = float(residual["l2_mps"])
+                    residual_max_mps = float(residual["max_mps"])
+                    residual_history.append(residual_norm_mps)
+                    residual_max_history.append(residual_max_mps)
+                    relaxation_history.append(float(relaxation))
+                    iterations_used = iteration + 1
+                    if residual_norm_mps <= fsi_coupling_tolerance_n:
+                        converged = True
+                        break
+                    if iteration == requested_iterations - 1:
+                        break
+                    if interface_reaction_aitken and previous_residual_vector is not None:
+                        relaxation = _sharp_marker_aitken_relaxation(
+                            previous_relaxation=relaxation,
+                            previous_residual_mps=previous_residual_vector,
+                            current_residual_mps=residual_vector,
+                        )
+                        aitken_update_count += 1
+                    previous_residual_vector = residual_vector.copy()
+                    marker_guess = relaxed_sharp_marker_state_arrays(
+                        marker_guess,
+                        marker_candidate,
+                        relaxation=relaxation,
+                    )
+
+                if report is None:
+                    raise RuntimeError("sharp marker fixed point produced no trial")
+                fsi_coupling_iterations_used = iterations_used
+                fsi_coupling_converged = converged
+                fsi_coupling_residual_norm_n = residual_norm_mps
+                fsi_coupling_relaxation_effective = relaxation
+                fsi_coupling_iqn_ils_least_squares_update_count = aitken_update_count
+                if len(residual_history) >= 2 and residual_history[0] > 0.0:
+                    amplification = residual_history[-1] / residual_history[0]
+                    fsi_coupling_physical_interface_map_amplification = amplification
+                    fsi_coupling_physical_interface_map_amplification_sample_count = (
+                        len(residual_history) - 1
+                    )
+                summary = {
+                    "hibm_coupling_scheme": "marker_fixed_point",
+                    "hibm_added_mass_stability_status": (
+                        "converged" if converged else "not_converged"
+                    ),
+                    "hibm_added_mass_stability_measured": True,
+                    "hibm_added_mass_stabilization": (
+                        "aitken_marker_state_under_relaxation"
+                        if interface_reaction_aitken
+                        else "marker_state_under_relaxation"
+                    ),
+                    "hibm_semi_implicit_coupling_enabled": True,
+                    "hibm_semi_implicit_coupling_matrix_active": False,
+                    "hibm_fsi_coupling_iterations_used": iterations_used,
+                    "hibm_fsi_coupling_converged": converged,
+                    "hibm_fsi_coupling_explicit_single_pass": False,
+                    "hibm_fsi_coupling_residual_source": (
+                        "marker_surface_fixed_point_position_velocity_residual_l2_mps"
+                    ),
+                    "hibm_fsi_coupling_residual_l2_mps": residual_norm_mps,
+                    "hibm_fsi_coupling_residual_max_mps": residual_max_mps,
+                    "hibm_fsi_coupling_residual_history_mps": residual_history,
+                    "hibm_fsi_coupling_residual_max_history_mps": residual_max_history,
+                    "hibm_fsi_coupling_relaxation_effective": relaxation,
+                    "hibm_fsi_coupling_relaxation_history": relaxation_history,
+                    "hibm_fsi_coupling_aitken_update_count": aitken_update_count,
+                }
+                return report, summary
+
+            fluid_wall_started_at = time.perf_counter()
+            try:
+                sharp_report, sharp_fixed_point_summary = (
+                    advance_sharp_marker_fixed_point_step()
                 )
             except Exception as exc:
                 _write_step_failure_artifacts(
@@ -5998,29 +8352,39 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     step=step,
                     exc=exc,
                     fluid=simulator.fluid,
+                    markers=sharp_coupling_state.markers,
+                    pressure_outlet_zmin=pressure_outlet_zmin_enabled,
                 )
                 raise
+            sharp_advance_wall_time_s = time.perf_counter() - fluid_wall_started_at
+            if fsi_coupling_iterations > 1:
+                fsi_coupling_wall_time_s = sharp_advance_wall_time_s
             fluid_advance_wall_time_s = max(
                 0.0,
-                time.perf_counter() - fluid_wall_started_at - solid_advance_wall_time_s,
+                sharp_advance_wall_time_s - solid_advance_wall_time_s,
             )
             solid_mpm_report = sharp_report.mpm
             if solid_mpm_report is None:
                 solid_mpm_report = solid_mpm.report()
             publish_solid_report_to_reduced_state(current_time_s, solid_mpm_report)
             sample_wall_started_at = time.perf_counter()
-            fluid_substep_dt_s = effective_fluid_substep_dt_s
+            fluid_substep_dt_s = step_fluid_substep_dt_s
             sample_report = simulator.sample_after_projection(
                 sharp_report.fluid_to_mpm_loads.fluid_projection,
                 dt_s=fluid_substep_dt_s,
             )
+            pressure_outlet_report = simulator.fluid.pressure_outlet_fv_flux_report(
+                dt_s=fluid_substep_dt_s,
+            )
             sample_wall_time_s = time.perf_counter() - sample_wall_started_at
             sharp_summary = hibm_mpm_sharp_step_summary(sharp_report)
+            sharp_summary.update(sharp_fixed_point_summary)
             row = build_hibm_mpm_sharp_case_row(
                 step=step,
                 sample_report=sample_report,
                 sharp_summary=sharp_summary,
                 fluid_projection_report=sharp_report.fluid_to_mpm_loads.fluid_projection,
+                pressure_outlet_report=pressure_outlet_report,
                 fluid_dt_s=spec.dt_s,
                 solid_mpm_report=solid_mpm_report,
                 solid_model=args.solid_model,
@@ -6051,12 +8415,63 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             )
             row["accepted_fsi_trial_state_reused"] = False
             row["fsi_coupling_wall_time_s"] = fsi_coupling_wall_time_s
+            row["fsi_coupling_iqn_ils_least_squares_update_count"] = (
+                fsi_coupling_iqn_ils_least_squares_update_count
+            )
+            row["fsi_coupling_interface_map_amplification"] = (
+                fsi_coupling_physical_interface_map_amplification
+            )
+            row["fsi_coupling_residual_jacobian_amplification"] = 0.0
+            row["fsi_coupling_physical_interface_map_amplification"] = (
+                fsi_coupling_physical_interface_map_amplification
+            )
+            row["fsi_coupling_physical_residual_jacobian_amplification"] = 0.0
+            row["fsi_coupling_raw_interface_map_amplification"] = (
+                fsi_coupling_physical_interface_map_amplification
+            )
+            row["fsi_coupling_raw_residual_jacobian_amplification"] = 0.0
+            row["fsi_coupling_interface_map_amplification_sample_count"] = (
+                fsi_coupling_physical_interface_map_amplification_sample_count
+            )
+            row["fsi_coupling_residual_jacobian_amplification_sample_count"] = 0
+            row["fsi_coupling_physical_interface_map_amplification_sample_count"] = (
+                fsi_coupling_physical_interface_map_amplification_sample_count
+            )
+            row["fsi_coupling_physical_residual_jacobian_amplification_sample_count"] = 0
+            row["fsi_coupling_raw_interface_map_amplification_sample_count"] = (
+                fsi_coupling_physical_interface_map_amplification_sample_count
+            )
+            row["fsi_coupling_raw_residual_jacobian_amplification_sample_count"] = 0
+            row["interface_reaction_relaxation"] = interface_reaction_relaxation
+            row["interface_reaction_aitken"] = interface_reaction_aitken
+            row["interface_reaction_relaxation_effective"] = (
+                fsi_coupling_relaxation_effective
+            )
+            row["interface_reaction_passivity_limit"] = interface_reaction_passivity_limit
+            row["interface_reaction_robin_impedance_ns_m"] = (
+                interface_reaction_robin_impedance_ns_m
+            )
+            row["interface_reaction_robin_matrix_impedance_ns_m"] = (
+                interface_reaction_robin_matrix_impedance_ns_m
+            )
+            row["interface_reaction_robin_target_mode"] = (
+                interface_reaction_robin_target_mode
+            )
             row["solid_advance_wall_time_s"] = solid_advance_wall_time_s
             row["fluid_advance_wall_time_s"] = fluid_advance_wall_time_s
             row["sample_wall_time_s"] = sample_wall_time_s
             row["surface_diagnostics_wall_time_s"] = 0.0
             row["checkpoint_wall_time_s"] = checkpoint_wall_time_s
             row["step_wall_time_s"] = time.perf_counter() - step_wall_started_at
+            row["fluid_substeps_base"] = effective_fluid_substeps
+            row["adaptive_fluid_substeps_enabled"] = adaptive_fluid_substeps_enabled
+            row["adaptive_fluid_substeps_target_cfl"] = float(
+                args.adaptive_fluid_substeps_target_cfl
+            )
+            row["adaptive_fluid_substeps_previous_cfl"] = previous_step_cfl
+            row["adaptive_fluid_substeps_previous_substeps"] = (
+                previous_step_fluid_substeps
+            )
             rows.append(row)
             if args.diagnostic_dump_zero_correctable_cells:
                 zero_correctable_summary = _write_hibm_zero_correctable_cell_dump(
@@ -6064,13 +8479,71 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     step=step,
                     fluid=simulator.fluid,
                     markers=sharp_coupling_state.markers,
-                    pressure_outlet_zmin=not args.disable_pressure_outlet_zmin,
+                    pressure_outlet_zmin=pressure_outlet_zmin_enabled,
                 )
                 row["diagnostic_zero_correctable_interior_cell_count"] = int(
                     zero_correctable_summary["zero_correctable_interior_cell_count"]
                 )
                 row["diagnostic_zero_correctable_shell_band_candidate_count"] = int(
                     zero_correctable_summary["shell_band_candidate_cell_count"]
+                )
+            if args.diagnostic_dump_high_residual_cells:
+                high_residual_summary = _write_hibm_high_residual_cell_dump(
+                    output_dir=output_dir,
+                    step=step,
+                    fluid=simulator.fluid,
+                    markers=sharp_coupling_state.markers,
+                    pressure_outlet_zmin=pressure_outlet_zmin_enabled,
+                )
+                row["diagnostic_high_residual_dumped_cell_count"] = int(
+                    high_residual_summary["dumped_cell_count"]
+                )
+                row["diagnostic_high_residual_max_abs_s"] = float(
+                    high_residual_summary["max_abs_residual_s"]
+                )
+                row["diagnostic_high_residual_velocity_dirichlet_cell_count"] = int(
+                    high_residual_summary["dumped_velocity_dirichlet_cell_count"]
+                )
+            if args.diagnostic_dump_pressure_neumann_invalid_rows:
+                load_pressure_neumann_invalid_summary = (
+                    _write_hibm_pressure_neumann_invalid_row_dump(
+                        output_dir=output_dir,
+                        step=step,
+                        rows=(
+                            sharp_report.fluid_to_mpm_loads
+                            .pressure_neumann_invalid_diagnostic_rows
+                        ),
+                        stage="load",
+                    )
+                )
+                next_pressure_neumann_invalid_summary = (
+                    _write_hibm_pressure_neumann_invalid_row_dump(
+                        output_dir=output_dir,
+                        step=step,
+                        rows=(
+                            sharp_report
+                            .next_pressure_neumann_invalid_diagnostic_rows
+                        ),
+                        stage="next",
+                    )
+                )
+                row["diagnostic_pressure_neumann_invalid_load_dumped_row_count"] = int(
+                    load_pressure_neumann_invalid_summary["captured_invalid_row_count"]
+                )
+                row["diagnostic_pressure_neumann_invalid_load_total_row_count"] = int(
+                    load_pressure_neumann_invalid_summary["total_invalid_row_count"]
+                )
+                row["diagnostic_pressure_neumann_invalid_next_dumped_row_count"] = int(
+                    next_pressure_neumann_invalid_summary["captured_invalid_row_count"]
+                )
+                row["diagnostic_pressure_neumann_invalid_next_total_row_count"] = int(
+                    next_pressure_neumann_invalid_summary["total_invalid_row_count"]
+                )
+                row["diagnostic_pressure_neumann_invalid_dumped_row_count"] = int(
+                    next_pressure_neumann_invalid_summary["captured_invalid_row_count"]
+                )
+                row["diagnostic_pressure_neumann_invalid_total_row_count"] = int(
+                    next_pressure_neumann_invalid_summary["total_invalid_row_count"]
                 )
             snapshot_interval = int(args.fluid_snapshot_interval)
             if snapshot_interval > 0 and (
@@ -6105,8 +8578,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     step=step,
                     exc=exc,
                     fluid=simulator.fluid,
+                    markers=sharp_coupling_state.markers,
+                    pressure_outlet_zmin=pressure_outlet_zmin_enabled,
                 )
                 raise
+            previous_step_cfl = float(row["cfl"])
+            previous_step_fluid_substeps = int(
+                float(row.get("fluid_substeps", step_fluid_substeps))
+            )
             if args.checkpoint_every_step:
                 write_csv(history_path, rows)
                 checkpoint_wall_started_at = time.perf_counter()
@@ -6172,8 +8651,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             )
             solid_advance_wall_time_s = time.perf_counter() - solid_wall_started_at
         tri_diagnostics.update_region_offsets(
-            primary_region_id=7,
-            secondary_region_id=8,
+            primary_region_id=primary_shell_region_id,
+            secondary_region_id=secondary_shell_region_id,
             primary_offset_m=z_displacement_vector(
                 0.5 * (step_start_main_displacement_z_m + float(simulator.main_w_m[None]))
             ),
@@ -6252,6 +8731,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 secondary_interface_impedance_force_n=(
                     accepted_secondary_fluid_step_robin_impedance_force_n
                 ),
+                fluid_substeps=step_fluid_substeps,
             )
             fluid_advance_wall_time_s = time.perf_counter() - fluid_wall_started_at
         else:
@@ -6512,8 +8992,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         row["fsi_coupling_mode_paper_hibm_mpm"] = bool(
             fsi_coupling_mode_report["paper_hibm_mpm"]
         )
-        row["main_tail_region_reaction_diagnostic_only"] = bool(
-            fsi_coupling_mode_report["main_tail_region_reaction_diagnostic_only"]
+        row["region_pair_reaction_diagnostic_only"] = bool(
+            fsi_coupling_mode_report["region_pair_reaction_diagnostic_only"]
         )
         row["fsi_coupling_solver"] = fsi_coupling_solver
         row["fsi_coupling_iterations_used"] = fsi_coupling_iterations_used
@@ -6771,8 +9251,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             simulator.fluid.velocity,
             simulator.fluid.pressure,
             grid_fields=simulator.fluid,
-            primary_region_id=7,
-            secondary_region_id=8,
+            primary_region_id=primary_shell_region_id,
+            secondary_region_id=secondary_shell_region_id,
             primary_velocity_mps=z_velocity_vector(float(row["main_velocity_z_mps"])),
             secondary_velocity_mps=z_velocity_vector(float(row["tail_velocity_z_mps"])),
             probe_distance_m=fluid_probe_distance_m,
@@ -7121,6 +9601,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         row["surface_diagnostics_wall_time_s"] = surface_diagnostics_wall_time_s
         row["checkpoint_wall_time_s"] = checkpoint_wall_time_s
         row["step_wall_time_s"] = time.perf_counter() - step_wall_started_at
+        row["fluid_substeps_base"] = effective_fluid_substeps
+        row["adaptive_fluid_substeps_enabled"] = adaptive_fluid_substeps_enabled
+        row["adaptive_fluid_substeps_target_cfl"] = float(
+            args.adaptive_fluid_substeps_target_cfl
+        )
+        row["adaptive_fluid_substeps_previous_cfl"] = previous_step_cfl
+        row["adaptive_fluid_substeps_previous_substeps"] = previous_step_fluid_substeps
         rows.append(row)
         try:
             _raise_for_step_numerical_guard(
@@ -7139,6 +9626,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 fluid=simulator.fluid,
             )
             raise
+        previous_step_cfl = float(row["cfl"])
+        previous_step_fluid_substeps = int(
+            float(row.get("fluid_substeps", step_fluid_substeps))
+        )
         if args.checkpoint_every_step:
             write_csv(history_path, rows)
             checkpoint_wall_started_at = time.perf_counter()
@@ -7199,6 +9690,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if sharp_case_runner_enabled:
         last = rows[-1] if rows else {}
         max_cfl = max(float(row["cfl"]) for row in rows) if rows else 0.0
+        max_fluid_substeps = (
+            max(int(float(row.get("fluid_substeps", effective_fluid_substeps))) for row in rows)
+            if rows
+            else effective_fluid_substeps
+        )
         max_div_l2 = max(float(row["divergence_l2"]) for row in rows) if rows else 0.0
         max_interior_div_l2 = (
             max(float(row["interior_divergence_l2"]) for row in rows) if rows else 0.0
@@ -7210,6 +9706,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
         max_no_slip_max = (
             max(float(row["hibm_no_slip_residual_max_mps"]) for row in rows)
+            if rows
+            else 0.0
+        )
+        max_fsi_coupling_residual_norm_mps = (
+            max(
+                float(row.get("fsi_coupling_residual_norm_mps", 0.0) or 0.0)
+                for row in rows
+            )
+            if rows
+            else 0.0
+        )
+        max_fsi_coupling_residual_max_mps = (
+            max(
+                float(row.get("fsi_coupling_residual_max_mps", 0.0) or 0.0)
+                for row in rows
+            )
             if rows
             else 0.0
         )
@@ -7239,6 +9751,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             if rows
             else 0
         )
+        max_hibm_air_backed_reachability_barrier_cell_count = (
+            max(
+                int(row["hibm_air_backed_reachability_barrier_cell_count"])
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_hibm_air_backed_seed_fallback_cell_count = (
+            max(
+                int(row["hibm_air_backed_seed_fallback_cell_count"])
+                for row in rows
+            )
+            if rows
+            else 0
+        )
         max_full_stress_invalid_count = (
             max(int(row["hibm_full_stress_invalid_marker_count"]) for row in rows)
             if rows
@@ -7257,11 +9785,39 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             if rows
             else 0
         )
+        max_pressure_neumann_invalid_unreconstructable_count = (
+            max(
+                int(
+                    row.get(
+                        "hibm_pressure_neumann_invalid_unreconstructable_count",
+                        0,
+                    )
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
         max_pressure_neumann_skipped_velocity_dirichlet_count = (
             max(
                 int(
                     row.get(
                         "hibm_pressure_neumann_skipped_velocity_dirichlet_count",
+                        0,
+                    )
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_pressure_neumann_skipped_pressure_boundary_adjacent_count = (
+            max(
+                int(
+                    row.get(
+                        "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count",
                         0,
                     )
                     or 0
@@ -7293,6 +9849,42 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
         max_tail_marker_count = (
             max(int(row["hibm_marker_secondary_count"]) for row in rows) if rows else 0
+        )
+        max_primary_stress_valid_count = (
+            max(
+                int(row.get("hibm_marker_primary_stress_valid_count", 0) or 0)
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_primary_stress_invalid_count = (
+            max(
+                int(row.get("hibm_marker_primary_stress_invalid_count", 0) or 0)
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_secondary_stress_valid_count = (
+            max(
+                int(row.get("hibm_marker_secondary_stress_valid_count", 0) or 0)
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_secondary_stress_invalid_count = (
+            max(
+                int(row.get("hibm_marker_secondary_stress_invalid_count", 0) or 0)
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_fsi_stress_invalid_count = max(
+            max_primary_stress_invalid_count,
+            max_secondary_stress_invalid_count,
         )
         max_tail_marker_force_n = (
             max(
@@ -7340,6 +9932,146 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             if rows
             else 0
         )
+        max_interface_reaction_relaxation_effective = (
+            max(float(row.get("interface_reaction_relaxation_effective", 0.0) or 0.0) for row in rows)
+            if rows
+            else 0.0
+        )
+        min_interface_reaction_relaxation_effective = (
+            min(float(row.get("interface_reaction_relaxation_effective", 0.0) or 0.0) for row in rows)
+            if rows
+            else 0.0
+        )
+        max_fsi_coupling_iterations_used = (
+            max(int(row.get("fsi_coupling_iterations_used", 0) or 0) for row in rows)
+            if rows
+            else 0
+        )
+        max_fsi_coupling_iqn_ils_least_squares_update_count = (
+            max(
+                int(
+                    row.get("fsi_coupling_iqn_ils_least_squares_update_count", 0)
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_fsi_coupling_interface_map_amplification = (
+            max(float(row.get("fsi_coupling_interface_map_amplification", 0.0) or 0.0) for row in rows)
+            if rows
+            else 0.0
+        )
+        max_fsi_coupling_residual_jacobian_amplification = (
+            max(float(row.get("fsi_coupling_residual_jacobian_amplification", 0.0) or 0.0) for row in rows)
+            if rows
+            else 0.0
+        )
+        max_fsi_coupling_physical_interface_map_amplification = (
+            max(float(row.get("fsi_coupling_physical_interface_map_amplification", 0.0) or 0.0) for row in rows)
+            if rows
+            else 0.0
+        )
+        max_fsi_coupling_physical_residual_jacobian_amplification = (
+            max(float(row.get("fsi_coupling_physical_residual_jacobian_amplification", 0.0) or 0.0) for row in rows)
+            if rows
+            else 0.0
+        )
+        max_fsi_coupling_raw_interface_map_amplification = (
+            max(float(row.get("fsi_coupling_raw_interface_map_amplification", 0.0) or 0.0) for row in rows)
+            if rows
+            else 0.0
+        )
+        max_fsi_coupling_raw_residual_jacobian_amplification = (
+            max(float(row.get("fsi_coupling_raw_residual_jacobian_amplification", 0.0) or 0.0) for row in rows)
+            if rows
+            else 0.0
+        )
+        max_fsi_coupling_interface_map_amplification_sample_count = (
+            max(
+                int(
+                    row.get(
+                        "fsi_coupling_interface_map_amplification_sample_count",
+                        0,
+                    )
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_fsi_coupling_residual_jacobian_amplification_sample_count = (
+            max(
+                int(
+                    row.get(
+                        "fsi_coupling_residual_jacobian_amplification_sample_count",
+                        0,
+                    )
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_fsi_coupling_physical_interface_map_amplification_sample_count = (
+            max(
+                int(
+                    row.get(
+                        "fsi_coupling_physical_interface_map_amplification_sample_count",
+                        0,
+                    )
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_fsi_coupling_physical_residual_jacobian_amplification_sample_count = (
+            max(
+                int(
+                    row.get(
+                        "fsi_coupling_physical_residual_jacobian_amplification_sample_count",
+                        0,
+                    )
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_fsi_coupling_raw_interface_map_amplification_sample_count = (
+            max(
+                int(
+                    row.get(
+                        "fsi_coupling_raw_interface_map_amplification_sample_count",
+                        0,
+                    )
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_fsi_coupling_raw_residual_jacobian_amplification_sample_count = (
+            max(
+                int(
+                    row.get(
+                        "fsi_coupling_raw_residual_jacobian_amplification_sample_count",
+                        0,
+                    )
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
         max_outlet_negative_z = (
             max(float(row["outlet_flow_negative_z_m3s"]) for row in rows)
             if rows
@@ -7364,6 +10096,50 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             sum(int(row.get("pressure_projection_cg_breakdown_count", 0) or 0) for row in rows)
             if rows
             else 0
+        )
+        pressure_projection_physical_failure_count = (
+            sum(
+                1
+                for row in rows
+                if _row_bool(
+                    row.get("pressure_projection_physical_failure", False)
+                )
+            )
+            if rows
+            else 0
+        )
+        max_hibm_unreached_incompatible_component_count = (
+            max(
+                int(
+                    row.get("hibm_unreached_incompatible_component_count", 0)
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_hibm_unreached_component_rhs_mean_max_abs = (
+            max(
+                float(row.get("hibm_unreached_component_rhs_mean_max_abs", 0.0) or 0.0)
+                for row in rows
+            )
+            if rows
+            else 0.0
+        )
+        max_hibm_unreached_component_rhs_integral_max_abs = (
+            max(
+                float(
+                    row.get(
+                        "hibm_unreached_component_rhs_integral_max_abs",
+                        0.0,
+                    )
+                    or 0.0
+                )
+                for row in rows
+            )
+            if rows
+            else 0.0
         )
         total_pressure_projection_cg_converged_all = (
             all(
@@ -7454,6 +10230,31 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             full_pressure_waveform_steps=full_pressure_waveform_steps,
             partial_run_stopped=partial_run_stopped,
             partial_run_reason=partial_run_reason,
+        )
+        validation_scope_complete = bool(validation_scope["validation_scope_complete"])
+        final_fsi_volume_source_m3s = _final_row_number(
+            last,
+            "fsi_volume_source_m3s",
+        )
+        final_outlet_to_fsi_volume_source_ratio = signed_positive_source_flux_ratio(
+            outlet_negative_z_flux_m3s=final_outlet_negative_z,
+            source_flux_m3s=final_fsi_volume_source_m3s,
+        )
+        max_outlet_to_fsi_volume_source_ratio = (
+            max(float(row["main_volume_flux_to_outlet_ratio"]) for row in rows)
+            if rows
+            else 0.0
+        )
+        outlet_to_fsi_gate_scope = outlet_to_fsi_volume_source_gate_scope(
+            fluid_grid_resolution=fluid_grid_resolution,
+            validation_scope_complete=validation_scope_complete,
+        )
+        final_outlet_to_fsi_volume_source_ratio_physical = (
+            physical_outlet_to_fsi_volume_source_passes(
+                outlet_negative_z_flux_m3s=final_outlet_negative_z,
+                fsi_volume_source_m3s=final_fsi_volume_source_m3s,
+                min_ratio=float(args.min_outlet_to_main_volume_flux_ratio),
+            )
         )
         timing_fields = (
             "step_wall_time_s",
@@ -7552,6 +10353,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "pressure_projection_cg_no_breakdown": (
                 pressure_projection_cg_breakdown_count == 0
             ),
+            "pressure_projection_no_physical_failure": (
+                pressure_projection_physical_failure_count == 0
+            ),
             "total_pressure_projection_cg_converged_all": (
                 total_pressure_projection_cg_converged_all
             ),
@@ -7563,6 +10367,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "hibm_invalid_projection_count_zero": max_ib_invalid_count == 0,
             "hibm_full_stress_invalid_marker_count_zero": (
                 max_full_stress_invalid_count == 0
+            ),
+            "hibm_fsi_full_stress_invalid_marker_count_zero": (
+                max_fsi_stress_invalid_count == 0
             ),
             "hibm_action_reaction_residual_bounded": math.isfinite(
                 max_fsi_action_reaction_residual_n
@@ -7584,13 +10391,60 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             ),
             "sharp_runner_skips_legacy_projected_force_report": True,
         }
+        if bool(outlet_to_fsi_gate_scope["hard_gate"]):
+            checks["final_outlet_to_fsi_volume_source_ratio_physical"] = (
+                final_outlet_to_fsi_volume_source_ratio_physical
+            )
+        else:
+            diagnostic_checks["final_outlet_to_fsi_volume_source_ratio_physical"] = (
+                final_outlet_to_fsi_volume_source_ratio_physical
+            )
         completed_step_checks_passed = checks_passed(checks)
-        validation_scope_complete = bool(validation_scope["validation_scope_complete"])
         validation_passed = completed_step_checks_passed if validation_scope_complete else None
         summary = {
             "case": "Squid soft robot",
             "model_class": "sharp-interface HIBM-MPM case runner",
             "uses_generic_simulation_core": True,
+            "source_config_used_as_input_only": str(source_config_path),
+            "cad_provenance": cad_provenance,
+            "real_cad_step_path": cad_provenance.get("cad_step_path"),
+            "real_cad_step_direct_binding": bool(
+                cad_provenance.get("direct_cad_step_binding", False)
+            ),
+            "real_cad_step_derived_surface_mesh_binding": bool(
+                cad_provenance.get("step_derived_surface_mesh_binding", False)
+            ),
+            "real_cad_step_binding": real_cad_step_binding,
+            "pressure_schedule_input": pressure_schedule_input,
+            "pressure_boundary_shell_mapping": asdict(pressure_boundary_mapping),
+            "pressure_load_source_region_id": int(pressure_load_source_region_id),
+            "pressure_load_region_id": int(pressure_load_region_id),
+            "pressure_load_direction": tuple(float(v) for v in pressure_load_direction),
+            "pressure_closure_normal": tuple(float(v) for v in pressure_closure_normal),
+            "pressure_far_side_normal_sign": float(pressure_far_side_normal_sign),
+            "pressure_outlet_boundary": pressure_outlet_boundary_report,
+            "pressure_outlet_zmin_enabled": pressure_outlet_zmin_enabled,
+            "shell_primary_region_id": int(primary_shell_region_id),
+            "shell_secondary_region_id": int(secondary_shell_region_id),
+            "source_config_fluid_active_mask_requested": (
+                source_config_fluid_active_mask_requested
+            ),
+            "source_config_reduced_water_intersection_requested": (
+                source_config_reduced_water_intersection_requested
+            ),
+            "initial_fluid_obstacle_mode": initial_fluid_obstacle_mode,
+            "source_config_fluid_topology": source_config_fluid_topology_report,
+            "source_config_region14_aperture_requested": (
+                source_config_region14_aperture_requested
+            ),
+            "region14_aperture_carve_enabled": region14_aperture_carve_enabled,
+            "region14_aperture_carve_source": region14_aperture_carve_source,
+            "open_downstream_farfield_enabled": bool(
+                spec.downstream_farfield_open_enabled
+            ),
+            "region14_aperture_geometry": region14_aperture_geometry,
+            "reduced_water_geometry": reduced_water_geometry_report(spec),
+            "tri_surface_diagnostics": tri_metadata,
             "solid_model": {
                 "type": args.solid_model,
                 "solid_particle_size_m": _final_row_number(
@@ -7659,6 +10513,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "timing_summary": timing_summary,
             "fsi_coupling_mode": fsi_coupling_mode,
             "fsi_coupling_mode_report": fsi_coupling_mode_report,
+            "fsi_coupling_iterations_requested": fsi_coupling_iterations,
+            "fsi_coupling_solver": fsi_coupling_solver,
+            "max_fsi_coupling_iterations_used": max_fsi_coupling_iterations_used,
+            "max_fsi_coupling_iqn_ils_least_squares_update_count": (
+                max_fsi_coupling_iqn_ils_least_squares_update_count
+            ),
+            "fsi_coupling_tolerance_n": fsi_coupling_tolerance_n,
+            "fsi_coupling_target_map_relaxation": fsi_coupling_target_map_relaxation,
             "fsi_coupling_explicit_single_pass": bool(
                 rows
                 and all(
@@ -7702,6 +10564,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 last.get("pressure_solver_force_reason", "")
             ),
             "max_cfl": max_cfl,
+            "fluid_substeps": effective_fluid_substeps,
+            "fluid_substep_dt_s": effective_fluid_substep_dt_s,
+            "adaptive_fluid_substeps_enabled": adaptive_fluid_substeps_enabled,
+            "adaptive_fluid_substeps_target_cfl": float(
+                args.adaptive_fluid_substeps_target_cfl
+            ),
+            "adaptive_fluid_substeps_max": int(args.adaptive_fluid_substeps_max),
+            "adaptive_fluid_substeps_safety": float(
+                args.adaptive_fluid_substeps_safety
+            ),
+            "max_fluid_substeps": max_fluid_substeps,
             "max_divergence_l2": max_div_l2,
             "max_interior_divergence_l2": max_interior_div_l2,
             "max_projection_to_pre_divergence_l2_ratio": (
@@ -7715,10 +10588,73 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             ),
             "pressure_projection_cg_converged_all": pressure_projection_cg_converged_all,
             "pressure_projection_cg_breakdown_count": pressure_projection_cg_breakdown_count,
+            "pressure_projection_physical_failure": (
+                pressure_projection_physical_failure_count > 0
+            ),
+            "pressure_projection_physical_failure_count": (
+                pressure_projection_physical_failure_count
+            ),
+            "max_hibm_unreached_incompatible_component_count": (
+                max_hibm_unreached_incompatible_component_count
+            ),
+            "max_hibm_unreached_component_rhs_mean_max_abs": (
+                max_hibm_unreached_component_rhs_mean_max_abs
+            ),
+            "max_hibm_unreached_component_rhs_integral_max_abs": (
+                max_hibm_unreached_component_rhs_integral_max_abs
+            ),
             "total_pressure_projection_cg_converged_all": total_pressure_projection_cg_converged_all,
             "total_pressure_projection_cg_breakdown_count": total_pressure_projection_cg_breakdown_count,
             "max_hibm_no_slip_residual_l2_mps": max_no_slip_l2,
             "max_hibm_no_slip_residual_mps": max_no_slip_max,
+            "max_fsi_coupling_residual_norm_mps": (
+                max_fsi_coupling_residual_norm_mps
+            ),
+            "max_fsi_coupling_residual_max_mps": (
+                max_fsi_coupling_residual_max_mps
+            ),
+            "max_fsi_coupling_interface_map_amplification": (
+                max_fsi_coupling_interface_map_amplification
+            ),
+            "max_fsi_coupling_residual_jacobian_amplification": (
+                max_fsi_coupling_residual_jacobian_amplification
+            ),
+            "max_fsi_coupling_physical_interface_map_amplification": (
+                max_fsi_coupling_physical_interface_map_amplification
+            ),
+            "max_fsi_coupling_physical_residual_jacobian_amplification": (
+                max_fsi_coupling_physical_residual_jacobian_amplification
+            ),
+            "max_fsi_coupling_raw_interface_map_amplification": (
+                max_fsi_coupling_raw_interface_map_amplification
+            ),
+            "max_fsi_coupling_raw_residual_jacobian_amplification": (
+                max_fsi_coupling_raw_residual_jacobian_amplification
+            ),
+            "max_fsi_coupling_interface_map_amplification_sample_count": (
+                max_fsi_coupling_interface_map_amplification_sample_count
+            ),
+            "max_fsi_coupling_residual_jacobian_amplification_sample_count": (
+                max_fsi_coupling_residual_jacobian_amplification_sample_count
+            ),
+            "max_fsi_coupling_physical_interface_map_amplification_sample_count": (
+                max_fsi_coupling_physical_interface_map_amplification_sample_count
+            ),
+            "max_fsi_coupling_physical_residual_jacobian_amplification_sample_count": (
+                max_fsi_coupling_physical_residual_jacobian_amplification_sample_count
+            ),
+            "max_fsi_coupling_raw_interface_map_amplification_sample_count": (
+                max_fsi_coupling_raw_interface_map_amplification_sample_count
+            ),
+            "max_fsi_coupling_raw_residual_jacobian_amplification_sample_count": (
+                max_fsi_coupling_raw_residual_jacobian_amplification_sample_count
+            ),
+            "max_interface_reaction_relaxation_effective": (
+                max_interface_reaction_relaxation_effective
+            ),
+            "min_interface_reaction_relaxation_effective": (
+                min_interface_reaction_relaxation_effective
+            ),
             "max_hibm_ib_node_count": max_ib_node_count,
             "max_hibm_ib_invalid_projection_count": max_ib_invalid_count,
             "max_hibm_internal_obstacle_cell_count": (
@@ -7730,11 +10666,44 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "max_hibm_pressure_disconnected_nonprojectable_cell_count": (
                 max_hibm_pressure_disconnected_nonprojectable_cell_count
             ),
+            "max_hibm_velocity_dirichlet_invalid_reconstruction_count": (
+                max_velocity_dirichlet_invalid_count
+            ),
+            "max_hibm_pressure_neumann_invalid_reconstruction_count": (
+                max_pressure_neumann_invalid_count
+            ),
+            "max_hibm_pressure_neumann_invalid_unreconstructable_count": (
+                max_pressure_neumann_invalid_unreconstructable_count
+            ),
+            "max_hibm_air_backed_reachability_barrier_cell_count": (
+                max_hibm_air_backed_reachability_barrier_cell_count
+            ),
+            "max_hibm_air_backed_seed_fallback_cell_count": (
+                max_hibm_air_backed_seed_fallback_cell_count
+            ),
             "max_hibm_pressure_neumann_skipped_velocity_dirichlet_count": (
                 max_pressure_neumann_skipped_velocity_dirichlet_count
             ),
+            "max_hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count": (
+                max_pressure_neumann_skipped_pressure_boundary_adjacent_count
+            ),
             "max_hibm_full_stress_invalid_marker_count": (
                 max_full_stress_invalid_count
+            ),
+            "max_hibm_primary_stress_valid_marker_count": (
+                max_primary_stress_valid_count
+            ),
+            "max_hibm_primary_stress_invalid_marker_count": (
+                max_primary_stress_invalid_count
+            ),
+            "max_hibm_secondary_stress_valid_marker_count": (
+                max_secondary_stress_valid_count
+            ),
+            "max_hibm_secondary_stress_invalid_marker_count": (
+                max_secondary_stress_invalid_count
+            ),
+            "max_hibm_fsi_stress_invalid_marker_count": (
+                max_fsi_stress_invalid_count
             ),
             "max_hibm_marker_count": max_marker_count,
             "max_main_marker_count": max_main_marker_count,
@@ -7753,6 +10722,20 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             ),
             "max_outlet_negative_z_flow_m3s": max_outlet_negative_z,
             "final_outlet_negative_z_flow_m3s": final_outlet_negative_z,
+            "final_fsi_volume_source_m3s": final_fsi_volume_source_m3s,
+            "final_outlet_to_fsi_volume_source_ratio": (
+                final_outlet_to_fsi_volume_source_ratio
+            ),
+            "final_outlet_to_fsi_volume_source_ratio_physical": (
+                final_outlet_to_fsi_volume_source_ratio_physical
+            ),
+            "max_outlet_to_fsi_volume_source_ratio": (
+                max_outlet_to_fsi_volume_source_ratio
+            ),
+            "outlet_to_fsi_volume_source_gate_scope": outlet_to_fsi_gate_scope,
+            "required_min_outlet_to_main_volume_flux_ratio": (
+                args.min_outlet_to_main_volume_flux_ratio
+            ),
             "final_negative_z_all_sections": final_all_sections_negative_z,
             "phase5_validation_complete": False,
             "interpretation_note": (
@@ -7871,6 +10854,42 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         all(_row_bool(row["pressure_projection_cg_converged_all"]) for row in rows)
         if rows
         else True
+    )
+    pressure_projection_physical_failure_count = (
+        sum(
+            1
+            for row in rows
+            if _row_bool(row.get("pressure_projection_physical_failure", False))
+        )
+        if rows
+        else 0
+    )
+    max_hibm_unreached_incompatible_component_count = (
+        max(
+            int(row.get("hibm_unreached_incompatible_component_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_hibm_unreached_component_rhs_mean_max_abs = (
+        max(
+            float(row.get("hibm_unreached_component_rhs_mean_max_abs", 0.0) or 0.0)
+            for row in rows
+        )
+        if rows
+        else 0.0
+    )
+    max_hibm_unreached_component_rhs_integral_max_abs = (
+        max(
+            float(
+                row.get("hibm_unreached_component_rhs_integral_max_abs", 0.0)
+                or 0.0
+            )
+            for row in rows
+        )
+        if rows
+        else 0.0
     )
     max_pressure_interface_matrix_diagonal_integral = (
         max(abs(float(row.get("pressure_interface_matrix_diagonal_integral", 0.0) or 0.0)) for row in rows)
@@ -8257,6 +11276,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     max_fsi_coupling_residual_norm_n = (
         max(float(row["fsi_coupling_residual_norm_n"]) for row in rows) if rows else 0.0
     )
+    max_fsi_coupling_residual_norm_mps = (
+        max(float(row.get("fsi_coupling_residual_norm_mps", 0.0) or 0.0) for row in rows)
+        if rows
+        else 0.0
+    )
+    max_fsi_coupling_residual_max_mps = (
+        max(float(row.get("fsi_coupling_residual_max_mps", 0.0) or 0.0) for row in rows)
+        if rows
+        else 0.0
+    )
     fsi_coupling_not_converged_count = (
         sum(1 for row in rows if bool(row.get("fsi_coupling_enabled", False)) and not bool(row.get("fsi_coupling_converged", False)))
         if rows
@@ -8547,7 +11576,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     boundary_drive_compliance = boundary_drive_compliance_report(
         prescribed_velocity_boundary=fsi_velocity_constraint_blend > 0.0,
-        prescribed_pressure_or_flow_boundary=False,
+        prescribed_pressure_or_flow_boundary=max_abs_pressure_load_pa > 0.0,
         nonzero_fluid_traction_scale=max(
             abs(float(args.constraint_force_scale) - 1.0),
             constraint_force_mobility_scale_delta,
@@ -8647,6 +11676,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "pressure_projection_cg_converged_all": pressure_projection_cg_converged_all,
         "pressure_projection_cg_no_breakdown": (
             pressure_projection_cg_breakdown_count == 0
+        ),
+        "pressure_projection_no_physical_failure": (
+            pressure_projection_physical_failure_count == 0
         ),
         "total_pressure_projection_cg_converged_all": (
             total_pressure_projection_cg_converged_all
@@ -8801,6 +11833,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "fsi_velocity_constraint_solid_mobility_ratio": fsi_velocity_constraint_solid_mobility_ratio,
         "fluid_substeps": effective_fluid_substeps,
         "fluid_substep_dt_s": effective_fluid_substep_dt_s,
+        "adaptive_fluid_substeps_enabled": adaptive_fluid_substeps_enabled,
+        "adaptive_fluid_substeps_target_cfl": float(
+            args.adaptive_fluid_substeps_target_cfl
+        ),
+        "adaptive_fluid_substeps_max": int(args.adaptive_fluid_substeps_max),
+        "adaptive_fluid_substeps_safety": float(args.adaptive_fluid_substeps_safety),
+        "max_fluid_substeps": max_fluid_substeps,
         "ibm_correction_iterations": max(1, int(args.ibm_correction_iterations)),
         "ibm_correction_dt_s": float(spec.dt_s)
         / float(effective_fluid_substeps)
@@ -8815,6 +11854,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "effective_multigrid_cycles": effective_multigrid_cycles,
         "divergence_cleanup_iterations": projection_divergence_cleanup_iterations,
         "divergence_cleanup_relaxation": float(args.divergence_cleanup_relaxation),
+        "hibm_post_dirichlet_consistency_projections": int(
+            args.hibm_post_dirichlet_consistency_projections
+        ),
         "fsi_coupling_mode": fsi_coupling_mode,
         "fsi_coupling_mode_report": fsi_coupling_mode_report,
         "fsi_coupling_iterations_requested": fsi_coupling_iterations,
@@ -8826,6 +11868,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "fsi_coupling_tolerance_n": fsi_coupling_tolerance_n,
         "fsi_coupling_target_map_relaxation": fsi_coupling_target_map_relaxation,
         "max_fsi_coupling_residual_norm_n": max_fsi_coupling_residual_norm_n,
+        "max_fsi_coupling_residual_norm_mps": (
+            max_fsi_coupling_residual_norm_mps
+        ),
+        "max_fsi_coupling_residual_max_mps": max_fsi_coupling_residual_max_mps,
         "max_fsi_coupling_interface_map_amplification": (
             max_fsi_coupling_interface_map_amplification
         ),
@@ -8938,19 +11984,50 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "solid z displacement before IBM force spreading and pressure traction sampling. "
             "Normals remain rest normals in this reduced shell validation."
         ),
-        "pressure_outlet_zmin_enabled": not args.disable_pressure_outlet_zmin,
-        "pressure_outlet_zmin_no_backflow_enabled": not args.disable_pressure_outlet_zmin,
+        "pressure_outlet_boundary": pressure_outlet_boundary_report,
+        "pressure_outlet_zmin_enabled": pressure_outlet_zmin_enabled,
+        "pressure_outlet_zmin_no_backflow_enabled": pressure_outlet_zmin_enabled,
         "boundary_drive_compliance": boundary_drive_compliance,
         "boundary_drive_compliance_gate": "diagnostic_only",
         "fluid_surface_traction_source": "sampled_projected_fluid_stress_field",
         "fluid_to_solid_interface_reaction_enabled": True,
         "tail_hydraulic_scalar_drive_enabled": False,
         "reduced_chamber_nozzle_obstacles_enabled": not args.disable_reduced_obstacles,
-        "region14_aperture_carve_enabled": bool(args.use_region14_aperture_carve),
+        "pressure_boundary_shell_mapping": asdict(pressure_boundary_mapping),
+        "pressure_load_source_region_id": int(pressure_load_source_region_id),
+        "pressure_load_region_id": int(pressure_load_region_id),
+        "pressure_load_direction": tuple(float(v) for v in pressure_load_direction),
+        "pressure_closure_normal": tuple(float(v) for v in pressure_closure_normal),
+        "pressure_far_side_normal_sign": float(pressure_far_side_normal_sign),
+        "shell_primary_region_id": int(primary_shell_region_id),
+        "shell_secondary_region_id": int(secondary_shell_region_id),
+        "source_config_fluid_active_mask_requested": (
+            source_config_fluid_active_mask_requested
+        ),
+        "source_config_reduced_water_intersection_requested": (
+            source_config_reduced_water_intersection_requested
+        ),
+        "initial_fluid_obstacle_mode": initial_fluid_obstacle_mode,
+        "source_config_fluid_topology": source_config_fluid_topology_report,
+        "source_config_region14_aperture_requested": (
+            source_config_region14_aperture_requested
+        ),
+        "region14_aperture_carve_enabled": region14_aperture_carve_enabled,
+        "region14_aperture_carve_source": region14_aperture_carve_source,
         "open_downstream_farfield_enabled": bool(spec.downstream_farfield_open_enabled),
         "region14_aperture_geometry": region14_aperture_geometry,
         "reduced_water_geometry": reduced_water_geometry_report(spec),
         "source_config_used_as_input_only": str(source_config_path),
+        "cad_provenance": cad_provenance,
+        "real_cad_step_path": cad_provenance.get("cad_step_path"),
+        "real_cad_step_direct_binding": bool(
+            cad_provenance.get("direct_cad_step_binding", False)
+        ),
+        "real_cad_step_derived_surface_mesh_binding": bool(
+            cad_provenance.get("step_derived_surface_mesh_binding", False)
+        ),
+        "real_cad_step_binding": real_cad_step_binding,
+        "pressure_schedule_input": pressure_schedule_input,
         "spec": asdict(spec),
         "tri_surface_diagnostics": tri_metadata,
         "active_water_connectivity": active_water,
@@ -9030,6 +12107,21 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "pressure_projection_cg_converged_all": pressure_projection_cg_converged_all,
         "pressure_projection_cg_breakdown_count": pressure_projection_cg_breakdown_count,
+        "pressure_projection_physical_failure": (
+            pressure_projection_physical_failure_count > 0
+        ),
+        "pressure_projection_physical_failure_count": (
+            pressure_projection_physical_failure_count
+        ),
+        "max_hibm_unreached_incompatible_component_count": (
+            max_hibm_unreached_incompatible_component_count
+        ),
+        "max_hibm_unreached_component_rhs_mean_max_abs": (
+            max_hibm_unreached_component_rhs_mean_max_abs
+        ),
+        "max_hibm_unreached_component_rhs_integral_max_abs": (
+            max_hibm_unreached_component_rhs_integral_max_abs
+        ),
         "max_pressure_interface_matrix_diagonal_integral": (
             max_pressure_interface_matrix_diagonal_integral
         ),
@@ -9252,6 +12344,23 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-config", default=DEFAULT_SOURCE_CONFIG)
+    parser.add_argument(
+        "--cad-step-path",
+        default=None,
+        help=(
+            "Optional real STEP CAD path used to audit source-config geometry provenance. "
+            "This is an input contract only; it does not prescribe forces, velocity, or flow."
+        ),
+    )
+    parser.add_argument(
+        "--require-real-cad-step",
+        action="store_true",
+        help=(
+            "Fail before initialization unless --source-config either directly "
+            "references --cad-step-path as a .step/.stp file or its generated "
+            "surface mesh cache records matching STEP and cache SHA256 hashes."
+        ),
+    )
     parser.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "output_008step"))
     parser.add_argument(
         "--steps",
@@ -9270,7 +12379,52 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "and exit before Taichi/MPM/FSI initialization."
         ),
     )
+    parser.add_argument(
+        "--pressure-t0-s",
+        type=float,
+        default=None,
+        help="Optional case pressure schedule t0 override in seconds.",
+    )
+    parser.add_argument(
+        "--pressure-t1-s",
+        type=float,
+        default=None,
+        help="Optional case pressure schedule t1 override in seconds.",
+    )
+    parser.add_argument(
+        "--pressure-t2-s",
+        type=float,
+        default=None,
+        help="Optional case pressure schedule t2 override in seconds.",
+    )
+    parser.add_argument(
+        "--pressure-p0-pa",
+        type=float,
+        default=None,
+        help="Optional case pressure schedule p0 override in Pa.",
+    )
+    parser.add_argument(
+        "--pressure-p1-pa",
+        type=float,
+        default=None,
+        help="Optional case pressure schedule p1 override in Pa.",
+    )
+    parser.add_argument(
+        "--pressure-p2-pa",
+        type=float,
+        default=None,
+        help="Optional case pressure schedule p2 override in Pa.",
+    )
     parser.add_argument("--projection-iterations", type=int, default=3000)
+    parser.add_argument(
+        "--hibm-post-dirichlet-consistency-projections",
+        type=int,
+        default=3,
+        help=(
+            "Number of post-substep HIBM velocity-Dirichlet reconstruction/"
+            "pressure-projection consistency passes on the sharp path."
+        ),
+    )
     parser.add_argument(
         "--pressure-solver",
         choices=PRESSURE_SOLVER_CHOICES,
@@ -9309,8 +12463,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=CG_PRECONDITIONER_CHOICES,
         default="auto",
         help=(
-            "Preconditioner for --pressure-solver fv_cg. auto preserves the current "
-            "behavior: multigrid on graded FV grids and Jacobi on uniform grids."
+            "Preconditioner for --pressure-solver fv_cg. auto uses multigrid on "
+            "graded FV grids only when no active pressure-interface matrix is present; "
+            "otherwise it uses Jacobi."
         ),
     )
     parser.add_argument(
@@ -9350,6 +12505,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Diagnostic-only HIBM-MPM sharp switch: dump interior fluid cells whose "
             "divergence stencil has no pressure-correctable faces."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-dump-high-residual-cells",
+        action="store_true",
+        help=(
+            "Diagnostic-only HIBM-MPM sharp switch: dump the highest post-projection "
+            "divergence residual cells with nearby marker and pressure-row context."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-dump-pressure-neumann-invalid-rows",
+        action="store_true",
+        help=(
+            "Diagnostic-only HIBM-MPM sharp switch: dump pressure-Neumann "
+            "interface rows rejected during reconstruction."
         ),
     )
     parser.add_argument(
@@ -9407,7 +12578,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--graded-grid-max-cells",
         type=int,
-        default=5_000_000,
+        default=0,
         help="Maximum generated fluid cells for --use-graded-grid. Use 0 to disable this guard.",
     )
     parser.add_argument(
@@ -9654,6 +12825,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--adaptive-fluid-substeps",
+        action="store_true",
+        help=(
+            "Increase the next step's fluid substeps from previously computed CFL "
+            "diagnostics. This is a generic CFL time-integration control and does "
+            "not prescribe pressure, velocity, force, or flow results."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-fluid-substeps-target-cfl",
+        type=float,
+        default=0.25,
+        help="Target CFL used when --adaptive-fluid-substeps is enabled.",
+    )
+    parser.add_argument(
+        "--adaptive-fluid-substeps-max",
+        type=int,
+        default=16,
+        help="Maximum fluid substeps allowed by --adaptive-fluid-substeps.",
+    )
+    parser.add_argument(
+        "--adaptive-fluid-substeps-safety",
+        type=float,
+        default=1.25,
+        help="Safety multiplier applied to previous CFL when choosing adaptive substeps.",
+    )
+    parser.add_argument(
         "--ibm-correction-iterations",
         type=int,
         default=2,
@@ -9666,25 +12864,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--fsi-coupling-iterations",
         type=int,
-        default=6,
+        default=1,
         help=(
-            "Solid-fluid fixed-point iterations per physical MPM time step. Values above "
-            "1 use Taichi device-side solid/fluid snapshots to re-advance the current "
-            "step with updated pressure/constraint interface reaction; this is not a nozzle "
-            "velocity, pressure, or flow boundary."
+            "Solid-fluid fixed-point iterations per physical MPM time step. "
+            "hibm_mpm_sharp uses a marker-level position/velocity fixed point "
+            "when this is greater than 1; legacy_projected_reduced keeps its "
+            "older region-reaction trial re-advance diagnostic path."
         ),
     )
     parser.add_argument(
         "--fsi-coupling-mode",
         choices=FSI_COUPLING_MODE_CHOICES,
-        default=FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
+        default=FSI_COUPLING_MODE_HIBM_MPM_SHARP,
         help=(
-            "Solver-level FSI coupling mode. legacy_projected_reduced keeps the "
-            "existing projected-IBM plus reduced region-reaction path as legacy "
-            "diagnostic coupling. hibm_mpm_sharp selects the generic "
-            "sharp-interface HIBM-MPM solver path; the current squid case "
-            "runner supports it with --solid-model neo_hookean_mpm while "
-            "Phase 5 long-run validation remains incomplete."
+            "Solver-level FSI coupling mode. hibm_mpm_sharp selects the generic "
+            "sharp-interface HIBM-MPM solver path. legacy_projected_reduced is an "
+            "explicit legacy diagnostic option that keeps the old projected-IBM "
+            "plus reduced region-reaction path."
         ),
     )
     parser.add_argument(
@@ -9726,6 +12922,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--disable-pressure-outlet-zmin", action="store_true")
     parser.add_argument("--disable-reduced-obstacles", action="store_true")
     parser.add_argument(
+        "--source-config-intersect-reduced-water-domain",
+        action="store_true",
+        help=(
+            "Legacy diagnostic topology path: when the source config provides a "
+            "CAD-derived fluid active mask, intersect it with the reduced analytic "
+            "squid water domain. Disabled by default so real CAD fluid topology is "
+            "not narrowed by case-specific analytic geometry."
+        ),
+    )
+    parser.add_argument(
         "--use-region14-aperture-carve",
         action="store_true",
         help=(
@@ -9735,11 +12941,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--disable-region14-aperture-carve",
+        action="store_true",
+        help=(
+            "Disable source-config-driven region 14 aperture carve even when the "
+            "source config declares selection 14 as the solid obstacle opening."
+        ),
+    )
+    parser.add_argument(
         "--open-downstream-farfield",
         action="store_true",
         help=(
-            "With --use-region14-aperture-carve, keep the external domain below the "
-            "region 14 aperture plane as active water instead of a narrow outlet plume. "
+            "With region 14 aperture carve enabled, keep the external domain below "
+            "the region 14 aperture plane as active water instead of a narrow outlet plume. "
             "This is an obstacle/topology correction, not a flow boundary condition."
         ),
     )

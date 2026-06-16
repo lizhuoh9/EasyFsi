@@ -536,6 +536,52 @@ class NeoHookeanMpmState:
             int(self.particle_count),
         )
 
+    @ti.kernel
+    def _enforce_rest_x_plane_kernel(self, particle_count: ti.i32):
+        for p in range(self.particle_capacity):
+            if p < particle_count:
+                self.x[p].x = self.rest_x[p].x
+                self.v[p].x = 0.0
+                self.C[p][0, 0] = 0.0
+                self.C[p][0, 1] = 0.0
+                self.C[p][0, 2] = 0.0
+                self.C[p][1, 0] = 0.0
+                self.C[p][2, 0] = 0.0
+                self.F[p][0, 0] = 1.0
+                self.F[p][0, 1] = 0.0
+                self.F[p][0, 2] = 0.0
+                self.F[p][1, 0] = 0.0
+                self.F[p][2, 0] = 0.0
+                self._update_surface_geometry_from_deformation(p)
+
+    @ti.kernel
+    def _enforce_rest_z_plane_kernel(self, particle_count: ti.i32):
+        for p in range(self.particle_capacity):
+            if p < particle_count:
+                self.x[p].z = self.rest_x[p].z
+                self.v[p].z = 0.0
+                self.C[p][0, 2] = 0.0
+                self.C[p][1, 2] = 0.0
+                self.C[p][2, 0] = 0.0
+                self.C[p][2, 1] = 0.0
+                self.C[p][2, 2] = 0.0
+                self.F[p][0, 2] = 0.0
+                self.F[p][1, 2] = 0.0
+                self.F[p][2, 0] = 0.0
+                self.F[p][2, 1] = 0.0
+                self.F[p][2, 2] = 1.0
+                self._update_surface_geometry_from_deformation(p)
+
+    def enforce_rest_x_plane(self) -> None:
+        if self.particle_count <= 0:
+            raise ValueError("initialize particles before applying plane constraint")
+        self._enforce_rest_x_plane_kernel(int(self.particle_count))
+
+    def enforce_rest_z_plane(self) -> None:
+        if self.particle_count <= 0:
+            raise ValueError("initialize particles before applying plane constraint")
+        self._enforce_rest_z_plane_kernel(int(self.particle_count))
+
     @ti.func
     def _clear_report_func(self):
         self.report_total_mass_kg[None] = 0.0

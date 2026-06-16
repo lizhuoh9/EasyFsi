@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import math
@@ -22,6 +23,8 @@ from cases.squid_soft_robot import (
     RUN_CHECKPOINT_VERSION,
     ReducedSquidFSI,
     SquidReducedSpec,
+    build_source_config_fluid_obstacle_mask,
+    checkpoint_run_fingerprint,
     effective_fluid_substeps_for_grid,
     finite_required_row_fields_for_mode,
     finite_required_row_fields_for_solid_model,
@@ -32,17 +35,24 @@ from cases.squid_soft_robot import (
     legacy_projected_reduced_fsi_coupling_enabled,
     build_hibm_mpm_sharp_coupling_state,
     build_hibm_mpm_sharp_case_row,
+    sharp_marker_fixed_point_residual_mps,
+    sharp_pressure_neumann_gradient_state_array,
+    relaxed_sharp_marker_state_arrays,
+    restore_sharp_pressure_neumann_gradient_state_array,
     divergence_sample_report_fields,
     load_run_checkpoint,
     nozzle_radius_at_z_m,
+    _cell_indices_for_points,
     _required_finite_row_number,
     _required_finite_row_vector,
     _raise_for_step_numerical_guard,
+    _write_hibm_high_residual_cell_dump,
     _write_step_failure_artifacts,
     parse_args,
     pressure_schedule_pa,
     pressure_schedule_applied_in_history,
     pressure_schedule_step_end_pa,
+    raise_for_unsupported_hibm_mpm_sharp_iteration_options,
     fsi_physical_interface_map_stability_report,
     pressure_flux_trend_report,
     fsi_physical_interface_map_stability_passes,
@@ -57,6 +67,7 @@ from cases.squid_soft_robot import (
     solid_response_constraint_force_mobility_ratio,
     shell_surface_mass_budget,
     run_process_completion_status,
+    validate_checkpoint_run_fingerprint,
     validation_scope_report,
     validate_resume_history_checkpoint_alignment,
     write_csv,
@@ -64,6 +75,7 @@ from cases.squid_soft_robot import (
     _final_row_int,
     _final_row_number,
     _interface_state_from_checkpoint,
+    _write_hibm_pressure_neumann_invalid_row_dump,
     required_fluid_impulse_report,
     required_projected_ibm_force_report,
     read_csv_rows,
@@ -75,9 +87,18 @@ from cases.squid_soft_robot import (
     run,
     runtime_budget_report,
     signed_positive_source_flux_ratio,
+    solid_mpm_bounds_padding_distance_m,
     solid_mpm_force_nonzero_when_pressure_loaded,
     solid_mpm_bounds_from_surface_metadata,
     solid_force_vector_from_report,
+    source_config_requests_fluid_active_mask,
+    source_config_cad_provenance_report,
+    source_config_pressure_boundary_shell_mapping,
+    source_config_pressure_load_region_id,
+    source_config_requests_reduced_water_intersection,
+    source_config_requests_region14_aperture_carve,
+    source_config_shell_region_pair,
+    source_config_solid_obstacle_particle_region_ids,
     spec_with_membrane_thickness_scale,
     spec_with_nozzle_graded_grid,
     spec_with_nozzle_taper,
@@ -106,6 +127,7 @@ from simulation_core.fsi_coupling import (
     relax_interface_reaction_forces,
     solve_interface_reaction_fixed_point,
 )
+from simulation_core.hibm_mpm import HibmMpmSharpCouplingState
 
 
 class SquidLatestCoreConfigTests(unittest.TestCase):
@@ -320,6 +342,8 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             "pressure_projection_cg_restart_policy",
             "pressure_solve_failure_policy",
             "pressure_solve_failure_action",
+            "pressure_projection_physical_failure_reason",
+            "pressure_projection_physical_failure_action",
             "fsi_coupling_scheme",
             "fsi_added_mass_stability_status",
             "fsi_added_mass_stabilization",
@@ -330,6 +354,10 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             "hibm_semi_implicit_coupling_enabled",
             "hibm_semi_implicit_coupling_matrix_active",
             "pressure_solve_failed",
+            "pressure_projection_physical_failure",
+            "hibm_unreached_incompatible_component_count",
+            "hibm_unreached_component_rhs_mean_max_abs",
+            "hibm_unreached_component_rhs_integral_max_abs",
             "fsi_added_mass_stability_measured",
             "fsi_semi_implicit_coupling_enabled",
             "fsi_semi_implicit_coupling_matrix_active",
@@ -458,6 +486,39 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn("numerical guard failed", process["error"])
         self.assertEqual(process["history_csv"], str(history_path))
 
+    def test_hibm_high_residual_dump_orders_largest_residual_first(self) -> None:
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        divergence = np.zeros((4, 4, 4), dtype=np.float32)
+        divergence[1, 1, 1] = 0.25
+        divergence[2, 1, 1] = -0.75
+        fluid.divergence.from_numpy(divergence)
+        fluid.velocity_dirichlet_boundary_active[2, 1, 1] = 1
+        fluid.velocity_dirichlet_boundary_value_mps[2, 1, 1] = (0.0, 0.0, -0.02)
+        fluid.velocity_dirichlet_boundary_projection_weight[2, 1, 1] = 0.5
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = _write_hibm_high_residual_cell_dump(
+                output_dir=Path(temp_dir),
+                step=2,
+                fluid=fluid,
+                pressure_outlet_zmin=True,
+                limit=2,
+            )
+            rows = read_csv_rows(Path(summary["csv_path"]))
+
+        self.assertEqual(summary["dumped_cell_count"], 2)
+        self.assertAlmostEqual(summary["max_abs_residual_s"], 0.75, delta=1.0e-6)
+        self.assertEqual((rows[0]["i"], rows[0]["j"], rows[0]["k"]), ("2", "1", "1"))
+        self.assertEqual(rows[0]["velocity_dirichlet_active"], "1")
+        self.assertAlmostEqual(
+            float(rows[0]["velocity_dirichlet_projection_weight"]),
+            0.5,
+            delta=1.0e-6,
+        )
+
     def test_step_failure_artifacts_write_minimal_fluid_vti_when_available(self) -> None:
         class FakeField:
             def __init__(self, values: np.ndarray) -> None:
@@ -479,6 +540,14 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
                 self.cell_width_x_m = FakeField(np.array([0.1, 0.1], dtype=np.float32))
                 self.cell_width_y_m = FakeField(np.array([0.1, 0.1], dtype=np.float32))
                 self.cell_width_z_m = FakeField(np.array([0.1, 0.1], dtype=np.float32))
+
+            def pressure_interface_matrix_terms_report(self) -> dict[str, object]:
+                return {
+                    "row_count": 2,
+                    "row_active_count": 1,
+                    "row_invalid_count": 1,
+                    "row_diagonal_integral_abs_mismatch": 0.25,
+                }
 
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
@@ -502,6 +571,11 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn('<VTKFile type="ImageData"', vti_text)
         self.assertIn('Name="velocity_mps"', vti_text)
         self.assertIn('Name="speed_mps"', vti_text)
+        self.assertEqual(process["failure_pressure_interface_matrix"]["row_count"], 2)
+        self.assertEqual(
+            process["failure_pressure_interface_matrix"]["row_invalid_count"],
+            1,
+        )
         self.assertIn('Name="obstacle"', vti_text)
         self.assertIn('Name="divergence"', vti_text)
 
@@ -922,6 +996,78 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             sharp_checks_source,
         )
         self.assertIn("max_pressure_neumann_invalid_count == 0", sharp_checks_source)
+        self.assertIn(
+            '"max_hibm_velocity_dirichlet_invalid_reconstruction_count"',
+            source,
+        )
+        self.assertIn(
+            '"max_hibm_pressure_neumann_invalid_reconstruction_count"',
+            source,
+        )
+        self.assertIn(
+            '"max_hibm_pressure_neumann_invalid_unreconstructable_count"',
+            source,
+        )
+
+    def test_pressure_neumann_invalid_row_dump_cli_and_writer(self) -> None:
+        args = parse_args(["--diagnostic-dump-pressure-neumann-invalid-rows"])
+
+        self.assertTrue(args.diagnostic_dump_pressure_neumann_invalid_rows)
+
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        self.assertIn("args.diagnostic_dump_pressure_neumann_invalid_rows", source)
+        self.assertIn("_write_hibm_pressure_neumann_invalid_row_dump", source)
+
+        class FakeBoundary:
+            def pressure_neumann_invalid_diagnostic_rows(self, **kwargs):
+                self.kwargs = kwargs
+                return [
+                    {
+                        "row_index": 0,
+                        "reason_code": 1,
+                        "reason": "unreconstructable",
+                        "node_i": 2,
+                        "node_j": 2,
+                        "node_k": 2,
+                        "owner_i": 2,
+                        "owner_j": 2,
+                        "owner_k": 2,
+                        "neighbor_i": -1,
+                        "neighbor_j": -1,
+                        "neighbor_k": -1,
+                        "anchor_i": -1,
+                        "anchor_j": -1,
+                        "anchor_k": -1,
+                        "marker_index": 0,
+                        "marker_region_id": 7,
+                    }
+                ]
+
+        boundary = FakeBoundary()
+        search = object()
+        markers = object()
+        fluid = object()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = _write_hibm_pressure_neumann_invalid_row_dump(
+                output_dir=Path(temp_dir),
+                step=3,
+                ib_boundary=boundary,
+                search=search,
+                markers=markers,
+                fluid=fluid,
+            )
+            csv_path = Path(str(summary["csv_path"]))
+            rows = read_csv_rows(csv_path)
+
+        self.assertEqual(summary["captured_invalid_row_count"], 1)
+        self.assertEqual(summary["total_invalid_row_count"], 1)
+        self.assertEqual(summary["reason_counts"], {"unreconstructable": 1})
+        self.assertEqual(summary["marker_region_counts"], {"7": 1})
+        self.assertEqual(rows[0]["reason"], "unreconstructable")
+        self.assertEqual(rows[0]["node_i"], "2")
+        self.assertIs(boundary.kwargs["search"], search)
+        self.assertIs(boundary.kwargs["markers"], markers)
+        self.assertIs(boundary.kwargs["fluid"], fluid)
 
     def test_physical_outlet_ratio_uses_signed_positive_source_flux(self) -> None:
         self.assertAlmostEqual(
@@ -1427,6 +1573,451 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertAlmostEqual(updated.outlet_plume_radius_m, aperture_radius_m)
         self.assertAlmostEqual(updated.monitor_radius_m, aperture_radius_m)
 
+    def test_source_config_requests_region14_aperture_carve(self) -> None:
+        self.assertTrue(
+            source_config_requests_region14_aperture_carve(
+                {
+                    "analysis_settings": {
+                        "solid_obstacle_opening_carve_enabled": True,
+                        "solid_obstacle_opening_carve_selection_ids": [14],
+                    }
+                }
+            )
+        )
+        self.assertTrue(
+            source_config_requests_region14_aperture_carve(
+                {
+                    "analysis_settings": {
+                        "solid_obstacle_opening_carve_enabled": True,
+                        "solid_obstacle_opening_carve_selection_ids": "12, 14",
+                    }
+                }
+            )
+        )
+        self.assertFalse(
+            source_config_requests_region14_aperture_carve(
+                {
+                    "analysis_settings": {
+                        "solid_obstacle_opening_carve_enabled": True,
+                        "solid_obstacle_opening_carve_selection_ids": [12],
+                    }
+                }
+            )
+        )
+        self.assertFalse(
+            source_config_requests_region14_aperture_carve(
+                {
+                    "analysis_settings": {
+                        "solid_obstacle_opening_carve_enabled": False,
+                        "solid_obstacle_opening_carve_selection_ids": [14],
+                    }
+                }
+            )
+        )
+
+    def test_source_config_requests_fluid_active_mask(self) -> None:
+        self.assertTrue(
+            source_config_requests_fluid_active_mask(
+                {"analysis_settings": {"fluid_active_mask_enabled": True}}
+            )
+        )
+        self.assertFalse(
+            source_config_requests_fluid_active_mask(
+                {"analysis_settings": {"fluid_active_mask_enabled": False}}
+            )
+        )
+
+    def test_source_config_solid_obstacle_regions_prefer_surface_only_bodies(self) -> None:
+        config = {
+            "analysis_settings": {
+                "solid_obstacle_surface_only_region_ids": [3, 4],
+                "solid_obstacle_exclude_fsi_contact_regions": True,
+                "solid_obstacle_moving_fsi_contact_region_ids": [1, 2],
+            }
+        }
+
+        self.assertEqual(
+            source_config_solid_obstacle_particle_region_ids(config, [1, 2, 3, 4]),
+            (3, 4),
+        )
+
+    def test_source_config_pressure_load_uses_pressure_boundary_not_stale_load_scope(
+        self,
+    ) -> None:
+        config = {
+            "analysis_settings": {
+                "solid_obstacle_moving_fsi_contact_surface_region_ids": [7, 8],
+            },
+            "loads": [
+                {
+                    "type": "Pressure",
+                    "scope": {
+                        "type": "named_selection",
+                        "named_selection_id": 5,
+                        "named_selection_name": "stale pressure scope",
+                    },
+                },
+            ],
+            "named_selections": [
+                {
+                    "id": 5,
+                    "name": "fixed rim",
+                    "boundary_condition": {"type": "Fixed Support", "params": {}},
+                },
+                {
+                    "id": 6,
+                    "name": "main membrane air pressure side",
+                    "boundary_condition": {
+                        "type": "Pressure",
+                        "params": {"Pressure": 8000.0, "Direction": "-z"},
+                    },
+                },
+                {
+                    "id": 7,
+                    "name": "main membrane water FSI side",
+                    "boundary_condition": {"type": "Free", "params": {}},
+                },
+                {
+                    "id": 8,
+                    "name": "tail membrane FSI side",
+                    "boundary_condition": {"type": "Free", "params": {}},
+                },
+            ],
+        }
+
+        self.assertEqual(source_config_pressure_load_region_id(config), 6)
+        self.assertEqual(source_config_shell_region_pair(config), (7, 8))
+        mapping = source_config_pressure_boundary_shell_mapping(config)
+        self.assertEqual(mapping.source_region_id, 6)
+        self.assertEqual(mapping.target_shell_region_id, 7)
+        self.assertEqual(mapping.primary_shell_region_id, 7)
+        self.assertEqual(mapping.secondary_shell_region_id, 8)
+        self.assertEqual(
+            mapping.mapping_source,
+            "inferred_dry_pressure_side_to_primary_fsi_shell_from_source_config",
+        )
+        self.assertTrue(mapping.boundary_condition_input_only)
+
+    def test_source_config_pressure_mapping_requires_declared_fsi_shell_target(
+        self,
+    ) -> None:
+        config = {
+            "named_selections": [
+                {
+                    "id": 6,
+                    "name": "main membrane air pressure side",
+                    "boundary_condition": {
+                        "type": "Pressure",
+                        "params": {"Pressure": 8000.0},
+                    },
+                },
+                {
+                    "id": 7,
+                    "name": "main membrane water FSI side",
+                    "boundary_condition": {"type": "Free", "params": {}},
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not declare ordered moving FSI contact surface regions",
+        ):
+            source_config_pressure_boundary_shell_mapping(config)
+
+    def test_source_config_pressure_mapping_accepts_explicit_target(self) -> None:
+        config = {
+            "analysis_settings": {
+                "solid_obstacle_moving_fsi_contact_surface_region_ids": [7, 8],
+                "pressure_boundary_to_fsi_shell_region_ids": {"6": 7},
+            },
+            "named_selections": [
+                {
+                    "id": 6,
+                    "name": "actuator pressure boundary",
+                    "boundary_condition": {
+                        "type": "Pressure",
+                        "params": {"Pressure": 8000.0},
+                    },
+                },
+                {
+                    "id": 7,
+                    "name": "primary shell",
+                    "boundary_condition": {"type": "Free", "params": {}},
+                },
+                {
+                    "id": 8,
+                    "name": "secondary shell",
+                    "boundary_condition": {"type": "Free", "params": {}},
+                },
+            ],
+        }
+
+        mapping = source_config_pressure_boundary_shell_mapping(config)
+
+        self.assertEqual(mapping.source_region_id, 6)
+        self.assertEqual(mapping.target_shell_region_id, 7)
+        self.assertEqual(
+            mapping.mapping_source,
+            "explicit_source_config_pressure_boundary_target",
+        )
+
+    def test_source_config_fluid_obstacle_mask_uses_volume_particles_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_config = temp_path / "source.json"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "analysis_settings": {
+                            "fluid_active_mask_enabled": True,
+                            "fluid_active_mask_mode": "ibamr_like_connected_component",
+                            "fluid_active_mask_seed_boundary_sides": ["z_min"],
+                            "fluid_active_mask_seed_radius_cells": 1,
+                            "solid_obstacle_exclude_fsi_contact_regions": True,
+                            "solid_obstacle_moving_fsi_contact_region_ids": [1],
+                            "solid_obstacle_mask_dilation_cells": 0,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            np.savez(
+                temp_path / "source.test.volume_particles.npz",
+                particle_rest_positions_m=np.asarray(
+                    [
+                        (0.15, 0.15, 0.15),  # region 1: moving FSI, not static obstacle
+                        (0.35, 0.35, 0.35),  # region 3: static CAD obstacle
+                        (0.65, 0.65, 0.65),  # region 4: static CAD obstacle
+                    ],
+                    dtype=np.float32,
+                ),
+                particle_region_ids=np.asarray([1, 3, 4], dtype=np.int32),
+                particle_volumes_m3=np.ones(3, dtype=np.float32),
+            )
+            grid = CartesianGrid.uniform(
+                bounds_min_m=(0.0, 0.0, 0.0),
+                bounds_max_m=(1.0, 1.0, 1.0),
+                grid_nodes=(4, 4, 4),
+            )
+
+            obstacle, report = build_source_config_fluid_obstacle_mask(
+                config=json.loads(source_config.read_text(encoding="utf-8")),
+                source_config_path=source_config,
+                grid=grid,
+                aperture_geometry={"available": False},
+            )
+
+        self.assertEqual(obstacle.shape, (4, 4, 4))
+        self.assertEqual(report["obstacle_region_ids"], (3, 4))
+        self.assertEqual(report["particle_obstacle_region_ids"], (3, 4))
+        self.assertEqual(report["selected_particle_count"], 2)
+        self.assertEqual(report["raw_solid_obstacle_cell_count"], 2)
+        self.assertEqual(report["fluid_active_mask_seed_cell_count"], 16)
+        self.assertEqual(report["host_device_transfer_policy"], "one_time_initial_obstacle_from_numpy_before_steps")
+        self.assertEqual(int(obstacle[1, 1, 1]), 1)
+        self.assertEqual(int(obstacle[2, 2, 2]), 1)
+        self.assertEqual(int(obstacle[0, 0, 0]), 0)
+
+    def test_cell_indices_include_points_on_upper_grid_boundary(self) -> None:
+        grid = CartesianGrid.uniform(
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            grid_nodes=(2, 2, 2),
+        )
+
+        i, j, k, valid = _cell_indices_for_points(
+            np.asarray([[1.0, 0.5, 1.0]], dtype=np.float64),
+            grid,
+        )
+
+        self.assertTrue(bool(valid[0]))
+        self.assertEqual((int(i[0]), int(j[0]), int(k[0])), (1, 1, 1))
+
+    def test_source_config_active_mask_uses_surface_region_seeds(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            mesh_path = temp_path / "seed_surface.stl"
+            mesh_path.write_text(
+                "\n".join(
+                    [
+                        "solid seed_surface",
+                        "facet normal 0 0 1",
+                        "outer loop",
+                        "vertex 1.25 1.25 2.5",
+                        "vertex 1.75 1.25 2.5",
+                        "vertex 1.50 1.75 2.5",
+                        "endloop",
+                        "endfacet",
+                        "endsolid seed_surface",
+                    ]
+                ),
+                encoding="ascii",
+            )
+            source_config = temp_path / "source.json"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "mesh_path": str(mesh_path),
+                        "mesh_scale_to_m": 1.0,
+                        "named_selections": [
+                            {"id": 8, "name": "fsi seed surface", "face_ids": [0]},
+                        ],
+                        "analysis_settings": {
+                            "fluid_active_mask_enabled": True,
+                            "fluid_active_mask_mode": "ibamr_like_connected_component",
+                            "fluid_active_mask_seed_boundary_sides": ["z_min"],
+                            "fluid_active_mask_seed_radius_cells": 1,
+                            "fluid_active_mask_seed_region_ids": [8],
+                            "solid_obstacle_exclude_fsi_contact_regions": False,
+                            "solid_obstacle_mask_dilation_cells": 0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            barrier_particles = []
+            for i in range(3):
+                for j in range(3):
+                    barrier_particles.append((0.5 + i, 0.5 + j, 1.5))
+            np.savez(
+                temp_path / "source.test.volume_particles.npz",
+                particle_rest_positions_m=np.asarray(barrier_particles, dtype=np.float32),
+                particle_region_ids=np.full(len(barrier_particles), 3, dtype=np.int32),
+                particle_volumes_m3=np.ones(len(barrier_particles), dtype=np.float32),
+            )
+            grid = CartesianGrid.uniform(
+                bounds_min_m=(0.0, 0.0, 0.0),
+                bounds_max_m=(3.0, 3.0, 3.0),
+                grid_nodes=(3, 3, 3),
+            )
+
+            obstacle, report = build_source_config_fluid_obstacle_mask(
+                config=json.loads(source_config.read_text(encoding="utf-8")),
+                source_config_path=source_config,
+                grid=grid,
+                aperture_geometry={"available": False},
+            )
+
+        self.assertEqual(int(obstacle[1, 1, 1]), 1)
+        self.assertEqual(int(obstacle[1, 1, 0]), 0)
+        self.assertEqual(int(obstacle[1, 1, 2]), 0)
+        self.assertGreater(report["fluid_active_mask_surface_seed_cell_count"], 0)
+        self.assertGreater(report["fluid_active_mask_seed_cell_count"], 9)
+
+    def test_source_config_active_mask_does_not_intersect_reduced_water_by_default(self) -> None:
+        config = {
+            "analysis_settings": {
+                "fluid_active_mask_enabled": True,
+                "fluid_active_mask_mode": "ibamr_like_connected_component",
+            },
+        }
+
+        self.assertFalse(source_config_requests_reduced_water_intersection(config))
+
+    def test_source_config_active_mask_reduced_water_intersection_is_explicit_opt_in(self) -> None:
+        config = {
+            "analysis_settings": {
+                "fluid_active_mask_enabled": True,
+                "fluid_active_mask_intersect_reduced_water_domain": True,
+            },
+        }
+
+        self.assertTrue(source_config_requests_reduced_water_intersection(config))
+
+    def test_source_config_region14_aperture_carve_enables_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_config = temp_path / "source.json"
+            output_dir = temp_path / "preflight_region14"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "analysis_settings": {
+                            "time_step_s": 5.0e-4,
+                            "solid_obstacle_opening_carve_enabled": True,
+                            "solid_obstacle_opening_carve_selection_ids": [14],
+                        },
+                        "domains": {"fluid": {"grid_size_m": 2.5e-3}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            aperture_stats = {
+                "region_id": 14,
+                "available": True,
+                "area_weighted_centroid_m": [0.004, -0.005, 0.967],
+                "vertex_radius_p95_m": 1.8e-3,
+            }
+            args = parse_args(
+                [
+                    "--source-config",
+                    str(source_config),
+                    "--output-dir",
+                    str(output_dir),
+                    "--preflight-only",
+                ]
+            )
+            with patch(
+                "cases.squid_soft_robot.compute_region_geometry_stats",
+                return_value=aperture_stats,
+            ):
+                summary = run(args)
+
+            self.assertTrue(summary["source_config_region14_aperture_requested"])
+            self.assertTrue(summary["region14_aperture_carve_enabled"])
+            self.assertEqual(summary["region14_aperture_carve_source"], "source_config")
+            self.assertAlmostEqual(
+                summary["reduced_water_geometry"]["nozzle_throat_radius_m"],
+                aperture_stats["vertex_radius_p95_m"],
+            )
+
+    def test_region14_aperture_carve_can_be_disabled_for_ablation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_config = temp_path / "source.json"
+            output_dir = temp_path / "preflight_region14_disabled"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "analysis_settings": {
+                            "time_step_s": 5.0e-4,
+                            "solid_obstacle_opening_carve_enabled": True,
+                            "solid_obstacle_opening_carve_selection_ids": [14],
+                        },
+                        "domains": {"fluid": {"grid_size_m": 2.5e-3}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = parse_args(
+                [
+                    "--source-config",
+                    str(source_config),
+                    "--output-dir",
+                    str(output_dir),
+                    "--disable-region14-aperture-carve",
+                    "--preflight-only",
+                ]
+            )
+            with patch(
+                "cases.squid_soft_robot.compute_region_geometry_stats",
+                return_value={
+                    "region_id": 14,
+                    "available": True,
+                    "area_weighted_centroid_m": [0.004, -0.005, 0.967],
+                    "vertex_radius_p95_m": 1.8e-3,
+                },
+            ):
+                summary = run(args)
+
+            self.assertTrue(summary["source_config_region14_aperture_requested"])
+            self.assertFalse(summary["region14_aperture_carve_enabled"])
+            self.assertEqual(
+                summary["region14_aperture_carve_source"],
+                "disabled_by_cli",
+            )
+
     def test_nozzle_graded_grid_uses_aperture_radius_and_resolves_nozzle(self) -> None:
         spec = SquidReducedSpec(
             source_config_path="dummy.json",
@@ -1569,7 +2160,6 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             target_spacing_m=6.0e-4,
             farfield_spacing_m=3.0e-3,
             max_growth_ratio=1.2,
-            max_cells=5_000_000,
             extra_refinement_regions=(tail_region,),
         )
 
@@ -1678,6 +2268,69 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertEqual(obstacle[x_taper_open, y_center, z_in_taper], 0)
         self.assertEqual(obstacle[x_taper_closed, y_center, z_in_taper], 1)
         self.assertEqual(obstacle[x_taper_open, y_center, z_before_taper], 1)
+
+    def test_reduced_obstacle_intersection_preserves_cad_solid_cells(self) -> None:
+        grid = CartesianGrid.uniform(
+            bounds_min_m=(-0.10, -0.10, 0.0),
+            bounds_max_m=(0.10, 0.10, 0.40),
+            grid_nodes=(5, 5, 8),
+        )
+        spec = SquidReducedSpec(
+            source_config_path="dummy.json",
+            fluid_bounds_min_m=grid.bounds_min_m,
+            fluid_bounds_max_m=grid.bounds_max_m,
+            grid_nodes=grid.grid_nodes,
+            dt_s=1.0e-3,
+            water_density_kgm3=1025.0,
+            water_viscosity_pa_s=1.05e-3,
+            chamber_radius_m=0.09,
+            chamber_z_min_m=0.30,
+            chamber_z_max_m=0.36,
+            nozzle_radius_m=0.01,
+            nozzle_z_max_m=0.34,
+            outlet_plume_radius_m=0.01,
+            monitor_center_x_m=0.0,
+            monitor_center_y_m=0.0,
+            downstream_z_m=0.10,
+            nozzle_taper_enabled=True,
+            nozzle_taper_length_m=0.10,
+            nozzle_taper_inlet_radius_m=0.05,
+            cartesian_grid=grid,
+        )
+        simulator = ReducedSquidFSI(
+            spec,
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        x_center = min(
+            range(len(grid.cell_centers_x_m)),
+            key=lambda index: abs(grid.cell_centers_x_m[index]),
+        )
+        y_center = min(
+            range(len(grid.cell_centers_y_m)),
+            key=lambda index: abs(grid.cell_centers_y_m[index]),
+        )
+        z_chamber = min(
+            range(len(grid.cell_centers_z_m)),
+            key=lambda index: abs(grid.cell_centers_z_m[index] - 0.325),
+        )
+        z_nozzle = min(
+            range(len(grid.cell_centers_z_m)),
+            key=lambda index: abs(grid.cell_centers_z_m[index] - 0.225),
+        )
+        x_outside = min(
+            range(len(grid.cell_centers_x_m)),
+            key=lambda index: abs(grid.cell_centers_x_m[index] - 0.08),
+        )
+        source_obstacle = np.zeros(grid.grid_nodes, dtype=np.int32)
+        source_obstacle[x_center, y_center, z_chamber] = 1
+        simulator.fluid.obstacle.from_numpy(source_obstacle)
+
+        simulator.intersect_current_obstacles_with_reduced_squid_water_domain()
+        obstacle = simulator.fluid.obstacle.to_numpy()
+
+        self.assertEqual(obstacle[x_center, y_center, z_chamber], 1)
+        self.assertEqual(obstacle[x_center, y_center, z_nozzle], 0)
+        self.assertEqual(obstacle[x_outside, y_center, z_nozzle], 1)
 
     def test_coarse_center_missed_nozzle_remains_connected_and_projects_source_to_outlet(self) -> None:
         grid = CartesianGrid.uniform(
@@ -2084,13 +2737,13 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             self.assertEqual(summary["cg_preconditioner"], "auto")
             self.assertEqual(
                 summary["fsi_coupling_mode"],
-                FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
+                FSI_COUPLING_MODE_HIBM_MPM_SHARP,
             )
             self.assertEqual(
                 summary["fsi_coupling_mode_report"],
-                fsi_coupling_mode_report(FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED),
+                fsi_coupling_mode_report(FSI_COUPLING_MODE_HIBM_MPM_SHARP),
             )
-            self.assertFalse(summary["fsi_coupling_mode_report"]["paper_hibm_mpm"])
+            self.assertTrue(summary["fsi_coupling_mode_report"]["paper_hibm_mpm"])
             self.assertIsNone(summary["effective_multigrid_cycles"])
             self.assertEqual(summary["fluid_substeps"], 12)
             self.assertAlmostEqual(summary["fluid_substep_dt_s"], 5.0e-4 / 12.0)
@@ -2098,13 +2751,13 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
                 summary["pressure_projection_budget"][
                     "pressure_project_calls_per_physical_step_max"
                 ],
-                168,
+                24,
             )
             self.assertEqual(
                 summary["pressure_projection_budget"][
                     "cg_iteration_budget_per_physical_step_max"
                 ],
-                504000,
+                72000,
             )
             self.assertEqual(summary["summary_json"], str(output_dir.resolve() / "preflight_summary.json"))
             self.assertFalse(summary["interface_reaction_passivity_limit"])
@@ -2132,6 +2785,247 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             self.assertIn("region14_aperture_geometry", written_summary)
             self.assertTrue(written_summary["reduced_water_geometry"]["nozzle_taper_enabled"])
             self.assertTrue(written_summary["fluid_grid_resolution"]["nozzle_resolves_diameter_10_cells"])
+
+    def test_preflight_reports_real_step_cad_provenance_without_relabeling_cached_stl(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            cad_path = temp_path / "sim.STEP"
+            cad_path.write_text(
+                """ISO-10303-21;
+HEADER;
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN_CC2'));
+ENDSEC;
+DATA;
+#1=SI_UNIT(.MILLI.,.METRE.);
+#10=MANIFOLD_SOLID_BREP('flange',#20);
+#11=MANIFOLD_SOLID_BREP('membrane',#30);
+#12=MANIFOLD_SOLID_BREP('noozle',#40);
+#13=MANIFOLD_SOLID_BREP('chamber',#50);
+ENDSEC;
+END-ISO-10303-21;
+""",
+                encoding="utf-8",
+            )
+            cached_stl = temp_path / "current_sim_step_4body_surface_mesh.stl"
+            cached_stl.write_text("solid cached\nendsolid cached\n", encoding="utf-8")
+            source_config = temp_path / "source.json"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "mesh_format": "step",
+                        "mesh_path": str(cached_stl),
+                        "surface_mesh_cache_path": str(cached_stl),
+                        "analysis_settings": {"time_step_s": 5.0e-4},
+                        "domains": {"fluid": {"grid_size_m": 2.5e-3}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = temp_path / "out"
+
+            args = parse_args(
+                [
+                    "--source-config",
+                    str(source_config),
+                    "--cad-step-path",
+                    str(cad_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--preflight-only",
+                ]
+            )
+            summary = run(args)
+
+            cad_report = summary["cad_provenance"]
+            self.assertEqual(
+                cad_report["cad_step_brep_names"],
+                ["flange", "membrane", "noozle", "chamber"],
+            )
+            self.assertEqual(cad_report["source_config_mesh_suffix"], ".stl")
+            self.assertFalse(cad_report["direct_cad_step_binding"])
+            self.assertFalse(summary["real_cad_step_direct_binding"])
+            self.assertEqual(summary["real_cad_step_path"], str(cad_path.resolve()))
+
+    def test_required_real_step_cad_rejects_cached_stl_source_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            cad_path = temp_path / "sim.STEP"
+            cad_path.write_text(
+                """ISO-10303-21;
+HEADER;
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN_CC2'));
+ENDSEC;
+DATA;
+#1=SI_UNIT(.MILLI.,.METRE.);
+#10=MANIFOLD_SOLID_BREP('chamber',#20);
+ENDSEC;
+END-ISO-10303-21;
+""",
+                encoding="utf-8",
+            )
+            cached_stl = temp_path / "cached.stl"
+            cached_stl.write_text("solid cached\nendsolid cached\n", encoding="utf-8")
+            source_config = temp_path / "source.json"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "mesh_format": "step",
+                        "mesh_path": str(cached_stl),
+                        "surface_mesh_cache_path": str(cached_stl),
+                        "analysis_settings": {"time_step_s": 5.0e-4},
+                        "domains": {"fluid": {"grid_size_m": 2.5e-3}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = parse_args(
+                [
+                    "--source-config",
+                    str(source_config),
+                    "--cad-step-path",
+                    str(cad_path),
+                    "--require-real-cad-step",
+                    "--output-dir",
+                    str(temp_path / "out"),
+                    "--preflight-only",
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "verified real STEP CAD binding"):
+                run(args)
+
+    def test_required_real_step_cad_accepts_verified_step_derived_surface_cache(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            cad_path = temp_path / "sim.STEP"
+            cad_path.write_text(
+                """ISO-10303-21;
+HEADER;
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN_CC2'));
+ENDSEC;
+DATA;
+#1=SI_UNIT(.MILLI.,.METRE.);
+#10=MANIFOLD_SOLID_BREP('chamber',#20);
+ENDSEC;
+END-ISO-10303-21;
+""",
+                encoding="utf-8",
+            )
+            cache_path = temp_path / "sim.surface_mesh.stl"
+            cache_path.write_text("solid derived\nendsolid derived\n", encoding="utf-8")
+            source_config = temp_path / "source.json"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "mesh_format": "step",
+                        "mesh_path": str(cad_path),
+                        "surface_mesh_cache_path": str(cache_path),
+                        "mesh_import": {
+                            "source_step_path": str(cad_path),
+                            "source_step_sha256": hashlib.sha256(
+                                cad_path.read_bytes()
+                            ).hexdigest(),
+                            "surface_mesh_cache_path": str(cache_path),
+                            "surface_mesh_cache_sha256": hashlib.sha256(
+                                cache_path.read_bytes()
+                            ).hexdigest(),
+                        },
+                        "analysis_settings": {"time_step_s": 5.0e-4},
+                        "domains": {"fluid": {"grid_size_m": 2.5e-3}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = parse_args(
+                [
+                    "--source-config",
+                    str(source_config),
+                    "--cad-step-path",
+                    str(cad_path),
+                    "--require-real-cad-step",
+                    "--output-dir",
+                    str(temp_path / "out"),
+                    "--preflight-only",
+                ]
+            )
+
+            summary = run(args)
+
+            self.assertTrue(summary["real_cad_step_binding"])
+            self.assertFalse(summary["real_cad_step_direct_binding"])
+            self.assertTrue(summary["real_cad_step_derived_surface_mesh_binding"])
+
+    def test_preflight_pressure_schedule_cli_override_is_boundary_input_only(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_config = temp_path / "source.json"
+            output_dir = temp_path / "out"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "analysis_settings": {"time_step_s": 5.0e-4},
+                        "domains": {"fluid": {"grid_size_m": 2.5e-3}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = parse_args(
+                [
+                    "--source-config",
+                    str(source_config),
+                    "--output-dir",
+                    str(output_dir),
+                    "--pressure-t1-s",
+                    "0.3",
+                    "--pressure-p1-pa",
+                    "8000",
+                    "--preflight-only",
+                ]
+            )
+
+            summary = run(args)
+
+            pressure_input = summary["pressure_schedule_input"]
+            self.assertTrue(pressure_input["cli_override_applied"])
+            self.assertTrue(pressure_input["boundary_condition_input_only"])
+            self.assertEqual(pressure_input["overrides"], {"pressure_t1_s": 0.3, "pressure_p1_pa": 8000.0})
+            self.assertAlmostEqual(summary["spec"]["pressure_t1_s"], 0.3)
+            self.assertAlmostEqual(summary["spec"]["pressure_p1_pa"], 8000.0)
+            self.assertIn("tail force", pressure_input["computed_response_fields"][0])
+
+    def test_invalid_pressure_schedule_cli_override_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_config = temp_path / "source.json"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "analysis_settings": {"time_step_s": 5.0e-4},
+                        "domains": {"fluid": {"grid_size_m": 2.5e-3}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = parse_args(
+                [
+                    "--source-config",
+                    str(source_config),
+                    "--output-dir",
+                    str(temp_path / "out"),
+                    "--pressure-t1-s",
+                    "0",
+                    "--preflight-only",
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "pressure schedule times"):
+                run(args)
 
     def test_graded_grid_preflight_defaults_divergence_cleanup_to_zero(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2346,12 +3240,29 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             def __setitem__(self, _key, value) -> None:
                 self.value = tuple(float(component) for component in value)
 
+        class FakeArrayField:
+            def __init__(self, values: np.ndarray) -> None:
+                self.values = np.asarray(values)
+
+            def to_numpy(self) -> np.ndarray:
+                return np.array(self.values)
+
         class FakeFluid:
             def __init__(self, grid: CartesianGrid) -> None:
                 self.grid = grid
                 self.nx, self.ny, self.nz = grid.grid_nodes
-                self.velocity = object()
-                self.pressure = object()
+                self.velocity = FakeArrayField(
+                    np.zeros((*grid.grid_nodes, 3), dtype=np.float32)
+                )
+                self.velocity_prev = FakeArrayField(
+                    np.zeros((*grid.grid_nodes, 3), dtype=np.float32)
+                )
+                self.pressure = FakeArrayField(
+                    np.zeros(grid.grid_nodes, dtype=np.float32)
+                )
+                self.obstacle = FakeArrayField(
+                    np.zeros(grid.grid_nodes, dtype=np.int32)
+                )
 
             def obstacle_cell_count(self) -> int:
                 return 0
@@ -2379,6 +3290,13 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
                 self.tail_v_mps = FakeScalarField(0.0)
                 self.volume_flux_m3s = FakeScalarField(1.0e-6)
                 self.nozzle_velocity_z_mps = FakeScalarField(-1.0e-3)
+                self.max_speed_mps = FakeScalarField(0.0)
+                self.lip_flow_z_m3s = FakeScalarField(-1.0e-6)
+                self.outlet_flow_z_m3s = FakeScalarField(-1.0e-6)
+                self.downstream_flow_z_m3s = FakeScalarField(-1.0e-6)
+                self.lip_sample_count = FakeScalarField(1.0)
+                self.outlet_sample_count = FakeScalarField(1.0)
+                self.downstream_sample_count = FakeScalarField(1.0)
                 self.primary_interface_reaction_force_n = FakeVectorField()
                 self.secondary_interface_reaction_force_n = FakeVectorField()
 
@@ -2508,6 +3426,9 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
                     primary_mean_displacement_m=(0.0, 0.0, -1.0e-6),
                     secondary_mean_displacement_m=(0.0, 0.0, 0.0),
                 )
+                self.x = FakeArrayField(np.zeros((1, 3), dtype=np.float32))
+                self.u = FakeArrayField(np.zeros((1, 3), dtype=np.float32))
+                self.v = FakeArrayField(np.zeros((1, 3), dtype=np.float32))
 
             def advance_region_loads(self, **_kwargs):
                 captured_solid_read_report.append(bool(_kwargs.get("read_report", True)))
@@ -2890,7 +3811,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             args = parse_args()
 
         self.assertAlmostEqual(args.interface_reaction_relaxation, 0.5)
-        self.assertEqual(args.fsi_coupling_iterations, 6)
+        self.assertEqual(args.fsi_coupling_iterations, 1)
         self.assertEqual(args.fsi_coupling_solver, "aitken")
         self.assertAlmostEqual(args.fsi_coupling_tolerance_n, 1.0e-3)
         self.assertAlmostEqual(args.fsi_coupling_target_map_relaxation, 1.0)
@@ -2909,6 +3830,10 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIsNone(args.multigrid_cycles)
         self.assertEqual(args.divergence_cleanup_iterations, 8)
         self.assertEqual(args.fluid_substeps, 1)
+        self.assertFalse(args.adaptive_fluid_substeps)
+        self.assertAlmostEqual(args.adaptive_fluid_substeps_target_cfl, 0.25)
+        self.assertEqual(args.adaptive_fluid_substeps_max, 16)
+        self.assertAlmostEqual(args.adaptive_fluid_substeps_safety, 1.25)
         self.assertEqual(args.ibm_correction_iterations, 2)
         self.assertAlmostEqual(args.constraint_force_scale, 1.0)
         self.assertAlmostEqual(args.fsi_constraint_force_solid_mobility_ratio, 0.0)
@@ -2918,8 +3843,18 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertAlmostEqual(args.projection_divergence_tolerance, 1.0e-2)
         self.assertAlmostEqual(args.min_outlet_to_main_volume_flux_ratio, 0.1)
         self.assertAlmostEqual(args.pressure_outlet_source_ratio_tolerance, 0.1)
+        self.assertIsNone(args.cad_step_path)
+        self.assertFalse(args.require_real_cad_step)
+        self.assertIsNone(args.pressure_t0_s)
+        self.assertIsNone(args.pressure_t1_s)
+        self.assertIsNone(args.pressure_t2_s)
+        self.assertIsNone(args.pressure_p0_pa)
+        self.assertIsNone(args.pressure_p1_pa)
+        self.assertIsNone(args.pressure_p2_pa)
         self.assertFalse(args.use_graded_grid)
         self.assertFalse(args.preflight_only)
+        self.assertFalse(args.use_region14_aperture_carve)
+        self.assertFalse(args.disable_region14_aperture_carve)
         self.assertFalse(args.use_nozzle_taper)
         self.assertFalse(args.checkpoint_every_step)
         self.assertFalse(args.resume_from_checkpoint)
@@ -2929,7 +3864,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIsNone(args.graded_grid_target_spacing_m)
         self.assertAlmostEqual(args.graded_grid_farfield_spacing_m, 3.0e-3)
         self.assertAlmostEqual(args.graded_grid_growth_ratio, 1.2)
-        self.assertEqual(args.graded_grid_max_cells, 5_000_000)
+        self.assertIsNone(args.graded_grid_max_cells)
         self.assertFalse(args.use_tail_refinement)
         self.assertIsNone(args.tail_refinement_target_spacing_m)
         self.assertIsNone(args.tail_refinement_padding_m)
@@ -2943,6 +3878,144 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "fsi_feedback_force_mode"))
         self.assertFalse(hasattr(args, "pressure_force_scale"))
         self.assertAlmostEqual(args.solid_mpm_flip_blend, 0.95)
+
+    def test_hibm_mpm_sharp_allows_marker_fixed_point_iterations(self) -> None:
+        raise_for_unsupported_hibm_mpm_sharp_iteration_options(
+            fsi_coupling_mode=FSI_COUPLING_MODE_HIBM_MPM_SHARP,
+            fsi_coupling_iterations=6,
+        )
+        raise_for_unsupported_hibm_mpm_sharp_iteration_options(
+            fsi_coupling_mode=FSI_COUPLING_MODE_HIBM_MPM_SHARP,
+            fsi_coupling_iterations=1,
+        )
+        raise_for_unsupported_hibm_mpm_sharp_iteration_options(
+            fsi_coupling_mode=FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
+            fsi_coupling_iterations=6,
+        )
+
+    def test_sharp_marker_fixed_point_residual_uses_position_and_velocity(self) -> None:
+        guess = {
+            "x_gamma_m": np.asarray(
+                [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                dtype=np.float32,
+            ),
+            "v_gamma_mps": np.asarray(
+                [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+                dtype=np.float32,
+            ),
+            "n_gamma": np.asarray(
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                dtype=np.float32,
+            ),
+            "A_gamma_m2": np.asarray([1.0, 1.0], dtype=np.float32),
+        }
+        candidate = {
+            **guess,
+            "x_gamma_m": np.asarray(
+                [[0.05, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                dtype=np.float32,
+            ),
+            "v_gamma_mps": np.asarray(
+                [[1.0, 0.0, 0.0], [0.0, 2.2, 0.0]],
+                dtype=np.float32,
+            ),
+        }
+
+        residual = sharp_marker_fixed_point_residual_mps(
+            guess,
+            candidate,
+            dt_s=0.5,
+        )
+
+        self.assertAlmostEqual(residual["max_mps"], 0.2, places=6)
+        self.assertAlmostEqual(
+            residual["l2_mps"],
+            math.sqrt((0.1 * 0.1 + 0.2 * 0.2) / 2.0),
+            places=6,
+        )
+        self.assertEqual(residual["sample_count"], 2)
+
+    def test_relaxed_sharp_marker_state_arrays_returns_new_normalized_state(self) -> None:
+        guess = {
+            "x_gamma_m": np.asarray([[0.0, 0.0, 0.0]], dtype=np.float32),
+            "v_gamma_mps": np.asarray([[0.0, 0.0, 0.0]], dtype=np.float32),
+            "n_gamma": np.asarray([[1.0, 0.0, 0.0]], dtype=np.float32),
+            "A_gamma_m2": np.asarray([1.0], dtype=np.float32),
+        }
+        candidate = {
+            "x_gamma_m": np.asarray([[1.0, 0.0, 0.0]], dtype=np.float32),
+            "v_gamma_mps": np.asarray([[0.0, 2.0, 0.0]], dtype=np.float32),
+            "n_gamma": np.asarray([[0.0, 1.0, 0.0]], dtype=np.float32),
+            "A_gamma_m2": np.asarray([3.0], dtype=np.float32),
+        }
+
+        relaxed = relaxed_sharp_marker_state_arrays(
+            guess,
+            candidate,
+            relaxation=0.25,
+        )
+
+        np.testing.assert_allclose(relaxed["x_gamma_m"], [[0.25, 0.0, 0.0]])
+        np.testing.assert_allclose(relaxed["v_gamma_mps"], [[0.0, 0.5, 0.0]])
+        np.testing.assert_allclose(
+            relaxed["n_gamma"],
+            [[0.94868326, 0.31622776, 0.0]],
+            rtol=1.0e-6,
+        )
+        np.testing.assert_allclose(relaxed["A_gamma_m2"], [1.5])
+        np.testing.assert_allclose(guess["x_gamma_m"], [[0.0, 0.0, 0.0]])
+
+    def test_sharp_pressure_neumann_gradient_state_roundtrips_marker_prefix(
+        self,
+    ) -> None:
+        coupling = HibmMpmSharpCouplingState(
+            grid_nodes=(4, 4, 4),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=3,
+            projection_triangle_capacity=1,
+        )
+        coupling.markers.load_markers(
+            positions_m=((0.25, 0.25, 0.25), (0.5, 0.5, 0.5)),
+            velocities_mps=((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+            normals=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+            areas_m2=(0.01, 0.02),
+            region_ids=(1, 2),
+        )
+        full = coupling.marker_pressure_neumann_gradient_pa_per_m.to_numpy()
+        full[:3] = np.asarray([11.0, 22.0, 999.0], dtype=full.dtype)
+        coupling.marker_pressure_neumann_gradient_pa_per_m.from_numpy(full)
+
+        state = sharp_pressure_neumann_gradient_state_array(coupling)
+        full[:3] = np.asarray([-1.0, -2.0, -3.0], dtype=full.dtype)
+        coupling.marker_pressure_neumann_gradient_pa_per_m.from_numpy(full)
+        restore_sharp_pressure_neumann_gradient_state_array(coupling, state)
+
+        restored = coupling.marker_pressure_neumann_gradient_pa_per_m.to_numpy()
+        np.testing.assert_allclose(restored[:2], [11.0, 22.0])
+        self.assertAlmostEqual(float(restored[2]), -3.0)
+
+    def test_sharp_fixed_point_trial_restore_resets_pressure_neumann_gradient(
+        self,
+    ) -> None:
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        block = source.split("def advance_sharp_marker_fixed_point_step():", 1)[1]
+        self.assertIn(
+            "pressure_gradient_state = (",
+            block,
+        )
+        self.assertIn(
+            "sharp_pressure_neumann_gradient_state_array(sharp_coupling_state)",
+            block,
+        )
+        self.assertIn(
+            "restore_sharp_pressure_neumann_gradient_state_array(",
+            source,
+        )
+        self.assertIn(
+            "restore_sharp_trial_state(marker_guess, pressure_gradient_state)",
+            block,
+        )
 
     def test_shell_surface_mass_scales_can_be_selected_explicitly(self) -> None:
         args = parse_args(
@@ -3438,6 +4511,91 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
 
         self.assertTrue(required_fields.issubset(CHECKPOINT_ARG_FINGERPRINT_FIELDS))
 
+    def test_checkpoint_fingerprint_allows_requested_step_extension(self) -> None:
+        spec = SquidReducedSpec(
+            source_config_path="dummy.json",
+            fluid_bounds_min_m=(-0.01, -0.01, -0.01),
+            fluid_bounds_max_m=(0.01, 0.01, 0.01),
+            grid_nodes=(6, 6, 6),
+            dt_s=1.0e-4,
+            water_density_kgm3=1000.0,
+            water_viscosity_pa_s=1.0e-3,
+        )
+        args = SimpleNamespace(
+            source_config="dummy.json",
+            solid_model="neo_hookean_mpm",
+            pressure_t0_s=0.0,
+            pressure_t1_s=0.0005,
+            pressure_t2_s=0.001,
+            pressure_p0_pa=0.0,
+            pressure_p1_pa=8000.0,
+            pressure_p2_pa=8000.0,
+        )
+        metadata = {
+            "run_fingerprint": checkpoint_run_fingerprint(
+                args=args,
+                spec=spec,
+                step_count=1,
+                full_pressure_waveform_steps=4000,
+            )
+        }
+
+        validate_checkpoint_run_fingerprint(
+            metadata,
+            args=args,
+            spec=spec,
+            step_count=2,
+            full_pressure_waveform_steps=4000,
+        )
+
+    def test_checkpoint_fingerprint_rejects_pressure_schedule_change(self) -> None:
+        spec = SquidReducedSpec(
+            source_config_path="dummy.json",
+            fluid_bounds_min_m=(-0.01, -0.01, -0.01),
+            fluid_bounds_max_m=(0.01, 0.01, 0.01),
+            grid_nodes=(6, 6, 6),
+            dt_s=1.0e-4,
+            water_density_kgm3=1000.0,
+            water_viscosity_pa_s=1.0e-3,
+        )
+        args = SimpleNamespace(
+            source_config="dummy.json",
+            solid_model="neo_hookean_mpm",
+            pressure_t0_s=0.0,
+            pressure_t1_s=0.0005,
+            pressure_t2_s=0.001,
+            pressure_p0_pa=0.0,
+            pressure_p1_pa=8000.0,
+            pressure_p2_pa=8000.0,
+        )
+        metadata = {
+            "run_fingerprint": checkpoint_run_fingerprint(
+                args=args,
+                spec=spec,
+                step_count=1,
+                full_pressure_waveform_steps=4000,
+            )
+        }
+        changed_args = SimpleNamespace(
+            source_config="dummy.json",
+            solid_model="neo_hookean_mpm",
+            pressure_t0_s=0.0,
+            pressure_t1_s=0.0005,
+            pressure_t2_s=0.001,
+            pressure_p0_pa=0.0,
+            pressure_p1_pa=9000.0,
+            pressure_p2_pa=9000.0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "fingerprint"):
+            validate_checkpoint_run_fingerprint(
+                metadata,
+                args=changed_args,
+                spec=spec,
+                step_count=2,
+                full_pressure_waveform_steps=4000,
+            )
+
     def test_checkpoint_interface_state_rejects_nonfinite_metadata(self) -> None:
         base_state = {
             "previous_residual_n": (1.0, 0.0, -1.0, 2.0, 0.0, -2.0),
@@ -3716,17 +4874,31 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn('"fsi_physical_interface_map_stability"', source)
         self.assertIn('"fsi_coupling_raw_interface_map_strict_physical"', source)
 
-    def test_fsi_coupling_mode_default_is_legacy_not_paper_hibm(self) -> None:
+    def test_fsi_coupling_mode_default_is_generic_hibm_mpm_sharp(self) -> None:
         args = parse_args([])
 
         self.assertEqual(
             args.fsi_coupling_mode,
-            FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
+            FSI_COUPLING_MODE_HIBM_MPM_SHARP,
         )
         report = fsi_coupling_mode_report(args.fsi_coupling_mode)
-        self.assertTrue(report["legacy"])
-        self.assertFalse(report["paper_hibm_mpm"])
-        self.assertTrue(report["main_tail_region_reaction_diagnostic_only"])
+        self.assertFalse(report["legacy"])
+        self.assertTrue(report["paper_hibm_mpm"])
+        self.assertFalse(report["region_pair_reaction_diagnostic_only"])
+        self.assertNotIn("main_tail", json.dumps(report))
+        self.assertNotIn("main/tail", json.dumps(report))
+
+        explicit_legacy = parse_args(
+            ["--fsi-coupling-mode", FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED]
+        )
+        legacy_report = fsi_coupling_mode_report(explicit_legacy.fsi_coupling_mode)
+        self.assertTrue(legacy_report["legacy"])
+
+    def test_squid_history_uses_generic_region_pair_reaction_key(self) -> None:
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+
+        self.assertIn("region_pair_reaction_diagnostic_only", source)
+        self.assertNotIn("main_tail_region_reaction_diagnostic_only", source)
 
     def test_squid_case_wires_core_fsi_coupling_mode_without_owning_solver(self) -> None:
         source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
@@ -3877,17 +5049,38 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
-        self.assertIn("far_pressure_region_id=7", sharp_advance_call)
+        self.assertIn("far_pressure_region_id=pressure_load_region_id", sharp_advance_call)
         self.assertIn("far_pressure_pa=pressure_pa", sharp_advance_call)
+        self.assertIn(
+            "far_pressure_side_normal_sign=pressure_far_side_normal_sign",
+            sharp_advance_call,
+        )
+        self.assertIn(
+            "pressure_outlet_zmin=pressure_outlet_zmin_enabled",
+            sharp_advance_call,
+        )
+        self.assertNotIn(
+            "pressure_outlet_zmin=not args.disable_pressure_outlet_zmin",
+            sharp_advance_call,
+        )
         self.assertIn(
             "far_pressure_inside_probe_max_multiplier=12.0", sharp_advance_call
         )
+        self.assertIn(
+            "one_sided_pressure_region_id=secondary_shell_region_id",
+            sharp_advance_call,
+        )
+        self.assertIn("one_sided_reference_pressure_pa=0.0", sharp_advance_call)
+        self.assertIn("one_sided_probe_max_multiplier=12.0", sharp_advance_call)
         sharp_pressure_setup = source.split("if sharp_case_runner_enabled:", 1)[
             1
         ].split("def advance_sharp_solid_substeps():", 1)[0]
         self.assertIn("pressure_schedule_step_end_pa(", sharp_pressure_setup)
         self.assertIn("current_time_s", sharp_pressure_setup)
         self.assertIn("spec.dt_s", sharp_pressure_setup)
+        self.assertIn("AxisAlignedBoundary.pressure_outlet", source)
+        self.assertIn("pressure_outlet_boundary_report", source)
+        self.assertIn('"pressure_outlet_boundary"', source)
         self.assertNotIn(
             "pressure_schedule_pa(current_time_s, spec)",
             sharp_pressure_setup,
@@ -3908,7 +5101,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             "divergence_cleanup_relaxation=float(args.divergence_cleanup_relaxation)",
             sharp_call,
         )
-        self.assertIn("fluid_substeps=effective_fluid_substeps", sharp_call)
+        self.assertIn("fluid_substeps=step_fluid_substeps", sharp_call)
         self.assertIn(
             "fluid_advection_scheme=str(args.fluid_advection_scheme)",
             sharp_call,
@@ -3918,6 +5111,13 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             sharp_call,
         )
         self.assertNotIn("fluid_substeps=1", sharp_call)
+
+    def test_pressure_schedule_is_reported_as_prescribed_boundary_drive(self) -> None:
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "prescribed_pressure_or_flow_boundary=max_abs_pressure_load_pa > 0.0",
+            source,
+        )
 
     def test_pressure_solve_failure_policy_is_explicit_cli_state(self) -> None:
         args = parse_args(["--pressure-solve-failure-policy", "report"])
@@ -3952,6 +5152,21 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn("solid_mpm_bounds_from_surface_metadata", source)
         self.assertIn("bounds_min_m=solid_mpm_bounds_min_m", source)
         self.assertIn("bounds_max_m=solid_mpm_bounds_max_m", source)
+
+    def test_solid_mpm_bounds_padding_uses_farfield_spacing_on_graded_grid(self) -> None:
+        padding = solid_mpm_bounds_padding_distance_m(
+            fluid_grid_axis_max_spacing_m=(0.0029, 0.0030, 0.0028),
+            estimated_solid_particle_spacing_m=0.00103,
+        )
+
+        self.assertAlmostEqual(padding, 0.009)
+        self.assertGreater(padding, 3.0 * 0.00103)
+
+        with self.assertRaises(ValueError):
+            solid_mpm_bounds_padding_distance_m(
+                fluid_grid_axis_max_spacing_m=(0.0030, 0.0, 0.0028),
+                estimated_solid_particle_spacing_m=0.00103,
+            )
 
     def test_sharp_case_row_uses_hibm_marker_fields_not_projected_ibm(self) -> None:
         sample_report = {
@@ -4011,6 +5226,9 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             "hibm_mpm_scatter_action_reaction_residual_n": 0.0,
             "hibm_no_slip_residual_l2_mps": 1.0e-5,
             "hibm_no_slip_residual_max_mps": 2.0e-5,
+            "hibm_post_solid_kinematic_projection_applied": True,
+            "hibm_post_solid_no_slip_residual_l2_mps": 3.0e-6,
+            "hibm_post_solid_no_slip_residual_max_mps": 4.0e-6,
             "hibm_velocity_dirichlet_invalid_reconstruction_count": 4,
             "hibm_velocity_dirichlet_invalid_no_fluid_sample_count": 1,
             "hibm_velocity_dirichlet_invalid_nonpositive_gap_count": 2,
@@ -4030,6 +5248,13 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             "hibm_pressure_correctable_divergence_l2": 7.0e-5,
             "hibm_pressure_correctable_divergence_max_abs": 8.0e-5,
             "hibm_pressure_correctable_divergence_cell_count": 12,
+            "hibm_air_backed_cell_count": 17,
+            "hibm_air_backed_component_count": 1,
+            "hibm_air_backed_cell_volume_m3": 2.5e-5,
+            "hibm_air_backed_seed_marker_count": 19,
+            "hibm_air_backed_seed_missed_marker_count": 0,
+            "hibm_air_backed_seed_fallback_cell_count": 4,
+            "hibm_air_backed_reachability_barrier_cell_count": 23,
             "hibm_pressure_fixed_divergence_l2": 6.0e-5,
             "hibm_pressure_fixed_divergence_max_abs": 7.0e-5,
             "hibm_pressure_fixed_divergence_cell_count": 2,
@@ -4044,7 +5269,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             "pressure_solver_requested": "fv_multigrid",
             "pressure_solver": "fv_cg",
             "pressure_solver_forced_to_fv_cg": True,
-            "pressure_solver_force_reason": "hibm_pressure_neumann_interface_rows",
+            "pressure_solver_force_reason": "hibm_pressure_neumann_requires_fv_solver",
             "pressure_nullspace_policy": "interface_matrix_anchored",
             "pressure_nullspace_compatibility_measured": True,
             "pressure_nullspace_zero_mean_projection_applied": False,
@@ -4067,6 +5292,16 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             "cg_breakdown_count": 0,
             "cg_converged_all": True,
         }
+        pressure_outlet_report = {
+            "source_volume_flux_m3s": 2.5e-8,
+            "zmin_pressure_outlet_flux_m3s": 1.0e-8,
+            "zmin_velocity_outlet_flux_m3s": 2.0e-8,
+            "zmin_pressure_outlet_to_source_ratio": 0.4,
+            "zmin_velocity_outlet_to_source_ratio": 0.8,
+            "zmin_projection_pre_velocity_outlet_flux_m3s": 3.0e-8,
+            "zmin_projection_post_pressure_velocity_outlet_flux_m3s": 2.25e-8,
+            "zmin_projection_post_boundary_velocity_outlet_flux_m3s": 2.0e-8,
+        }
         solid_report = SimpleNamespace(
             particle_count=10,
             active_grid_nodes=8,
@@ -4087,6 +5322,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             sample_report=sample_report,
             sharp_summary=sharp_summary,
             fluid_projection_report=projection_report,
+            pressure_outlet_report=pressure_outlet_report,
             fluid_dt_s=2.0e-5,
             solid_mpm_report=solid_report,
             solid_model="neo_hookean_mpm",
@@ -4107,10 +5343,64 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertFalse(row["fsi_semi_implicit_coupling_enabled"])
         self.assertFalse(row["fsi_semi_implicit_coupling_matrix_active"])
         self.assertTrue(row["fsi_coupling_step_completed"])
-        self.assertFalse(row["fsi_coupling_convergence_measured"])
+        self.assertTrue(row["fsi_coupling_convergence_measured"])
         self.assertFalse(row["fsi_coupling_converged"])
-        self.assertEqual(row["fsi_coupling_iterations_used"], 0)
+        self.assertEqual(row["fsi_coupling_iterations_used"], 1)
         self.assertFalse(row["fsi_action_reaction_balance_measured"])
+        self.assertEqual(
+            row["fsi_coupling_residual_source"],
+            "hibm_post_solid_no_slip_velocity_residual_l2_mps",
+        )
+        self.assertEqual(row["fsi_coupling_residual_units"], "m/s")
+        self.assertAlmostEqual(row["fsi_coupling_residual_norm_n"], 3.0e-6)
+        self.assertAlmostEqual(row["fsi_coupling_residual_norm_mps"], 3.0e-6)
+        self.assertAlmostEqual(row["fsi_coupling_residual_max_mps"], 4.0e-6)
+        fixed_point_summary = {
+            **sharp_summary,
+            "hibm_coupling_scheme": "marker_fixed_point",
+            "hibm_added_mass_stability_status": "not_converged",
+            "hibm_added_mass_stability_measured": True,
+            "hibm_added_mass_stabilization": "aitken_marker_state_under_relaxation",
+            "hibm_semi_implicit_coupling_enabled": True,
+            "hibm_semi_implicit_coupling_matrix_active": False,
+            "hibm_fsi_coupling_iterations_used": 6,
+            "hibm_fsi_coupling_converged": False,
+            "hibm_fsi_coupling_explicit_single_pass": False,
+            "hibm_fsi_coupling_residual_source": (
+                "marker_surface_fixed_point_position_velocity_residual_l2_mps"
+            ),
+            "hibm_fsi_coupling_residual_l2_mps": 8.0e-4,
+            "hibm_fsi_coupling_residual_max_mps": 2.5e-3,
+        }
+        fixed_point_row = build_hibm_mpm_sharp_case_row(
+            step=3,
+            sample_report=sample_report,
+            sharp_summary=fixed_point_summary,
+            fluid_projection_report=projection_report,
+            pressure_outlet_report=pressure_outlet_report,
+            fluid_dt_s=2.0e-5,
+            solid_mpm_report=solid_report,
+            solid_model="neo_hookean_mpm",
+            fsi_coupling_mode_report=fsi_coupling_mode_report(
+                FSI_COUPLING_MODE_HIBM_MPM_SHARP
+            ),
+            fsi_coupling_iterations_requested=6,
+        )
+        self.assertFalse(fixed_point_row["fsi_coupling_explicit_single_pass"])
+        self.assertEqual(fixed_point_row["fsi_coupling_scheme"], "marker_fixed_point")
+        self.assertEqual(fixed_point_row["fsi_coupling_iterations_used"], 6)
+        self.assertEqual(
+            fixed_point_row["fsi_coupling_residual_source"],
+            "marker_surface_fixed_point_position_velocity_residual_l2_mps",
+        )
+        self.assertAlmostEqual(
+            fixed_point_row["fsi_coupling_residual_norm_mps"],
+            8.0e-4,
+        )
+        self.assertAlmostEqual(
+            fixed_point_row["fsi_coupling_residual_max_mps"],
+            2.5e-3,
+        )
         self.assertEqual(
             row["fsi_action_reaction_residual_source"],
             "marker_to_mpm_scatter_force_conservation",
@@ -4122,7 +5412,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertTrue(row["pressure_solver_forced_to_fv_cg"])
         self.assertEqual(
             row["pressure_solver_force_reason"],
-            "hibm_pressure_neumann_interface_rows",
+            "hibm_pressure_neumann_requires_fv_solver",
         )
         self.assertEqual(row["pressure_nullspace_policy"], "interface_matrix_anchored")
         self.assertTrue(row["pressure_nullspace_compatibility_measured"])
@@ -4179,6 +5469,45 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertEqual(row["hibm_marker_primary_count"], 3)
         self.assertEqual(row["hibm_marker_secondary_count"], 5)
         self.assertEqual(row["hibm_marker_total_count"], 8)
+        self.assertEqual(row["hibm_air_backed_cell_count"], 17)
+        self.assertEqual(row["hibm_air_backed_component_count"], 1)
+        self.assertEqual(row["hibm_air_backed_seed_marker_count"], 19)
+        self.assertEqual(row["hibm_air_backed_seed_missed_marker_count"], 0)
+        self.assertEqual(row["hibm_air_backed_seed_fallback_cell_count"], 4)
+        self.assertEqual(
+            row["hibm_air_backed_reachability_barrier_cell_count"],
+            23,
+        )
+        self.assertEqual(
+            row["fsi_volume_source_m3s"],
+            pressure_outlet_report["source_volume_flux_m3s"],
+        )
+        self.assertNotIn("main_fsi_volume_source_m3s", row)
+        self.assertNotIn("tail_fsi_volume_source_m3s", row)
+        self.assertEqual(
+            row["fsi_volume_source_semantics"],
+            "computed_pressure_outlet_source_field_not_region_decomposed",
+        )
+        self.assertEqual(
+            row["pressure_outlet_source_volume_flux_m3s"],
+            pressure_outlet_report["source_volume_flux_m3s"],
+        )
+        self.assertEqual(
+            row["pressure_outlet_velocity_flux_m3s"],
+            pressure_outlet_report["zmin_velocity_outlet_flux_m3s"],
+        )
+        self.assertEqual(
+            row["pressure_outlet_velocity_to_source_ratio"],
+            pressure_outlet_report["zmin_velocity_outlet_to_source_ratio"],
+        )
+        self.assertEqual(
+            row["pressure_outlet_pressure_flux_m3s"],
+            pressure_outlet_report["zmin_pressure_outlet_flux_m3s"],
+        )
+        self.assertEqual(
+            row["pressure_outlet_pressure_to_source_ratio"],
+            pressure_outlet_report["zmin_pressure_outlet_to_source_ratio"],
+        )
         self.assertEqual(row["main_fsi_fluid_force_z_n"], 3.0)
         self.assertEqual(row["tail_fsi_fluid_force_z_n"], -1.0)
         self.assertEqual(row["main_fsi_fluid_reaction_z_n"], -3.0)
@@ -4218,10 +5547,23 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn("fsi_force_probe_valid_fraction", legacy_fields)
         self.assertIn("hibm_ib_node_count", sharp_fields)
         self.assertIn("hibm_internal_obstacle_cell_count", sharp_fields)
+        self.assertIn("hibm_air_backed_cell_count", sharp_fields)
+        self.assertIn("hibm_air_backed_component_count", sharp_fields)
+        self.assertIn("hibm_air_backed_cell_volume_m3", sharp_fields)
+        self.assertIn("hibm_air_backed_seed_marker_count", sharp_fields)
+        self.assertIn("hibm_air_backed_seed_missed_marker_count", sharp_fields)
+        self.assertIn("hibm_air_backed_seed_fallback_cell_count", sharp_fields)
+        self.assertIn(
+            "hibm_air_backed_reachability_barrier_cell_count",
+            sharp_fields,
+        )
         self.assertIn("hibm_marker_primary_count", sharp_fields)
         self.assertIn("hibm_marker_secondary_count", sharp_fields)
         self.assertIn("hibm_marker_total_count", sharp_fields)
         self.assertIn("hibm_marker_total_force_z_n", sharp_fields)
+        self.assertIn("fsi_volume_source_m3s", sharp_fields)
+        self.assertNotIn("main_fsi_volume_source_m3s", sharp_fields)
+        self.assertNotIn("tail_fsi_volume_source_m3s", sharp_fields)
         self.assertNotIn("hibm_coupling_scheme", sharp_fields)
         self.assertNotIn("hibm_added_mass_stability_status", sharp_fields)
         self.assertIn("hibm_added_mass_stability_measured", sharp_fields)
@@ -4235,6 +5577,17 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn("fsi_semi_implicit_coupling_enabled", sharp_fields)
         self.assertIn("fsi_semi_implicit_coupling_matrix_active", sharp_fields)
         self.assertIn("hibm_no_slip_residual_l2_mps", sharp_fields)
+        self.assertIn("hibm_post_solid_kinematic_projection_applied", sharp_fields)
+        self.assertIn("hibm_post_solid_no_slip_residual_l2_mps", sharp_fields)
+        self.assertIn("fsi_coupling_residual_norm_mps", sharp_fields)
+        self.assertIn("fsi_coupling_residual_max_mps", sharp_fields)
+        self.assertIn("hibm_full_stress_two_sided_pressure_marker_count", sharp_fields)
+        self.assertIn("hibm_full_stress_one_sided_pressure_marker_count", sharp_fields)
+        self.assertIn("hibm_full_stress_one_sided_extended_marker_count", sharp_fields)
+        self.assertIn(
+            "hibm_full_stress_one_sided_gradient_missing_marker_count",
+            sharp_fields,
+        )
         self.assertIn("hibm_velocity_dirichlet_invalid_reconstruction_count", sharp_fields)
         self.assertIn("hibm_velocity_dirichlet_invalid_no_fluid_sample_count", sharp_fields)
         self.assertIn("hibm_velocity_dirichlet_invalid_nonpositive_gap_count", sharp_fields)
@@ -4284,6 +5637,11 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             "hibm_pressure_neumann_transmissibility_capped_row_count",
             sharp_fields,
         )
+        self.assertIn(
+            "hibm_pressure_neumann_gradient_raw_max_abs_pa_per_m",
+            sharp_fields,
+        )
+        self.assertIn("hibm_pressure_neumann_gradient_limited_count", sharp_fields)
         self.assertIn("solid_mpm_grid_out_of_bounds_particle_count", sharp_fields)
         self.assertNotIn("projected_ibm_residual_mps", sharp_fields)
         self.assertNotIn("projected_ibm_residual_l2_mps", sharp_fields)
@@ -5086,6 +6444,24 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
             "far_pressure_inside_probe_max_multiplier=12.0", sharp_advance_call
         )
 
+    def test_sharp_case_treats_internal_nodes_as_thin_interface_not_obstacle(
+        self,
+    ) -> None:
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        sharp_advance_call = source.split(
+            "sharp_report = sharp_coupling_state.advance_mpm_step(",
+            1,
+        )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
+
+        self.assertIn(
+            "convert_internal_nodes_to_obstacles=False",
+            sharp_advance_call,
+        )
+        self.assertIn(
+            "far_pressure_air_backed_probe_normal_sign=pressure_far_side_normal_sign",
+            sharp_advance_call,
+        )
+
 
 class SquidHistoryWriteRobustnessTests(unittest.TestCase):
     """2026-06-13 production incident: an external reader (a monitoring
@@ -5150,14 +6526,10 @@ class SquidHistoryWriteRobustnessTests(unittest.TestCase):
 
 
 class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
-    """S2-A11b: the 2s production run lost far-pressure closure coverage
-    monotonically for ~110 steps (16.2 markers/step, from 7782 down to 6104)
-    while the run kept marching toward an unrecoverable state; the forensic
-    deficit-vs-wall-overlap law (Pearson r = 0.9999) shows the decline was a
-    faithful geometric symptom. The case needs a loud early failure: a
-    closure-coverage floor guard inside the sharp per-step guard block (the
-    same failure-artifact try as the solid out-of-bounds guard), default-off
-    for bitwise compatibility.
+    """Closure coverage below a configured floor is a fatal sharp-case signal.
+
+    The guard lives beside the solid out-of-bounds guard and remains default
+    off; this test uses synthetic row values, not historical run targets.
     """
 
     FIELD = "hibm_full_stress_far_pressure_closed_marker_count"
@@ -5172,25 +6544,25 @@ class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
     def test_raises_after_patience_consecutive_rows_below_floor(self) -> None:
         from cases.squid_soft_robot import _raise_for_closure_coverage_floor
 
-        rows = self._rows([7782, 7782, 6500, 6400, 6300])
+        rows = self._rows([10, 10, 6, 5, 4])
 
         with self.assertRaises(RuntimeError) as raised:
-            _raise_for_closure_coverage_floor(rows, 7000, 3)
+            _raise_for_closure_coverage_floor(rows, 7, 3)
 
         message = str(raised.exception)
         self.assertIn(self.FIELD, message)
-        self.assertIn("7000", message)
+        self.assertIn("7", message)
         self.assertIn("3", message)
-        self.assertIn("6300", message)
+        self.assertIn("4", message)
 
     def test_below_floor_for_patience_minus_one_is_silent(self) -> None:
         from cases.squid_soft_robot import _raise_for_closure_coverage_floor
 
-        rows = self._rows([7782, 7782, 7782, 6400, 6300])
+        rows = self._rows([10, 10, 10, 6, 5])
 
-        _raise_for_closure_coverage_floor(rows, 7000, 3)
+        _raise_for_closure_coverage_floor(rows, 7, 3)
         # Fewer rows than the patience window can never establish a streak.
-        _raise_for_closure_coverage_floor(self._rows([6400, 6300]), 7000, 3)
+        _raise_for_closure_coverage_floor(self._rows([6, 5]), 7, 3)
 
     def test_disabled_floor_zero_is_silent(self) -> None:
         from cases.squid_soft_robot import _raise_for_closure_coverage_floor
@@ -5202,13 +6574,13 @@ class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
     def test_recovery_resets_the_streak(self) -> None:
         from cases.squid_soft_robot import _raise_for_closure_coverage_floor
 
-        recovered = self._rows([6300, 6300, 7782, 6400, 6300])
+        recovered = self._rows([5, 6, 10, 6, 5])
 
-        _raise_for_closure_coverage_floor(recovered, 7000, 3)
+        _raise_for_closure_coverage_floor(recovered, 7, 3)
 
-        relapsed = recovered + self._rows([6200])
+        relapsed = recovered + self._rows([4])
         with self.assertRaises(RuntimeError):
-            _raise_for_closure_coverage_floor(relapsed, 7000, 3)
+            _raise_for_closure_coverage_floor(relapsed, 7, 3)
 
     def test_sharp_guard_block_wires_floor_guard_and_neo_passes_fixed_rim(
         self,
@@ -5277,18 +6649,10 @@ class SquidNeoSolidSubsetContractTests(unittest.TestCase):
 
 class SquidSharpAirBackedClosureContractTests(unittest.TestCase):
     def test_sharp_case_declares_air_backed_far_pressure_closure(self) -> None:
-        # S2-A12 contract: the squid's far-pressure closure region 7 is the
-        # pressurized air chamber above the main membrane, but the carve
-        # model fills it with fake incompressible water - a flood-sealed
-        # ~7000-cell pocket that accrued the vacated-zone divergence debt
-        # for 1000 steps and killed run #2 at step 1017 on reconnection
-        # (run_2s_20260613b), while its numerical compliance swallowed the
-        # pump's displaced volume (outlet ~1e-12 m3/s all eras). The case
-        # must therefore arm the fluid-side air zone on its sharp advance
-        # call: far_pressure_air_backed=True alongside the closure wiring
-        # (region 7 + waveform p_far + the 12.0 reach the seed ladder
-        # reuses). Imitates the A10 contract: the case's single sharp
-        # advance site; the checkpoint-resume path re-enters the same loop.
+        # S2-A12 contract: the squid's far-pressure closure rides on the
+        # generic HIBM air-backed classification. The case configures the
+        # closure region, pressure, and probe reach; the solver computes the
+        # selected cells and resulting flow at run time.
         source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
         sharp_advance_call = source.split(
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
@@ -5296,8 +6660,13 @@ class SquidSharpAirBackedClosureContractTests(unittest.TestCase):
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
         self.assertIn("far_pressure_air_backed=True", sharp_advance_call)
         # The closure wiring the air zone rides on stays in place.
-        self.assertIn("far_pressure_region_id=7", sharp_advance_call)
+        self.assertIn("far_pressure_region_id=pressure_load_region_id", sharp_advance_call)
+        self.assertIn("far_pressure_barrier_region_id=5", sharp_advance_call)
         self.assertIn("far_pressure_pa=pressure_pa", sharp_advance_call)
+        self.assertIn(
+            "far_pressure_air_backed_probe_normal_sign=pressure_far_side_normal_sign",
+            sharp_advance_call,
+        )
         self.assertIn(
             "far_pressure_inside_probe_max_multiplier=12.0", sharp_advance_call
         )

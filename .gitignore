@@ -5,12 +5,15 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.codegraph/
 
 output/
 cases/output_008step/
 rendered/
 tmp/
 _tmp_*/
+_campaign/
+_codex_validation/
 _diagnostic_runs/
 _smoke_equivalence/
 

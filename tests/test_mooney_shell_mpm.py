@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import inspect
+import math
 import unittest
 
 import numpy as np
@@ -1487,6 +1488,46 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             -1000.0 * face_area_m2,
             delta=2.0e-7,
         )
+
+    def test_near_singular_tri_face_reports_finite_force(self) -> None:
+        mesh = SurfaceMesh(
+            vertices=np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0e-2, 0.0, 0.0],
+                    [0.0, 3.0e-10, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+            faces=np.array([[0, 1, 2]], dtype=np.int32),
+        )
+        state = TriMooneyShellMpmState(
+            mesh,
+            thickness_m=0.003,
+            density_kgm3=1040.0,
+            c1_pa=20.0,
+            c2_pa=10.0,
+            face_region_id=np.array([7], dtype=np.int32),
+            primary_region_id=7,
+            secondary_region_id=8,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.0025,
+            grid_nodes=(16, 16, 16),
+            bounds_padding_fraction=1.0,
+        )
+        state.x[2] = (1.0e-2, 0.0, 0.0)
+
+        report = state.advance_with_external_forces(
+            dt_s=0.0,
+            primary_region_id=7,
+            secondary_region_id=8,
+            velocity_damping=1.0,
+            flip_blend=1.0,
+        )
+
+        self.assertTrue(all(math.isfinite(value) for value in report.total_force_n))
+        self.assertTrue(math.isfinite(report.internal_force_rms_n))
+        self.assertLess(max(abs(value) for value in report.total_force_n), 1.0e-3)
 
     def test_region_interface_reaction_accepts_full_3d_forces(self) -> None:
         mesh = SurfaceMesh(

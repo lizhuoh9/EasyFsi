@@ -391,22 +391,37 @@ class TriMooneyShellMpmState:
             )
 
     @ti.func
+    def _scalar_is_safe(self, value):
+        return value == value and ti.abs(value) < 1.0e30
+
+    @ti.func
+    def _vector_is_safe(self, value):
+        return (
+            self._scalar_is_safe(value.x)
+            and self._scalar_is_safe(value.y)
+            and self._scalar_is_safe(value.z)
+        )
+
+    @ti.func
     def _atomic_add_vector(self, field, value):
-        ti.atomic_add(field[None].x, value.x)
-        ti.atomic_add(field[None].y, value.y)
-        ti.atomic_add(field[None].z, value.z)
+        if self._vector_is_safe(value):
+            ti.atomic_add(field[None].x, value.x)
+            ti.atomic_add(field[None].y, value.y)
+            ti.atomic_add(field[None].z, value.z)
 
     @ti.func
     def _atomic_add_particle_force(self, index, value):
-        ti.atomic_add(self.internal_force_n[index].x, value.x)
-        ti.atomic_add(self.internal_force_n[index].y, value.y)
-        ti.atomic_add(self.internal_force_n[index].z, value.z)
+        if self._vector_is_safe(value):
+            ti.atomic_add(self.internal_force_n[index].x, value.x)
+            ti.atomic_add(self.internal_force_n[index].y, value.y)
+            ti.atomic_add(self.internal_force_n[index].z, value.z)
 
     @ti.func
     def _atomic_add_particle_external_force(self, index, value):
-        ti.atomic_add(self.external_force_n[index].x, value.x)
-        ti.atomic_add(self.external_force_n[index].y, value.y)
-        ti.atomic_add(self.external_force_n[index].z, value.z)
+        if self._vector_is_safe(value):
+            ti.atomic_add(self.external_force_n[index].x, value.x)
+            ti.atomic_add(self.external_force_n[index].y, value.y)
+            ti.atomic_add(self.external_force_n[index].z, value.z)
 
     @ti.func
     def _atomic_add_particle_surface_normal(self, index, value):
@@ -535,6 +550,16 @@ class TriMooneyShellMpmState:
             ti.atomic_max(self.report_max_edge_strain[None], ti.abs(stretch - 1.0))
 
     @ti.func
+    def _limit_vector_norm(self, value, max_norm):
+        limited = value
+        norm = value.norm()
+        if norm != norm or norm > 1.0e30:
+            limited = ti.Vector([0.0, 0.0, 0.0])
+        elif max_norm > 0.0 and norm > max_norm:
+            limited = value * (max_norm / norm)
+        return limited
+
+    @ti.func
     def _accumulate_mooney_face(self, ia, ib, ic, pressure_pa, thickness_m):
         rest_a = self.rest_x[ia]
         rest_b = self.rest_x[ib]
@@ -569,7 +594,11 @@ class TriMooneyShellMpmState:
                     c00 = f0.dot(f0)
                     c01 = f0.dot(f1)
                     c11 = f1.dot(f1)
-                    det_c = ti.max(c00 * c11 - c01 * c01, 1.0e-12)
+                    c_cap = 1.0e6
+                    c00 = ti.min(c00, c_cap)
+                    c01 = ti.min(ti.max(c01, -c_cap), c_cap)
+                    c11 = ti.min(c11, c_cap)
+                    det_c = ti.max(c00 * c11 - c01 * c01, 1.0e-6)
                     inv_det_c = 1.0 / det_c
                     inv_c00 = c11 * inv_det_c
                     inv_c01 = -c01 * inv_det_c
@@ -589,9 +618,25 @@ class TriMooneyShellMpmState:
                     rest_volume_m3 = thickness_m * rest_area_m2
                     grad_edge0 = rest_volume_m3 * (p0 * inv00 + p1 * inv01)
                     grad_edge1 = rest_volume_m3 * (p1 * inv11)
-                    self._atomic_add_particle_force(ia, grad_edge0 + grad_edge1)
-                    self._atomic_add_particle_force(ib, -grad_edge0)
-                    self._atomic_add_particle_force(ic, -grad_edge1)
+                    force_cap_n = (
+                        self.membrane_force_scale
+                        * (self.c1_pa + self.c2_pa)
+                        * thickness_m
+                        * ti.sqrt(rest_area_m2)
+                        * 100.0
+                    )
+                    self._atomic_add_particle_force(
+                        ia,
+                        self._limit_vector_norm(grad_edge0 + grad_edge1, force_cap_n),
+                    )
+                    self._atomic_add_particle_force(
+                        ib,
+                        self._limit_vector_norm(-grad_edge0, force_cap_n),
+                    )
+                    self._atomic_add_particle_force(
+                        ic,
+                        self._limit_vector_norm(-grad_edge1, force_cap_n),
+                    )
             normal = rest_normal
             if area_vec_norm > 1.0e-12:
                 normal = area_vec / area_vec_norm
@@ -624,6 +669,7 @@ class TriMooneyShellMpmState:
         self,
         primary_region_id,
         secondary_region_id,
+        primary_area_load_region_id,
         primary_area_load_npm2,
         primary_interface_reaction_n,
         secondary_interface_reaction_n,
@@ -646,12 +692,17 @@ class TriMooneyShellMpmState:
             elif region == secondary_region_id:
                 thickness_m = self.secondary_thickness_m
             self._accumulate_mooney_face(face.x, face.y, face.z, 0.0, thickness_m)
+            face_external_force = ti.Vector([0.0, 0.0, 0.0])
+            if region == primary_area_load_region_id:
+                face_external_force += primary_area_load_npm2 * area
             if region == primary_region_id:
                 reaction = primary_interface_reaction_n * area / ti.max(self.primary_area_m2[None], 1.0e-12)
-                self._apply_region_load(face.x, face.y, face.z, primary_area_load_npm2 * area + reaction)
+                face_external_force += reaction
             elif region == secondary_region_id:
                 reaction = secondary_interface_reaction_n * area / ti.max(self.secondary_area_m2[None], 1.0e-12)
-                self._apply_region_load(face.x, face.y, face.z, reaction)
+                face_external_force += reaction
+            if face_external_force.norm() > 0.0:
+                self._apply_region_load(face.x, face.y, face.z, face_external_force)
         for e in range(self.edge_count):
             edge = self.edge_indices[e]
             self._accumulate_edge_strain_stat(edge.x, edge.y)
@@ -703,6 +754,8 @@ class TriMooneyShellMpmState:
     @ti.func
     def _particle_grid_out_of_bounds(self, coord):
         out_of_bounds = 0
+        if self._vector_is_safe(coord) == 0:
+            out_of_bounds = 1
         if coord.x < 0.0 or coord.x > ti.cast(self.nx - 1, ti.f32):
             out_of_bounds = 1
         if coord.y < 0.0 or coord.y > ti.cast(self.ny - 1, ti.f32):
@@ -955,6 +1008,7 @@ class TriMooneyShellMpmState:
         dt_s: ti.f32,
         primary_region_id: ti.i32,
         secondary_region_id: ti.i32,
+        primary_area_load_region_id: ti.i32,
         primary_area_load_x_npm2: ti.f32,
         primary_area_load_y_npm2: ti.f32,
         primary_area_load_z_npm2: ti.f32,
@@ -989,6 +1043,7 @@ class TriMooneyShellMpmState:
         self._compute_region_surface_forces(
             primary_region_id,
             secondary_region_id,
+            primary_area_load_region_id,
             primary_area_load,
             primary_reaction,
             secondary_reaction,
@@ -1155,6 +1210,7 @@ class TriMooneyShellMpmState:
         primary_area_load_npm2: tuple[float, float, float],
         primary_interface_reaction_n: tuple[float, float, float],
         secondary_interface_reaction_n: tuple[float, float, float],
+        primary_area_load_region_id: int | None = None,
         velocity_damping: float = 1.0,
         flip_blend: float = 0.95,
         body_acceleration_mps2: tuple[float, float, float] = (0.0, 0.0, 0.0),
@@ -1165,10 +1221,16 @@ class TriMooneyShellMpmState:
         primary_reaction = _vector3(primary_interface_reaction_n, "primary_interface_reaction_n")
         secondary_reaction = _vector3(secondary_interface_reaction_n, "secondary_interface_reaction_n")
         body_acceleration = _vector3(body_acceleration_mps2, "body_acceleration_mps2")
+        area_load_region_id = (
+            int(primary_region_id)
+            if primary_area_load_region_id is None
+            else int(primary_area_load_region_id)
+        )
         self._step_region_kernel(
             float(dt_s),
             int(primary_region_id),
             int(secondary_region_id),
+            area_load_region_id,
             float(primary_area_load[0]),
             float(primary_area_load[1]),
             float(primary_area_load[2]),
@@ -1207,6 +1269,7 @@ class TriMooneyShellMpmState:
             float(dt_s),
             int(primary_region_id),
             int(secondary_region_id),
+            int(primary_region_id),
             0.0,
             0.0,
             0.0,

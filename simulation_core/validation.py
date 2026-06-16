@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
+from collections.abc import Sequence
 from typing import Any
 
 
@@ -19,6 +20,67 @@ class BoundaryDriveComplianceReport:
     prescribed_pressure_or_flow_boundary: bool
     nonzero_fluid_traction_scale: float
     compliant: bool
+
+
+@dataclass(frozen=True)
+class ReferenceCurve:
+    name: str
+    units: str
+    points: tuple[tuple[float, float], ...]
+    source: str
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        units: str,
+        points: Sequence[tuple[float, float]],
+        source: str,
+    ) -> None:
+        normalized = tuple(
+            (float(time_s), float(value)) for time_s, value in points
+        )
+        if not name:
+            raise ValueError("name must be non-empty")
+        if not units:
+            raise ValueError("units must be non-empty")
+        if not source:
+            raise ValueError("source must be non-empty")
+        if len(normalized) < 2:
+            raise ValueError("reference curve requires at least two points")
+        previous_time = -math.inf
+        for time_s, value in normalized:
+            if not math.isfinite(time_s) or not math.isfinite(value):
+                raise ValueError("reference curve points must be finite")
+            if time_s <= previous_time:
+                raise ValueError("reference curve times must be strictly increasing")
+            previous_time = time_s
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "units", units)
+        object.__setattr__(self, "points", normalized)
+        object.__setattr__(self, "source", source)
+
+    def value_at(self, time_s: float) -> float:
+        query = float(time_s)
+        first_time = self.points[0][0]
+        last_time = self.points[-1][0]
+        if query < first_time or query > last_time:
+            raise ValueError("time_s is outside the reference curve range")
+        for (left_time, left_value), (right_time, right_value) in zip(
+            self.points,
+            self.points[1:],
+        ):
+            if query <= right_time:
+                span = right_time - left_time
+                fraction = 0.0 if span == 0.0 else (query - left_time) / span
+                return left_value + fraction * (right_value - left_value)
+        return self.points[-1][1]
+
+    def relative_error_at(self, *, time_s: float, computed_value: float) -> float:
+        reference = self.value_at(time_s)
+        if abs(reference) <= 1.0e-30:
+            return abs(float(computed_value) - reference)
+        return abs(float(computed_value) - reference) / abs(reference)
 
 
 def vector_norm(values: Any) -> float:

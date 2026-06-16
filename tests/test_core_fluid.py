@@ -1704,6 +1704,55 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
             delta=1.0e-6,
         )
 
+    def test_fv_cg_uses_f64_work_vectors_for_high_contrast_interface_rows(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+
+        self.assertEqual(solver.cg_r.dtype, ti.f64)
+        self.assertEqual(solver.cg_rhs.dtype, ti.f64)
+        self.assertEqual(solver.cg_z.dtype, ti.f64)
+        self.assertEqual(solver.cg_d.dtype, ti.f64)
+        self.assertEqual(solver.cg_Ad.dtype, ti.f64)
+        self.assertEqual(solver.cg_r_old.dtype, ti.f64)
+        self.assertEqual(solver.bicgstab_s.dtype, ti.f64)
+        self.assertEqual(solver.bicgstab_t.dtype, ti.f64)
+        self.assertEqual(solver.pressure.dtype, ti.f64)
+        self.assertEqual(solver.pressure_interface_projection_divergence_s.dtype, ti.f64)
+        self.assertEqual(solver.pressure_interface_matrix_diagonal.dtype, ti.f64)
+        self.assertEqual(solver.pressure_interface_matrix_rhs.dtype, ti.f64)
+        self.assertEqual(solver.hibm_pressure_fill_next.dtype, ti.f64)
+        self.assertEqual(solver.reduction_sum.dtype, ti.f64)
+        self.assertEqual(solver.reduction_max.dtype, ti.f64)
+        self.assertEqual(solver.divergence_combined_sum.dtype, ti.f64)
+        self.assertEqual(solver.divergence_combined_max.dtype, ti.f64)
+        self.assertEqual(solver._mg_rhs[0].dtype, ti.f64)
+        self.assertEqual(solver._mg_residual[0].dtype, ti.f64)
+
+    def test_interface_matrix_forces_fv_multigrid_projection_to_fv_cg(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        interface_diagonal = np.zeros((5, 5, 5), dtype=np.float64)
+        interface_diagonal[2, 2, 2] = 1.0
+        solver.pressure_interface_matrix_diagonal.from_numpy(interface_diagonal)
+
+        report = solver.project(
+            iterations=4,
+            pressure_solver="fv_multigrid",
+            pressure_solve_failure_policy="report",
+        )
+
+        self.assertEqual(report["pressure_solver_requested"], "fv_multigrid")
+        self.assertEqual(report["pressure_solver"], "fv_cg")
+        self.assertTrue(report["pressure_solver_forced_to_fv_cg"])
+        self.assertEqual(
+            report["pressure_solver_force_reason"],
+            "pressure_interface_matrix_requires_rowlist_fv_cg",
+        )
+
     def test_fv_cg_interface_coupling_enters_operator_symmetrically(self) -> None:
         solver = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
@@ -1787,6 +1836,65 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         relative_error = abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0e-30)
         self.assertLess(relative_error, 1.0e-5)
 
+    def test_fv_cg_interface_coupling_applies_multiple_owner_slots(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.ones((5, 5, 5), dtype=np.float32)
+        owner = (2, 2, 2)
+        neighbor0 = (2, 2, 3)
+        neighbor1 = (2, 3, 2)
+        pressure[owner] = 3.0
+        pressure[neighbor0] = 1.0
+        pressure[neighbor1] = 2.0
+        solver.pressure_tmp.from_numpy(pressure)
+        solver._fv_laplacian_apply_kernel(solver.pressure_tmp, solver.cg_r, 0)
+        base_operator = solver.cg_r.to_numpy()
+
+        cell_volume_m3 = 0.2**3
+        coefficient0 = 4.0 * cell_volume_m3
+        coefficient1 = 7.0 * cell_volume_m3
+        diagonal = np.zeros((5, 5, 5), dtype=np.float32)
+        diagonal[owner] = (coefficient0 + coefficient1) / cell_volume_m3
+        diagonal[neighbor0] = coefficient0 / cell_volume_m3
+        diagonal[neighbor1] = coefficient1 / cell_volume_m3
+        solver.pressure_interface_matrix_diagonal.from_numpy(diagonal)
+        solver.pressure_interface_coupling_active[owner] = 2
+        solver.pressure_interface_coupling_neighbor[owner] = neighbor0
+        solver.pressure_interface_coupling_coefficient[owner] = coefficient0
+        solver.pressure_interface_coupling_extra_neighbor[
+            owner[0],
+            owner[1],
+            owner[2],
+            0,
+        ] = neighbor1
+        solver.pressure_interface_coupling_extra_coefficient[
+            owner[0],
+            owner[1],
+            owner[2],
+            0,
+        ] = coefficient1
+
+        solver._fv_laplacian_apply_kernel(solver.pressure_tmp, solver.cg_Ad, 0)
+
+        operator = solver.cg_Ad.to_numpy()
+        self.assertAlmostEqual(
+            operator[owner] - base_operator[owner],
+            15.0,
+            delta=5.0e-5,
+        )
+        self.assertAlmostEqual(
+            operator[neighbor0] - base_operator[neighbor0],
+            -8.0,
+            delta=5.0e-5,
+        )
+        self.assertAlmostEqual(
+            operator[neighbor1] - base_operator[neighbor1],
+            -7.0,
+            delta=5.0e-5,
+        )
+
     def test_fv_cg_interface_matrix_rhs_enters_positive_cg_rhs(self) -> None:
         solver = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
@@ -1819,7 +1927,52 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         velocity = tuple(float(solver.velocity[2, 2, 2][axis]) for axis in range(3))
         self.assertEqual(velocity, (0.25, -0.5, 0.75))
 
-    def test_fv_cg_laplacian_excludes_conflicting_neumann_row_at_hibm_dirichlet(self) -> None:
+    def test_preserve_projected_rows_reclamps_reconstructed_hibm_dirichlet_row(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        node = (2, 2, 2)
+        solver.velocity[node] = (9.0, 9.0, 9.0)
+        solver.velocity_dirichlet_boundary_active[node] = 1
+        solver.velocity_dirichlet_boundary_value_mps[node] = (0.25, -0.5, 0.75)
+        solver.velocity_dirichlet_boundary_projection_weight[node] = 0.5
+
+        solver._apply_velocity_dirichlet_boundary_rows_kernel(1, 1)
+
+        velocity = tuple(float(solver.velocity[node][axis]) for axis in range(3))
+        self.assertEqual(velocity, (0.25, -0.5, 0.75))
+        report = solver.velocity_dirichlet_boundary_report()
+        self.assertEqual(report.active_cells, 1)
+        self.assertGreater(report.max_delta_mps, 0.0)
+
+    def test_fv_cg_projection_reduces_velocity_dirichlet_injected_divergence(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(6, 6, 6), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        node = (3, 3, 3)
+        solver.velocity_dirichlet_boundary_active[node] = 1
+        solver.velocity_dirichlet_boundary_value_mps[node] = (0.0, 0.0, -0.1)
+        solver.velocity_dirichlet_boundary_projection_weight[node] = 1.0
+
+        report = solver.project(
+            iterations=512,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            reset_pressure=True,
+            read_report=True,
+        )
+
+        self.assertGreater(report["pre_projection_l2"], 1.0e-4)
+        self.assertLess(report["projection_l2"], report["pre_projection_l2"] * 0.25)
+        self.assertLess(report["l2"], report["pre_projection_l2"] * 0.25)
+
+    def test_fv_cg_laplacian_applies_neumann_row_at_hibm_dirichlet(self) -> None:
         solver = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
             runtime=TaichiRuntimeConfig(arch="cuda"),
@@ -1828,7 +1981,11 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         pressure[2, 2, 1] = 1.0
         solver.pressure_tmp.from_numpy(pressure)
         solver.velocity_dirichlet_boundary_active[2, 2, 2] = 1
+        solver._fv_laplacian_apply_kernel(solver.pressure_tmp, solver.cg_r, 0)
+        base_operator = solver.cg_r.to_numpy()
+
         solver.pressure_interface_matrix_diagonal[2, 2, 2] = 4.0
+        solver.pressure_interface_matrix_diagonal[2, 2, 1] = 4.0
         solver.pressure_interface_coupling_active[2, 2, 2] = 1
         solver.pressure_interface_coupling_neighbor[2, 2, 2] = (2, 2, 1)
         solver.pressure_interface_coupling_coefficient[2, 2, 2] = 4.0 * (0.2**3)
@@ -1836,7 +1993,40 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         solver._fv_laplacian_apply_kernel(solver.pressure_tmp, solver.cg_Ad, 0)
 
         operator = solver.cg_Ad.to_numpy()
-        self.assertAlmostEqual(operator[2, 2, 2], 0.0, delta=5.0e-5)
+        self.assertAlmostEqual(
+            operator[2, 2, 2] - base_operator[2, 2, 2],
+            8.0,
+            delta=5.0e-5,
+        )
+        self.assertAlmostEqual(
+            operator[2, 2, 1] - base_operator[2, 2, 1],
+            -8.0,
+            delta=5.0e-5,
+        )
+
+    def test_fv_diagonal_uses_reconstructed_hibm_dirichlet_projection_weight(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((5, 5, 5), dtype=np.int32)
+        obstacle[1, 2, 2] = 0
+        obstacle[2, 2, 2] = 0
+        solver.obstacle.from_numpy(obstacle)
+        solver.velocity_dirichlet_boundary_active[2, 2, 2] = 1
+        solver.velocity_dirichlet_boundary_projection_weight[2, 2, 2] = 0.5
+
+        solver._fv_diagonal_kernel(solver.fv_diag, 0)
+
+        diagonal = solver.fv_diag.to_numpy()
+        half_face_coefficient = 0.5 / (0.2 * 0.2)
+        self.assertAlmostEqual(
+            float(diagonal[2, 2, 2]),
+            half_face_coefficient,
+            delta=1.0e-5,
+        )
 
     def test_fv_cg_laplacian_keeps_hibm_dirichlet_face_prescribed_with_reconstruction_weight(
         self,
@@ -1850,7 +2040,11 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         solver.pressure_tmp.from_numpy(pressure)
         solver.velocity_dirichlet_boundary_active[2, 2, 2] = 1
         solver.velocity_dirichlet_boundary_projection_weight[2, 2, 2] = 0.5
+        solver._fv_laplacian_apply_kernel(solver.pressure_tmp, solver.cg_r, 0)
+        base_operator = solver.cg_r.to_numpy()
+
         solver.pressure_interface_matrix_diagonal[2, 2, 2] = 4.0
+        solver.pressure_interface_matrix_diagonal[2, 2, 1] = 4.0
         solver.pressure_interface_coupling_active[2, 2, 2] = 1
         solver.pressure_interface_coupling_neighbor[2, 2, 2] = (2, 2, 1)
         solver.pressure_interface_coupling_coefficient[2, 2, 2] = 4.0 * (0.2**3)
@@ -1858,7 +2052,16 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         solver._fv_laplacian_apply_kernel(solver.pressure_tmp, solver.cg_Ad, 0)
 
         operator = solver.cg_Ad.to_numpy()
-        self.assertAlmostEqual(operator[2, 2, 2], 0.0, delta=5.0e-5)
+        self.assertAlmostEqual(
+            operator[2, 2, 2] - base_operator[2, 2, 2],
+            8.0,
+            delta=5.0e-5,
+        )
+        self.assertAlmostEqual(
+            operator[2, 2, 1] - base_operator[2, 2, 1],
+            -8.0,
+            delta=5.0e-5,
+        )
 
     def test_fv_laplacian_matches_gradient_response_at_reconstructed_dirichlet_row(
         self,
@@ -1889,7 +2092,7 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
             atol=5.0e-5,
         )
 
-    def test_fv_laplacian_excludes_pressure_neumann_term_on_fixed_dirichlet_face(
+    def test_fv_laplacian_includes_pressure_neumann_term_on_fixed_dirichlet_face(
         self,
     ) -> None:
         solver = CartesianFluidSolver(
@@ -1904,6 +2107,9 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         solver.velocity_dirichlet_boundary_active[2, 2, 2] = 1
         solver.velocity_dirichlet_boundary_value_mps[2, 2, 2] = (0.0, 0.0, 0.0)
         transmissibility = 4.0 * (0.2**3)
+        solver._fv_laplacian_apply_kernel(solver.pressure_tmp, solver.cg_r, 0)
+        base_operator = solver.cg_r.to_numpy()
+
         solver.pressure_interface_matrix_diagonal[2, 2, 2] = 4.0
         solver.pressure_interface_matrix_diagonal[2, 2, 1] = 4.0
         solver.pressure_interface_coupling_active[2, 2, 2] = 1
@@ -1915,12 +2121,63 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         solver.compute_divergence()
 
         operator = solver.cg_Ad.to_numpy()
-        divergence_response = solver.divergence.to_numpy()
-        np.testing.assert_allclose(
-            operator,
-            divergence_response,
-            rtol=1.0e-6,
-            atol=5.0e-5,
+        self.assertAlmostEqual(
+            operator[2, 2, 2] - base_operator[2, 2, 2],
+            8.0,
+            delta=5.0e-5,
+        )
+        self.assertAlmostEqual(
+            operator[2, 2, 1] - base_operator[2, 2, 1],
+            -8.0,
+            delta=5.0e-5,
+        )
+        self.assertEqual(
+            tuple(float(solver.velocity[2, 2, 2][axis]) for axis in range(3)),
+            (0.0, 0.0, 0.0),
+        )
+
+    def test_pressure_interface_row_list_projection_flux_enters_divergence_report(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        pressure = np.zeros((5, 5, 5), dtype=np.float32)
+        pressure[2, 2, 2] = 3.0
+        pressure[2, 2, 1] = 1.0
+        solver.pressure.from_numpy(pressure)
+        solver.pressure_tmp.from_numpy(pressure)
+
+        owner = (2, 2, 2)
+        neighbor = (2, 2, 1)
+        cell_volume_m3 = 0.2**3
+        transmissibility = 4.0 * cell_volume_m3
+        solver.pressure_interface_matrix_diagonal[owner] = transmissibility / cell_volume_m3
+        solver.pressure_interface_matrix_diagonal[neighbor] = (
+            transmissibility / cell_volume_m3
+        )
+        solver.pressure_interface_row_count[None] = 1
+        solver.pressure_interface_row_owner[0] = owner
+        solver.pressure_interface_row_neighbor[0] = neighbor
+        solver.pressure_interface_row_transmissibility[0] = transmissibility
+
+        solver._fv_laplacian_apply_kernel(solver.pressure_tmp, solver.cg_Ad, 0)
+        solver._subtract_pressure_gradient_kernel(1.0, 0)
+        solver._update_pressure_interface_projection_divergence_kernel(1.0)
+        solver.compute_divergence()
+
+        operator = solver.cg_Ad.to_numpy()
+        total_divergence = (
+            solver.divergence.to_numpy()
+            + solver.pressure_interface_projection_divergence_s.to_numpy()
+        )
+        np.testing.assert_allclose(total_divergence, operator, rtol=1.0e-6, atol=5.0e-5)
+        stats = solver.divergence_residual_stats()
+        self.assertAlmostEqual(
+            stats["max_abs"],
+            float(np.max(np.abs(operator))),
+            delta=5.0e-5,
         )
 
     def test_hibm_solid_band_nonprojectable_cells_are_masked(self) -> None:
@@ -2084,6 +2341,79 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
             1,
         )
 
+    def test_fv_cg_reports_unreached_component_rhs_incompatibility(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(9, 4, 9), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((9, 4, 9), dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        obstacle[2, 2, 4] = 0
+        obstacle[2, 2, 5] = 0
+        obstacle[6, 2, 6] = 0
+        solver.obstacle.from_numpy(obstacle)
+        unreached = solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        self.assertEqual(unreached, 3)
+        solver.volume_source_s[2, 2, 4] = 1.0
+        solver.volume_source_s[2, 2, 5] = 3.0
+        solver.volume_source_s[6, 2, 6] = -2.0
+
+        report = solver.project(
+            iterations=200,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+        )
+
+        self.assertTrue(report["cg_converged_all"])
+        self.assertFalse(report["pressure_solve_failed"])
+        self.assertTrue(report["pressure_projection_physical_failure"])
+        self.assertEqual(
+            report["pressure_projection_physical_failure_reason"],
+            "unreached_component_rhs_incompatible",
+        )
+        self.assertEqual(
+            int(report["hibm_unreached_incompatible_component_count"]),
+            2,
+        )
+        self.assertGreater(
+            float(report["hibm_unreached_component_rhs_mean_max_abs"]),
+            0.0,
+        )
+
+    def test_fv_cg_raises_on_unreached_component_rhs_incompatibility(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(9, 4, 9), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((9, 4, 9), dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        obstacle[2, 2, 4] = 0
+        obstacle[2, 2, 5] = 0
+        solver.obstacle.from_numpy(obstacle)
+        unreached = solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        self.assertEqual(unreached, 2)
+        solver.volume_source_s[2, 2, 4] = 1.0
+        solver.volume_source_s[2, 2, 5] = 3.0
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "unreached component RHS is incompatible",
+        ):
+            solver.project(
+                iterations=200,
+                pressure_outlet_zmin=True,
+                pressure_solver="fv_cg",
+                cg_tolerance=1.0e-6,
+                pressure_solve_failure_policy="raise",
+            )
+
     def test_final_divergence_report_excludes_anchored_unreached_cells(self) -> None:
         solver = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(9, 4, 9), dt_s=1.0e-3),
@@ -2235,6 +2565,66 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         self.assertAlmostEqual(report["rhs_integral"], -6.0, delta=1.0e-5)
         self.assertAlmostEqual(report["max_abs_diagonal"], 4.0 / cell_volume, delta=1.0e-4)
         self.assertEqual(report["active_cells"], 2)
+        self.assertEqual(report["row_count"], 0)
+        self.assertEqual(report["row_active_count"], 0)
+        self.assertAlmostEqual(report["row_diagonal_integral"], 0.0, delta=1.0e-8)
+        self.assertAlmostEqual(
+            report["row_diagonal_integral_abs_mismatch"],
+            6.0,
+            delta=1.0e-5,
+        )
+
+    def test_pressure_interface_matrix_terms_report_checks_rowlist_diagonal_closure(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        owner = (2, 2, 2)
+        neighbor = (2, 2, 3)
+        cell_volume = 0.2**3
+        transmissibility = 0.5
+        diagonal = np.zeros((5, 5, 5), dtype=np.float32)
+        diagonal[owner] = transmissibility / cell_volume
+        diagonal[neighbor] = transmissibility / cell_volume
+        solver.pressure_interface_matrix_diagonal.from_numpy(diagonal)
+        solver.pressure_interface_row_count[None] = 1
+        solver.pressure_interface_row_owner[0] = owner
+        solver.pressure_interface_row_neighbor[0] = neighbor
+        solver.pressure_interface_row_transmissibility[0] = transmissibility
+
+        closed_report = solver.pressure_interface_matrix_terms_report()
+
+        self.assertEqual(closed_report["row_count"], 1)
+        self.assertEqual(closed_report["row_active_count"], 1)
+        self.assertEqual(closed_report["row_invalid_count"], 0)
+        self.assertAlmostEqual(
+            closed_report["row_diagonal_integral"],
+            2.0 * transmissibility,
+            delta=1.0e-6,
+        )
+        self.assertAlmostEqual(
+            closed_report["row_diagonal_integral_abs_mismatch"],
+            0.0,
+            delta=1.0e-6,
+        )
+
+        diagonal[neighbor] = 0.0
+        solver.pressure_interface_matrix_diagonal.from_numpy(diagonal)
+
+        open_report = solver.pressure_interface_matrix_terms_report()
+
+        self.assertEqual(open_report["row_count"], 1)
+        self.assertEqual(open_report["row_active_count"], 1)
+        self.assertGreater(
+            open_report["row_diagonal_integral_abs_mismatch"],
+            0.49,
+        )
+        self.assertGreater(
+            open_report["row_diagonal_max_abs_density_mismatch"],
+            0.49 / cell_volume,
+        )
 
     def test_fv_cg_graded_obstacle_source_balances_pressure_outlet(self) -> None:
         grid, obstacle, source, source_total_m3s, cell_volume_m3 = self._graded_obstacle_source_case()
@@ -2374,6 +2764,235 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
             0.0,
             delta=source_total_m3s * 0.01,
         )
+
+    def test_fv_cg_auto_uses_jacobi_when_interface_couplings_are_active(self) -> None:
+        grid, obstacle, source, *_ = self._graded_obstacle_source_case()
+        spec = FluidDomainSpec(
+            bounds_min_m=grid.bounds_min_m,
+            bounds_max_m=grid.bounds_max_m,
+            grid_nodes=None,
+            density_kgm3=1000.0,
+            viscosity_pa_s=1.0e-3,
+            dt_s=1.0e-3,
+            cartesian_grid=grid,
+        )
+        solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
+        solver.obstacle.from_numpy(obstacle)
+        solver.volume_source_s.from_numpy(source)
+        nx, ny, nz = grid.grid_nodes
+        owner = (nx // 2, ny // 2, nz // 2 + 1)
+        neighbor = (nx // 2, ny // 2, nz // 2)
+        owner_volume = (
+            grid.cell_widths_x_m[owner[0]]
+            * grid.cell_widths_y_m[owner[1]]
+            * grid.cell_widths_z_m[owner[2]]
+        )
+        neighbor_volume = (
+            grid.cell_widths_x_m[neighbor[0]]
+            * grid.cell_widths_y_m[neighbor[1]]
+            * grid.cell_widths_z_m[neighbor[2]]
+        )
+        transmissibility = 0.25 * min(owner_volume, neighbor_volume)
+        solver.pressure_interface_matrix_diagonal[owner] = transmissibility / owner_volume
+        solver.pressure_interface_matrix_diagonal[neighbor] = (
+            transmissibility / neighbor_volume
+        )
+        solver.pressure_interface_coupling_active[owner] = 1
+        solver.pressure_interface_coupling_neighbor[owner] = neighbor
+        solver.pressure_interface_coupling_coefficient[owner] = transmissibility
+        multigrid_calls: list[object] = []
+
+        original_multigrid_preconditioner = solver._apply_fv_multigrid_preconditioner
+
+        def counted_multigrid_preconditioner(self, *_args, **_kwargs) -> None:
+            multigrid_calls.append(_args)
+            return original_multigrid_preconditioner(*_args, **_kwargs)
+
+        solver._apply_fv_multigrid_preconditioner = MethodType(
+            counted_multigrid_preconditioner,
+            solver,
+        )
+
+        solver.project(
+            iterations=8,
+            pressure_outlet_zmin=True,
+            reset_pressure=True,
+            pressure_solver="fv_cg",
+            cg_preconditioner="auto",
+            pressure_solve_failure_policy="report",
+            read_report=False,
+        )
+
+        self.assertEqual(len(multigrid_calls), 0)
+        self.assertEqual(solver.last_project_cg_project_calls, 1)
+
+    def test_fv_cg_auto_uses_jacobi_when_interface_rowlist_is_active(self) -> None:
+        grid, obstacle, source, *_ = self._graded_obstacle_source_case()
+        spec = FluidDomainSpec(
+            bounds_min_m=grid.bounds_min_m,
+            bounds_max_m=grid.bounds_max_m,
+            grid_nodes=None,
+            density_kgm3=1000.0,
+            viscosity_pa_s=1.0e-3,
+            dt_s=1.0e-3,
+            cartesian_grid=grid,
+        )
+        solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
+        solver.obstacle.from_numpy(obstacle)
+        solver.volume_source_s.from_numpy(source)
+        nx, ny, nz = grid.grid_nodes
+        owner = (nx // 2, ny // 2, nz // 2 + 1)
+        neighbor = (nx // 2, ny // 2, nz // 2)
+        owner_volume = (
+            grid.cell_widths_x_m[owner[0]]
+            * grid.cell_widths_y_m[owner[1]]
+            * grid.cell_widths_z_m[owner[2]]
+        )
+        neighbor_volume = (
+            grid.cell_widths_x_m[neighbor[0]]
+            * grid.cell_widths_y_m[neighbor[1]]
+            * grid.cell_widths_z_m[neighbor[2]]
+        )
+        transmissibility = 0.25 * min(owner_volume, neighbor_volume)
+        solver.pressure_interface_matrix_diagonal[owner] = transmissibility / owner_volume
+        solver.pressure_interface_matrix_diagonal[neighbor] = (
+            transmissibility / neighbor_volume
+        )
+        solver.pressure_interface_row_count[None] = 1
+        solver.pressure_interface_row_owner[0] = owner
+        solver.pressure_interface_row_neighbor[0] = neighbor
+        solver.pressure_interface_row_transmissibility[0] = transmissibility
+        multigrid_calls: list[object] = []
+
+        original_multigrid_preconditioner = solver._apply_fv_multigrid_preconditioner
+
+        def counted_multigrid_preconditioner(self, *_args, **_kwargs) -> None:
+            multigrid_calls.append(_args)
+            return original_multigrid_preconditioner(*_args, **_kwargs)
+
+        solver._apply_fv_multigrid_preconditioner = MethodType(
+            counted_multigrid_preconditioner,
+            solver,
+        )
+
+        report = solver.project(
+            iterations=8,
+            pressure_outlet_zmin=True,
+            reset_pressure=True,
+            pressure_solver="fv_cg",
+            cg_preconditioner="auto",
+            pressure_solve_failure_policy="report",
+            read_report=True,
+        )
+
+        self.assertEqual(len(multigrid_calls), 0)
+        self.assertEqual(report["pressure_interface_matrix_row_active_count"], 1)
+        self.assertTrue(report["pressure_interface_matrix_active"])
+        self.assertEqual(solver.last_project_cg_project_calls, 1)
+
+    def test_fv_cg_explicit_multigrid_preconditioner_is_disabled_for_interface_couplings(
+        self,
+    ) -> None:
+        grid, obstacle, source, *_ = self._graded_obstacle_source_case()
+        spec = FluidDomainSpec(
+            bounds_min_m=grid.bounds_min_m,
+            bounds_max_m=grid.bounds_max_m,
+            grid_nodes=None,
+            density_kgm3=1000.0,
+            viscosity_pa_s=1.0e-3,
+            dt_s=1.0e-3,
+            cartesian_grid=grid,
+        )
+        solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
+        solver.obstacle.from_numpy(obstacle)
+        solver.volume_source_s.from_numpy(source)
+        nx, ny, nz = grid.grid_nodes
+        owner = (nx // 2, ny // 2, nz // 2 + 1)
+        neighbor = (nx // 2, ny // 2, nz // 2)
+        owner_volume = (
+            grid.cell_widths_x_m[owner[0]]
+            * grid.cell_widths_y_m[owner[1]]
+            * grid.cell_widths_z_m[owner[2]]
+        )
+        neighbor_volume = (
+            grid.cell_widths_x_m[neighbor[0]]
+            * grid.cell_widths_y_m[neighbor[1]]
+            * grid.cell_widths_z_m[neighbor[2]]
+        )
+        transmissibility = 0.25 * min(owner_volume, neighbor_volume)
+        solver.pressure_interface_matrix_diagonal[owner] = transmissibility / owner_volume
+        solver.pressure_interface_matrix_diagonal[neighbor] = (
+            transmissibility / neighbor_volume
+        )
+        solver.pressure_interface_coupling_active[owner] = 1
+        solver.pressure_interface_coupling_neighbor[owner] = neighbor
+        solver.pressure_interface_coupling_coefficient[owner] = transmissibility
+        multigrid_calls: list[object] = []
+
+        original_multigrid_preconditioner = solver._apply_fv_multigrid_preconditioner
+
+        def counted_multigrid_preconditioner(self, *_args, **_kwargs) -> None:
+            multigrid_calls.append(_args)
+            return original_multigrid_preconditioner(*_args, **_kwargs)
+
+        solver._apply_fv_multigrid_preconditioner = MethodType(
+            counted_multigrid_preconditioner,
+            solver,
+        )
+
+        solver.project(
+            iterations=8,
+            pressure_outlet_zmin=True,
+            reset_pressure=True,
+            pressure_solver="fv_cg",
+            cg_preconditioner="fv_multigrid_light",
+            pressure_solve_failure_policy="report",
+            read_report=False,
+        )
+
+        self.assertEqual(len(multigrid_calls), 0)
+        self.assertEqual(solver.last_project_cg_project_calls, 1)
+
+    def test_fv_cg_auto_uses_multigrid_on_graded_grid_without_interface_couplings(
+        self,
+    ) -> None:
+        grid, obstacle, source, *_ = self._graded_obstacle_source_case()
+        spec = FluidDomainSpec(
+            bounds_min_m=grid.bounds_min_m,
+            bounds_max_m=grid.bounds_max_m,
+            grid_nodes=None,
+            density_kgm3=1000.0,
+            viscosity_pa_s=1.0e-3,
+            dt_s=1.0e-3,
+            cartesian_grid=grid,
+        )
+        solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
+        solver.obstacle.from_numpy(obstacle)
+        solver.volume_source_s.from_numpy(source)
+        multigrid_calls: list[object] = []
+        original_multigrid_preconditioner = solver._apply_fv_multigrid_preconditioner
+
+        def counted_multigrid_preconditioner(self, *_args, **_kwargs) -> None:
+            multigrid_calls.append(_args)
+            return original_multigrid_preconditioner(*_args, **_kwargs)
+
+        solver._apply_fv_multigrid_preconditioner = MethodType(
+            counted_multigrid_preconditioner,
+            solver,
+        )
+
+        solver.project(
+            iterations=8,
+            pressure_outlet_zmin=True,
+            reset_pressure=True,
+            pressure_solver="fv_cg",
+            cg_preconditioner="auto",
+            pressure_solve_failure_policy="report",
+            read_report=False,
+        )
+
+        self.assertGreater(len(multigrid_calls), 0)
+        self.assertEqual(solver.last_project_cg_project_calls, 1)
 
     def test_fv_cg_closed_domain_mean_projection_stays_device_side(self) -> None:
         widths = tuple(0.03 * (1.0 + 0.1 * ((index % 3) - 1)) for index in range(10))
@@ -2669,8 +3288,8 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         self.assertEqual(report["cg_breakdown_code"], 0)
         self.assertEqual(report["cg_breakdown_dAd"], 0.0)
         self.assertEqual(report["cg_restart_count"], 0)
-        self.assertFalse(report["cg_restart_count_measured"])
-        self.assertEqual(report["cg_restart_policy"], "not_implemented")
+        self.assertTrue(report["cg_restart_count_measured"])
+        self.assertEqual(report["cg_restart_policy"], "periodic_exact_residual")
 
     def test_closed_domain_non_cg_projection_reports_unmeasured_nullspace_policy(
         self,
@@ -2795,7 +3414,10 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         self.assertEqual(report["cg_breakdown_count"], 1)
         self.assertEqual(report["pressure_solve_failure_policy"], "report")
         self.assertTrue(report["pressure_solve_failed"])
-        self.assertEqual(report["pressure_solve_failure_action"], "reported")
+        self.assertEqual(
+            report["pressure_solve_failure_action"],
+            "reported_cleared_pressure_correction",
+        )
 
     def test_fv_cg_pressure_failure_raise_aborts_before_velocity_correction(self) -> None:
         solver = CartesianFluidSolver(
@@ -2901,6 +3523,217 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         self.assertTrue(solver.last_cg_converged, solver.last_cg_breakdown)
         self.assertEqual(solver.last_cg_breakdown, "")
         self.assertLessEqual(solver.last_cg_relative_residual, 1.0e-6)
+
+    def test_fv_cg_restarts_exact_residual_after_device_breakdown(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        residual_checks = 0
+        d_ad_calls = 0
+
+        def no_op(self, *_args, **_kwargs) -> None:
+            return None
+
+        def fake_weighted_dot(self, *_args, **_kwargs) -> float:
+            return 1.0
+
+        def fake_weighted_dot_to_field(self, _a, _b, out) -> None:
+            nonlocal residual_checks, d_ad_calls
+            if out is self.cg_rr:
+                residual_checks += 1
+                if residual_checks <= 3:
+                    self.cg_rr[None] = 0.25
+                else:
+                    self.cg_rr[None] = 1.0e-16
+            elif out is self.cg_rz:
+                self.cg_rz[None] = 1.0
+            elif out is self.cg_dAd:
+                d_ad_calls += 1
+                self.cg_dAd[None] = 0.0 if d_ad_calls == 1 else 1.0
+            elif out is self.cg_rz_new:
+                self.cg_rz_new[None] = 1.0
+            elif out is self.cg_beta_numerator:
+                self.cg_beta_numerator[None] = 1.0
+
+        for name in (
+            "_prepare_fv_multigrid_rhs",
+            "_fv_diagonal_kernel",
+            "_cg_build_positive_rhs_kernel",
+            "_fv_laplacian_apply_kernel",
+            "_axpby_scalar_field_kernel",
+            "_apply_jacobi_preconditioner_kernel",
+            "_copy_scalar_field_kernel",
+            "_cg_apply_alpha_kernel",
+        ):
+            setattr(solver, name, MethodType(no_op, solver))
+        solver._weighted_dot_kernel = MethodType(fake_weighted_dot, solver)
+        solver._weighted_dot_to_field_kernel = MethodType(fake_weighted_dot_to_field, solver)
+
+        solver._solve_pressure_poisson_fv_cg(
+            iterations=32,
+            rhs_scale=1.0,
+            pressure_outlet_zmin=True,
+            tolerance=1.0e-6,
+            preconditioner="jacobi",
+        )
+
+        self.assertTrue(solver.last_cg_converged, solver.last_cg_breakdown)
+        self.assertEqual(solver.last_cg_breakdown, "")
+        self.assertEqual(solver.last_cg_restart_count, 1)
+        self.assertEqual(int(solver.cg_breakdown_code[None]), 0)
+
+    def test_fv_cg_interface_matrix_does_not_enter_bicgstab_fallback_after_pcg_budget(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        fallback_calls: list[dict[str, object]] = []
+
+        def no_op(self, *_args, **_kwargs) -> None:
+            return None
+
+        def fake_weighted_dot(self, *_args, **_kwargs) -> float:
+            return 1.0
+
+        def fake_weighted_dot_to_field(self, _a, _b, out) -> None:
+            if out is self.cg_rr:
+                self.cg_rr[None] = 1.0
+            elif out is self.cg_rz:
+                self.cg_rz[None] = 1.0
+            elif out is self.cg_dAd:
+                self.cg_dAd[None] = 1.0
+            elif out is self.cg_rz_new:
+                self.cg_rz_new[None] = 1.0
+            elif out is self.cg_beta_numerator:
+                self.cg_beta_numerator[None] = 1.0
+
+        def fake_fallback(self, **kwargs) -> None:
+            fallback_calls.append(dict(kwargs))
+            self.last_cg_iterations = int(kwargs["start_iteration"]) + 1
+            self.last_cg_relative_residual = 0.0
+            self.last_cg_converged = True
+            self.last_cg_breakdown = ""
+
+        for name in (
+            "_prepare_fv_multigrid_rhs",
+            "_fv_diagonal_kernel",
+            "_cg_build_positive_rhs_kernel",
+            "_fv_laplacian_apply_kernel",
+            "_axpby_scalar_field_kernel",
+            "_apply_jacobi_preconditioner_kernel",
+            "_copy_scalar_field_kernel",
+            "_cg_apply_alpha_kernel",
+            "_cg_update_direction_and_rz_kernel",
+        ):
+            setattr(solver, name, MethodType(no_op, solver))
+        solver._weighted_dot_kernel = MethodType(fake_weighted_dot, solver)
+        solver._weighted_dot_to_field_kernel = MethodType(fake_weighted_dot_to_field, solver)
+        solver._continue_pressure_poisson_fv_bicgstab = MethodType(fake_fallback, solver)
+
+        solver._solve_pressure_poisson_fv_cg(
+            iterations=1,
+            rhs_scale=1.0,
+            pressure_outlet_zmin=True,
+            tolerance=1.0e-6,
+            preconditioner="jacobi",
+            pressure_interface_matrix_active=True,
+        )
+
+        self.assertEqual(fallback_calls, [])
+        self.assertFalse(solver.last_cg_converged)
+        self.assertEqual(solver.last_cg_iterations, 1)
+
+    def test_fv_cg_interface_rowlist_can_enter_bicgstab_fallback_after_pcg_budget(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        solver.pressure_interface_row_count[None] = 1
+        fallback_calls: list[dict[str, object]] = []
+
+        def no_op(self, *_args, **_kwargs) -> None:
+            return None
+
+        def fake_weighted_dot(self, *_args, **_kwargs) -> float:
+            return 1.0
+
+        def fake_weighted_dot_to_field(self, _a, _b, out) -> None:
+            if out is self.cg_rr:
+                self.cg_rr[None] = 1.0
+            elif out is self.cg_rz:
+                self.cg_rz[None] = 1.0
+            elif out is self.cg_dAd:
+                self.cg_dAd[None] = 1.0
+            elif out is self.cg_rz_new:
+                self.cg_rz_new[None] = 1.0
+            elif out is self.cg_beta_numerator:
+                self.cg_beta_numerator[None] = 1.0
+
+        def fake_fallback(self, **kwargs) -> None:
+            fallback_calls.append(dict(kwargs))
+            self.last_cg_iterations = int(kwargs["start_iteration"]) + 1
+            self.last_cg_relative_residual = 0.0
+            self.last_cg_converged = True
+            self.last_cg_breakdown = ""
+
+        for name in (
+            "_prepare_fv_multigrid_rhs",
+            "_fv_diagonal_kernel",
+            "_cg_build_positive_rhs_kernel",
+            "_fv_laplacian_apply_kernel",
+            "_axpby_scalar_field_kernel",
+            "_apply_jacobi_preconditioner_kernel",
+            "_copy_scalar_field_kernel",
+            "_cg_apply_alpha_kernel",
+            "_cg_update_direction_and_rz_kernel",
+        ):
+            setattr(solver, name, MethodType(no_op, solver))
+        solver._weighted_dot_kernel = MethodType(fake_weighted_dot, solver)
+        solver._weighted_dot_to_field_kernel = MethodType(fake_weighted_dot_to_field, solver)
+        solver._continue_pressure_poisson_fv_bicgstab = MethodType(fake_fallback, solver)
+
+        solver._solve_pressure_poisson_fv_cg(
+            iterations=1,
+            rhs_scale=1.0,
+            pressure_outlet_zmin=True,
+            tolerance=1.0e-6,
+            preconditioner="jacobi",
+            pressure_interface_matrix_active=True,
+        )
+
+        self.assertEqual(len(fallback_calls), 1)
+        self.assertTrue(solver.last_cg_converged)
+        self.assertEqual(solver.last_cg_iterations, 2)
+
+    def test_bicgstab_fallback_solves_generic_fv_rhs_on_device(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        rhs = np.zeros((4, 4, 4), dtype=np.float64)
+        rhs[2, 2, 2] = 1.0
+        solver.cg_rhs.from_numpy(rhs)
+        solver._fv_diagonal_kernel(solver.fv_diag, 1)
+        b_norm = float(np.sqrt(max(solver._weighted_dot_kernel(solver.cg_rhs, solver.cg_rhs), 0.0)))
+
+        solver._continue_pressure_poisson_fv_bicgstab(
+            start_iteration=0,
+            max_iters=80,
+            b_norm=b_norm,
+            outlet=1,
+            tolerance=1.0e-8,
+            anchor_unreached=False,
+            remove_nullspace_mean=False,
+        )
+
+        self.assertTrue(solver.last_cg_converged, solver.last_cg_breakdown)
+        self.assertLessEqual(solver.last_cg_relative_residual, 1.0e-8)
+        self.assertIn("bicgstab_fallback", solver.last_cg_restart_policy)
 
     def test_predict_viscosity_damps_shear_mode(self) -> None:
         solver = CartesianFluidSolver(
@@ -3210,6 +4043,26 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         )
         self.assertEqual(int(solver.report_hibm_fresh_fluid_cells[None]), 1)
 
+    def test_hibm_internal_obstacle_conversion_can_be_disabled_for_thin_interfaces(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        node_kind = ti.field(dtype=ti.i32, shape=(5, 5, 5))
+        internal = np.zeros((5, 5, 5), dtype=np.int32)
+        internal[2, 2, 2] = 7
+        node_kind.from_numpy(internal)
+
+        converted = solver.apply_hibm_internal_obstacles(
+            node_kind,
+            internal_node_code=7,
+            convert_internal_nodes=False,
+        )
+
+        self.assertEqual(converted, 0)
+        self.assertEqual(int(solver.obstacle[2, 2, 2]), 0)
+        self.assertEqual(int(solver.report_hibm_internal_obstacle_cells[None]), 0)
+
     def test_released_hibm_internal_cell_uses_dirichlet_velocity_without_fluid_neighbors(self) -> None:
         solver = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
@@ -3309,17 +4162,22 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         solver.velocity_dirichlet_boundary_active[1, 1, 1] = 1
         solver.velocity_dirichlet_boundary_value_mps[1, 1, 1] = (0.1, 0.2, -0.3)
 
-        solver.project(
+        report = solver.project(
             iterations=2,
             pressure_solver="fv_jacobi",
             preserve_velocity_constraints=False,
             reset_pressure=True,
-            read_report=False,
+            read_report=True,
         )
 
         velocity = tuple(float(solver.velocity[1, 1, 1][axis]) for axis in range(3))
         np.testing.assert_allclose(velocity, (0.1, 0.2, -0.3), atol=1.0e-7)
         self.assertEqual(solver.velocity_constraint_weight[1, 1, 1], 0.0)
+        self.assertGreaterEqual(report["velocity_dirichlet_boundary_apply_calls"], 1)
+        self.assertGreater(report["velocity_dirichlet_boundary_active_cells_total"], 0)
+        self.assertGreater(report["velocity_dirichlet_boundary_active_cells_max"], 0)
+        self.assertGreater(report["velocity_dirichlet_boundary_max_delta_mps"], 0.0)
+        self.assertGreater(report["velocity_dirichlet_boundary_mean_delta_mps"], 0.0)
 
     def test_apply_velocity_constraints_reports_region_momentum_deltas(self) -> None:
         solver = CartesianFluidSolver(
@@ -3848,7 +4706,7 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
         )
         self.assertAlmostEqual(float(solver.volume_source_s[2, 2, 2]), 7.0)
 
-    def test_default_band_mode_ignores_classification_and_converts_all(
+    def test_default_band_mode_uses_classification_and_keeps_enclosed_water(
         self,
     ) -> None:
         import os
@@ -3864,14 +4722,14 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
                 unclassified_node_code=self._NODE_NONE,
             )
 
-        # Bitwise-unchanged default: the classification is ignored, both
-        # candidates convert through the legacy kernel, and the split
-        # mirrors report "not measured".
-        self.assertEqual(marked, 2)
+        # Default sharp diagnostics use the classification field: membrane
+        # interior slivers convert, but enclosed water stays active and is
+        # counted instead of disappearing behind the -1 sentinel.
+        self.assertEqual(marked, 1)
         self.assertEqual(int(solver.obstacle[2, 2, 2]), 1)
-        self.assertEqual(int(solver.obstacle[0, 0, 0]), 1)
-        self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), -1)
-        self.assertEqual(int(solver.last_hibm_solid_band_enclosed_water_cells), -1)
+        self.assertEqual(int(solver.obstacle[0, 0, 0]), 0)
+        self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), 1)
+        self.assertEqual(int(solver.last_hibm_solid_band_enclosed_water_cells), 1)
 
     def test_projection_report_exposes_band_population_split_mirrors(self) -> None:
         import os
