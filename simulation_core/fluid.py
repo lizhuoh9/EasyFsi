@@ -14,7 +14,9 @@ from .runtime import TaichiRuntimeConfig, init_taichi
 
 
 CG_PRECONDITIONER_CHOICES = ("auto", "jacobi", "fv_multigrid", "fv_multigrid_light")
-HIBM_PRESSURE_COMPONENT_CAPACITY = 256
+HIBM_PRESSURE_COMPONENT_CAPACITY = 768
+HIBM_UNREACHED_COMPONENT_SMALL_THRESHOLD_CELLS = 128
+HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS = 4
 
 
 @dataclass(frozen=True)
@@ -894,6 +896,8 @@ class CartesianFluidSolver:
         self.force = ti.Vector.field(3, dtype=ti.f32, shape=shape)
         self.obstacle = ti.field(dtype=ti.i32, shape=shape)
         self.hibm_fresh_fluid_cell = ti.field(dtype=ti.i32, shape=shape)
+        self.hibm_solid_band_protection_cell = ti.field(dtype=ti.i32, shape=shape)
+        self.hibm_no_slip_sampling_obstacle = ti.field(dtype=ti.i32, shape=shape)
         self.velocity_constraint_sum = ti.Vector.field(3, dtype=ti.f32, shape=shape)
         self.velocity_constraint_weight = ti.field(dtype=ti.f32, shape=shape)
         self.velocity_constraint_primary_sum = ti.Vector.field(3, dtype=ti.f32, shape=shape)
@@ -992,6 +996,14 @@ class CartesianFluidSolver:
         self.report_hibm_solid_band_nonprojectable_cells = ti.field(dtype=ti.i32, shape=())
         self.report_hibm_solid_band_interior_cells = ti.field(dtype=ti.i32, shape=())
         self.report_hibm_solid_band_enclosed_water_cells = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_solid_band_velocity_dirichlet_protected_cells = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_solid_band_mask_protected_cells = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -1098,6 +1110,7 @@ class CartesianFluidSolver:
         self.last_hibm_pressure_unreached_component_count = 0
         self._hibm_pressure_unreached_component_count = 0
         self.last_hibm_pressure_unreached_component_overflow = False
+        self._reset_hibm_pressure_unreached_component_distribution_stats()
         self.last_hibm_pressure_component_labels_converged = True
         self.last_hibm_unreached_cells_with_interface_diagonal = 0
         self.last_hibm_unreached_cells_with_interface_coupling = 0
@@ -1111,6 +1124,8 @@ class CartesianFluidSolver:
         # populations (S2-A8').
         self.last_hibm_solid_band_interior_cells = -1
         self.last_hibm_solid_band_enclosed_water_cells = -1
+        self.last_hibm_solid_band_velocity_dirichlet_protected_cells = -1
+        self.last_hibm_solid_band_mask_protected_cells = -1
         # -1 means "the post-projection converted-cell pressure fill has
         # not run since construction / restore_state" (S2-A8''). The fill
         # is never mounted inside project(): the HIBM assemble calls it
@@ -1312,6 +1327,8 @@ class CartesianFluidSolver:
         self.report_hibm_solid_band_nonprojectable_cells[None] = 0
         self.report_hibm_solid_band_interior_cells[None] = 0
         self.report_hibm_solid_band_enclosed_water_cells[None] = 0
+        self.report_hibm_solid_band_velocity_dirichlet_protected_cells[None] = 0
+        self.report_hibm_solid_band_mask_protected_cells[None] = 0
         self.report_hibm_pressure_disconnected_nonprojectable_cells[None] = 0
         self.report_hibm_pressure_filled_cells[None] = 0
         self.report_hibm_air_backed_cells[None] = 0
@@ -1332,6 +1349,29 @@ class CartesianFluidSolver:
     def snapshot_hibm_base_obstacle(self) -> None:
         self._snapshot_hibm_base_obstacle_kernel()
         self._hibm_base_obstacle_initialized = True
+
+    def set_hibm_solid_band_protection_mask_from_numpy(self, mask: np.ndarray) -> None:
+        """Set static cells that solid-band conversion must preserve as fluid."""
+        array = np.asarray(mask, dtype=np.int32)
+        if tuple(array.shape) != tuple(self.obstacle.shape):
+            raise ValueError(
+                "solid-band protection mask shape "
+                f"{tuple(array.shape)} does not match fluid grid "
+                f"{tuple(self.obstacle.shape)}"
+            )
+        self.hibm_solid_band_protection_cell.from_numpy(array)
+
+    @ti.kernel
+    def _build_hibm_no_slip_sampling_obstacle_kernel(self):
+        for i, j, k in self.obstacle:
+            self.hibm_no_slip_sampling_obstacle[i, j, k] = self.obstacle[i, j, k]
+            if self.velocity_dirichlet_boundary_active[i, j, k] != 0:
+                self.hibm_no_slip_sampling_obstacle[i, j, k] = 0
+
+    def build_hibm_no_slip_sampling_obstacle(self):
+        """Expose no-slip row owners as samplable cells for residual diagnostics."""
+        self._build_hibm_no_slip_sampling_obstacle_kernel()
+        return self.hibm_no_slip_sampling_obstacle
 
     def _ensure_hibm_base_obstacle(self) -> None:
         if not self._hibm_base_obstacle_initialized:
@@ -1458,10 +1498,15 @@ class CartesianFluidSolver:
         pressure_outlet_zmin: ti.i32,
         convert_to_obstacle: ti.i32,
         interior_only: ti.i32,
+        protect_velocity_dirichlet_radius_cells: ti.i32,
+        protect_velocity_dirichlet_marker_region_id: ti.i32,
+        protect_solid_band_mask: ti.i32,
     ):
         self.report_hibm_solid_band_nonprojectable_cells[None] = 0
         self.report_hibm_solid_band_interior_cells[None] = 0
         self.report_hibm_solid_band_enclosed_water_cells[None] = 0
+        self.report_hibm_solid_band_velocity_dirichlet_protected_cells[None] = 0
+        self.report_hibm_solid_band_mask_protected_cells[None] = 0
         for i, j, k in self.obstacle:
             if (
                 self.obstacle[i, j, k] == 0
@@ -1472,20 +1517,76 @@ class CartesianFluidSolver:
                     pressure_outlet_zmin,
                 )
             ):
-                # Population split (S2-A8'): a candidate the IB node
-                # search classified (any code other than the unclassified
-                # sentinel) lies inside the near-surface band - a
-                # membrane-interior sliver. An unclassified candidate has
-                # no marker within the search radius: real enclosed water
-                # sealed off only by the Dirichlet row cloud.
+                # Population split (S2-A8'): a candidate the IB node search
+                # classified (any code other than the unclassified sentinel)
+                # lies inside the near-surface band - a membrane-interior
+                # sliver. An unclassified candidate has no marker within the
+                # search radius: real enclosed water sealed off by the
+                # Dirichlet row cloud. Merely touching a Dirichlet row cannot
+                # make a cell a sliver; real sealed water touches no-slip rows
+                # by construction.
                 is_interior_sliver = 0
+                protected_velocity_dirichlet = 0
+                protected_solid_band_mask = 0
                 if (
-                    node_kind_code[i, j, k] != unclassified_node_code
-                    or self._divergence_stencil_touches_velocity_dirichlet_region(
-                        i,
-                        j,
-                        k,
+                    protect_solid_band_mask == 1
+                    and self.hibm_solid_band_protection_cell[i, j, k] != 0
+                ):
+                    protected_solid_band_mask = 1
+                if protect_velocity_dirichlet_radius_cells >= 0:
+                    di = -protect_velocity_dirichlet_radius_cells
+                    while di <= protect_velocity_dirichlet_radius_cells:
+                        dj = -protect_velocity_dirichlet_radius_cells
+                        while dj <= protect_velocity_dirichlet_radius_cells:
+                            dk = -protect_velocity_dirichlet_radius_cells
+                            while dk <= protect_velocity_dirichlet_radius_cells:
+                                ii = i + di
+                                jj = j + dj
+                                kk = k + dk
+                                if (
+                                    0 <= ii
+                                    and ii < self.nx
+                                    and 0 <= jj
+                                    and jj < self.ny
+                                    and 0 <= kk
+                                    and kk < self.nz
+                                    and self.velocity_dirichlet_boundary_active[
+                                        ii,
+                                        jj,
+                                        kk,
+                                    ]
+                                    != 0
+                                    and (
+                                        protect_velocity_dirichlet_marker_region_id
+                                        < 0
+                                        or self.velocity_dirichlet_boundary_marker_region_id[
+                                            ii,
+                                            jj,
+                                            kk,
+                                        ]
+                                        == protect_velocity_dirichlet_marker_region_id
+                                    )
+                                ):
+                                    protected_velocity_dirichlet = 1
+                                dk += 1
+                            dj += 1
+                        di += 1
+                if protected_velocity_dirichlet == 1:
+                    ti.atomic_add(
+                        self.report_hibm_solid_band_velocity_dirichlet_protected_cells[
+                            None
+                        ],
+                        1,
                     )
+                if protected_solid_band_mask == 1:
+                    ti.atomic_add(
+                        self.report_hibm_solid_band_mask_protected_cells[None],
+                        1,
+                    )
+                if (
+                    protected_velocity_dirichlet == 0
+                    and protected_solid_band_mask == 0
+                    and node_kind_code[i, j, k] != unclassified_node_code
                 ):
                     is_interior_sliver = 1
                 if is_interior_sliver == 1:
@@ -1493,7 +1594,10 @@ class CartesianFluidSolver:
                         self.report_hibm_solid_band_interior_cells[None],
                         1,
                     )
-                else:
+                elif (
+                    protected_velocity_dirichlet == 0
+                    and protected_solid_band_mask == 0
+                ):
                     ti.atomic_add(
                         self.report_hibm_solid_band_enclosed_water_cells[None],
                         1,
@@ -1518,6 +1622,9 @@ class CartesianFluidSolver:
         pressure_outlet_zmin: bool = False,
         node_kind_code=None,
         unclassified_node_code: int = 0,
+        protect_velocity_dirichlet_radius_cells: int = -1,
+        protect_velocity_dirichlet_marker_region_id: int = -1,
+        protect_solid_band_mask: bool = False,
     ) -> int:
         """Mark one band sweep and return the newly marked cell count.
 
@@ -1533,10 +1640,7 @@ class CartesianFluidSolver:
 
         - interior slivers: candidates the search classified near the
           marker surface (``node_kind_code != unclassified_node_code``) -
-          membrane-interior quasi-solid cells inside the row cloud; a
-          candidate whose divergence stencil touches a region-stamped
-          velocity Dirichlet row is also treated as row-cloud sliver even
-          if the node search left that cell unclassified;
+          membrane-interior quasi-solid cells inside the row cloud;
         - enclosed water: unclassified candidates (no marker within the
           search radius) - real water sealed off by the Dirichlet row
           cloud, solvable by the per-component zero-mean anchoring chain.
@@ -1563,9 +1667,21 @@ class CartesianFluidSolver:
           every candidate. With ``node_kind_code`` the two populations are
           still counted.
 
+        ``protect_velocity_dirichlet_radius_cells >= 0`` preserves classified
+        candidates that touch a no-slip Dirichlet row neighborhood. When
+        ``protect_velocity_dirichlet_marker_region_id >= 0`` is set, only rows
+        stamped with that marker region qualify. The sharp HIBM path uses this
+        for primary water-side interface samples: those cells are part of the
+        active fluid boundary condition, not membrane-interior slivers.
+        ``protect_solid_band_mask=True`` also preserves cells explicitly marked
+        in ``hibm_solid_band_protection_cell`` (source-config normal-probe
+        fluid cells).
+
         ``last_hibm_solid_band_interior_cells`` /
-        ``last_hibm_solid_band_enclosed_water_cells`` mirror the per-sweep
-        populations host-side (-1 when the sweep ran without a split).
+        ``last_hibm_solid_band_enclosed_water_cells`` /
+        ``last_hibm_solid_band_velocity_dirichlet_protected_cells`` mirror the
+        per-sweep populations host-side (-1 when the sweep ran without a
+        split).
         """
         count_only = os.environ.get("HIBM_BAND_COUNT_ONLY") == "1"
         interior_only_requested = (
@@ -1581,6 +1697,8 @@ class CartesianFluidSolver:
         preserve_enclosed_water = not count_only
         self.last_hibm_solid_band_interior_cells = -1
         self.last_hibm_solid_band_enclosed_water_cells = -1
+        self.last_hibm_solid_band_velocity_dirichlet_protected_cells = -1
+        self.last_hibm_solid_band_mask_protected_cells = -1
         if split_populations:
             if tuple(node_kind_code.shape) != tuple(self.obstacle.shape):
                 raise ValueError(
@@ -1594,12 +1712,23 @@ class CartesianFluidSolver:
                 1 if pressure_outlet_zmin else 0,
                 0 if count_only else 1,
                 1 if preserve_enclosed_water else 0,
+                int(protect_velocity_dirichlet_radius_cells),
+                int(protect_velocity_dirichlet_marker_region_id),
+                1 if protect_solid_band_mask else 0,
             )
             self.last_hibm_solid_band_interior_cells = int(
                 self.report_hibm_solid_band_interior_cells[None]
             )
             self.last_hibm_solid_band_enclosed_water_cells = int(
                 self.report_hibm_solid_band_enclosed_water_cells[None]
+            )
+            self.last_hibm_solid_band_velocity_dirichlet_protected_cells = int(
+                self.report_hibm_solid_band_velocity_dirichlet_protected_cells[
+                    None
+                ]
+            )
+            self.last_hibm_solid_band_mask_protected_cells = int(
+                self.report_hibm_solid_band_mask_protected_cells[None]
             )
         else:
             self._mark_hibm_solid_band_nonprojectable_cells_kernel(
@@ -1770,6 +1899,16 @@ class CartesianFluidSolver:
                     1,
                 )
 
+    def _reset_hibm_pressure_unreached_component_distribution_stats(self) -> None:
+        self.last_hibm_pressure_unreached_component_raw_count = 0
+        self.last_hibm_pressure_unreached_component_largest_cell_count = 0
+        self.last_hibm_pressure_unreached_component_singleton_count = 0
+        self.last_hibm_pressure_unreached_component_small_threshold_cells = (
+            HIBM_UNREACHED_COMPONENT_SMALL_THRESHOLD_CELLS
+        )
+        self.last_hibm_pressure_unreached_component_small_count = 0
+        self.last_hibm_pressure_unreached_component_small_cell_count = 0
+
     def mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
         self,
         *,
@@ -1794,6 +1933,7 @@ class CartesianFluidSolver:
             self.last_hibm_pressure_unreached_component_count = 0
             self._hibm_pressure_unreached_component_count = 0
             self.last_hibm_pressure_unreached_component_overflow = False
+            self._reset_hibm_pressure_unreached_component_distribution_stats()
             self.last_hibm_pressure_component_labels_converged = True
             self.last_hibm_unreached_cells_with_interface_diagonal = 0
             self.last_hibm_unreached_cells_with_interface_coupling = 0
@@ -1856,6 +1996,7 @@ class CartesianFluidSolver:
         self.last_hibm_pressure_unreached_component_count = 0
         self._hibm_pressure_unreached_component_count = 0
         self.last_hibm_pressure_unreached_component_overflow = False
+        self._reset_hibm_pressure_unreached_component_distribution_stats()
         if unreached > 0:
             self._init_hibm_unreached_component_labels_kernel()
             labels_converged = False
@@ -1946,14 +2087,26 @@ class CartesianFluidSolver:
         self,
         *,
         max_component_cells: int,
+        overflow_singletons_only: bool = False,
+        protect_velocity_dirichlet_radius_cells: int = 0,
+        protect_solid_band_mask: bool = False,
+        convert_unstamped_small_components: bool = False,
     ) -> int:
         """Convert small disconnected row-cloud components to obstacle cells.
 
-        Only already-labeled outlet-unreachable components are eligible, and
-        only when the component is small and its divergence stencil touches a
-        region-stamped velocity Dirichlet row. Larger disconnected water
-        bodies remain active for the explicit air-backed or pressure
-        compatibility paths.
+        Outlet-unreachable components are eligible when the component is small
+        and its divergence stencil touches a region-stamped velocity
+        Dirichlet row. If the previous component labeling overflowed, isolated
+        singleton components from the already-computed pressure component labels
+        are also cleaned so they cannot exhaust the diagnostic label budget.
+        ``overflow_singletons_only`` restricts the cleanup to that latter
+        no-row-reload case. ``protect_velocity_dirichlet_radius_cells`` can
+        keep singleton cleanup away from no-slip row neighborhoods so residual
+        sampling remains measured. ``convert_unstamped_small_components`` is an
+        opt-in sharp-HIBM sliver cleanup for tiny disconnected fragments that
+        are not row-stamped; it must be used with a small threshold so larger
+        disconnected water bodies remain active for the explicit air-backed or
+        pressure compatibility paths.
         """
         max_cells = int(max_component_cells)
         self.last_hibm_row_cloud_orphan_cell_count = 0
@@ -1961,7 +2114,6 @@ class CartesianFluidSolver:
         if max_cells <= 0:
             return 0
 
-        labels = self.hibm_pressure_unreached_component_label.to_numpy()
         obstacle = self.obstacle.to_numpy()
         reachable = self.hibm_pressure_outlet_reachable.to_numpy()
         barrier = self.hibm_pressure_reachability_barrier.to_numpy()
@@ -1969,11 +2121,29 @@ class CartesianFluidSolver:
             (obstacle == 0)
             & (barrier == 0)
             & (reachable == 0)
-            & (labels < 0)
         )
         if not np.any(valid):
             return 0
 
+        nx, ny, nz = valid.shape
+        protected = np.zeros(valid.shape, dtype=bool)
+        protect_radius = max(0, int(protect_velocity_dirichlet_radius_cells))
+        if protect_radius > 0:
+            row_active = self.velocity_dirichlet_boundary_active.to_numpy() != 0
+            for row_i, row_j, row_k in np.argwhere(row_active):
+                i0 = max(0, int(row_i) - protect_radius)
+                i1 = min(nx, int(row_i) + protect_radius + 1)
+                j0 = max(0, int(row_j) - protect_radius)
+                j1 = min(ny, int(row_j) + protect_radius + 1)
+                k0 = max(0, int(row_k) - protect_radius)
+                k1 = min(nz, int(row_k) + protect_radius + 1)
+                protected[i0:i1, j0:j1, k0:k1] = True
+        if bool(protect_solid_band_mask):
+            protected |= self.hibm_solid_band_protection_cell.to_numpy() != 0
+
+        overflow_singleton_cleanup = bool(
+            self.last_hibm_pressure_unreached_component_overflow
+        )
         row_region = self.velocity_dirichlet_boundary_marker_region_id.to_numpy()
         row_touch = row_region >= 0
         stencil_touch = row_touch.copy()
@@ -1981,21 +2151,109 @@ class CartesianFluidSolver:
         stencil_touch[:, :-1, :] |= row_touch[:, 1:, :]
         stencil_touch[:, :, :-1] |= row_touch[:, :, 1:]
 
-        values = labels[valid]
-        unique_labels, inverse, counts = np.unique(
-            values,
-            return_inverse=True,
-            return_counts=True,
-        )
-        component_touches_row = np.zeros(unique_labels.shape, dtype=bool)
-        np.logical_or.at(component_touches_row, inverse, stencil_touch[valid])
-        selected_labels = unique_labels[
-            (counts <= max_cells) & component_touches_row
-        ]
-        if selected_labels.size == 0:
-            return 0
+        visited = np.zeros(valid.shape, dtype=bool)
+        convert_mask = np.zeros(valid.shape, dtype=bool)
+        selected_component_count = 0
 
-        convert_mask = valid & np.isin(labels, selected_labels)
+        if bool(overflow_singletons_only):
+            if (
+                not overflow_singleton_cleanup
+                or not bool(self.last_hibm_pressure_component_labels_converged)
+            ):
+                return 0
+            labels = self.hibm_pressure_unreached_component_label.to_numpy()
+            label_values = labels[valid]
+            label_values = label_values[label_values < (1 << 30)]
+            if label_values.size <= 0:
+                return 0
+            component_labels, component_sizes = np.unique(
+                label_values,
+                return_counts=True,
+            )
+            singleton_labels = component_labels[component_sizes == 1]
+            if singleton_labels.size <= 0:
+                return 0
+            convert_mask = valid & np.isin(labels, singleton_labels)
+            protected_singletons = int(np.count_nonzero(convert_mask & protected))
+            if protected_singletons > 0:
+                convert_mask &= ~protected
+            selected_component_count = int(np.count_nonzero(convert_mask))
+        elif bool(convert_unstamped_small_components):
+            if not bool(self.last_hibm_pressure_component_labels_converged):
+                return 0
+            labels = self.hibm_pressure_unreached_component_label.to_numpy()
+            label_values = labels[valid]
+            label_values = label_values[label_values < (1 << 30)]
+            if label_values.size <= 0:
+                return 0
+            component_labels, component_sizes = np.unique(
+                label_values,
+                return_counts=True,
+            )
+            small_labels = component_labels[component_sizes <= max_cells]
+            if small_labels.size <= 0:
+                return 0
+            protected_label_values = labels[valid & protected]
+            protected_label_values = protected_label_values[
+                protected_label_values < (1 << 30)
+            ]
+            if protected_label_values.size > 0:
+                small_labels = np.setdiff1d(
+                    small_labels,
+                    np.unique(protected_label_values),
+                    assume_unique=False,
+                )
+            if small_labels.size <= 0:
+                return 0
+            convert_mask = valid & np.isin(labels, small_labels)
+            selected_component_count = int(small_labels.size)
+        else:
+            for seed_i, seed_j, seed_k in np.argwhere(valid):
+                seed = (int(seed_i), int(seed_j), int(seed_k))
+                if visited[seed]:
+                    continue
+                stack = [seed]
+                visited[seed] = True
+                cells: list[tuple[int, int, int]] = []
+                touches_row = False
+                touches_protected = False
+                while stack:
+                    i, j, k = stack.pop()
+                    cells.append((i, j, k))
+                    touches_row = touches_row or bool(stencil_touch[i, j, k])
+                    touches_protected = touches_protected or bool(
+                        protected[i, j, k]
+                    )
+                    for ni, nj, nk in (
+                        (i - 1, j, k),
+                        (i + 1, j, k),
+                        (i, j - 1, k),
+                        (i, j + 1, k),
+                        (i, j, k - 1),
+                        (i, j, k + 1),
+                    ):
+                        if (
+                            0 <= ni < nx
+                            and 0 <= nj < ny
+                            and 0 <= nk < nz
+                            and valid[ni, nj, nk]
+                            and not visited[ni, nj, nk]
+                        ):
+                            visited[ni, nj, nk] = True
+                            stack.append((ni, nj, nk))
+                is_overflow_singleton = (
+                    overflow_singleton_cleanup and len(cells) == 1
+                )
+                selected = (
+                    touches_row
+                    or is_overflow_singleton
+                    or bool(convert_unstamped_small_components)
+                )
+                selected = selected and not touches_protected
+                if len(cells) <= max_cells and selected:
+                    selected_component_count += 1
+                    for cell in cells:
+                        convert_mask[cell] = True
         converted = int(np.count_nonzero(convert_mask))
         if converted <= 0:
             return 0
@@ -2016,7 +2274,7 @@ class CartesianFluidSolver:
         self.divergence.from_numpy(divergence)
 
         self.last_hibm_row_cloud_orphan_cell_count = converted
-        self.last_hibm_row_cloud_orphan_component_count = int(selected_labels.size)
+        self.last_hibm_row_cloud_orphan_component_count = int(selected_component_count)
         return converted
 
     @ti.kernel
@@ -2273,6 +2531,7 @@ class CartesianFluidSolver:
         self._hibm_pressure_unreached_component_count = 0
         self.last_hibm_pressure_unreached_component_count = 0
         self.last_hibm_pressure_unreached_component_overflow = False
+        self._reset_hibm_pressure_unreached_component_distribution_stats()
         self.last_hibm_pressure_reachability_converged = True
         self.last_hibm_pressure_reachability_sweeps = 0
         self.last_hibm_pressure_reachability_reused = False
@@ -2286,6 +2545,8 @@ class CartesianFluidSolver:
         self.last_hibm_solid_band_marked_increment = 0
         self.last_hibm_solid_band_interior_cells = -1
         self.last_hibm_solid_band_enclosed_water_cells = -1
+        self.last_hibm_solid_band_velocity_dirichlet_protected_cells = -1
+        self.last_hibm_solid_band_mask_protected_cells = -1
         self.last_hibm_pressure_filled_cell_count = -1
         self.last_hibm_air_backed_cell_count = -1
         self.last_hibm_air_backed_component_count = -1
@@ -2340,6 +2601,7 @@ class CartesianFluidSolver:
                 [0.0, 0.0, 0.0]
             )
             self.velocity_dirichlet_boundary_projection_weight[i, j, k] = 0.0
+            self.velocity_dirichlet_boundary_marker_region_id[i, j, k] = -1
         self.report_velocity_dirichlet_boundary_cells[None] = 0
         self.report_velocity_dirichlet_boundary_delta_sum[None] = 0.0
         self.report_velocity_dirichlet_boundary_delta_max[None] = 0.0
@@ -4885,9 +5147,31 @@ class CartesianFluidSolver:
     def _compact_hibm_unreached_component_labels_host(self) -> int:
         labels = self.hibm_pressure_unreached_component_label.to_numpy()
         valid = (labels >= 0) & (labels < (1 << 30))
-        raw_labels = np.unique(labels[valid])
+        raw_labels, raw_counts = np.unique(labels[valid], return_counts=True)
+        raw_component_count = int(raw_labels.size)
+        self.last_hibm_pressure_unreached_component_raw_count = raw_component_count
+        if raw_component_count > 0:
+            counts = raw_counts.astype(np.int64, copy=False)
+            threshold = int(
+                self.last_hibm_pressure_unreached_component_small_threshold_cells
+            )
+            small_mask = counts <= max(0, threshold)
+            self.last_hibm_pressure_unreached_component_largest_cell_count = int(
+                counts.max()
+            )
+            self.last_hibm_pressure_unreached_component_singleton_count = int(
+                np.count_nonzero(counts == 1)
+            )
+            self.last_hibm_pressure_unreached_component_small_count = int(
+                np.count_nonzero(small_mask)
+            )
+            self.last_hibm_pressure_unreached_component_small_cell_count = int(
+                counts[small_mask].sum()
+            )
+        else:
+            self._reset_hibm_pressure_unreached_component_distribution_stats()
         component_count = min(
-            int(raw_labels.size),
+            raw_component_count,
             HIBM_PRESSURE_COMPONENT_CAPACITY,
         )
         selected_labels = raw_labels[:component_count]
@@ -4901,7 +5185,7 @@ class CartesianFluidSolver:
             labels[valid] = values
         self.hibm_pressure_unreached_component_label.from_numpy(labels)
         self.last_hibm_pressure_unreached_component_overflow = (
-            int(raw_labels.size) > HIBM_PRESSURE_COMPONENT_CAPACITY
+            raw_component_count > HIBM_PRESSURE_COMPONENT_CAPACITY
         )
         return component_count
 
@@ -6902,6 +7186,7 @@ class CartesianFluidSolver:
         cg_tolerance: float = 1.0e-6,
         cg_preconditioner: str = "auto",
         pressure_solve_failure_policy: str = "report",
+        hibm_tiny_unreached_cleanup_component_cells: int = 0,
         read_report: bool = True,
     ) -> dict[str, float]:
         if iterations <= 0:
@@ -7017,6 +7302,10 @@ class CartesianFluidSolver:
         pressure_projection_unreached_incompatible_component_count = 0
         pressure_projection_unreached_rhs_mean_max_abs = 0.0
         pressure_projection_unreached_rhs_integral_max_abs = 0.0
+        hibm_projection_overflow_singleton_cleanup_cell_count = 0
+        hibm_projection_overflow_singleton_cleanup_component_count = 0
+        hibm_projection_tiny_unreached_cleanup_cell_count = 0
+        hibm_projection_tiny_unreached_cleanup_component_count = 0
 
         def record_cg_stats() -> None:
             nonlocal pressure_solve_failed
@@ -7075,6 +7364,12 @@ class CartesianFluidSolver:
             incompatible_count = int(
                 self.last_hibm_unreached_incompatible_component_count
             )
+            component_overflow = bool(
+                self.last_hibm_pressure_unreached_component_overflow
+            )
+            labels_converged = bool(
+                self.last_hibm_pressure_component_labels_converged
+            )
             pressure_projection_unreached_incompatible_component_count = max(
                 int(pressure_projection_unreached_incompatible_component_count),
                 incompatible_count,
@@ -7087,7 +7382,17 @@ class CartesianFluidSolver:
                 float(pressure_projection_unreached_rhs_integral_max_abs),
                 float(self.last_hibm_unreached_component_rhs_integral_max_abs),
             )
-            if incompatible_count > 0:
+            if component_overflow:
+                pressure_projection_physical_failure = True
+                pressure_projection_physical_failure_reason = (
+                    "unreached_component_label_overflow"
+                )
+            elif not labels_converged:
+                pressure_projection_physical_failure = True
+                pressure_projection_physical_failure_reason = (
+                    "unreached_component_labels_not_converged"
+                )
+            elif incompatible_count > 0:
                 pressure_projection_physical_failure = True
                 pressure_projection_physical_failure_reason = (
                     "unreached_component_rhs_incompatible"
@@ -7119,6 +7424,24 @@ class CartesianFluidSolver:
                 pressure_projection_physical_failure_action = "reported"
                 return
             pressure_projection_physical_failure_action = "raised"
+            if (
+                pressure_projection_physical_failure_reason
+                == "unreached_component_label_overflow"
+            ):
+                raise RuntimeError(
+                    "FV-CG pressure projection physical gate failed: "
+                    "unreached component labels exceeded diagnostic capacity; "
+                    "sealed-component RHS compatibility is unverified"
+                )
+            if (
+                pressure_projection_physical_failure_reason
+                == "unreached_component_labels_not_converged"
+            ):
+                raise RuntimeError(
+                    "FV-CG pressure projection physical gate failed: "
+                    "unreached component labels did not converge; "
+                    "sealed-component RHS compatibility is unverified"
+                )
             raise RuntimeError(
                 "FV-CG pressure projection physical gate failed: "
                 "unreached component RHS is incompatible with a sealed "
@@ -7191,6 +7514,52 @@ class CartesianFluidSolver:
         self._reset_zmin_projection_flux_report_kernel()
         self._clear_pressure_interface_projection_divergence_kernel()
         apply_velocity_boundary_conditions()
+        if bool(pressure_outlet_zmin):
+            self.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=True,
+            )
+            converted_overflow_singletons = (
+                self.convert_hibm_row_cloud_orphan_components(
+                    max_component_cells=1,
+                    overflow_singletons_only=True,
+                    protect_velocity_dirichlet_radius_cells=2,
+                )
+            )
+            if int(converted_overflow_singletons) > 0:
+                hibm_projection_overflow_singleton_cleanup_cell_count += int(
+                    converted_overflow_singletons
+                )
+                hibm_projection_overflow_singleton_cleanup_component_count += int(
+                    self.last_hibm_row_cloud_orphan_component_count
+                )
+                self.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                    pressure_outlet_zmin=True,
+                )
+            tiny_unreached_cleanup_threshold = max(
+                0,
+                int(hibm_tiny_unreached_cleanup_component_cells),
+            )
+            if tiny_unreached_cleanup_threshold > 0:
+                for _tiny_unreached_cleanup_pass in range(8):
+                    converted_tiny_unreached = (
+                        self.convert_hibm_row_cloud_orphan_components(
+                            max_component_cells=tiny_unreached_cleanup_threshold,
+                            convert_unstamped_small_components=True,
+                            protect_velocity_dirichlet_radius_cells=0,
+                            protect_solid_band_mask=False,
+                        )
+                    )
+                    if int(converted_tiny_unreached) <= 0:
+                        break
+                    hibm_projection_tiny_unreached_cleanup_cell_count += int(
+                        converted_tiny_unreached
+                    )
+                    hibm_projection_tiny_unreached_cleanup_component_count += int(
+                        self.last_hibm_row_cloud_orphan_component_count
+                    )
+                    self.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                        pressure_outlet_zmin=True,
+                    )
         if pressure_outlet_zmin:
             self._record_zmin_projection_pre_velocity_flux_kernel()
         self.compute_divergence(pressure_outlet_zmin=pressure_outlet_zmin)
@@ -7544,6 +7913,18 @@ class CartesianFluidSolver:
             "hibm_unreached_component_rhs_integral_max_abs": float(
                 pressure_projection_unreached_rhs_integral_max_abs
             ),
+            "hibm_projection_overflow_singleton_cleanup_cell_count": int(
+                hibm_projection_overflow_singleton_cleanup_cell_count
+            ),
+            "hibm_projection_overflow_singleton_cleanup_component_count": int(
+                hibm_projection_overflow_singleton_cleanup_component_count
+            ),
+            "hibm_projection_tiny_unreached_cleanup_cell_count": int(
+                hibm_projection_tiny_unreached_cleanup_cell_count
+            ),
+            "hibm_projection_tiny_unreached_cleanup_component_count": int(
+                hibm_projection_tiny_unreached_cleanup_component_count
+            ),
             "cg_project_calls": int(self.last_project_cg_project_calls),
             "cg_iterations_total": int(self.last_project_cg_iterations_total),
             "cg_iterations_max": int(self.last_project_cg_iterations_max),
@@ -7563,6 +7944,24 @@ class CartesianFluidSolver:
             ),
             "cg_unreached_component_count": int(
                 self.last_hibm_pressure_unreached_component_count
+            ),
+            "cg_unreached_component_raw_count": int(
+                self.last_hibm_pressure_unreached_component_raw_count
+            ),
+            "cg_unreached_component_largest_cell_count": int(
+                self.last_hibm_pressure_unreached_component_largest_cell_count
+            ),
+            "cg_unreached_component_singleton_count": int(
+                self.last_hibm_pressure_unreached_component_singleton_count
+            ),
+            "cg_unreached_component_small_threshold_cells": int(
+                self.last_hibm_pressure_unreached_component_small_threshold_cells
+            ),
+            "cg_unreached_component_small_count": int(
+                self.last_hibm_pressure_unreached_component_small_count
+            ),
+            "cg_unreached_component_small_cell_count": int(
+                self.last_hibm_pressure_unreached_component_small_cell_count
             ),
             "cg_unreached_component_overflow": bool(
                 self.last_hibm_pressure_unreached_component_overflow
@@ -7587,6 +7986,12 @@ class CartesianFluidSolver:
             ),
             "hibm_solid_band_enclosed_water_cells": int(
                 self.last_hibm_solid_band_enclosed_water_cells
+            ),
+            "hibm_solid_band_velocity_dirichlet_protected_cells": int(
+                self.last_hibm_solid_band_velocity_dirichlet_protected_cells
+            ),
+            "hibm_solid_band_mask_protected_cells": int(
+                self.last_hibm_solid_band_mask_protected_cells
             ),
             # S2-A8'' host-mirror passthrough: -1 = the converted-cell
             # pressure fill never ran; otherwise the count from the most

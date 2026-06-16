@@ -7,7 +7,13 @@ import numpy as np
 import taichi as ti
 
 from simulation_core import CartesianFluidSolver, FluidDomainSpec, TaichiRuntimeConfig
-from simulation_core.fluid import CartesianGrid, GradedGridSpec, RefinementRegion, build_graded_grid
+from simulation_core.fluid import (
+    HIBM_PRESSURE_COMPONENT_CAPACITY,
+    CartesianGrid,
+    GradedGridSpec,
+    RefinementRegion,
+    build_graded_grid,
+)
 
 
 class CoreCartesianFluidSolverTests(unittest.TestCase):
@@ -2341,6 +2347,146 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
             1,
         )
 
+    def test_fv_cg_reports_unreached_component_size_distribution(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(9, 4, 9), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((9, 4, 9), dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        obstacle[2, 2, 4] = 0
+        obstacle[2, 2, 5] = 0
+        obstacle[6, 2, 6] = 0
+        solver.obstacle.from_numpy(obstacle)
+
+        unreached = solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+
+        self.assertEqual(unreached, 3)
+        self.assertEqual(solver.last_hibm_pressure_unreached_component_count, 2)
+        self.assertEqual(solver.last_hibm_pressure_unreached_component_raw_count, 2)
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_largest_cell_count,
+            2,
+        )
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_singleton_count,
+            1,
+        )
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_small_threshold_cells,
+            128,
+        )
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_small_count,
+            2,
+        )
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_small_cell_count,
+            3,
+        )
+
+        report = solver.project(
+            iterations=200,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+        )
+
+        self.assertEqual(int(report["cg_unreached_component_raw_count"]), 2)
+        self.assertEqual(
+            int(report["cg_unreached_component_largest_cell_count"]),
+            2,
+        )
+        self.assertEqual(int(report["cg_unreached_component_singleton_count"]), 1)
+        self.assertEqual(
+            int(report["cg_unreached_component_small_threshold_cells"]),
+            128,
+        )
+        self.assertEqual(int(report["cg_unreached_component_small_count"]), 2)
+        self.assertEqual(int(report["cg_unreached_component_small_cell_count"]), 3)
+
+    def test_fv_cg_cleans_raw_singleton_overflow_before_projection(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(23, 23, 23), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((23, 23, 23), dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        singleton_count = 0
+        for i in range(1, 23, 2):
+            for j in range(1, 23, 2):
+                for k in range(2, 23, 2):
+                    obstacle[i, j, k] = 0
+                    singleton_count += 1
+        solver.obstacle.from_numpy(obstacle)
+
+        unreached = solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+
+        self.assertEqual(unreached, singleton_count)
+        self.assertGreater(singleton_count, HIBM_PRESSURE_COMPONENT_CAPACITY)
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_count,
+            HIBM_PRESSURE_COMPONENT_CAPACITY,
+        )
+        self.assertTrue(solver.last_hibm_pressure_unreached_component_overflow)
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_raw_count,
+            singleton_count,
+        )
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_largest_cell_count,
+            1,
+        )
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_singleton_count,
+            singleton_count,
+        )
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_small_count,
+            singleton_count,
+        )
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_small_cell_count,
+            singleton_count,
+        )
+
+        report = solver.project(
+            iterations=64,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+            pressure_solve_failure_policy="report",
+        )
+
+        self.assertFalse(report["pressure_projection_physical_failure"])
+        self.assertEqual(report["pressure_projection_physical_failure_reason"], "")
+        self.assertEqual(
+            int(report["hibm_projection_overflow_singleton_cleanup_cell_count"]),
+            singleton_count,
+        )
+        self.assertEqual(
+            int(
+                report[
+                    "hibm_projection_overflow_singleton_cleanup_component_count"
+                ]
+            ),
+            singleton_count,
+        )
+        self.assertEqual(int(report["cg_unreached_component_count"]), 0)
+        self.assertEqual(int(report["cg_unreached_component_raw_count"]), 0)
+        self.assertEqual(
+            int(report["cg_unreached_component_largest_cell_count"]),
+            0,
+        )
+        self.assertEqual(
+            int(report["cg_unreached_component_singleton_count"]),
+            0,
+        )
+
     def test_fv_cg_reports_unreached_component_rhs_incompatibility(self) -> None:
         solver = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(9, 4, 9), dt_s=1.0e-3),
@@ -2381,6 +2527,111 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         self.assertGreater(
             float(report["hibm_unreached_component_rhs_mean_max_abs"]),
             0.0,
+        )
+
+    def test_fv_cg_tiny_unreached_cleanup_is_opt_in(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(9, 4, 9), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((9, 4, 9), dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        tiny_cells = ((2, 2, 4), (2, 2, 5))
+        large_cells = tuple((6, 2, k) for k in range(2, 7))
+        for cell in tiny_cells + large_cells:
+            obstacle[cell] = 0
+        solver.obstacle.from_numpy(obstacle)
+        solver.volume_source_s[2, 2, 4] = 1.0
+        solver.volume_source_s[2, 2, 5] = 3.0
+        solver.volume_source_s[6, 2, 3] = -2.0
+
+        report = solver.project(
+            iterations=200,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+            hibm_tiny_unreached_cleanup_component_cells=4,
+        )
+
+        self.assertTrue(report["cg_converged_all"])
+        self.assertTrue(report["pressure_projection_physical_failure"])
+        self.assertEqual(
+            report["pressure_projection_physical_failure_reason"],
+            "unreached_component_rhs_incompatible",
+        )
+        self.assertEqual(
+            int(report["hibm_projection_tiny_unreached_cleanup_cell_count"]),
+            len(tiny_cells),
+        )
+        self.assertEqual(
+            int(report["hibm_projection_tiny_unreached_cleanup_component_count"]),
+            1,
+        )
+        self.assertEqual(int(report["cg_unreached_component_raw_count"]), 1)
+        self.assertEqual(
+            int(report["cg_unreached_component_largest_cell_count"]),
+            len(large_cells),
+        )
+        self.assertEqual(
+            int(report["hibm_unreached_incompatible_component_count"]),
+            1,
+        )
+        obstacle_after = solver.obstacle.to_numpy()
+        self.assertTrue(all(int(obstacle_after[cell]) == 1 for cell in tiny_cells))
+        self.assertTrue(all(int(obstacle_after[cell]) == 0 for cell in large_cells))
+
+    def test_fv_cg_reports_unreached_component_label_overflow_as_physical_failure(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(31, 31, 31), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((31, 31, 31), dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        component_count = 0
+        target_component_count = HIBM_PRESSURE_COMPONENT_CAPACITY + 1
+        for i in range(1, 30, 2):
+            if component_count >= target_component_count:
+                break
+            for j in range(1, 30, 2):
+                if component_count >= target_component_count:
+                    break
+                for k in range(2, 29, 3):
+                    if component_count >= target_component_count:
+                        break
+                    obstacle[i, j, k] = 0
+                    obstacle[i, j, k + 1] = 0
+                    component_count += 1
+        solver.obstacle.from_numpy(obstacle)
+        unreached = solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        self.assertEqual(unreached, 2 * component_count)
+        self.assertGreater(component_count, HIBM_PRESSURE_COMPONENT_CAPACITY)
+        self.assertTrue(solver.last_hibm_pressure_unreached_component_overflow)
+        self.assertEqual(
+            solver.last_hibm_pressure_unreached_component_singleton_count,
+            0,
+        )
+
+        report = solver.project(
+            iterations=64,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-6,
+        )
+
+        self.assertTrue(report["cg_converged_all"])
+        self.assertTrue(report["pressure_projection_physical_failure"])
+        self.assertEqual(
+            report["pressure_projection_physical_failure_reason"],
+            "unreached_component_label_overflow",
+        )
+        self.assertTrue(report["cg_unreached_component_overflow"])
+        self.assertEqual(
+            int(report["hibm_projection_overflow_singleton_cleanup_cell_count"]),
+            0,
         )
 
     def test_fv_cg_raises_on_unreached_component_rhs_incompatibility(
@@ -4731,6 +4982,106 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
         self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), 1)
         self.assertEqual(int(solver.last_hibm_solid_band_enclosed_water_cells), 1)
 
+    def test_band_split_can_protect_classified_no_slip_row_neighborhood(
+        self,
+    ) -> None:
+        import os
+        from unittest import mock
+
+        solver, node_kind_code = self._solver_with_two_band_candidates()
+        solver.velocity_dirichlet_boundary_marker_region_id.fill(-1)
+        solver.velocity_dirichlet_boundary_marker_region_id[2, 2, 2] = 7
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HIBM_BAND_COUNT_ONLY", None)
+            os.environ.pop("HIBM_BAND_INTERIOR_ONLY", None)
+            marked = solver.mark_hibm_solid_band_nonprojectable_cells(
+                pressure_outlet_zmin=False,
+                node_kind_code=node_kind_code,
+                unclassified_node_code=self._NODE_NONE,
+                protect_velocity_dirichlet_radius_cells=0,
+                protect_velocity_dirichlet_marker_region_id=7,
+            )
+
+        self.assertEqual(marked, 0)
+        self.assertEqual(int(solver.last_hibm_solid_band_marked_increment), 0)
+        self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), 0)
+        self.assertEqual(int(solver.last_hibm_solid_band_enclosed_water_cells), 1)
+        self.assertEqual(
+            int(solver.last_hibm_solid_band_velocity_dirichlet_protected_cells),
+            1,
+        )
+        self.assertEqual(int(solver.obstacle[2, 2, 2]), 0)
+        self.assertEqual(
+            tuple(float(solver.velocity[2, 2, 2][axis]) for axis in range(3)),
+            (1.0, -2.0, 3.0),
+        )
+        self.assertAlmostEqual(float(solver.volume_source_s[2, 2, 2]), 7.0)
+
+    def test_band_split_protection_respects_marker_region_filter(self) -> None:
+        import os
+        from unittest import mock
+
+        solver, node_kind_code = self._solver_with_two_band_candidates()
+        solver.velocity_dirichlet_boundary_marker_region_id.fill(-1)
+        solver.velocity_dirichlet_boundary_marker_region_id[2, 2, 2] = 7
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HIBM_BAND_COUNT_ONLY", None)
+            os.environ.pop("HIBM_BAND_INTERIOR_ONLY", None)
+            marked = solver.mark_hibm_solid_band_nonprojectable_cells(
+                pressure_outlet_zmin=False,
+                node_kind_code=node_kind_code,
+                unclassified_node_code=self._NODE_NONE,
+                protect_velocity_dirichlet_radius_cells=0,
+                protect_velocity_dirichlet_marker_region_id=8,
+            )
+
+        self.assertEqual(marked, 1)
+        self.assertEqual(int(solver.last_hibm_solid_band_marked_increment), 1)
+        self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), 1)
+        self.assertEqual(
+            int(solver.last_hibm_solid_band_velocity_dirichlet_protected_cells),
+            0,
+        )
+        self.assertEqual(int(solver.obstacle[2, 2, 2]), 1)
+
+    def test_band_split_can_protect_source_probe_clear_mask_cells(self) -> None:
+        import os
+        from unittest import mock
+
+        solver, node_kind_code = self._solver_with_two_band_candidates()
+        protection_mask = np.zeros(tuple(solver.obstacle.shape), dtype=np.int32)
+        protection_mask[2, 2, 2] = 1
+        solver.set_hibm_solid_band_protection_mask_from_numpy(protection_mask)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HIBM_BAND_COUNT_ONLY", None)
+            os.environ.pop("HIBM_BAND_INTERIOR_ONLY", None)
+            marked = solver.mark_hibm_solid_band_nonprojectable_cells(
+                pressure_outlet_zmin=False,
+                node_kind_code=node_kind_code,
+                unclassified_node_code=self._NODE_NONE,
+                protect_solid_band_mask=True,
+            )
+
+        self.assertEqual(marked, 0)
+        self.assertEqual(int(solver.last_hibm_solid_band_marked_increment), 0)
+        self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), 0)
+        self.assertEqual(int(solver.last_hibm_solid_band_mask_protected_cells), 1)
+        self.assertEqual(int(solver.obstacle[2, 2, 2]), 0)
+
+    def test_no_slip_sampling_obstacle_exposes_dirichlet_rows_only(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        solver.obstacle[1, 1, 1] = 1
+        solver.obstacle[2, 2, 2] = 1
+        solver.velocity_dirichlet_boundary_active[2, 2, 2] = 1
+
+        sampling_obstacle = solver.build_hibm_no_slip_sampling_obstacle()
+
+        self.assertEqual(int(sampling_obstacle[1, 1, 1]), 1)
+        self.assertEqual(int(sampling_obstacle[2, 2, 2]), 0)
+
     def test_projection_report_exposes_band_population_split_mirrors(self) -> None:
         import os
         from unittest import mock
@@ -4767,6 +5118,11 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
         # unmeasured rather than as misleading zeros.
         self.assertEqual(int(report["hibm_solid_band_interior_cells"]), -1)
         self.assertEqual(int(report["hibm_solid_band_enclosed_water_cells"]), -1)
+        self.assertEqual(
+            int(report["hibm_solid_band_velocity_dirichlet_protected_cells"]),
+            -1,
+        )
+        self.assertEqual(int(report["hibm_solid_band_mask_protected_cells"]), -1)
 
     def test_restore_state_resets_band_population_split_mirrors(self) -> None:
         solver = CartesianFluidSolver(
@@ -4776,11 +5132,18 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
         solver.save_state()
         solver.last_hibm_solid_band_interior_cells = 5
         solver.last_hibm_solid_band_enclosed_water_cells = 6
+        solver.last_hibm_solid_band_velocity_dirichlet_protected_cells = 7
+        solver.last_hibm_solid_band_mask_protected_cells = 8
 
         solver.restore_state()
 
         self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), -1)
         self.assertEqual(int(solver.last_hibm_solid_band_enclosed_water_cells), -1)
+        self.assertEqual(
+            int(solver.last_hibm_solid_band_velocity_dirichlet_protected_cells),
+            -1,
+        )
+        self.assertEqual(int(solver.last_hibm_solid_band_mask_protected_cells), -1)
 
 
 class HibmConvertedCellPressureFillTests(unittest.TestCase):

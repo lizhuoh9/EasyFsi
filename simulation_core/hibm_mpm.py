@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import numpy as np
 import taichi as ti
 
 from .pressure_interface import (
@@ -21,6 +22,12 @@ FSI_COUPLING_MODE_CHOICES = (
     FSI_COUPLING_MODE_HIBM_MPM_SHARP,
 )
 HIBM_OWNER_RELOCATION_WALK_STEPS = 24
+HIBM_NO_SLIP_NEAREST_FLUID_FALLBACK_RADIUS_CELLS = 4
+HIBM_OVERFLOW_SINGLETON_NO_SLIP_PROTECTION_RADIUS_CELLS = 2
+HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS = 4
+HIBM_PRESSURE_NEUMANN_NEAREST_FLUID_FALLBACK_RADIUS_CELLS = 2
+HIBM_PRESSURE_NEUMANN_ZERO_GRADIENT_TOLERANCE_PA_PER_M = 1.0e-12
+HIBM_PRESSURE_DISCONNECTED_SMALL_COMPONENT_THRESHOLD_CELLS = 128
 PRESSURE_NEUMANN_INVALID_DIAGNOSTIC_CAPACITY = 1024
 PRESSURE_NEUMANN_INVALID_REASON_UNRECONSTRUCTABLE = 1
 PRESSURE_NEUMANN_INVALID_REASON_BAD_MARKER = 2
@@ -93,6 +100,17 @@ class HibmMpmNoSlipResidualReport:
     invalid_marker_count: int
     max_no_slip_residual_mps: float
     l2_no_slip_residual_mps: float
+    direct_sample_marker_count: int = 0
+    normal_walk_sample_marker_count: int = 0
+    nearest_fluid_sample_marker_count: int = 0
+    zero_normal_marker_count: int = 0
+    no_fluid_sample_marker_count: int = 0
+    primary_region_valid_marker_count: int = 0
+    primary_region_invalid_marker_count: int = 0
+    secondary_region_valid_marker_count: int = 0
+    secondary_region_invalid_marker_count: int = 0
+    other_region_valid_marker_count: int = 0
+    other_region_invalid_marker_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -144,6 +162,10 @@ class HibmMpmVelocityDirichletBoundaryReport:
     active_velocity_dirichlet_rows: int
     inactive_obstacle_rows: int
     max_abs_velocity_mps: float
+    primary_region_active_rows: int = 0
+    secondary_region_active_rows: int = 0
+    other_region_active_rows: int = 0
+    unassigned_region_active_rows: int = 0
     invalid_reconstruction_row_count: int = 0
     invalid_no_fluid_sample_row_count: int = 0
     invalid_nonpositive_gap_row_count: int = 0
@@ -155,6 +177,32 @@ class HibmMpmVelocityDirichletBoundaryReport:
     relocation_blocked_row_count: int = 0
     min_projection_weight: float = 0.0
     max_projection_weight: float = 0.0
+
+
+@dataclass(frozen=True)
+class HibmMpmPressureDisconnectedRegionReport:
+    cell_count: int = 0
+    component_count: int = 0
+    component_raw_count: int = 0
+    largest_component_cell_count: int = 0
+    singleton_component_count: int = 0
+    small_component_threshold_cells: int = (
+        HIBM_PRESSURE_DISCONNECTED_SMALL_COMPONENT_THRESHOLD_CELLS
+    )
+    small_component_count: int = 0
+    small_component_cell_count: int = 0
+    component_overflow: bool = False
+    component_labels_converged: bool = True
+    min_i: int = -1
+    min_j: int = -1
+    min_k: int = -1
+    max_i: int = -1
+    max_j: int = -1
+    max_k: int = -1
+    primary_region_stencil_cell_count: int = 0
+    secondary_region_stencil_cell_count: int = 0
+    other_region_stencil_cell_count: int = 0
+    unassigned_region_stencil_cell_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -200,6 +248,7 @@ class HibmMpmSharpFluidToMpmLoadReport:
     internal_obstacle_cell_count: int
     solid_band_nonprojectable_cell_count: int
     pressure_disconnected_nonprojectable_cell_count: int
+    pressure_disconnected_region: HibmMpmPressureDisconnectedRegionReport
     boundary_conditions: HibmMpmIbBoundaryConditionReport
     pressure_neumann_gradient: HibmMpmPressureNeumannGradientReport | None
     velocity_dirichlet: HibmMpmVelocityDirichletBoundaryReport
@@ -218,6 +267,12 @@ class HibmMpmSharpFluidToMpmLoadReport:
     # (default bitwise-unchanged mode).
     solid_band_interior_cell_count: int = -1
     solid_band_enclosed_water_cell_count: int = -1
+    solid_band_velocity_dirichlet_protected_cell_count: int = -1
+    solid_band_mask_protected_cell_count: int = -1
+    row_cloud_orphan_cell_count: int = 0
+    row_cloud_orphan_component_count: int = 0
+    overflow_singleton_cleanup_cell_count: int = 0
+    overflow_singleton_cleanup_component_count: int = 0
     # S2-A12 air-backed closure region (default off => -1 sentinels):
     # selected-component conversion census + far-side seeding health.
     air_backed_cell_count: int = -1
@@ -238,6 +293,7 @@ class HibmMpmSharpMpmStepReport:
     next_internal_obstacle_cell_count: int
     next_solid_band_nonprojectable_cell_count: int
     next_pressure_disconnected_nonprojectable_cell_count: int
+    next_pressure_disconnected_region: HibmMpmPressureDisconnectedRegionReport
     next_boundary_conditions: HibmMpmIbBoundaryConditionReport
     next_velocity_dirichlet: HibmMpmVelocityDirichletBoundaryReport
     next_pressure_neumann: HibmMpmPressureNeumannMatrixReport
@@ -245,6 +301,12 @@ class HibmMpmSharpMpmStepReport:
     next_pressure_neumann_invalid_diagnostic_rows: tuple[dict[str, Any], ...] = ()
     next_solid_band_interior_cell_count: int = -1
     next_solid_band_enclosed_water_cell_count: int = -1
+    next_solid_band_velocity_dirichlet_protected_cell_count: int = -1
+    next_solid_band_mask_protected_cell_count: int = -1
+    next_row_cloud_orphan_cell_count: int = 0
+    next_row_cloud_orphan_component_count: int = 0
+    next_overflow_singleton_cleanup_cell_count: int = 0
+    next_overflow_singleton_cleanup_component_count: int = 0
     post_solid_kinematic_projection_applied: bool = False
     post_solid_fluid_projection: dict[str, Any] | None = None
     post_solid_no_slip_residual: HibmMpmNoSlipResidualReport | None = None
@@ -273,6 +335,137 @@ def _normalize_vector3(value: Sequence[float], *, name: str) -> tuple[float, flo
     if norm <= 0.0:
         raise ValueError(f"{name} must contain non-zero vectors")
     return tuple(component / norm for component in vector)
+
+
+def _positive_divergence_stencil_touch_mask(row_mask: np.ndarray) -> np.ndarray:
+    touch = np.array(row_mask, dtype=bool, copy=True)
+    touch[:-1, :, :] |= row_mask[1:, :, :]
+    touch[:, :-1, :] |= row_mask[:, 1:, :]
+    touch[:, :, :-1] |= row_mask[:, :, 1:]
+    return touch
+
+
+def _pressure_disconnected_component_distribution_kwargs(
+    fluid: Any,
+) -> dict[str, int]:
+    return {
+        "component_raw_count": int(
+            getattr(fluid, "last_hibm_pressure_unreached_component_raw_count", 0)
+        ),
+        "largest_component_cell_count": int(
+            getattr(
+                fluid,
+                "last_hibm_pressure_unreached_component_largest_cell_count",
+                0,
+            )
+        ),
+        "singleton_component_count": int(
+            getattr(
+                fluid,
+                "last_hibm_pressure_unreached_component_singleton_count",
+                0,
+            )
+        ),
+        "small_component_threshold_cells": int(
+            getattr(
+                fluid,
+                "last_hibm_pressure_unreached_component_small_threshold_cells",
+                HIBM_PRESSURE_DISCONNECTED_SMALL_COMPONENT_THRESHOLD_CELLS,
+            )
+        ),
+        "small_component_count": int(
+            getattr(
+                fluid,
+                "last_hibm_pressure_unreached_component_small_count",
+                0,
+            )
+        ),
+        "small_component_cell_count": int(
+            getattr(
+                fluid,
+                "last_hibm_pressure_unreached_component_small_cell_count",
+                0,
+            )
+        ),
+    }
+
+
+def hibm_mpm_pressure_disconnected_region_report(
+    fluid: Any,
+    *,
+    primary_region_id: int | None,
+    secondary_region_id: int | None,
+) -> HibmMpmPressureDisconnectedRegionReport:
+    obstacle = fluid.obstacle.to_numpy()
+    reachable = fluid.hibm_pressure_outlet_reachable.to_numpy()
+    barrier = fluid.hibm_pressure_reachability_barrier.to_numpy()
+    unreached = (obstacle == 0) & (barrier == 0) & (reachable == 0)
+    cell_count = int(np.count_nonzero(unreached))
+    if cell_count <= 0:
+        return HibmMpmPressureDisconnectedRegionReport(
+            component_count=int(
+                getattr(fluid, "last_hibm_pressure_unreached_component_count", 0)
+            ),
+            **_pressure_disconnected_component_distribution_kwargs(fluid),
+            component_overflow=bool(
+                getattr(fluid, "last_hibm_pressure_unreached_component_overflow", False)
+            ),
+            component_labels_converged=bool(
+                getattr(fluid, "last_hibm_pressure_component_labels_converged", True)
+            ),
+        )
+
+    coords = np.argwhere(unreached)
+    mins = coords.min(axis=0)
+    maxs = coords.max(axis=0)
+    active_rows = fluid.velocity_dirichlet_boundary_active.to_numpy() != 0
+    row_region = fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
+    primary_mask = np.zeros_like(active_rows, dtype=bool)
+    if primary_region_id is not None and int(primary_region_id) >= 0:
+        primary_mask = active_rows & (row_region == int(primary_region_id))
+    secondary_mask = np.zeros_like(active_rows, dtype=bool)
+    if secondary_region_id is not None and int(secondary_region_id) >= 0:
+        secondary_mask = (
+            active_rows
+            & (row_region == int(secondary_region_id))
+            & ~primary_mask
+        )
+    unassigned_mask = active_rows & (row_region < 0)
+    other_mask = active_rows & ~(primary_mask | secondary_mask | unassigned_mask)
+
+    primary_touch = _positive_divergence_stencil_touch_mask(primary_mask)
+    secondary_touch = _positive_divergence_stencil_touch_mask(secondary_mask)
+    other_touch = _positive_divergence_stencil_touch_mask(other_mask)
+    unassigned_touch = _positive_divergence_stencil_touch_mask(unassigned_mask)
+    return HibmMpmPressureDisconnectedRegionReport(
+        cell_count=cell_count,
+        component_count=int(
+            getattr(fluid, "last_hibm_pressure_unreached_component_count", 0)
+        ),
+        **_pressure_disconnected_component_distribution_kwargs(fluid),
+        component_overflow=bool(
+            getattr(fluid, "last_hibm_pressure_unreached_component_overflow", False)
+        ),
+        component_labels_converged=bool(
+            getattr(fluid, "last_hibm_pressure_component_labels_converged", True)
+        ),
+        min_i=int(mins[0]),
+        min_j=int(mins[1]),
+        min_k=int(mins[2]),
+        max_i=int(maxs[0]),
+        max_j=int(maxs[1]),
+        max_k=int(maxs[2]),
+        primary_region_stencil_cell_count=int(
+            np.count_nonzero(unreached & primary_touch)
+        ),
+        secondary_region_stencil_cell_count=int(
+            np.count_nonzero(unreached & secondary_touch)
+        ),
+        other_region_stencil_cell_count=int(np.count_nonzero(unreached & other_touch)),
+        unassigned_region_stencil_cell_count=int(
+            np.count_nonzero(unreached & unassigned_touch)
+        ),
+    )
 
 
 @ti.data_oriented
@@ -441,6 +634,50 @@ class HibmMpmSurfaceMarkers:
         self.report_no_slip_invalid_marker_count = ti.field(dtype=ti.i32, shape=())
         self.report_no_slip_max_residual_mps = ti.field(dtype=ti.f32, shape=())
         self.report_no_slip_sum_residual2_mps2 = ti.field(dtype=ti.f64, shape=())
+        self.report_no_slip_direct_sample_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_no_slip_normal_walk_sample_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_no_slip_nearest_fluid_sample_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_no_slip_zero_normal_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_no_slip_no_fluid_sample_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_no_slip_primary_region_valid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_no_slip_primary_region_invalid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_no_slip_secondary_region_valid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_no_slip_secondary_region_invalid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_no_slip_other_region_valid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_no_slip_other_region_invalid_marker_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.report_mpm_scatter_marker_force_n = ti.Vector.field(
             3,
             dtype=ti.f64,
@@ -3813,6 +4050,7 @@ class HibmMpmSurfaceMarkers:
         )
         split_viscous_path = viscosity > 0.0 and bool(two_sided_pressure)
         if pressure_only_fast_path:
+            _debug_stage_progress("stress_sampling:pressure_only:start")
             self._sample_pressure_only_marker_tractions_kernel(
                 pressure_field,
                 obstacle_field,
@@ -3833,7 +4071,9 @@ class HibmMpmSurfaceMarkers:
                 one_sided_region_id,
                 one_sided_reference_pressure,
             )
+            _debug_stage_progress("stress_sampling:pressure_only:done")
         elif split_viscous_path:
+            _debug_stage_progress("stress_sampling:split_pressure:start")
             self._sample_fluid_stress_to_marker_tractions_kernel(
                 velocity_field,
                 pressure_field,
@@ -3868,7 +4108,11 @@ class HibmMpmSurfaceMarkers:
                 node_anchor_available,
                 use_sampling_obstacle,
             )
+            _debug_stage_progress("stress_sampling:split_pressure:done")
+            _debug_stage_progress("stress_sampling:split_reset_reports:start")
             self._reset_split_viscous_marker_traction_reports_kernel()
+            _debug_stage_progress("stress_sampling:split_reset_reports:done")
+            _debug_stage_progress("stress_sampling:split_viscous_mode_2:start")
             self._add_split_viscous_mode_marker_tractions_kernel(
                 velocity_field,
                 obstacle_field,
@@ -3893,7 +4137,9 @@ class HibmMpmSurfaceMarkers:
                 use_sampling_obstacle,
                 2,
             )
+            _debug_stage_progress("stress_sampling:split_viscous_mode_2:done")
             if far_region_id != -1:
+                _debug_stage_progress("stress_sampling:split_viscous_mode_3:start")
                 self._add_split_viscous_mode_marker_tractions_kernel(
                     velocity_field,
                     obstacle_field,
@@ -3918,6 +4164,8 @@ class HibmMpmSurfaceMarkers:
                     use_sampling_obstacle,
                     3,
                 )
+                _debug_stage_progress("stress_sampling:split_viscous_mode_3:done")
+                _debug_stage_progress("stress_sampling:split_viscous_mode_4:start")
                 self._add_split_viscous_mode_marker_tractions_kernel(
                     velocity_field,
                     obstacle_field,
@@ -3942,7 +4190,9 @@ class HibmMpmSurfaceMarkers:
                     use_sampling_obstacle,
                     4,
                 )
+                _debug_stage_progress("stress_sampling:split_viscous_mode_4:done")
             if one_sided_region_id != -1:
+                _debug_stage_progress("stress_sampling:split_viscous_mode_5:start")
                 self._add_split_viscous_mode_marker_tractions_kernel(
                     velocity_field,
                     obstacle_field,
@@ -3967,6 +4217,8 @@ class HibmMpmSurfaceMarkers:
                     use_sampling_obstacle,
                     5,
                 )
+                _debug_stage_progress("stress_sampling:split_viscous_mode_5:done")
+                _debug_stage_progress("stress_sampling:split_viscous_mode_6:start")
                 self._add_split_viscous_mode_marker_tractions_kernel(
                     velocity_field,
                     obstacle_field,
@@ -3991,7 +4243,9 @@ class HibmMpmSurfaceMarkers:
                     use_sampling_obstacle,
                     6,
                 )
+                _debug_stage_progress("stress_sampling:split_viscous_mode_6:done")
             if bool(use_pressure_anchor_fallback):
+                _debug_stage_progress("stress_sampling:split_viscous_mode_7:start")
                 self._add_split_viscous_mode_marker_tractions_kernel(
                     velocity_field,
                     obstacle_field,
@@ -4016,7 +4270,9 @@ class HibmMpmSurfaceMarkers:
                     use_sampling_obstacle,
                     7,
                 )
+                _debug_stage_progress("stress_sampling:split_viscous_mode_7:done")
         else:
+            _debug_stage_progress("stress_sampling:full:start")
             self._sample_fluid_stress_to_marker_tractions_kernel(
                 velocity_field,
                 pressure_field,
@@ -4051,6 +4307,7 @@ class HibmMpmSurfaceMarkers:
                 node_anchor_available,
                 use_sampling_obstacle,
             )
+            _debug_stage_progress("stress_sampling:full:done")
         return HibmMpmFluidStressSampleReport(
             valid_marker_count=int(self.report_stress_valid_marker_count[None]),
             invalid_marker_count=int(self.report_stress_invalid_marker_count[None]),
@@ -4748,11 +5005,24 @@ class HibmMpmSurfaceMarkers:
         nx: ti.i32,
         ny: ti.i32,
         nz: ti.i32,
+        primary_region_id: ti.i32,
+        secondary_region_id: ti.i32,
     ):
         self.report_no_slip_valid_marker_count[None] = 0
         self.report_no_slip_invalid_marker_count[None] = 0
         self.report_no_slip_max_residual_mps[None] = 0.0
         self.report_no_slip_sum_residual2_mps2[None] = ti.cast(0.0, ti.f64)
+        self.report_no_slip_direct_sample_marker_count[None] = 0
+        self.report_no_slip_normal_walk_sample_marker_count[None] = 0
+        self.report_no_slip_nearest_fluid_sample_marker_count[None] = 0
+        self.report_no_slip_zero_normal_marker_count[None] = 0
+        self.report_no_slip_no_fluid_sample_marker_count[None] = 0
+        self.report_no_slip_primary_region_valid_marker_count[None] = 0
+        self.report_no_slip_primary_region_invalid_marker_count[None] = 0
+        self.report_no_slip_secondary_region_valid_marker_count[None] = 0
+        self.report_no_slip_secondary_region_invalid_marker_count[None] = 0
+        self.report_no_slip_other_region_valid_marker_count[None] = 0
+        self.report_no_slip_other_region_invalid_marker_count[None] = 0
         for marker in range(marker_count):
             grid_coordinate = self._grid_coordinate_from_fields(
                 self.x_gamma_m[marker],
@@ -4766,6 +5036,7 @@ class HibmMpmSurfaceMarkers:
                 ny,
                 nz,
             )
+            sample_source = 0
             fluid_velocity, fluid_weight = self._sample_fluid_velocity_trilinear(
                 velocity_field,
                 obstacle_field,
@@ -4777,9 +5048,171 @@ class HibmMpmSurfaceMarkers:
                 nz,
             )
             if fluid_weight > 1.0e-12:
+                sample_source = 1
+            if fluid_weight <= 1.0e-12:
+                normal = self.n_gamma[marker]
+                normal_norm = normal.norm()
+                if normal_norm > 1.0e-12:
+                    walk_normal = normal / normal_norm
+                    base_i = ti.min(
+                        ti.max(ti.floor(grid_coordinate.x + 0.5, ti.i32), 0),
+                        nx - 1,
+                    )
+                    base_j = ti.min(
+                        ti.max(ti.floor(grid_coordinate.y + 0.5, ti.i32), 0),
+                        ny - 1,
+                    )
+                    base_k = ti.min(
+                        ti.max(ti.floor(grid_coordinate.z + 0.5, ti.i32), 0),
+                        nz - 1,
+                    )
+                    cell_width_x = cell_face_x_m[base_i + 1] - cell_face_x_m[base_i]
+                    cell_width_y = cell_face_y_m[base_j + 1] - cell_face_y_m[base_j]
+                    cell_width_z = cell_face_z_m[base_k + 1] - cell_face_z_m[base_k]
+                    walk_step_m = 0.5 / ti.max(
+                        ti.abs(walk_normal.x) / ti.max(cell_width_x, 1.0e-12)
+                        + ti.abs(walk_normal.y) / ti.max(cell_width_y, 1.0e-12)
+                        + ti.abs(walk_normal.z) / ti.max(cell_width_z, 1.0e-12),
+                        1.0e-12,
+                    )
+                    fallback_found = 0
+                    for side_index in ti.static(range(2)):
+                        side_sign = 1.0
+                        if side_index == 1:
+                            side_sign = -1.0
+                        step_index = 0
+                        while (
+                            step_index < HIBM_OWNER_RELOCATION_WALK_STEPS
+                            and fallback_found == 0
+                        ):
+                            candidate_position = (
+                                self.x_gamma_m[marker]
+                                + walk_normal
+                                * (
+                                    side_sign
+                                    * walk_step_m
+                                    * ti.cast(step_index + 1, ti.f32)
+                                )
+                            )
+                            candidate_coordinate = self._grid_coordinate_from_fields(
+                                candidate_position,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            candidate_velocity, candidate_weight = (
+                                self._sample_fluid_velocity_trilinear(
+                                    velocity_field,
+                                    obstacle_field,
+                                    candidate_coordinate.x,
+                                    candidate_coordinate.y,
+                                    candidate_coordinate.z,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                            )
+                            if candidate_weight > 1.0e-12:
+                                fluid_velocity = candidate_velocity
+                                fluid_weight = candidate_weight
+                                sample_source = 2
+                                fallback_found = 1
+                            step_index += 1
+                else:
+                    self.report_no_slip_zero_normal_marker_count[None] += 1
+                if fluid_weight <= 1.0e-12:
+                    base_i = ti.min(
+                        ti.max(ti.floor(grid_coordinate.x + 0.5, ti.i32), 0),
+                        nx - 1,
+                    )
+                    base_j = ti.min(
+                        ti.max(ti.floor(grid_coordinate.y + 0.5, ti.i32), 0),
+                        ny - 1,
+                    )
+                    base_k = ti.min(
+                        ti.max(ti.floor(grid_coordinate.z + 0.5, ti.i32), 0),
+                        nz - 1,
+                    )
+                    nearest_found = 0
+                    nearest_distance2 = 1.0e30
+                    nearest_velocity = ti.Vector([0.0, 0.0, 0.0])
+                    di = -HIBM_NO_SLIP_NEAREST_FLUID_FALLBACK_RADIUS_CELLS
+                    while di <= HIBM_NO_SLIP_NEAREST_FLUID_FALLBACK_RADIUS_CELLS:
+                        dj = -HIBM_NO_SLIP_NEAREST_FLUID_FALLBACK_RADIUS_CELLS
+                        while dj <= HIBM_NO_SLIP_NEAREST_FLUID_FALLBACK_RADIUS_CELLS:
+                            dk = -HIBM_NO_SLIP_NEAREST_FLUID_FALLBACK_RADIUS_CELLS
+                            while (
+                                dk
+                                <= HIBM_NO_SLIP_NEAREST_FLUID_FALLBACK_RADIUS_CELLS
+                            ):
+                                candidate_i = base_i + di
+                                candidate_j = base_j + dj
+                                candidate_k = base_k + dk
+                                if (
+                                    0 <= candidate_i
+                                    and candidate_i < nx
+                                    and 0 <= candidate_j
+                                    and candidate_j < ny
+                                    and 0 <= candidate_k
+                                    and candidate_k < nz
+                                ):
+                                    if (
+                                        obstacle_field[
+                                            candidate_i,
+                                            candidate_j,
+                                            candidate_k,
+                                        ]
+                                        == 0
+                                    ):
+                                        candidate_center = ti.Vector(
+                                            [
+                                                cell_center_x_m[candidate_i],
+                                                cell_center_y_m[candidate_j],
+                                                cell_center_z_m[candidate_k],
+                                            ]
+                                        )
+                                        delta = (
+                                            candidate_center - self.x_gamma_m[marker]
+                                        )
+                                        distance2 = delta.dot(delta)
+                                        if distance2 < nearest_distance2:
+                                            nearest_distance2 = distance2
+                                            nearest_velocity = velocity_field[
+                                                candidate_i,
+                                                candidate_j,
+                                                candidate_k,
+                                            ]
+                                            nearest_found = 1
+                                dk += 1
+                            dj += 1
+                        di += 1
+                    if nearest_found != 0:
+                        fluid_velocity = nearest_velocity
+                        fluid_weight = 1.0
+                        sample_source = 3
+            if fluid_weight > 1.0e-12:
                 residual = fluid_velocity - self.v_gamma_mps[marker]
                 residual_norm = residual.norm()
                 self.report_no_slip_valid_marker_count[None] += 1
+                marker_region = self.region_id[marker]
+                if marker_region == primary_region_id:
+                    self.report_no_slip_primary_region_valid_marker_count[None] += 1
+                elif marker_region == secondary_region_id:
+                    self.report_no_slip_secondary_region_valid_marker_count[None] += 1
+                else:
+                    self.report_no_slip_other_region_valid_marker_count[None] += 1
+                if sample_source == 1:
+                    self.report_no_slip_direct_sample_marker_count[None] += 1
+                elif sample_source == 2:
+                    self.report_no_slip_normal_walk_sample_marker_count[None] += 1
+                elif sample_source == 3:
+                    self.report_no_slip_nearest_fluid_sample_marker_count[None] += 1
                 ti.atomic_max(
                     self.report_no_slip_max_residual_mps[None],
                     residual_norm,
@@ -4790,6 +5223,14 @@ class HibmMpmSurfaceMarkers:
                 )
             else:
                 self.report_no_slip_invalid_marker_count[None] += 1
+                self.report_no_slip_no_fluid_sample_marker_count[None] += 1
+                marker_region = self.region_id[marker]
+                if marker_region == primary_region_id:
+                    self.report_no_slip_primary_region_invalid_marker_count[None] += 1
+                elif marker_region == secondary_region_id:
+                    self.report_no_slip_secondary_region_invalid_marker_count[None] += 1
+                else:
+                    self.report_no_slip_other_region_invalid_marker_count[None] += 1
 
     def sample_no_slip_residual(
         self,
@@ -4802,6 +5243,8 @@ class HibmMpmSurfaceMarkers:
         cell_center_y_m,
         cell_center_z_m,
         grid_nodes: tuple[int, int, int],
+        primary_region_id: int = -1,
+        secondary_region_id: int = -1,
     ) -> HibmMpmNoSlipResidualReport:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
@@ -4819,6 +5262,8 @@ class HibmMpmSurfaceMarkers:
             int(nodes[0]),
             int(nodes[1]),
             int(nodes[2]),
+            int(primary_region_id),
+            int(secondary_region_id),
         )
         valid_count = int(self.report_no_slip_valid_marker_count[None])
         sum_residual2 = float(self.report_no_slip_sum_residual2_mps2[None])
@@ -4832,6 +5277,39 @@ class HibmMpmSurfaceMarkers:
                 self.report_no_slip_max_residual_mps[None]
             ),
             l2_no_slip_residual_mps=l2_residual,
+            direct_sample_marker_count=int(
+                self.report_no_slip_direct_sample_marker_count[None]
+            ),
+            normal_walk_sample_marker_count=int(
+                self.report_no_slip_normal_walk_sample_marker_count[None]
+            ),
+            nearest_fluid_sample_marker_count=int(
+                self.report_no_slip_nearest_fluid_sample_marker_count[None]
+            ),
+            zero_normal_marker_count=int(
+                self.report_no_slip_zero_normal_marker_count[None]
+            ),
+            no_fluid_sample_marker_count=int(
+                self.report_no_slip_no_fluid_sample_marker_count[None]
+            ),
+            primary_region_valid_marker_count=int(
+                self.report_no_slip_primary_region_valid_marker_count[None]
+            ),
+            primary_region_invalid_marker_count=int(
+                self.report_no_slip_primary_region_invalid_marker_count[None]
+            ),
+            secondary_region_valid_marker_count=int(
+                self.report_no_slip_secondary_region_valid_marker_count[None]
+            ),
+            secondary_region_invalid_marker_count=int(
+                self.report_no_slip_secondary_region_invalid_marker_count[None]
+            ),
+            other_region_valid_marker_count=int(
+                self.report_no_slip_other_region_valid_marker_count[None]
+            ),
+            other_region_invalid_marker_count=int(
+                self.report_no_slip_other_region_invalid_marker_count[None]
+            ),
         )
 
     @ti.func
@@ -6708,6 +7186,42 @@ class HibmMpmIbBoundaryConditions:
             max_abs_velocity_mps=float(
                 self.report_velocity_dirichlet_max_abs_velocity[None]
             ),
+            unassigned_region_active_rows=int(
+                self.report_velocity_dirichlet_boundary_rows[None]
+            ),
+        )
+
+    @staticmethod
+    def _velocity_dirichlet_region_row_counts(
+        velocity_dirichlet_active,
+        velocity_dirichlet_marker_region_id,
+        *,
+        primary_region_id: int | None,
+        secondary_region_id: int | None,
+    ) -> tuple[int, int, int, int]:
+        active_mask = velocity_dirichlet_active.to_numpy() != 0
+        active_rows = int(active_mask.sum())
+        if active_rows <= 0 or velocity_dirichlet_marker_region_id is None:
+            return (0, 0, 0, active_rows)
+        region_id = velocity_dirichlet_marker_region_id.to_numpy()
+        primary_mask = np.zeros_like(active_mask, dtype=bool)
+        if primary_region_id is not None and int(primary_region_id) >= 0:
+            primary_mask = active_mask & (region_id == int(primary_region_id))
+        secondary_mask = np.zeros_like(active_mask, dtype=bool)
+        if secondary_region_id is not None and int(secondary_region_id) >= 0:
+            secondary_mask = (
+                active_mask
+                & (region_id == int(secondary_region_id))
+                & ~primary_mask
+            )
+        unassigned_mask = active_mask & (region_id < 0)
+        assigned_known_mask = primary_mask | secondary_mask | unassigned_mask
+        other_mask = active_mask & ~assigned_known_mask
+        return (
+            int(primary_mask.sum()),
+            int(secondary_mask.sum()),
+            int(other_mask.sum()),
+            int(unassigned_mask.sum()),
         )
 
     @ti.func
@@ -7670,12 +8184,15 @@ class HibmMpmIbBoundaryConditions:
         grid_nodes: tuple[int, int, int],
         velocity_dirichlet_marker_region_id=None,
         marker_region_id=None,
+        primary_region_id: int | None = None,
+        secondary_region_id: int | None = None,
     ) -> HibmMpmVelocityDirichletBoundaryReport:
         if tuple(search.grid_nodes) != self.grid_nodes:
             raise ValueError("search.grid_nodes must match boundary grid_nodes")
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
             raise ValueError("grid_nodes must contain three values >= 2")
+        _debug_stage_progress("velocity_rows:prefill_anchor:start")
         # S2-A7: full-field sentinel reset + interior-point prefill,
         # strictly before the row assembly so the success paths overwrite
         # the prefill with the row's own fluid sample/claim cell.
@@ -7693,6 +8210,8 @@ class HibmMpmIbBoundaryConditions:
             int(nodes[1]),
             int(nodes[2]),
         )
+        _debug_stage_progress("velocity_rows:prefill_anchor:done")
+        _debug_stage_progress("velocity_rows:assemble_reconstructed:start")
         self._assemble_velocity_dirichlet_reconstructed_boundary_rows_kernel(
             velocity_dirichlet_active,
             velocity_dirichlet_value_mps,
@@ -7712,6 +8231,8 @@ class HibmMpmIbBoundaryConditions:
             int(nodes[1]),
             int(nodes[2]),
         )
+        _debug_stage_progress("velocity_rows:assemble_reconstructed:done")
+        _debug_stage_progress("velocity_rows:relocate_masked:start")
         self._relocate_masked_velocity_dirichlet_rows_kernel(
             velocity_dirichlet_active,
             velocity_dirichlet_value_mps,
@@ -7730,6 +8251,7 @@ class HibmMpmIbBoundaryConditions:
             int(nodes[1]),
             int(nodes[2]),
         )
+        _debug_stage_progress("velocity_rows:relocate_masked:done")
         if velocity_dirichlet_marker_region_id is not None or marker_region_id is not None:
             if velocity_dirichlet_marker_region_id is None or marker_region_id is None:
                 raise ValueError(
@@ -7743,6 +8265,7 @@ class HibmMpmIbBoundaryConditions:
                     "velocity_dirichlet_marker_region_id shape must match "
                     "velocity_dirichlet_active"
                 )
+            _debug_stage_progress("velocity_rows:stamp_regions:start")
             self._stamp_velocity_dirichlet_marker_regions_kernel(
                 velocity_dirichlet_active,
                 velocity_dirichlet_marker_region_id,
@@ -7751,12 +8274,24 @@ class HibmMpmIbBoundaryConditions:
                 marker_region_id,
                 int(marker_region_id.shape[0]),
             )
+            _debug_stage_progress("velocity_rows:stamp_regions:done")
         active_rows = int(self.report_velocity_dirichlet_boundary_rows[None])
         min_projection_weight = 0.0
         if active_rows > 0:
             min_projection_weight = float(
                 self.report_velocity_dirichlet_min_projection_weight[None]
             )
+        (
+            primary_rows,
+            secondary_rows,
+            other_rows,
+            unassigned_rows,
+        ) = self._velocity_dirichlet_region_row_counts(
+            velocity_dirichlet_active,
+            velocity_dirichlet_marker_region_id,
+            primary_region_id=primary_region_id,
+            secondary_region_id=secondary_region_id,
+        )
         return HibmMpmVelocityDirichletBoundaryReport(
             active_velocity_dirichlet_rows=active_rows,
             inactive_obstacle_rows=int(
@@ -7765,6 +8300,10 @@ class HibmMpmIbBoundaryConditions:
             max_abs_velocity_mps=float(
                 self.report_velocity_dirichlet_max_abs_velocity[None]
             ),
+            primary_region_active_rows=primary_rows,
+            secondary_region_active_rows=secondary_rows,
+            other_region_active_rows=other_rows,
+            unassigned_region_active_rows=unassigned_rows,
             invalid_reconstruction_row_count=int(
                 self.report_velocity_dirichlet_invalid_reconstruction_rows[None]
             ),
@@ -8784,6 +9323,140 @@ class HibmMpmIbBoundaryConditions:
                                     min_normal_width = normal_line_min_width
                                     reconstruction_gap_floor = normal_line_gap_floor
                                     row_reconstructable = 1
+                            if row_reconstructable == 0:
+                                nearest_i = -1
+                                nearest_j = -1
+                                nearest_k = -1
+                                nearest_distance = 0.0
+                                nearest_gap = 0.0
+                                nearest_normal_width = 0.0
+                                nearest_min_width = 0.0
+                                nearest_gap_floor = 0.0
+                                nearest_metric = 1.0e30
+                                di = (
+                                    -HIBM_PRESSURE_NEUMANN_NEAREST_FLUID_FALLBACK_RADIUS_CELLS
+                                )
+                                while (
+                                    di
+                                    <= HIBM_PRESSURE_NEUMANN_NEAREST_FLUID_FALLBACK_RADIUS_CELLS
+                                ):
+                                    dj = (
+                                        -HIBM_PRESSURE_NEUMANN_NEAREST_FLUID_FALLBACK_RADIUS_CELLS
+                                    )
+                                    while (
+                                        dj
+                                        <= HIBM_PRESSURE_NEUMANN_NEAREST_FLUID_FALLBACK_RADIUS_CELLS
+                                    ):
+                                        dk = (
+                                            -HIBM_PRESSURE_NEUMANN_NEAREST_FLUID_FALLBACK_RADIUS_CELLS
+                                        )
+                                        while (
+                                            dk
+                                            <= HIBM_PRESSURE_NEUMANN_NEAREST_FLUID_FALLBACK_RADIUS_CELLS
+                                        ):
+                                            candidate_i = owner_i + di
+                                            candidate_j = owner_j + dj
+                                            candidate_k = owner_k + dk
+                                            if (
+                                                0 <= candidate_i
+                                                and candidate_i < nx
+                                                and 0 <= candidate_j
+                                                and candidate_j < ny
+                                                and 0 <= candidate_k
+                                                and candidate_k < nz
+                                                and (
+                                                    candidate_i != owner_i
+                                                    or candidate_j != owner_j
+                                                    or candidate_k != owner_k
+                                                )
+                                                and obstacle_field[
+                                                    candidate_i,
+                                                    candidate_j,
+                                                    candidate_k,
+                                                ]
+                                                == 0
+                                                and velocity_dirichlet_active[
+                                                    candidate_i,
+                                                    candidate_j,
+                                                    candidate_k,
+                                                ]
+                                                == 0
+                                            ):
+                                                candidate_position = ti.Vector(
+                                                    [
+                                                        cell_center_x_m[candidate_i],
+                                                        cell_center_y_m[candidate_j],
+                                                        cell_center_z_m[candidate_k],
+                                                    ]
+                                                )
+                                                candidate_distance = (
+                                                    candidate_position - boundary_point
+                                                ).dot(normal)
+                                                candidate_gap = ti.abs(
+                                                    candidate_distance - node_distance
+                                                )
+                                                candidate_spacing_inv = (
+                                                    ti.abs(normal.x)
+                                                    / cell_width_x_m[candidate_i]
+                                                    + ti.abs(normal.y)
+                                                    / cell_width_y_m[candidate_j]
+                                                    + ti.abs(normal.z)
+                                                    / cell_width_z_m[candidate_k]
+                                                )
+                                                candidate_normal_width = 1.0 / ti.max(
+                                                    candidate_spacing_inv,
+                                                    1.0e-12,
+                                                )
+                                                candidate_min_width = ti.min(
+                                                    node_normal_width,
+                                                    candidate_normal_width,
+                                                )
+                                                candidate_gap_floor = ti.max(
+                                                    1.0e-12,
+                                                    1.0e-3 * candidate_min_width,
+                                                )
+                                                index_metric = ti.cast(
+                                                    di * di + dj * dj + dk * dk,
+                                                    ti.f32,
+                                                )
+                                                if (
+                                                    candidate_gap > candidate_gap_floor
+                                                    and (
+                                                        index_metric < nearest_metric
+                                                        or (
+                                                            index_metric
+                                                            == nearest_metric
+                                                            and candidate_gap
+                                                            > nearest_gap
+                                                        )
+                                                    )
+                                                ):
+                                                    nearest_i = candidate_i
+                                                    nearest_j = candidate_j
+                                                    nearest_k = candidate_k
+                                                    nearest_distance = candidate_distance
+                                                    nearest_gap = candidate_gap
+                                                    nearest_normal_width = (
+                                                        candidate_normal_width
+                                                    )
+                                                    nearest_min_width = candidate_min_width
+                                                    nearest_gap_floor = (
+                                                        candidate_gap_floor
+                                                    )
+                                                    nearest_metric = index_metric
+                                            dk += 1
+                                        dj += 1
+                                    di += 1
+                                if nearest_i >= 0:
+                                    neighbor_i = nearest_i
+                                    neighbor_j = nearest_j
+                                    neighbor_k = nearest_k
+                                    neighbor_distance = nearest_distance
+                                    reconstruction_gap = nearest_gap
+                                    neighbor_normal_width = nearest_normal_width
+                                    min_normal_width = nearest_min_width
+                                    reconstruction_gap_floor = nearest_gap_floor
+                                    row_reconstructable = 1
                         row_rejected_by_pressure_boundary = 0
                         if (
                             row_reconstructable != 0
@@ -9130,7 +9803,11 @@ class HibmMpmIbBoundaryConditions:
                                     ],
                                     ti.max(node_coefficient, neighbor_coefficient),
                                 )
-                        elif row_rejected_by_pressure_boundary == 0:
+                        elif (
+                            row_rejected_by_pressure_boundary == 0
+                            and ti.abs(self.pressure_neumann_gradient_field[node])
+                            > HIBM_PRESSURE_NEUMANN_ZERO_GRADIENT_TOLERANCE_PA_PER_M
+                        ):
                             ti.atomic_add(
                                 self.report_pressure_neumann_invalid_reconstruction_rows[
                                     None
@@ -10210,6 +10887,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 fluid.velocity_dirichlet_boundary_marker_region_id
             ),
             marker_region_id=markers.region_id,
+            primary_region_id=primary_region_id,
+            secondary_region_id=secondary_region_id,
         )
 
     def assemble_pressure_neumann_rows() -> HibmMpmPressureNeumannMatrixReport:
@@ -10274,6 +10953,10 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             "cg_mean_projection_count",
             "cg_breakdown_count",
             "hibm_post_dirichlet_consistency_projection_count",
+            "hibm_projection_overflow_singleton_cleanup_cell_count",
+            "hibm_projection_overflow_singleton_cleanup_component_count",
+            "hibm_projection_tiny_unreached_cleanup_cell_count",
+            "hibm_projection_tiny_unreached_cleanup_component_count",
         )
         for key in sum_keys:
             if any(key in report for report in projection_reports):
@@ -10290,12 +10973,25 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 combined[key] = max(
                     float(report.get(key, 0.0)) for report in projection_reports
                 )
-        max_int_keys = ("hibm_unreached_incompatible_component_count",)
+        max_int_keys = (
+            "hibm_unreached_incompatible_component_count",
+            "cg_unreached_component_count",
+            "cg_unreached_component_raw_count",
+            "cg_unreached_component_largest_cell_count",
+            "cg_unreached_component_singleton_count",
+            "cg_unreached_component_small_count",
+            "cg_unreached_component_small_cell_count",
+        )
         for key in max_int_keys:
             if any(key in report for report in projection_reports):
                 combined[key] = max(
                     int(report.get(key, 0)) for report in projection_reports
                 )
+        if any("cg_unreached_component_overflow" in report for report in projection_reports):
+            combined["cg_unreached_component_overflow"] = any(
+                bool(report.get("cg_unreached_component_overflow", False))
+                for report in projection_reports
+            )
         if any("cg_converged_all" in report for report in projection_reports):
             combined["cg_converged_all"] = all(
                 bool(report.get("cg_converged_all", True))
@@ -10392,6 +11088,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
             node_kind_code=ib_search.node_kind_code,
             unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+            protect_solid_band_mask=True,
         )
         if int(band_increment) <= 0:
             break
@@ -10407,6 +11104,16 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     )
     solid_band_enclosed_water_cell_count = int(
         getattr(fluid, "last_hibm_solid_band_enclosed_water_cells", -1)
+    )
+    solid_band_velocity_dirichlet_protected_cell_count = int(
+        getattr(
+            fluid,
+            "last_hibm_solid_band_velocity_dirichlet_protected_cells",
+            -1,
+        )
+    )
+    solid_band_mask_protected_cell_count = int(
+        getattr(fluid, "last_hibm_solid_band_mask_protected_cells", -1)
     )
     hibm_air_backed_reachability_barrier_cell_count = -1
     use_air_backed_reachability_barrier = (
@@ -10510,6 +11217,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                     pressure_outlet_zmin=bool(pressure_outlet_zmin),
                     node_kind_code=ib_search.node_kind_code,
                     unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+                    protect_solid_band_mask=True,
                 )
                 if int(band_increment) <= 0:
                     break
@@ -10522,6 +11230,16 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             solid_band_enclosed_water_cell_count = int(
                 getattr(fluid, "last_hibm_solid_band_enclosed_water_cells", -1)
             )
+            solid_band_velocity_dirichlet_protected_cell_count = int(
+                getattr(
+                    fluid,
+                    "last_hibm_solid_band_velocity_dirichlet_protected_cells",
+                    -1,
+                )
+            )
+            solid_band_mask_protected_cell_count = int(
+                getattr(fluid, "last_hibm_solid_band_mask_protected_cells", -1)
+            )
     pressure_gradient_report = None
     pressure_report = HibmMpmPressureNeumannMatrixReport(
         active_pressure_neumann_rows=0,
@@ -10529,6 +11247,59 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         max_abs_rhs=0.0,
     )
     projection_reports: list[dict[str, Any]] = []
+    row_cloud_orphan_cell_count = 0
+    row_cloud_orphan_component_count = 0
+    overflow_singleton_cleanup_cell_count = 0
+    overflow_singleton_cleanup_component_count = 0
+
+    def convert_row_cloud_orphans_until_saturated() -> None:
+        nonlocal pressure_disconnected_nonprojectable_cell_count
+        nonlocal row_cloud_orphan_cell_count
+        nonlocal row_cloud_orphan_component_count
+        nonlocal velocity_report
+        for _row_cloud_orphan_pass in range(8):
+            converted_count = fluid.convert_hibm_row_cloud_orphan_components(
+                max_component_cells=(
+                    HIBM_PRESSURE_DISCONNECTED_SMALL_COMPONENT_THRESHOLD_CELLS
+                ),
+            )
+            if int(converted_count) <= 0:
+                break
+            row_cloud_orphan_cell_count += int(converted_count)
+            row_cloud_orphan_component_count += int(
+                getattr(fluid, "last_hibm_row_cloud_orphan_component_count", 0)
+            )
+            velocity_report = assemble_velocity_dirichlet_rows()
+            pressure_disconnected_nonprojectable_cell_count = (
+                fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                    pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                )
+            )
+
+    def convert_overflow_singletons_without_row_reload() -> bool:
+        nonlocal pressure_disconnected_nonprojectable_cell_count
+        nonlocal overflow_singleton_cleanup_cell_count
+        nonlocal overflow_singleton_cleanup_component_count
+        converted_count = fluid.convert_hibm_row_cloud_orphan_components(
+            max_component_cells=1,
+            overflow_singletons_only=True,
+            protect_velocity_dirichlet_radius_cells=(
+                HIBM_OVERFLOW_SINGLETON_NO_SLIP_PROTECTION_RADIUS_CELLS
+            ),
+        )
+        if int(converted_count) <= 0:
+            return False
+        overflow_singleton_cleanup_cell_count += int(converted_count)
+        overflow_singleton_cleanup_component_count += int(
+            getattr(fluid, "last_hibm_row_cloud_orphan_component_count", 0)
+        )
+        pressure_disconnected_nonprojectable_cell_count = (
+            fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=bool(pressure_outlet_zmin),
+            )
+        )
+        return True
+
     _debug_stage_progress("fluid_substeps:start")
     for _ in range(substeps):
         velocity_report = assemble_velocity_dirichlet_rows()
@@ -10537,18 +11308,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 pressure_outlet_zmin=bool(pressure_outlet_zmin),
             )
         )
-        for _row_cloud_orphan_pass in range(8):
-            row_cloud_orphan_count = fluid.convert_hibm_row_cloud_orphan_components(
-                max_component_cells=128,
-            )
-            if int(row_cloud_orphan_count) <= 0:
-                break
-            velocity_report = assemble_velocity_dirichlet_rows()
-            pressure_disconnected_nonprojectable_cell_count = (
-                fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
-                    pressure_outlet_zmin=bool(pressure_outlet_zmin),
-                )
-            )
+        convert_row_cloud_orphans_until_saturated()
         if bool(run_fluid_predictor):
             fluid.predict(
                 dt_s=fluid_substep_dt,
@@ -10599,7 +11359,9 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                     dt_s=pressure_neumann_dt,
                 )
             )
+            convert_row_cloud_orphans_until_saturated()
 
+        convert_overflow_singletons_without_row_reload()
         pressure_report = assemble_pressure_neumann_rows()
         requested_pressure_solver = str(pressure_solver)
         effective_pressure_solver = requested_pressure_solver
@@ -10624,6 +11386,9 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 cg_tolerance=float(cg_tolerance),
                 cg_preconditioner=str(cg_preconditioner),
                 pressure_solve_failure_policy=pressure_solve_failure_policy_name,
+                hibm_tiny_unreached_cleanup_component_cells=(
+                    HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS
+                ),
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
@@ -10655,6 +11420,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 pressure_outlet_zmin=bool(pressure_outlet_zmin),
             )
         )
+        convert_overflow_singletons_without_row_reload()
         if int(velocity_report.active_velocity_dirichlet_rows) <= 0:
             break
         pressure_report = assemble_pressure_neumann_rows()
@@ -10681,6 +11447,9 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 cg_tolerance=float(cg_tolerance),
                 cg_preconditioner=str(cg_preconditioner),
                 pressure_solve_failure_policy=pressure_solve_failure_policy_name,
+                hibm_tiny_unreached_cleanup_component_cells=(
+                    HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS
+                ),
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
@@ -10800,9 +11569,10 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     }
     _debug_stage_progress("final_divergence_and_partition_stats:done")
     _debug_stage_progress("sample_no_slip_residual:start")
+    no_slip_sampling_obstacle = fluid.build_hibm_no_slip_sampling_obstacle()
     no_slip_report = markers.sample_no_slip_residual(
         fluid.velocity,
-        fluid.obstacle,
+        no_slip_sampling_obstacle,
         fluid.cell_face_x_m,
         fluid.cell_face_y_m,
         fluid.cell_face_z_m,
@@ -10810,6 +11580,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         fluid.cell_center_y_m,
         fluid.cell_center_z_m,
         fluid.grid.grid_nodes,
+        primary_region_id=int(primary_region_id),
+        secondary_region_id=int(secondary_region_id),
     )
     _debug_stage_progress("sample_no_slip_residual:done")
     # S2-A8'' closure sampling preparation, strictly after the LAST
@@ -10920,15 +11692,33 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             fluid=fluid,
         )
     )
+    pressure_disconnected_region = hibm_mpm_pressure_disconnected_region_report(
+        fluid,
+        primary_region_id=primary_region_id,
+        secondary_region_id=secondary_region_id,
+    )
     return HibmMpmSharpFluidToMpmLoadReport(
         ib_node_search=ib_report,
         internal_obstacle_cell_count=internal_obstacle_cell_count,
         solid_band_nonprojectable_cell_count=solid_band_nonprojectable_cell_count,
         solid_band_interior_cell_count=solid_band_interior_cell_count,
         solid_band_enclosed_water_cell_count=solid_band_enclosed_water_cell_count,
+        solid_band_velocity_dirichlet_protected_cell_count=(
+            solid_band_velocity_dirichlet_protected_cell_count
+        ),
+        solid_band_mask_protected_cell_count=solid_band_mask_protected_cell_count,
+        row_cloud_orphan_cell_count=int(row_cloud_orphan_cell_count),
+        row_cloud_orphan_component_count=int(row_cloud_orphan_component_count),
+        overflow_singleton_cleanup_cell_count=int(
+            overflow_singleton_cleanup_cell_count
+        ),
+        overflow_singleton_cleanup_component_count=int(
+            overflow_singleton_cleanup_component_count
+        ),
         pressure_disconnected_nonprojectable_cell_count=(
             pressure_disconnected_nonprojectable_cell_count
         ),
+        pressure_disconnected_region=pressure_disconnected_region,
         air_backed_cell_count=int(hibm_air_backed_cell_count),
         air_backed_component_count=int(hibm_air_backed_component_count),
         air_backed_cell_volume_m3=float(hibm_air_backed_cell_volume_m3),
@@ -11169,12 +11959,15 @@ def advance_hibm_mpm_sharp_mpm_step(
             fluid.velocity_dirichlet_boundary_marker_region_id
         ),
         marker_region_id=markers.region_id,
+        primary_region_id=primary_region_id,
+        secondary_region_id=secondary_region_id,
     )
     next_solid_band_nonprojectable_cell_count = (
         fluid.mark_hibm_solid_band_nonprojectable_cells(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
             node_kind_code=ib_search.node_kind_code,
             unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+            protect_solid_band_mask=True,
         )
     )
     next_pressure_disconnected_nonprojectable_cell_count = (
@@ -11182,6 +11975,79 @@ def advance_hibm_mpm_sharp_mpm_step(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
         )
     )
+    next_row_cloud_orphan_cell_count = 0
+    next_row_cloud_orphan_component_count = 0
+    next_overflow_singleton_cleanup_cell_count = 0
+    next_overflow_singleton_cleanup_component_count = 0
+
+    def convert_next_row_cloud_orphans_until_saturated() -> None:
+        nonlocal next_pressure_disconnected_nonprojectable_cell_count
+        nonlocal next_row_cloud_orphan_cell_count
+        nonlocal next_row_cloud_orphan_component_count
+        nonlocal next_velocity_report
+        for _next_row_cloud_orphan_pass in range(8):
+            converted_count = fluid.convert_hibm_row_cloud_orphan_components(
+                max_component_cells=(
+                    HIBM_PRESSURE_DISCONNECTED_SMALL_COMPONENT_THRESHOLD_CELLS
+                ),
+            )
+            if int(converted_count) <= 0:
+                break
+            next_row_cloud_orphan_cell_count += int(converted_count)
+            next_row_cloud_orphan_component_count += int(
+                getattr(fluid, "last_hibm_row_cloud_orphan_component_count", 0)
+            )
+            next_velocity_report = ib_boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
+                fluid.velocity_dirichlet_boundary_active,
+                fluid.velocity_dirichlet_boundary_value_mps,
+                fluid.velocity_dirichlet_boundary_projection_weight,
+                fluid.obstacle,
+                fluid.velocity,
+                ib_search,
+                cell_face_x_m=fluid.cell_face_x_m,
+                cell_face_y_m=fluid.cell_face_y_m,
+                cell_face_z_m=fluid.cell_face_z_m,
+                cell_center_x_m=fluid.cell_center_x_m,
+                cell_center_y_m=fluid.cell_center_y_m,
+                cell_center_z_m=fluid.cell_center_z_m,
+                grid_nodes=fluid.grid.grid_nodes,
+                velocity_dirichlet_marker_region_id=(
+                    fluid.velocity_dirichlet_boundary_marker_region_id
+                ),
+                marker_region_id=markers.region_id,
+                primary_region_id=primary_region_id,
+                secondary_region_id=secondary_region_id,
+            )
+            next_pressure_disconnected_nonprojectable_cell_count = (
+                fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                    pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                )
+            )
+
+    def convert_next_overflow_singletons_without_row_reload() -> bool:
+        nonlocal next_pressure_disconnected_nonprojectable_cell_count
+        nonlocal next_overflow_singleton_cleanup_cell_count
+        nonlocal next_overflow_singleton_cleanup_component_count
+        converted_count = fluid.convert_hibm_row_cloud_orphan_components(
+            max_component_cells=1,
+            overflow_singletons_only=True,
+            protect_velocity_dirichlet_radius_cells=(
+                HIBM_OVERFLOW_SINGLETON_NO_SLIP_PROTECTION_RADIUS_CELLS
+            ),
+        )
+        if int(converted_count) <= 0:
+            return False
+        next_overflow_singleton_cleanup_cell_count += int(converted_count)
+        next_overflow_singleton_cleanup_component_count += int(
+            getattr(fluid, "last_hibm_row_cloud_orphan_component_count", 0)
+        )
+        next_pressure_disconnected_nonprojectable_cell_count = (
+            fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=bool(pressure_outlet_zmin),
+            )
+        )
+        return True
+
     if (
         int(next_solid_band_nonprojectable_cell_count) > 0
         or int(next_pressure_disconnected_nonprojectable_cell_count) > 0
@@ -11204,6 +12070,8 @@ def advance_hibm_mpm_sharp_mpm_step(
                 fluid.velocity_dirichlet_boundary_marker_region_id
             ),
             marker_region_id=markers.region_id,
+            primary_region_id=primary_region_id,
+            secondary_region_id=secondary_region_id,
         )
         for _next_band_pass in range(8):
             next_band_increment = (
@@ -11211,6 +12079,7 @@ def advance_hibm_mpm_sharp_mpm_step(
                     pressure_outlet_zmin=bool(pressure_outlet_zmin),
                     node_kind_code=ib_search.node_kind_code,
                     unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+                    protect_solid_band_mask=True,
                 )
             )
             if int(next_band_increment) <= 0:
@@ -11236,6 +12105,8 @@ def advance_hibm_mpm_sharp_mpm_step(
                     fluid.velocity_dirichlet_boundary_marker_region_id
                 ),
                 marker_region_id=markers.region_id,
+                primary_region_id=primary_region_id,
+                secondary_region_id=secondary_region_id,
             )
         next_pressure_disconnected_nonprojectable_cell_count = (
             fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
@@ -11262,6 +12133,8 @@ def advance_hibm_mpm_sharp_mpm_step(
             use_existing_reachability_barrier=use_next_air_backed_reachability_barrier,
         )
     )
+    convert_next_row_cloud_orphans_until_saturated()
+    next_air_backed_cell_count = 0
     if bool(far_pressure_air_backed) and int(far_pressure_region_id) != -1:
         markers.mark_far_pressure_air_backed_seed_components(
             fluid.obstacle,
@@ -11302,6 +12175,7 @@ def advance_hibm_mpm_sharp_mpm_step(
                         pressure_outlet_zmin=bool(pressure_outlet_zmin),
                         node_kind_code=ib_search.node_kind_code,
                         unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+                        protect_solid_band_mask=True,
                     )
                 )
                 if int(next_band_increment) <= 0:
@@ -11327,7 +12201,17 @@ def advance_hibm_mpm_sharp_mpm_step(
                         fluid.velocity_dirichlet_boundary_marker_region_id
                     ),
                     marker_region_id=markers.region_id,
+                    primary_region_id=primary_region_id,
+                    secondary_region_id=secondary_region_id,
                 )
+    # Air conversion changes pressure reachability; keep current-step velocity
+    # rows intact so the post-solid projection does not consume diagnostic rows.
+    next_pressure_disconnected_nonprojectable_cell_count = (
+        fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=bool(pressure_outlet_zmin),
+        )
+    )
+    convert_next_overflow_singletons_without_row_reload()
     # Final-sweep band populations for the post-step rebuild (S2-A8'):
     # -1 when the band ran without a split (default mode).
     next_solid_band_interior_cell_count = int(
@@ -11335,6 +12219,21 @@ def advance_hibm_mpm_sharp_mpm_step(
     )
     next_solid_band_enclosed_water_cell_count = int(
         getattr(fluid, "last_hibm_solid_band_enclosed_water_cells", -1)
+    )
+    next_solid_band_velocity_dirichlet_protected_cell_count = int(
+        getattr(
+            fluid,
+            "last_hibm_solid_band_velocity_dirichlet_protected_cells",
+            -1,
+        )
+    )
+    next_solid_band_mask_protected_cell_count = int(
+        getattr(fluid, "last_hibm_solid_band_mask_protected_cells", -1)
+    )
+    next_pressure_disconnected_region = hibm_mpm_pressure_disconnected_region_report(
+        fluid,
+        primary_region_id=primary_region_id,
+        secondary_region_id=secondary_region_id,
     )
     next_pressure_report = ib_boundary.assemble_pressure_neumann_matrix_rows(
         fluid.pressure_interface_matrix_diagonal,
@@ -11405,6 +12304,9 @@ def advance_hibm_mpm_sharp_mpm_step(
                 cg_tolerance=float(cg_tolerance),
                 cg_preconditioner=str(cg_preconditioner),
                 pressure_solve_failure_policy=str(pressure_solve_failure_policy),
+                hibm_tiny_unreached_cleanup_component_cells=(
+                    HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS
+                ),
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
@@ -11425,9 +12327,12 @@ def advance_hibm_mpm_sharp_mpm_step(
             }
         )
         post_solid_projection_applied = True
+        post_solid_no_slip_sampling_obstacle = (
+            fluid.build_hibm_no_slip_sampling_obstacle()
+        )
         post_solid_no_slip_report = markers.sample_no_slip_residual(
             fluid.velocity,
-            fluid.obstacle,
+            post_solid_no_slip_sampling_obstacle,
             fluid.cell_face_x_m,
             fluid.cell_face_y_m,
             fluid.cell_face_z_m,
@@ -11435,6 +12340,8 @@ def advance_hibm_mpm_sharp_mpm_step(
             fluid.cell_center_y_m,
             fluid.cell_center_z_m,
             fluid.grid.grid_nodes,
+            primary_region_id=int(primary_region_id),
+            secondary_region_id=int(secondary_region_id),
         )
     return HibmMpmSharpMpmStepReport(
         fluid_to_mpm_loads=load_report,
@@ -11447,9 +12354,26 @@ def advance_hibm_mpm_sharp_mpm_step(
         next_solid_band_enclosed_water_cell_count=(
             next_solid_band_enclosed_water_cell_count
         ),
+        next_solid_band_velocity_dirichlet_protected_cell_count=(
+            next_solid_band_velocity_dirichlet_protected_cell_count
+        ),
+        next_solid_band_mask_protected_cell_count=(
+            next_solid_band_mask_protected_cell_count
+        ),
+        next_row_cloud_orphan_cell_count=int(next_row_cloud_orphan_cell_count),
+        next_row_cloud_orphan_component_count=int(
+            next_row_cloud_orphan_component_count
+        ),
+        next_overflow_singleton_cleanup_cell_count=int(
+            next_overflow_singleton_cleanup_cell_count
+        ),
+        next_overflow_singleton_cleanup_component_count=int(
+            next_overflow_singleton_cleanup_component_count
+        ),
         next_pressure_disconnected_nonprojectable_cell_count=(
             next_pressure_disconnected_nonprojectable_cell_count
         ),
+        next_pressure_disconnected_region=next_pressure_disconnected_region,
         next_boundary_conditions=next_boundary_report,
         next_velocity_dirichlet=next_velocity_report,
         next_pressure_neumann=next_pressure_report,
@@ -11476,11 +12400,15 @@ def hibm_mpm_sharp_step_summary(
     post_no_slip = report.post_solid_no_slip_residual
     return {
         "hibm_coupling_scheme": "explicit_loose",
-        "hibm_added_mass_stability_status": "unmeasured",
+        "hibm_added_mass_stability_status": "unmeasured_single_pass",
         "hibm_added_mass_stability_measured": False,
         "hibm_added_mass_stabilization": "none",
         "hibm_semi_implicit_coupling_enabled": False,
         "hibm_semi_implicit_coupling_matrix_active": False,
+        "hibm_fsi_coupling_iterations_used": 1,
+        "hibm_fsi_coupling_converged": False,
+        "hibm_fsi_coupling_explicit_single_pass": True,
+        "hibm_fsi_coupling_residual_source": "unmeasured_single_pass",
         "hibm_ib_node_count": load.ib_node_search.near_boundary_node_count,
         "hibm_ib_external_node_count": load.ib_node_search.external_ib_node_count,
         "hibm_ib_internal_node_count": load.ib_node_search.internal_node_count,
@@ -11494,8 +12422,69 @@ def hibm_mpm_sharp_step_summary(
         "hibm_solid_band_enclosed_water_cell_count": (
             load.solid_band_enclosed_water_cell_count
         ),
+        "hibm_solid_band_velocity_dirichlet_protected_cell_count": (
+            load.solid_band_velocity_dirichlet_protected_cell_count
+        ),
+        "hibm_solid_band_mask_protected_cell_count": (
+            load.solid_band_mask_protected_cell_count
+        ),
+        "hibm_row_cloud_orphan_cell_count": load.row_cloud_orphan_cell_count,
+        "hibm_row_cloud_orphan_component_count": (
+            load.row_cloud_orphan_component_count
+        ),
+        "hibm_overflow_singleton_cleanup_cell_count": (
+            load.overflow_singleton_cleanup_cell_count
+        ),
+        "hibm_overflow_singleton_cleanup_component_count": (
+            load.overflow_singleton_cleanup_component_count
+        ),
         "hibm_pressure_disconnected_nonprojectable_cell_count": (
             load.pressure_disconnected_nonprojectable_cell_count
+        ),
+        "hibm_pressure_disconnected_component_count": (
+            load.pressure_disconnected_region.component_count
+        ),
+        "hibm_pressure_disconnected_component_raw_count": (
+            load.pressure_disconnected_region.component_raw_count
+        ),
+        "hibm_pressure_disconnected_largest_component_cell_count": (
+            load.pressure_disconnected_region.largest_component_cell_count
+        ),
+        "hibm_pressure_disconnected_singleton_component_count": (
+            load.pressure_disconnected_region.singleton_component_count
+        ),
+        "hibm_pressure_disconnected_small_component_threshold_cells": (
+            load.pressure_disconnected_region.small_component_threshold_cells
+        ),
+        "hibm_pressure_disconnected_small_component_count": (
+            load.pressure_disconnected_region.small_component_count
+        ),
+        "hibm_pressure_disconnected_small_component_cell_count": (
+            load.pressure_disconnected_region.small_component_cell_count
+        ),
+        "hibm_pressure_disconnected_component_overflow": (
+            load.pressure_disconnected_region.component_overflow
+        ),
+        "hibm_pressure_disconnected_component_labels_converged": (
+            load.pressure_disconnected_region.component_labels_converged
+        ),
+        "hibm_pressure_disconnected_min_i": load.pressure_disconnected_region.min_i,
+        "hibm_pressure_disconnected_min_j": load.pressure_disconnected_region.min_j,
+        "hibm_pressure_disconnected_min_k": load.pressure_disconnected_region.min_k,
+        "hibm_pressure_disconnected_max_i": load.pressure_disconnected_region.max_i,
+        "hibm_pressure_disconnected_max_j": load.pressure_disconnected_region.max_j,
+        "hibm_pressure_disconnected_max_k": load.pressure_disconnected_region.max_k,
+        "hibm_pressure_disconnected_primary_region_stencil_cell_count": (
+            load.pressure_disconnected_region.primary_region_stencil_cell_count
+        ),
+        "hibm_pressure_disconnected_secondary_region_stencil_cell_count": (
+            load.pressure_disconnected_region.secondary_region_stencil_cell_count
+        ),
+        "hibm_pressure_disconnected_other_region_stencil_cell_count": (
+            load.pressure_disconnected_region.other_region_stencil_cell_count
+        ),
+        "hibm_pressure_disconnected_unassigned_region_stencil_cell_count": (
+            load.pressure_disconnected_region.unassigned_region_stencil_cell_count
         ),
         "hibm_air_backed_cell_count": load.air_backed_cell_count,
         "hibm_air_backed_component_count": load.air_backed_component_count,
@@ -11526,6 +12515,18 @@ def hibm_mpm_sharp_step_summary(
         ),
         "hibm_velocity_dirichlet_active_rows": (
             load.velocity_dirichlet.active_velocity_dirichlet_rows
+        ),
+        "hibm_velocity_dirichlet_primary_region_active_rows": (
+            load.velocity_dirichlet.primary_region_active_rows
+        ),
+        "hibm_velocity_dirichlet_secondary_region_active_rows": (
+            load.velocity_dirichlet.secondary_region_active_rows
+        ),
+        "hibm_velocity_dirichlet_other_region_active_rows": (
+            load.velocity_dirichlet.other_region_active_rows
+        ),
+        "hibm_velocity_dirichlet_unassigned_region_active_rows": (
+            load.velocity_dirichlet.unassigned_region_active_rows
         ),
         "hibm_velocity_dirichlet_max_abs_velocity_mps": (
             load.velocity_dirichlet.max_abs_velocity_mps
@@ -11759,6 +12760,39 @@ def hibm_mpm_sharp_step_summary(
         "hibm_no_slip_residual_l2_mps": (
             load.no_slip_residual.l2_no_slip_residual_mps
         ),
+        "hibm_no_slip_residual_direct_sample_marker_count": (
+            load.no_slip_residual.direct_sample_marker_count
+        ),
+        "hibm_no_slip_residual_normal_walk_sample_marker_count": (
+            load.no_slip_residual.normal_walk_sample_marker_count
+        ),
+        "hibm_no_slip_residual_nearest_fluid_sample_marker_count": (
+            load.no_slip_residual.nearest_fluid_sample_marker_count
+        ),
+        "hibm_no_slip_residual_zero_normal_marker_count": (
+            load.no_slip_residual.zero_normal_marker_count
+        ),
+        "hibm_no_slip_residual_no_fluid_sample_marker_count": (
+            load.no_slip_residual.no_fluid_sample_marker_count
+        ),
+        "hibm_no_slip_residual_primary_region_valid_marker_count": (
+            load.no_slip_residual.primary_region_valid_marker_count
+        ),
+        "hibm_no_slip_residual_primary_region_invalid_marker_count": (
+            load.no_slip_residual.primary_region_invalid_marker_count
+        ),
+        "hibm_no_slip_residual_secondary_region_valid_marker_count": (
+            load.no_slip_residual.secondary_region_valid_marker_count
+        ),
+        "hibm_no_slip_residual_secondary_region_invalid_marker_count": (
+            load.no_slip_residual.secondary_region_invalid_marker_count
+        ),
+        "hibm_no_slip_residual_other_region_valid_marker_count": (
+            load.no_slip_residual.other_region_valid_marker_count
+        ),
+        "hibm_no_slip_residual_other_region_invalid_marker_count": (
+            load.no_slip_residual.other_region_invalid_marker_count
+        ),
         "hibm_post_solid_kinematic_projection_applied": (
             report.post_solid_kinematic_projection_applied
         ),
@@ -11798,6 +12832,51 @@ def hibm_mpm_sharp_step_summary(
         ),
         "hibm_post_solid_no_slip_residual_l2_mps": (
             0.0 if post_no_slip is None else post_no_slip.l2_no_slip_residual_mps
+        ),
+        "hibm_post_solid_no_slip_residual_direct_sample_marker_count": (
+            0 if post_no_slip is None else post_no_slip.direct_sample_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_normal_walk_sample_marker_count": (
+            0 if post_no_slip is None else post_no_slip.normal_walk_sample_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_nearest_fluid_sample_marker_count": (
+            0
+            if post_no_slip is None
+            else post_no_slip.nearest_fluid_sample_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_zero_normal_marker_count": (
+            0 if post_no_slip is None else post_no_slip.zero_normal_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_no_fluid_sample_marker_count": (
+            0 if post_no_slip is None else post_no_slip.no_fluid_sample_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_primary_region_valid_marker_count": (
+            0
+            if post_no_slip is None
+            else post_no_slip.primary_region_valid_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_primary_region_invalid_marker_count": (
+            0
+            if post_no_slip is None
+            else post_no_slip.primary_region_invalid_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_secondary_region_valid_marker_count": (
+            0
+            if post_no_slip is None
+            else post_no_slip.secondary_region_valid_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_secondary_region_invalid_marker_count": (
+            0
+            if post_no_slip is None
+            else post_no_slip.secondary_region_invalid_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_other_region_valid_marker_count": (
+            0 if post_no_slip is None else post_no_slip.other_region_valid_marker_count
+        ),
+        "hibm_post_solid_no_slip_residual_other_region_invalid_marker_count": (
+            0
+            if post_no_slip is None
+            else post_no_slip.other_region_invalid_marker_count
         ),
         "hibm_full_stress_valid_marker_count": load.fluid_stress.valid_marker_count,
         "hibm_full_stress_invalid_marker_count": (
@@ -11920,8 +12999,83 @@ def hibm_mpm_sharp_step_summary(
         "hibm_next_solid_band_enclosed_water_cell_count": (
             report.next_solid_band_enclosed_water_cell_count
         ),
+        "hibm_next_solid_band_velocity_dirichlet_protected_cell_count": (
+            report.next_solid_band_velocity_dirichlet_protected_cell_count
+        ),
+        "hibm_next_solid_band_mask_protected_cell_count": (
+            report.next_solid_band_mask_protected_cell_count
+        ),
+        "hibm_next_row_cloud_orphan_cell_count": (
+            report.next_row_cloud_orphan_cell_count
+        ),
+        "hibm_next_row_cloud_orphan_component_count": (
+            report.next_row_cloud_orphan_component_count
+        ),
+        "hibm_next_overflow_singleton_cleanup_cell_count": (
+            report.next_overflow_singleton_cleanup_cell_count
+        ),
+        "hibm_next_overflow_singleton_cleanup_component_count": (
+            report.next_overflow_singleton_cleanup_component_count
+        ),
         "hibm_next_pressure_disconnected_nonprojectable_cell_count": (
             report.next_pressure_disconnected_nonprojectable_cell_count
+        ),
+        "hibm_next_pressure_disconnected_component_count": (
+            report.next_pressure_disconnected_region.component_count
+        ),
+        "hibm_next_pressure_disconnected_component_raw_count": (
+            report.next_pressure_disconnected_region.component_raw_count
+        ),
+        "hibm_next_pressure_disconnected_largest_component_cell_count": (
+            report.next_pressure_disconnected_region.largest_component_cell_count
+        ),
+        "hibm_next_pressure_disconnected_singleton_component_count": (
+            report.next_pressure_disconnected_region.singleton_component_count
+        ),
+        "hibm_next_pressure_disconnected_small_component_threshold_cells": (
+            report.next_pressure_disconnected_region.small_component_threshold_cells
+        ),
+        "hibm_next_pressure_disconnected_small_component_count": (
+            report.next_pressure_disconnected_region.small_component_count
+        ),
+        "hibm_next_pressure_disconnected_small_component_cell_count": (
+            report.next_pressure_disconnected_region.small_component_cell_count
+        ),
+        "hibm_next_pressure_disconnected_component_overflow": (
+            report.next_pressure_disconnected_region.component_overflow
+        ),
+        "hibm_next_pressure_disconnected_component_labels_converged": (
+            report.next_pressure_disconnected_region.component_labels_converged
+        ),
+        "hibm_next_pressure_disconnected_min_i": (
+            report.next_pressure_disconnected_region.min_i
+        ),
+        "hibm_next_pressure_disconnected_min_j": (
+            report.next_pressure_disconnected_region.min_j
+        ),
+        "hibm_next_pressure_disconnected_min_k": (
+            report.next_pressure_disconnected_region.min_k
+        ),
+        "hibm_next_pressure_disconnected_max_i": (
+            report.next_pressure_disconnected_region.max_i
+        ),
+        "hibm_next_pressure_disconnected_max_j": (
+            report.next_pressure_disconnected_region.max_j
+        ),
+        "hibm_next_pressure_disconnected_max_k": (
+            report.next_pressure_disconnected_region.max_k
+        ),
+        "hibm_next_pressure_disconnected_primary_region_stencil_cell_count": (
+            report.next_pressure_disconnected_region.primary_region_stencil_cell_count
+        ),
+        "hibm_next_pressure_disconnected_secondary_region_stencil_cell_count": (
+            report.next_pressure_disconnected_region.secondary_region_stencil_cell_count
+        ),
+        "hibm_next_pressure_disconnected_other_region_stencil_cell_count": (
+            report.next_pressure_disconnected_region.other_region_stencil_cell_count
+        ),
+        "hibm_next_pressure_disconnected_unassigned_region_stencil_cell_count": (
+            report.next_pressure_disconnected_region.unassigned_region_stencil_cell_count
         ),
         "hibm_next_ib_invalid_projection_count": (
             report.next_ib_node_search.invalid_projection_count
@@ -11937,6 +13091,18 @@ def hibm_mpm_sharp_step_summary(
         ),
         "hibm_next_velocity_dirichlet_active_rows": (
             report.next_velocity_dirichlet.active_velocity_dirichlet_rows
+        ),
+        "hibm_next_velocity_dirichlet_primary_region_active_rows": (
+            report.next_velocity_dirichlet.primary_region_active_rows
+        ),
+        "hibm_next_velocity_dirichlet_secondary_region_active_rows": (
+            report.next_velocity_dirichlet.secondary_region_active_rows
+        ),
+        "hibm_next_velocity_dirichlet_other_region_active_rows": (
+            report.next_velocity_dirichlet.other_region_active_rows
+        ),
+        "hibm_next_velocity_dirichlet_unassigned_region_active_rows": (
+            report.next_velocity_dirichlet.unassigned_region_active_rows
         ),
         "hibm_next_velocity_dirichlet_max_abs_velocity_mps": (
             report.next_velocity_dirichlet.max_abs_velocity_mps
@@ -12171,6 +13337,18 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
         ),
         next_solid_band_enclosed_water_cell_count=(
             report.next_solid_band_enclosed_water_cell_count
+        ),
+        next_solid_band_velocity_dirichlet_protected_cell_count=(
+            report.next_solid_band_velocity_dirichlet_protected_cell_count
+        ),
+        next_solid_band_mask_protected_cell_count=(
+            report.next_solid_band_mask_protected_cell_count
+        ),
+        next_overflow_singleton_cleanup_cell_count=(
+            report.next_overflow_singleton_cleanup_cell_count
+        ),
+        next_overflow_singleton_cleanup_component_count=(
+            report.next_overflow_singleton_cleanup_component_count
         ),
         next_pressure_disconnected_nonprojectable_cell_count=(
             report.next_pressure_disconnected_nonprojectable_cell_count

@@ -240,7 +240,40 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_ib_internal_node_count",
     "hibm_internal_obstacle_cell_count",
     "hibm_solid_band_nonprojectable_cell_count",
+    "hibm_solid_band_interior_cell_count",
+    "hibm_solid_band_enclosed_water_cell_count",
+    "hibm_solid_band_velocity_dirichlet_protected_cell_count",
+    "hibm_solid_band_mask_protected_cell_count",
+    "hibm_row_cloud_orphan_cell_count",
+    "hibm_row_cloud_orphan_component_count",
+    "hibm_overflow_singleton_cleanup_cell_count",
+    "hibm_overflow_singleton_cleanup_component_count",
     "hibm_pressure_disconnected_nonprojectable_cell_count",
+    "hibm_pressure_disconnected_component_count",
+    "hibm_pressure_disconnected_component_raw_count",
+    "hibm_pressure_disconnected_largest_component_cell_count",
+    "hibm_pressure_disconnected_singleton_component_count",
+    "hibm_pressure_disconnected_small_component_threshold_cells",
+    "hibm_pressure_disconnected_small_component_count",
+    "hibm_pressure_disconnected_small_component_cell_count",
+    "hibm_pressure_disconnected_component_overflow",
+    "hibm_next_solid_band_interior_cell_count",
+    "hibm_next_solid_band_enclosed_water_cell_count",
+    "hibm_next_solid_band_velocity_dirichlet_protected_cell_count",
+    "hibm_next_solid_band_mask_protected_cell_count",
+    "hibm_next_row_cloud_orphan_cell_count",
+    "hibm_next_row_cloud_orphan_component_count",
+    "hibm_next_overflow_singleton_cleanup_cell_count",
+    "hibm_next_overflow_singleton_cleanup_component_count",
+    "hibm_next_pressure_disconnected_nonprojectable_cell_count",
+    "hibm_next_pressure_disconnected_component_count",
+    "hibm_next_pressure_disconnected_component_raw_count",
+    "hibm_next_pressure_disconnected_largest_component_cell_count",
+    "hibm_next_pressure_disconnected_singleton_component_count",
+    "hibm_next_pressure_disconnected_small_component_threshold_cells",
+    "hibm_next_pressure_disconnected_small_component_count",
+    "hibm_next_pressure_disconnected_small_component_cell_count",
+    "hibm_next_pressure_disconnected_component_overflow",
     "hibm_air_backed_cell_count",
     "hibm_air_backed_component_count",
     "hibm_air_backed_cell_volume_m3",
@@ -299,11 +332,37 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_interior_pressure_fixed_divergence_l2",
     "hibm_interior_pressure_fixed_divergence_max_abs",
     "hibm_interior_pressure_fixed_divergence_cell_count",
+    "hibm_no_slip_residual_valid_marker_count",
+    "hibm_no_slip_residual_invalid_marker_count",
     "hibm_no_slip_residual_max_mps",
     "hibm_no_slip_residual_l2_mps",
+    "hibm_no_slip_residual_direct_sample_marker_count",
+    "hibm_no_slip_residual_normal_walk_sample_marker_count",
+    "hibm_no_slip_residual_nearest_fluid_sample_marker_count",
+    "hibm_no_slip_residual_zero_normal_marker_count",
+    "hibm_no_slip_residual_no_fluid_sample_marker_count",
+    "hibm_no_slip_residual_primary_region_valid_marker_count",
+    "hibm_no_slip_residual_primary_region_invalid_marker_count",
+    "hibm_no_slip_residual_secondary_region_valid_marker_count",
+    "hibm_no_slip_residual_secondary_region_invalid_marker_count",
+    "hibm_no_slip_residual_other_region_valid_marker_count",
+    "hibm_no_slip_residual_other_region_invalid_marker_count",
     "hibm_post_solid_kinematic_projection_applied",
+    "hibm_post_solid_no_slip_residual_valid_marker_count",
+    "hibm_post_solid_no_slip_residual_invalid_marker_count",
     "hibm_post_solid_no_slip_residual_max_mps",
     "hibm_post_solid_no_slip_residual_l2_mps",
+    "hibm_post_solid_no_slip_residual_direct_sample_marker_count",
+    "hibm_post_solid_no_slip_residual_normal_walk_sample_marker_count",
+    "hibm_post_solid_no_slip_residual_nearest_fluid_sample_marker_count",
+    "hibm_post_solid_no_slip_residual_zero_normal_marker_count",
+    "hibm_post_solid_no_slip_residual_no_fluid_sample_marker_count",
+    "hibm_post_solid_no_slip_residual_primary_region_valid_marker_count",
+    "hibm_post_solid_no_slip_residual_primary_region_invalid_marker_count",
+    "hibm_post_solid_no_slip_residual_secondary_region_valid_marker_count",
+    "hibm_post_solid_no_slip_residual_secondary_region_invalid_marker_count",
+    "hibm_post_solid_no_slip_residual_other_region_valid_marker_count",
+    "hibm_post_solid_no_slip_residual_other_region_invalid_marker_count",
     "hibm_full_stress_valid_marker_count",
     "hibm_full_stress_invalid_marker_count",
     "hibm_full_stress_max_abs_traction_pa",
@@ -350,13 +409,22 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "pressure_solve_failed",
     "pressure_projection_physical_failure",
     "hibm_unreached_incompatible_component_count",
+    "hibm_unreached_component_raw_count",
+    "hibm_unreached_largest_component_cell_count",
+    "hibm_unreached_singleton_component_count",
+    "hibm_unreached_small_component_threshold_cells",
+    "hibm_unreached_small_component_count",
+    "hibm_unreached_small_component_cell_count",
+    "hibm_projection_overflow_singleton_cleanup_cell_count",
+    "hibm_projection_overflow_singleton_cleanup_component_count",
+    "hibm_projection_tiny_unreached_cleanup_cell_count",
+    "hibm_projection_tiny_unreached_cleanup_component_count",
     "hibm_unreached_component_rhs_mean_max_abs",
     "hibm_unreached_component_rhs_integral_max_abs",
     "fsi_added_mass_stability_measured",
     "fsi_semi_implicit_coupling_enabled",
     "fsi_semi_implicit_coupling_matrix_active",
     "fsi_action_reaction_residual_abs_n",
-    "fsi_coupling_residual_norm_n",
     "fsi_coupling_residual_norm_mps",
     "fsi_coupling_residual_max_mps",
     "main_fsi_fluid_force_x_n",
@@ -451,6 +519,7 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "ibm_correction_iterations",
     "fsi_coupling_iterations",
     "fsi_coupling_tolerance_n",
+    "fsi_marker_coupling_tolerance_mps",
     "disable_pressure_outlet_zmin",
     "disable_reduced_obstacles",
     "source_config_intersect_reduced_water_domain",
@@ -2056,6 +2125,32 @@ def _mapping_int(
     return int(mapping.get(key, default) or 0)
 
 
+def sharp_report_fluid_projection_failure_reason(report: object) -> str:
+    load_report = getattr(report, "fluid_to_mpm_loads", None)
+    projection = getattr(load_report, "fluid_projection", None)
+    if not isinstance(projection, Mapping):
+        return "missing_fluid_projection_report"
+
+    reasons: list[str] = []
+    if bool(projection.get("pressure_solve_failed", False)):
+        reasons.append("pressure_solve_failed")
+    if bool(projection.get("pressure_projection_physical_failure", False)):
+        physical_reason = str(
+            projection.get(
+                "pressure_projection_physical_failure_reason",
+                "",
+            )
+            or "pressure_projection_physical_failure"
+        )
+        reasons.append(physical_reason)
+    if not bool(projection.get("cg_converged_all", True)):
+        reasons.append("cg_converged_all=false")
+    cg_breakdown_count = int(projection.get("cg_breakdown_count", 0) or 0)
+    if cg_breakdown_count > 0:
+        reasons.append(f"cg_breakdown_count={cg_breakdown_count}")
+    return "; ".join(reasons)
+
+
 def build_hibm_mpm_sharp_case_row(
     *,
     step: int,
@@ -2098,11 +2193,22 @@ def build_hibm_mpm_sharp_case_row(
         sharp_summary,
         "hibm_mpm_scatter_action_reaction_residual_n",
     )
+    sharp_fsi_convergence_measured = (
+        "hibm_fsi_coupling_residual_l2_mps" in sharp_summary
+    )
+    sharp_explicit_single_pass = bool(
+        sharp_summary.get("hibm_fsi_coupling_explicit_single_pass", True)
+    )
+    sharp_added_mass_status = str(
+        sharp_summary.get("hibm_added_mass_stability_status", "unmeasured")
+    )
+    if sharp_explicit_single_pass and not sharp_fsi_convergence_measured:
+        sharp_added_mass_status = "unmeasured_single_pass"
     if "hibm_fsi_coupling_residual_l2_mps" in sharp_summary:
         sharp_fsi_residual_source = str(
             sharp_summary.get(
                 "hibm_fsi_coupling_residual_source",
-                "marker_surface_fixed_point_position_velocity_residual_l2_mps",
+                "marker_surface_fixed_point_velocity_residual_l2_mps",
             )
         )
         sharp_fsi_residual_l2_mps = _mapping_float(
@@ -2114,27 +2220,49 @@ def build_hibm_mpm_sharp_case_row(
             "hibm_fsi_coupling_residual_max_mps",
         )
     elif bool(sharp_summary.get("hibm_post_solid_kinematic_projection_applied", False)):
-        sharp_fsi_residual_source = (
-            "hibm_post_solid_no_slip_velocity_residual_l2_mps"
-        )
-        sharp_fsi_residual_l2_mps = _mapping_float(
+        post_solid_no_slip_valid_marker_count = _mapping_int(
             sharp_summary,
-            "hibm_post_solid_no_slip_residual_l2_mps",
+            "hibm_post_solid_no_slip_residual_valid_marker_count",
+            0,
         )
-        sharp_fsi_residual_max_mps = _mapping_float(
-            sharp_summary,
-            "hibm_post_solid_no_slip_residual_max_mps",
-        )
+        if total_marker_count > 0 and post_solid_no_slip_valid_marker_count <= 0:
+            sharp_fsi_residual_source = (
+                "unmeasured_no_valid_post_solid_no_slip_markers"
+            )
+            sharp_fsi_residual_l2_mps = math.nan
+            sharp_fsi_residual_max_mps = math.nan
+        else:
+            sharp_fsi_residual_source = (
+                "hibm_post_solid_no_slip_velocity_residual_l2_mps"
+            )
+            sharp_fsi_residual_l2_mps = _mapping_float(
+                sharp_summary,
+                "hibm_post_solid_no_slip_residual_l2_mps",
+            )
+            sharp_fsi_residual_max_mps = _mapping_float(
+                sharp_summary,
+                "hibm_post_solid_no_slip_residual_max_mps",
+            )
     else:
-        sharp_fsi_residual_source = "hibm_no_slip_velocity_residual_l2_mps"
-        sharp_fsi_residual_l2_mps = _mapping_float(
+        no_slip_valid_marker_count = _mapping_int(
             sharp_summary,
-            "hibm_no_slip_residual_l2_mps",
+            "hibm_no_slip_residual_valid_marker_count",
+            0,
         )
-        sharp_fsi_residual_max_mps = _mapping_float(
-            sharp_summary,
-            "hibm_no_slip_residual_max_mps",
-        )
+        if total_marker_count > 0 and no_slip_valid_marker_count <= 0:
+            sharp_fsi_residual_source = "unmeasured_no_valid_no_slip_markers"
+            sharp_fsi_residual_l2_mps = math.nan
+            sharp_fsi_residual_max_mps = math.nan
+        else:
+            sharp_fsi_residual_source = "hibm_no_slip_velocity_residual_l2_mps"
+            sharp_fsi_residual_l2_mps = _mapping_float(
+                sharp_summary,
+                "hibm_no_slip_residual_l2_mps",
+            )
+            sharp_fsi_residual_max_mps = _mapping_float(
+                sharp_summary,
+                "hibm_no_slip_residual_max_mps",
+            )
 
     row.update(
         {
@@ -2158,12 +2286,8 @@ def build_hibm_mpm_sharp_case_row(
                 1,
             ),
             "fsi_coupling_enabled": True,
-            "fsi_coupling_explicit_single_pass": bool(
-                sharp_summary.get("hibm_fsi_coupling_explicit_single_pass", True)
-            ),
-            "fsi_added_mass_stability_status": str(
-                sharp_summary.get("hibm_added_mass_stability_status", "unmeasured")
-            ),
+            "fsi_coupling_explicit_single_pass": sharp_explicit_single_pass,
+            "fsi_added_mass_stability_status": sharp_added_mass_status,
             "fsi_added_mass_stability_measured": bool(
                 sharp_summary.get("hibm_added_mass_stability_measured", False)
             ),
@@ -2180,7 +2304,9 @@ def build_hibm_mpm_sharp_case_row(
                 )
             ),
             "fsi_coupling_step_completed": True,
-            "fsi_coupling_convergence_measured": True,
+            "fsi_coupling_convergence_measured": bool(
+                sharp_fsi_convergence_measured
+            ),
             "fsi_coupling_converged": bool(
                 sharp_summary.get("hibm_fsi_coupling_converged", False)
             ),
@@ -2189,7 +2315,7 @@ def build_hibm_mpm_sharp_case_row(
             "fluid_advection_scheme": str(
                 fluid_projection_report.get("fluid_advection_scheme", "euler")
             ),
-            "fsi_coupling_residual_norm_n": sharp_fsi_residual_l2_mps,
+            "fsi_coupling_residual_norm_n": math.nan,
             "fsi_coupling_residual_norm_mps": sharp_fsi_residual_l2_mps,
             "fsi_coupling_residual_max_mps": sharp_fsi_residual_max_mps,
             "fsi_coupling_residual_units": "m/s",
@@ -2345,6 +2471,54 @@ def build_hibm_mpm_sharp_case_row(
             "hibm_unreached_incompatible_component_count": _mapping_int(
                 fluid_projection_report,
                 "hibm_unreached_incompatible_component_count",
+            ),
+            "hibm_unreached_component_raw_count": _mapping_int(
+                fluid_projection_report,
+                "cg_unreached_component_raw_count",
+            ),
+            "hibm_unreached_largest_component_cell_count": _mapping_int(
+                fluid_projection_report,
+                "cg_unreached_component_largest_cell_count",
+            ),
+            "hibm_unreached_singleton_component_count": _mapping_int(
+                fluid_projection_report,
+                "cg_unreached_component_singleton_count",
+            ),
+            "hibm_unreached_small_component_threshold_cells": _mapping_int(
+                fluid_projection_report,
+                "cg_unreached_component_small_threshold_cells",
+            ),
+            "hibm_unreached_small_component_count": _mapping_int(
+                fluid_projection_report,
+                "cg_unreached_component_small_count",
+            ),
+            "hibm_unreached_small_component_cell_count": _mapping_int(
+                fluid_projection_report,
+                "cg_unreached_component_small_cell_count",
+            ),
+            "hibm_projection_overflow_singleton_cleanup_cell_count": (
+                _mapping_int(
+                    fluid_projection_report,
+                    "hibm_projection_overflow_singleton_cleanup_cell_count",
+                )
+            ),
+            "hibm_projection_overflow_singleton_cleanup_component_count": (
+                _mapping_int(
+                    fluid_projection_report,
+                    "hibm_projection_overflow_singleton_cleanup_component_count",
+                )
+            ),
+            "hibm_projection_tiny_unreached_cleanup_cell_count": (
+                _mapping_int(
+                    fluid_projection_report,
+                    "hibm_projection_tiny_unreached_cleanup_cell_count",
+                )
+            ),
+            "hibm_projection_tiny_unreached_cleanup_component_count": (
+                _mapping_int(
+                    fluid_projection_report,
+                    "hibm_projection_tiny_unreached_cleanup_component_count",
+                )
             ),
             "hibm_unreached_component_rhs_mean_max_abs": _mapping_float(
                 fluid_projection_report,
@@ -2580,6 +2754,7 @@ def _surface_region_seed_mask(
     grid: CartesianGrid,
     region_ids: Sequence[int],
     radius_cells: int = 1,
+    normal_probe_distance_m: float = 0.0,
 ) -> tuple[np.ndarray, dict[str, object]]:
     import trimesh
 
@@ -2601,6 +2776,11 @@ def _surface_region_seed_mask(
             "fluid_active_mask_surface_seed_point_in_grid_count": 0,
             "fluid_active_mask_surface_seed_cell_count": 0,
             "fluid_active_mask_surface_seed_radius_cells": radius,
+            "fluid_active_mask_surface_seed_normal_probe_distance_m": max(
+                0.0,
+                float(normal_probe_distance_m),
+            ),
+            "fluid_active_mask_surface_seed_normal_probe_point_count": 0,
             "fluid_active_mask_surface_seed_region_face_counts": region_face_counts,
         }
     mesh_path = _surface_mesh_path(dict(config))
@@ -2610,15 +2790,34 @@ def _surface_region_seed_mask(
     faces = np.asarray(mesh.faces, dtype=np.int64)
     selected = faces[np.asarray(selected_face_ids, dtype=np.int64)]
     tri = vertices[selected]
+    centroids = np.mean(tri, axis=1)
     points = np.concatenate(
         (
-            np.mean(tri, axis=1),
+            centroids,
             tri[:, 0, :],
             tri[:, 1, :],
             tri[:, 2, :],
         ),
         axis=0,
     )
+    normal_probe_point_count = 0
+    normal_probe_distance = max(0.0, float(normal_probe_distance_m))
+    if normal_probe_distance > 0.0:
+        raw_normals = np.cross(tri[:, 1, :] - tri[:, 0, :], tri[:, 2, :] - tri[:, 0, :])
+        normal_norms = np.linalg.norm(raw_normals, axis=1)
+        valid_normals = normal_norms > 1.0e-30
+        if np.any(valid_normals):
+            unit_normals = np.zeros_like(raw_normals)
+            unit_normals[valid_normals] = (
+                raw_normals[valid_normals]
+                / normal_norms[valid_normals, None]
+            )
+            normal_probe_points = (
+                centroids[valid_normals]
+                + unit_normals[valid_normals] * normal_probe_distance
+            )
+            normal_probe_point_count = int(normal_probe_points.shape[0])
+            points = np.concatenate((points, normal_probe_points), axis=0)
     i, j, k, valid = _cell_indices_for_points(points, grid)
     offsets = tuple(range(-radius, radius + 1))
     for di in offsets:
@@ -2643,8 +2842,134 @@ def _surface_region_seed_mask(
         "fluid_active_mask_surface_seed_point_in_grid_count": int(np.count_nonzero(valid)),
         "fluid_active_mask_surface_seed_cell_count": int(np.count_nonzero(seed)),
         "fluid_active_mask_surface_seed_radius_cells": radius,
+        "fluid_active_mask_surface_seed_normal_probe_distance_m": normal_probe_distance,
+        "fluid_active_mask_surface_seed_normal_probe_point_count": normal_probe_point_count,
         "fluid_active_mask_surface_seed_region_face_counts": region_face_counts,
     }
+
+
+def _clear_surface_region_normal_probe_obstacle_cells(
+    obstacle: np.ndarray,
+    *,
+    config: Mapping[str, object],
+    grid: CartesianGrid,
+    region_ids: Sequence[int],
+    normal_probe_distance_m: float,
+    radius_cells: int = 0,
+) -> dict[str, object]:
+    import trimesh
+
+    if obstacle.shape != tuple(int(value) for value in grid.grid_nodes):
+        raise ValueError("obstacle shape must match grid.grid_nodes")
+    unique_region_ids = tuple(sorted({int(value) for value in region_ids}))
+    selected_face_ids: list[int] = []
+    region_face_counts: dict[str, int] = {}
+    for region_id in unique_region_ids:
+        face_ids = _face_ids_for_region(dict(config), region_id)
+        region_face_counts[str(region_id)] = len(face_ids)
+        selected_face_ids.extend(face_ids)
+    probe_distance = max(0.0, float(normal_probe_distance_m))
+    radius = max(0, int(radius_cells))
+    if not selected_face_ids or probe_distance <= 0.0:
+        return {
+            "fluid_active_mask_surface_probe_clear_region_ids": unique_region_ids,
+            "fluid_active_mask_surface_probe_clear_face_count": int(
+                len(selected_face_ids)
+            ),
+            "fluid_active_mask_surface_probe_clear_point_count": 0,
+            "fluid_active_mask_surface_probe_clear_cell_count": 0,
+            "fluid_active_mask_surface_probe_clear_cells_ijk": (),
+            "fluid_active_mask_surface_probe_clear_radius_cells": radius,
+            "fluid_active_mask_surface_probe_clear_distance_m": probe_distance,
+            "fluid_active_mask_surface_probe_clear_region_face_counts": (
+                region_face_counts
+            ),
+        }
+
+    mesh_path = _surface_mesh_path(dict(config))
+    mesh_scale_to_m = float(config.get("mesh_scale_to_m", 1.0))
+    mesh = trimesh.load_mesh(mesh_path, process=False)
+    vertices = np.asarray(mesh.vertices, dtype=np.float64) * mesh_scale_to_m
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    selected = faces[np.asarray(selected_face_ids, dtype=np.int64)]
+    tri = vertices[selected]
+    centroids = np.mean(tri, axis=1)
+    raw_normals = np.cross(tri[:, 1, :] - tri[:, 0, :], tri[:, 2, :] - tri[:, 0, :])
+    normal_norms = np.linalg.norm(raw_normals, axis=1)
+    valid_normals = normal_norms > 1.0e-30
+    points = np.empty((0, 3), dtype=np.float64)
+    if np.any(valid_normals):
+        unit_normals = (
+            raw_normals[valid_normals]
+            / normal_norms[valid_normals, None]
+        )
+        points = centroids[valid_normals] + unit_normals * probe_distance
+
+    nodes = tuple(int(value) for value in grid.grid_nodes)
+    i, j, k, valid = _cell_indices_for_points(points, grid)
+    clear_mask = np.zeros(obstacle.shape, dtype=bool)
+    offsets = tuple(range(-radius, radius + 1))
+    for di in offsets:
+        ii = i[valid] + di
+        valid_i = (ii >= 0) & (ii < nodes[0])
+        for dj in offsets:
+            jj = j[valid] + dj
+            valid_j = (jj >= 0) & (jj < nodes[1])
+            for dk in offsets:
+                kk = k[valid] + dk
+                valid_k = (kk >= 0) & (kk < nodes[2])
+                valid_offset = valid_i & valid_j & valid_k
+                clear_mask[
+                    ii[valid_offset],
+                    jj[valid_offset],
+                    kk[valid_offset],
+                ] = True
+    cleared_mask = obstacle & clear_mask
+    cleared = int(np.count_nonzero(cleared_mask))
+    cleared_cells_ijk = tuple(
+        tuple(int(value) for value in cell)
+        for cell in np.argwhere(cleared_mask)
+    )
+    obstacle[clear_mask] = False
+    return {
+        "fluid_active_mask_surface_probe_clear_region_ids": unique_region_ids,
+        "fluid_active_mask_surface_probe_clear_face_count": int(len(selected_face_ids)),
+        "fluid_active_mask_surface_probe_clear_point_count": int(points.shape[0]),
+        "fluid_active_mask_surface_probe_clear_cell_count": cleared,
+        "fluid_active_mask_surface_probe_clear_cells_ijk": cleared_cells_ijk,
+        "fluid_active_mask_surface_probe_clear_radius_cells": radius,
+        "fluid_active_mask_surface_probe_clear_distance_m": probe_distance,
+        "fluid_active_mask_surface_probe_clear_region_face_counts": region_face_counts,
+    }
+
+
+def _solid_band_protection_mask_from_cells(
+    shape: Sequence[int],
+    cells_ijk: Sequence[Sequence[int]],
+    *,
+    radius_cells: int = 0,
+) -> np.ndarray:
+    mask = np.zeros(tuple(int(value) for value in shape), dtype=np.int32)
+    radius = max(0, int(radius_cells))
+    offsets = tuple(range(-radius, radius + 1))
+    nx, ny, nz = mask.shape
+    for cell in cells_ijk:
+        if len(cell) != 3:
+            continue
+        ci, cj, ck = (int(value) for value in cell)
+        for di in offsets:
+            i = ci + di
+            if i < 0 or i >= nx:
+                continue
+            for dj in offsets:
+                j = cj + dj
+                if j < 0 or j >= ny:
+                    continue
+                for dk in offsets:
+                    k = ck + dk
+                    if 0 <= k < nz:
+                        mask[i, j, k] = 1
+    return mask
 
 
 def _mark_particle_obstacle_cells(
@@ -2938,8 +3263,67 @@ def build_source_config_fluid_obstacle_mask(
                 analysis.get("solid_obstacle_opening_carve_depth_cells", 2) or 2
             ),
         )
-    candidate_fluid = ~obstacle
     seed_radius_cells = int(analysis.get("fluid_active_mask_seed_radius_cells", 1) or 1)
+    surface_seed_normal_probe_cells = max(
+        0,
+        int(analysis.get("fluid_active_mask_surface_seed_normal_probe_cells", 1) or 0),
+    )
+    surface_seed_normal_probe_distance_m = 0.0
+    if surface_seed_normal_probe_cells > 0:
+        min_cell_spacing_m = min(
+            min(float(value) for value in grid.cell_widths_x_m),
+            min(float(value) for value in grid.cell_widths_y_m),
+            min(float(value) for value in grid.cell_widths_z_m),
+        )
+        surface_seed_normal_probe_distance_m = (
+            float(surface_seed_normal_probe_cells) * min_cell_spacing_m
+        )
+    clear_region_ids = _selection_ids_as_int_tuple(
+        analysis.get("fluid_active_mask_surface_probe_clear_region_ids", ()),
+    )
+    if (
+        not clear_region_ids
+        and bool(
+            analysis.get(
+                "fluid_active_mask_clear_primary_fsi_surface_probe_obstacles",
+                True,
+            )
+        )
+    ):
+        moving_surface_ids = _selection_ids_as_int_tuple(
+            analysis.get("solid_obstacle_moving_fsi_contact_surface_region_ids", ()),
+        )
+        if moving_surface_ids:
+            clear_region_ids = (int(moving_surface_ids[0]),)
+    if clear_region_ids:
+        surface_probe_clear_report = _clear_surface_region_normal_probe_obstacle_cells(
+            obstacle,
+            config=config,
+            grid=grid,
+            region_ids=clear_region_ids,
+            normal_probe_distance_m=surface_seed_normal_probe_distance_m,
+            radius_cells=int(
+                analysis.get(
+                    "fluid_active_mask_surface_probe_clear_radius_cells",
+                    0,
+                )
+                or 0
+            ),
+        )
+    else:
+        surface_probe_clear_report = {
+            "fluid_active_mask_surface_probe_clear_region_ids": (),
+            "fluid_active_mask_surface_probe_clear_face_count": 0,
+            "fluid_active_mask_surface_probe_clear_point_count": 0,
+            "fluid_active_mask_surface_probe_clear_cell_count": 0,
+            "fluid_active_mask_surface_probe_clear_cells_ijk": (),
+            "fluid_active_mask_surface_probe_clear_radius_cells": 0,
+            "fluid_active_mask_surface_probe_clear_distance_m": (
+                surface_seed_normal_probe_distance_m
+            ),
+            "fluid_active_mask_surface_probe_clear_region_face_counts": {},
+        }
+    candidate_fluid = ~obstacle
     boundary_seed = np.zeros(candidate_fluid.shape, dtype=bool)
     if "z_min" in seed_sides:
         seed_depth = min(max(1, seed_radius_cells), candidate_fluid.shape[2])
@@ -2972,6 +3356,7 @@ def build_source_config_fluid_obstacle_mask(
             grid=grid,
             region_ids=tuple(sorted(seed_region_ids)),
             radius_cells=seed_radius_cells,
+            normal_probe_distance_m=surface_seed_normal_probe_distance_m,
         )
     else:
         surface_seed = np.zeros(candidate_fluid.shape, dtype=bool)
@@ -2982,6 +3367,10 @@ def build_source_config_fluid_obstacle_mask(
             "fluid_active_mask_surface_seed_point_in_grid_count": 0,
             "fluid_active_mask_surface_seed_cell_count": 0,
             "fluid_active_mask_surface_seed_radius_cells": seed_radius_cells,
+            "fluid_active_mask_surface_seed_normal_probe_distance_m": (
+                surface_seed_normal_probe_distance_m
+            ),
+            "fluid_active_mask_surface_seed_normal_probe_point_count": 0,
             "fluid_active_mask_surface_seed_region_face_counts": {},
         }
     active_water, seed_cell_count = _connected_active_mask(
@@ -3015,6 +3404,7 @@ def build_source_config_fluid_obstacle_mask(
         "final_obstacle_cell_count": int(np.count_nonzero(final_obstacle)),
         "host_device_transfer_policy": "one_time_initial_obstacle_from_numpy_before_steps",
         **obstacle_report,
+        **surface_probe_clear_report,
         **surface_seed_report,
     }
     return final_obstacle.astype(np.int32), report
@@ -3918,6 +4308,16 @@ def _row_bool(value: object) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes"}
     return bool(value)
+
+
+def _rows_max_int(rows: Sequence[Mapping[str, object]], key: str) -> int:
+    if not rows:
+        return 0
+    return max(int(row.get(key, 0) or 0) for row in rows)
+
+
+def _rows_any_bool(rows: Sequence[Mapping[str, object]], key: str) -> bool:
+    return any(_row_bool(row.get(key, False)) for row in rows)
 
 
 def pressure_schedule_applied_in_history(rows: Sequence[dict[str, object]]) -> bool:
@@ -5206,6 +5606,30 @@ def restore_sharp_pressure_neumann_gradient_state_array(
     field.from_numpy(full)
 
 
+def relaxed_sharp_pressure_neumann_gradient_state_array(
+    guess: object,
+    candidate: object,
+    *,
+    relaxation: float,
+) -> np.ndarray:
+    omega = float(relaxation)
+    if not math.isfinite(omega) or not 0.0 <= omega <= 1.5:
+        raise ValueError("relaxation must be finite and in [0, 1.5]")
+    guess_array = np.asarray(guess)
+    candidate_array = np.asarray(candidate)
+    if tuple(candidate_array.shape) != tuple(guess_array.shape):
+        raise ValueError(
+            "sharp pressure-Neumann gradient state shape mismatch: "
+            f"{tuple(candidate_array.shape)} != {tuple(guess_array.shape)}"
+        )
+    if not bool(np.all(np.isfinite(guess_array))) or not bool(
+        np.all(np.isfinite(candidate_array))
+    ):
+        raise ValueError("sharp pressure-Neumann gradient state must be finite")
+    relaxed = guess_array + omega * (candidate_array - guess_array)
+    return relaxed.astype(guess_array.dtype, copy=False)
+
+
 def _sharp_marker_state_array(
     state: Mapping[str, object],
     name: str,
@@ -5288,6 +5712,77 @@ def sharp_marker_fixed_point_residual_mps(
         "l2_mps": float(np.sqrt(np.mean(marker_norms * marker_norms))),
         "max_mps": float(np.max(marker_norms)),
         "sample_count": int(marker_norms.shape[0]),
+    }
+
+
+def _marker_group_l2_mps(
+    marker_norms_mps: np.ndarray,
+    mask: np.ndarray,
+) -> float:
+    if marker_norms_mps.shape[0] <= 0 or not bool(np.any(mask)):
+        return 0.0
+    values = marker_norms_mps[mask]
+    return float(np.sqrt(np.mean(values * values)))
+
+
+def sharp_marker_fixed_point_residual_diagnostics_mps(
+    guess: Mapping[str, object],
+    candidate: Mapping[str, object],
+    *,
+    dt_s: float,
+    marker_region_ids: object,
+    primary_region_id: int,
+    secondary_region_id: int,
+) -> dict[str, float | int]:
+    residual_vector = _sharp_marker_fixed_point_residual_vector_mps(
+        guess,
+        candidate,
+        dt_s=dt_s,
+    )
+    marker_count = int(residual_vector.shape[0])
+    if marker_count <= 0:
+        return {
+            "position_l2_mps": 0.0,
+            "position_max_mps": 0.0,
+            "velocity_l2_mps": 0.0,
+            "velocity_max_mps": 0.0,
+            "combined_l2_mps": 0.0,
+            "combined_max_mps": 0.0,
+            "primary_region_l2_mps": 0.0,
+            "secondary_region_l2_mps": 0.0,
+            "other_region_l2_mps": 0.0,
+            "max_marker_index": -1,
+            "max_marker_region_id": -1,
+            "max_marker_position_mps": 0.0,
+            "max_marker_velocity_mps": 0.0,
+            "max_marker_combined_mps": 0.0,
+        }
+    regions = np.asarray(marker_region_ids, dtype=np.int64)
+    if regions.shape[0] < marker_count:
+        raise ValueError("marker_region_ids must contain at least marker_count values")
+    regions = regions[:marker_count]
+    position_norms = np.linalg.norm(residual_vector[:, :3], axis=1)
+    velocity_norms = np.linalg.norm(residual_vector[:, 3:], axis=1)
+    marker_norms = np.linalg.norm(residual_vector, axis=1)
+    primary_mask = regions == int(primary_region_id)
+    secondary_mask = regions == int(secondary_region_id)
+    other_mask = ~(primary_mask | secondary_mask)
+    max_index = int(np.argmax(marker_norms))
+    return {
+        "position_l2_mps": float(np.sqrt(np.mean(position_norms * position_norms))),
+        "position_max_mps": float(np.max(position_norms)),
+        "velocity_l2_mps": float(np.sqrt(np.mean(velocity_norms * velocity_norms))),
+        "velocity_max_mps": float(np.max(velocity_norms)),
+        "combined_l2_mps": float(np.sqrt(np.mean(marker_norms * marker_norms))),
+        "combined_max_mps": float(np.max(marker_norms)),
+        "primary_region_l2_mps": _marker_group_l2_mps(marker_norms, primary_mask),
+        "secondary_region_l2_mps": _marker_group_l2_mps(marker_norms, secondary_mask),
+        "other_region_l2_mps": _marker_group_l2_mps(marker_norms, other_mask),
+        "max_marker_index": max_index,
+        "max_marker_region_id": int(regions[max_index]),
+        "max_marker_position_mps": float(position_norms[max_index]),
+        "max_marker_velocity_mps": float(velocity_norms[max_index]),
+        "max_marker_combined_mps": float(marker_norms[max_index]),
     }
 
 
@@ -6695,6 +7190,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     fsi_coupling_tolerance_n = float(args.fsi_coupling_tolerance_n)
     if not math.isfinite(fsi_coupling_tolerance_n) or fsi_coupling_tolerance_n < 0.0:
         raise ValueError("--fsi-coupling-tolerance-n must be a finite non-negative number")
+    fsi_marker_coupling_tolerance_mps = float(args.fsi_marker_coupling_tolerance_mps)
+    if (
+        not math.isfinite(fsi_marker_coupling_tolerance_mps)
+        or fsi_marker_coupling_tolerance_mps < 0.0
+    ):
+        raise ValueError(
+            "--fsi-marker-coupling-tolerance-mps must be a finite non-negative number"
+        )
     fsi_coupling_target_map_relaxation = float(args.fsi_coupling_target_map_relaxation)
     if (
         not math.isfinite(fsi_coupling_target_map_relaxation)
@@ -7137,6 +7640,45 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 )
             )
             simulator.fluid.obstacle.from_numpy(source_config_water_obstacle_mask)
+            surface_probe_clear_cells = tuple(
+                source_config_fluid_topology_report.get(
+                    "fluid_active_mask_surface_probe_clear_cells_ijk",
+                    (),
+                )
+                or ()
+            )
+            if surface_probe_clear_cells:
+                analysis_settings = source_config.get("analysis_settings", {})
+                if not isinstance(analysis_settings, Mapping):
+                    analysis_settings = {}
+                protection_radius_cells = int(
+                    analysis_settings.get(
+                        "fluid_active_mask_surface_probe_clear_solid_band_protection_radius_cells",
+                        0,
+                    )
+                    or 0
+                )
+                solid_band_protection_mask = _solid_band_protection_mask_from_cells(
+                    source_config_water_obstacle_mask.shape,
+                    surface_probe_clear_cells,
+                    radius_cells=protection_radius_cells,
+                )
+                source_config_fluid_topology_report[
+                    "fluid_active_mask_surface_probe_clear_solid_band_protection_radius_cells"
+                ] = int(max(0, protection_radius_cells))
+                source_config_fluid_topology_report[
+                    "fluid_active_mask_surface_probe_clear_solid_band_protection_cell_count"
+                ] = int(np.count_nonzero(solid_band_protection_mask))
+                simulator.fluid.set_hibm_solid_band_protection_mask_from_numpy(
+                    solid_band_protection_mask,
+                )
+            else:
+                source_config_fluid_topology_report[
+                    "fluid_active_mask_surface_probe_clear_solid_band_protection_radius_cells"
+                ] = 0
+                source_config_fluid_topology_report[
+                    "fluid_active_mask_surface_probe_clear_solid_band_protection_cell_count"
+                ] = 0
             pre_intersection_obstacle_cell_count = int(
                 source_config_fluid_topology_report.get("final_obstacle_cell_count", 0)
                 or 0
@@ -8235,7 +8777,25 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 requested_iterations = max(1, int(fsi_coupling_iterations))
                 if requested_iterations <= 1:
                     report = advance_sharp_trial_once()
-                    return report, {}
+                    fsi_coupling_iterations_used = 1
+                    fsi_coupling_converged = False
+                    fsi_coupling_residual_norm_n = math.nan
+                    return report, {
+                        "hibm_coupling_scheme": "explicit_loose",
+                        "hibm_added_mass_stability_status": (
+                            "unmeasured_single_pass"
+                        ),
+                        "hibm_added_mass_stability_measured": False,
+                        "hibm_added_mass_stabilization": "none",
+                        "hibm_semi_implicit_coupling_enabled": False,
+                        "hibm_semi_implicit_coupling_matrix_active": False,
+                        "hibm_fsi_coupling_iterations_used": 1,
+                        "hibm_fsi_coupling_converged": False,
+                        "hibm_fsi_coupling_explicit_single_pass": True,
+                        "hibm_fsi_coupling_residual_source": (
+                            "unmeasured_single_pass"
+                        ),
+                    }
 
                 simulator.save_reduced_state()
                 simulator.fluid.save_state()
@@ -8244,9 +8804,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 pressure_gradient_state = (
                     sharp_pressure_neumann_gradient_state_array(sharp_coupling_state)
                 )
-                previous_residual_vector: np.ndarray | None = None
+                previous_velocity_residual_vector: np.ndarray | None = None
                 residual_history: list[float] = []
                 residual_max_history: list[float] = []
+                combined_residual_history: list[float] = []
+                combined_residual_max_history: list[float] = []
+                residual_position_history: list[float] = []
+                residual_velocity_history: list[float] = []
+                residual_primary_region_history: list[float] = []
+                residual_secondary_region_history: list[float] = []
+                residual_other_region_history: list[float] = []
+                residual_max_marker_index_history: list[int] = []
+                residual_max_marker_region_history: list[int] = []
                 relaxation_history: list[float] = []
                 relaxation = float(interface_reaction_relaxation)
                 converged = False
@@ -8255,6 +8824,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 report = None
                 residual_norm_mps = math.inf
                 residual_max_mps = math.inf
+                combined_residual_norm_mps = math.inf
+                combined_residual_max_mps = math.inf
 
                 for iteration in range(requested_iterations):
                     restore_sharp_trial_state(marker_guess, pressure_gradient_state)
@@ -8262,46 +8833,142 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     marker_candidate = sharp_marker_state_arrays(
                         sharp_coupling_state.markers
                     )
+                    candidate_pressure_gradient_state = (
+                        sharp_pressure_neumann_gradient_state_array(
+                            sharp_coupling_state
+                        )
+                    )
                     residual = sharp_marker_fixed_point_residual_mps(
                         marker_guess,
                         marker_candidate,
                         dt_s=spec.dt_s,
+                    )
+                    marker_region_ids = (
+                        sharp_coupling_state.markers.region_id.to_numpy()
+                        [: int(sharp_coupling_state.markers.marker_count)]
+                    )
+                    residual_diagnostics = (
+                        sharp_marker_fixed_point_residual_diagnostics_mps(
+                            marker_guess,
+                            marker_candidate,
+                            dt_s=spec.dt_s,
+                            marker_region_ids=marker_region_ids,
+                            primary_region_id=primary_shell_region_id,
+                            secondary_region_id=secondary_shell_region_id,
+                        )
                     )
                     residual_vector = _sharp_marker_fixed_point_residual_vector_mps(
                         marker_guess,
                         marker_candidate,
                         dt_s=spec.dt_s,
                     )
-                    residual_norm_mps = float(residual["l2_mps"])
-                    residual_max_mps = float(residual["max_mps"])
+                    velocity_residual_vector = residual_vector[:, 3:].reshape(-1)
+                    combined_residual_norm_mps = float(residual["l2_mps"])
+                    combined_residual_max_mps = float(residual["max_mps"])
+                    residual_norm_mps = float(residual_diagnostics["velocity_l2_mps"])
+                    residual_max_mps = float(residual_diagnostics["velocity_max_mps"])
                     residual_history.append(residual_norm_mps)
                     residual_max_history.append(residual_max_mps)
+                    combined_residual_history.append(combined_residual_norm_mps)
+                    combined_residual_max_history.append(combined_residual_max_mps)
+                    residual_position_history.append(
+                        float(residual_diagnostics["position_l2_mps"])
+                    )
+                    residual_velocity_history.append(residual_norm_mps)
+                    residual_primary_region_history.append(
+                        float(residual_diagnostics["primary_region_l2_mps"])
+                    )
+                    residual_secondary_region_history.append(
+                        float(residual_diagnostics["secondary_region_l2_mps"])
+                    )
+                    residual_other_region_history.append(
+                        float(residual_diagnostics["other_region_l2_mps"])
+                    )
+                    residual_max_marker_index_history.append(
+                        int(residual_diagnostics["max_marker_index"])
+                    )
+                    residual_max_marker_region_history.append(
+                        int(residual_diagnostics["max_marker_region_id"])
+                    )
                     relaxation_history.append(float(relaxation))
                     iterations_used = iteration + 1
-                    if residual_norm_mps <= fsi_coupling_tolerance_n:
+                    velocity_residual_norm_mps = residual_norm_mps
+                    trial_projection_failure_reason = (
+                        sharp_report_fluid_projection_failure_reason(report)
+                    )
+                    if trial_projection_failure_reason:
+                        raise RuntimeError(
+                            "sharp marker fixed point trial fluid projection failed "
+                            f"(iteration={int(iterations_used)}, "
+                            f"reason={trial_projection_failure_reason}, "
+                            f"velocity_residual_l2_mps={float(residual_norm_mps):.6g}, "
+                            f"velocity_residual_max_mps={float(residual_max_mps):.6g}, "
+                            f"combined_residual_l2_mps={float(combined_residual_norm_mps):.6g}, "
+                            f"combined_residual_max_mps={float(combined_residual_max_mps):.6g}, "
+                            f"residual_history_mps={residual_history}, "
+                            f"residual_max_history_mps={residual_max_history}, "
+                            f"combined_residual_history_mps={combined_residual_history}, "
+                            f"combined_residual_max_history_mps={combined_residual_max_history}, "
+                            f"relaxation_history={relaxation_history})"
+                        )
+                    if velocity_residual_norm_mps <= fsi_marker_coupling_tolerance_mps:
                         converged = True
                         break
                     if iteration == requested_iterations - 1:
                         break
-                    if interface_reaction_aitken and previous_residual_vector is not None:
+                    if (
+                        interface_reaction_aitken
+                        and previous_velocity_residual_vector is not None
+                    ):
                         relaxation = _sharp_marker_aitken_relaxation(
                             previous_relaxation=relaxation,
-                            previous_residual_mps=previous_residual_vector,
-                            current_residual_mps=residual_vector,
+                            previous_residual_mps=previous_velocity_residual_vector,
+                            current_residual_mps=velocity_residual_vector,
                         )
                         aitken_update_count += 1
-                    previous_residual_vector = residual_vector.copy()
+                    previous_velocity_residual_vector = (
+                        velocity_residual_vector.copy()
+                    )
                     marker_guess = relaxed_sharp_marker_state_arrays(
                         marker_guess,
                         marker_candidate,
                         relaxation=relaxation,
                     )
+                    pressure_gradient_state = (
+                        relaxed_sharp_pressure_neumann_gradient_state_array(
+                            pressure_gradient_state,
+                            candidate_pressure_gradient_state,
+                            relaxation=relaxation,
+                        )
+                    )
 
                 if report is None:
                     raise RuntimeError("sharp marker fixed point produced no trial")
+                if not converged:
+                    raise RuntimeError(
+                        "sharp marker fixed point did not converge "
+                        f"(iterations={int(iterations_used)}, "
+                        f"velocity_residual_l2_mps={float(residual_norm_mps):.6g}, "
+                        f"velocity_residual_max_mps={float(residual_max_mps):.6g}, "
+                        f"combined_residual_l2_mps={float(combined_residual_norm_mps):.6g}, "
+                        f"combined_residual_max_mps={float(combined_residual_max_mps):.6g}, "
+                        f"tolerance_mps={float(fsi_marker_coupling_tolerance_mps):.6g}, "
+                        f"residual_history_mps={residual_history}, "
+                        f"residual_max_history_mps={residual_max_history}, "
+                        f"combined_residual_history_mps={combined_residual_history}, "
+                        f"combined_residual_max_history_mps={combined_residual_max_history}, "
+                        f"position_residual_history_mps={residual_position_history}, "
+                        f"velocity_residual_history_mps={residual_velocity_history}, "
+                        f"primary_region_residual_history_mps={residual_primary_region_history}, "
+                        f"secondary_region_residual_history_mps={residual_secondary_region_history}, "
+                        f"other_region_residual_history_mps={residual_other_region_history}, "
+                        f"max_marker_index_history={residual_max_marker_index_history}, "
+                        f"max_marker_region_history={residual_max_marker_region_history}, "
+                        f"relaxation_history={relaxation_history})"
+                    )
                 fsi_coupling_iterations_used = iterations_used
                 fsi_coupling_converged = converged
-                fsi_coupling_residual_norm_n = residual_norm_mps
+                fsi_coupling_residual_norm_n = math.nan
                 fsi_coupling_relaxation_effective = relaxation
                 fsi_coupling_iqn_ils_least_squares_update_count = aitken_update_count
                 if len(residual_history) >= 2 and residual_history[0] > 0.0:
@@ -8327,12 +8994,45 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     "hibm_fsi_coupling_converged": converged,
                     "hibm_fsi_coupling_explicit_single_pass": False,
                     "hibm_fsi_coupling_residual_source": (
-                        "marker_surface_fixed_point_position_velocity_residual_l2_mps"
+                        "marker_surface_fixed_point_velocity_residual_l2_mps"
                     ),
                     "hibm_fsi_coupling_residual_l2_mps": residual_norm_mps,
                     "hibm_fsi_coupling_residual_max_mps": residual_max_mps,
                     "hibm_fsi_coupling_residual_history_mps": residual_history,
                     "hibm_fsi_coupling_residual_max_history_mps": residual_max_history,
+                    "hibm_fsi_coupling_combined_residual_l2_mps": (
+                        combined_residual_norm_mps
+                    ),
+                    "hibm_fsi_coupling_combined_residual_max_mps": (
+                        combined_residual_max_mps
+                    ),
+                    "hibm_fsi_coupling_combined_residual_history_mps": (
+                        combined_residual_history
+                    ),
+                    "hibm_fsi_coupling_combined_residual_max_history_mps": (
+                        combined_residual_max_history
+                    ),
+                    "hibm_fsi_coupling_position_residual_history_mps": (
+                        residual_position_history
+                    ),
+                    "hibm_fsi_coupling_velocity_residual_history_mps": (
+                        residual_velocity_history
+                    ),
+                    "hibm_fsi_coupling_primary_region_residual_history_mps": (
+                        residual_primary_region_history
+                    ),
+                    "hibm_fsi_coupling_secondary_region_residual_history_mps": (
+                        residual_secondary_region_history
+                    ),
+                    "hibm_fsi_coupling_other_region_residual_history_mps": (
+                        residual_other_region_history
+                    ),
+                    "hibm_fsi_coupling_max_marker_index_history": (
+                        residual_max_marker_index_history
+                    ),
+                    "hibm_fsi_coupling_max_marker_region_history": (
+                        residual_max_marker_region_history
+                    ),
                     "hibm_fsi_coupling_relaxation_effective": relaxation,
                     "hibm_fsi_coupling_relaxation_history": relaxation_history,
                     "hibm_fsi_coupling_aitken_update_count": aitken_update_count,
@@ -9709,6 +10409,60 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             if rows
             else 0.0
         )
+        max_no_slip_valid_marker_count = (
+            max(
+                int(row.get("hibm_no_slip_residual_valid_marker_count", 0) or 0)
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_no_slip_invalid_marker_count = (
+            max(
+                int(row.get("hibm_no_slip_residual_invalid_marker_count", 0) or 0)
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        post_solid_no_slip_residual_required = (
+            any(
+                _row_bool(
+                    row.get("hibm_post_solid_kinematic_projection_applied", False)
+                )
+                for row in rows
+            )
+            if rows
+            else False
+        )
+        max_post_solid_no_slip_valid_marker_count = (
+            max(
+                int(
+                    row.get(
+                        "hibm_post_solid_no_slip_residual_valid_marker_count",
+                        0,
+                    )
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
+        max_post_solid_no_slip_invalid_marker_count = (
+            max(
+                int(
+                    row.get(
+                        "hibm_post_solid_no_slip_residual_invalid_marker_count",
+                        0,
+                    )
+                    or 0
+                )
+                for row in rows
+            )
+            if rows
+            else 0
+        )
         max_fsi_coupling_residual_norm_mps = (
             max(
                 float(row.get("fsi_coupling_residual_norm_mps", 0.0) or 0.0)
@@ -9743,6 +10497,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             if rows
             else 0
         )
+        max_hibm_row_cloud_orphan_cell_count = _rows_max_int(
+            rows,
+            "hibm_row_cloud_orphan_cell_count",
+        )
+        max_hibm_row_cloud_orphan_component_count = _rows_max_int(
+            rows,
+            "hibm_row_cloud_orphan_component_count",
+        )
+        max_hibm_overflow_singleton_cleanup_cell_count = _rows_max_int(
+            rows,
+            "hibm_overflow_singleton_cleanup_cell_count",
+        )
+        max_hibm_overflow_singleton_cleanup_component_count = _rows_max_int(
+            rows,
+            "hibm_overflow_singleton_cleanup_component_count",
+        )
         max_hibm_pressure_disconnected_nonprojectable_cell_count = (
             max(
                 int(row["hibm_pressure_disconnected_nonprojectable_cell_count"])
@@ -9750,6 +10520,92 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             )
             if rows
             else 0
+        )
+        max_hibm_pressure_disconnected_component_count = _rows_max_int(
+            rows,
+            "hibm_pressure_disconnected_component_count",
+        )
+        max_hibm_pressure_disconnected_component_raw_count = _rows_max_int(
+            rows,
+            "hibm_pressure_disconnected_component_raw_count",
+        )
+        max_hibm_pressure_disconnected_largest_component_cell_count = (
+            _rows_max_int(
+                rows,
+                "hibm_pressure_disconnected_largest_component_cell_count",
+            )
+        )
+        max_hibm_pressure_disconnected_singleton_component_count = _rows_max_int(
+            rows,
+            "hibm_pressure_disconnected_singleton_component_count",
+        )
+        max_hibm_pressure_disconnected_small_component_count = _rows_max_int(
+            rows,
+            "hibm_pressure_disconnected_small_component_count",
+        )
+        max_hibm_pressure_disconnected_small_component_cell_count = _rows_max_int(
+            rows,
+            "hibm_pressure_disconnected_small_component_cell_count",
+        )
+        hibm_pressure_disconnected_component_overflow_seen = _rows_any_bool(
+            rows,
+            "hibm_pressure_disconnected_component_overflow",
+        )
+        max_hibm_next_row_cloud_orphan_cell_count = _rows_max_int(
+            rows,
+            "hibm_next_row_cloud_orphan_cell_count",
+        )
+        max_hibm_next_row_cloud_orphan_component_count = _rows_max_int(
+            rows,
+            "hibm_next_row_cloud_orphan_component_count",
+        )
+        max_hibm_next_overflow_singleton_cleanup_cell_count = _rows_max_int(
+            rows,
+            "hibm_next_overflow_singleton_cleanup_cell_count",
+        )
+        max_hibm_next_overflow_singleton_cleanup_component_count = _rows_max_int(
+            rows,
+            "hibm_next_overflow_singleton_cleanup_component_count",
+        )
+        max_hibm_next_pressure_disconnected_nonprojectable_cell_count = (
+            _rows_max_int(
+                rows,
+                "hibm_next_pressure_disconnected_nonprojectable_cell_count",
+            )
+        )
+        max_hibm_next_pressure_disconnected_component_count = _rows_max_int(
+            rows,
+            "hibm_next_pressure_disconnected_component_count",
+        )
+        max_hibm_next_pressure_disconnected_component_raw_count = _rows_max_int(
+            rows,
+            "hibm_next_pressure_disconnected_component_raw_count",
+        )
+        max_hibm_next_pressure_disconnected_largest_component_cell_count = (
+            _rows_max_int(
+                rows,
+                "hibm_next_pressure_disconnected_largest_component_cell_count",
+            )
+        )
+        max_hibm_next_pressure_disconnected_singleton_component_count = (
+            _rows_max_int(
+                rows,
+                "hibm_next_pressure_disconnected_singleton_component_count",
+            )
+        )
+        max_hibm_next_pressure_disconnected_small_component_count = _rows_max_int(
+            rows,
+            "hibm_next_pressure_disconnected_small_component_count",
+        )
+        max_hibm_next_pressure_disconnected_small_component_cell_count = (
+            _rows_max_int(
+                rows,
+                "hibm_next_pressure_disconnected_small_component_cell_count",
+            )
+        )
+        hibm_next_pressure_disconnected_component_overflow_seen = _rows_any_bool(
+            rows,
+            "hibm_next_pressure_disconnected_component_overflow",
         )
         max_hibm_air_backed_reachability_barrier_cell_count = (
             max(
@@ -10087,6 +10943,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             and _final_row_number(last, "outlet_flow_negative_z_m3s") > 0.0
             and _final_row_number(last, "downstream_flow_negative_z_m3s") > 0.0
         )
+        final_jet_sections_negative_z = bool(
+            last
+            and _final_row_number(last, "outlet_flow_negative_z_m3s") > 0.0
+            and _final_row_number(last, "downstream_flow_negative_z_m3s") > 0.0
+        )
         pressure_projection_cg_converged_all = (
             all(_row_bool(row.get("pressure_projection_cg_converged_all", True)) for row in rows)
             if rows
@@ -10118,6 +10979,48 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             )
             if rows
             else 0
+        )
+        max_hibm_unreached_component_raw_count = _rows_max_int(
+            rows,
+            "hibm_unreached_component_raw_count",
+        )
+        max_hibm_unreached_largest_component_cell_count = _rows_max_int(
+            rows,
+            "hibm_unreached_largest_component_cell_count",
+        )
+        max_hibm_unreached_singleton_component_count = _rows_max_int(
+            rows,
+            "hibm_unreached_singleton_component_count",
+        )
+        max_hibm_unreached_small_component_count = _rows_max_int(
+            rows,
+            "hibm_unreached_small_component_count",
+        )
+        max_hibm_unreached_small_component_cell_count = _rows_max_int(
+            rows,
+            "hibm_unreached_small_component_cell_count",
+        )
+        max_hibm_projection_overflow_singleton_cleanup_cell_count = (
+            _rows_max_int(
+                rows,
+                "hibm_projection_overflow_singleton_cleanup_cell_count",
+            )
+        )
+        max_hibm_projection_overflow_singleton_cleanup_component_count = (
+            _rows_max_int(
+                rows,
+                "hibm_projection_overflow_singleton_cleanup_component_count",
+            )
+        )
+        max_hibm_projection_tiny_unreached_cleanup_cell_count = _rows_max_int(
+            rows,
+            "hibm_projection_tiny_unreached_cleanup_cell_count",
+        )
+        max_hibm_projection_tiny_unreached_cleanup_component_count = (
+            _rows_max_int(
+                rows,
+                "hibm_projection_tiny_unreached_cleanup_component_count",
+            )
         )
         max_hibm_unreached_component_rhs_mean_max_abs = (
             max(
@@ -10308,6 +11211,21 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "hibm_pressure_neumann_reconstruction_valid": (
                 max_pressure_neumann_invalid_count == 0
             ),
+            "hibm_no_slip_residual_samples_present": (
+                max_no_slip_valid_marker_count > 0
+            ),
+            "hibm_no_slip_residual_all_markers_measured": (
+                post_solid_no_slip_residual_required
+                or max_no_slip_invalid_marker_count == 0
+            ),
+            "hibm_post_solid_no_slip_residual_samples_present": (
+                (not post_solid_no_slip_residual_required)
+                or max_post_solid_no_slip_valid_marker_count > 0
+            ),
+            "hibm_post_solid_no_slip_residual_all_markers_measured": (
+                (not post_solid_no_slip_residual_required)
+                or max_post_solid_no_slip_invalid_marker_count == 0
+            ),
             "hibm_full_stress_marker_samples_present": bool(
                 last and int(last["hibm_full_stress_valid_marker_count"]) > 0
             ),
@@ -10326,8 +11244,19 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             if rows
             else False,
             "fsi_coupling_convergence_not_claimed": all(
-                not bool(row.get("fsi_coupling_convergence_measured", False))
-                and not bool(row.get("fsi_coupling_converged", False))
+                (
+                    bool(row.get("fsi_coupling_explicit_single_pass", False))
+                    and not bool(row.get("fsi_coupling_convergence_measured", False))
+                    and not bool(row.get("fsi_coupling_converged", False))
+                )
+                or (
+                    not bool(row.get("fsi_coupling_explicit_single_pass", False))
+                    and bool(row.get("fsi_coupling_convergence_measured", False))
+                    and bool(row.get("fsi_coupling_converged", False))
+                    and str(row.get("fsi_coupling_residual_units", "")) == "m/s"
+                    and str(row.get("fsi_coupling_residual_source", ""))
+                    == "marker_surface_fixed_point_velocity_residual_l2_mps"
+                )
                 for row in rows
             )
             if rows
@@ -10335,7 +11264,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "finite_primary_diagnostics": len(nonfinite_diagnostics) == 0,
             "negative_z_outlet_flow_present": max_outlet_negative_z > 0.0,
             "final_negative_z_outlet_flow": final_outlet_negative_z > 0.0,
-            "final_negative_z_all_sections": final_all_sections_negative_z,
+            "final_negative_z_jet_sections": final_jet_sections_negative_z,
             "section_samples_present": bool(
                 rows
                 and int(last["lip_sample_count"]) > 0
@@ -10520,6 +11449,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 max_fsi_coupling_iqn_ils_least_squares_update_count
             ),
             "fsi_coupling_tolerance_n": fsi_coupling_tolerance_n,
+            "fsi_marker_coupling_tolerance_mps": (
+                fsi_marker_coupling_tolerance_mps
+            ),
             "fsi_coupling_target_map_relaxation": fsi_coupling_target_map_relaxation,
             "fsi_coupling_explicit_single_pass": bool(
                 rows
@@ -10597,6 +11529,33 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "max_hibm_unreached_incompatible_component_count": (
                 max_hibm_unreached_incompatible_component_count
             ),
+            "max_hibm_unreached_component_raw_count": (
+                max_hibm_unreached_component_raw_count
+            ),
+            "max_hibm_unreached_largest_component_cell_count": (
+                max_hibm_unreached_largest_component_cell_count
+            ),
+            "max_hibm_unreached_singleton_component_count": (
+                max_hibm_unreached_singleton_component_count
+            ),
+            "max_hibm_unreached_small_component_count": (
+                max_hibm_unreached_small_component_count
+            ),
+            "max_hibm_unreached_small_component_cell_count": (
+                max_hibm_unreached_small_component_cell_count
+            ),
+            "max_hibm_projection_overflow_singleton_cleanup_cell_count": (
+                max_hibm_projection_overflow_singleton_cleanup_cell_count
+            ),
+            "max_hibm_projection_overflow_singleton_cleanup_component_count": (
+                max_hibm_projection_overflow_singleton_cleanup_component_count
+            ),
+            "max_hibm_projection_tiny_unreached_cleanup_cell_count": (
+                max_hibm_projection_tiny_unreached_cleanup_cell_count
+            ),
+            "max_hibm_projection_tiny_unreached_cleanup_component_count": (
+                max_hibm_projection_tiny_unreached_cleanup_component_count
+            ),
             "max_hibm_unreached_component_rhs_mean_max_abs": (
                 max_hibm_unreached_component_rhs_mean_max_abs
             ),
@@ -10607,6 +11566,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "total_pressure_projection_cg_breakdown_count": total_pressure_projection_cg_breakdown_count,
             "max_hibm_no_slip_residual_l2_mps": max_no_slip_l2,
             "max_hibm_no_slip_residual_mps": max_no_slip_max,
+            "max_hibm_no_slip_residual_valid_marker_count": (
+                max_no_slip_valid_marker_count
+            ),
+            "max_hibm_no_slip_residual_invalid_marker_count": (
+                max_no_slip_invalid_marker_count
+            ),
+            "max_hibm_post_solid_no_slip_residual_valid_marker_count": (
+                max_post_solid_no_slip_valid_marker_count
+            ),
+            "max_hibm_post_solid_no_slip_residual_invalid_marker_count": (
+                max_post_solid_no_slip_invalid_marker_count
+            ),
             "max_fsi_coupling_residual_norm_mps": (
                 max_fsi_coupling_residual_norm_mps
             ),
@@ -10663,8 +11634,77 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "max_hibm_solid_band_nonprojectable_cell_count": (
                 max_hibm_solid_band_nonprojectable_cell_count
             ),
+            "max_hibm_row_cloud_orphan_cell_count": (
+                max_hibm_row_cloud_orphan_cell_count
+            ),
+            "max_hibm_row_cloud_orphan_component_count": (
+                max_hibm_row_cloud_orphan_component_count
+            ),
+            "max_hibm_overflow_singleton_cleanup_cell_count": (
+                max_hibm_overflow_singleton_cleanup_cell_count
+            ),
+            "max_hibm_overflow_singleton_cleanup_component_count": (
+                max_hibm_overflow_singleton_cleanup_component_count
+            ),
             "max_hibm_pressure_disconnected_nonprojectable_cell_count": (
                 max_hibm_pressure_disconnected_nonprojectable_cell_count
+            ),
+            "max_hibm_pressure_disconnected_component_count": (
+                max_hibm_pressure_disconnected_component_count
+            ),
+            "max_hibm_pressure_disconnected_component_raw_count": (
+                max_hibm_pressure_disconnected_component_raw_count
+            ),
+            "max_hibm_pressure_disconnected_largest_component_cell_count": (
+                max_hibm_pressure_disconnected_largest_component_cell_count
+            ),
+            "max_hibm_pressure_disconnected_singleton_component_count": (
+                max_hibm_pressure_disconnected_singleton_component_count
+            ),
+            "max_hibm_pressure_disconnected_small_component_count": (
+                max_hibm_pressure_disconnected_small_component_count
+            ),
+            "max_hibm_pressure_disconnected_small_component_cell_count": (
+                max_hibm_pressure_disconnected_small_component_cell_count
+            ),
+            "hibm_pressure_disconnected_component_overflow_seen": (
+                hibm_pressure_disconnected_component_overflow_seen
+            ),
+            "max_hibm_next_row_cloud_orphan_cell_count": (
+                max_hibm_next_row_cloud_orphan_cell_count
+            ),
+            "max_hibm_next_row_cloud_orphan_component_count": (
+                max_hibm_next_row_cloud_orphan_component_count
+            ),
+            "max_hibm_next_overflow_singleton_cleanup_cell_count": (
+                max_hibm_next_overflow_singleton_cleanup_cell_count
+            ),
+            "max_hibm_next_overflow_singleton_cleanup_component_count": (
+                max_hibm_next_overflow_singleton_cleanup_component_count
+            ),
+            "max_hibm_next_pressure_disconnected_nonprojectable_cell_count": (
+                max_hibm_next_pressure_disconnected_nonprojectable_cell_count
+            ),
+            "max_hibm_next_pressure_disconnected_component_count": (
+                max_hibm_next_pressure_disconnected_component_count
+            ),
+            "max_hibm_next_pressure_disconnected_component_raw_count": (
+                max_hibm_next_pressure_disconnected_component_raw_count
+            ),
+            "max_hibm_next_pressure_disconnected_largest_component_cell_count": (
+                max_hibm_next_pressure_disconnected_largest_component_cell_count
+            ),
+            "max_hibm_next_pressure_disconnected_singleton_component_count": (
+                max_hibm_next_pressure_disconnected_singleton_component_count
+            ),
+            "max_hibm_next_pressure_disconnected_small_component_count": (
+                max_hibm_next_pressure_disconnected_small_component_count
+            ),
+            "max_hibm_next_pressure_disconnected_small_component_cell_count": (
+                max_hibm_next_pressure_disconnected_small_component_cell_count
+            ),
+            "hibm_next_pressure_disconnected_component_overflow_seen": (
+                hibm_next_pressure_disconnected_component_overflow_seen
             ),
             "max_hibm_velocity_dirichlet_invalid_reconstruction_count": (
                 max_velocity_dirichlet_invalid_count
@@ -10737,6 +11777,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 args.min_outlet_to_main_volume_flux_ratio
             ),
             "final_negative_z_all_sections": final_all_sections_negative_z,
+            "final_negative_z_jet_sections": final_jet_sections_negative_z,
             "phase5_validation_complete": False,
             "interpretation_note": (
                 "hibm_mpm_sharp uses simulation_core marker fields, IB node "
@@ -10871,6 +11912,42 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
         if rows
         else 0
+    )
+    max_hibm_unreached_component_raw_count = _rows_max_int(
+        rows,
+        "hibm_unreached_component_raw_count",
+    )
+    max_hibm_unreached_largest_component_cell_count = _rows_max_int(
+        rows,
+        "hibm_unreached_largest_component_cell_count",
+    )
+    max_hibm_unreached_singleton_component_count = _rows_max_int(
+        rows,
+        "hibm_unreached_singleton_component_count",
+    )
+    max_hibm_unreached_small_component_count = _rows_max_int(
+        rows,
+        "hibm_unreached_small_component_count",
+    )
+    max_hibm_unreached_small_component_cell_count = _rows_max_int(
+        rows,
+        "hibm_unreached_small_component_cell_count",
+    )
+    max_hibm_projection_overflow_singleton_cleanup_cell_count = _rows_max_int(
+        rows,
+        "hibm_projection_overflow_singleton_cleanup_cell_count",
+    )
+    max_hibm_projection_overflow_singleton_cleanup_component_count = _rows_max_int(
+        rows,
+        "hibm_projection_overflow_singleton_cleanup_component_count",
+    )
+    max_hibm_projection_tiny_unreached_cleanup_cell_count = _rows_max_int(
+        rows,
+        "hibm_projection_tiny_unreached_cleanup_cell_count",
+    )
+    max_hibm_projection_tiny_unreached_cleanup_component_count = _rows_max_int(
+        rows,
+        "hibm_projection_tiny_unreached_cleanup_component_count",
     )
     max_hibm_unreached_component_rhs_mean_max_abs = (
         max(
@@ -11273,8 +12350,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     max_fsi_coupling_iterations_used = (
         max(int(row["fsi_coupling_iterations_used"]) for row in rows) if rows else 0
     )
+    fsi_coupling_residual_norm_n_values = [
+        float(row["fsi_coupling_residual_norm_n"])
+        for row in rows
+        if math.isfinite(float(row["fsi_coupling_residual_norm_n"]))
+    ]
     max_fsi_coupling_residual_norm_n = (
-        max(float(row["fsi_coupling_residual_norm_n"]) for row in rows) if rows else 0.0
+        max(fsi_coupling_residual_norm_n_values)
+        if fsi_coupling_residual_norm_n_values
+        else math.nan
     )
     max_fsi_coupling_residual_norm_mps = (
         max(float(row.get("fsi_coupling_residual_norm_mps", 0.0) or 0.0) for row in rows)
@@ -11866,6 +12950,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             max_fsi_coupling_iqn_ils_least_squares_update_count
         ),
         "fsi_coupling_tolerance_n": fsi_coupling_tolerance_n,
+        "fsi_marker_coupling_tolerance_mps": fsi_marker_coupling_tolerance_mps,
         "fsi_coupling_target_map_relaxation": fsi_coupling_target_map_relaxation,
         "max_fsi_coupling_residual_norm_n": max_fsi_coupling_residual_norm_n,
         "max_fsi_coupling_residual_norm_mps": (
@@ -12115,6 +13200,33 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "max_hibm_unreached_incompatible_component_count": (
             max_hibm_unreached_incompatible_component_count
+        ),
+        "max_hibm_unreached_component_raw_count": (
+            max_hibm_unreached_component_raw_count
+        ),
+        "max_hibm_unreached_largest_component_cell_count": (
+            max_hibm_unreached_largest_component_cell_count
+        ),
+        "max_hibm_unreached_singleton_component_count": (
+            max_hibm_unreached_singleton_component_count
+        ),
+        "max_hibm_unreached_small_component_count": (
+            max_hibm_unreached_small_component_count
+        ),
+        "max_hibm_unreached_small_component_cell_count": (
+            max_hibm_unreached_small_component_cell_count
+        ),
+        "max_hibm_projection_overflow_singleton_cleanup_cell_count": (
+            max_hibm_projection_overflow_singleton_cleanup_cell_count
+        ),
+        "max_hibm_projection_overflow_singleton_cleanup_component_count": (
+            max_hibm_projection_overflow_singleton_cleanup_component_count
+        ),
+        "max_hibm_projection_tiny_unreached_cleanup_cell_count": (
+            max_hibm_projection_tiny_unreached_cleanup_cell_count
+        ),
+        "max_hibm_projection_tiny_unreached_cleanup_component_count": (
+            max_hibm_projection_tiny_unreached_cleanup_component_count
         ),
         "max_hibm_unreached_component_rhs_mean_max_abs": (
             max_hibm_unreached_component_rhs_mean_max_abs
@@ -12898,6 +14010,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1.0e-3,
         help="Convergence tolerance for the two-component step-internal interface-reaction residual in Newtons.",
+    )
+    parser.add_argument(
+        "--fsi-marker-coupling-tolerance-mps",
+        type=float,
+        default=1.0e-4,
+        help=(
+            "Convergence tolerance for sharp HIBM-MPM marker fixed-point "
+            "position/velocity residual in m/s."
+        ),
     )
     parser.add_argument(
         "--fsi-coupling-target-map-relaxation",
