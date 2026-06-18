@@ -33,6 +33,7 @@ from cases.squid_soft_robot import (
     force_decomposition_report,
     fsi_same_step_rerun_triggered,
     fsi_trial_acceptance_passes,
+    fsi_trial_acceptance_rejection_reason,
     fluid_grid_resolution_report,
     infer_spec,
     interface_reaction_target_for_mode,
@@ -4447,6 +4448,31 @@ END-ISO-10303-21;
                 {"trial_cfl": 0.25},
                 cfl_limit=0.5,
             )
+        )
+
+    def test_fsi_trial_acceptance_reports_rejection_reason(self) -> None:
+        self.assertIsNone(
+            fsi_trial_acceptance_rejection_reason(
+                {"trial_cfl": 0.25, "trial_interior_divergence_l2": 0.05},
+                cfl_limit=0.5,
+                interior_divergence_l2_limit=0.1,
+            )
+        )
+        self.assertEqual(
+            fsi_trial_acceptance_rejection_reason(
+                {"trial_cfl": 0.5, "trial_interior_divergence_l2": 0.05},
+                cfl_limit=0.5,
+                interior_divergence_l2_limit=0.1,
+            ),
+            "cfl",
+        )
+        self.assertEqual(
+            fsi_trial_acceptance_rejection_reason(
+                {"trial_cfl": 0.25, "trial_interior_divergence_l2": 0.15},
+                cfl_limit=0.5,
+                interior_divergence_l2_limit=0.1,
+            ),
+            "interior_divergence_l2",
         )
 
     def test_fsi_coupling_adaptive_trust_region_cli_is_explicit(self) -> None:

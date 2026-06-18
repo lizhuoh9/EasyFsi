@@ -2109,18 +2109,35 @@ def fsi_trial_acceptance_passes(
     cfl_limit: float,
     interior_divergence_l2_limit: float = math.inf,
 ) -> bool:
+    return (
+        fsi_trial_acceptance_rejection_reason(
+            payload,
+            cfl_limit=cfl_limit,
+            interior_divergence_l2_limit=interior_divergence_l2_limit,
+        )
+        is None
+    )
+
+
+def fsi_trial_acceptance_rejection_reason(
+    payload: Mapping[str, object],
+    *,
+    cfl_limit: float,
+    interior_divergence_l2_limit: float = math.inf,
+) -> str | None:
     trial_cfl = float(payload.get("trial_cfl", math.inf))
     if not (math.isfinite(trial_cfl) and trial_cfl < float(cfl_limit)):
-        return False
+        return "cfl"
     if math.isfinite(float(interior_divergence_l2_limit)):
         trial_interior_divergence_l2 = float(
             payload.get("trial_interior_divergence_l2", math.inf)
         )
-        return (
+        if not (
             math.isfinite(trial_interior_divergence_l2)
             and trial_interior_divergence_l2 <= float(interior_divergence_l2_limit)
-        )
-    return True
+        ):
+            return "interior_divergence_l2"
+    return None
 
 
 def raise_for_unsupported_hibm_mpm_sharp_robin_options(
@@ -9033,6 +9050,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         fsi_coupling_rejected_trial_backtrack_count = 0
         fsi_coupling_residual_growth_rejected_trial_count = 0
         fsi_coupling_max_residual_rejected_trial_count = 0
+        fsi_coupling_trial_cfl_rejected_count = 0
+        fsi_coupling_trial_interior_divergence_rejected_count = 0
         fsi_coupling_trust_region_limited_update_count = 0
         fsi_coupling_trust_region_shrink_count = 0
         fsi_coupling_trust_region_growth_count = 0
@@ -9435,16 +9454,26 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             def accept_fsi_interface_reaction_evaluation(
                 evaluation: InterfaceReactionTargetEvaluation,
             ) -> bool:
+                nonlocal fsi_coupling_trial_cfl_rejected_count
+                nonlocal fsi_coupling_trial_interior_divergence_rejected_count
                 payload = evaluation.payload
                 if not isinstance(payload, Mapping):
+                    fsi_coupling_trial_cfl_rejected_count += 1
                     return False
-                return fsi_trial_acceptance_passes(
+                rejection_reason = fsi_trial_acceptance_rejection_reason(
                     payload,
                     cfl_limit=0.5,
                     interior_divergence_l2_limit=(
                         fsi_coupling_trial_interior_divergence_tolerance
                     ),
                 )
+                if rejection_reason == "cfl":
+                    fsi_coupling_trial_cfl_rejected_count += 1
+                    return False
+                if rejection_reason == "interior_divergence_l2":
+                    fsi_coupling_trial_interior_divergence_rejected_count += 1
+                    return False
+                return True
 
             def apply_accepted_fsi_interface_reaction(reaction_force_n: tuple[float, ...]) -> None:
                 primary_reaction_n, secondary_reaction_n = _split_region_pair_vector(reaction_force_n)
@@ -10871,6 +10900,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
         row["fsi_coupling_max_residual_rejected_trial_count"] = (
             fsi_coupling_max_residual_rejected_trial_count
+        )
+        row["fsi_coupling_trial_cfl_rejected_count"] = (
+            fsi_coupling_trial_cfl_rejected_count
+        )
+        row["fsi_coupling_trial_interior_divergence_rejected_count"] = (
+            fsi_coupling_trial_interior_divergence_rejected_count
         )
         row["fsi_coupling_trust_region_limited_update_count"] = (
             fsi_coupling_trust_region_limited_update_count
@@ -13964,6 +13999,28 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if rows
         else 0
     )
+    max_fsi_coupling_trial_cfl_rejected_count = (
+        max(
+            int(row.get("fsi_coupling_trial_cfl_rejected_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_trial_interior_divergence_rejected_count = (
+        max(
+            int(
+                row.get(
+                    "fsi_coupling_trial_interior_divergence_rejected_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
     max_fsi_coupling_trust_region_limited_update_count = (
         max(
             int(
@@ -14054,6 +14111,28 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             int(
                 row.get(
                     "fsi_coupling_max_residual_rejected_trial_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_trial_cfl_rejected_count = (
+        sum(
+            int(row.get("fsi_coupling_trial_cfl_rejected_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_trial_interior_divergence_rejected_count = (
+        sum(
+            int(
+                row.get(
+                    "fsi_coupling_trial_interior_divergence_rejected_count",
                     0,
                 )
                 or 0
@@ -14875,6 +14954,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "max_fsi_coupling_max_residual_rejected_trial_count": (
             max_fsi_coupling_max_residual_rejected_trial_count
         ),
+        "max_fsi_coupling_trial_cfl_rejected_count": (
+            max_fsi_coupling_trial_cfl_rejected_count
+        ),
+        "max_fsi_coupling_trial_interior_divergence_rejected_count": (
+            max_fsi_coupling_trial_interior_divergence_rejected_count
+        ),
         "max_fsi_coupling_trust_region_limited_update_count": (
             max_fsi_coupling_trust_region_limited_update_count
         ),
@@ -14904,6 +14989,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "total_fsi_coupling_max_residual_rejected_trial_count": (
             total_fsi_coupling_max_residual_rejected_trial_count
+        ),
+        "total_fsi_coupling_trial_cfl_rejected_count": (
+            total_fsi_coupling_trial_cfl_rejected_count
+        ),
+        "total_fsi_coupling_trial_interior_divergence_rejected_count": (
+            total_fsi_coupling_trial_interior_divergence_rejected_count
         ),
         "total_fsi_coupling_trust_region_limited_update_count": (
             total_fsi_coupling_trust_region_limited_update_count
