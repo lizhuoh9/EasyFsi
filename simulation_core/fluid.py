@@ -970,6 +970,20 @@ class CartesianFluidSolver:
             shape=(),
         )
         self.report_source_volume_flux_m3s = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_reachable_source_volume_flux_m3s = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_unreached_source_volume_flux_m3s = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_reachable_source_cell_count = ti.field(dtype=ti.i32, shape=())
+        self.report_zmin_unreached_source_cell_count = ti.field(dtype=ti.i32, shape=())
+        self.report_zmin_unreached_source_abs_flux_m3s = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_unreached_source_weighted_x_m = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_unreached_source_weighted_y_m = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_unreached_source_weighted_z_m = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_unreached_source_min_x_m = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_unreached_source_min_y_m = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_unreached_source_min_z_m = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_unreached_source_max_x_m = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_unreached_source_max_y_m = ti.field(dtype=ti.f32, shape=())
+        self.report_zmin_unreached_source_max_z_m = ti.field(dtype=ti.f32, shape=())
         self.report_zmin_pressure_outlet_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.report_zmin_velocity_outlet_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.report_zmin_pressure_outlet_flux_ratio = ti.field(dtype=ti.f32, shape=())
@@ -978,7 +992,7 @@ class CartesianFluidSolver:
         self.report_zmin_pressure_step_pre_velocity_outlet_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.report_zmin_projection_post_pressure_velocity_outlet_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.report_zmin_projection_post_boundary_velocity_outlet_flux_m3s = ti.field(dtype=ti.f32, shape=())
-        self.pressure_outlet_report_snapshot = ti.Vector.field(8, dtype=ti.f32, shape=())
+        self.pressure_outlet_report_snapshot = ti.Vector.field(10, dtype=ti.f32, shape=())
         self.report_pressure_interface_matrix_diagonal_integral = ti.field(dtype=ti.f64, shape=())
         self.report_pressure_interface_matrix_rhs_integral = ti.field(dtype=ti.f64, shape=())
         self.report_pressure_interface_matrix_max_abs_diagonal = ti.field(dtype=ti.f64, shape=())
@@ -1301,6 +1315,20 @@ class CartesianFluidSolver:
         self.report_velocity_dirichlet_boundary_delta_max[None] = 0.0
         self.report_velocity_dirichlet_boundary_momentum_delta_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_source_volume_flux_m3s[None] = 0.0
+        self.report_zmin_reachable_source_volume_flux_m3s[None] = 0.0
+        self.report_zmin_unreached_source_volume_flux_m3s[None] = 0.0
+        self.report_zmin_reachable_source_cell_count[None] = 0
+        self.report_zmin_unreached_source_cell_count[None] = 0
+        self.report_zmin_unreached_source_abs_flux_m3s[None] = 0.0
+        self.report_zmin_unreached_source_weighted_x_m[None] = 0.0
+        self.report_zmin_unreached_source_weighted_y_m[None] = 0.0
+        self.report_zmin_unreached_source_weighted_z_m[None] = 0.0
+        self.report_zmin_unreached_source_min_x_m[None] = 1.0e30
+        self.report_zmin_unreached_source_min_y_m[None] = 1.0e30
+        self.report_zmin_unreached_source_min_z_m[None] = 1.0e30
+        self.report_zmin_unreached_source_max_x_m[None] = -1.0e30
+        self.report_zmin_unreached_source_max_y_m[None] = -1.0e30
+        self.report_zmin_unreached_source_max_z_m[None] = -1.0e30
         self.report_zmin_pressure_outlet_flux_m3s[None] = 0.0
         self.report_zmin_velocity_outlet_flux_m3s[None] = 0.0
         self.report_zmin_pressure_outlet_flux_ratio[None] = 0.0
@@ -1309,7 +1337,7 @@ class CartesianFluidSolver:
         self.report_zmin_pressure_step_pre_velocity_outlet_flux_m3s[None] = 0.0
         self.report_zmin_projection_post_pressure_velocity_outlet_flux_m3s[None] = 0.0
         self.report_zmin_projection_post_boundary_velocity_outlet_flux_m3s[None] = 0.0
-        self.pressure_outlet_report_snapshot[None] = ti.Vector([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.pressure_outlet_report_snapshot[None] = ti.Vector([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.cg_rz[None] = 0.0
         self.cg_rz_new[None] = 0.0
         self.cg_dAd[None] = 0.0
@@ -5751,16 +5779,77 @@ class CartesianFluidSolver:
         dt_over_rho: ti.f32,
     ):
         self.report_source_volume_flux_m3s[None] = 0.0
+        self.report_zmin_reachable_source_volume_flux_m3s[None] = 0.0
+        self.report_zmin_unreached_source_volume_flux_m3s[None] = 0.0
+        self.report_zmin_reachable_source_cell_count[None] = 0
+        self.report_zmin_unreached_source_cell_count[None] = 0
+        self.report_zmin_unreached_source_abs_flux_m3s[None] = 0.0
+        self.report_zmin_unreached_source_weighted_x_m[None] = 0.0
+        self.report_zmin_unreached_source_weighted_y_m[None] = 0.0
+        self.report_zmin_unreached_source_weighted_z_m[None] = 0.0
+        self.report_zmin_unreached_source_min_x_m[None] = 1.0e30
+        self.report_zmin_unreached_source_min_y_m[None] = 1.0e30
+        self.report_zmin_unreached_source_min_z_m[None] = 1.0e30
+        self.report_zmin_unreached_source_max_x_m[None] = -1.0e30
+        self.report_zmin_unreached_source_max_y_m[None] = -1.0e30
+        self.report_zmin_unreached_source_max_z_m[None] = -1.0e30
         self.report_zmin_velocity_outlet_flux_m3s[None] = 0.0
         self.report_zmin_pressure_outlet_flux_ratio[None] = 0.0
         self.report_zmin_velocity_outlet_flux_ratio[None] = 0.0
         for i, j, k in self.volume_source_s:
             if self.obstacle[i, j, k] == 0:
                 cell_volume_m3 = self.cell_width_x_m[i] * self.cell_width_y_m[j] * self.cell_width_z_m[k]
+                source_flux_m3s = self.volume_source_s[i, j, k] * cell_volume_m3
                 ti.atomic_add(
                     self.report_source_volume_flux_m3s[None],
-                    self.volume_source_s[i, j, k] * cell_volume_m3,
+                    source_flux_m3s,
                 )
+                if self.hibm_pressure_outlet_reachable[i, j, k] != 0:
+                    ti.atomic_add(
+                        self.report_zmin_reachable_source_volume_flux_m3s[None],
+                        source_flux_m3s,
+                    )
+                    if ti.abs(source_flux_m3s) > 1.0e-30:
+                        ti.atomic_add(
+                            self.report_zmin_reachable_source_cell_count[None],
+                            1,
+                        )
+                else:
+                    ti.atomic_add(
+                        self.report_zmin_unreached_source_volume_flux_m3s[None],
+                        source_flux_m3s,
+                    )
+                    source_abs_flux_m3s = ti.abs(source_flux_m3s)
+                    if source_abs_flux_m3s > 1.0e-30:
+                        x_m = self.cell_center_x_m[i]
+                        y_m = self.cell_center_y_m[j]
+                        z_m = self.cell_center_z_m[k]
+                        ti.atomic_add(
+                            self.report_zmin_unreached_source_cell_count[None],
+                            1,
+                        )
+                        ti.atomic_add(
+                            self.report_zmin_unreached_source_abs_flux_m3s[None],
+                            source_abs_flux_m3s,
+                        )
+                        ti.atomic_add(
+                            self.report_zmin_unreached_source_weighted_x_m[None],
+                            source_abs_flux_m3s * x_m,
+                        )
+                        ti.atomic_add(
+                            self.report_zmin_unreached_source_weighted_y_m[None],
+                            source_abs_flux_m3s * y_m,
+                        )
+                        ti.atomic_add(
+                            self.report_zmin_unreached_source_weighted_z_m[None],
+                            source_abs_flux_m3s * z_m,
+                        )
+                        ti.atomic_min(self.report_zmin_unreached_source_min_x_m[None], x_m)
+                        ti.atomic_min(self.report_zmin_unreached_source_min_y_m[None], y_m)
+                        ti.atomic_min(self.report_zmin_unreached_source_min_z_m[None], z_m)
+                        ti.atomic_max(self.report_zmin_unreached_source_max_x_m[None], x_m)
+                        ti.atomic_max(self.report_zmin_unreached_source_max_y_m[None], y_m)
+                        ti.atomic_max(self.report_zmin_unreached_source_max_z_m[None], z_m)
         for i, j in ti.ndrange(self.nx, self.ny):
             if self.obstacle[i, j, 0] == 0:
                 outlet_cell_area_m2 = self.cell_width_x_m[i] * self.cell_width_y_m[j]
@@ -5787,6 +5876,8 @@ class CartesianFluidSolver:
                 self.report_zmin_projection_pre_velocity_outlet_flux_m3s[None],
                 self.report_zmin_projection_post_pressure_velocity_outlet_flux_m3s[None],
                 self.report_zmin_projection_post_boundary_velocity_outlet_flux_m3s[None],
+                self.report_zmin_reachable_source_volume_flux_m3s[None],
+                self.report_zmin_unreached_source_volume_flux_m3s[None],
             ]
         )
 
@@ -7158,6 +7249,37 @@ class CartesianFluidSolver:
             float(step_dt_s / self.rho),
         )
         snapshot = self.pressure_outlet_report_snapshot[None]
+        unreached_abs_flux_m3s = float(
+            self.report_zmin_unreached_source_abs_flux_m3s[None]
+        )
+        unreached_source_cell_count = int(
+            self.report_zmin_unreached_source_cell_count[None]
+        )
+        unreached_source_centroid_x_m = math.nan
+        unreached_source_centroid_y_m = math.nan
+        unreached_source_centroid_z_m = math.nan
+        unreached_source_min_x_m = math.nan
+        unreached_source_min_y_m = math.nan
+        unreached_source_min_z_m = math.nan
+        unreached_source_max_x_m = math.nan
+        unreached_source_max_y_m = math.nan
+        unreached_source_max_z_m = math.nan
+        if unreached_source_cell_count > 0 and unreached_abs_flux_m3s > 1.0e-30:
+            unreached_source_centroid_x_m = float(
+                self.report_zmin_unreached_source_weighted_x_m[None]
+            ) / unreached_abs_flux_m3s
+            unreached_source_centroid_y_m = float(
+                self.report_zmin_unreached_source_weighted_y_m[None]
+            ) / unreached_abs_flux_m3s
+            unreached_source_centroid_z_m = float(
+                self.report_zmin_unreached_source_weighted_z_m[None]
+            ) / unreached_abs_flux_m3s
+            unreached_source_min_x_m = float(self.report_zmin_unreached_source_min_x_m[None])
+            unreached_source_min_y_m = float(self.report_zmin_unreached_source_min_y_m[None])
+            unreached_source_min_z_m = float(self.report_zmin_unreached_source_min_z_m[None])
+            unreached_source_max_x_m = float(self.report_zmin_unreached_source_max_x_m[None])
+            unreached_source_max_y_m = float(self.report_zmin_unreached_source_max_y_m[None])
+            unreached_source_max_z_m = float(self.report_zmin_unreached_source_max_z_m[None])
         self.last_pressure_outlet_report_host_reads = 1
         return {
             "source_volume_flux_m3s": float(snapshot[0]),
@@ -7168,6 +7290,22 @@ class CartesianFluidSolver:
             "zmin_projection_pre_velocity_outlet_flux_m3s": float(snapshot[5]),
             "zmin_projection_post_pressure_velocity_outlet_flux_m3s": float(snapshot[6]),
             "zmin_projection_post_boundary_velocity_outlet_flux_m3s": float(snapshot[7]),
+            "zmin_reachable_source_volume_flux_m3s": float(snapshot[8]),
+            "zmin_unreached_source_volume_flux_m3s": float(snapshot[9]),
+            "zmin_reachable_source_cell_count": int(
+                self.report_zmin_reachable_source_cell_count[None]
+            ),
+            "zmin_unreached_source_cell_count": unreached_source_cell_count,
+            "zmin_unreached_source_abs_flux_m3s": unreached_abs_flux_m3s,
+            "zmin_unreached_source_centroid_x_m": unreached_source_centroid_x_m,
+            "zmin_unreached_source_centroid_y_m": unreached_source_centroid_y_m,
+            "zmin_unreached_source_centroid_z_m": unreached_source_centroid_z_m,
+            "zmin_unreached_source_min_x_m": unreached_source_min_x_m,
+            "zmin_unreached_source_min_y_m": unreached_source_min_y_m,
+            "zmin_unreached_source_min_z_m": unreached_source_min_z_m,
+            "zmin_unreached_source_max_x_m": unreached_source_max_x_m,
+            "zmin_unreached_source_max_y_m": unreached_source_max_y_m,
+            "zmin_unreached_source_max_z_m": unreached_source_max_z_m,
         }
 
     def project(

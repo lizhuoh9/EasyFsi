@@ -26,10 +26,13 @@ from cases.squid_soft_robot import (
     SquidReducedSpec,
     build_source_config_fluid_obstacle_mask,
     checkpoint_run_fingerprint,
+    count_enabled_unconverged_fsi_rows,
     effective_fluid_substeps_for_grid,
     finite_required_row_fields_for_mode,
     finite_required_row_fields_for_solid_model,
     force_decomposition_report,
+    fsi_same_step_rerun_triggered,
+    fsi_trial_acceptance_passes,
     fluid_grid_resolution_report,
     infer_spec,
     interface_reaction_target_for_mode,
@@ -104,6 +107,7 @@ from cases.squid_soft_robot import (
     source_config_shell_region_pair,
     source_config_solid_obstacle_particle_region_ids,
     _clear_surface_region_normal_probe_obstacle_cells,
+    _connect_surface_seed_components_to_zmin,
     _solid_band_protection_mask_from_cells,
     _surface_region_seed_mask,
     spec_with_membrane_thickness_scale,
@@ -2228,6 +2232,50 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             ((0, 0, 2),),
         )
 
+    def test_connect_surface_seed_components_to_zmin_carves_minimal_barrier(self) -> None:
+        obstacle = np.zeros((1, 1, 5), dtype=bool)
+        obstacle[0, 0, 2] = True
+        boundary_seed = np.zeros_like(obstacle, dtype=bool)
+        boundary_seed[0, 0, 0] = True
+        surface_seed = np.zeros_like(obstacle, dtype=bool)
+        surface_seed[0, 0, 4] = True
+
+        report = _connect_surface_seed_components_to_zmin(
+            obstacle,
+            boundary_seed=boundary_seed,
+            surface_seed=surface_seed,
+            max_carve_cells=1,
+        )
+
+        self.assertFalse(bool(obstacle[0, 0, 2]))
+        self.assertEqual(report["initial_unreachable_surface_seed_component_count"], 1)
+        self.assertEqual(report["final_unreachable_surface_seed_component_count"], 0)
+        self.assertEqual(report["connected_path_count"], 1)
+        self.assertEqual(report["carved_cell_count"], 1)
+        self.assertEqual(report["carved_bbox_ijk"], ((0, 0, 2), (0, 0, 2)))
+
+    def test_connect_surface_seed_components_to_zmin_respects_carve_limit(self) -> None:
+        obstacle = np.zeros((1, 1, 5), dtype=bool)
+        obstacle[0, 0, 2] = True
+        boundary_seed = np.zeros_like(obstacle, dtype=bool)
+        boundary_seed[0, 0, 0] = True
+        surface_seed = np.zeros_like(obstacle, dtype=bool)
+        surface_seed[0, 0, 4] = True
+
+        report = _connect_surface_seed_components_to_zmin(
+            obstacle,
+            boundary_seed=boundary_seed,
+            surface_seed=surface_seed,
+            max_carve_cells=0,
+        )
+
+        self.assertTrue(bool(obstacle[0, 0, 2]))
+        self.assertEqual(report["initial_unreachable_surface_seed_component_count"], 1)
+        self.assertEqual(report["final_unreachable_surface_seed_component_count"], 1)
+        self.assertEqual(report["connected_path_count"], 0)
+        self.assertEqual(report["carved_cell_count"], 0)
+        self.assertTrue(report["skipped_by_max_carve_limit"])
+
     def test_solid_band_protection_mask_from_cells_dilates_locally(self) -> None:
         mask = _solid_band_protection_mask_from_cells(
             (3, 3, 3),
@@ -2905,6 +2953,14 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
     def test_pressure_solver_auto_uses_fv_cg_for_graded_grid(self) -> None:
         self.assertEqual(resolve_pressure_solver("auto", graded_grid_enabled=False), "fv_multigrid")
         self.assertEqual(resolve_pressure_solver("auto", graded_grid_enabled=True), "fv_cg")
+        self.assertEqual(
+            resolve_pressure_solver(
+                "auto",
+                graded_grid_enabled=False,
+                fsi_coupling_mode=FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
+            ),
+            "fv_cg",
+        )
         self.assertEqual(resolve_pressure_solver("fv_jacobi", graded_grid_enabled=True), "fv_jacobi")
         self.assertEqual(resolve_pressure_solver("fv_multigrid", graded_grid_enabled=True), "fv_multigrid")
         self.assertEqual(resolve_pressure_solver("fv_cg", graded_grid_enabled=True), "fv_cg")
@@ -3860,6 +3916,20 @@ END-ISO-10303-21;
             }
             pressure_outlet_report = {
                 "source_volume_flux_m3s": 1.0e-6,
+                "zmin_reachable_source_volume_flux_m3s": 1.0e-6,
+                "zmin_unreached_source_volume_flux_m3s": 0.0,
+                "zmin_reachable_source_cell_count": 1,
+                "zmin_unreached_source_cell_count": 0,
+                "zmin_unreached_source_abs_flux_m3s": 0.0,
+                "zmin_unreached_source_centroid_x_m": math.nan,
+                "zmin_unreached_source_centroid_y_m": math.nan,
+                "zmin_unreached_source_centroid_z_m": math.nan,
+                "zmin_unreached_source_min_x_m": math.nan,
+                "zmin_unreached_source_min_y_m": math.nan,
+                "zmin_unreached_source_min_z_m": math.nan,
+                "zmin_unreached_source_max_x_m": math.nan,
+                "zmin_unreached_source_max_y_m": math.nan,
+                "zmin_unreached_source_max_z_m": math.nan,
                 "zmin_velocity_outlet_flux_m3s": (
                     1.0e-6 if is_final_accepted_step else 2.5e-7
                 ),
@@ -4141,6 +4211,16 @@ END-ISO-10303-21;
         self.assertEqual(process["completed_steps"], 1)
         self.assertEqual(process["partial_run_reason"], "max_wall_time_s")
 
+    def test_fsi_not_converged_count_parses_resume_csv_booleans(self) -> None:
+        rows = [
+            {"fsi_coupling_enabled": "True", "fsi_coupling_converged": "True"},
+            {"fsi_coupling_enabled": "True", "fsi_coupling_converged": "False"},
+            {"fsi_coupling_enabled": True, "fsi_coupling_converged": False},
+            {"fsi_coupling_enabled": "False", "fsi_coupling_converged": "False"},
+        ]
+
+        self.assertEqual(count_enabled_unconverged_fsi_rows(rows), 2)
+
     def test_partitioned_interface_reaction_defaults_are_under_relaxed_aitken_without_passivity(self) -> None:
         with patch("sys.argv", ["squid_soft_robot.py"]):
             args = parse_args()
@@ -4149,9 +4229,52 @@ END-ISO-10303-21;
         self.assertEqual(args.fsi_coupling_iterations, 1)
         self.assertEqual(args.fsi_coupling_solver, "aitken")
         self.assertAlmostEqual(args.fsi_coupling_tolerance_n, 1.0e-3)
+        self.assertEqual(args.fsi_coupling_adaptive_iterations_max, 0)
+        self.assertTrue(
+            math.isinf(args.fsi_coupling_adaptive_iterations_residual_threshold_n)
+        )
+        self.assertTrue(
+            math.isinf(args.fsi_coupling_adaptive_iterations_cfl_threshold)
+        )
+        self.assertEqual(args.fsi_coupling_same_step_rerun_iterations_max, 0)
+        self.assertTrue(
+            math.isinf(args.fsi_coupling_same_step_rerun_residual_threshold_n)
+        )
+        self.assertEqual(args.fsi_coupling_residual_continuation_iterations_max, 0)
+        self.assertTrue(
+            math.isinf(args.fsi_coupling_residual_continuation_threshold_n)
+        )
+        self.assertFalse(
+            args.fsi_coupling_residual_continuation_rebound_secant_from_best
+        )
+        self.assertTrue(
+            math.isinf(args.fsi_coupling_residual_continuation_rebound_secant_factor)
+        )
+        self.assertEqual(
+            args.fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max,
+            0,
+        )
+        self.assertTrue(
+            math.isinf(args.fsi_coupling_trial_interior_divergence_tolerance)
+        )
         self.assertAlmostEqual(args.fsi_coupling_target_map_relaxation, 1.0)
+        self.assertAlmostEqual(args.fsi_coupling_rejected_trial_backtrack, 1.0)
+        self.assertTrue(math.isinf(args.fsi_coupling_residual_growth_rejection_factor))
+        self.assertTrue(math.isinf(args.fsi_coupling_max_accepted_residual_n))
+        self.assertTrue(math.isinf(args.fsi_coupling_trust_region_force_increment_n))
+        self.assertFalse(args.fsi_coupling_trust_region_adaptive)
+        self.assertAlmostEqual(args.fsi_coupling_trust_region_shrink_factor, 0.5)
+        self.assertAlmostEqual(args.fsi_coupling_trust_region_growth_factor, 1.25)
+        self.assertTrue(math.isinf(args.fsi_coupling_trust_region_rebound_factor))
+        self.assertAlmostEqual(args.fsi_coupling_trust_region_rebound_backtrack, 0.5)
+        self.assertTrue(math.isinf(args.fsi_coupling_trust_region_rebound_stop_factor))
+        self.assertTrue(
+            math.isinf(args.fsi_coupling_trust_region_rebound_stop_max_residual_n)
+        )
         self.assertFalse(args.reuse_accepted_fsi_trial_state)
         self.assertTrue(args.interface_reaction_aitken)
+        self.assertAlmostEqual(args.interface_reaction_aitken_lower_bound, 0.01)
+        self.assertAlmostEqual(args.interface_reaction_aitken_upper_bound, 1.5)
         self.assertFalse(args.interface_reaction_passivity_limit)
         self.assertAlmostEqual(args.interface_reaction_robin_impedance_ns_m, 0.0)
         self.assertAlmostEqual(args.interface_reaction_robin_matrix_impedance_ns_m, 0.0)
@@ -4160,6 +4283,189 @@ END-ISO-10303-21;
         self.assertFalse(args.steps_explicit)
         self.assertEqual(args.pressure_solver, "auto")
         self.assertEqual(args.pressure_solve_failure_policy, "raise")
+
+    def test_fsi_coupling_max_accepted_residual_cli_is_explicit(self) -> None:
+        args = parse_args(["--fsi-coupling-max-accepted-residual-n", "1.5"])
+
+        self.assertAlmostEqual(args.fsi_coupling_max_accepted_residual_n, 1.5)
+
+    def test_fsi_coupling_trust_region_force_increment_cli_is_explicit(self) -> None:
+        args = parse_args(["--fsi-coupling-trust-region-force-increment-n", "2.5"])
+
+        self.assertAlmostEqual(args.fsi_coupling_trust_region_force_increment_n, 2.5)
+
+    def test_fsi_coupling_adaptive_iterations_cli_is_explicit(self) -> None:
+        args = parse_args(
+            [
+                "--fsi-coupling-iterations",
+                "6",
+                "--fsi-coupling-adaptive-iterations-max",
+                "12",
+                "--fsi-coupling-adaptive-iterations-residual-threshold-n",
+                "1.0",
+                "--fsi-coupling-adaptive-iterations-cfl-threshold",
+                "0.1",
+            ]
+        )
+
+        self.assertEqual(args.fsi_coupling_iterations, 6)
+        self.assertEqual(args.fsi_coupling_adaptive_iterations_max, 12)
+        self.assertAlmostEqual(
+            args.fsi_coupling_adaptive_iterations_residual_threshold_n,
+            1.0,
+        )
+        self.assertAlmostEqual(args.fsi_coupling_adaptive_iterations_cfl_threshold, 0.1)
+
+    def test_fsi_coupling_same_step_rerun_cli_is_explicit(self) -> None:
+        args = parse_args(
+            [
+                "--fsi-coupling-iterations",
+                "6",
+                "--fsi-coupling-same-step-rerun-iterations-max",
+                "12",
+                "--fsi-coupling-same-step-rerun-residual-threshold-n",
+                "0.5",
+            ]
+        )
+
+        self.assertEqual(args.fsi_coupling_iterations, 6)
+        self.assertEqual(args.fsi_coupling_same_step_rerun_iterations_max, 12)
+        self.assertAlmostEqual(
+            args.fsi_coupling_same_step_rerun_residual_threshold_n,
+            0.5,
+        )
+
+    def test_fsi_coupling_residual_continuation_cli_is_explicit(self) -> None:
+        args = parse_args(
+            [
+                "--fsi-coupling-residual-continuation-iterations-max",
+                "6",
+                "--fsi-coupling-residual-continuation-threshold-n",
+                "0.25",
+                "--fsi-coupling-residual-continuation-rebound-secant-from-best",
+                "--fsi-coupling-residual-continuation-rebound-secant-factor",
+                "1.0",
+                "--fsi-coupling-residual-continuation-rebound-secant-evaluation-extensions-max",
+                "1",
+                "--fsi-coupling-trial-interior-divergence-tolerance",
+                "0.1",
+            ]
+        )
+
+        self.assertEqual(args.fsi_coupling_residual_continuation_iterations_max, 6)
+        self.assertAlmostEqual(
+            args.fsi_coupling_residual_continuation_threshold_n,
+            0.25,
+        )
+        self.assertTrue(
+            args.fsi_coupling_residual_continuation_rebound_secant_from_best
+        )
+        self.assertAlmostEqual(
+            args.fsi_coupling_residual_continuation_rebound_secant_factor,
+            1.0,
+        )
+        self.assertEqual(
+            args.fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max,
+            1,
+        )
+        self.assertAlmostEqual(
+            args.fsi_coupling_trial_interior_divergence_tolerance,
+            0.1,
+        )
+
+    def test_fsi_same_step_rerun_triggers_only_for_unconverged_high_residual(self) -> None:
+        self.assertTrue(
+            fsi_same_step_rerun_triggered(
+                current_iterations_requested=6,
+                rerun_iterations_max=12,
+                residual_norm_n=0.75,
+                residual_threshold_n=0.5,
+                converged=False,
+            )
+        )
+        self.assertTrue(
+            fsi_same_step_rerun_triggered(
+                current_iterations_requested=6,
+                rerun_iterations_max=12,
+                residual_norm_n=math.inf,
+                residual_threshold_n=0.5,
+                converged=False,
+            )
+        )
+        self.assertFalse(
+            fsi_same_step_rerun_triggered(
+                current_iterations_requested=12,
+                rerun_iterations_max=12,
+                residual_norm_n=0.75,
+                residual_threshold_n=0.5,
+                converged=False,
+            )
+        )
+        self.assertFalse(
+            fsi_same_step_rerun_triggered(
+                current_iterations_requested=6,
+                rerun_iterations_max=12,
+                residual_norm_n=0.75,
+                residual_threshold_n=0.5,
+                converged=True,
+            )
+        )
+        self.assertFalse(
+            fsi_same_step_rerun_triggered(
+                current_iterations_requested=6,
+                rerun_iterations_max=12,
+                residual_norm_n=0.75,
+                residual_threshold_n=math.inf,
+                converged=False,
+            )
+        )
+
+    def test_fsi_trial_acceptance_can_gate_interior_divergence(self) -> None:
+        self.assertTrue(
+            fsi_trial_acceptance_passes(
+                {"trial_cfl": 0.25, "trial_interior_divergence_l2": 0.05},
+                cfl_limit=0.5,
+                interior_divergence_l2_limit=0.1,
+            )
+        )
+        self.assertFalse(
+            fsi_trial_acceptance_passes(
+                {"trial_cfl": 0.25, "trial_interior_divergence_l2": 0.15},
+                cfl_limit=0.5,
+                interior_divergence_l2_limit=0.1,
+            )
+        )
+        self.assertFalse(
+            fsi_trial_acceptance_passes(
+                {"trial_cfl": 0.25},
+                cfl_limit=0.5,
+                interior_divergence_l2_limit=0.1,
+            )
+        )
+        self.assertTrue(
+            fsi_trial_acceptance_passes(
+                {"trial_cfl": 0.25},
+                cfl_limit=0.5,
+            )
+        )
+
+    def test_fsi_coupling_adaptive_trust_region_cli_is_explicit(self) -> None:
+        args = parse_args(
+            [
+                "--fsi-coupling-trust-region-force-increment-n",
+                "2.0",
+                "--fsi-coupling-trust-region-adaptive",
+                "--fsi-coupling-trust-region-shrink-factor",
+                "0.25",
+                "--fsi-coupling-trust-region-growth-factor",
+                "1.5",
+            ]
+        )
+
+        self.assertAlmostEqual(args.fsi_coupling_trust_region_force_increment_n, 2.0)
+        self.assertTrue(args.fsi_coupling_trust_region_adaptive)
+        self.assertAlmostEqual(args.fsi_coupling_trust_region_shrink_factor, 0.25)
+        self.assertAlmostEqual(args.fsi_coupling_trust_region_growth_factor, 1.5)
         self.assertEqual(args.fluid_advection_scheme, "euler")
         self.assertEqual(args.cg_preconditioner, "auto")
         self.assertIsNone(args.multigrid_cycles)
@@ -4213,6 +4519,28 @@ END-ISO-10303-21;
         self.assertFalse(hasattr(args, "fsi_feedback_force_mode"))
         self.assertFalse(hasattr(args, "pressure_force_scale"))
         self.assertAlmostEqual(args.solid_mpm_flip_blend, 0.95)
+
+    def test_fsi_coupling_trust_region_rebound_cli_is_explicit(self) -> None:
+        args = parse_args(
+            [
+                "--fsi-coupling-trust-region-rebound-factor",
+                "2.0",
+                "--fsi-coupling-trust-region-rebound-backtrack",
+                "0.25",
+                "--fsi-coupling-trust-region-rebound-stop-factor",
+                "3.0",
+                "--fsi-coupling-trust-region-rebound-stop-max-residual-n",
+                "1.5",
+            ]
+        )
+
+        self.assertAlmostEqual(args.fsi_coupling_trust_region_rebound_factor, 2.0)
+        self.assertAlmostEqual(args.fsi_coupling_trust_region_rebound_backtrack, 0.25)
+        self.assertAlmostEqual(args.fsi_coupling_trust_region_rebound_stop_factor, 3.0)
+        self.assertAlmostEqual(
+            args.fsi_coupling_trust_region_rebound_stop_max_residual_n,
+            1.5,
+        )
 
     def test_hibm_mpm_sharp_allows_marker_fixed_point_iterations(self) -> None:
         raise_for_unsupported_hibm_mpm_sharp_iteration_options(
@@ -4541,6 +4869,32 @@ END-ISO-10303-21;
             args = parse_args()
 
         self.assertAlmostEqual(args.fsi_coupling_target_map_relaxation, 0.25)
+
+    def test_fsi_coupling_rejected_trial_backtrack_can_be_selected_explicitly(self) -> None:
+        with patch(
+            "sys.argv",
+            [
+                "squid_soft_robot.py",
+                "--fsi-coupling-rejected-trial-backtrack",
+                "0.25",
+            ],
+        ):
+            args = parse_args()
+
+        self.assertAlmostEqual(args.fsi_coupling_rejected_trial_backtrack, 0.25)
+
+    def test_fsi_coupling_residual_growth_rejection_factor_can_be_selected_explicitly(self) -> None:
+        with patch(
+            "sys.argv",
+            [
+                "squid_soft_robot.py",
+                "--fsi-coupling-residual-growth-rejection-factor",
+                "2.5",
+            ],
+        ):
+            args = parse_args()
+
+        self.assertAlmostEqual(args.fsi_coupling_residual_growth_rejection_factor, 2.5)
 
     def test_fsi_velocity_constraint_solid_mobility_ratio_can_be_selected_explicitly(self) -> None:
         with patch(
@@ -4999,6 +5353,26 @@ END-ISO-10303-21;
             "cg_preconditioner",
             "pressure_solve_failure_policy",
             "reuse_accepted_fsi_trial_state",
+            "fsi_coupling_adaptive_iterations_max",
+            "fsi_coupling_adaptive_iterations_residual_threshold_n",
+            "fsi_coupling_adaptive_iterations_cfl_threshold",
+            "fsi_coupling_same_step_rerun_iterations_max",
+            "fsi_coupling_same_step_rerun_residual_threshold_n",
+            "fsi_coupling_residual_continuation_iterations_max",
+            "fsi_coupling_residual_continuation_threshold_n",
+            "fsi_coupling_residual_continuation_rebound_secant_from_best",
+            "fsi_coupling_residual_continuation_rebound_secant_factor",
+            "fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max",
+            "fsi_coupling_trial_interior_divergence_tolerance",
+            "fsi_coupling_max_accepted_residual_n",
+            "fsi_coupling_trust_region_force_increment_n",
+            "fsi_coupling_trust_region_adaptive",
+            "fsi_coupling_trust_region_shrink_factor",
+            "fsi_coupling_trust_region_growth_factor",
+            "fsi_coupling_trust_region_rebound_factor",
+            "fsi_coupling_trust_region_rebound_backtrack",
+            "fsi_coupling_trust_region_rebound_stop_factor",
+            "fsi_coupling_trust_region_rebound_stop_max_residual_n",
         }
 
         self.assertTrue(required_fields.issubset(CHECKPOINT_ARG_FINGERPRINT_FIELDS))
@@ -5428,6 +5802,22 @@ END-ISO-10303-21;
         self.assertIn("legacy_projected_reduced_fsi_coupling_enabled", source)
         self.assertIn("fsi_coupling_mode=fsi_coupling_mode", source)
 
+    def test_legacy_reduced_strong_coupling_is_not_ibm_correction_iterations(self) -> None:
+        self.assertFalse(
+            legacy_projected_reduced_fsi_coupling_enabled(
+                fsi_coupling_mode=FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
+                solid_model="tri_mooney_shell_mpm",
+                fsi_coupling_iterations=1,
+            )
+        )
+        self.assertTrue(
+            legacy_projected_reduced_fsi_coupling_enabled(
+                fsi_coupling_mode=FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
+                solid_model="tri_mooney_shell_mpm",
+                fsi_coupling_iterations=6,
+            )
+        )
+
     def test_squid_case_builds_sharp_coupling_from_core_taichi_fields(self) -> None:
         source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
         fluid = CartesianFluidSolver(
@@ -5790,6 +6180,20 @@ END-ISO-10303-21;
         }
         pressure_outlet_report = {
             "source_volume_flux_m3s": 2.5e-8,
+            "zmin_reachable_source_volume_flux_m3s": 1.5e-8,
+            "zmin_unreached_source_volume_flux_m3s": 1.0e-8,
+            "zmin_reachable_source_cell_count": 3,
+            "zmin_unreached_source_cell_count": 2,
+            "zmin_unreached_source_abs_flux_m3s": 1.0e-8,
+            "zmin_unreached_source_centroid_x_m": 1.0e-3,
+            "zmin_unreached_source_centroid_y_m": 2.0e-3,
+            "zmin_unreached_source_centroid_z_m": 3.0e-3,
+            "zmin_unreached_source_min_x_m": 0.5e-3,
+            "zmin_unreached_source_min_y_m": 1.5e-3,
+            "zmin_unreached_source_min_z_m": 2.5e-3,
+            "zmin_unreached_source_max_x_m": 1.5e-3,
+            "zmin_unreached_source_max_y_m": 2.5e-3,
+            "zmin_unreached_source_max_z_m": 3.5e-3,
             "zmin_pressure_outlet_flux_m3s": 1.0e-8,
             "zmin_velocity_outlet_flux_m3s": 2.0e-8,
             "zmin_pressure_outlet_to_source_ratio": 0.4,
@@ -6024,6 +6428,65 @@ END-ISO-10303-21;
             row["pressure_outlet_source_volume_flux_m3s"],
             pressure_outlet_report["source_volume_flux_m3s"],
         )
+        self.assertEqual(
+            row["pressure_outlet_reachable_source_volume_flux_m3s"],
+            pressure_outlet_report["zmin_reachable_source_volume_flux_m3s"],
+        )
+        self.assertEqual(
+            row["pressure_outlet_unreached_source_volume_flux_m3s"],
+            pressure_outlet_report["zmin_unreached_source_volume_flux_m3s"],
+        )
+        for row_key, report_key in (
+            (
+                "pressure_outlet_reachable_source_cell_count",
+                "zmin_reachable_source_cell_count",
+            ),
+            (
+                "pressure_outlet_unreached_source_cell_count",
+                "zmin_unreached_source_cell_count",
+            ),
+            (
+                "pressure_outlet_unreached_source_abs_flux_m3s",
+                "zmin_unreached_source_abs_flux_m3s",
+            ),
+            (
+                "pressure_outlet_unreached_source_centroid_x_m",
+                "zmin_unreached_source_centroid_x_m",
+            ),
+            (
+                "pressure_outlet_unreached_source_centroid_y_m",
+                "zmin_unreached_source_centroid_y_m",
+            ),
+            (
+                "pressure_outlet_unreached_source_centroid_z_m",
+                "zmin_unreached_source_centroid_z_m",
+            ),
+            (
+                "pressure_outlet_unreached_source_min_x_m",
+                "zmin_unreached_source_min_x_m",
+            ),
+            (
+                "pressure_outlet_unreached_source_min_y_m",
+                "zmin_unreached_source_min_y_m",
+            ),
+            (
+                "pressure_outlet_unreached_source_min_z_m",
+                "zmin_unreached_source_min_z_m",
+            ),
+            (
+                "pressure_outlet_unreached_source_max_x_m",
+                "zmin_unreached_source_max_x_m",
+            ),
+            (
+                "pressure_outlet_unreached_source_max_y_m",
+                "zmin_unreached_source_max_y_m",
+            ),
+            (
+                "pressure_outlet_unreached_source_max_z_m",
+                "zmin_unreached_source_max_z_m",
+            ),
+        ):
+            self.assertEqual(row[row_key], pressure_outlet_report[report_key])
         self.assertEqual(
             row["pressure_outlet_velocity_flux_m3s"],
             pressure_outlet_report["zmin_velocity_outlet_flux_m3s"],
@@ -6592,6 +7055,32 @@ END-ISO-10303-21;
             args = parse_args()
 
         self.assertFalse(args.interface_reaction_aitken)
+
+    def test_interface_reaction_aitken_lower_bound_can_be_selected_explicitly(self) -> None:
+        with patch(
+            "sys.argv",
+            [
+                "squid_soft_robot.py",
+                "--interface-reaction-aitken-lower-bound",
+                "0.005",
+            ],
+        ):
+            args = parse_args()
+
+        self.assertAlmostEqual(args.interface_reaction_aitken_lower_bound, 0.005)
+
+    def test_interface_reaction_aitken_upper_bound_can_be_selected_explicitly(self) -> None:
+        with patch(
+            "sys.argv",
+            [
+                "squid_soft_robot.py",
+                "--interface-reaction-aitken-upper-bound",
+                "0.25",
+            ],
+        ):
+            args = parse_args()
+
+        self.assertAlmostEqual(args.interface_reaction_aitken_upper_bound, 0.25)
 
     def test_mooney_force_scale_cli_is_named_for_membrane_not_edge_springs(self) -> None:
         with patch("sys.argv", ["squid_soft_robot.py"]):

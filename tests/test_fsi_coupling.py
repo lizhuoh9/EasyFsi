@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import math
 import unittest
 
 from simulation_core.fsi_coupling import (
@@ -75,6 +76,50 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
         self.assertAlmostEqual(second.update.force_n[0], 7.5)
         self.assertAlmostEqual(second.update.force_n[1], -6.0)
         self.assertEqual(second.next_state.previous_residual_n, (0.0, 0.0))
+
+    def test_interface_reaction_aitken_lower_bound_is_configurable(self) -> None:
+        state = InterfaceReactionRelaxationState(
+            previous_residual_n=(1.0,),
+            previous_velocity_mps=(0.0,),
+            relaxation=0.5,
+        )
+
+        result = update_interface_reaction_for_next_step(
+            previous_force_n=(0.0,),
+            target_force_n=(2.0,),
+            velocity_mps=(0.0,),
+            state=state,
+            initial_relaxation=0.5,
+            use_aitken=True,
+            passivity_limit=False,
+            aitken_lower_bound=0.005,
+        )
+
+        self.assertAlmostEqual(result.relaxation, 0.005)
+        self.assertAlmostEqual(result.update.force_n[0], 0.01)
+        self.assertAlmostEqual(result.next_state.relaxation, 0.005)
+
+    def test_interface_reaction_aitken_upper_bound_is_configurable(self) -> None:
+        state = InterfaceReactionRelaxationState(
+            previous_residual_n=(1.0,),
+            previous_velocity_mps=(0.0,),
+            relaxation=0.5,
+        )
+
+        result = update_interface_reaction_for_next_step(
+            previous_force_n=(0.0,),
+            target_force_n=(0.5,),
+            velocity_mps=(0.0,),
+            state=state,
+            initial_relaxation=0.5,
+            use_aitken=True,
+            passivity_limit=False,
+            aitken_upper_bound=0.25,
+        )
+
+        self.assertAlmostEqual(result.relaxation, 0.25)
+        self.assertAlmostEqual(result.update.force_n[0], 0.125)
+        self.assertAlmostEqual(result.next_state.relaxation, 0.25)
 
     def test_interface_reaction_step_update_reuses_passivity_limit(self) -> None:
         result = update_interface_reaction_for_next_step(
@@ -268,6 +313,289 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
             ("initial_relaxation", {"tolerance_n": 0.0, "initial_relaxation": float("nan")}),
             ("initial_relaxation", {"tolerance_n": 0.0, "initial_relaxation": float("inf")}),
             ("initial_relaxation", {"tolerance_n": 0.0, "initial_relaxation": None}),
+            (
+                "aitken_lower_bound",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "aitken_lower_bound": float("nan"),
+                },
+            ),
+            (
+                "aitken_lower_bound",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "aitken_lower_bound": -0.1,
+                },
+            ),
+            (
+                "aitken_lower_bound",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "aitken_lower_bound": 1.6,
+                },
+            ),
+            (
+                "aitken_upper_bound",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "aitken_upper_bound": float("nan"),
+                },
+            ),
+            (
+                "aitken_upper_bound",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "aitken_lower_bound": 0.5,
+                    "aitken_upper_bound": 0.25,
+                },
+            ),
+            (
+                "aitken_upper_bound",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "aitken_upper_bound": 1.6,
+                },
+            ),
+            (
+                "rejected_trial_backtrack",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "rejected_trial_backtrack": float("nan"),
+                },
+            ),
+            (
+                "rejected_trial_backtrack",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "rejected_trial_backtrack": 0.0,
+                },
+            ),
+            (
+                "rejected_trial_backtrack",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "rejected_trial_backtrack": -0.1,
+                },
+            ),
+            (
+                "rejected_trial_backtrack",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "rejected_trial_backtrack": 1.1,
+                },
+            ),
+            (
+                "residual_growth_rejection_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "residual_growth_rejection_factor": float("nan"),
+                },
+            ),
+            (
+                "residual_growth_rejection_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "residual_growth_rejection_factor": 0.0,
+                },
+            ),
+            (
+                "residual_growth_rejection_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "residual_growth_rejection_factor": 0.5,
+                },
+            ),
+            (
+                "max_accepted_residual_n",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "max_accepted_residual_n": float("nan"),
+                },
+            ),
+            (
+                "max_accepted_residual_n",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "max_accepted_residual_n": -0.1,
+                },
+            ),
+            (
+                "trust_region_force_increment_n",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_force_increment_n": float("nan"),
+                },
+            ),
+            (
+                "trust_region_force_increment_n",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_force_increment_n": 0.0,
+                },
+            ),
+            (
+                "trust_region_force_increment_n",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_force_increment_n": -0.1,
+                },
+            ),
+            (
+                "trust_region_shrink_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_force_increment_n": 1.0,
+                    "trust_region_shrink_factor": 0.0,
+                },
+            ),
+            (
+                "trust_region_growth_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_force_increment_n": 1.0,
+                    "trust_region_growth_factor": 0.5,
+                },
+            ),
+            (
+                "trust_region_rebound_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_rebound_factor": float("nan"),
+                },
+            ),
+            (
+                "trust_region_rebound_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_rebound_factor": 0.5,
+                },
+            ),
+            (
+                "trust_region_rebound_backtrack",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_rebound_backtrack": 0.0,
+                },
+            ),
+            (
+                "trust_region_rebound_backtrack",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_rebound_backtrack": 1.0,
+                },
+            ),
+            (
+                "trust_region_rebound_stop_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_rebound_stop_factor": float("nan"),
+                },
+            ),
+            (
+                "trust_region_rebound_stop_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_rebound_stop_factor": 0.5,
+                },
+            ),
+            (
+                "trust_region_rebound_stop_max_residual_n",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_rebound_stop_max_residual_n": float("nan"),
+                },
+            ),
+            (
+                "trust_region_rebound_stop_max_residual_n",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_rebound_stop_max_residual_n": -0.1,
+                },
+            ),
+            (
+                "residual_continuation_iterations_max",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "residual_continuation_iterations_max": -1,
+                },
+            ),
+            (
+                "residual_continuation_threshold_n",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "residual_continuation_threshold_n": float("nan"),
+                },
+            ),
+            (
+                "residual_continuation_threshold_n",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "residual_continuation_threshold_n": -0.1,
+                },
+            ),
+            (
+                "residual_continuation_rebound_secant_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "residual_continuation_rebound_secant_factor": float("nan"),
+                },
+            ),
+            (
+                "residual_continuation_rebound_secant_factor",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "residual_continuation_rebound_secant_factor": 0.5,
+                },
+            ),
+            (
+                "residual_continuation_rebound_secant_evaluation_extensions_max",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "residual_continuation_rebound_secant_evaluation_extensions_max": -1,
+                },
+            ),
+            (
+                "trust_region_adaptive",
+                {
+                    "tolerance_n": 0.0,
+                    "initial_relaxation": 1.0,
+                    "trust_region_adaptive": True,
+                },
+            ),
         )
         for field_name, kwargs in cases:
             with self.subTest(field_name=field_name):
@@ -379,6 +707,58 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
         )
         self.assertEqual(result.force_n, (4.0, -2.0))
 
+    def test_fixed_point_uses_configured_aitken_lower_bound(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=(2.0 * force_n[0] + 1.0,),
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=0.5,
+            use_aitken=True,
+            passivity_limit=False,
+            aitken_lower_bound=0.005,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.iterations_used, 2)
+        self.assertAlmostEqual(result.relaxation, 0.005)
+
+    def test_fixed_point_uses_configured_aitken_upper_bound(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=(1.0,),
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=0.5,
+            use_aitken=True,
+            passivity_limit=False,
+            aitken_upper_bound=0.25,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.iterations_used, 2)
+        self.assertAlmostEqual(result.relaxation, 0.25)
+
     def test_unconverged_fixed_point_commits_best_evaluated_trial_not_next_guess(self) -> None:
         guesses: list[tuple[float, ...]] = []
 
@@ -409,6 +789,657 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
         self.assertEqual(result.residual_history_n, ((10.0,), (100.0,)))
         self.assertEqual(result.force_n, (0.0,))
         self.assertEqual(result.residual_norm_n, 10.0)
+
+    def test_fixed_point_rejects_converged_trial_when_acceptance_predicate_fails(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                return InterfaceReactionTargetEvaluation(
+                    target_force_n=(1.0,),
+                    velocity_mps=(0.0,),
+                    payload={"trial_cfl": 0.2},
+                )
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=force_n,
+                velocity_mps=(0.0,),
+                payload={"trial_cfl": 2.0},
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            accept_evaluation=lambda evaluation: bool(evaluation.payload["trial_cfl"] < 0.5),
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (1.0,)))
+        self.assertEqual(result.accepted_trial_index, 0)
+        self.assertEqual(result.rejected_trial_count, 1)
+        self.assertEqual(result.rejected_trial_backtrack_count, 0)
+        self.assertEqual(result.force_n, (0.0,))
+        self.assertEqual(result.accepted_payload, {"trial_cfl": 0.2})
+
+    def test_rejected_trial_backtrack_retries_between_accepted_and_rejected_force(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                return InterfaceReactionTargetEvaluation(
+                    target_force_n=(10.0,),
+                    velocity_mps=(0.0,),
+                    payload={"trial_cfl": 0.1},
+                )
+            if force_n[0] == 10.0:
+                return InterfaceReactionTargetEvaluation(
+                    target_force_n=(10.0,),
+                    velocity_mps=(0.0,),
+                    payload={"trial_cfl": 2.0},
+                )
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=(10.0,),
+                velocity_mps=(0.0,),
+                payload={"trial_cfl": 0.1},
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            accept_evaluation=lambda evaluation: bool(evaluation.payload["trial_cfl"] < 0.5),
+            restore_state=restore_state,
+            max_iterations=3,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            rejected_trial_backtrack=0.5,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (10.0,), (5.0,)))
+        self.assertEqual(result.accepted_trial_index, 2)
+        self.assertEqual(result.rejected_trial_count, 1)
+        self.assertEqual(result.rejected_trial_backtrack_count, 1)
+        self.assertEqual(result.force_n, (5.0,))
+        self.assertEqual(result.accepted_payload, {"trial_cfl": 0.1})
+
+    def test_residual_growth_rejection_backtracks_otherwise_accepted_trial(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (1.0,)
+            elif force_n[0] == 1.0:
+                target = (100.0,)
+            else:
+                target = (0.75,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+                payload={"trial_cfl": 0.1},
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            accept_evaluation=lambda evaluation: bool(evaluation.payload["trial_cfl"] < 0.5),
+            restore_state=restore_state,
+            max_iterations=3,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            rejected_trial_backtrack=0.5,
+            residual_growth_rejection_factor=2.0,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (1.0,), (0.5,)))
+        self.assertEqual(result.residual_history_n, ((1.0,), (99.0,), (0.25,)))
+        self.assertEqual(result.accepted_trial_index, 2)
+        self.assertEqual(result.rejected_trial_count, 1)
+        self.assertEqual(result.rejected_trial_backtrack_count, 1)
+        self.assertEqual(result.residual_growth_rejected_trial_count, 1)
+        self.assertEqual(result.force_n, (0.5,))
+
+    def test_residual_growth_rejection_is_disabled_by_default(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            target = (1.0,) if force_n[0] == 0.0 else (100.0,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            rejected_trial_backtrack=0.5,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (1.0,)))
+        self.assertEqual(result.rejected_trial_count, 0)
+        self.assertEqual(result.residual_growth_rejected_trial_count, 0)
+        self.assertEqual(result.max_residual_rejected_trial_count, 0)
+        self.assertEqual(result.trust_region_limited_update_count, 0)
+        self.assertEqual(result.trust_region_rebound_backtrack_count, 0)
+        self.assertEqual(result.force_n, (0.0,))
+
+    def test_trust_region_limits_next_force_update_without_rejecting_trial(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=(10.0,),
+                velocity_mps=(0.0,),
+                payload={"trial_cfl": 0.1},
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            accept_evaluation=lambda evaluation: bool(evaluation.payload["trial_cfl"] < 0.5),
+            restore_state=restore_state,
+            max_iterations=3,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            trust_region_force_increment_n=2.0,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (2.0,), (4.0,)))
+        self.assertEqual(result.residual_history_n, ((10.0,), (8.0,), (6.0,)))
+        self.assertEqual(result.rejected_trial_count, 0)
+        self.assertEqual(result.trust_region_limited_update_count, 3)
+        self.assertEqual(result.force_n, (4.0,))
+
+    def test_adaptive_trust_region_shrinks_after_residual_growth(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (10.0,)
+            elif force_n[0] == 2.0:
+                target = (100.0,)
+            else:
+                target = (3.5,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=4,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            trust_region_force_increment_n=2.0,
+            trust_region_adaptive=True,
+            trust_region_shrink_factor=0.5,
+            trust_region_growth_factor=2.0,
+        )
+
+        self.assertTrue(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (2.0,), (3.0,), (3.5,)))
+        self.assertEqual(result.residual_history_n, ((10.0,), (98.0,), (0.5,), (0.0,)))
+        self.assertEqual(result.trust_region_limited_update_count, 2)
+        self.assertEqual(result.trust_region_shrink_count, 1)
+        self.assertEqual(result.trust_region_growth_count, 1)
+        self.assertEqual(result.trust_region_effective_force_increment_n, 2.0)
+        self.assertEqual(result.force_n, (3.5,))
+
+    def test_trust_region_rebound_backtracks_from_worse_trial_to_best_trial(
+        self,
+    ) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (2.0,)
+            elif force_n[0] == 2.0:
+                target = (3.0,)
+            elif force_n[0] == 3.0:
+                target = (10.0,)
+            else:
+                target = (2.6,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=4,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            trust_region_rebound_factor=2.0,
+            trust_region_rebound_backtrack=0.5,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (2.0,), (3.0,), (2.5,)))
+        self.assertEqual(result.residual_history_n[:3], ((2.0,), (1.0,), (7.0,)))
+        self.assertAlmostEqual(result.residual_history_n[3][0], 0.1)
+        self.assertEqual(result.accepted_trial_index, 3)
+        self.assertEqual(result.rejected_trial_count, 0)
+        self.assertEqual(result.trust_region_rebound_backtrack_count, 1)
+        self.assertEqual(result.force_n, (2.5,))
+
+    def test_trust_region_rebound_stop_commits_best_trial_without_rejecting(
+        self,
+    ) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (2.0,)
+            elif force_n[0] == 2.0:
+                target = (3.0,)
+            else:
+                target = (10.0,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=4,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            trust_region_rebound_stop_factor=2.0,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.iterations_used, 3)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (2.0,), (3.0,)))
+        self.assertEqual(result.residual_history_n, ((2.0,), (1.0,), (7.0,)))
+        self.assertEqual(result.accepted_trial_index, 1)
+        self.assertEqual(result.rejected_trial_count, 0)
+        self.assertEqual(result.trust_region_rebound_stop_count, 1)
+        self.assertEqual(result.trust_region_rebound_backtrack_count, 0)
+        self.assertEqual(result.force_n, (2.0,))
+        self.assertEqual(result.residual_norm_n, 1.0)
+
+    def test_rebound_stop_residual_ceiling_continues_high_residual_best_trial(
+        self,
+    ) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (2.0,)
+            elif force_n[0] == 2.0:
+                target = (3.0,)
+            elif force_n[0] == 3.0:
+                target = (10.0,)
+            else:
+                target = (3.25,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=4,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            trust_region_rebound_stop_factor=2.0,
+            trust_region_rebound_stop_max_residual_n=0.5,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.iterations_used, 4)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (2.0,), (3.0,), (10.0,)))
+        self.assertEqual(result.residual_history_n, ((2.0,), (1.0,), (7.0,), (-6.75,)))
+        self.assertEqual(result.accepted_trial_index, 1)
+        self.assertEqual(result.trust_region_rebound_stop_count, 0)
+        self.assertEqual(result.trust_region_rebound_stop_suppressed_count, 2)
+        self.assertEqual(result.force_n, (2.0,))
+        self.assertEqual(result.residual_norm_n, 1.0)
+
+    def test_residual_continuation_extends_only_until_quality_threshold(
+        self,
+    ) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (1.0,)
+            elif force_n[0] == 1.0:
+                target = (1.75,)
+            else:
+                target = (1.9,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            residual_continuation_iterations_max=3,
+            residual_continuation_threshold_n=0.5,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.iterations_used, 3)
+        self.assertEqual(result.residual_continuation_iteration_count, 1)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (1.0,), (1.75,)))
+        self.assertEqual(result.residual_history_n[:2], ((1.0,), (0.75,)))
+        self.assertAlmostEqual(result.residual_history_n[2][0], 0.15)
+        self.assertEqual(result.force_n, (1.75,))
+        self.assertAlmostEqual(result.residual_norm_n, 0.15)
+
+    def test_residual_continuation_rebound_secant_restarts_from_best_trial(
+        self,
+    ) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (2.0,)
+            elif force_n[0] == 2.0:
+                target = (3.0,)
+            elif force_n[0] == 3.0:
+                target = (10.0,)
+            elif force_n[0] < 2.0:
+                target = (force_n[0] + 0.1,)
+            else:
+                target = (20.0,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            trust_region_force_increment_n=2.0,
+            trust_region_rebound_stop_factor=2.0,
+            residual_continuation_iterations_max=2,
+            residual_continuation_threshold_n=0.5,
+            residual_continuation_rebound_secant_from_best=True,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.iterations_used, 4)
+        self.assertEqual(result.residual_continuation_iteration_count, 2)
+        self.assertEqual(result.residual_continuation_rebound_secant_count, 1)
+        self.assertEqual(
+            result.residual_continuation_rebound_secant_evaluation_extension_count,
+            0,
+        )
+        self.assertEqual(result.trust_region_rebound_stop_count, 0)
+        self.assertEqual(result.trial_force_history_n[:3], ((0.0,), (2.0,), (3.0,)))
+        self.assertAlmostEqual(result.trial_force_history_n[3][0], 2.0 - 1.0 / 6.0)
+        self.assertEqual(result.accepted_trial_index, 3)
+        self.assertAlmostEqual(result.force_n[0], 2.0 - 1.0 / 6.0)
+        self.assertAlmostEqual(result.residual_norm_n, 0.1)
+
+    def test_residual_continuation_rebound_secant_factor_can_trigger_before_stop2(
+        self,
+    ) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (2.0,)
+            elif force_n[0] == 2.0:
+                target = (3.0,)
+            elif force_n[0] == 3.0:
+                target = (4.9,)
+            elif force_n[0] < 2.0:
+                target = (force_n[0] + 0.1,)
+            else:
+                target = (20.0,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            trust_region_force_increment_n=2.0,
+            trust_region_rebound_stop_factor=2.0,
+            residual_continuation_iterations_max=2,
+            residual_continuation_threshold_n=0.5,
+            residual_continuation_rebound_secant_from_best=True,
+            residual_continuation_rebound_secant_factor=1.0,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.iterations_used, 4)
+        self.assertEqual(result.residual_continuation_rebound_secant_count, 1)
+        self.assertEqual(result.trust_region_rebound_stop_count, 0)
+        self.assertEqual(result.accepted_trial_index, 3)
+        self.assertAlmostEqual(result.force_n[0], 2.0 - 1.0 / 0.9)
+        self.assertAlmostEqual(result.residual_norm_n, 0.1)
+
+    def test_residual_continuation_rebound_secant_extension_evaluates_final_candidate(
+        self,
+    ) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (2.0,)
+            elif force_n[0] == 2.0:
+                target = (3.0,)
+            elif force_n[0] == 3.0:
+                target = (10.0,)
+            elif force_n[0] < 2.0:
+                target = (force_n[0] + 0.1,)
+            else:
+                target = (20.0,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            trust_region_force_increment_n=2.0,
+            trust_region_rebound_stop_factor=2.0,
+            residual_continuation_iterations_max=1,
+            residual_continuation_threshold_n=0.5,
+            residual_continuation_rebound_secant_from_best=True,
+            residual_continuation_rebound_secant_evaluation_extensions_max=1,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.iterations_used, 4)
+        self.assertEqual(result.residual_continuation_iteration_count, 1)
+        self.assertEqual(result.residual_continuation_rebound_secant_count, 1)
+        self.assertEqual(
+            result.residual_continuation_rebound_secant_evaluation_extension_count,
+            1,
+        )
+        self.assertEqual(result.trial_force_history_n[:3], ((0.0,), (2.0,), (3.0,)))
+        self.assertAlmostEqual(result.trial_force_history_n[3][0], 2.0 - 1.0 / 6.0)
+        self.assertEqual(result.accepted_trial_index, 3)
+        self.assertAlmostEqual(result.residual_norm_n, 0.1)
+
+    def test_max_accepted_residual_backtracks_otherwise_accepted_trial(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (1.0,)
+            elif force_n[0] == 1.0:
+                target = (100.0,)
+            else:
+                target = (0.75,)
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+                payload={"trial_cfl": 0.1},
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            accept_evaluation=lambda evaluation: bool(evaluation.payload["trial_cfl"] < 0.5),
+            restore_state=restore_state,
+            max_iterations=3,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            rejected_trial_backtrack=0.5,
+            max_accepted_residual_n=2.0,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (1.0,), (0.5,)))
+        self.assertEqual(result.residual_history_n, ((1.0,), (99.0,), (0.25,)))
+        self.assertEqual(result.accepted_trial_index, 2)
+        self.assertEqual(result.rejected_trial_count, 1)
+        self.assertEqual(result.rejected_trial_backtrack_count, 1)
+        self.assertEqual(result.max_residual_rejected_trial_count, 1)
+        self.assertEqual(result.force_n, (0.5,))
+
+    def test_rejected_first_trial_backtracks_toward_zero_force_without_accepted_anchor(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 8.0:
+                return InterfaceReactionTargetEvaluation(
+                    target_force_n=force_n,
+                    velocity_mps=(0.0,),
+                    payload={"trial_cfl": 2.0},
+                )
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=(8.0,),
+                velocity_mps=(0.0,),
+                payload={"trial_cfl": 0.1},
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(8.0,),
+            evaluate_target=evaluate_target,
+            accept_evaluation=lambda evaluation: bool(evaluation.payload["trial_cfl"] < 0.5),
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            rejected_trial_backtrack=0.25,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((8.0,), (2.0,)))
+        self.assertEqual(result.accepted_trial_index, 1)
+        self.assertEqual(result.rejected_trial_count, 1)
+        self.assertEqual(result.rejected_trial_backtrack_count, 1)
+        self.assertEqual(result.force_n, (2.0,))
+
+    def test_all_rejected_backtracked_trials_commit_zero_force_failsafe(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=force_n,
+                velocity_mps=(0.0,),
+                payload={"trial_cfl": 2.0},
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(8.0,),
+            evaluate_target=evaluate_target,
+            accept_evaluation=lambda evaluation: bool(evaluation.payload["trial_cfl"] < 0.5),
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            rejected_trial_backtrack=0.25,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((8.0,), (2.0,)))
+        self.assertIsNone(result.accepted_trial_index)
+        self.assertEqual(result.rejected_trial_count, 2)
+        self.assertEqual(result.rejected_trial_backtrack_count, 2)
+        self.assertEqual(result.force_n, (0.0,))
+        self.assertTrue(math.isinf(result.residual_norm_n))
 
     def test_passivity_limit_is_committed_after_fixed_point_trials_not_used_as_guess(self) -> None:
         guesses: list[tuple[float, ...]] = []

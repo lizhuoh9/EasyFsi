@@ -5,6 +5,7 @@ import math
 import os
 import sys
 import time
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from functools import wraps
@@ -31,6 +32,7 @@ from simulation_core import (
     GradedGridSpec,
     HibmMpmSharpCouplingState,
     INTERFACE_REACTION_SOLVER_CHOICES,
+    InterfaceReactionFixedPointResult,
     InterfaceReactionRelaxationState,
     InterfaceReactionTargetEvaluation,
     NeoHookeanMpmState,
@@ -124,6 +126,8 @@ FINITE_REQUIRED_ROW_FIELDS = (
     "main_fsi_volume_source_m3s",
     "tail_fsi_volume_source_m3s",
     "pressure_outlet_source_volume_flux_m3s",
+    "pressure_outlet_reachable_source_volume_flux_m3s",
+    "pressure_outlet_unreached_source_volume_flux_m3s",
     "pressure_outlet_velocity_flux_m3s",
     "pressure_outlet_velocity_to_source_ratio",
     "pressure_outlet_pressure_flux_m3s",
@@ -501,6 +505,8 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "fsi_velocity_constraint_solid_mobility_ratio",
     "interface_reaction_relaxation",
     "interface_reaction_aitken",
+    "interface_reaction_aitken_lower_bound",
+    "interface_reaction_aitken_upper_bound",
     "interface_reaction_passivity_limit",
     "interface_reaction_robin_impedance_ns_m",
     "interface_reaction_robin_matrix_impedance_ns_m",
@@ -508,6 +514,17 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "fsi_coupling_mode",
     "fsi_coupling_solver",
     "fsi_coupling_target_map_relaxation",
+    "fsi_coupling_rejected_trial_backtrack",
+    "fsi_coupling_residual_growth_rejection_factor",
+    "fsi_coupling_max_accepted_residual_n",
+    "fsi_coupling_trust_region_force_increment_n",
+    "fsi_coupling_trust_region_adaptive",
+    "fsi_coupling_trust_region_shrink_factor",
+    "fsi_coupling_trust_region_growth_factor",
+    "fsi_coupling_trust_region_rebound_factor",
+    "fsi_coupling_trust_region_rebound_backtrack",
+    "fsi_coupling_trust_region_rebound_stop_factor",
+    "fsi_coupling_trust_region_rebound_stop_max_residual_n",
     "reuse_accepted_fsi_trial_state",
     "min_outlet_to_main_volume_flux_ratio",
     "pressure_outlet_source_ratio_tolerance",
@@ -518,11 +535,24 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "adaptive_fluid_substeps_safety",
     "ibm_correction_iterations",
     "fsi_coupling_iterations",
+    "fsi_coupling_adaptive_iterations_max",
+    "fsi_coupling_adaptive_iterations_residual_threshold_n",
+    "fsi_coupling_adaptive_iterations_cfl_threshold",
+    "fsi_coupling_same_step_rerun_iterations_max",
+    "fsi_coupling_same_step_rerun_residual_threshold_n",
+    "fsi_coupling_residual_continuation_iterations_max",
+    "fsi_coupling_residual_continuation_threshold_n",
+    "fsi_coupling_residual_continuation_rebound_secant_from_best",
+    "fsi_coupling_residual_continuation_rebound_secant_factor",
+    "fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max",
+    "fsi_coupling_trial_interior_divergence_tolerance",
     "fsi_coupling_tolerance_n",
     "fsi_marker_coupling_tolerance_mps",
     "disable_pressure_outlet_zmin",
     "disable_reduced_obstacles",
     "source_config_intersect_reduced_water_domain",
+    "source_config_connect_surface_seeds_to_zmin",
+    "source_config_surface_seed_zmin_connection_max_carve_cells",
     "use_region14_aperture_carve",
     "disable_region14_aperture_carve",
     "open_downstream_farfield",
@@ -1293,6 +1323,39 @@ class ReducedSquidFSI:
             **divergence_sample_report_fields(divergence),
         }
 
+    def sample_cfl_report(
+        self,
+        *,
+        dt_s: float | None = None,
+    ) -> dict[str, float]:
+        spec = self.spec
+        self.sample_sections_kernel(
+            self.fluid.velocity,
+            self.fluid.cell_center_x_m,
+            self.fluid.cell_center_y_m,
+            self.fluid.cell_center_z_m,
+            self.fluid.cell_width_x_m,
+            self.fluid.cell_width_y_m,
+            self.fluid.cell_width_z_m,
+            float(spec.monitor_center_x_m),
+            float(spec.monitor_center_y_m),
+            float(spec.monitor_radius_m),
+            float(spec.outlet_plume_radius_m),
+            float(spec.outlet_plume_radius_m),
+            float(spec.lip_z_m),
+            float(spec.outlet_z_m),
+            float(spec.downstream_z_m),
+        )
+        h = min(cartesian_grid_axis_min_spacing_m(self.fluid.grid))
+        sample_values = self.sample_report_float_snapshot[None]
+        self.last_sample_report_host_reads = 1
+        max_speed = float(sample_values[14])
+        cfl_dt_s = float(self.spec.dt_s) if dt_s is None else float(dt_s)
+        return {
+            "max_fluid_speed_mps": max_speed,
+            "cfl": max_speed * cfl_dt_s / max(h, 1.0e-12),
+        }
+
 
 def divergence_sample_report_fields(
     divergence: Mapping[str, object],
@@ -2021,6 +2084,45 @@ def legacy_projected_reduced_fsi_coupling_enabled(
     )
 
 
+def fsi_same_step_rerun_triggered(
+    *,
+    current_iterations_requested: int,
+    rerun_iterations_max: int,
+    residual_norm_n: float,
+    residual_threshold_n: float,
+    converged: bool,
+) -> bool:
+    """Return whether a projected/reduced FSI step should be rerun in-place."""
+    if rerun_iterations_max <= current_iterations_requested:
+        return False
+    if not math.isfinite(residual_threshold_n):
+        return False
+    residual = float(residual_norm_n)
+    if math.isnan(residual):
+        return False
+    return (not bool(converged)) and residual > residual_threshold_n
+
+
+def fsi_trial_acceptance_passes(
+    payload: Mapping[str, object],
+    *,
+    cfl_limit: float,
+    interior_divergence_l2_limit: float = math.inf,
+) -> bool:
+    trial_cfl = float(payload.get("trial_cfl", math.inf))
+    if not (math.isfinite(trial_cfl) and trial_cfl < float(cfl_limit)):
+        return False
+    if math.isfinite(float(interior_divergence_l2_limit)):
+        trial_interior_divergence_l2 = float(
+            payload.get("trial_interior_divergence_l2", math.inf)
+        )
+        return (
+            math.isfinite(trial_interior_divergence_l2)
+            and trial_interior_divergence_l2 <= float(interior_divergence_l2_limit)
+        )
+    return True
+
+
 def raise_for_unsupported_hibm_mpm_sharp_robin_options(
     *,
     fsi_coupling_mode: str,
@@ -2357,6 +2459,62 @@ def build_hibm_mpm_sharp_case_row(
             "pressure_outlet_source_volume_flux_m3s": _mapping_float(
                 pressure_outlet_report,
                 "source_volume_flux_m3s",
+            ),
+            "pressure_outlet_reachable_source_volume_flux_m3s": _mapping_float(
+                pressure_outlet_report,
+                "zmin_reachable_source_volume_flux_m3s",
+            ),
+            "pressure_outlet_unreached_source_volume_flux_m3s": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_volume_flux_m3s",
+            ),
+            "pressure_outlet_reachable_source_cell_count": _mapping_int(
+                pressure_outlet_report,
+                "zmin_reachable_source_cell_count",
+            ),
+            "pressure_outlet_unreached_source_cell_count": _mapping_int(
+                pressure_outlet_report,
+                "zmin_unreached_source_cell_count",
+            ),
+            "pressure_outlet_unreached_source_abs_flux_m3s": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_abs_flux_m3s",
+            ),
+            "pressure_outlet_unreached_source_centroid_x_m": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_centroid_x_m",
+            ),
+            "pressure_outlet_unreached_source_centroid_y_m": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_centroid_y_m",
+            ),
+            "pressure_outlet_unreached_source_centroid_z_m": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_centroid_z_m",
+            ),
+            "pressure_outlet_unreached_source_min_x_m": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_min_x_m",
+            ),
+            "pressure_outlet_unreached_source_min_y_m": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_min_y_m",
+            ),
+            "pressure_outlet_unreached_source_min_z_m": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_min_z_m",
+            ),
+            "pressure_outlet_unreached_source_max_x_m": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_max_x_m",
+            ),
+            "pressure_outlet_unreached_source_max_y_m": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_max_y_m",
+            ),
+            "pressure_outlet_unreached_source_max_z_m": _mapping_float(
+                pressure_outlet_report,
+                "zmin_unreached_source_max_z_m",
             ),
             "pressure_outlet_velocity_flux_m3s": _mapping_float(
                 pressure_outlet_report,
@@ -3188,12 +3346,211 @@ def _connected_active_mask(
     return visited, seed_count
 
 
+def _component_count(mask: np.ndarray) -> int:
+    active = np.asarray(mask, dtype=bool)
+    visited = np.zeros(active.shape, dtype=bool)
+    nx, ny, nz = active.shape
+    count = 0
+    for seed_index in zip(*np.nonzero(active), strict=False):
+        if visited[seed_index]:
+            continue
+        count += 1
+        stack = [tuple(int(value) for value in seed_index)]
+        visited[seed_index] = True
+        while stack:
+            i, j, k = stack.pop()
+            for ni, nj, nk in (
+                (i - 1, j, k),
+                (i + 1, j, k),
+                (i, j - 1, k),
+                (i, j + 1, k),
+                (i, j, k - 1),
+                (i, j, k + 1),
+            ):
+                if (
+                    0 <= ni < nx
+                    and 0 <= nj < ny
+                    and 0 <= nk < nz
+                    and active[ni, nj, nk]
+                    and not visited[ni, nj, nk]
+                ):
+                    visited[ni, nj, nk] = True
+                    stack.append((ni, nj, nk))
+    return count
+
+
+def _mask_bbox_ijk(mask: np.ndarray) -> tuple[tuple[int, int, int], tuple[int, int, int]] | None:
+    indices = np.argwhere(np.asarray(mask, dtype=bool))
+    if indices.size == 0:
+        return None
+    mins = tuple(int(value) for value in np.min(indices, axis=0))
+    maxs = tuple(int(value) for value in np.max(indices, axis=0))
+    return mins, maxs
+
+
+def _minimum_obstacle_carve_path(
+    *,
+    obstacle: np.ndarray,
+    source_mask: np.ndarray,
+    target_mask: np.ndarray,
+) -> tuple[list[tuple[int, int, int]], int] | None:
+    obstacle_bool = np.asarray(obstacle, dtype=bool)
+    source = np.asarray(source_mask, dtype=bool)
+    target = np.asarray(target_mask, dtype=bool)
+    if obstacle_bool.shape != source.shape or source.shape != target.shape:
+        raise ValueError("obstacle, source_mask, and target_mask shapes must match")
+    nx, ny, nz = obstacle_bool.shape
+    total = nx * ny * nz
+    source_indices = np.flatnonzero(source.reshape(-1))
+    if source_indices.size == 0 or not np.any(target):
+        return None
+    target_flat = target.reshape(-1)
+    obstacle_flat = obstacle_bool.reshape(-1)
+    max_distance = np.iinfo(np.int32).max
+    distance = np.full(total, max_distance, dtype=np.int32)
+    previous = np.full(total, -1, dtype=np.int64)
+    queue: deque[int] = deque()
+    for flat_index in source_indices:
+        index = int(flat_index)
+        distance[index] = 0
+        queue.append(index)
+
+    def unravel(index: int) -> tuple[int, int, int]:
+        i = index // (ny * nz)
+        rem = index - i * ny * nz
+        j = rem // nz
+        k = rem - j * nz
+        return int(i), int(j), int(k)
+
+    def ravel(i: int, j: int, k: int) -> int:
+        return int((i * ny + j) * nz + k)
+
+    end_index = -1
+    while queue:
+        index = queue.popleft()
+        if target_flat[index]:
+            end_index = int(index)
+            break
+        i, j, k = unravel(index)
+        for ni, nj, nk in (
+            (i - 1, j, k),
+            (i + 1, j, k),
+            (i, j - 1, k),
+            (i, j + 1, k),
+            (i, j, k - 1),
+            (i, j, k + 1),
+        ):
+            if not (0 <= ni < nx and 0 <= nj < ny and 0 <= nk < nz):
+                continue
+            neighbor = ravel(ni, nj, nk)
+            step_cost = 1 if obstacle_flat[neighbor] else 0
+            candidate_distance = int(distance[index]) + step_cost
+            if candidate_distance >= int(distance[neighbor]):
+                continue
+            distance[neighbor] = candidate_distance
+            previous[neighbor] = index
+            if step_cost == 0:
+                queue.appendleft(neighbor)
+            else:
+                queue.append(neighbor)
+    if end_index < 0:
+        return None
+    path_indices: list[int] = []
+    cursor = end_index
+    while cursor >= 0:
+        path_indices.append(int(cursor))
+        cursor = int(previous[cursor])
+    path_indices.reverse()
+    return [unravel(index) for index in path_indices], int(distance[end_index])
+
+
+def _connect_surface_seed_components_to_zmin(
+    obstacle: np.ndarray,
+    *,
+    boundary_seed: np.ndarray,
+    surface_seed: np.ndarray,
+    max_carve_cells: int,
+) -> dict[str, object]:
+    if obstacle.shape != boundary_seed.shape or boundary_seed.shape != surface_seed.shape:
+        raise ValueError("obstacle, boundary_seed, and surface_seed shapes must match")
+    max_carve = max(0, int(max_carve_cells))
+    carved_mask = np.zeros(obstacle.shape, dtype=bool)
+    total_carved = 0
+    connected_paths = 0
+    skipped_max_carve = False
+    path_reports: list[dict[str, object]] = []
+
+    candidate_fluid = ~np.asarray(obstacle, dtype=bool)
+    zmin_active, _ = _connected_active_mask(candidate_fluid, boundary_seed)
+    surface_active, _ = _connected_active_mask(candidate_fluid, surface_seed)
+    target = surface_active & ~zmin_active
+    initial_unreachable_cells = int(np.count_nonzero(target))
+    initial_unreachable_components = _component_count(target)
+
+    while np.any(target):
+        path_result = _minimum_obstacle_carve_path(
+            obstacle=obstacle,
+            source_mask=zmin_active,
+            target_mask=target,
+        )
+        if path_result is None:
+            break
+        path, obstacle_cost = path_result
+        if obstacle_cost <= 0:
+            break
+        if total_carved + obstacle_cost > max_carve:
+            skipped_max_carve = True
+            break
+        path_carved = 0
+        for i, j, k in path:
+            if bool(obstacle[i, j, k]):
+                obstacle[i, j, k] = False
+                carved_mask[i, j, k] = True
+                path_carved += 1
+        if path_carved <= 0:
+            break
+        total_carved += path_carved
+        connected_paths += 1
+        path_reports.append(
+            {
+                "path_cell_count": int(len(path)),
+                "carved_cell_count": int(path_carved),
+                "obstacle_cost": int(obstacle_cost),
+                "start_ijk": tuple(int(value) for value in path[0]),
+                "end_ijk": tuple(int(value) for value in path[-1]),
+            }
+        )
+        candidate_fluid = ~np.asarray(obstacle, dtype=bool)
+        zmin_active, _ = _connected_active_mask(candidate_fluid, boundary_seed)
+        surface_active, _ = _connected_active_mask(candidate_fluid, surface_seed)
+        target = surface_active & ~zmin_active
+
+    final_unreachable_cells = int(np.count_nonzero(target))
+    final_unreachable_components = _component_count(target)
+    bbox = _mask_bbox_ijk(carved_mask)
+    return {
+        "enabled": True,
+        "max_carve_cells": int(max_carve),
+        "initial_unreachable_surface_seed_cell_count": initial_unreachable_cells,
+        "initial_unreachable_surface_seed_component_count": initial_unreachable_components,
+        "final_unreachable_surface_seed_cell_count": final_unreachable_cells,
+        "final_unreachable_surface_seed_component_count": final_unreachable_components,
+        "connected_path_count": int(connected_paths),
+        "carved_cell_count": int(total_carved),
+        "skipped_by_max_carve_limit": bool(skipped_max_carve),
+        "carved_bbox_ijk": None if bbox is None else bbox,
+        "paths": tuple(path_reports),
+    }
+
+
 def build_source_config_fluid_obstacle_mask(
     *,
     config: Mapping[str, object],
     source_config_path: Path,
     grid: CartesianGrid,
     aperture_geometry: Mapping[str, object],
+    connect_surface_seeds_to_zmin: bool = False,
+    surface_seed_zmin_connection_max_carve_cells: int = 0,
 ) -> tuple[np.ndarray, dict[str, object]]:
     analysis = config.get("analysis_settings", {})
     if not isinstance(analysis, Mapping):
@@ -3373,6 +3730,19 @@ def build_source_config_fluid_obstacle_mask(
             "fluid_active_mask_surface_seed_normal_probe_point_count": 0,
             "fluid_active_mask_surface_seed_region_face_counts": {},
         }
+    surface_seed_zmin_connection_report: dict[str, object] = {
+        "enabled": False,
+        "reason": "not_requested",
+        "max_carve_cells": int(max(0, surface_seed_zmin_connection_max_carve_cells)),
+    }
+    if connect_surface_seeds_to_zmin:
+        surface_seed_zmin_connection_report = _connect_surface_seed_components_to_zmin(
+            obstacle,
+            boundary_seed=boundary_seed,
+            surface_seed=surface_seed,
+            max_carve_cells=surface_seed_zmin_connection_max_carve_cells,
+        )
+    candidate_fluid = ~obstacle
     active_water, seed_cell_count = _connected_active_mask(
         candidate_fluid,
         boundary_seed | surface_seed,
@@ -3406,6 +3776,9 @@ def build_source_config_fluid_obstacle_mask(
         **obstacle_report,
         **surface_probe_clear_report,
         **surface_seed_report,
+        "fluid_active_mask_surface_seed_zmin_connection": (
+            surface_seed_zmin_connection_report
+        ),
     }
     return final_obstacle.astype(np.int32), report
 
@@ -4289,6 +4662,21 @@ def _final_row_number(
     return _required_finite_row_number(final_row, field, context=context)
 
 
+def _final_row_number_or_none(
+    final_row: dict[str, object] | None,
+    field: str,
+) -> float | None:
+    if final_row is None:
+        return None
+    try:
+        value = float(final_row.get(field, math.nan))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
 def _final_row_int(
     final_row: dict[str, object] | None,
     field: str,
@@ -4318,6 +4706,17 @@ def _rows_max_int(rows: Sequence[Mapping[str, object]], key: str) -> int:
 
 def _rows_any_bool(rows: Sequence[Mapping[str, object]], key: str) -> bool:
     return any(_row_bool(row.get(key, False)) for row in rows)
+
+
+def count_enabled_unconverged_fsi_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> int:
+    return sum(
+        1
+        for row in rows
+        if _row_bool(row.get("fsi_coupling_enabled", False))
+        and not _row_bool(row.get("fsi_coupling_converged", False))
+    )
 
 
 def pressure_schedule_applied_in_history(rows: Sequence[dict[str, object]]) -> bool:
@@ -4939,9 +5338,12 @@ def resolve_pressure_solver(
     pressure_solver: str,
     *,
     graded_grid_enabled: bool,
+    fsi_coupling_mode: str | None = None,
 ) -> str:
     solver_name = str(pressure_solver)
     if solver_name == "auto":
+        if str(fsi_coupling_mode) == FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED:
+            return "fv_cg"
         return "fv_cg" if graded_grid_enabled else "fv_multigrid"
     if solver_name not in PRESSURE_SOLVER_CHOICES:
         raise ValueError(f"unsupported pressure solver: {pressure_solver!r}")
@@ -7187,6 +7589,146 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "--fsi-velocity-constraint-solid-mobility-ratio must be a finite non-negative number"
         )
     fsi_coupling_iterations = max(1, int(args.fsi_coupling_iterations))
+    fsi_coupling_adaptive_iterations_max_arg = int(
+        args.fsi_coupling_adaptive_iterations_max
+    )
+    if fsi_coupling_adaptive_iterations_max_arg < 0:
+        raise ValueError("--fsi-coupling-adaptive-iterations-max must be non-negative")
+    if (
+        fsi_coupling_adaptive_iterations_max_arg > 0
+        and fsi_coupling_adaptive_iterations_max_arg < fsi_coupling_iterations
+    ):
+        raise ValueError(
+            "--fsi-coupling-adaptive-iterations-max must be 0 or at least "
+            "--fsi-coupling-iterations"
+        )
+    fsi_coupling_adaptive_iterations_max = (
+        fsi_coupling_adaptive_iterations_max_arg
+        if fsi_coupling_adaptive_iterations_max_arg > 0
+        else fsi_coupling_iterations
+    )
+    fsi_coupling_adaptive_iterations_residual_threshold_n = float(
+        args.fsi_coupling_adaptive_iterations_residual_threshold_n
+    )
+    if not (
+        math.isinf(fsi_coupling_adaptive_iterations_residual_threshold_n)
+        or (
+            math.isfinite(fsi_coupling_adaptive_iterations_residual_threshold_n)
+            and fsi_coupling_adaptive_iterations_residual_threshold_n >= 0.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-adaptive-iterations-residual-threshold-n must be "
+            "non-negative or infinity"
+        )
+    fsi_coupling_adaptive_iterations_cfl_threshold = float(
+        args.fsi_coupling_adaptive_iterations_cfl_threshold
+    )
+    if not (
+        math.isinf(fsi_coupling_adaptive_iterations_cfl_threshold)
+        or (
+            math.isfinite(fsi_coupling_adaptive_iterations_cfl_threshold)
+            and fsi_coupling_adaptive_iterations_cfl_threshold >= 0.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-adaptive-iterations-cfl-threshold must be "
+            "non-negative or infinity"
+        )
+    fsi_coupling_same_step_rerun_iterations_max_arg = int(
+        args.fsi_coupling_same_step_rerun_iterations_max
+    )
+    if fsi_coupling_same_step_rerun_iterations_max_arg < 0:
+        raise ValueError(
+            "--fsi-coupling-same-step-rerun-iterations-max must be non-negative"
+        )
+    if (
+        fsi_coupling_same_step_rerun_iterations_max_arg > 0
+        and fsi_coupling_same_step_rerun_iterations_max_arg < fsi_coupling_iterations
+    ):
+        raise ValueError(
+            "--fsi-coupling-same-step-rerun-iterations-max must be 0 or at least "
+            "--fsi-coupling-iterations"
+        )
+    fsi_coupling_same_step_rerun_iterations_max = (
+        fsi_coupling_same_step_rerun_iterations_max_arg
+        if fsi_coupling_same_step_rerun_iterations_max_arg > 0
+        else fsi_coupling_iterations
+    )
+    fsi_coupling_same_step_rerun_residual_threshold_n = float(
+        args.fsi_coupling_same_step_rerun_residual_threshold_n
+    )
+    if not (
+        math.isinf(fsi_coupling_same_step_rerun_residual_threshold_n)
+        or (
+            math.isfinite(fsi_coupling_same_step_rerun_residual_threshold_n)
+            and fsi_coupling_same_step_rerun_residual_threshold_n >= 0.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-same-step-rerun-residual-threshold-n must be "
+            "non-negative or infinity"
+        )
+    fsi_coupling_residual_continuation_iterations_max = int(
+        args.fsi_coupling_residual_continuation_iterations_max
+    )
+    if fsi_coupling_residual_continuation_iterations_max < 0:
+        raise ValueError(
+            "--fsi-coupling-residual-continuation-iterations-max must be non-negative"
+        )
+    fsi_coupling_residual_continuation_threshold_n = float(
+        args.fsi_coupling_residual_continuation_threshold_n
+    )
+    if not (
+        math.isinf(fsi_coupling_residual_continuation_threshold_n)
+        or (
+            math.isfinite(fsi_coupling_residual_continuation_threshold_n)
+            and fsi_coupling_residual_continuation_threshold_n >= 0.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-residual-continuation-threshold-n must be "
+            "non-negative or infinity"
+        )
+    fsi_coupling_residual_continuation_rebound_secant_from_best = bool(
+        args.fsi_coupling_residual_continuation_rebound_secant_from_best
+    )
+    fsi_coupling_residual_continuation_rebound_secant_factor = float(
+        args.fsi_coupling_residual_continuation_rebound_secant_factor
+    )
+    if not (
+        math.isinf(fsi_coupling_residual_continuation_rebound_secant_factor)
+        or (
+            math.isfinite(fsi_coupling_residual_continuation_rebound_secant_factor)
+            and fsi_coupling_residual_continuation_rebound_secant_factor >= 1.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-residual-continuation-rebound-secant-factor must "
+            "be >= 1 or infinity"
+        )
+    fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max = int(
+        args.fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max
+    )
+    if fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max < 0:
+        raise ValueError(
+            "--fsi-coupling-residual-continuation-rebound-secant-evaluation-"
+            "extensions-max must be non-negative"
+        )
+    fsi_coupling_trial_interior_divergence_tolerance = float(
+        args.fsi_coupling_trial_interior_divergence_tolerance
+    )
+    if not (
+        math.isinf(fsi_coupling_trial_interior_divergence_tolerance)
+        or (
+            math.isfinite(fsi_coupling_trial_interior_divergence_tolerance)
+            and fsi_coupling_trial_interior_divergence_tolerance >= 0.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-trial-interior-divergence-tolerance must be "
+            "non-negative or infinity"
+        )
     fsi_coupling_tolerance_n = float(args.fsi_coupling_tolerance_n)
     if not math.isfinite(fsi_coupling_tolerance_n) or fsi_coupling_tolerance_n < 0.0:
         raise ValueError("--fsi-coupling-tolerance-n must be a finite non-negative number")
@@ -7208,6 +7750,136 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if fsi_coupling_solver not in INTERFACE_REACTION_SOLVER_CHOICES:
         choices = ", ".join(INTERFACE_REACTION_SOLVER_CHOICES)
         raise ValueError(f"--fsi-coupling-solver must be one of: {choices}")
+    fsi_coupling_rejected_trial_backtrack = float(
+        args.fsi_coupling_rejected_trial_backtrack
+    )
+    if (
+        not math.isfinite(fsi_coupling_rejected_trial_backtrack)
+        or not 0.0 < fsi_coupling_rejected_trial_backtrack <= 1.0
+    ):
+        raise ValueError(
+            "--fsi-coupling-rejected-trial-backtrack must be a finite number in (0, 1]"
+        )
+    fsi_coupling_residual_growth_rejection_factor = float(
+        args.fsi_coupling_residual_growth_rejection_factor
+    )
+    if not (
+        math.isinf(fsi_coupling_residual_growth_rejection_factor)
+        or (
+            math.isfinite(fsi_coupling_residual_growth_rejection_factor)
+            and fsi_coupling_residual_growth_rejection_factor >= 1.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-residual-growth-rejection-factor must be >= 1 or infinity"
+        )
+    fsi_coupling_max_accepted_residual_n = float(
+        args.fsi_coupling_max_accepted_residual_n
+    )
+    if not (
+        math.isinf(fsi_coupling_max_accepted_residual_n)
+        or (
+            math.isfinite(fsi_coupling_max_accepted_residual_n)
+            and fsi_coupling_max_accepted_residual_n >= 0.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-max-accepted-residual-n must be non-negative or infinity"
+        )
+    fsi_coupling_trust_region_force_increment_n = float(
+        args.fsi_coupling_trust_region_force_increment_n
+    )
+    if not (
+        math.isinf(fsi_coupling_trust_region_force_increment_n)
+        or (
+            math.isfinite(fsi_coupling_trust_region_force_increment_n)
+            and fsi_coupling_trust_region_force_increment_n > 0.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-trust-region-force-increment-n must be positive or infinity"
+        )
+    fsi_coupling_trust_region_adaptive = bool(
+        args.fsi_coupling_trust_region_adaptive
+    )
+    fsi_coupling_trust_region_shrink_factor = float(
+        args.fsi_coupling_trust_region_shrink_factor
+    )
+    if not (
+        math.isfinite(fsi_coupling_trust_region_shrink_factor)
+        and 0.0 < fsi_coupling_trust_region_shrink_factor <= 1.0
+    ):
+        raise ValueError(
+            "--fsi-coupling-trust-region-shrink-factor must be finite and in (0, 1]"
+        )
+    fsi_coupling_trust_region_growth_factor = float(
+        args.fsi_coupling_trust_region_growth_factor
+    )
+    if not (
+        math.isfinite(fsi_coupling_trust_region_growth_factor)
+        and fsi_coupling_trust_region_growth_factor >= 1.0
+    ):
+        raise ValueError(
+            "--fsi-coupling-trust-region-growth-factor must be finite and >= 1"
+        )
+    fsi_coupling_trust_region_rebound_factor = float(
+        args.fsi_coupling_trust_region_rebound_factor
+    )
+    if not (
+        math.isinf(fsi_coupling_trust_region_rebound_factor)
+        or (
+            math.isfinite(fsi_coupling_trust_region_rebound_factor)
+            and fsi_coupling_trust_region_rebound_factor >= 1.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-trust-region-rebound-factor must be >= 1 or infinity"
+        )
+    fsi_coupling_trust_region_rebound_backtrack = float(
+        args.fsi_coupling_trust_region_rebound_backtrack
+    )
+    if not (
+        math.isfinite(fsi_coupling_trust_region_rebound_backtrack)
+        and 0.0 < fsi_coupling_trust_region_rebound_backtrack < 1.0
+    ):
+        raise ValueError(
+            "--fsi-coupling-trust-region-rebound-backtrack must be finite and in (0, 1)"
+        )
+    fsi_coupling_trust_region_rebound_stop_factor = float(
+        args.fsi_coupling_trust_region_rebound_stop_factor
+    )
+    if not (
+        math.isinf(fsi_coupling_trust_region_rebound_stop_factor)
+        or (
+            math.isfinite(fsi_coupling_trust_region_rebound_stop_factor)
+            and fsi_coupling_trust_region_rebound_stop_factor >= 1.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-trust-region-rebound-stop-factor must be >= 1 or infinity"
+        )
+    fsi_coupling_trust_region_rebound_stop_max_residual_n = float(
+        args.fsi_coupling_trust_region_rebound_stop_max_residual_n
+    )
+    if not (
+        math.isinf(fsi_coupling_trust_region_rebound_stop_max_residual_n)
+        or (
+            math.isfinite(fsi_coupling_trust_region_rebound_stop_max_residual_n)
+            and fsi_coupling_trust_region_rebound_stop_max_residual_n >= 0.0
+        )
+    ):
+        raise ValueError(
+            "--fsi-coupling-trust-region-rebound-stop-max-residual-n must be "
+            "non-negative or infinity"
+        )
+    if (
+        fsi_coupling_trust_region_adaptive
+        and math.isinf(fsi_coupling_trust_region_force_increment_n)
+    ):
+        raise ValueError(
+            "--fsi-coupling-trust-region-adaptive requires a finite "
+            "--fsi-coupling-trust-region-force-increment-n"
+        )
     fsi_coupling_mode = str(args.fsi_coupling_mode)
     fsi_coupling_mode_report = require_implemented_fsi_coupling_mode(fsi_coupling_mode)
     sharp_case_runner_enabled = fsi_coupling_mode == FSI_COUPLING_MODE_HIBM_MPM_SHARP
@@ -7263,6 +7935,29 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         fsi_coupling_iterations=fsi_coupling_iterations,
     )
     interface_reaction_aitken = bool(args.interface_reaction_aitken)
+    interface_reaction_aitken_lower_bound = float(
+        args.interface_reaction_aitken_lower_bound
+    )
+    if (
+        not math.isfinite(interface_reaction_aitken_lower_bound)
+        or not 0.0 <= interface_reaction_aitken_lower_bound <= 1.5
+    ):
+        raise ValueError(
+            "--interface-reaction-aitken-lower-bound must be a finite number in [0, 1.5]"
+        )
+    interface_reaction_aitken_upper_bound = float(
+        args.interface_reaction_aitken_upper_bound
+    )
+    if (
+        not math.isfinite(interface_reaction_aitken_upper_bound)
+        or not interface_reaction_aitken_lower_bound
+        <= interface_reaction_aitken_upper_bound
+        <= 1.5
+    ):
+        raise ValueError(
+            "--interface-reaction-aitken-upper-bound must be finite and satisfy "
+            "interface_reaction_aitken_lower_bound <= upper <= 1.5"
+        )
     max_wall_time_s = float(args.max_wall_time_s)
     if not math.isfinite(max_wall_time_s) or max_wall_time_s < 0.0:
         raise ValueError("--max-wall-time-s must be a finite non-negative number")
@@ -7437,6 +8132,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     pressure_solver_name = resolve_pressure_solver(
         args.pressure_solver,
         graded_grid_enabled=graded_grid_enabled,
+        fsi_coupling_mode=fsi_coupling_mode,
     )
     if (
         interface_reaction_robin_matrix_impedance_ns_m > 0.0
@@ -7563,7 +8259,80 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "fsi_coupling_target_map_relaxation": (
                 fsi_coupling_target_map_relaxation
             ),
+            "fsi_coupling_iterations_base": fsi_coupling_iterations,
+            "fsi_coupling_adaptive_iterations_max": (
+                fsi_coupling_adaptive_iterations_max
+            ),
+            "fsi_coupling_adaptive_iterations_residual_threshold_n": (
+                fsi_coupling_adaptive_iterations_residual_threshold_n
+            ),
+            "fsi_coupling_adaptive_iterations_cfl_threshold": (
+                fsi_coupling_adaptive_iterations_cfl_threshold
+            ),
+            "fsi_coupling_same_step_rerun_iterations_max": (
+                fsi_coupling_same_step_rerun_iterations_max
+            ),
+            "fsi_coupling_same_step_rerun_residual_threshold_n": (
+                fsi_coupling_same_step_rerun_residual_threshold_n
+            ),
+            "fsi_coupling_residual_continuation_iterations_max": (
+                fsi_coupling_residual_continuation_iterations_max
+            ),
+            "fsi_coupling_residual_continuation_threshold_n": (
+                fsi_coupling_residual_continuation_threshold_n
+            ),
+            "fsi_coupling_residual_continuation_rebound_secant_from_best": (
+                fsi_coupling_residual_continuation_rebound_secant_from_best
+            ),
+            "fsi_coupling_residual_continuation_rebound_secant_factor": (
+                fsi_coupling_residual_continuation_rebound_secant_factor
+            ),
+            "fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max": (
+                fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max
+            ),
+            "fsi_coupling_trial_interior_divergence_tolerance": (
+                fsi_coupling_trial_interior_divergence_tolerance
+            ),
+            "fsi_coupling_rejected_trial_backtrack": (
+                fsi_coupling_rejected_trial_backtrack
+            ),
+            "fsi_coupling_residual_growth_rejection_factor": (
+                fsi_coupling_residual_growth_rejection_factor
+            ),
+            "fsi_coupling_max_accepted_residual_n": (
+                fsi_coupling_max_accepted_residual_n
+            ),
+            "fsi_coupling_trust_region_force_increment_n": (
+                fsi_coupling_trust_region_force_increment_n
+            ),
+            "fsi_coupling_trust_region_adaptive": (
+                fsi_coupling_trust_region_adaptive
+            ),
+            "fsi_coupling_trust_region_shrink_factor": (
+                fsi_coupling_trust_region_shrink_factor
+            ),
+            "fsi_coupling_trust_region_growth_factor": (
+                fsi_coupling_trust_region_growth_factor
+            ),
+            "fsi_coupling_trust_region_rebound_factor": (
+                fsi_coupling_trust_region_rebound_factor
+            ),
+            "fsi_coupling_trust_region_rebound_backtrack": (
+                fsi_coupling_trust_region_rebound_backtrack
+            ),
+            "fsi_coupling_trust_region_rebound_stop_factor": (
+                fsi_coupling_trust_region_rebound_stop_factor
+            ),
+            "fsi_coupling_trust_region_rebound_stop_max_residual_n": (
+                fsi_coupling_trust_region_rebound_stop_max_residual_n
+            ),
             "interface_reaction_aitken": interface_reaction_aitken,
+            "interface_reaction_aitken_lower_bound": (
+                interface_reaction_aitken_lower_bound
+            ),
+            "interface_reaction_aitken_upper_bound": (
+                interface_reaction_aitken_upper_bound
+            ),
             "interface_reaction_relaxation": interface_reaction_relaxation,
             "fluid_grid_spacing_m": (
                 None if uniform_spacing_m is None else [float(value) for value in uniform_spacing_m]
@@ -7637,6 +8406,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     source_config_path=source_config_path,
                     grid=fluid_grid,
                     aperture_geometry=region14_aperture_geometry,
+                    connect_surface_seeds_to_zmin=bool(
+                        args.source_config_connect_surface_seeds_to_zmin
+                    ),
+                    surface_seed_zmin_connection_max_carve_cells=int(
+                        args.source_config_surface_seed_zmin_connection_max_carve_cells
+                    ),
                 )
             )
             simulator.fluid.obstacle.from_numpy(source_config_water_obstacle_mask)
@@ -8164,12 +8939,19 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         first_step = completed_step + 1
 
     previous_step_cfl = None
+    previous_step_fsi_coupling_residual_norm_n = None
     previous_step_fluid_substeps = effective_fluid_substeps
     if rows:
         try:
             previous_step_cfl = float(rows[-1]["cfl"])
         except (KeyError, TypeError, ValueError):
             previous_step_cfl = None
+        try:
+            previous_step_fsi_coupling_residual_norm_n = float(
+                rows[-1]["fsi_coupling_residual_norm_n"]
+            )
+        except (KeyError, TypeError, ValueError):
+            previous_step_fsi_coupling_residual_norm_n = None
         try:
             previous_step_fluid_substeps = max(
                 effective_fluid_substeps,
@@ -8187,6 +8969,40 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 previous_substeps=previous_step_fluid_substeps,
             )
         step_fluid_substep_dt_s = float(spec.dt_s) / float(step_fluid_substeps)
+        step_fsi_coupling_iterations = fsi_coupling_iterations
+        fsi_coupling_adaptive_iterations_residual_triggered = (
+            previous_step_fsi_coupling_residual_norm_n is not None
+            and math.isfinite(previous_step_fsi_coupling_residual_norm_n)
+            and math.isfinite(
+                fsi_coupling_adaptive_iterations_residual_threshold_n
+            )
+            and previous_step_fsi_coupling_residual_norm_n
+            > fsi_coupling_adaptive_iterations_residual_threshold_n
+        )
+        fsi_coupling_adaptive_iterations_cfl_triggered = (
+            previous_step_cfl is not None
+            and math.isfinite(previous_step_cfl)
+            and math.isfinite(fsi_coupling_adaptive_iterations_cfl_threshold)
+            and previous_step_cfl
+            > fsi_coupling_adaptive_iterations_cfl_threshold
+        )
+        fsi_coupling_adaptive_iterations_triggered = (
+            fsi_coupling_adaptive_iterations_max > fsi_coupling_iterations
+            and (
+                fsi_coupling_adaptive_iterations_residual_triggered
+                or fsi_coupling_adaptive_iterations_cfl_triggered
+            )
+        )
+        if fsi_coupling_adaptive_iterations_triggered:
+            step_fsi_coupling_iterations = fsi_coupling_adaptive_iterations_max
+        fsi_coupling_same_step_rerun_triggered = False
+        fsi_coupling_same_step_rerun_count = 0
+        fsi_coupling_same_step_rerun_initial_iterations_requested = (
+            step_fsi_coupling_iterations
+        )
+        fsi_coupling_same_step_rerun_initial_iterations_used = 0
+        fsi_coupling_same_step_rerun_initial_residual_norm_n = math.nan
+        fsi_coupling_same_step_rerun_initial_converged = False
         fsi_coupling_wall_time_s = 0.0
         solid_advance_wall_time_s = 0.0
         fluid_advance_wall_time_s = 0.0
@@ -8197,7 +9013,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         velocity_constraint_report = None
         velocity_constraint_spread_report = None
         fsi_coupling_iterations_used = 1
-        fsi_coupling_converged = fsi_coupling_iterations <= 1
+        fsi_coupling_converged = step_fsi_coupling_iterations <= 1
         fsi_coupling_residual_norm_n = 0.0
         fsi_coupling_relaxation_effective = interface_reaction_relaxation
         fsi_coupling_iqn_ils_least_squares_update_count = 0
@@ -8213,6 +9029,27 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         fsi_coupling_physical_residual_jacobian_amplification_sample_count = 0
         fsi_coupling_raw_interface_map_amplification_sample_count = 0
         fsi_coupling_raw_residual_jacobian_amplification_sample_count = 0
+        fsi_coupling_rejected_trial_count = 0
+        fsi_coupling_rejected_trial_backtrack_count = 0
+        fsi_coupling_residual_growth_rejected_trial_count = 0
+        fsi_coupling_max_residual_rejected_trial_count = 0
+        fsi_coupling_trust_region_limited_update_count = 0
+        fsi_coupling_trust_region_shrink_count = 0
+        fsi_coupling_trust_region_growth_count = 0
+        fsi_coupling_trust_region_rebound_backtrack_count = 0
+        fsi_coupling_trust_region_rebound_stop_count = 0
+        fsi_coupling_trust_region_rebound_stop_suppressed_count = 0
+        fsi_coupling_residual_continuation_iteration_count = 0
+        fsi_coupling_residual_continuation_rebound_secant_count = 0
+        fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count = 0
+        fsi_coupling_trust_region_effective_force_increment_n = (
+            fsi_coupling_trust_region_force_increment_n
+        )
+        fsi_coupling_accepted_trial_cfl = math.nan
+        fsi_coupling_accepted_trial_max_fluid_speed_mps = math.nan
+        fsi_coupling_accepted_trial_interior_divergence_l2 = math.nan
+        fsi_coupling_trial_cfl_max = math.nan
+        fsi_coupling_trial_interior_divergence_l2_max = math.nan
         fsi_coupling_trial_force_history_n: tuple[tuple[float, ...], ...] = ()
         fsi_coupling_target_force_history_n: tuple[tuple[float, ...], ...] = ()
         fsi_coupling_residual_history_n: tuple[tuple[float, ...], ...] = ()
@@ -8242,7 +9079,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         fsi_coupling_enabled = legacy_projected_reduced_fsi_coupling_enabled(
             fsi_coupling_mode=fsi_coupling_mode,
             solid_model=args.solid_model,
-            fsi_coupling_iterations=fsi_coupling_iterations,
+            fsi_coupling_iterations=step_fsi_coupling_iterations,
         )
         step_start_main_velocity_z_mps = float(simulator.main_v_mps[None])
         step_start_tail_velocity_z_mps = float(simulator.tail_v_mps[None])
@@ -8411,6 +9248,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 nonlocal fsi_secondary_response_constraint_force_solid_mobility_ratio
                 nonlocal fsi_primary_velocity_target_solid_mobility_ratio
                 nonlocal fsi_secondary_velocity_target_solid_mobility_ratio
+                nonlocal fsi_coupling_trial_cfl_max
+                nonlocal fsi_coupling_trial_interior_divergence_l2_max
                 primary_reaction_n, secondary_reaction_n = _split_region_pair_vector(reaction_force_n)
                 trial_solid_report = advance_physical_solid_step(
                     current_step_time_s,
@@ -8499,6 +9338,43 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     read_full_report=reuse_accepted_fsi_trial_state,
                 )
                 accumulate_fsi_trial_pressure_projection_stats(trial_fluid_report)
+                trial_fluid_substep_dt_s = float(
+                    getattr(
+                        trial_fluid_report,
+                        "fluid_substep_dt_s",
+                        step_fluid_substep_dt_s,
+                    )
+                )
+                trial_sample_report = simulator.sample_cfl_report(
+                    dt_s=trial_fluid_substep_dt_s,
+                )
+                trial_cfl = float(trial_sample_report["cfl"])
+                if math.isfinite(trial_cfl):
+                    fsi_coupling_trial_cfl_max = (
+                        trial_cfl
+                        if not math.isfinite(fsi_coupling_trial_cfl_max)
+                        else max(fsi_coupling_trial_cfl_max, trial_cfl)
+                    )
+                trial_interior_divergence_l2 = math.nan
+                if math.isfinite(fsi_coupling_trial_interior_divergence_tolerance):
+                    trial_projection_sample_report = simulator.sample_after_projection(
+                        trial_fluid_report.divergence,
+                        dt_s=trial_fluid_substep_dt_s,
+                    )
+                    trial_interior_divergence_l2 = float(
+                        trial_projection_sample_report["interior_divergence_l2"]
+                    )
+                    if math.isfinite(trial_interior_divergence_l2):
+                        fsi_coupling_trial_interior_divergence_l2_max = (
+                            trial_interior_divergence_l2
+                            if not math.isfinite(
+                                fsi_coupling_trial_interior_divergence_l2_max
+                            )
+                            else max(
+                                fsi_coupling_trial_interior_divergence_l2_max,
+                                trial_interior_divergence_l2,
+                            )
+                        )
                 primary_target_n = trial_fluid_report.interface_reaction_target.primary_force_n
                 secondary_target_n = trial_fluid_report.interface_reaction_target.secondary_force_n
                 stabilized_target_force_n = _combine_region_pair_vectors(
@@ -8533,6 +9409,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     payload={
                         "solid_report": trial_solid_report,
                         "fluid_report": trial_fluid_report,
+                        "trial_cfl": trial_cfl,
+                        "trial_interior_divergence_l2": trial_interior_divergence_l2,
+                        "trial_max_fluid_speed_mps": float(
+                            trial_sample_report["max_fluid_speed_mps"]
+                        ),
                         "raw_target_force_n": raw_target_force_n,
                         "selected_target_force_n": selected_target_force_n,
                         "robin_impedance_force_n": trial_robin_impedance_force_n,
@@ -8551,6 +9432,20 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     },
                 )
 
+            def accept_fsi_interface_reaction_evaluation(
+                evaluation: InterfaceReactionTargetEvaluation,
+            ) -> bool:
+                payload = evaluation.payload
+                if not isinstance(payload, Mapping):
+                    return False
+                return fsi_trial_acceptance_passes(
+                    payload,
+                    cfl_limit=0.5,
+                    interior_divergence_l2_limit=(
+                        fsi_coupling_trial_interior_divergence_tolerance
+                    ),
+                )
+
             def apply_accepted_fsi_interface_reaction(reaction_force_n: tuple[float, ...]) -> None:
                 primary_reaction_n, secondary_reaction_n = _split_region_pair_vector(reaction_force_n)
                 simulator.set_interface_reaction(
@@ -8562,32 +9457,173 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 nonlocal accepted_fsi_trial_payload
                 accepted_fsi_trial_payload = payload if isinstance(payload, dict) else None
 
-            fixed_point_result = solve_and_apply_interface_reaction_step(
-                initial_force_n=_combine_region_pair_vectors(
-                    simulator.primary_interface_reaction_force_n[None],
-                    simulator.secondary_interface_reaction_force_n[None],
-                ),
-                save_state=save_fsi_step_state,
-                evaluate_target=evaluate_fsi_interface_reaction_target,
-                restore_state=restore_fsi_trial_state,
-                apply_force=apply_accepted_fsi_interface_reaction,
-                commit_accepted_state=(
-                    commit_accepted_fsi_trial_state
-                    if reuse_accepted_fsi_trial_state
-                    else None
-                ),
-                max_iterations=fsi_coupling_iterations,
-                tolerance_n=fsi_coupling_tolerance_n,
-                initial_relaxation=interface_reaction_relaxation,
-                use_aitken=interface_reaction_aitken,
-                passivity_limit=interface_reaction_passivity_limit,
-                solver=fsi_coupling_solver,
-                target_map_relaxation=fsi_coupling_target_map_relaxation,
+            initial_fsi_reaction_force_n = _combine_region_pair_vectors(
+                simulator.primary_interface_reaction_force_n[None],
+                simulator.secondary_interface_reaction_force_n[None],
             )
+
+            def solve_fsi_interface_reaction_attempt(
+                iterations_requested: int,
+            ) -> InterfaceReactionFixedPointResult:
+                return solve_and_apply_interface_reaction_step(
+                    initial_force_n=initial_fsi_reaction_force_n,
+                    save_state=save_fsi_step_state,
+                    evaluate_target=evaluate_fsi_interface_reaction_target,
+                    restore_state=restore_fsi_trial_state,
+                    apply_force=apply_accepted_fsi_interface_reaction,
+                    commit_accepted_state=(
+                        commit_accepted_fsi_trial_state
+                        if reuse_accepted_fsi_trial_state
+                        else None
+                    ),
+                    max_iterations=iterations_requested,
+                    tolerance_n=fsi_coupling_tolerance_n,
+                    initial_relaxation=interface_reaction_relaxation,
+                    use_aitken=interface_reaction_aitken,
+                    passivity_limit=interface_reaction_passivity_limit,
+                    solver=fsi_coupling_solver,
+                    target_map_relaxation=fsi_coupling_target_map_relaxation,
+                    accept_evaluation=accept_fsi_interface_reaction_evaluation,
+                    aitken_lower_bound=interface_reaction_aitken_lower_bound,
+                    aitken_upper_bound=interface_reaction_aitken_upper_bound,
+                    rejected_trial_backtrack=fsi_coupling_rejected_trial_backtrack,
+                    residual_growth_rejection_factor=(
+                        fsi_coupling_residual_growth_rejection_factor
+                    ),
+                    max_accepted_residual_n=fsi_coupling_max_accepted_residual_n,
+                    trust_region_force_increment_n=(
+                        fsi_coupling_trust_region_force_increment_n
+                    ),
+                    trust_region_adaptive=fsi_coupling_trust_region_adaptive,
+                    trust_region_shrink_factor=(
+                        fsi_coupling_trust_region_shrink_factor
+                    ),
+                    trust_region_growth_factor=(
+                        fsi_coupling_trust_region_growth_factor
+                    ),
+                    trust_region_rebound_factor=(
+                        fsi_coupling_trust_region_rebound_factor
+                    ),
+                    trust_region_rebound_backtrack=(
+                        fsi_coupling_trust_region_rebound_backtrack
+                    ),
+                    trust_region_rebound_stop_factor=(
+                        fsi_coupling_trust_region_rebound_stop_factor
+                    ),
+                    trust_region_rebound_stop_max_residual_n=(
+                        fsi_coupling_trust_region_rebound_stop_max_residual_n
+                    ),
+                    residual_continuation_iterations_max=(
+                        fsi_coupling_residual_continuation_iterations_max
+                    ),
+                    residual_continuation_threshold_n=(
+                        fsi_coupling_residual_continuation_threshold_n
+                    ),
+                    residual_continuation_rebound_secant_from_best=(
+                        fsi_coupling_residual_continuation_rebound_secant_from_best
+                    ),
+                    residual_continuation_rebound_secant_factor=(
+                        fsi_coupling_residual_continuation_rebound_secant_factor
+                    ),
+                    residual_continuation_rebound_secant_evaluation_extensions_max=(
+                        fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max
+                    ),
+                )
+
+            fixed_point_result = solve_fsi_interface_reaction_attempt(
+                step_fsi_coupling_iterations
+            )
+            if fsi_same_step_rerun_triggered(
+                current_iterations_requested=step_fsi_coupling_iterations,
+                rerun_iterations_max=fsi_coupling_same_step_rerun_iterations_max,
+                residual_norm_n=fixed_point_result.residual_norm_n,
+                residual_threshold_n=(
+                    fsi_coupling_same_step_rerun_residual_threshold_n
+                ),
+                converged=fixed_point_result.converged,
+            ):
+                fsi_coupling_same_step_rerun_triggered = True
+                fsi_coupling_same_step_rerun_count = 1
+                fsi_coupling_same_step_rerun_initial_iterations_requested = (
+                    step_fsi_coupling_iterations
+                )
+                fsi_coupling_same_step_rerun_initial_iterations_used = (
+                    fixed_point_result.iterations_used
+                )
+                fsi_coupling_same_step_rerun_initial_residual_norm_n = (
+                    fixed_point_result.residual_norm_n
+                )
+                fsi_coupling_same_step_rerun_initial_converged = (
+                    fixed_point_result.converged
+                )
+                restore_fsi_trial_state()
+                accepted_fsi_trial_payload = None
+                step_fsi_coupling_iterations = (
+                    fsi_coupling_same_step_rerun_iterations_max
+                )
+                fixed_point_result = solve_fsi_interface_reaction_attempt(
+                    step_fsi_coupling_iterations
+                )
             fsi_coupling_iterations_used = fixed_point_result.iterations_used
             fsi_coupling_converged = fixed_point_result.converged
             fsi_coupling_residual_norm_n = fixed_point_result.residual_norm_n
             fsi_coupling_relaxation_effective = fixed_point_result.relaxation
+            fsi_coupling_rejected_trial_count = fixed_point_result.rejected_trial_count
+            fsi_coupling_rejected_trial_backtrack_count = (
+                fixed_point_result.rejected_trial_backtrack_count
+            )
+            fsi_coupling_residual_growth_rejected_trial_count = (
+                fixed_point_result.residual_growth_rejected_trial_count
+            )
+            fsi_coupling_max_residual_rejected_trial_count = (
+                fixed_point_result.max_residual_rejected_trial_count
+            )
+            fsi_coupling_trust_region_limited_update_count = (
+                fixed_point_result.trust_region_limited_update_count
+            )
+            fsi_coupling_trust_region_shrink_count = (
+                fixed_point_result.trust_region_shrink_count
+            )
+            fsi_coupling_trust_region_growth_count = (
+                fixed_point_result.trust_region_growth_count
+            )
+            fsi_coupling_trust_region_rebound_backtrack_count = (
+                fixed_point_result.trust_region_rebound_backtrack_count
+            )
+            fsi_coupling_trust_region_rebound_stop_count = (
+                fixed_point_result.trust_region_rebound_stop_count
+            )
+            fsi_coupling_trust_region_rebound_stop_suppressed_count = (
+                fixed_point_result.trust_region_rebound_stop_suppressed_count
+            )
+            fsi_coupling_residual_continuation_iteration_count = (
+                fixed_point_result.residual_continuation_iteration_count
+            )
+            fsi_coupling_residual_continuation_rebound_secant_count = (
+                fixed_point_result.residual_continuation_rebound_secant_count
+            )
+            fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count = (
+                fixed_point_result.residual_continuation_rebound_secant_evaluation_extension_count
+            )
+            fsi_coupling_trust_region_effective_force_increment_n = (
+                fixed_point_result.trust_region_effective_force_increment_n
+            )
+            if isinstance(fixed_point_result.accepted_payload, Mapping):
+                fsi_coupling_accepted_trial_cfl = float(
+                    fixed_point_result.accepted_payload.get("trial_cfl", math.nan)
+                )
+                fsi_coupling_accepted_trial_max_fluid_speed_mps = float(
+                    fixed_point_result.accepted_payload.get(
+                        "trial_max_fluid_speed_mps",
+                        math.nan,
+                    )
+                )
+                fsi_coupling_accepted_trial_interior_divergence_l2 = float(
+                    fixed_point_result.accepted_payload.get(
+                        "trial_interior_divergence_l2",
+                        math.nan,
+                    )
+                )
             fsi_coupling_iqn_ils_least_squares_update_count = (
                 fixed_point_result.iqn_ils_least_squares_update_count
             )
@@ -9144,6 +10180,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             row["fsi_coupling_raw_residual_jacobian_amplification_sample_count"] = 0
             row["interface_reaction_relaxation"] = interface_reaction_relaxation
             row["interface_reaction_aitken"] = interface_reaction_aitken
+            row["interface_reaction_aitken_lower_bound"] = (
+                interface_reaction_aitken_lower_bound
+            )
+            row["interface_reaction_aitken_upper_bound"] = (
+                interface_reaction_aitken_upper_bound
+            )
             row["interface_reaction_relaxation_effective"] = (
                 fsi_coupling_relaxation_effective
             )
@@ -9499,6 +10541,48 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         row["pressure_outlet_source_volume_flux_m3s"] = pressure_outlet_report[
             "source_volume_flux_m3s"
         ]
+        row["pressure_outlet_reachable_source_volume_flux_m3s"] = pressure_outlet_report[
+            "zmin_reachable_source_volume_flux_m3s"
+        ]
+        row["pressure_outlet_unreached_source_volume_flux_m3s"] = pressure_outlet_report[
+            "zmin_unreached_source_volume_flux_m3s"
+        ]
+        row["pressure_outlet_reachable_source_cell_count"] = pressure_outlet_report[
+            "zmin_reachable_source_cell_count"
+        ]
+        row["pressure_outlet_unreached_source_cell_count"] = pressure_outlet_report[
+            "zmin_unreached_source_cell_count"
+        ]
+        row["pressure_outlet_unreached_source_abs_flux_m3s"] = pressure_outlet_report[
+            "zmin_unreached_source_abs_flux_m3s"
+        ]
+        row["pressure_outlet_unreached_source_centroid_x_m"] = pressure_outlet_report[
+            "zmin_unreached_source_centroid_x_m"
+        ]
+        row["pressure_outlet_unreached_source_centroid_y_m"] = pressure_outlet_report[
+            "zmin_unreached_source_centroid_y_m"
+        ]
+        row["pressure_outlet_unreached_source_centroid_z_m"] = pressure_outlet_report[
+            "zmin_unreached_source_centroid_z_m"
+        ]
+        row["pressure_outlet_unreached_source_min_x_m"] = pressure_outlet_report[
+            "zmin_unreached_source_min_x_m"
+        ]
+        row["pressure_outlet_unreached_source_min_y_m"] = pressure_outlet_report[
+            "zmin_unreached_source_min_y_m"
+        ]
+        row["pressure_outlet_unreached_source_min_z_m"] = pressure_outlet_report[
+            "zmin_unreached_source_min_z_m"
+        ]
+        row["pressure_outlet_unreached_source_max_x_m"] = pressure_outlet_report[
+            "zmin_unreached_source_max_x_m"
+        ]
+        row["pressure_outlet_unreached_source_max_y_m"] = pressure_outlet_report[
+            "zmin_unreached_source_max_y_m"
+        ]
+        row["pressure_outlet_unreached_source_max_z_m"] = pressure_outlet_report[
+            "zmin_unreached_source_max_z_m"
+        ]
         row["pressure_outlet_velocity_flux_m3s"] = pressure_outlet_report[
             "zmin_velocity_outlet_flux_m3s"
         ]
@@ -9687,7 +10771,84 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             accepted_pressure_projection_cg_breakdown_count_for_cost
             + fsi_trial_pressure_projection_cg_breakdown_count
         )
-        row["fsi_coupling_iterations_requested"] = fsi_coupling_iterations
+        row["fsi_coupling_iterations_requested"] = step_fsi_coupling_iterations
+        row["fsi_coupling_iterations_base"] = fsi_coupling_iterations
+        row["fsi_coupling_adaptive_iterations_max"] = (
+            fsi_coupling_adaptive_iterations_max
+        )
+        row["fsi_coupling_adaptive_iterations_residual_threshold_n"] = (
+            fsi_coupling_adaptive_iterations_residual_threshold_n
+        )
+        row["fsi_coupling_adaptive_iterations_cfl_threshold"] = (
+            fsi_coupling_adaptive_iterations_cfl_threshold
+        )
+        row["fsi_coupling_adaptive_iterations_triggered"] = (
+            fsi_coupling_adaptive_iterations_triggered
+        )
+        row["fsi_coupling_adaptive_iterations_residual_triggered"] = (
+            fsi_coupling_adaptive_iterations_residual_triggered
+        )
+        row["fsi_coupling_adaptive_iterations_cfl_triggered"] = (
+            fsi_coupling_adaptive_iterations_cfl_triggered
+        )
+        row["fsi_coupling_same_step_rerun_iterations_max"] = (
+            fsi_coupling_same_step_rerun_iterations_max
+        )
+        row["fsi_coupling_same_step_rerun_residual_threshold_n"] = (
+            fsi_coupling_same_step_rerun_residual_threshold_n
+        )
+        row["fsi_coupling_same_step_rerun_triggered"] = (
+            fsi_coupling_same_step_rerun_triggered
+        )
+        row["fsi_coupling_same_step_rerun_count"] = (
+            fsi_coupling_same_step_rerun_count
+        )
+        row["fsi_coupling_same_step_rerun_initial_iterations_requested"] = (
+            fsi_coupling_same_step_rerun_initial_iterations_requested
+        )
+        row["fsi_coupling_same_step_rerun_initial_iterations_used"] = (
+            fsi_coupling_same_step_rerun_initial_iterations_used
+        )
+        row["fsi_coupling_same_step_rerun_initial_residual_norm_n"] = (
+            fsi_coupling_same_step_rerun_initial_residual_norm_n
+        )
+        row["fsi_coupling_same_step_rerun_initial_converged"] = (
+            fsi_coupling_same_step_rerun_initial_converged
+        )
+        row["fsi_coupling_residual_continuation_iterations_max"] = (
+            fsi_coupling_residual_continuation_iterations_max
+        )
+        row["fsi_coupling_residual_continuation_threshold_n"] = (
+            fsi_coupling_residual_continuation_threshold_n
+        )
+        row["fsi_coupling_residual_continuation_rebound_secant_from_best"] = (
+            fsi_coupling_residual_continuation_rebound_secant_from_best
+        )
+        row["fsi_coupling_residual_continuation_rebound_secant_factor"] = (
+            fsi_coupling_residual_continuation_rebound_secant_factor
+        )
+        row[
+            "fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max"
+        ] = (
+            fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max
+        )
+        row["fsi_coupling_residual_continuation_iteration_count"] = (
+            fsi_coupling_residual_continuation_iteration_count
+        )
+        row["fsi_coupling_residual_continuation_rebound_secant_count"] = (
+            fsi_coupling_residual_continuation_rebound_secant_count
+        )
+        row[
+            "fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count"
+        ] = fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count
+        row["fsi_coupling_previous_step_residual_norm_n"] = (
+            math.nan
+            if previous_step_fsi_coupling_residual_norm_n is None
+            else previous_step_fsi_coupling_residual_norm_n
+        )
+        row["fsi_coupling_previous_step_cfl"] = (
+            math.nan if previous_step_cfl is None else previous_step_cfl
+        )
         row["fsi_coupling_mode"] = fsi_coupling_mode
         row["fsi_coupling_mode_paper_hibm_mpm"] = bool(
             fsi_coupling_mode_report["paper_hibm_mpm"]
@@ -9701,8 +10862,86 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         row["fsi_coupling_converged"] = fsi_coupling_converged
         row["fsi_coupling_residual_norm_n"] = fsi_coupling_residual_norm_n
         row["fsi_coupling_relaxation_effective"] = fsi_coupling_relaxation_effective
+        row["fsi_coupling_rejected_trial_count"] = fsi_coupling_rejected_trial_count
+        row["fsi_coupling_rejected_trial_backtrack_count"] = (
+            fsi_coupling_rejected_trial_backtrack_count
+        )
+        row["fsi_coupling_residual_growth_rejected_trial_count"] = (
+            fsi_coupling_residual_growth_rejected_trial_count
+        )
+        row["fsi_coupling_max_residual_rejected_trial_count"] = (
+            fsi_coupling_max_residual_rejected_trial_count
+        )
+        row["fsi_coupling_trust_region_limited_update_count"] = (
+            fsi_coupling_trust_region_limited_update_count
+        )
+        row["fsi_coupling_trust_region_shrink_count"] = (
+            fsi_coupling_trust_region_shrink_count
+        )
+        row["fsi_coupling_trust_region_growth_count"] = (
+            fsi_coupling_trust_region_growth_count
+        )
+        row["fsi_coupling_trust_region_rebound_backtrack_count"] = (
+            fsi_coupling_trust_region_rebound_backtrack_count
+        )
+        row["fsi_coupling_trust_region_rebound_stop_count"] = (
+            fsi_coupling_trust_region_rebound_stop_count
+        )
+        row["fsi_coupling_trust_region_rebound_stop_suppressed_count"] = (
+            fsi_coupling_trust_region_rebound_stop_suppressed_count
+        )
+        row["fsi_coupling_trust_region_effective_force_increment_n"] = (
+            fsi_coupling_trust_region_effective_force_increment_n
+        )
+        row["fsi_coupling_accepted_trial_cfl"] = fsi_coupling_accepted_trial_cfl
+        row["fsi_coupling_accepted_trial_max_fluid_speed_mps"] = (
+            fsi_coupling_accepted_trial_max_fluid_speed_mps
+        )
+        row["fsi_coupling_accepted_trial_interior_divergence_l2"] = (
+            fsi_coupling_accepted_trial_interior_divergence_l2
+        )
+        row["fsi_coupling_trial_cfl_max"] = fsi_coupling_trial_cfl_max
+        row["fsi_coupling_trial_interior_divergence_tolerance"] = (
+            fsi_coupling_trial_interior_divergence_tolerance
+        )
+        row["fsi_coupling_trial_interior_divergence_l2_max"] = (
+            fsi_coupling_trial_interior_divergence_l2_max
+        )
         row["fsi_coupling_target_map_relaxation"] = (
             fsi_coupling_target_map_relaxation
+        )
+        row["fsi_coupling_rejected_trial_backtrack"] = (
+            fsi_coupling_rejected_trial_backtrack
+        )
+        row["fsi_coupling_residual_growth_rejection_factor"] = (
+            fsi_coupling_residual_growth_rejection_factor
+        )
+        row["fsi_coupling_max_accepted_residual_n"] = (
+            fsi_coupling_max_accepted_residual_n
+        )
+        row["fsi_coupling_trust_region_force_increment_n"] = (
+            fsi_coupling_trust_region_force_increment_n
+        )
+        row["fsi_coupling_trust_region_adaptive"] = (
+            fsi_coupling_trust_region_adaptive
+        )
+        row["fsi_coupling_trust_region_shrink_factor"] = (
+            fsi_coupling_trust_region_shrink_factor
+        )
+        row["fsi_coupling_trust_region_growth_factor"] = (
+            fsi_coupling_trust_region_growth_factor
+        )
+        row["fsi_coupling_trust_region_rebound_factor"] = (
+            fsi_coupling_trust_region_rebound_factor
+        )
+        row["fsi_coupling_trust_region_rebound_backtrack"] = (
+            fsi_coupling_trust_region_rebound_backtrack
+        )
+        row["fsi_coupling_trust_region_rebound_stop_factor"] = (
+            fsi_coupling_trust_region_rebound_stop_factor
+        )
+        row["fsi_coupling_trust_region_rebound_stop_max_residual_n"] = (
+            fsi_coupling_trust_region_rebound_stop_max_residual_n
         )
         row["fsi_coupling_iqn_ils_least_squares_update_count"] = (
             fsi_coupling_iqn_ils_least_squares_update_count
@@ -10232,6 +11471,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             use_aitken=interface_reaction_aitken,
             passivity_limit=interface_reaction_passivity_limit,
             robin_impedance_ns_per_m=0.0,
+            aitken_lower_bound=interface_reaction_aitken_lower_bound,
+            aitken_upper_bound=interface_reaction_aitken_upper_bound,
         )
         interface_reaction_state = reaction_step_update.next_state
         reaction_update = reaction_step_update.update
@@ -10243,6 +11484,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         relaxed_tail_reaction_z_n = relaxed_secondary_reaction_n[2]
         row["interface_reaction_relaxation"] = interface_reaction_relaxation
         row["interface_reaction_aitken"] = interface_reaction_aitken
+        row["interface_reaction_aitken_lower_bound"] = (
+            interface_reaction_aitken_lower_bound
+        )
+        row["interface_reaction_aitken_upper_bound"] = (
+            interface_reaction_aitken_upper_bound
+        )
         row["interface_reaction_relaxation_effective"] = interface_reaction_relaxation_used
         row["interface_reaction_passivity_limit"] = interface_reaction_passivity_limit
         row["interface_reaction_robin_impedance_ns_m"] = (
@@ -10327,6 +11574,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             )
             raise
         previous_step_cfl = float(row["cfl"])
+        previous_step_fsi_coupling_residual_norm_n = float(
+            row["fsi_coupling_residual_norm_n"]
+        )
         previous_step_fluid_substeps = int(
             float(row.get("fluid_substeps", step_fluid_substeps))
         )
@@ -11139,6 +12389,62 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             last,
             "fsi_volume_source_m3s",
         )
+        final_pressure_outlet_reachable_source_volume_flux_m3s = _final_row_number(
+            last,
+            "pressure_outlet_reachable_source_volume_flux_m3s",
+        )
+        final_pressure_outlet_unreached_source_volume_flux_m3s = _final_row_number(
+            last,
+            "pressure_outlet_unreached_source_volume_flux_m3s",
+        )
+        final_pressure_outlet_reachable_source_cell_count = _final_row_number(
+            last,
+            "pressure_outlet_reachable_source_cell_count",
+        )
+        final_pressure_outlet_unreached_source_cell_count = _final_row_number(
+            last,
+            "pressure_outlet_unreached_source_cell_count",
+        )
+        final_pressure_outlet_unreached_source_abs_flux_m3s = _final_row_number(
+            last,
+            "pressure_outlet_unreached_source_abs_flux_m3s",
+        )
+        final_pressure_outlet_unreached_source_centroid_x_m = _final_row_number_or_none(
+            last,
+            "pressure_outlet_unreached_source_centroid_x_m",
+        )
+        final_pressure_outlet_unreached_source_centroid_y_m = _final_row_number_or_none(
+            last,
+            "pressure_outlet_unreached_source_centroid_y_m",
+        )
+        final_pressure_outlet_unreached_source_centroid_z_m = _final_row_number_or_none(
+            last,
+            "pressure_outlet_unreached_source_centroid_z_m",
+        )
+        final_pressure_outlet_unreached_source_min_x_m = _final_row_number_or_none(
+            last,
+            "pressure_outlet_unreached_source_min_x_m",
+        )
+        final_pressure_outlet_unreached_source_min_y_m = _final_row_number_or_none(
+            last,
+            "pressure_outlet_unreached_source_min_y_m",
+        )
+        final_pressure_outlet_unreached_source_min_z_m = _final_row_number_or_none(
+            last,
+            "pressure_outlet_unreached_source_min_z_m",
+        )
+        final_pressure_outlet_unreached_source_max_x_m = _final_row_number_or_none(
+            last,
+            "pressure_outlet_unreached_source_max_x_m",
+        )
+        final_pressure_outlet_unreached_source_max_y_m = _final_row_number_or_none(
+            last,
+            "pressure_outlet_unreached_source_max_y_m",
+        )
+        final_pressure_outlet_unreached_source_max_z_m = _final_row_number_or_none(
+            last,
+            "pressure_outlet_unreached_source_max_z_m",
+        )
         final_outlet_to_fsi_volume_source_ratio = signed_positive_source_flux_ratio(
             outlet_negative_z_flux_m3s=final_outlet_negative_z,
             source_flux_m3s=final_fsi_volume_source_m3s,
@@ -11443,6 +12749,27 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "fsi_coupling_mode": fsi_coupling_mode,
             "fsi_coupling_mode_report": fsi_coupling_mode_report,
             "fsi_coupling_iterations_requested": fsi_coupling_iterations,
+            "fsi_coupling_adaptive_iterations_max": (
+                fsi_coupling_adaptive_iterations_max
+            ),
+            "fsi_coupling_adaptive_iterations_residual_threshold_n": (
+                fsi_coupling_adaptive_iterations_residual_threshold_n
+            ),
+            "fsi_coupling_adaptive_iterations_cfl_threshold": (
+                fsi_coupling_adaptive_iterations_cfl_threshold
+            ),
+            "fsi_coupling_same_step_rerun_iterations_max": (
+                fsi_coupling_same_step_rerun_iterations_max
+            ),
+            "fsi_coupling_same_step_rerun_residual_threshold_n": (
+                fsi_coupling_same_step_rerun_residual_threshold_n
+            ),
+            "fsi_coupling_residual_continuation_iterations_max": (
+                fsi_coupling_residual_continuation_iterations_max
+            ),
+            "fsi_coupling_residual_continuation_threshold_n": (
+                fsi_coupling_residual_continuation_threshold_n
+            ),
             "fsi_coupling_solver": fsi_coupling_solver,
             "max_fsi_coupling_iterations_used": max_fsi_coupling_iterations_used,
             "max_fsi_coupling_iqn_ils_least_squares_update_count": (
@@ -11763,6 +13090,48 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "max_outlet_negative_z_flow_m3s": max_outlet_negative_z,
             "final_outlet_negative_z_flow_m3s": final_outlet_negative_z,
             "final_fsi_volume_source_m3s": final_fsi_volume_source_m3s,
+            "final_pressure_outlet_reachable_source_volume_flux_m3s": (
+                final_pressure_outlet_reachable_source_volume_flux_m3s
+            ),
+            "final_pressure_outlet_unreached_source_volume_flux_m3s": (
+                final_pressure_outlet_unreached_source_volume_flux_m3s
+            ),
+            "final_pressure_outlet_reachable_source_cell_count": (
+                final_pressure_outlet_reachable_source_cell_count
+            ),
+            "final_pressure_outlet_unreached_source_cell_count": (
+                final_pressure_outlet_unreached_source_cell_count
+            ),
+            "final_pressure_outlet_unreached_source_abs_flux_m3s": (
+                final_pressure_outlet_unreached_source_abs_flux_m3s
+            ),
+            "final_pressure_outlet_unreached_source_centroid_x_m": (
+                final_pressure_outlet_unreached_source_centroid_x_m
+            ),
+            "final_pressure_outlet_unreached_source_centroid_y_m": (
+                final_pressure_outlet_unreached_source_centroid_y_m
+            ),
+            "final_pressure_outlet_unreached_source_centroid_z_m": (
+                final_pressure_outlet_unreached_source_centroid_z_m
+            ),
+            "final_pressure_outlet_unreached_source_min_x_m": (
+                final_pressure_outlet_unreached_source_min_x_m
+            ),
+            "final_pressure_outlet_unreached_source_min_y_m": (
+                final_pressure_outlet_unreached_source_min_y_m
+            ),
+            "final_pressure_outlet_unreached_source_min_z_m": (
+                final_pressure_outlet_unreached_source_min_z_m
+            ),
+            "final_pressure_outlet_unreached_source_max_x_m": (
+                final_pressure_outlet_unreached_source_max_x_m
+            ),
+            "final_pressure_outlet_unreached_source_max_y_m": (
+                final_pressure_outlet_unreached_source_max_y_m
+            ),
+            "final_pressure_outlet_unreached_source_max_z_m": (
+                final_pressure_outlet_unreached_source_max_z_m
+            ),
             "final_outlet_to_fsi_volume_source_ratio": (
                 final_outlet_to_fsi_volume_source_ratio
             ),
@@ -12178,6 +13547,62 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         last,
         "pressure_outlet_source_volume_flux_m3s",
     )
+    final_pressure_outlet_reachable_source_volume_flux_m3s = _final_row_number(
+        last,
+        "pressure_outlet_reachable_source_volume_flux_m3s",
+    )
+    final_pressure_outlet_unreached_source_volume_flux_m3s = _final_row_number(
+        last,
+        "pressure_outlet_unreached_source_volume_flux_m3s",
+    )
+    final_pressure_outlet_reachable_source_cell_count = _final_row_number(
+        last,
+        "pressure_outlet_reachable_source_cell_count",
+    )
+    final_pressure_outlet_unreached_source_cell_count = _final_row_number(
+        last,
+        "pressure_outlet_unreached_source_cell_count",
+    )
+    final_pressure_outlet_unreached_source_abs_flux_m3s = _final_row_number(
+        last,
+        "pressure_outlet_unreached_source_abs_flux_m3s",
+    )
+    final_pressure_outlet_unreached_source_centroid_x_m = _final_row_number_or_none(
+        last,
+        "pressure_outlet_unreached_source_centroid_x_m",
+    )
+    final_pressure_outlet_unreached_source_centroid_y_m = _final_row_number_or_none(
+        last,
+        "pressure_outlet_unreached_source_centroid_y_m",
+    )
+    final_pressure_outlet_unreached_source_centroid_z_m = _final_row_number_or_none(
+        last,
+        "pressure_outlet_unreached_source_centroid_z_m",
+    )
+    final_pressure_outlet_unreached_source_min_x_m = _final_row_number_or_none(
+        last,
+        "pressure_outlet_unreached_source_min_x_m",
+    )
+    final_pressure_outlet_unreached_source_min_y_m = _final_row_number_or_none(
+        last,
+        "pressure_outlet_unreached_source_min_y_m",
+    )
+    final_pressure_outlet_unreached_source_min_z_m = _final_row_number_or_none(
+        last,
+        "pressure_outlet_unreached_source_min_z_m",
+    )
+    final_pressure_outlet_unreached_source_max_x_m = _final_row_number_or_none(
+        last,
+        "pressure_outlet_unreached_source_max_x_m",
+    )
+    final_pressure_outlet_unreached_source_max_y_m = _final_row_number_or_none(
+        last,
+        "pressure_outlet_unreached_source_max_y_m",
+    )
+    final_pressure_outlet_unreached_source_max_z_m = _final_row_number_or_none(
+        last,
+        "pressure_outlet_unreached_source_max_z_m",
+    )
     final_pressure_outlet_velocity_flux_m3s = _final_row_number(
         last,
         "pressure_outlet_velocity_flux_m3s",
@@ -12350,6 +13775,429 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     max_fsi_coupling_iterations_used = (
         max(int(row["fsi_coupling_iterations_used"]) for row in rows) if rows else 0
     )
+    max_fsi_coupling_iterations_requested = (
+        max(int(row.get("fsi_coupling_iterations_requested", 0) or 0) for row in rows)
+        if rows
+        else 0
+    )
+    total_fsi_coupling_adaptive_iterations_triggered = (
+        sum(
+            1
+            for row in rows
+            if bool(row.get("fsi_coupling_adaptive_iterations_triggered", False))
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_adaptive_iterations_residual_triggered = (
+        sum(
+            1
+            for row in rows
+            if bool(
+                row.get(
+                    "fsi_coupling_adaptive_iterations_residual_triggered",
+                    False,
+                )
+            )
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_adaptive_iterations_cfl_triggered = (
+        sum(
+            1
+            for row in rows
+            if bool(row.get("fsi_coupling_adaptive_iterations_cfl_triggered", False))
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_same_step_rerun_triggered = (
+        sum(
+            1
+            for row in rows
+            if bool(row.get("fsi_coupling_same_step_rerun_triggered", False))
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_same_step_rerun_count = (
+        sum(
+            int(row.get("fsi_coupling_same_step_rerun_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    same_step_rerun_initial_residuals = [
+        float(row.get("fsi_coupling_same_step_rerun_initial_residual_norm_n", 0.0))
+        for row in rows
+        if math.isfinite(
+            float(
+                row.get(
+                    "fsi_coupling_same_step_rerun_initial_residual_norm_n",
+                    math.nan,
+                )
+            )
+        )
+    ]
+    max_fsi_coupling_same_step_rerun_initial_residual_norm_n = (
+        max(same_step_rerun_initial_residuals)
+        if same_step_rerun_initial_residuals
+        else 0.0
+    )
+    max_fsi_coupling_residual_continuation_iteration_count = (
+        max(
+            int(row.get("fsi_coupling_residual_continuation_iteration_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_residual_continuation_iteration_count = (
+        sum(
+            int(row.get("fsi_coupling_residual_continuation_iteration_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_residual_continuation_rebound_secant_count = (
+        max(
+            int(
+                row.get(
+                    "fsi_coupling_residual_continuation_rebound_secant_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_residual_continuation_rebound_secant_count = (
+        sum(
+            int(
+                row.get(
+                    "fsi_coupling_residual_continuation_rebound_secant_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count = (
+        max(
+            int(
+                row.get(
+                    "fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count = (
+        sum(
+            int(
+                row.get(
+                    "fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fluid_substeps = (
+        max(int(float(row.get("fluid_substeps", effective_fluid_substeps))) for row in rows)
+        if rows
+        else effective_fluid_substeps
+    )
+    max_fsi_coupling_rejected_trial_count = (
+        max(int(row.get("fsi_coupling_rejected_trial_count", 0) or 0) for row in rows)
+        if rows
+        else 0
+    )
+    max_fsi_coupling_rejected_trial_backtrack_count = (
+        max(
+            int(row.get("fsi_coupling_rejected_trial_backtrack_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_residual_growth_rejected_trial_count = (
+        max(
+            int(
+                row.get(
+                    "fsi_coupling_residual_growth_rejected_trial_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_max_residual_rejected_trial_count = (
+        max(
+            int(
+                row.get(
+                    "fsi_coupling_max_residual_rejected_trial_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_trust_region_limited_update_count = (
+        max(
+            int(
+                row.get(
+                    "fsi_coupling_trust_region_limited_update_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_trust_region_shrink_count = (
+        max(
+            int(row.get("fsi_coupling_trust_region_shrink_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_trust_region_growth_count = (
+        max(
+            int(row.get("fsi_coupling_trust_region_growth_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_trust_region_rebound_backtrack_count = (
+        max(
+            int(
+                row.get(
+                    "fsi_coupling_trust_region_rebound_backtrack_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_trust_region_rebound_stop_count = (
+        max(
+            int(
+                row.get(
+                    "fsi_coupling_trust_region_rebound_stop_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    max_fsi_coupling_trust_region_rebound_stop_suppressed_count = (
+        max(
+            int(
+                row.get(
+                    "fsi_coupling_trust_region_rebound_stop_suppressed_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_rejected_trial_count = (
+        sum(int(row.get("fsi_coupling_rejected_trial_count", 0) or 0) for row in rows)
+        if rows
+        else 0
+    )
+    total_fsi_coupling_rejected_trial_backtrack_count = (
+        sum(
+            int(row.get("fsi_coupling_rejected_trial_backtrack_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_max_residual_rejected_trial_count = (
+        sum(
+            int(
+                row.get(
+                    "fsi_coupling_max_residual_rejected_trial_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_trust_region_limited_update_count = (
+        sum(
+            int(
+                row.get(
+                    "fsi_coupling_trust_region_limited_update_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_trust_region_shrink_count = (
+        sum(
+            int(row.get("fsi_coupling_trust_region_shrink_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_trust_region_growth_count = (
+        sum(
+            int(row.get("fsi_coupling_trust_region_growth_count", 0) or 0)
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_trust_region_rebound_backtrack_count = (
+        sum(
+            int(
+                row.get(
+                    "fsi_coupling_trust_region_rebound_backtrack_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_trust_region_rebound_stop_count = (
+        sum(
+            int(
+                row.get(
+                    "fsi_coupling_trust_region_rebound_stop_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_trust_region_rebound_stop_suppressed_count = (
+        sum(
+            int(
+                row.get(
+                    "fsi_coupling_trust_region_rebound_stop_suppressed_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    total_fsi_coupling_residual_growth_rejected_trial_count = (
+        sum(
+            int(
+                row.get(
+                    "fsi_coupling_residual_growth_rejected_trial_count",
+                    0,
+                )
+                or 0
+            )
+            for row in rows
+        )
+        if rows
+        else 0
+    )
+    fsi_coupling_accepted_trial_cfl_values = [
+        float(row.get("fsi_coupling_accepted_trial_cfl", math.nan))
+        for row in rows
+        if math.isfinite(float(row.get("fsi_coupling_accepted_trial_cfl", math.nan)))
+    ]
+    max_fsi_coupling_accepted_trial_cfl = (
+        max(fsi_coupling_accepted_trial_cfl_values)
+        if fsi_coupling_accepted_trial_cfl_values
+        else math.nan
+    )
+    fsi_coupling_trial_cfl_values = [
+        float(row.get("fsi_coupling_trial_cfl_max", math.nan))
+        for row in rows
+        if math.isfinite(float(row.get("fsi_coupling_trial_cfl_max", math.nan)))
+    ]
+    max_fsi_coupling_trial_cfl = (
+        max(fsi_coupling_trial_cfl_values)
+        if fsi_coupling_trial_cfl_values
+        else math.nan
+    )
+    fsi_coupling_accepted_trial_interior_divergence_l2_values = [
+        float(row.get("fsi_coupling_accepted_trial_interior_divergence_l2", math.nan))
+        for row in rows
+        if math.isfinite(
+            float(
+                row.get(
+                    "fsi_coupling_accepted_trial_interior_divergence_l2",
+                    math.nan,
+                )
+            )
+        )
+    ]
+    max_fsi_coupling_accepted_trial_interior_divergence_l2 = (
+        max(fsi_coupling_accepted_trial_interior_divergence_l2_values)
+        if fsi_coupling_accepted_trial_interior_divergence_l2_values
+        else math.nan
+    )
+    fsi_coupling_trial_interior_divergence_l2_values = [
+        float(row.get("fsi_coupling_trial_interior_divergence_l2_max", math.nan))
+        for row in rows
+        if math.isfinite(
+            float(row.get("fsi_coupling_trial_interior_divergence_l2_max", math.nan))
+        )
+    ]
+    max_fsi_coupling_trial_interior_divergence_l2 = (
+        max(fsi_coupling_trial_interior_divergence_l2_values)
+        if fsi_coupling_trial_interior_divergence_l2_values
+        else math.nan
+    )
     fsi_coupling_residual_norm_n_values = [
         float(row["fsi_coupling_residual_norm_n"])
         for row in rows
@@ -12371,7 +14219,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         else 0.0
     )
     fsi_coupling_not_converged_count = (
-        sum(1 for row in rows if bool(row.get("fsi_coupling_enabled", False)) and not bool(row.get("fsi_coupling_converged", False)))
+        count_enabled_unconverged_fsi_rows(rows)
         if rows
         else 0
     )
@@ -12944,14 +14792,189 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "fsi_coupling_mode": fsi_coupling_mode,
         "fsi_coupling_mode_report": fsi_coupling_mode_report,
         "fsi_coupling_iterations_requested": fsi_coupling_iterations,
+        "max_fsi_coupling_iterations_requested": (
+            max_fsi_coupling_iterations_requested
+        ),
+        "fsi_coupling_adaptive_iterations_max": (
+            fsi_coupling_adaptive_iterations_max
+        ),
+        "fsi_coupling_adaptive_iterations_residual_threshold_n": (
+            fsi_coupling_adaptive_iterations_residual_threshold_n
+        ),
+        "fsi_coupling_adaptive_iterations_cfl_threshold": (
+            fsi_coupling_adaptive_iterations_cfl_threshold
+        ),
+        "total_fsi_coupling_adaptive_iterations_triggered": (
+            total_fsi_coupling_adaptive_iterations_triggered
+        ),
+        "total_fsi_coupling_adaptive_iterations_residual_triggered": (
+            total_fsi_coupling_adaptive_iterations_residual_triggered
+        ),
+        "total_fsi_coupling_adaptive_iterations_cfl_triggered": (
+            total_fsi_coupling_adaptive_iterations_cfl_triggered
+        ),
+        "fsi_coupling_same_step_rerun_iterations_max": (
+            fsi_coupling_same_step_rerun_iterations_max
+        ),
+        "fsi_coupling_same_step_rerun_residual_threshold_n": (
+            fsi_coupling_same_step_rerun_residual_threshold_n
+        ),
+        "total_fsi_coupling_same_step_rerun_triggered": (
+            total_fsi_coupling_same_step_rerun_triggered
+        ),
+        "total_fsi_coupling_same_step_rerun_count": (
+            total_fsi_coupling_same_step_rerun_count
+        ),
+        "max_fsi_coupling_same_step_rerun_initial_residual_norm_n": (
+            max_fsi_coupling_same_step_rerun_initial_residual_norm_n
+        ),
+        "fsi_coupling_residual_continuation_iterations_max": (
+            fsi_coupling_residual_continuation_iterations_max
+        ),
+        "fsi_coupling_residual_continuation_threshold_n": (
+            fsi_coupling_residual_continuation_threshold_n
+        ),
+        "fsi_coupling_residual_continuation_rebound_secant_from_best": (
+            fsi_coupling_residual_continuation_rebound_secant_from_best
+        ),
+        "fsi_coupling_residual_continuation_rebound_secant_factor": (
+            fsi_coupling_residual_continuation_rebound_secant_factor
+        ),
+        "fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max": (
+            fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max
+        ),
+        "max_fsi_coupling_residual_continuation_iteration_count": (
+            max_fsi_coupling_residual_continuation_iteration_count
+        ),
+        "total_fsi_coupling_residual_continuation_iteration_count": (
+            total_fsi_coupling_residual_continuation_iteration_count
+        ),
+        "max_fsi_coupling_residual_continuation_rebound_secant_count": (
+            max_fsi_coupling_residual_continuation_rebound_secant_count
+        ),
+        "total_fsi_coupling_residual_continuation_rebound_secant_count": (
+            total_fsi_coupling_residual_continuation_rebound_secant_count
+        ),
+        "max_fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count": (
+            max_fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count
+        ),
+        "total_fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count": (
+            total_fsi_coupling_residual_continuation_rebound_secant_evaluation_extension_count
+        ),
         "fsi_coupling_solver": fsi_coupling_solver,
         "max_fsi_coupling_iterations_used": max_fsi_coupling_iterations_used,
+        "max_fsi_coupling_rejected_trial_count": (
+            max_fsi_coupling_rejected_trial_count
+        ),
+        "max_fsi_coupling_rejected_trial_backtrack_count": (
+            max_fsi_coupling_rejected_trial_backtrack_count
+        ),
+        "max_fsi_coupling_residual_growth_rejected_trial_count": (
+            max_fsi_coupling_residual_growth_rejected_trial_count
+        ),
+        "max_fsi_coupling_max_residual_rejected_trial_count": (
+            max_fsi_coupling_max_residual_rejected_trial_count
+        ),
+        "max_fsi_coupling_trust_region_limited_update_count": (
+            max_fsi_coupling_trust_region_limited_update_count
+        ),
+        "max_fsi_coupling_trust_region_shrink_count": (
+            max_fsi_coupling_trust_region_shrink_count
+        ),
+        "max_fsi_coupling_trust_region_growth_count": (
+            max_fsi_coupling_trust_region_growth_count
+        ),
+        "max_fsi_coupling_trust_region_rebound_backtrack_count": (
+            max_fsi_coupling_trust_region_rebound_backtrack_count
+        ),
+        "max_fsi_coupling_trust_region_rebound_stop_count": (
+            max_fsi_coupling_trust_region_rebound_stop_count
+        ),
+        "max_fsi_coupling_trust_region_rebound_stop_suppressed_count": (
+            max_fsi_coupling_trust_region_rebound_stop_suppressed_count
+        ),
+        "total_fsi_coupling_rejected_trial_count": (
+            total_fsi_coupling_rejected_trial_count
+        ),
+        "total_fsi_coupling_rejected_trial_backtrack_count": (
+            total_fsi_coupling_rejected_trial_backtrack_count
+        ),
+        "total_fsi_coupling_residual_growth_rejected_trial_count": (
+            total_fsi_coupling_residual_growth_rejected_trial_count
+        ),
+        "total_fsi_coupling_max_residual_rejected_trial_count": (
+            total_fsi_coupling_max_residual_rejected_trial_count
+        ),
+        "total_fsi_coupling_trust_region_limited_update_count": (
+            total_fsi_coupling_trust_region_limited_update_count
+        ),
+        "total_fsi_coupling_trust_region_shrink_count": (
+            total_fsi_coupling_trust_region_shrink_count
+        ),
+        "total_fsi_coupling_trust_region_growth_count": (
+            total_fsi_coupling_trust_region_growth_count
+        ),
+        "total_fsi_coupling_trust_region_rebound_backtrack_count": (
+            total_fsi_coupling_trust_region_rebound_backtrack_count
+        ),
+        "total_fsi_coupling_trust_region_rebound_stop_count": (
+            total_fsi_coupling_trust_region_rebound_stop_count
+        ),
+        "total_fsi_coupling_trust_region_rebound_stop_suppressed_count": (
+            total_fsi_coupling_trust_region_rebound_stop_suppressed_count
+        ),
+        "max_fsi_coupling_accepted_trial_cfl": (
+            max_fsi_coupling_accepted_trial_cfl
+        ),
+        "max_fsi_coupling_trial_cfl": max_fsi_coupling_trial_cfl,
+        "fsi_coupling_trial_interior_divergence_tolerance": (
+            fsi_coupling_trial_interior_divergence_tolerance
+        ),
+        "max_fsi_coupling_accepted_trial_interior_divergence_l2": (
+            max_fsi_coupling_accepted_trial_interior_divergence_l2
+        ),
+        "max_fsi_coupling_trial_interior_divergence_l2": (
+            max_fsi_coupling_trial_interior_divergence_l2
+        ),
         "max_fsi_coupling_iqn_ils_least_squares_update_count": (
             max_fsi_coupling_iqn_ils_least_squares_update_count
         ),
         "fsi_coupling_tolerance_n": fsi_coupling_tolerance_n,
         "fsi_marker_coupling_tolerance_mps": fsi_marker_coupling_tolerance_mps,
         "fsi_coupling_target_map_relaxation": fsi_coupling_target_map_relaxation,
+        "fsi_coupling_rejected_trial_backtrack": (
+            fsi_coupling_rejected_trial_backtrack
+        ),
+        "fsi_coupling_residual_growth_rejection_factor": (
+            fsi_coupling_residual_growth_rejection_factor
+        ),
+        "fsi_coupling_max_accepted_residual_n": (
+            fsi_coupling_max_accepted_residual_n
+        ),
+        "fsi_coupling_trust_region_force_increment_n": (
+            fsi_coupling_trust_region_force_increment_n
+        ),
+        "fsi_coupling_trust_region_adaptive": (
+            fsi_coupling_trust_region_adaptive
+        ),
+        "fsi_coupling_trust_region_shrink_factor": (
+            fsi_coupling_trust_region_shrink_factor
+        ),
+        "fsi_coupling_trust_region_growth_factor": (
+            fsi_coupling_trust_region_growth_factor
+        ),
+        "fsi_coupling_trust_region_rebound_factor": (
+            fsi_coupling_trust_region_rebound_factor
+        ),
+        "fsi_coupling_trust_region_rebound_backtrack": (
+            fsi_coupling_trust_region_rebound_backtrack
+        ),
+        "fsi_coupling_trust_region_rebound_stop_factor": (
+            fsi_coupling_trust_region_rebound_stop_factor
+        ),
+        "fsi_coupling_trust_region_rebound_stop_max_residual_n": (
+            fsi_coupling_trust_region_rebound_stop_max_residual_n
+        ),
         "max_fsi_coupling_residual_norm_n": max_fsi_coupling_residual_norm_n,
         "max_fsi_coupling_residual_norm_mps": (
             max_fsi_coupling_residual_norm_mps
@@ -13020,10 +15043,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "interface_reaction_relaxation": interface_reaction_relaxation,
         "interface_reaction_aitken": interface_reaction_aitken,
+        "interface_reaction_aitken_lower_bound": (
+            interface_reaction_aitken_lower_bound
+        ),
+        "interface_reaction_aitken_upper_bound": (
+            interface_reaction_aitken_upper_bound
+        ),
         "interface_reaction_aitken_note": (
             "When enabled, Aitken Delta^2 adapts both step-internal interface-reaction fixed-point "
             "updates and the accepted-step next interface-reaction residual; relaxation is clipped "
-            "to [0.01, 1.5]."
+            "to [interface_reaction_aitken_lower_bound, interface_reaction_aitken_upper_bound]."
         ),
         "interface_reaction_passivity_limit": interface_reaction_passivity_limit,
         "interface_reaction_passivity_limiter_note": (
@@ -13314,6 +15343,48 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "max_abs_fsi_volume_source_m3s": max_abs_fsi_volume_source_m3s,
         "final_fsi_volume_source_m3s": final_fsi_volume_source_m3s,
         "final_pressure_outlet_source_volume_flux_m3s": final_pressure_outlet_source_volume_flux_m3s,
+        "final_pressure_outlet_reachable_source_volume_flux_m3s": (
+            final_pressure_outlet_reachable_source_volume_flux_m3s
+        ),
+        "final_pressure_outlet_unreached_source_volume_flux_m3s": (
+            final_pressure_outlet_unreached_source_volume_flux_m3s
+        ),
+        "final_pressure_outlet_reachable_source_cell_count": (
+            final_pressure_outlet_reachable_source_cell_count
+        ),
+        "final_pressure_outlet_unreached_source_cell_count": (
+            final_pressure_outlet_unreached_source_cell_count
+        ),
+        "final_pressure_outlet_unreached_source_abs_flux_m3s": (
+            final_pressure_outlet_unreached_source_abs_flux_m3s
+        ),
+        "final_pressure_outlet_unreached_source_centroid_x_m": (
+            final_pressure_outlet_unreached_source_centroid_x_m
+        ),
+        "final_pressure_outlet_unreached_source_centroid_y_m": (
+            final_pressure_outlet_unreached_source_centroid_y_m
+        ),
+        "final_pressure_outlet_unreached_source_centroid_z_m": (
+            final_pressure_outlet_unreached_source_centroid_z_m
+        ),
+        "final_pressure_outlet_unreached_source_min_x_m": (
+            final_pressure_outlet_unreached_source_min_x_m
+        ),
+        "final_pressure_outlet_unreached_source_min_y_m": (
+            final_pressure_outlet_unreached_source_min_y_m
+        ),
+        "final_pressure_outlet_unreached_source_min_z_m": (
+            final_pressure_outlet_unreached_source_min_z_m
+        ),
+        "final_pressure_outlet_unreached_source_max_x_m": (
+            final_pressure_outlet_unreached_source_max_x_m
+        ),
+        "final_pressure_outlet_unreached_source_max_y_m": (
+            final_pressure_outlet_unreached_source_max_y_m
+        ),
+        "final_pressure_outlet_unreached_source_max_z_m": (
+            final_pressure_outlet_unreached_source_max_z_m
+        ),
         "final_pressure_outlet_velocity_flux_m3s": final_pressure_outlet_velocity_flux_m3s,
         "final_pressure_outlet_velocity_to_source_ratio": (
             final_pressure_outlet_velocity_to_source_ratio
@@ -13389,6 +15460,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "max_fsi_fluid_reaction_full_3d_residual_n": max_fluid_reaction_full_residual_n,
         "max_fsi_fluid_reaction_full_3d_relative_error": max_fluid_reaction_full_relative_error,
+        "interface_reaction_aitken_lower_bound": (
+            interface_reaction_aitken_lower_bound
+        ),
+        "interface_reaction_aitken_upper_bound": (
+            interface_reaction_aitken_upper_bound
+        ),
         "max_interface_reaction_relaxation_effective": max_interface_reaction_relaxation_effective,
         "min_interface_reaction_relaxation_effective": min_interface_reaction_relaxation_effective,
         "max_positive_main_interface_reaction_power_w": max_positive_main_interface_reaction_power_w,
@@ -13862,6 +15939,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--interface-reaction-aitken-lower-bound",
+        type=float,
+        default=0.01,
+        help=(
+            "Lower clipping bound for Aitken Delta^2 relaxation used in "
+            "interface-reaction fixed-point and accepted-step updates. The "
+            "default 0.01 preserves existing behavior."
+        ),
+    )
+    parser.add_argument(
+        "--interface-reaction-aitken-upper-bound",
+        type=float,
+        default=1.5,
+        help=(
+            "Upper clipping bound for Aitken Delta^2 relaxation used in "
+            "interface-reaction fixed-point and accepted-step updates. The "
+            "default 1.5 preserves existing behavior."
+        ),
+    )
+    parser.add_argument(
         "--interface-reaction-passivity-limit",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -13985,6 +16082,122 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--fsi-coupling-adaptive-iterations-max",
+        type=int,
+        default=0,
+        help=(
+            "Optional residual-triggered maximum for legacy projected/reduced "
+            "step-internal interface-reaction iterations. 0 disables the "
+            "adaptive budget and uses --fsi-coupling-iterations every step."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-adaptive-iterations-residual-threshold-n",
+        type=float,
+        default=math.inf,
+        help=(
+            "Use --fsi-coupling-adaptive-iterations-max on the next step when "
+            "the previous step's FSI coupling residual norm exceeds this "
+            "Newton threshold. The default infinity disables the trigger."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-adaptive-iterations-cfl-threshold",
+        type=float,
+        default=math.inf,
+        help=(
+            "Use --fsi-coupling-adaptive-iterations-max on the next step when "
+            "the previous step's sampled CFL exceeds this threshold. The "
+            "default infinity disables the CFL trigger."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-same-step-rerun-iterations-max",
+        type=int,
+        default=0,
+        help=(
+            "Optional maximum for rerunning the current legacy "
+            "projected/reduced FSI step when the first fixed-point attempt "
+            "finishes above the same-step residual threshold. 0 disables the "
+            "same-step rerun path."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-same-step-rerun-residual-threshold-n",
+        type=float,
+        default=math.inf,
+        help=(
+            "Physical force residual threshold in Newtons that triggers a "
+            "same-step FSI rerun when the first attempt did not converge. The "
+            "default infinity disables the trigger."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-residual-continuation-iterations-max",
+        type=int,
+        default=0,
+        help=(
+            "Optional extra fixed-point iterations appended inside the current "
+            "legacy projected/reduced FSI solve when the base iteration budget "
+            "ends above --fsi-coupling-residual-continuation-threshold-n. "
+            "0 disables continuation."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-residual-continuation-threshold-n",
+        type=float,
+        default=math.inf,
+        help=(
+            "Accepted physical force residual threshold in Newtons for "
+            "continuing the current fixed-point solve beyond the base "
+            "--fsi-coupling-iterations budget. The default infinity disables "
+            "continuation."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-residual-continuation-rebound-secant-from-best",
+        action="store_true",
+        help=(
+            "When residual continuation is active and a continuation trial "
+            "rebounds away from the best accepted trial, restart from the best "
+            "trial with a diagonal secant force update instead of stopping from "
+            "the best trial."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-residual-continuation-rebound-secant-factor",
+        type=float,
+        default=math.inf,
+        help=(
+            "Residual rebound factor for triggering the optional "
+            "residual-continuation secant-from-best update. The default "
+            "infinity makes the secant trigger inherit "
+            "--fsi-coupling-trust-region-rebound-stop-factor."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-residual-continuation-rebound-secant-evaluation-extensions-max",
+        type=int,
+        default=0,
+        help=(
+            "Maximum number of extra same-step fixed-point evaluations reserved "
+            "only for evaluating a rebound secant-from-best candidate produced "
+            "at the end of the residual-continuation budget. 0 preserves the "
+            "strict configured continuation budget."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-trial-interior-divergence-tolerance",
+        type=float,
+        default=math.inf,
+        help=(
+            "Optional acceptance gate for legacy projected/reduced FSI trials. "
+            "When finite, reject otherwise CFL-safe trial states whose sampled "
+            "post-projection interior_divergence_l2 exceeds this tolerance. "
+            "The default infinity preserves the previous CFL-only acceptance."
+        ),
+    )
+    parser.add_argument(
         "--fsi-coupling-mode",
         choices=FSI_COUPLING_MODE_CHOICES,
         default=FSI_COUPLING_MODE_HIBM_MPM_SHARP,
@@ -14032,6 +16245,115 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--fsi-coupling-rejected-trial-backtrack",
+        type=float,
+        default=1.0,
+        help=(
+            "Backtracking fraction in (0, 1] applied after an interface-reaction "
+            "trial is rejected by the stability predicate. The default 1.0 "
+            "preserves the previous no-backtracking behavior."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-residual-growth-rejection-factor",
+        type=float,
+        default=math.inf,
+        help=(
+            "Reject an otherwise stability-accepted interface-reaction trial "
+            "when its physical residual norm exceeds the best accepted residual "
+            "by this factor. Values must be >= 1; the default infinity disables "
+            "this residual-aware trust gate."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-max-accepted-residual-n",
+        type=float,
+        default=math.inf,
+        help=(
+            "Reject an otherwise stability-accepted interface-reaction trial "
+            "when its physical residual norm exceeds this Newton threshold. "
+            "The default infinity disables this absolute residual trust gate."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-trust-region-force-increment-n",
+        type=float,
+        default=math.inf,
+        help=(
+            "Limit the norm of each proposed interface-reaction force update "
+            "between fixed-point trials. The default infinity disables this "
+            "force-increment trust region."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-trust-region-adaptive",
+        action="store_true",
+        help=(
+            "Adapt the force-increment trust radius inside each fixed-point "
+            "solve: shrink after physical residual growth and grow back after "
+            "residual reduction. Requires a finite trust-region increment."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-trust-region-shrink-factor",
+        type=float,
+        default=0.5,
+        help=(
+            "Adaptive trust-region shrink factor in (0, 1] applied after a "
+            "trial's physical residual grows relative to the previous trial."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-trust-region-growth-factor",
+        type=float,
+        default=1.25,
+        help=(
+            "Adaptive trust-region growth factor >= 1 applied after a trial's "
+            "physical residual decreases relative to the previous trial."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-trust-region-rebound-factor",
+        type=float,
+        default=math.inf,
+        help=(
+            "Backtrack the next interface-reaction trial toward the best "
+            "accepted trial when an otherwise accepted trial's physical "
+            "residual exceeds the best accepted residual by this factor. "
+            "The default infinity disables this rebound trust backtrack."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-trust-region-rebound-backtrack",
+        type=float,
+        default=0.5,
+        help=(
+            "Rebound trust backtrack factor in (0, 1) used to place the next "
+            "trial between the best accepted force and the rebounded force."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-trust-region-rebound-stop-factor",
+        type=float,
+        default=math.inf,
+        help=(
+            "Stop the current interface-reaction fixed-point solve and commit "
+            "the best accepted trial when a later otherwise accepted trial's "
+            "physical residual exceeds the best accepted residual by this "
+            "factor. The default infinity disables this best-trial stop policy."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-trust-region-rebound-stop-max-residual-n",
+        type=float,
+        default=math.inf,
+        help=(
+            "Only allow the best-trial rebound-stop policy to stop early when "
+            "the best accepted physical residual is at or below this Newton "
+            "ceiling. The default infinity preserves the previous stop policy."
+        ),
+    )
+    parser.add_argument(
         "--reuse-accepted-fsi-trial-state",
         action="store_true",
         help=(
@@ -14050,6 +16372,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "CAD-derived fluid active mask, intersect it with the reduced analytic "
             "squid water domain. Disabled by default so real CAD fluid topology is "
             "not narrowed by case-specific analytic geometry."
+        ),
+    )
+    parser.add_argument(
+        "--source-config-connect-surface-seeds-to-zmin",
+        action="store_true",
+        help=(
+            "Diagnostic topology repair: minimally carve obstacle cells so "
+            "surface-seeded active-water components connect to the z-min pressure "
+            "outlet component. Disabled by default because it changes the CAD-derived "
+            "initial obstacle mask."
+        ),
+    )
+    parser.add_argument(
+        "--source-config-surface-seed-zmin-connection-max-carve-cells",
+        type=int,
+        default=256,
+        help=(
+            "Maximum obstacle cells the surface-seed-to-zmin diagnostic topology "
+            "repair may carve when --source-config-connect-surface-seeds-to-zmin is set."
         ),
     )
     parser.add_argument(

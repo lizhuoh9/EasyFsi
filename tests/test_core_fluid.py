@@ -2281,6 +2281,72 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         )
         self.assertAlmostEqual(float(solver.volume_source_s[2, 2, 4]), 7.0)
 
+    def test_pressure_outlet_report_splits_reachable_and_unreached_source_flux(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.zeros((5, 5, 5), dtype=np.int32)
+        obstacle[:, :, 2] = 1
+        solver.obstacle.from_numpy(obstacle)
+        solver.volume_source_s[2, 2, 1] = 5.0
+        solver.volume_source_s[2, 2, 4] = 7.0
+        solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+
+        report = solver.pressure_outlet_fv_flux_report()
+        cell_volume_m3 = (
+            float(solver.cell_width_x_m[2])
+            * float(solver.cell_width_y_m[2])
+            * float(solver.cell_width_z_m[1])
+        )
+
+        self.assertAlmostEqual(
+            report["zmin_reachable_source_volume_flux_m3s"],
+            5.0 * cell_volume_m3,
+        )
+        self.assertAlmostEqual(
+            report["zmin_unreached_source_volume_flux_m3s"],
+            7.0 * cell_volume_m3,
+        )
+        self.assertAlmostEqual(
+            report["source_volume_flux_m3s"],
+            12.0 * cell_volume_m3,
+        )
+        self.assertEqual(report["zmin_reachable_source_cell_count"], 1)
+        self.assertEqual(report["zmin_unreached_source_cell_count"], 1)
+        self.assertAlmostEqual(
+            report["zmin_unreached_source_abs_flux_m3s"],
+            7.0 * cell_volume_m3,
+        )
+        expected_x_m = float(solver.grid.cell_centers_x_m[2])
+        expected_y_m = float(solver.grid.cell_centers_y_m[2])
+        expected_z_m = float(solver.grid.cell_centers_z_m[4])
+        self.assertAlmostEqual(
+            report["zmin_unreached_source_centroid_x_m"],
+            expected_x_m,
+        )
+        self.assertAlmostEqual(
+            report["zmin_unreached_source_centroid_y_m"],
+            expected_y_m,
+        )
+        self.assertAlmostEqual(
+            report["zmin_unreached_source_centroid_z_m"],
+            expected_z_m,
+        )
+        for field_name, expected in (
+            ("zmin_unreached_source_min_x_m", expected_x_m),
+            ("zmin_unreached_source_max_x_m", expected_x_m),
+            ("zmin_unreached_source_min_y_m", expected_y_m),
+            ("zmin_unreached_source_max_y_m", expected_y_m),
+            ("zmin_unreached_source_min_z_m", expected_z_m),
+            ("zmin_unreached_source_max_z_m", expected_z_m),
+        ):
+            self.assertAlmostEqual(report[field_name], expected)
+
     def test_fv_cg_anchors_pressure_mean_over_outlet_unreached_set(self) -> None:
         solver = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),

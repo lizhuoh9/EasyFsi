@@ -81,6 +81,20 @@ class InterfaceReactionFixedPointResult:
     accepted_trial_index: int | None = None
     accepted_state_reusable: bool = False
     accepted_payload: object | None = None
+    rejected_trial_count: int = 0
+    rejected_trial_backtrack_count: int = 0
+    residual_growth_rejected_trial_count: int = 0
+    max_residual_rejected_trial_count: int = 0
+    trust_region_limited_update_count: int = 0
+    trust_region_shrink_count: int = 0
+    trust_region_growth_count: int = 0
+    trust_region_rebound_backtrack_count: int = 0
+    trust_region_rebound_stop_count: int = 0
+    trust_region_rebound_stop_suppressed_count: int = 0
+    residual_continuation_iteration_count: int = 0
+    residual_continuation_rebound_secant_count: int = 0
+    residual_continuation_rebound_secant_evaluation_extension_count: int = 0
+    trust_region_effective_force_increment_n: float = math.inf
     iqn_ils_least_squares_update_count: int = 0
     interface_map_amplification_max: float = 0.0
     residual_jacobian_amplification_max: float = 0.0
@@ -342,6 +356,35 @@ def _relaxed_interface_reaction_guess(
     ).force_n
 
 
+def _limit_force_update(
+    *,
+    current_force_n: ForceVector,
+    proposed_force_n: ForceVector,
+    max_increment_n: float,
+) -> tuple[ForceVector, bool]:
+    if math.isinf(max_increment_n):
+        return proposed_force_n, False
+    _same_length(
+        current_force_n,
+        proposed_force_n,
+        lhs_name="current_force_n",
+        rhs_name="proposed_force_n",
+    )
+    delta = tuple(
+        proposed_value - current_value
+        for current_value, proposed_value in zip(current_force_n, proposed_force_n)
+    )
+    delta_norm = _force_norm(delta)
+    if delta_norm <= max_increment_n:
+        return proposed_force_n, False
+    scale = max_increment_n / delta_norm
+    limited = tuple(
+        current_value + scale * delta_value
+        for current_value, delta_value in zip(current_force_n, delta)
+    )
+    return limited, True
+
+
 def _iqn_ils_interface_reaction_guess(
     *,
     trial_force_history: Sequence[ForceVector],
@@ -413,6 +456,60 @@ def _iqn_ils_interface_reaction_guess(
         )
     )
     if not _force_is_finite(proposed):
+        return fallback, False
+    return proposed, True
+
+
+def _diagonal_secant_interface_reaction_guess_from_anchor(
+    *,
+    trial_force_history: Sequence[ForceVector],
+    residual_history: Sequence[ForceVector],
+    anchor_force_n: ForceVector,
+    anchor_residual_n: ForceVector,
+    anchor_target_force_n: ForceVector,
+    anchor_velocity_mps: ForceVector,
+    relaxation: float,
+) -> tuple[ForceVector, bool]:
+    fallback = _relaxed_interface_reaction_guess(
+        reaction_guess=anchor_force_n,
+        target_force_n=anchor_target_force_n,
+        velocity_mps=anchor_velocity_mps,
+        relaxation=relaxation,
+    )
+    if len(trial_force_history) < 2 or len(residual_history) < 2:
+        return fallback, False
+
+    proposed_components: list[float] = []
+    used_secant = False
+    for component_index, (anchor_value, anchor_residual_value) in enumerate(
+        zip(anchor_force_n, anchor_residual_n)
+    ):
+        proposed_value: float | None = None
+        for history_index in range(len(trial_force_history) - 1, 0, -1):
+            force_delta = (
+                trial_force_history[history_index][component_index]
+                - trial_force_history[history_index - 1][component_index]
+            )
+            residual_delta = (
+                residual_history[history_index][component_index]
+                - residual_history[history_index - 1][component_index]
+            )
+            if abs(force_delta) <= 1.0e-30 or abs(residual_delta) <= 1.0e-30:
+                continue
+            slope = residual_delta / force_delta
+            if abs(slope) <= 1.0e-30:
+                continue
+            candidate = anchor_value - anchor_residual_value / slope
+            if math.isfinite(candidate):
+                proposed_value = candidate
+                used_secant = True
+                break
+        if proposed_value is None:
+            proposed_value = fallback[component_index]
+        proposed_components.append(proposed_value)
+
+    proposed = tuple(proposed_components)
+    if not used_secant or not _force_is_finite(proposed):
         return fallback, False
     return proposed, True
 
@@ -544,6 +641,8 @@ def update_interface_reaction_for_next_step(
     use_aitken: bool,
     passivity_limit: bool,
     robin_impedance_ns_per_m: float = 0.0,
+    aitken_lower_bound: float = 0.01,
+    aitken_upper_bound: float = 1.5,
 ) -> InterfaceReactionStepUpdate:
     """Return the accepted interface-reaction update and next relaxation state."""
     previous_force = _force_vector(previous_force_n, name="previous_force_n")
@@ -564,12 +663,27 @@ def update_interface_reaction_for_next_step(
         target_value - previous_value
         for previous_value, target_value in zip(previous_force, stabilized_target_force)
     )
+    aitken_lower_bound_value = _finite_float(
+        aitken_lower_bound,
+        name="aitken_lower_bound",
+    )
+    aitken_upper_bound_value = _finite_float(
+        aitken_upper_bound,
+        name="aitken_upper_bound",
+    )
+    if not 0.0 <= aitken_lower_bound_value <= aitken_upper_bound_value <= 1.5:
+        raise ValueError(
+            "aitken_lower_bound and aitken_upper_bound must be finite and satisfy "
+            "0 <= lower <= upper <= 1.5"
+        )
     relaxation = float(initial_relaxation)
     if use_aitken and state.previous_residual_n is not None:
         relaxation = aitken_relaxation_factor(
             state.relaxation,
             state.previous_residual_n,
             residual,
+            lower=aitken_lower_bound_value,
+            upper=aitken_upper_bound_value,
         )
     update = relax_interface_reaction_forces(
         previous_force_n=previous_force,
@@ -602,6 +716,25 @@ def solve_interface_reaction_fixed_point(
     passivity_limit: bool,
     solver: str = "aitken",
     target_map_relaxation: float = 1.0,
+    accept_evaluation: Callable[[InterfaceReactionTargetEvaluation], bool] | None = None,
+    aitken_lower_bound: float = 0.01,
+    aitken_upper_bound: float = 1.5,
+    rejected_trial_backtrack: float = 1.0,
+    residual_growth_rejection_factor: float = math.inf,
+    max_accepted_residual_n: float = math.inf,
+    trust_region_force_increment_n: float = math.inf,
+    trust_region_adaptive: bool = False,
+    trust_region_shrink_factor: float = 0.5,
+    trust_region_growth_factor: float = 1.25,
+    trust_region_rebound_factor: float = math.inf,
+    trust_region_rebound_backtrack: float = 0.5,
+    trust_region_rebound_stop_factor: float = math.inf,
+    trust_region_rebound_stop_max_residual_n: float = math.inf,
+    residual_continuation_iterations_max: int = 0,
+    residual_continuation_threshold_n: float = math.inf,
+    residual_continuation_rebound_secant_from_best: bool = False,
+    residual_continuation_rebound_secant_factor: float = math.inf,
+    residual_continuation_rebound_secant_evaluation_extensions_max: int = 0,
 ) -> InterfaceReactionFixedPointResult:
     """Run an interface-reaction fixed-point solve around caller-managed snapshots."""
     if max_iterations < 1:
@@ -616,9 +749,153 @@ def solve_interface_reaction_fixed_point(
         or not 0.0 < solver_target_map_relaxation <= 1.0
     ):
         raise ValueError("target_map_relaxation must be a finite number in (0, 1]")
+    aitken_lower_bound_value = _finite_float(
+        aitken_lower_bound,
+        name="aitken_lower_bound",
+    )
+    aitken_upper_bound_value = _finite_float(
+        aitken_upper_bound,
+        name="aitken_upper_bound",
+    )
+    if not 0.0 <= aitken_lower_bound_value <= aitken_upper_bound_value <= 1.5:
+        raise ValueError(
+            "aitken_lower_bound and aitken_upper_bound must be finite and satisfy "
+            "0 <= lower <= upper <= 1.5"
+        )
+    rejected_trial_backtrack_value = _finite_float(
+        rejected_trial_backtrack,
+        name="rejected_trial_backtrack",
+    )
+    if not 0.0 < rejected_trial_backtrack_value <= 1.0:
+        raise ValueError("rejected_trial_backtrack must be finite and in (0, 1]")
+    residual_growth_rejection_factor_value = float(residual_growth_rejection_factor)
+    if not (
+        math.isinf(residual_growth_rejection_factor_value)
+        or (
+            math.isfinite(residual_growth_rejection_factor_value)
+            and residual_growth_rejection_factor_value >= 1.0
+        )
+    ):
+        raise ValueError(
+            "residual_growth_rejection_factor must be >= 1 or infinity"
+        )
+    max_accepted_residual_value = float(max_accepted_residual_n)
+    if not (
+        math.isinf(max_accepted_residual_value)
+        or (math.isfinite(max_accepted_residual_value) and max_accepted_residual_value >= 0.0)
+    ):
+        raise ValueError("max_accepted_residual_n must be non-negative or infinity")
+    trust_region_force_increment_value = float(trust_region_force_increment_n)
+    if not (
+        math.isinf(trust_region_force_increment_value)
+        or (
+            math.isfinite(trust_region_force_increment_value)
+            and trust_region_force_increment_value > 0.0
+        )
+    ):
+        raise ValueError("trust_region_force_increment_n must be positive or infinity")
+    trust_region_adaptive_enabled = bool(trust_region_adaptive)
+    trust_region_shrink_factor_value = _finite_float(
+        trust_region_shrink_factor,
+        name="trust_region_shrink_factor",
+    )
+    if not 0.0 < trust_region_shrink_factor_value <= 1.0:
+        raise ValueError("trust_region_shrink_factor must be finite and in (0, 1]")
+    trust_region_growth_factor_value = _finite_float(
+        trust_region_growth_factor,
+        name="trust_region_growth_factor",
+    )
+    if trust_region_growth_factor_value < 1.0:
+        raise ValueError("trust_region_growth_factor must be finite and >= 1")
+    trust_region_rebound_factor_value = float(trust_region_rebound_factor)
+    if not (
+        math.isinf(trust_region_rebound_factor_value)
+        or (
+            math.isfinite(trust_region_rebound_factor_value)
+            and trust_region_rebound_factor_value >= 1.0
+        )
+    ):
+        raise ValueError("trust_region_rebound_factor must be >= 1 or infinity")
+    trust_region_rebound_backtrack_value = _finite_float(
+        trust_region_rebound_backtrack,
+        name="trust_region_rebound_backtrack",
+    )
+    if not 0.0 < trust_region_rebound_backtrack_value < 1.0:
+        raise ValueError("trust_region_rebound_backtrack must be finite and in (0, 1)")
+    trust_region_rebound_stop_factor_value = float(trust_region_rebound_stop_factor)
+    if not (
+        math.isinf(trust_region_rebound_stop_factor_value)
+        or (
+            math.isfinite(trust_region_rebound_stop_factor_value)
+            and trust_region_rebound_stop_factor_value >= 1.0
+        )
+    ):
+        raise ValueError("trust_region_rebound_stop_factor must be >= 1 or infinity")
+    trust_region_rebound_stop_max_residual_value = float(
+        trust_region_rebound_stop_max_residual_n
+    )
+    if not (
+        math.isinf(trust_region_rebound_stop_max_residual_value)
+        or (
+            math.isfinite(trust_region_rebound_stop_max_residual_value)
+            and trust_region_rebound_stop_max_residual_value >= 0.0
+        )
+    ):
+        raise ValueError(
+            "trust_region_rebound_stop_max_residual_n must be non-negative or infinity"
+        )
+    if trust_region_adaptive_enabled and math.isinf(trust_region_force_increment_value):
+        raise ValueError(
+            "trust_region_adaptive requires a finite trust_region_force_increment_n"
+        )
+    residual_continuation_iterations_max_value = int(
+        residual_continuation_iterations_max
+    )
+    if residual_continuation_iterations_max_value < 0:
+        raise ValueError("residual_continuation_iterations_max must be non-negative")
+    residual_continuation_threshold_value = float(
+        residual_continuation_threshold_n
+    )
+    if not (
+        math.isinf(residual_continuation_threshold_value)
+        or (
+            math.isfinite(residual_continuation_threshold_value)
+            and residual_continuation_threshold_value >= 0.0
+        )
+    ):
+        raise ValueError(
+            "residual_continuation_threshold_n must be non-negative or infinity"
+        )
+    residual_continuation_rebound_secant_evaluation_extensions_max_value = int(
+        residual_continuation_rebound_secant_evaluation_extensions_max
+    )
+    if residual_continuation_rebound_secant_evaluation_extensions_max_value < 0:
+        raise ValueError(
+            "residual_continuation_rebound_secant_evaluation_extensions_max "
+            "must be non-negative"
+        )
+    residual_continuation_rebound_secant_factor_value = float(
+        residual_continuation_rebound_secant_factor
+    )
+    if not (
+        math.isinf(residual_continuation_rebound_secant_factor_value)
+        or (
+            math.isfinite(residual_continuation_rebound_secant_factor_value)
+            and residual_continuation_rebound_secant_factor_value >= 1.0
+        )
+    ):
+        raise ValueError(
+            "residual_continuation_rebound_secant_factor must be >= 1 or infinity"
+        )
+    effective_residual_continuation_rebound_secant_factor = (
+        trust_region_rebound_stop_factor_value
+        if math.isinf(residual_continuation_rebound_secant_factor_value)
+        else residual_continuation_rebound_secant_factor_value
+    )
 
     reaction_guess = _force_vector(initial_force_n, name="initial_force_n")
     previous_residual: ForceVector | None = None
+    previous_trial_residual_norm_n: float | None = None
     relaxation = _finite_float(initial_relaxation, name="initial_relaxation")
     residual_norm_n = 0.0
     converged = False
@@ -629,6 +906,20 @@ def solve_interface_reaction_fixed_point(
     accepted_residual_norm_n = math.inf
     accepted_trial_index: int | None = None
     accepted_payload: object | None = None
+    rejected_trial_count = 0
+    rejected_trial_backtrack_count = 0
+    residual_growth_rejected_trial_count = 0
+    max_residual_rejected_trial_count = 0
+    trust_region_limited_update_count = 0
+    trust_region_shrink_count = 0
+    trust_region_growth_count = 0
+    trust_region_rebound_backtrack_count = 0
+    trust_region_rebound_stop_count = 0
+    trust_region_rebound_stop_suppressed_count = 0
+    residual_continuation_iteration_count = 0
+    residual_continuation_rebound_secant_count = 0
+    residual_continuation_rebound_secant_evaluation_extension_count = 0
+    trust_region_effective_force_increment_n = trust_region_force_increment_value
     trial_force_history: list[ForceVector] = []
     target_force_history: list[ForceVector] = []
     residual_history: list[ForceVector] = []
@@ -638,7 +929,17 @@ def solve_interface_reaction_fixed_point(
     diagnostic_residual_history: list[ForceVector] = []
     iqn_ils_least_squares_update_count = 0
 
-    for iteration in range(max_iterations):
+    base_continuation_iteration_budget = (
+        int(max_iterations) + residual_continuation_iterations_max_value
+    )
+    total_iteration_budget = base_continuation_iteration_budget
+    iteration = 0
+    while iteration < total_iteration_budget:
+        if iteration >= max_iterations:
+            if converged or accepted_residual_norm_n <= residual_continuation_threshold_value:
+                break
+            if iteration < base_continuation_iteration_budget:
+                residual_continuation_iteration_count += 1
         restore_state()
         trial_force_history.append(reaction_guess)
         evaluation = evaluate_target(reaction_guess)
@@ -681,8 +982,64 @@ def solve_interface_reaction_fixed_point(
         diagnostic_target_force_history.append(diagnostic_target)
         diagnostic_residual_history.append(diagnostic_residual)
         residual_norm_n = math.sqrt(sum(component * component for component in physical_residual))
+        if (
+            trust_region_adaptive_enabled
+            and previous_trial_residual_norm_n is not None
+        ):
+            if residual_norm_n > previous_trial_residual_norm_n:
+                updated_increment = (
+                    trust_region_effective_force_increment_n
+                    * trust_region_shrink_factor_value
+                )
+                if updated_increment < trust_region_effective_force_increment_n:
+                    trust_region_shrink_count += 1
+                trust_region_effective_force_increment_n = updated_increment
+            elif residual_norm_n < previous_trial_residual_norm_n:
+                updated_increment = min(
+                    trust_region_force_increment_value,
+                    trust_region_effective_force_increment_n
+                    * trust_region_growth_factor_value,
+                )
+                if updated_increment > trust_region_effective_force_increment_n:
+                    trust_region_growth_count += 1
+                trust_region_effective_force_increment_n = updated_increment
+        previous_trial_residual_norm_n = residual_norm_n
         iterations_used = iteration + 1
-        if residual_norm_n <= accepted_residual_norm_n:
+        trial_accepted_by_predicate = (
+            True if accept_evaluation is None else bool(accept_evaluation(evaluation))
+        )
+        trial_rejected_by_residual_growth = False
+        if (
+            trial_accepted_by_predicate
+            and math.isfinite(residual_growth_rejection_factor_value)
+            and accepted_trial_index is not None
+            and accepted_residual_norm_n < math.inf
+            and residual_norm_n > tolerance_value
+            and residual_norm_n
+            > max(
+                accepted_residual_norm_n * residual_growth_rejection_factor_value,
+                tolerance_value,
+            )
+        ):
+            trial_rejected_by_residual_growth = True
+            residual_growth_rejected_trial_count += 1
+        trial_rejected_by_max_residual = False
+        if (
+            trial_accepted_by_predicate
+            and not trial_rejected_by_residual_growth
+            and math.isfinite(max_accepted_residual_value)
+            and residual_norm_n > max_accepted_residual_value
+        ):
+            trial_rejected_by_max_residual = True
+            max_residual_rejected_trial_count += 1
+        trial_accepted = (
+            trial_accepted_by_predicate
+            and not trial_rejected_by_residual_growth
+            and not trial_rejected_by_max_residual
+        )
+        if not trial_accepted:
+            rejected_trial_count += 1
+        if trial_accepted and residual_norm_n <= accepted_residual_norm_n:
             accepted_force_n = reaction_guess
             accepted_velocity_mps = velocity
             accepted_target_force_n = physical_target
@@ -690,13 +1047,146 @@ def solve_interface_reaction_fixed_point(
             accepted_trial_index = iteration
             accepted_payload = evaluation.payload
         if residual_norm_n <= tolerance_value:
-            converged = True
-            break
+            converged = trial_accepted
+            if (
+                trial_accepted
+                or rejected_trial_backtrack_value >= 1.0
+            ):
+                break
+        trial_rebounded_stop_from_best = (
+            trial_accepted
+            and math.isfinite(trust_region_rebound_stop_factor_value)
+            and accepted_trial_index is not None
+            and accepted_residual_norm_n < math.inf
+            and residual_norm_n > tolerance_value
+            and residual_norm_n
+            > max(
+                accepted_residual_norm_n * trust_region_rebound_stop_factor_value,
+                tolerance_value,
+            )
+            and reaction_guess != accepted_force_n
+        )
+        trial_rebounded_secant_from_best = (
+            residual_continuation_rebound_secant_from_best
+            and math.isfinite(effective_residual_continuation_rebound_secant_factor)
+            and iteration >= max_iterations
+            and accepted_trial_index is not None
+            and accepted_residual_norm_n < math.inf
+            and accepted_residual_norm_n > residual_continuation_threshold_value
+            and residual_norm_n > tolerance_value
+            and residual_norm_n
+            > max(
+                accepted_residual_norm_n
+                * effective_residual_continuation_rebound_secant_factor,
+                tolerance_value,
+            )
+            and reaction_guess != accepted_force_n
+        )
+        if trial_rebounded_secant_from_best:
+            accepted_residual = residual_history[accepted_trial_index]
+            accepted_solver_target = target_force_history[accepted_trial_index]
+            proposed_reaction_guess, used_secant = (
+                _diagonal_secant_interface_reaction_guess_from_anchor(
+                    trial_force_history=trial_force_history,
+                    residual_history=residual_history,
+                    anchor_force_n=accepted_force_n,
+                    anchor_residual_n=accepted_residual,
+                    anchor_target_force_n=accepted_solver_target,
+                    anchor_velocity_mps=accepted_velocity_mps,
+                    relaxation=relaxation,
+                )
+            )
+            reaction_guess, trust_region_limited = _limit_force_update(
+                current_force_n=accepted_force_n,
+                proposed_force_n=proposed_reaction_guess,
+                max_increment_n=trust_region_effective_force_increment_n,
+            )
+            if trust_region_limited:
+                trust_region_limited_update_count += 1
+            if used_secant:
+                residual_continuation_rebound_secant_count += 1
+                if (
+                    iteration + 1 >= total_iteration_budget
+                    and residual_continuation_rebound_secant_evaluation_extension_count
+                    < residual_continuation_rebound_secant_evaluation_extensions_max_value
+                ):
+                    total_iteration_budget += 1
+                    residual_continuation_rebound_secant_evaluation_extension_count += 1
+            previous_residual = None
+            iteration += 1
+            continue
+        if trial_rebounded_stop_from_best:
+            if (
+                accepted_residual_norm_n
+                <= trust_region_rebound_stop_max_residual_value
+            ):
+                trust_region_rebound_stop_count += 1
+                break
+            trust_region_rebound_stop_suppressed_count += 1
+        trial_rebounded_from_best = (
+            trial_accepted_by_predicate
+            and math.isfinite(trust_region_rebound_factor_value)
+            and accepted_trial_index is not None
+            and accepted_residual_norm_n < math.inf
+            and residual_norm_n > tolerance_value
+            and residual_norm_n
+            > max(
+                accepted_residual_norm_n * trust_region_rebound_factor_value,
+                tolerance_value,
+            )
+            and reaction_guess != accepted_force_n
+        )
+        if trial_rebounded_from_best:
+            reaction_guess = tuple(
+                accepted_value
+                + trust_region_rebound_backtrack_value
+                * (current_value - accepted_value)
+                for accepted_value, current_value in zip(
+                    accepted_force_n,
+                    reaction_guess,
+                )
+            )
+            trust_region_rebound_backtrack_count += 1
+            previous_residual = None
+            relaxation = min(
+                max(
+                    relaxation * trust_region_rebound_backtrack_value,
+                    aitken_lower_bound_value,
+                ),
+                aitken_upper_bound_value,
+            )
+            iteration += 1
+            continue
+        if not trial_accepted and rejected_trial_backtrack_value < 1.0:
+            backtrack_anchor = (
+                accepted_force_n
+                if accepted_trial_index is not None
+                else tuple(0.0 for _ in reaction_guess)
+            )
+            reaction_guess = tuple(
+                accepted_value
+                + rejected_trial_backtrack_value * (rejected_value - accepted_value)
+                for accepted_value, rejected_value in zip(backtrack_anchor, reaction_guess)
+            )
+            rejected_trial_backtrack_count += 1
+            previous_residual = None
+            relaxation = min(
+                max(relaxation * rejected_trial_backtrack_value, aitken_lower_bound_value),
+                aitken_upper_bound_value,
+            )
+            iteration += 1
+            continue
         if use_aitken and previous_residual is not None:
-            relaxation = aitken_relaxation_factor(relaxation, previous_residual, residual)
+            relaxation = aitken_relaxation_factor(
+                relaxation,
+                previous_residual,
+                residual,
+                lower=aitken_lower_bound_value,
+                upper=aitken_upper_bound_value,
+            )
         previous_residual = residual
         if solver_name == "iqn_ils":
-            reaction_guess, used_least_squares = _iqn_ils_interface_reaction_guess(
+            proposed_reaction_guess, used_least_squares = _iqn_ils_interface_reaction_guess(
                 trial_force_history=trial_force_history,
                 residual_history=residual_history,
                 current_residual_n=residual,
@@ -707,18 +1197,35 @@ def solve_interface_reaction_fixed_point(
             if used_least_squares:
                 iqn_ils_least_squares_update_count += 1
         else:
-            reaction_guess = _relaxed_interface_reaction_guess(
+            proposed_reaction_guess = _relaxed_interface_reaction_guess(
                 reaction_guess=reaction_guess,
                 target_force_n=target,
                 velocity_mps=velocity,
                 relaxation=relaxation,
             )
+        reaction_guess, trust_region_limited = _limit_force_update(
+            current_force_n=trial_force_history[-1],
+            proposed_force_n=proposed_reaction_guess,
+            max_increment_n=trust_region_effective_force_increment_n,
+        )
+        if trust_region_limited:
+            trust_region_limited_update_count += 1
+        iteration += 1
 
-    if converged:
-        accepted_force_n = reaction_guess
-        accepted_target_force_n = physical_target_force_history[-1]
-        accepted_trial_index = iterations_used - 1
-    if passivity_limit:
+    if (
+        accepted_trial_index is None
+        and rejected_trial_count > 0
+        and rejected_trial_backtrack_value < 1.0
+    ):
+        # All evaluated trials violated the caller's safety predicate; do not
+        # commit the unsafe initial/rejected force.
+        accepted_force_n = tuple(0.0 for _ in reaction_guess)
+        accepted_velocity_mps = tuple(0.0 for _ in reaction_guess)
+        accepted_target_force_n = accepted_force_n
+        accepted_residual_norm_n = math.inf
+        converged = False
+
+    if passivity_limit and accepted_trial_index is not None:
         force_before_passivity = accepted_force_n
         accepted_force_n = relax_interface_reaction_forces(
             previous_force_n=accepted_force_n,
@@ -787,6 +1294,26 @@ def solve_interface_reaction_fixed_point(
         accepted_trial_index=accepted_trial_index,
         accepted_state_reusable=accepted_state_reusable,
         accepted_payload=accepted_payload,
+        rejected_trial_count=rejected_trial_count,
+        rejected_trial_backtrack_count=rejected_trial_backtrack_count,
+        residual_growth_rejected_trial_count=residual_growth_rejected_trial_count,
+        max_residual_rejected_trial_count=max_residual_rejected_trial_count,
+        trust_region_limited_update_count=trust_region_limited_update_count,
+        trust_region_shrink_count=trust_region_shrink_count,
+        trust_region_growth_count=trust_region_growth_count,
+        trust_region_rebound_backtrack_count=trust_region_rebound_backtrack_count,
+        trust_region_rebound_stop_count=trust_region_rebound_stop_count,
+        trust_region_rebound_stop_suppressed_count=(
+            trust_region_rebound_stop_suppressed_count
+        ),
+        residual_continuation_iteration_count=residual_continuation_iteration_count,
+        residual_continuation_rebound_secant_count=(
+            residual_continuation_rebound_secant_count
+        ),
+        residual_continuation_rebound_secant_evaluation_extension_count=(
+            residual_continuation_rebound_secant_evaluation_extension_count
+        ),
+        trust_region_effective_force_increment_n=trust_region_effective_force_increment_n,
         iqn_ils_least_squares_update_count=iqn_ils_least_squares_update_count,
         interface_map_amplification_max=interface_map_amplification[0],
         residual_jacobian_amplification_max=residual_jacobian_amplification[0],
@@ -835,6 +1362,25 @@ def solve_and_apply_interface_reaction_step(
     passivity_limit: bool,
     solver: str = "aitken",
     target_map_relaxation: float = 1.0,
+    accept_evaluation: Callable[[InterfaceReactionTargetEvaluation], bool] | None = None,
+    aitken_lower_bound: float = 0.01,
+    aitken_upper_bound: float = 1.5,
+    rejected_trial_backtrack: float = 1.0,
+    residual_growth_rejection_factor: float = math.inf,
+    max_accepted_residual_n: float = math.inf,
+    trust_region_force_increment_n: float = math.inf,
+    trust_region_adaptive: bool = False,
+    trust_region_shrink_factor: float = 0.5,
+    trust_region_growth_factor: float = 1.25,
+    trust_region_rebound_factor: float = math.inf,
+    trust_region_rebound_backtrack: float = 0.5,
+    trust_region_rebound_stop_factor: float = math.inf,
+    trust_region_rebound_stop_max_residual_n: float = math.inf,
+    residual_continuation_iterations_max: int = 0,
+    residual_continuation_threshold_n: float = math.inf,
+    residual_continuation_rebound_secant_from_best: bool = False,
+    residual_continuation_rebound_secant_factor: float = math.inf,
+    residual_continuation_rebound_secant_evaluation_extensions_max: int = 0,
 ) -> InterfaceReactionFixedPointResult:
     """Solve one partitioned FSI step and commit the accepted interface force.
 
@@ -858,6 +1404,35 @@ def solve_and_apply_interface_reaction_step(
             passivity_limit=passivity_limit,
             solver=solver,
             target_map_relaxation=target_map_relaxation,
+            accept_evaluation=accept_evaluation,
+            aitken_lower_bound=aitken_lower_bound,
+            aitken_upper_bound=aitken_upper_bound,
+            rejected_trial_backtrack=rejected_trial_backtrack,
+            residual_growth_rejection_factor=residual_growth_rejection_factor,
+            max_accepted_residual_n=max_accepted_residual_n,
+            trust_region_force_increment_n=trust_region_force_increment_n,
+            trust_region_adaptive=trust_region_adaptive,
+            trust_region_shrink_factor=trust_region_shrink_factor,
+            trust_region_growth_factor=trust_region_growth_factor,
+            trust_region_rebound_factor=trust_region_rebound_factor,
+            trust_region_rebound_backtrack=trust_region_rebound_backtrack,
+            trust_region_rebound_stop_factor=trust_region_rebound_stop_factor,
+            trust_region_rebound_stop_max_residual_n=(
+                trust_region_rebound_stop_max_residual_n
+            ),
+            residual_continuation_iterations_max=(
+                residual_continuation_iterations_max
+            ),
+            residual_continuation_threshold_n=residual_continuation_threshold_n,
+            residual_continuation_rebound_secant_from_best=(
+                residual_continuation_rebound_secant_from_best
+            ),
+            residual_continuation_rebound_secant_factor=(
+                residual_continuation_rebound_secant_factor
+            ),
+            residual_continuation_rebound_secant_evaluation_extensions_max=(
+                residual_continuation_rebound_secant_evaluation_extensions_max
+            ),
         )
     finally:
         if (
