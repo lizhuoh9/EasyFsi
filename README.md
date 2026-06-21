@@ -2,6 +2,11 @@
 
 本目录是对上级目录 HIBM-MPM 代码的**功能等价重构副本**。原目录代码未被修改。
 
+> 当前同步说明：本仓库已经包含 refactored 副本之后继续推进的 sharp HIBM-MPM / squid FSI 收敛修复与验证工作。最新目标和审查记录见
+> [SHARP_HIBM_MPM_CONVERGENCE_FIX_GOAL_2026-06-18.md](SHARP_HIBM_MPM_CONVERGENCE_FIX_GOAL_2026-06-18.md)、
+> [SQUID_2S_SIMULATION_GOAL_2026-06-17.md](SQUID_2S_SIMULATION_GOAL_2026-06-17.md) 和
+> [SQUID_JET_FSI_COUPLING_REVIEW.md](SQUID_JET_FSI_COUPLING_REVIEW.md)。
+
 ## 目录性质
 
 - 这是一份**保守、可验证**的重构：所有修改都以"行为不变"为第一原则，逐条列在

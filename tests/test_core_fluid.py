@@ -1483,6 +1483,158 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         self.assertAlmostEqual(report["zmin_velocity_outlet_to_source_ratio"], 1.0)
         self.assertAlmostEqual(report["zmin_pressure_outlet_to_source_ratio"], 0.0)
 
+    def test_pressure_outlet_ratio_uses_positive_source_without_cancellation(self) -> None:
+        grid_nodes = (4, 4, 4)
+        spec = FluidDomainSpec.unit_box(
+            grid_nodes=grid_nodes,
+            density_kgm3=1.0,
+            dt_s=1.0,
+        )
+        solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
+        positive_source_m3s = 0.25
+        negative_source_m3s = -0.20
+        source = np.zeros(grid_nodes, dtype=np.float32)
+        source[0, 0, 1] = positive_source_m3s / spec.cell_volume_m3
+        source[1, 0, 1] = negative_source_m3s / spec.cell_volume_m3
+        velocity = np.zeros((*grid_nodes, 3), dtype=np.float32)
+        velocity[0, 0, 0, 2] = -8.0
+        velocity[1, 0, 0, 2] = 4.0
+        solver.volume_source_s.from_numpy(source)
+        solver.velocity.from_numpy(velocity)
+
+        report = solver.pressure_outlet_fv_flux_report()
+
+        self.assertAlmostEqual(
+            report["positive_source_volume_flux_m3s"],
+            positive_source_m3s,
+        )
+        self.assertAlmostEqual(
+            report["zmin_velocity_outlet_to_positive_source_ratio"],
+            1.0,
+        )
+        self.assertAlmostEqual(
+            report["zmin_velocity_outlet_to_net_source_ratio"],
+            5.0,
+            delta=1.0e-6,
+        )
+
+    def test_pressure_outlet_abs_source_ratio_tracks_cancelling_sources(self) -> None:
+        grid_nodes = (4, 4, 4)
+        spec = FluidDomainSpec.unit_box(
+            grid_nodes=grid_nodes,
+            density_kgm3=1.0,
+            dt_s=1.0,
+        )
+        solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
+        source = np.zeros(grid_nodes, dtype=np.float32)
+        source[0, 0, 1] = 0.25 / spec.cell_volume_m3
+        source[1, 0, 1] = -0.20 / spec.cell_volume_m3
+        velocity = np.zeros((*grid_nodes, 3), dtype=np.float32)
+        velocity[0, 0, 0, 2] = -8.0
+        velocity[1, 0, 0, 2] = 4.0
+        solver.volume_source_s.from_numpy(source)
+        solver.velocity.from_numpy(velocity)
+
+        report = solver.pressure_outlet_fv_flux_report()
+
+        self.assertAlmostEqual(report["abs_source_volume_flux_m3s"], 0.45)
+        self.assertAlmostEqual(
+            report["zmin_velocity_outlet_to_abs_source_ratio"],
+            0.25 / 0.45,
+            delta=1.0e-6,
+        )
+
+    def test_pressure_outlet_unreached_source_location_requires_current_reachability(self) -> None:
+        grid_nodes = (4, 4, 4)
+        spec = FluidDomainSpec.unit_box(
+            grid_nodes=grid_nodes,
+            density_kgm3=1.0,
+            dt_s=1.0,
+        )
+        solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
+        source = np.zeros(grid_nodes, dtype=np.float32)
+        source[0, 0, 1] = 0.25 / spec.cell_volume_m3
+        solver.volume_source_s.from_numpy(source)
+
+        report = solver.pressure_outlet_fv_flux_report()
+
+        self.assertFalse(bool(report["zmin_reachability_valid"]))
+        self.assertEqual(int(report["zmin_reachability_revision"]), 0)
+        for key in (
+            "zmin_unreached_source_centroid_x_m",
+            "zmin_unreached_source_centroid_y_m",
+            "zmin_unreached_source_centroid_z_m",
+            "zmin_unreached_source_min_x_m",
+            "zmin_unreached_source_min_y_m",
+            "zmin_unreached_source_min_z_m",
+            "zmin_unreached_source_max_x_m",
+            "zmin_unreached_source_max_y_m",
+            "zmin_unreached_source_max_z_m",
+        ):
+            self.assertTrue(np.isnan(report[key]), key)
+
+    def test_pressure_outlet_unreached_source_location_reports_after_reachability_mark(self) -> None:
+        grid_nodes = (9, 4, 9)
+        spec = FluidDomainSpec.unit_box(
+            grid_nodes=grid_nodes,
+            density_kgm3=1.0,
+            dt_s=1.0,
+        )
+        solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
+        obstacle = np.ones(grid_nodes, dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        obstacle[2, 2, 4] = 0
+        obstacle[2, 2, 5] = 0
+        source = np.zeros(grid_nodes, dtype=np.float32)
+        source[2, 2, 4] = 0.25 / spec.cell_volume_m3
+        solver.obstacle.from_numpy(obstacle)
+        solver.volume_source_s.from_numpy(source)
+
+        unreached = solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        report = solver.pressure_outlet_fv_flux_report()
+
+        self.assertEqual(unreached, 2)
+        self.assertTrue(bool(report["zmin_reachability_valid"]))
+        self.assertGreater(int(report["zmin_reachability_revision"]), 0)
+        self.assertEqual(int(report["zmin_unreached_source_cell_count"]), 1)
+        self.assertAlmostEqual(
+            report["zmin_unreached_source_centroid_x_m"],
+            solver.grid.cell_centers_x_m[2],
+        )
+        self.assertAlmostEqual(
+            report["zmin_unreached_source_centroid_y_m"],
+            solver.grid.cell_centers_y_m[2],
+        )
+        self.assertAlmostEqual(
+            report["zmin_unreached_source_centroid_z_m"],
+            solver.grid.cell_centers_z_m[4],
+        )
+
+    def test_hibm_pressure_reachability_revision_changes_on_fresh_flood(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        first_report = solver.pressure_outlet_fv_flux_report()
+
+        solver.velocity_dirichlet_boundary_active[0, 0, 1] = 1
+        solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        second_report = solver.pressure_outlet_fv_flux_report()
+
+        self.assertTrue(bool(first_report["zmin_reachability_valid"]))
+        self.assertTrue(bool(second_report["zmin_reachability_valid"]))
+        self.assertGreater(
+            int(second_report["zmin_reachability_revision"]),
+            int(first_report["zmin_reachability_revision"]),
+        )
+
     def test_nonuniform_fv_jacobi_pressure_outlet_balances_explicit_volume_source(self) -> None:
         grid = CartesianGrid(
             bounds_min_m=(0.0, 0.0, 0.0),
@@ -1758,6 +1910,42 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
             report["pressure_solver_force_reason"],
             "pressure_interface_matrix_requires_rowlist_fv_cg",
         )
+
+    def test_project_raises_if_topology_mutates_with_active_pressure_matrix(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        interface_diagonal = np.zeros((5, 5, 5), dtype=np.float64)
+        interface_diagonal[2, 2, 2] = 1.0
+        solver.pressure_interface_matrix_diagonal.from_numpy(interface_diagonal)
+        conversion_calls: list[dict[str, object]] = []
+
+        def fake_mark(_self, **_kwargs: object) -> int:
+            return 0
+
+        def fake_convert(_self, **kwargs: object) -> int:
+            conversion_calls.append(dict(kwargs))
+            return 1
+
+        solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells = MethodType(
+            fake_mark,
+            solver,
+        )
+        solver.convert_hibm_row_cloud_orphan_components = MethodType(
+            fake_convert,
+            solver,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "topology cleanup.*pressure matrix"):
+            solver.project(
+                iterations=1,
+                pressure_outlet_zmin=True,
+                pressure_solver="fv_cg",
+                read_report=False,
+            )
+
+        self.assertEqual(len(conversion_calls), 1)
 
     def test_fv_cg_interface_coupling_enters_operator_symmetrically(self) -> None:
         solver = CartesianFluidSolver(
@@ -4786,6 +4974,8 @@ class UnreachedSetInterfaceHitObservabilityTests(unittest.TestCase):
         self.assertEqual(int(report["hibm_solid_band_last_marked_increment"]), 1)
         self.assertTrue(bool(report["hibm_pressure_component_labels_converged"]))
         self.assertTrue(bool(report["hibm_pressure_reachability_converged"]))
+        self.assertTrue(bool(report["hibm_pressure_reachability_valid"]))
+        self.assertGreater(int(report["hibm_pressure_reachability_revision"]), 0)
 
     def test_restore_state_resets_reachability_and_interface_hit_flags(self) -> None:
         solver = CartesianFluidSolver(

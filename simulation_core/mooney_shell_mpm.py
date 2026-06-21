@@ -48,6 +48,8 @@ class TriMooneyShellMpmReport:
     internal_force_rms_n: float
     net_internal_force_relative_error: float
     transfer_relative_error: float
+    primary_particle_count: int = 0
+    secondary_particle_count: int = 0
 
 
 def _unique_undirected_edges(faces: np.ndarray) -> np.ndarray:
@@ -101,6 +103,29 @@ def _raise_if_all_particles_out_of_bounds(
         )
 
 
+def _raise_if_out_of_bounds_exceeds_tolerance(
+    particle_count: int,
+    grid_out_of_bounds_particle_count: int,
+    tolerance: int,
+) -> None:
+    if grid_out_of_bounds_particle_count > int(tolerance):
+        raise RuntimeError(
+            f"{grid_out_of_bounds_particle_count} of {particle_count} MPM particles "
+            "are outside the background grid; refusing to advance a partial solid"
+        )
+
+
+def _raise_if_required_shell_region_empty(
+    *,
+    primary_count: int,
+    secondary_count: int,
+) -> None:
+    if primary_count <= 0:
+        raise RuntimeError("primary shell region has no in-grid MPM particles")
+    if secondary_count <= 0:
+        raise RuntimeError("secondary shell region has no in-grid MPM particles")
+
+
 @ti.data_oriented
 class TriMooneyShellMpmState:
     """Paper-style Mooney membrane MPM on an explicit triangle surface mesh."""
@@ -122,6 +147,8 @@ class TriMooneyShellMpmState:
         fixed_region_id: int = -1,
         primary_thickness_m: float | None = None,
         secondary_thickness_m: float | None = None,
+        out_of_bounds_particle_tolerance: int = 0,
+        require_nonempty_region_counts: bool | None = None,
         runtime: TaichiRuntimeConfig | None = None,
     ):
         init_taichi(runtime)
@@ -141,6 +168,8 @@ class TriMooneyShellMpmState:
             raise ValueError("grid_nodes must be at least 4 in each direction")
         if bounds_padding_fraction <= 0.0:
             raise ValueError("bounds_padding_fraction must be positive")
+        if int(out_of_bounds_particle_tolerance) < 0:
+            raise ValueError("out_of_bounds_particle_tolerance must be non-negative")
 
         vertices = np.asarray(mesh.vertices, dtype=np.float32)
         faces = np.asarray(mesh.faces, dtype=np.int32)
@@ -150,6 +179,14 @@ class TriMooneyShellMpmState:
             regions = np.asarray(face_region_id, dtype=np.int32)
             if regions.shape != (mesh.face_count,):
                 raise ValueError("face_region_id must have shape (face_count,)")
+        region_counts_required = (
+            bool(
+                np.any(regions == int(primary_region_id))
+                or np.any(regions == int(secondary_region_id))
+            )
+            if require_nonempty_region_counts is None
+            else bool(require_nonempty_region_counts)
+        )
         bounds_min, bounds_max = _mesh_bounds_with_padding(vertices, bounds_padding_fraction)
 
         self.particle_count = int(mesh.vertex_count)
@@ -163,6 +200,8 @@ class TriMooneyShellMpmState:
         self.primary_region_id = int(primary_region_id)
         self.secondary_region_id = int(secondary_region_id)
         self.fixed_region_id = int(fixed_region_id)
+        self.out_of_bounds_particle_tolerance = int(out_of_bounds_particle_tolerance)
+        self.require_nonempty_region_counts = region_counts_required
         self.primary_thickness_m = float(thickness_m if primary_thickness_m is None else primary_thickness_m)
         self.secondary_thickness_m = float(thickness_m if secondary_thickness_m is None else secondary_thickness_m)
         self.grid_nodes = tuple(int(value) for value in grid_nodes)
@@ -1319,14 +1358,25 @@ class TriMooneyShellMpmState:
         values = snapshot[:32]
         counts = snapshot[32:37]
         self.last_report_host_reads = 1
-        _raise_if_all_particles_out_of_bounds(int(self.particle_count), int(counts[1]))
+        _raise_if_out_of_bounds_exceeds_tolerance(
+            int(self.particle_count),
+            int(counts[1]),
+            self.out_of_bounds_particle_tolerance,
+        )
         force_l2 = float(values[0]) ** 0.5
         total_area_m2 = float(values[4])
         particle_spacing_m = 0.0
         if total_area_m2 > 0.0 and self.particle_count > 0:
             particle_spacing_m = (total_area_m2 / self.particle_count) ** 0.5
-        primary_count = max(int(counts[3]), 1)
-        secondary_count = max(int(counts[4]), 1)
+        primary_particle_count = int(counts[3])
+        secondary_particle_count = int(counts[4])
+        if self.require_nonempty_region_counts:
+            _raise_if_required_shell_region_empty(
+                primary_count=primary_particle_count,
+                secondary_count=secondary_particle_count,
+            )
+        primary_count = max(primary_particle_count, 1)
+        secondary_count = max(secondary_particle_count, 1)
         return TriMooneyShellMpmReport(
             particle_count=self.particle_count,
             face_count=self.face_count,
@@ -1387,6 +1437,8 @@ class TriMooneyShellMpmState:
                 / max(force_l2, 1.0e-20)
             ),
             transfer_relative_error=float(values[31]),
+            primary_particle_count=primary_particle_count,
+            secondary_particle_count=secondary_particle_count,
         )
 
 

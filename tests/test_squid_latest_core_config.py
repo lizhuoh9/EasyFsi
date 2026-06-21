@@ -32,6 +32,7 @@ from cases.squid_soft_robot import (
     finite_required_row_fields_for_solid_model,
     force_decomposition_report,
     fsi_same_step_rerun_triggered,
+    fsi_same_step_rerun_fluid_substeps,
     fsi_trial_acceptance_passes,
     fsi_trial_acceptance_rejection_reason,
     fluid_grid_resolution_report,
@@ -61,6 +62,7 @@ from cases.squid_soft_robot import (
     pressure_schedule_applied_in_history,
     pressure_schedule_step_end_pa,
     raise_for_unsupported_hibm_mpm_sharp_iteration_options,
+    resolve_fsi_stabilization_preset_parameters,
     fsi_physical_interface_map_stability_report,
     pressure_flux_trend_report,
     fsi_physical_interface_map_stability_passes,
@@ -380,6 +382,106 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             "fsi_semi_implicit_coupling_matrix_active",
         ):
             self.assertIn(measured_field, sharp_fields)
+
+    def test_fsi_trial_replay_and_rejection_fields_are_reported(self) -> None:
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+
+        for token in (
+            'row["accepted_fsi_trial_state_readvanced"]',
+            'row["fsi_all_trials_rejected"]',
+            'row["fsi_zero_force_commit_blocked"]',
+            "accepted_fsi_trial_state_readvance_count",
+            '"accepted_fsi_trial_state_readvance_count":',
+            '"fsi_all_trials_rejected_count":',
+            '"fsi_zero_force_commit_blocked_count":',
+        ):
+            self.assertIn(token, source)
+
+    def test_nonlast_best_trial_is_readvanced_before_commit(self) -> None:
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+
+        fallback_branch = source.index("if accepted_fsi_trial_payload is not None:")
+        readvance_flag = source.index(
+            "accepted_fsi_trial_state_readvanced = (",
+            fallback_branch,
+        )
+        accepted_index_guard = source.index(
+            "fixed_point_result.accepted_trial_index is not None",
+            readvance_flag,
+        )
+        accepted_force_read = source.index(
+            "primary_interface_reaction_n = _taichi_vector3_to_tuple(",
+            accepted_index_guard,
+        )
+        solid_readvance = source.index(
+            "solid_mpm_report = advance_physical_solid_step(",
+            accepted_force_read,
+        )
+        fluid_readvance = source.index(
+            "fluid_step_report = advance_fluid_step(",
+            solid_readvance,
+        )
+        row_write = source.index(
+            'row["accepted_fsi_trial_state_readvanced"] = (',
+            fluid_readvance,
+        )
+
+        self.assertLess(readvance_flag, accepted_index_guard)
+        self.assertLess(accepted_index_guard, accepted_force_read)
+        self.assertLess(accepted_force_read, solid_readvance)
+        self.assertLess(solid_readvance, fluid_readvance)
+        self.assertLess(fluid_readvance, row_write)
+
+    def test_replayed_sharp_trial_rescatters_external_force_before_solid_advance(
+        self,
+    ) -> None:
+        case_source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        core_source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+
+        trial_function = case_source.index("def advance_sharp_trial_once():")
+        external_force_arg = case_source.index(
+            "mpm_external_force_n=solid_mpm.external_force_n",
+            trial_function,
+        )
+        solid_step_arg = case_source.index(
+            "solid_step=advance_sharp_solid_substeps",
+            external_force_arg,
+        )
+        fixed_point_loop = case_source.index("for iteration in range(requested_iterations):")
+        restore_trial = case_source.index(
+            "restore_sharp_trial_state(marker_guess, pressure_gradient_state)",
+            fixed_point_loop,
+        )
+        replay_trial = case_source.index(
+            "report = advance_sharp_trial_once()",
+            restore_trial,
+        )
+
+        clear_force = core_source.index("clear_report = markers.clear_mpm_external_forces(")
+        scatter_force = core_source.index(
+            "scatter_report = markers.scatter_marker_forces_to_mpm_particles(",
+            clear_force,
+        )
+        load_return = core_source.index(
+            "return HibmMpmSharpFluidToMpmLoadReport(",
+            scatter_force,
+        )
+        load_report = core_source.index(
+            "load_report = assemble_hibm_mpm_sharp_fluid_to_mpm_loads(",
+            load_return,
+        )
+        freshness_guard = core_source.index(
+            "if not hibm_mpm_external_force_fresh_for_solid_step(load_report):",
+            load_report,
+        )
+        solid_advance = core_source.index("mpm_report = solid_step()", freshness_guard)
+
+        self.assertLess(external_force_arg, solid_step_arg)
+        self.assertLess(restore_trial, replay_trial)
+        self.assertLess(clear_force, scatter_force)
+        self.assertLess(scatter_force, load_return)
+        self.assertLess(load_report, freshness_guard)
+        self.assertLess(freshness_guard, solid_advance)
 
     def test_required_row_number_rejects_missing_and_nonfinite_values(self) -> None:
         with self.assertRaises(KeyError):
@@ -764,7 +866,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
 
         self.assertIn("try:", advance_block)
         self.assertIn(
-            "sharp_report = sharp_coupling_state.advance_mpm_step(",
+            "advance_sharp_marker_fixed_point_step()",
             advance_block,
         )
         self.assertIn("_write_step_failure_artifacts(", advance_block)
@@ -782,6 +884,22 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
 
         self.assertIn("dt_s=fluid_substep_dt_s", sample_block)
         self.assertNotIn("dt_s=spec.dt_s", sample_block)
+
+    def test_sharp_sampling_uses_latest_post_solid_projection_when_available(self) -> None:
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        sharp_block = source.split("if sharp_case_runner_enabled:", 1)[1]
+        sample_block = sharp_block.split(
+            "latest_fluid_projection_report =",
+            1,
+        )[1].split("sample_wall_time_s =", 1)[0]
+
+        self.assertIn("sharp_report.post_solid_fluid_projection", sample_block)
+        self.assertIn("sharp_report.fluid_to_mpm_loads.fluid_projection", sample_block)
+        self.assertIn(
+            "sample_report = simulator.sample_after_projection(",
+            sample_block,
+        )
+        self.assertIn("latest_fluid_projection_report", sample_block)
 
     def test_required_tuple3_rejects_missing_or_wrong_length_values(self) -> None:
         self.assertEqual(
@@ -3479,6 +3597,8 @@ END-ISO-10303-21;
                     "fv_cg",
                     "--interface-reaction-robin-matrix-impedance-ns-m",
                     "125000",
+                    "--fsi-coupling-mode",
+                    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
                     "--preflight-only",
                 ]
             )
@@ -3728,6 +3848,16 @@ END-ISO-10303-21;
             def restore_reduced_state(self) -> None:
                 return None
 
+            def sample_cfl_report(
+                self,
+                *,
+                dt_s: float | None = None,
+            ) -> dict[str, object]:
+                return {
+                    "cfl": 0.0,
+                    "max_fluid_speed_mps": 0.0,
+                }
+
             def sample_after_projection(
                 self,
                 divergence: dict[str, float],
@@ -3917,10 +4047,14 @@ END-ISO-10303-21;
             }
             pressure_outlet_report = {
                 "source_volume_flux_m3s": 1.0e-6,
+                "positive_source_volume_flux_m3s": 1.0e-6,
+                "abs_source_volume_flux_m3s": 1.0e-6,
                 "zmin_reachable_source_volume_flux_m3s": 1.0e-6,
                 "zmin_unreached_source_volume_flux_m3s": 0.0,
                 "zmin_reachable_source_cell_count": 1,
                 "zmin_unreached_source_cell_count": 0,
+                "zmin_reachability_valid": True,
+                "zmin_reachability_revision": 9,
                 "zmin_unreached_source_abs_flux_m3s": 0.0,
                 "zmin_unreached_source_centroid_x_m": math.nan,
                 "zmin_unreached_source_centroid_y_m": math.nan,
@@ -3937,8 +4071,20 @@ END-ISO-10303-21;
                 "zmin_velocity_outlet_to_source_ratio": (
                     1.0 if is_final_accepted_step else 0.25
                 ),
+                "zmin_velocity_outlet_to_net_source_ratio": (
+                    1.0 if is_final_accepted_step else 0.25
+                ),
+                "zmin_velocity_outlet_to_positive_source_ratio": (
+                    1.0 if is_final_accepted_step else 0.25
+                ),
+                "zmin_velocity_outlet_to_abs_source_ratio": (
+                    1.0 if is_final_accepted_step else 0.25
+                ),
                 "zmin_pressure_outlet_flux_m3s": pressure_outlet_pressure_flux_m3s,
                 "zmin_pressure_outlet_to_source_ratio": pressure_outlet_pressure_flux_m3s / 1.0e-6,
+                "zmin_pressure_outlet_to_net_source_ratio": pressure_outlet_pressure_flux_m3s / 1.0e-6,
+                "zmin_pressure_outlet_to_positive_source_ratio": pressure_outlet_pressure_flux_m3s / 1.0e-6,
+                "zmin_pressure_outlet_to_abs_source_ratio": pressure_outlet_pressure_flux_m3s / 1.0e-6,
                 "zmin_projection_pre_velocity_outlet_flux_m3s": (
                     -9.0e-6 if not is_final_accepted_step else 0.0
                 ),
@@ -3996,6 +4142,10 @@ END-ISO-10303-21;
 
         metadata = {
             "diagnostic_area_m2_by_region": {"7": 1.0e-4, "8": 1.0e-4},
+            "diagnostic_area_weighted_normal_by_region": {
+                "7": (0.0, 0.0, 1.0),
+                "8": (0.0, 0.0, -1.0),
+            },
             "solid_area_m2_by_region": {"5": 1.0e-4},
             "solid_surface_face_count": 1,
         }
@@ -4029,6 +4179,8 @@ END-ISO-10303-21;
                     "1",
                     "--fsi-coupling-iterations",
                     "2",
+                    "--fsi-coupling-mode",
+                    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
                     "--constraint-force-scale",
                     "0.5",
                     "--cg-preconditioner",
@@ -4241,6 +4393,10 @@ END-ISO-10303-21;
         self.assertTrue(
             math.isinf(args.fsi_coupling_same_step_rerun_residual_threshold_n)
         )
+        self.assertAlmostEqual(
+            args.fsi_coupling_same_step_rerun_fluid_substep_factor,
+            1.0,
+        )
         self.assertEqual(args.fsi_coupling_residual_continuation_iterations_max, 0)
         self.assertTrue(
             math.isinf(args.fsi_coupling_residual_continuation_threshold_n)
@@ -4326,6 +4482,8 @@ END-ISO-10303-21;
                 "12",
                 "--fsi-coupling-same-step-rerun-residual-threshold-n",
                 "0.5",
+                "--fsi-coupling-same-step-rerun-fluid-substep-factor",
+                "1.25",
             ]
         )
 
@@ -4334,6 +4492,10 @@ END-ISO-10303-21;
         self.assertAlmostEqual(
             args.fsi_coupling_same_step_rerun_residual_threshold_n,
             0.5,
+        )
+        self.assertAlmostEqual(
+            args.fsi_coupling_same_step_rerun_fluid_substep_factor,
+            1.25,
         )
 
     def test_fsi_coupling_residual_continuation_cli_is_explicit(self) -> None:
@@ -4419,6 +4581,64 @@ END-ISO-10303-21;
                 residual_threshold_n=math.inf,
                 converged=False,
             )
+        )
+        self.assertTrue(
+            fsi_same_step_rerun_triggered(
+                current_iterations_requested=6,
+                rerun_iterations_max=12,
+                residual_norm_n=math.inf,
+                residual_threshold_n=math.inf,
+                converged=False,
+                safety_rejected=True,
+            )
+        )
+        self.assertFalse(
+            fsi_same_step_rerun_triggered(
+                current_iterations_requested=12,
+                rerun_iterations_max=12,
+                residual_norm_n=math.inf,
+                residual_threshold_n=math.inf,
+                converged=False,
+                safety_rejected=True,
+            )
+        )
+
+    def test_fsi_same_step_rerun_fluid_substeps_only_for_safety_rejection(self) -> None:
+        self.assertEqual(
+            fsi_same_step_rerun_fluid_substeps(
+                current_substeps=21,
+                max_substeps=64,
+                substep_factor=1.25,
+                safety_rejected=True,
+            ),
+            27,
+        )
+        self.assertEqual(
+            fsi_same_step_rerun_fluid_substeps(
+                current_substeps=21,
+                max_substeps=24,
+                substep_factor=1.25,
+                safety_rejected=True,
+            ),
+            24,
+        )
+        self.assertEqual(
+            fsi_same_step_rerun_fluid_substeps(
+                current_substeps=21,
+                max_substeps=64,
+                substep_factor=1.25,
+                safety_rejected=False,
+            ),
+            21,
+        )
+        self.assertEqual(
+            fsi_same_step_rerun_fluid_substeps(
+                current_substeps=21,
+                max_substeps=64,
+                substep_factor=1.0,
+                safety_rejected=True,
+            ),
+            21,
         )
 
     def test_fsi_trial_acceptance_can_gate_interior_divergence(self) -> None:
@@ -5384,6 +5604,7 @@ END-ISO-10303-21;
             "fsi_coupling_adaptive_iterations_cfl_threshold",
             "fsi_coupling_same_step_rerun_iterations_max",
             "fsi_coupling_same_step_rerun_residual_threshold_n",
+            "fsi_coupling_same_step_rerun_fluid_substep_factor",
             "fsi_coupling_residual_continuation_iterations_max",
             "fsi_coupling_residual_continuation_threshold_n",
             "fsi_coupling_residual_continuation_rebound_secant_from_best",
@@ -6131,6 +6352,9 @@ END-ISO-10303-21;
             "hibm_marker_secondary_force_n": (-0.25, 0.5, -1.0),
             "hibm_marker_total_force_n": (0.75, 2.5, 2.0),
             "hibm_marker_action_reaction_residual_n": 0.0,
+            "hibm_mpm_external_force_clear_particle_count": 10,
+            "hibm_mpm_external_force_clear_max_abs_before_n": 3.0,
+            "hibm_mpm_external_force_fresh_for_solid_step": True,
             "hibm_mpm_scatter_action_reaction_residual_n": 0.0,
             "hibm_no_slip_residual_valid_marker_count": 8,
             "hibm_no_slip_residual_invalid_marker_count": 0,
@@ -6206,10 +6430,14 @@ END-ISO-10303-21;
         }
         pressure_outlet_report = {
             "source_volume_flux_m3s": 2.5e-8,
+            "positive_source_volume_flux_m3s": 3.0e-8,
+            "abs_source_volume_flux_m3s": 3.5e-8,
             "zmin_reachable_source_volume_flux_m3s": 1.5e-8,
             "zmin_unreached_source_volume_flux_m3s": 1.0e-8,
             "zmin_reachable_source_cell_count": 3,
             "zmin_unreached_source_cell_count": 2,
+            "zmin_reachability_valid": True,
+            "zmin_reachability_revision": 7,
             "zmin_unreached_source_abs_flux_m3s": 1.0e-8,
             "zmin_unreached_source_centroid_x_m": 1.0e-3,
             "zmin_unreached_source_centroid_y_m": 2.0e-3,
@@ -6224,6 +6452,12 @@ END-ISO-10303-21;
             "zmin_velocity_outlet_flux_m3s": 2.0e-8,
             "zmin_pressure_outlet_to_source_ratio": 0.4,
             "zmin_velocity_outlet_to_source_ratio": 0.8,
+            "zmin_pressure_outlet_to_net_source_ratio": 0.4,
+            "zmin_velocity_outlet_to_net_source_ratio": 0.8,
+            "zmin_pressure_outlet_to_positive_source_ratio": 1.0 / 3.0,
+            "zmin_velocity_outlet_to_positive_source_ratio": 2.0 / 3.0,
+            "zmin_pressure_outlet_to_abs_source_ratio": 1.0 / 3.5,
+            "zmin_velocity_outlet_to_abs_source_ratio": 2.0 / 3.5,
             "zmin_projection_pre_velocity_outlet_flux_m3s": 3.0e-8,
             "zmin_projection_post_pressure_velocity_outlet_flux_m3s": 2.25e-8,
             "zmin_projection_post_boundary_velocity_outlet_flux_m3s": 2.0e-8,
@@ -6431,6 +6665,12 @@ END-ISO-10303-21;
         self.assertEqual(row["hibm_marker_primary_count"], 3)
         self.assertEqual(row["hibm_marker_secondary_count"], 5)
         self.assertEqual(row["hibm_marker_total_count"], 8)
+        self.assertEqual(row["hibm_mpm_external_force_clear_particle_count"], 10)
+        self.assertEqual(
+            row["hibm_mpm_external_force_clear_max_abs_before_n"],
+            3.0,
+        )
+        self.assertTrue(row["hibm_mpm_external_force_fresh_for_solid_step"])
         self.assertEqual(row["hibm_air_backed_cell_count"], 17)
         self.assertEqual(row["hibm_air_backed_component_count"], 1)
         self.assertEqual(row["hibm_air_backed_seed_marker_count"], 19)
@@ -6455,12 +6695,28 @@ END-ISO-10303-21;
             pressure_outlet_report["source_volume_flux_m3s"],
         )
         self.assertEqual(
+            row["pressure_outlet_positive_source_volume_flux_m3s"],
+            pressure_outlet_report["positive_source_volume_flux_m3s"],
+        )
+        self.assertEqual(
+            row["pressure_outlet_abs_source_volume_flux_m3s"],
+            pressure_outlet_report["abs_source_volume_flux_m3s"],
+        )
+        self.assertEqual(
             row["pressure_outlet_reachable_source_volume_flux_m3s"],
             pressure_outlet_report["zmin_reachable_source_volume_flux_m3s"],
         )
         self.assertEqual(
             row["pressure_outlet_unreached_source_volume_flux_m3s"],
             pressure_outlet_report["zmin_unreached_source_volume_flux_m3s"],
+        )
+        self.assertEqual(
+            row["pressure_outlet_reachability_valid"],
+            pressure_outlet_report["zmin_reachability_valid"],
+        )
+        self.assertEqual(
+            row["pressure_outlet_reachability_revision"],
+            pressure_outlet_report["zmin_reachability_revision"],
         )
         for row_key, report_key in (
             (
@@ -6521,6 +6777,33 @@ END-ISO-10303-21;
             row["pressure_outlet_velocity_to_source_ratio"],
             pressure_outlet_report["zmin_velocity_outlet_to_source_ratio"],
         )
+        for row_key, report_key in (
+            (
+                "pressure_outlet_velocity_to_net_source_ratio",
+                "zmin_velocity_outlet_to_net_source_ratio",
+            ),
+            (
+                "pressure_outlet_velocity_to_positive_source_ratio",
+                "zmin_velocity_outlet_to_positive_source_ratio",
+            ),
+            (
+                "pressure_outlet_velocity_to_abs_source_ratio",
+                "zmin_velocity_outlet_to_abs_source_ratio",
+            ),
+            (
+                "pressure_outlet_pressure_to_net_source_ratio",
+                "zmin_pressure_outlet_to_net_source_ratio",
+            ),
+            (
+                "pressure_outlet_pressure_to_positive_source_ratio",
+                "zmin_pressure_outlet_to_positive_source_ratio",
+            ),
+            (
+                "pressure_outlet_pressure_to_abs_source_ratio",
+                "zmin_pressure_outlet_to_abs_source_ratio",
+            ),
+        ):
+            self.assertEqual(row[row_key], pressure_outlet_report[report_key])
         self.assertEqual(
             row["pressure_outlet_pressure_flux_m3s"],
             pressure_outlet_report["zmin_pressure_outlet_flux_m3s"],
@@ -6553,6 +6836,21 @@ END-ISO-10303-21;
         self.assertEqual(row["solid_mpm_grid_out_of_bounds_particle_count"], 2)
         self.assertNotIn("projected_ibm_residual_mps", row)
         self.assertNotIn("fsi_force_probe_valid_fraction", row)
+
+    def test_pressure_outlet_positive_abs_source_fields_are_reported(self) -> None:
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+
+        for token in (
+            'row["pressure_outlet_positive_source_volume_flux_m3s"]',
+            'row["pressure_outlet_abs_source_volume_flux_m3s"]',
+            'row["pressure_outlet_velocity_to_positive_source_ratio"]',
+            'row["pressure_outlet_velocity_to_abs_source_ratio"]',
+            '"final_pressure_outlet_positive_source_volume_flux_m3s"',
+            '"final_pressure_outlet_abs_source_volume_flux_m3s"',
+            '"final_pressure_outlet_velocity_to_positive_source_ratio"',
+            '"final_pressure_outlet_velocity_to_abs_source_ratio"',
+        ):
+            self.assertIn(token, source)
 
     def test_sharp_required_row_fields_do_not_require_projected_ibm_reports(self) -> None:
         legacy_fields = finite_required_row_fields_for_mode(
@@ -6596,6 +6894,9 @@ END-ISO-10303-21;
         self.assertIn("hibm_marker_secondary_count", sharp_fields)
         self.assertIn("hibm_marker_total_count", sharp_fields)
         self.assertIn("hibm_marker_total_force_z_n", sharp_fields)
+        self.assertIn("hibm_mpm_external_force_clear_particle_count", sharp_fields)
+        self.assertIn("hibm_mpm_external_force_clear_max_abs_before_n", sharp_fields)
+        self.assertIn("hibm_mpm_external_force_fresh_for_solid_step", sharp_fields)
         self.assertIn("fsi_volume_source_m3s", sharp_fields)
         self.assertIn("fsi_coupling_residual_norm_mps", sharp_fields)
         self.assertNotIn("main_fsi_volume_source_m3s", sharp_fields)
@@ -6792,7 +7093,119 @@ END-ISO-10303-21;
         self.assertIn("primary_velocity_target_solid_mobility_ratio=", source)
         self.assertIn("secondary_velocity_target_solid_mobility_ratio=", source)
         self.assertIn('"max_fsi_primary_velocity_target_solid_mobility_ratio"', source)
+
+    def test_legacy_mobility_ratio_uses_solid_response_dt(self) -> None:
+        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+
+        self.assertIn("solid_response_dt_s = float(spec.dt_s)", source)
+        self.assertGreaterEqual(source.count("dt_s=solid_response_dt_s"), 4)
+        self.assertIn('row["fsi_solid_response_dt_s"]', source)
+        self.assertIn('"fsi_solid_response_dt_s": fsi_solid_response_dt_s', source)
         self.assertIn('"max_fsi_secondary_velocity_target_solid_mobility_ratio"', source)
+
+    def test_stabilization_presets_expand_to_expected_parameters(self) -> None:
+        off = resolve_fsi_stabilization_preset_parameters("off")
+        conservative = resolve_fsi_stabilization_preset_parameters("conservative")
+        aggressive = resolve_fsi_stabilization_preset_parameters("aggressive")
+
+        self.assertEqual(off["fsi_coupling_target_map_relaxation"], 1.0)
+        self.assertEqual(off["fsi_coupling_trust_region_force_increment_n"], math.inf)
+        self.assertFalse(off["fsi_coupling_trust_region_adaptive"])
+        self.assertEqual(conservative["fsi_coupling_target_map_relaxation"], 0.35)
+        self.assertEqual(conservative["fsi_coupling_trust_region_force_increment_n"], 0.25)
+        self.assertTrue(conservative["fsi_coupling_trust_region_adaptive"])
+        self.assertEqual(aggressive["fsi_coupling_target_map_relaxation"], 0.65)
+        self.assertEqual(aggressive["fsi_coupling_trust_region_force_increment_n"], 1.0)
+        self.assertTrue(aggressive["fsi_coupling_trust_region_adaptive"])
+
+        args = parse_args(["--fsi-stabilization-preset", "aggressive"])
+        self.assertEqual(args.fsi_stabilization_preset, "aggressive")
+        self.assertEqual(args.fsi_coupling_target_map_relaxation, 0.65)
+        self.assertEqual(args.fsi_coupling_trust_region_force_increment_n, 1.0)
+        self.assertTrue(args.fsi_coupling_trust_region_adaptive)
+
+        explicit_off = parse_args(
+            [
+                "--fsi-stabilization-preset",
+                "off",
+                "--fsi-coupling-target-map-relaxation",
+                "0.8",
+            ]
+        )
+        self.assertEqual(explicit_off.fsi_stabilization_preset, "off")
+        self.assertEqual(explicit_off.fsi_coupling_target_map_relaxation, 0.8)
+
+    def test_stabilization_preset_conflict_policy_is_enforced(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                parse_args(
+                    [
+                        "--fsi-stabilization-preset",
+                        "conservative",
+                        "--fsi-coupling-target-map-relaxation",
+                        "0.8",
+                    ]
+                )
+
+        error = stderr.getvalue()
+        self.assertIn("--fsi-stabilization-preset", error)
+        self.assertIn("--fsi-coupling-target-map-relaxation", error)
+
+    def test_stabilization_preset_writes_effective_parameters_to_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_config = temp_path / "source.json"
+            output_dir = temp_path / "preflight_stabilization"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "analysis_settings": {"time_step_s": 5.0e-4},
+                        "domains": {"fluid": {"grid_size_m": 2.5e-3}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = parse_args(
+                [
+                    "--source-config",
+                    str(source_config),
+                    "--output-dir",
+                    str(output_dir),
+                    "--preflight-only",
+                    "--fsi-stabilization-preset",
+                    "conservative",
+                ]
+            )
+
+            summary = run(args)
+            written_summary = json.loads(
+                (output_dir / "preflight_summary.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(summary["fsi_stabilization_preset"], "conservative")
+            self.assertEqual(
+                summary["fsi_stabilization_effective_parameters"],
+                written_summary["fsi_stabilization_effective_parameters"],
+            )
+            self.assertEqual(
+                summary["fsi_stabilization_effective_parameters"][
+                    "fsi_coupling_target_map_relaxation"
+                ],
+                0.35,
+            )
+            self.assertEqual(summary["fsi_coupling_target_map_relaxation"], 0.35)
+            self.assertEqual(
+                summary["fsi_stabilization_effective_parameters"][
+                    "fsi_coupling_trust_region_force_increment_n"
+                ],
+                0.25,
+            )
+            self.assertTrue(summary["fsi_coupling_trust_region_adaptive"])
+            self.assertIn(
+                "reject_explicit_managed_options",
+                summary["fsi_stabilization_preset_conflict_policy"],
+            )
 
     def test_velocity_constraint_equivalent_force_uses_correction_dt(self) -> None:
         source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
@@ -7715,11 +8128,11 @@ class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
         # construction must honor the case's Fixed Support rim region the way
         # the tri_mooney_shell_mpm construction already does.
         source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
-        sharp_step_tail = source.split(
-            "sharp_report = sharp_coupling_state.advance_mpm_step(",
+        sharp_step_tail = source.split("if sharp_case_runner_enabled:", 1)[1].split(
+            "reused_fluid_step_report = None",
             1,
-        )[1].split("reused_fluid_step_report = None", 1)[0]
-        sharp_guard_try = sharp_step_tail.split("try:", 1)[1].split(
+        )[0]
+        sharp_guard_try = sharp_step_tail.split("rows.append(row)", 1)[1].split(
             "except Exception as exc:",
             1,
         )[0]

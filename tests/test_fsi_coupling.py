@@ -871,6 +871,33 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
         self.assertEqual(result.force_n, (5.0,))
         self.assertEqual(result.accepted_payload, {"trial_cfl": 0.1})
 
+    def test_all_rejected_trials_raise_instead_of_zero_force(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=(force_n[0] + 1.0,),
+                velocity_mps=(0.0,),
+                payload={"trial_cfl": 2.0},
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "all FSI trials rejected"):
+            solve_interface_reaction_fixed_point(
+                initial_force_n=(3.0,),
+                evaluate_target=evaluate_target,
+                accept_evaluation=lambda evaluation: bool(
+                    evaluation.payload["trial_cfl"] < 0.5
+                ),
+                restore_state=restore_state,
+                max_iterations=2,
+                tolerance_n=0.0,
+                initial_relaxation=1.0,
+                use_aitken=False,
+                passivity_limit=False,
+                rejected_trial_backtrack=0.5,
+            )
+
     def test_residual_growth_rejection_backtracks_otherwise_accepted_trial(self) -> None:
         def restore_state() -> None:
             return None
@@ -1013,6 +1040,98 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
         self.assertEqual(result.trust_region_growth_count, 1)
         self.assertEqual(result.trust_region_effective_force_increment_n, 2.0)
         self.assertEqual(result.force_n, (3.5,))
+
+    def test_rejected_trial_does_not_grow_trust_region(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (1.0,)
+                accept = True
+            elif force_n[0] == 1.0:
+                target = (101.0,)
+                accept = True
+            else:
+                target = (2.5,)
+                accept = False
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+                payload={"accept": accept},
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            accept_evaluation=lambda evaluation: bool(evaluation.payload["accept"]),
+            restore_state=restore_state,
+            max_iterations=3,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            trust_region_force_increment_n=2.0,
+            trust_region_adaptive=True,
+            trust_region_shrink_factor=0.5,
+            trust_region_growth_factor=2.0,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (1.0,), (2.0,)))
+        self.assertEqual(result.residual_history_n, ((1.0,), (100.0,), (0.5,)))
+        self.assertEqual(result.rejected_trial_count, 1)
+        self.assertEqual(result.trust_region_shrink_count, 1)
+        self.assertEqual(result.trust_region_growth_count, 0)
+        self.assertEqual(result.trust_region_effective_force_increment_n, 1.0)
+        self.assertEqual(result.force_n, (0.0,))
+
+    def test_trust_region_growth_uses_previous_accepted_residual(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            if force_n[0] == 0.0:
+                target = (1.0,)
+                accept = True
+            elif force_n[0] == 1.0:
+                target = (101.0,)
+                accept = False
+            else:
+                target = (2.5,)
+                accept = True
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=target,
+                velocity_mps=(0.0,),
+                payload={"accept": accept},
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            accept_evaluation=lambda evaluation: bool(evaluation.payload["accept"]),
+            restore_state=restore_state,
+            max_iterations=3,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            rejected_trial_backtrack=0.5,
+            trust_region_force_increment_n=2.0,
+            trust_region_adaptive=True,
+            trust_region_shrink_factor=0.5,
+            trust_region_growth_factor=2.0,
+        )
+
+        self.assertFalse(result.converged)
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (1.0,), (0.5,)))
+        self.assertEqual(result.residual_history_n, ((1.0,), (100.0,), (2.0,)))
+        self.assertEqual(result.rejected_trial_count, 1)
+        self.assertEqual(result.rejected_trial_backtrack_count, 1)
+        self.assertEqual(result.trust_region_shrink_count, 2)
+        self.assertEqual(result.trust_region_growth_count, 0)
+        self.assertEqual(result.trust_region_effective_force_increment_n, 0.5)
+        self.assertEqual(result.force_n, (0.0,))
 
     def test_trust_region_rebound_backtracks_from_worse_trial_to_best_trial(
         self,
@@ -1409,7 +1528,7 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
         self.assertEqual(result.rejected_trial_backtrack_count, 1)
         self.assertEqual(result.force_n, (2.0,))
 
-    def test_all_rejected_backtracked_trials_commit_zero_force_failsafe(self) -> None:
+    def test_all_rejected_trials_can_explicitly_fallback_to_initial_force(self) -> None:
         def restore_state() -> None:
             return None
 
@@ -1431,6 +1550,7 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
             use_aitken=False,
             passivity_limit=False,
             rejected_trial_backtrack=0.25,
+            all_rejected_trial_policy="initial_force",
         )
 
         self.assertFalse(result.converged)
@@ -1438,8 +1558,43 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
         self.assertIsNone(result.accepted_trial_index)
         self.assertEqual(result.rejected_trial_count, 2)
         self.assertEqual(result.rejected_trial_backtrack_count, 2)
-        self.assertEqual(result.force_n, (0.0,))
+        self.assertEqual(result.force_n, (8.0,))
+        self.assertTrue(result.all_trials_rejected)
+        self.assertTrue(result.zero_force_commit_blocked)
+        self.assertEqual(result.fallback_force_source, "initial_force")
         self.assertTrue(math.isinf(result.residual_norm_n))
+
+    def test_all_rejected_trials_are_not_reported_as_converged(self) -> None:
+        def restore_state() -> None:
+            return None
+
+        def evaluate_target(force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=force_n,
+                velocity_mps=(0.0,),
+                payload={"trial_cfl": 2.0},
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(8.0,),
+            evaluate_target=evaluate_target,
+            accept_evaluation=lambda evaluation: bool(evaluation.payload["trial_cfl"] < 0.5),
+            restore_state=restore_state,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=False,
+            passivity_limit=False,
+            rejected_trial_backtrack=0.25,
+            all_rejected_trial_policy="initial_force",
+        )
+
+        self.assertFalse(result.converged)
+        self.assertTrue(result.all_trials_rejected)
+        self.assertTrue(result.zero_force_commit_blocked)
+        self.assertEqual(result.fallback_force_source, "initial_force")
+        self.assertIsNone(result.accepted_trial_index)
+        self.assertEqual(result.force_n, (8.0,))
 
     def test_passivity_limit_is_committed_after_fixed_point_trials_not_used_as_guess(self) -> None:
         guesses: list[tuple[float, ...]] = []

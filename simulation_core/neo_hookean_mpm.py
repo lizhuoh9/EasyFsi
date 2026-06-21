@@ -26,6 +26,29 @@ def _raise_if_all_particles_out_of_bounds(
         )
 
 
+def _raise_if_out_of_bounds_exceeds_tolerance(
+    particle_count: int,
+    grid_out_of_bounds_particle_count: int,
+    tolerance: int,
+) -> None:
+    if grid_out_of_bounds_particle_count > int(tolerance):
+        raise RuntimeError(
+            f"{grid_out_of_bounds_particle_count} of {particle_count} MPM particles "
+            "are outside the background grid; refusing to advance a partial solid"
+        )
+
+
+def _raise_if_required_shell_region_empty(
+    *,
+    primary_count: int,
+    secondary_count: int,
+) -> None:
+    if primary_count <= 0:
+        raise RuntimeError("primary shell region has no in-grid MPM particles")
+    if secondary_count <= 0:
+        raise RuntimeError("secondary shell region has no in-grid MPM particles")
+
+
 @dataclass(frozen=True)
 class NeoHookeanMpmReport:
     particle_count: int
@@ -48,6 +71,8 @@ class NeoHookeanMpmReport:
     deformation_clamp_count: int
     mean_radial_stretch: float
     max_radial_stretch_error: float
+    primary_particle_count: int = 0
+    secondary_particle_count: int = 0
 
 
 @ti.data_oriented
@@ -60,6 +85,7 @@ class NeoHookeanMpmState:
         bounds_min_m: tuple[float, float, float],
         bounds_max_m: tuple[float, float, float],
         grid_nodes: tuple[int, int, int],
+        out_of_bounds_particle_tolerance: int = 0,
         runtime: TaichiRuntimeConfig | None = None,
     ):
         init_taichi(runtime)
@@ -67,7 +93,12 @@ class NeoHookeanMpmState:
             raise ValueError("particle_capacity must be positive")
         if min(grid_nodes) < 4:
             raise ValueError("grid_nodes must be at least 4 in each direction")
+        if int(out_of_bounds_particle_tolerance) < 0:
+            raise ValueError("out_of_bounds_particle_tolerance must be non-negative")
         self.particle_capacity = int(particle_capacity)
+        self.out_of_bounds_particle_tolerance = int(out_of_bounds_particle_tolerance)
+        self.require_nonempty_region_counts = False
+        self.require_nonempty_secondary_region_count = False
         self.particle_count = 0
         self.grid_nodes = tuple(int(value) for value in grid_nodes)
         self.nx, self.ny, self.nz = self.grid_nodes
@@ -226,6 +257,8 @@ class NeoHookeanMpmState:
             float(box_max_m[2]),
             float(density_kgm3),
         )
+        self.require_nonempty_region_counts = False
+        self.require_nonempty_secondary_region_count = False
         self._update_rest_center()
 
     @ti.kernel
@@ -350,6 +383,10 @@ class NeoHookeanMpmState:
             float(density_kgm3),
             float(primary_thickness_m),
             float(secondary_thickness_m),
+        )
+        self.require_nonempty_region_counts = True
+        self.require_nonempty_secondary_region_count = (
+            int(secondary_region_id) in active_regions or int(fixed_region_id) < 0
         )
         self._update_rest_center()
 
@@ -1018,13 +1055,27 @@ class NeoHookeanMpmState:
         values = snapshot[:28]
         counts = snapshot[28:34]
         self.last_report_host_reads = 1
-        _raise_if_all_particles_out_of_bounds(int(self.particle_count), int(counts[1]))
+        _raise_if_out_of_bounds_exceeds_tolerance(
+            int(self.particle_count),
+            int(counts[1]),
+            self.out_of_bounds_particle_tolerance,
+        )
         total_volume_m3 = float(values[1])
         particle_spacing_m = 0.0
         if total_volume_m3 > 0.0 and self.particle_count > 0:
             particle_spacing_m = (total_volume_m3 / self.particle_count) ** (1.0 / 3.0)
-        primary_count = max(int(counts[4]), 1)
-        secondary_count = max(int(counts[5]), 1)
+        primary_particle_count = int(counts[4])
+        secondary_particle_count = int(counts[5])
+        if self.require_nonempty_region_counts:
+            secondary_count_for_guard = secondary_particle_count
+            if not self.require_nonempty_secondary_region_count:
+                secondary_count_for_guard = 1
+            _raise_if_required_shell_region_empty(
+                primary_count=primary_particle_count,
+                secondary_count=secondary_count_for_guard,
+            )
+        primary_count = max(primary_particle_count, 1)
+        secondary_count = max(secondary_particle_count, 1)
         radial_stretch_count = max(int(counts[3]), 1)
         return NeoHookeanMpmReport(
             particle_count=int(self.particle_count),
@@ -1063,4 +1114,6 @@ class NeoHookeanMpmState:
             deformation_clamp_count=int(counts[2]),
             mean_radial_stretch=float(values[14]) / radial_stretch_count,
             max_radial_stretch_error=float(values[15]),
+            primary_particle_count=primary_particle_count,
+            secondary_particle_count=secondary_particle_count,
         )

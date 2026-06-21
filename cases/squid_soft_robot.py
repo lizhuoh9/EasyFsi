@@ -69,6 +69,70 @@ DEFAULT_SOURCE_CONFIG = str(
     / "simulation_config.json"
 )
 
+FSI_STABILIZATION_PRESET_CHOICES = ("off", "conservative", "aggressive")
+FSI_STABILIZATION_PRESET_CONFLICT_POLICY = (
+    "reject_explicit_managed_options"
+)
+FSI_STABILIZATION_PRESET_MANAGED_FIELDS = (
+    "fsi_coupling_target_map_relaxation",
+    "fsi_coupling_rejected_trial_backtrack",
+    "fsi_coupling_residual_growth_rejection_factor",
+    "fsi_coupling_max_accepted_residual_n",
+    "fsi_coupling_trust_region_force_increment_n",
+    "fsi_coupling_trust_region_adaptive",
+    "fsi_coupling_trust_region_shrink_factor",
+    "fsi_coupling_trust_region_growth_factor",
+    "fsi_coupling_trust_region_rebound_factor",
+    "fsi_coupling_trust_region_rebound_backtrack",
+    "fsi_coupling_trust_region_rebound_stop_factor",
+    "fsi_coupling_trust_region_rebound_stop_max_residual_n",
+)
+_FSI_STABILIZATION_PRESET_PARAMETERS = {
+    "off": {
+        "fsi_coupling_target_map_relaxation": 1.0,
+        "fsi_coupling_rejected_trial_backtrack": 1.0,
+        "fsi_coupling_residual_growth_rejection_factor": math.inf,
+        "fsi_coupling_max_accepted_residual_n": math.inf,
+        "fsi_coupling_trust_region_force_increment_n": math.inf,
+        "fsi_coupling_trust_region_adaptive": False,
+        "fsi_coupling_trust_region_shrink_factor": 0.5,
+        "fsi_coupling_trust_region_growth_factor": 1.25,
+        "fsi_coupling_trust_region_rebound_factor": math.inf,
+        "fsi_coupling_trust_region_rebound_backtrack": 0.5,
+        "fsi_coupling_trust_region_rebound_stop_factor": math.inf,
+        "fsi_coupling_trust_region_rebound_stop_max_residual_n": math.inf,
+    },
+    "conservative": {
+        "fsi_coupling_target_map_relaxation": 0.35,
+        "fsi_coupling_rejected_trial_backtrack": 0.5,
+        "fsi_coupling_residual_growth_rejection_factor": 1.25,
+        "fsi_coupling_max_accepted_residual_n": math.inf,
+        "fsi_coupling_trust_region_force_increment_n": 0.25,
+        "fsi_coupling_trust_region_adaptive": True,
+        "fsi_coupling_trust_region_shrink_factor": 0.5,
+        "fsi_coupling_trust_region_growth_factor": 1.1,
+        "fsi_coupling_trust_region_rebound_factor": 1.5,
+        "fsi_coupling_trust_region_rebound_backtrack": 0.5,
+        "fsi_coupling_trust_region_rebound_stop_factor": 2.0,
+        "fsi_coupling_trust_region_rebound_stop_max_residual_n": math.inf,
+    },
+    "aggressive": {
+        "fsi_coupling_target_map_relaxation": 0.65,
+        "fsi_coupling_rejected_trial_backtrack": 0.75,
+        "fsi_coupling_residual_growth_rejection_factor": 2.0,
+        "fsi_coupling_max_accepted_residual_n": math.inf,
+        "fsi_coupling_trust_region_force_increment_n": 1.0,
+        "fsi_coupling_trust_region_adaptive": True,
+        "fsi_coupling_trust_region_shrink_factor": 0.7,
+        "fsi_coupling_trust_region_growth_factor": 1.25,
+        "fsi_coupling_trust_region_rebound_factor": 3.0,
+        "fsi_coupling_trust_region_rebound_backtrack": 0.65,
+        "fsi_coupling_trust_region_rebound_stop_factor": 4.0,
+        "fsi_coupling_trust_region_rebound_stop_max_residual_n": math.inf,
+    },
+}
+
+
 FINITE_REQUIRED_ROW_FIELDS = (
     "main_displacement_z_m",
     "tail_displacement_z_m",
@@ -126,12 +190,22 @@ FINITE_REQUIRED_ROW_FIELDS = (
     "main_fsi_volume_source_m3s",
     "tail_fsi_volume_source_m3s",
     "pressure_outlet_source_volume_flux_m3s",
+    "pressure_outlet_positive_source_volume_flux_m3s",
+    "pressure_outlet_abs_source_volume_flux_m3s",
     "pressure_outlet_reachable_source_volume_flux_m3s",
     "pressure_outlet_unreached_source_volume_flux_m3s",
+    "pressure_outlet_reachability_valid",
+    "pressure_outlet_reachability_revision",
     "pressure_outlet_velocity_flux_m3s",
     "pressure_outlet_velocity_to_source_ratio",
+    "pressure_outlet_velocity_to_net_source_ratio",
+    "pressure_outlet_velocity_to_positive_source_ratio",
+    "pressure_outlet_velocity_to_abs_source_ratio",
     "pressure_outlet_pressure_flux_m3s",
     "pressure_outlet_pressure_to_source_ratio",
+    "pressure_outlet_pressure_to_net_source_ratio",
+    "pressure_outlet_pressure_to_positive_source_ratio",
+    "pressure_outlet_pressure_to_abs_source_ratio",
     "pressure_outlet_projection_pre_velocity_flux_m3s",
     "pressure_outlet_projection_post_pressure_velocity_flux_m3s",
     "pressure_outlet_projection_post_boundary_velocity_flux_m3s",
@@ -352,6 +426,16 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_no_slip_residual_other_region_valid_marker_count",
     "hibm_no_slip_residual_other_region_invalid_marker_count",
     "hibm_post_solid_kinematic_projection_applied",
+    "hibm_post_solid_divergence_l2",
+    "hibm_post_solid_divergence_max_abs",
+    "hibm_post_solid_interior_divergence_l2",
+    "hibm_post_solid_interior_divergence_max_abs",
+    "hibm_post_solid_projection_divergence_l2",
+    "hibm_post_solid_projection_divergence_max_abs",
+    "hibm_post_solid_post_boundary_divergence_l2",
+    "hibm_post_solid_post_boundary_divergence_max_abs",
+    "hibm_post_solid_post_constraint_divergence_l2",
+    "hibm_post_solid_post_constraint_divergence_max_abs",
     "hibm_post_solid_no_slip_residual_valid_marker_count",
     "hibm_post_solid_no_slip_residual_invalid_marker_count",
     "hibm_post_solid_no_slip_residual_max_mps",
@@ -391,6 +475,9 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_marker_secondary_force_norm_max_n",
     "hibm_marker_total_force_norm_max_n",
     "hibm_marker_action_reaction_residual_n",
+    "hibm_mpm_external_force_clear_particle_count",
+    "hibm_mpm_external_force_clear_max_abs_before_n",
+    "hibm_mpm_external_force_fresh_for_solid_step",
     "hibm_mpm_scatter_action_reaction_residual_n",
     "hibm_surface_updated_marker_count",
     "hibm_surface_invalid_marker_count",
@@ -447,6 +534,21 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "fsi_grid_force_y_n",
     "fsi_grid_force_z_n",
     "fsi_volume_source_m3s",
+    "pressure_outlet_source_volume_flux_m3s",
+    "pressure_outlet_positive_source_volume_flux_m3s",
+    "pressure_outlet_abs_source_volume_flux_m3s",
+    "pressure_outlet_reachability_valid",
+    "pressure_outlet_reachability_revision",
+    "pressure_outlet_velocity_flux_m3s",
+    "pressure_outlet_velocity_to_source_ratio",
+    "pressure_outlet_velocity_to_net_source_ratio",
+    "pressure_outlet_velocity_to_positive_source_ratio",
+    "pressure_outlet_velocity_to_abs_source_ratio",
+    "pressure_outlet_pressure_flux_m3s",
+    "pressure_outlet_pressure_to_source_ratio",
+    "pressure_outlet_pressure_to_net_source_ratio",
+    "pressure_outlet_pressure_to_positive_source_ratio",
+    "pressure_outlet_pressure_to_abs_source_ratio",
     "solid_mpm_transfer_relative_error",
     "solid_mpm_max_speed_mps",
     "solid_mpm_grid_out_of_bounds_particle_count",
@@ -512,6 +614,7 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "interface_reaction_robin_matrix_impedance_ns_m",
     "interface_reaction_robin_target_mode",
     "fsi_coupling_mode",
+    "fsi_stabilization_preset",
     "fsi_coupling_solver",
     "fsi_coupling_target_map_relaxation",
     "fsi_coupling_rejected_trial_backtrack",
@@ -540,6 +643,7 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "fsi_coupling_adaptive_iterations_cfl_threshold",
     "fsi_coupling_same_step_rerun_iterations_max",
     "fsi_coupling_same_step_rerun_residual_threshold_n",
+    "fsi_coupling_same_step_rerun_fluid_substep_factor",
     "fsi_coupling_residual_continuation_iterations_max",
     "fsi_coupling_residual_continuation_threshold_n",
     "fsi_coupling_residual_continuation_rebound_secant_from_best",
@@ -568,6 +672,58 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "diagnostic_disable_pressure_neumann_matrix_rows",
     "arch",
 )
+
+
+def resolve_fsi_stabilization_preset_parameters(preset: str) -> dict[str, object]:
+    preset_name = str(preset)
+    if preset_name not in _FSI_STABILIZATION_PRESET_PARAMETERS:
+        choices = ", ".join(FSI_STABILIZATION_PRESET_CHOICES)
+        raise ValueError(f"--fsi-stabilization-preset must be one of: {choices}")
+    return dict(_FSI_STABILIZATION_PRESET_PARAMETERS[preset_name])
+
+
+def _raw_cli_option_present(raw_args: Sequence[str], option: str) -> bool:
+    prefix = f"{option}="
+    return any(token == option or token.startswith(prefix) for token in raw_args)
+
+
+def _fsi_stabilization_preset_conflicts(raw_args: Sequence[str]) -> tuple[str, ...]:
+    return tuple(
+        f"--{field.replace('_', '-')}"
+        for field in FSI_STABILIZATION_PRESET_MANAGED_FIELDS
+        if _raw_cli_option_present(raw_args, f"--{field.replace('_', '-')}")
+    )
+
+
+def _apply_fsi_stabilization_preset(
+    args: argparse.Namespace,
+    *,
+    raw_args: Sequence[str],
+    parser: argparse.ArgumentParser,
+) -> None:
+    preset_name = str(args.fsi_stabilization_preset)
+    if preset_name == "off":
+        return
+    conflicts = _fsi_stabilization_preset_conflicts(raw_args)
+    if conflicts:
+        parser.error(
+            "--fsi-stabilization-preset cannot be combined with explicit "
+            f"managed options under {FSI_STABILIZATION_PRESET_CONFLICT_POLICY}: "
+            + ", ".join(conflicts)
+        )
+    for field, value in resolve_fsi_stabilization_preset_parameters(
+        preset_name
+    ).items():
+        setattr(args, field, value)
+
+
+def fsi_stabilization_effective_parameters_from_args(
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    return {
+        field: getattr(args, field)
+        for field in FSI_STABILIZATION_PRESET_MANAGED_FIELDS
+    }
 
 
 def finite_required_row_fields_for_solid_model(solid_model: str) -> tuple[str, ...]:
@@ -2091,16 +2247,40 @@ def fsi_same_step_rerun_triggered(
     residual_norm_n: float,
     residual_threshold_n: float,
     converged: bool,
+    safety_rejected: bool = False,
 ) -> bool:
     """Return whether a projected/reduced FSI step should be rerun in-place."""
     if rerun_iterations_max <= current_iterations_requested:
         return False
+    if safety_rejected:
+        return True
     if not math.isfinite(residual_threshold_n):
         return False
     residual = float(residual_norm_n)
     if math.isnan(residual):
         return False
     return (not bool(converged)) and residual > residual_threshold_n
+
+
+def fsi_same_step_rerun_fluid_substeps(
+    *,
+    current_substeps: int,
+    max_substeps: int,
+    substep_factor: float,
+    safety_rejected: bool,
+) -> int:
+    """Return same-step fluid substeps after an all-rejected safety attempt."""
+    current = int(current_substeps)
+    maximum = int(max_substeps)
+    factor = float(substep_factor)
+    if current < 1 or maximum <= current:
+        return current
+    if not safety_rejected:
+        return current
+    if not math.isfinite(factor) or factor <= 1.0:
+        return current
+    requested = max(current + 1, int(math.ceil(float(current) * factor)))
+    return min(maximum, requested)
 
 
 def fsi_trial_acceptance_passes(
@@ -2477,6 +2657,14 @@ def build_hibm_mpm_sharp_case_row(
                 pressure_outlet_report,
                 "source_volume_flux_m3s",
             ),
+            "pressure_outlet_positive_source_volume_flux_m3s": _mapping_float(
+                pressure_outlet_report,
+                "positive_source_volume_flux_m3s",
+            ),
+            "pressure_outlet_abs_source_volume_flux_m3s": _mapping_float(
+                pressure_outlet_report,
+                "abs_source_volume_flux_m3s",
+            ),
             "pressure_outlet_reachable_source_volume_flux_m3s": _mapping_float(
                 pressure_outlet_report,
                 "zmin_reachable_source_volume_flux_m3s",
@@ -2484,6 +2672,13 @@ def build_hibm_mpm_sharp_case_row(
             "pressure_outlet_unreached_source_volume_flux_m3s": _mapping_float(
                 pressure_outlet_report,
                 "zmin_unreached_source_volume_flux_m3s",
+            ),
+            "pressure_outlet_reachability_valid": bool(
+                pressure_outlet_report.get("zmin_reachability_valid", False)
+            ),
+            "pressure_outlet_reachability_revision": _mapping_int(
+                pressure_outlet_report,
+                "zmin_reachability_revision",
             ),
             "pressure_outlet_reachable_source_cell_count": _mapping_int(
                 pressure_outlet_report,
@@ -2541,6 +2736,18 @@ def build_hibm_mpm_sharp_case_row(
                 pressure_outlet_report,
                 "zmin_velocity_outlet_to_source_ratio",
             ),
+            "pressure_outlet_velocity_to_net_source_ratio": _mapping_float(
+                pressure_outlet_report,
+                "zmin_velocity_outlet_to_net_source_ratio",
+            ),
+            "pressure_outlet_velocity_to_positive_source_ratio": _mapping_float(
+                pressure_outlet_report,
+                "zmin_velocity_outlet_to_positive_source_ratio",
+            ),
+            "pressure_outlet_velocity_to_abs_source_ratio": _mapping_float(
+                pressure_outlet_report,
+                "zmin_velocity_outlet_to_abs_source_ratio",
+            ),
             "pressure_outlet_pressure_flux_m3s": _mapping_float(
                 pressure_outlet_report,
                 "zmin_pressure_outlet_flux_m3s",
@@ -2548,6 +2755,18 @@ def build_hibm_mpm_sharp_case_row(
             "pressure_outlet_pressure_to_source_ratio": _mapping_float(
                 pressure_outlet_report,
                 "zmin_pressure_outlet_to_source_ratio",
+            ),
+            "pressure_outlet_pressure_to_net_source_ratio": _mapping_float(
+                pressure_outlet_report,
+                "zmin_pressure_outlet_to_net_source_ratio",
+            ),
+            "pressure_outlet_pressure_to_positive_source_ratio": _mapping_float(
+                pressure_outlet_report,
+                "zmin_pressure_outlet_to_positive_source_ratio",
+            ),
+            "pressure_outlet_pressure_to_abs_source_ratio": _mapping_float(
+                pressure_outlet_report,
+                "zmin_pressure_outlet_to_abs_source_ratio",
             ),
             "pressure_outlet_projection_pre_velocity_flux_m3s": _mapping_float(
                 pressure_outlet_report,
@@ -7686,6 +7905,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "--fsi-coupling-same-step-rerun-residual-threshold-n must be "
             "non-negative or infinity"
         )
+    fsi_coupling_same_step_rerun_fluid_substep_factor = float(
+        args.fsi_coupling_same_step_rerun_fluid_substep_factor
+    )
+    if (
+        not math.isfinite(fsi_coupling_same_step_rerun_fluid_substep_factor)
+        or fsi_coupling_same_step_rerun_fluid_substep_factor < 1.0
+    ):
+        raise ValueError(
+            "--fsi-coupling-same-step-rerun-fluid-substep-factor must be "
+            "finite and at least 1"
+        )
     fsi_coupling_residual_continuation_iterations_max = int(
         args.fsi_coupling_residual_continuation_iterations_max
     )
@@ -7897,6 +8127,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "--fsi-coupling-trust-region-adaptive requires a finite "
             "--fsi-coupling-trust-region-force-increment-n"
         )
+    fsi_stabilization_preset = str(args.fsi_stabilization_preset)
+    fsi_stabilization_effective_parameters = (
+        fsi_stabilization_effective_parameters_from_args(args)
+    )
     fsi_coupling_mode = str(args.fsi_coupling_mode)
     fsi_coupling_mode_report = require_implemented_fsi_coupling_mode(fsi_coupling_mode)
     sharp_case_runner_enabled = fsi_coupling_mode == FSI_COUPLING_MODE_HIBM_MPM_SHARP
@@ -8186,6 +8420,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         grid=grid_for_effective_cycles,
     )
     effective_fluid_substep_dt_s = float(spec.dt_s) / float(effective_fluid_substeps)
+    solid_response_dt_s = float(spec.dt_s)
+    fsi_solid_response_dt_s = solid_response_dt_s
     adaptive_fluid_substeps_enabled = bool(args.adaptive_fluid_substeps)
     fluid_substep_controller = (
         CflSubstepController(
@@ -8245,6 +8481,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "divergence_cleanup_iterations": projection_divergence_cleanup_iterations,
             "fsi_coupling_mode": fsi_coupling_mode,
             "fsi_coupling_mode_report": fsi_coupling_mode_report,
+            "fsi_stabilization_preset": fsi_stabilization_preset,
+            "fsi_stabilization_preset_conflict_policy": (
+                FSI_STABILIZATION_PRESET_CONFLICT_POLICY
+            ),
+            "fsi_stabilization_effective_parameters": (
+                fsi_stabilization_effective_parameters
+            ),
             "steps": step_count,
             "full_pressure_waveform_steps": full_pressure_waveform_steps,
             "steps_explicit": bool(getattr(args, "steps_explicit", True)),
@@ -8291,6 +8534,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             ),
             "fsi_coupling_same_step_rerun_residual_threshold_n": (
                 fsi_coupling_same_step_rerun_residual_threshold_n
+            ),
+            "fsi_coupling_same_step_rerun_fluid_substep_factor": (
+                fsi_coupling_same_step_rerun_fluid_substep_factor
             ),
             "fsi_coupling_residual_continuation_iterations_max": (
                 fsi_coupling_residual_continuation_iterations_max
@@ -9020,6 +9266,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         fsi_coupling_same_step_rerun_initial_iterations_used = 0
         fsi_coupling_same_step_rerun_initial_residual_norm_n = math.nan
         fsi_coupling_same_step_rerun_initial_converged = False
+        fsi_coupling_same_step_rerun_safety_rejected = False
+        fsi_coupling_same_step_rerun_initial_fluid_substeps = step_fluid_substeps
+        fsi_coupling_same_step_rerun_final_fluid_substeps = step_fluid_substeps
         fsi_coupling_wall_time_s = 0.0
         solid_advance_wall_time_s = 0.0
         fluid_advance_wall_time_s = 0.0
@@ -9076,8 +9325,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         fsi_coupling_physical_residual_history_n: tuple[tuple[float, ...], ...] = ()
         fsi_coupling_raw_target_force_history_n: tuple[tuple[float, ...], ...] = ()
         fsi_coupling_raw_residual_history_n: tuple[tuple[float, ...], ...] = ()
+        fixed_point_result = None
         accepted_fsi_trial_payload: dict[str, object] | None = None
         accepted_fsi_trial_state_reused = False
+        accepted_fsi_trial_state_readvanced = False
+        fsi_all_trials_rejected = False
+        fsi_zero_force_commit_blocked = False
         fsi_trial_pressure_projection_cg_project_calls = 0
         fsi_trial_pressure_projection_cg_iterations_total = 0
         fsi_trial_pressure_projection_cg_iterations_max = 0
@@ -9121,11 +9374,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ) -> tuple[float, float]:
             if not fsi_solid_response_mobility_coupling:
                 return 0.0, 0.0
-            correction_dt_s = (
-                float(spec.dt_s)
-                / float(step_fluid_substeps)
-                / float(max(1, int(args.ibm_correction_iterations)))
-            )
             primary_ratio = solid_response_constraint_force_mobility_ratio(
                 previous_velocity_mps=z_velocity_vector(step_start_main_velocity_z_mps),
                 current_velocity_mps=solid_report.primary_mean_velocity_mps,
@@ -9133,7 +9381,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 interface_area_m2=primary_fsi_face_area_m2,
                 probe_distance_m=fluid_probe_distance_m,
                 density_kgm3=spec.water_density_kgm3,
-                dt_s=correction_dt_s,
+                dt_s=solid_response_dt_s,
             )
             secondary_ratio = solid_response_constraint_force_mobility_ratio(
                 previous_velocity_mps=z_velocity_vector(step_start_tail_velocity_z_mps),
@@ -9142,7 +9390,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 interface_area_m2=secondary_fsi_face_area_m2,
                 probe_distance_m=fluid_probe_distance_m,
                 density_kgm3=spec.water_density_kgm3,
-                dt_s=correction_dt_s,
+                dt_s=solid_response_dt_s,
             )
             return primary_ratio, secondary_ratio
 
@@ -9155,11 +9403,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             base_ratio = fsi_velocity_target_solid_mobility_ratio
             if not fsi_solid_response_velocity_mobility_coupling:
                 return base_ratio, base_ratio
-            correction_dt_s = (
-                float(spec.dt_s)
-                / float(step_fluid_substeps)
-                / float(max(1, int(args.ibm_correction_iterations)))
-            )
             primary_ratio = base_ratio + solid_response_constraint_force_mobility_ratio(
                 previous_velocity_mps=z_velocity_vector(step_start_main_velocity_z_mps),
                 current_velocity_mps=solid_report.primary_mean_velocity_mps,
@@ -9167,7 +9410,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 interface_area_m2=primary_fsi_face_area_m2,
                 probe_distance_m=fluid_probe_distance_m,
                 density_kgm3=spec.water_density_kgm3,
-                dt_s=correction_dt_s,
+                dt_s=solid_response_dt_s,
             )
             secondary_ratio = base_ratio + solid_response_constraint_force_mobility_ratio(
                 previous_velocity_mps=z_velocity_vector(step_start_tail_velocity_z_mps),
@@ -9176,7 +9419,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 interface_area_m2=secondary_fsi_face_area_m2,
                 probe_distance_m=fluid_probe_distance_m,
                 density_kgm3=spec.water_density_kgm3,
-                dt_s=correction_dt_s,
+                dt_s=solid_response_dt_s,
             )
             return primary_ratio, secondary_ratio
 
@@ -9562,7 +9805,21 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             fixed_point_result = solve_fsi_interface_reaction_attempt(
                 step_fsi_coupling_iterations
             )
-            if fsi_same_step_rerun_triggered(
+            fsi_coupling_first_attempt_safety_rejected = (
+                fixed_point_result.accepted_trial_index is None
+                and fixed_point_result.rejected_trial_count > 0
+            )
+            fsi_coupling_same_step_rerun_next_fluid_substeps = (
+                fsi_same_step_rerun_fluid_substeps(
+                    current_substeps=step_fluid_substeps,
+                    max_substeps=int(args.adaptive_fluid_substeps_max),
+                    substep_factor=(
+                        fsi_coupling_same_step_rerun_fluid_substep_factor
+                    ),
+                    safety_rejected=fsi_coupling_first_attempt_safety_rejected,
+                )
+            )
+            fsi_coupling_same_step_iteration_rerun = fsi_same_step_rerun_triggered(
                 current_iterations_requested=step_fsi_coupling_iterations,
                 rerun_iterations_max=fsi_coupling_same_step_rerun_iterations_max,
                 residual_norm_n=fixed_point_result.residual_norm_n,
@@ -9570,6 +9827,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     fsi_coupling_same_step_rerun_residual_threshold_n
                 ),
                 converged=fixed_point_result.converged,
+                safety_rejected=fsi_coupling_first_attempt_safety_rejected,
+            )
+            fsi_coupling_same_step_fluid_substep_rerun = (
+                fsi_coupling_same_step_rerun_next_fluid_substeps
+                > step_fluid_substeps
+            )
+            if (
+                fsi_coupling_same_step_iteration_rerun
+                or fsi_coupling_same_step_fluid_substep_rerun
             ):
                 fsi_coupling_same_step_rerun_triggered = True
                 fsi_coupling_same_step_rerun_count = 1
@@ -9585,10 +9851,27 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 fsi_coupling_same_step_rerun_initial_converged = (
                     fixed_point_result.converged
                 )
+                fsi_coupling_same_step_rerun_safety_rejected = (
+                    fsi_coupling_first_attempt_safety_rejected
+                )
+                fsi_coupling_same_step_rerun_initial_fluid_substeps = (
+                    step_fluid_substeps
+                )
                 restore_fsi_trial_state()
                 accepted_fsi_trial_payload = None
-                step_fsi_coupling_iterations = (
-                    fsi_coupling_same_step_rerun_iterations_max
+                if fsi_coupling_same_step_iteration_rerun:
+                    step_fsi_coupling_iterations = (
+                        fsi_coupling_same_step_rerun_iterations_max
+                    )
+                if fsi_coupling_same_step_fluid_substep_rerun:
+                    step_fluid_substeps = (
+                        fsi_coupling_same_step_rerun_next_fluid_substeps
+                    )
+                    step_fluid_substep_dt_s = float(spec.dt_s) / float(
+                        step_fluid_substeps
+                    )
+                fsi_coupling_same_step_rerun_final_fluid_substeps = (
+                    step_fluid_substeps
                 )
                 fixed_point_result = solve_fsi_interface_reaction_attempt(
                     step_fsi_coupling_iterations
@@ -9597,6 +9880,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             fsi_coupling_converged = fixed_point_result.converged
             fsi_coupling_residual_norm_n = fixed_point_result.residual_norm_n
             fsi_coupling_relaxation_effective = fixed_point_result.relaxation
+            fsi_all_trials_rejected = fixed_point_result.all_trials_rejected
+            fsi_zero_force_commit_blocked = fixed_point_result.zero_force_commit_blocked
             fsi_coupling_rejected_trial_count = fixed_point_result.rejected_trial_count
             fsi_coupling_rejected_trial_backtrack_count = (
                 fixed_point_result.rejected_trial_backtrack_count
@@ -10134,8 +10419,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             publish_solid_report_to_reduced_state(current_time_s, solid_mpm_report)
             sample_wall_started_at = time.perf_counter()
             fluid_substep_dt_s = step_fluid_substep_dt_s
+            latest_fluid_projection_report = (
+                sharp_report.post_solid_fluid_projection
+                if sharp_report.post_solid_fluid_projection is not None
+                else sharp_report.fluid_to_mpm_loads.fluid_projection
+            )
             sample_report = simulator.sample_after_projection(
-                sharp_report.fluid_to_mpm_loads.fluid_projection,
+                latest_fluid_projection_report,
                 dt_s=fluid_substep_dt_s,
             )
             pressure_outlet_report = simulator.fluid.pressure_outlet_fv_flux_report(
@@ -10179,6 +10469,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 expected_flux_m3s - downstream_negative_z_flux_m3s
             )
             row["accepted_fsi_trial_state_reused"] = False
+            row["accepted_fsi_trial_state_readvanced"] = False
+            row["fsi_all_trials_rejected"] = False
+            row["fsi_zero_force_commit_blocked"] = False
             row["fsi_coupling_wall_time_s"] = fsi_coupling_wall_time_s
             row["fsi_coupling_iqn_ils_least_squares_update_count"] = (
                 fsi_coupling_iqn_ils_least_squares_update_count
@@ -10407,6 +10700,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 raise RuntimeError("accepted FSI trial payload is missing reusable reports")
             accepted_fsi_trial_state_reused = True
         else:
+            accepted_fsi_trial_state_readvanced = (
+                fixed_point_result is not None
+                and fixed_point_result.accepted_trial_index is not None
+            )
             solid_wall_started_at = time.perf_counter()
             current_time_s = float(simulator.time_s[None])
             primary_interface_reaction_n = _taichi_vector3_to_tuple(
@@ -10570,11 +10867,23 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         row["pressure_outlet_source_volume_flux_m3s"] = pressure_outlet_report[
             "source_volume_flux_m3s"
         ]
+        row["pressure_outlet_positive_source_volume_flux_m3s"] = pressure_outlet_report[
+            "positive_source_volume_flux_m3s"
+        ]
+        row["pressure_outlet_abs_source_volume_flux_m3s"] = pressure_outlet_report[
+            "abs_source_volume_flux_m3s"
+        ]
         row["pressure_outlet_reachable_source_volume_flux_m3s"] = pressure_outlet_report[
             "zmin_reachable_source_volume_flux_m3s"
         ]
         row["pressure_outlet_unreached_source_volume_flux_m3s"] = pressure_outlet_report[
             "zmin_unreached_source_volume_flux_m3s"
+        ]
+        row["pressure_outlet_reachability_valid"] = bool(
+            pressure_outlet_report.get("zmin_reachability_valid", False)
+        )
+        row["pressure_outlet_reachability_revision"] = pressure_outlet_report[
+            "zmin_reachability_revision"
         ]
         row["pressure_outlet_reachable_source_cell_count"] = pressure_outlet_report[
             "zmin_reachable_source_cell_count"
@@ -10618,11 +10927,29 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         row["pressure_outlet_velocity_to_source_ratio"] = pressure_outlet_report[
             "zmin_velocity_outlet_to_source_ratio"
         ]
+        row["pressure_outlet_velocity_to_net_source_ratio"] = pressure_outlet_report[
+            "zmin_velocity_outlet_to_net_source_ratio"
+        ]
+        row["pressure_outlet_velocity_to_positive_source_ratio"] = pressure_outlet_report[
+            "zmin_velocity_outlet_to_positive_source_ratio"
+        ]
+        row["pressure_outlet_velocity_to_abs_source_ratio"] = pressure_outlet_report[
+            "zmin_velocity_outlet_to_abs_source_ratio"
+        ]
         row["pressure_outlet_pressure_flux_m3s"] = pressure_outlet_report[
             "zmin_pressure_outlet_flux_m3s"
         ]
         row["pressure_outlet_pressure_to_source_ratio"] = pressure_outlet_report[
             "zmin_pressure_outlet_to_source_ratio"
+        ]
+        row["pressure_outlet_pressure_to_net_source_ratio"] = pressure_outlet_report[
+            "zmin_pressure_outlet_to_net_source_ratio"
+        ]
+        row["pressure_outlet_pressure_to_positive_source_ratio"] = pressure_outlet_report[
+            "zmin_pressure_outlet_to_positive_source_ratio"
+        ]
+        row["pressure_outlet_pressure_to_abs_source_ratio"] = pressure_outlet_report[
+            "zmin_pressure_outlet_to_abs_source_ratio"
         ]
         row["pressure_outlet_projection_pre_velocity_flux_m3s"] = pressure_outlet_report[
             "zmin_projection_pre_velocity_outlet_flux_m3s"
@@ -10844,6 +11171,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         row["fsi_coupling_same_step_rerun_initial_converged"] = (
             fsi_coupling_same_step_rerun_initial_converged
         )
+        row["fsi_coupling_same_step_rerun_safety_rejected"] = (
+            fsi_coupling_same_step_rerun_safety_rejected
+        )
+        row["fsi_coupling_same_step_rerun_fluid_substep_factor"] = (
+            fsi_coupling_same_step_rerun_fluid_substep_factor
+        )
+        row["fsi_coupling_same_step_rerun_initial_fluid_substeps"] = (
+            fsi_coupling_same_step_rerun_initial_fluid_substeps
+        )
+        row["fsi_coupling_same_step_rerun_final_fluid_substeps"] = (
+            fsi_coupling_same_step_rerun_final_fluid_substeps
+        )
         row["fsi_coupling_residual_continuation_iterations_max"] = (
             fsi_coupling_residual_continuation_iterations_max
         )
@@ -10889,6 +11228,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         row["fsi_coupling_iterations_used"] = fsi_coupling_iterations_used
         row["fsi_coupling_enabled"] = fsi_coupling_enabled
         row["fsi_coupling_converged"] = fsi_coupling_converged
+        row["fsi_all_trials_rejected"] = fsi_all_trials_rejected
+        row["fsi_zero_force_commit_blocked"] = fsi_zero_force_commit_blocked
         row["fsi_coupling_residual_norm_n"] = fsi_coupling_residual_norm_n
         row["fsi_coupling_relaxation_effective"] = fsi_coupling_relaxation_effective
         row["fsi_coupling_rejected_trial_count"] = fsi_coupling_rejected_trial_count
@@ -11018,6 +11359,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             fsi_coupling_raw_residual_jacobian_amplification_sample_count
         )
         row["accepted_fsi_trial_state_reused"] = accepted_fsi_trial_state_reused
+        row["accepted_fsi_trial_state_readvanced"] = (
+            accepted_fsi_trial_state_readvanced
+        )
         row["fsi_coupling_trial_force_history_n"] = fsi_coupling_trial_force_history_n
         row["fsi_coupling_target_force_history_n"] = fsi_coupling_target_force_history_n
         row["fsi_coupling_residual_history_n"] = fsi_coupling_residual_history_n
@@ -11060,6 +11404,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         row["fsi_solid_response_mobility_coupling"] = (
             fsi_solid_response_mobility_coupling
         )
+        row["fsi_solid_response_dt_s"] = fsi_solid_response_dt_s
         row["fsi_velocity_target_solid_mobility_ratio"] = (
             fsi_velocity_target_solid_mobility_ratio
         )
@@ -12424,6 +12769,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             last,
             "fsi_volume_source_m3s",
         )
+        final_pressure_outlet_positive_source_volume_flux_m3s = _final_row_number(
+            last,
+            "pressure_outlet_positive_source_volume_flux_m3s",
+        )
+        final_pressure_outlet_abs_source_volume_flux_m3s = _final_row_number(
+            last,
+            "pressure_outlet_abs_source_volume_flux_m3s",
+        )
         final_pressure_outlet_reachable_source_volume_flux_m3s = _final_row_number(
             last,
             "pressure_outlet_reachable_source_volume_flux_m3s",
@@ -12479,6 +12832,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         final_pressure_outlet_unreached_source_max_z_m = _final_row_number_or_none(
             last,
             "pressure_outlet_unreached_source_max_z_m",
+        )
+        final_pressure_outlet_velocity_to_positive_source_ratio = _final_row_number(
+            last,
+            "pressure_outlet_velocity_to_positive_source_ratio",
+        )
+        final_pressure_outlet_velocity_to_abs_source_ratio = _final_row_number(
+            last,
+            "pressure_outlet_velocity_to_abs_source_ratio",
         )
         final_outlet_to_fsi_volume_source_ratio = signed_positive_source_flux_ratio(
             outlet_negative_z_flux_m3s=final_outlet_negative_z,
@@ -12783,6 +13144,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "timing_summary": timing_summary,
             "fsi_coupling_mode": fsi_coupling_mode,
             "fsi_coupling_mode_report": fsi_coupling_mode_report,
+            "fsi_stabilization_preset": fsi_stabilization_preset,
+            "fsi_stabilization_preset_conflict_policy": (
+                FSI_STABILIZATION_PRESET_CONFLICT_POLICY
+            ),
+            "fsi_stabilization_effective_parameters": (
+                fsi_stabilization_effective_parameters
+            ),
             "fsi_coupling_iterations_requested": fsi_coupling_iterations,
             "fsi_coupling_adaptive_iterations_max": (
                 fsi_coupling_adaptive_iterations_max
@@ -13125,6 +13493,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "max_outlet_negative_z_flow_m3s": max_outlet_negative_z,
             "final_outlet_negative_z_flow_m3s": final_outlet_negative_z,
             "final_fsi_volume_source_m3s": final_fsi_volume_source_m3s,
+            "final_pressure_outlet_positive_source_volume_flux_m3s": (
+                final_pressure_outlet_positive_source_volume_flux_m3s
+            ),
+            "final_pressure_outlet_abs_source_volume_flux_m3s": (
+                final_pressure_outlet_abs_source_volume_flux_m3s
+            ),
             "final_pressure_outlet_reachable_source_volume_flux_m3s": (
                 final_pressure_outlet_reachable_source_volume_flux_m3s
             ),
@@ -13166,6 +13540,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             ),
             "final_pressure_outlet_unreached_source_max_z_m": (
                 final_pressure_outlet_unreached_source_max_z_m
+            ),
+            "final_pressure_outlet_velocity_to_positive_source_ratio": (
+                final_pressure_outlet_velocity_to_positive_source_ratio
+            ),
+            "final_pressure_outlet_velocity_to_abs_source_ratio": (
+                final_pressure_outlet_velocity_to_abs_source_ratio
             ),
             "final_outlet_to_fsi_volume_source_ratio": (
                 final_outlet_to_fsi_volume_source_ratio
@@ -13539,6 +13919,29 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if rows
         else 0
     )
+    accepted_fsi_trial_state_readvance_count = (
+        sum(
+            1
+            for row in rows
+            if _row_bool(row.get("accepted_fsi_trial_state_readvanced", False))
+        )
+        if rows
+        else 0
+    )
+    fsi_all_trials_rejected_count = (
+        sum(1 for row in rows if _row_bool(row.get("fsi_all_trials_rejected", False)))
+        if rows
+        else 0
+    )
+    fsi_zero_force_commit_blocked_count = (
+        sum(
+            1
+            for row in rows
+            if _row_bool(row.get("fsi_zero_force_commit_blocked", False))
+        )
+        if rows
+        else 0
+    )
     max_abs_pressure_load_pa = (
         max(abs(float(row["pressure_load_pa"])) for row in rows) if rows else 0.0
     )
@@ -13582,6 +13985,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         last,
         "pressure_outlet_source_volume_flux_m3s",
     )
+    final_pressure_outlet_positive_source_volume_flux_m3s = _final_row_number(
+        last,
+        "pressure_outlet_positive_source_volume_flux_m3s",
+    )
+    final_pressure_outlet_abs_source_volume_flux_m3s = _final_row_number(
+        last,
+        "pressure_outlet_abs_source_volume_flux_m3s",
+    )
     final_pressure_outlet_reachable_source_volume_flux_m3s = _final_row_number(
         last,
         "pressure_outlet_reachable_source_volume_flux_m3s",
@@ -13589,6 +14000,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     final_pressure_outlet_unreached_source_volume_flux_m3s = _final_row_number(
         last,
         "pressure_outlet_unreached_source_volume_flux_m3s",
+    )
+    final_pressure_outlet_reachability_valid = (
+        _row_bool(last.get("pressure_outlet_reachability_valid", False))
+        if last is not None
+        else False
+    )
+    final_pressure_outlet_reachability_revision = _final_row_number(
+        last,
+        "pressure_outlet_reachability_revision",
     )
     final_pressure_outlet_reachable_source_cell_count = _final_row_number(
         last,
@@ -13646,6 +14066,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         last,
         "pressure_outlet_velocity_to_source_ratio",
     )
+    final_pressure_outlet_velocity_to_net_source_ratio = _final_row_number(
+        last,
+        "pressure_outlet_velocity_to_net_source_ratio",
+    )
+    final_pressure_outlet_velocity_to_positive_source_ratio = _final_row_number(
+        last,
+        "pressure_outlet_velocity_to_positive_source_ratio",
+    )
+    final_pressure_outlet_velocity_to_abs_source_ratio = _final_row_number(
+        last,
+        "pressure_outlet_velocity_to_abs_source_ratio",
+    )
     final_pressure_outlet_pressure_flux_m3s = _final_row_number(
         last,
         "pressure_outlet_pressure_flux_m3s",
@@ -13653,6 +14085,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     final_pressure_outlet_pressure_to_source_ratio = _final_row_number(
         last,
         "pressure_outlet_pressure_to_source_ratio",
+    )
+    final_pressure_outlet_pressure_to_net_source_ratio = _final_row_number(
+        last,
+        "pressure_outlet_pressure_to_net_source_ratio",
+    )
+    final_pressure_outlet_pressure_to_positive_source_ratio = _final_row_number(
+        last,
+        "pressure_outlet_pressure_to_positive_source_ratio",
+    )
+    final_pressure_outlet_pressure_to_abs_source_ratio = _final_row_number(
+        last,
+        "pressure_outlet_pressure_to_abs_source_ratio",
     )
     final_pressure_outlet_projection_pre_velocity_flux_m3s = _final_row_number(
         last,
@@ -14665,7 +15109,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "negative_z_outlet_flow_present": max_outlet_negative_z > 0.0,
         "final_negative_z_outlet_flow": final_outlet_negative_z > 0.0,
         "pressure_outlet_velocity_to_source_ratio_near_one": pressure_outlet_source_ratio_passes(
-            source_volume_flux_m3s=final_pressure_outlet_source_volume_flux_m3s,
+            source_volume_flux_m3s=(
+                final_pressure_outlet_positive_source_volume_flux_m3s
+            ),
             velocity_outlet_flux_m3s=final_pressure_outlet_velocity_flux_m3s,
             pressure_outlet_flux_m3s=final_pressure_outlet_pressure_flux_m3s,
             ratio_tolerance=pressure_outlet_source_ratio_tolerance,
@@ -14824,6 +15270,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "fsi_velocity_constraint_blend": fsi_velocity_constraint_blend,
         "fsi_constraint_force_solid_mobility_ratio": fsi_constraint_force_solid_mobility_ratio,
+        "fsi_solid_response_dt_s": fsi_solid_response_dt_s,
         "max_fsi_primary_response_constraint_force_solid_mobility_ratio": (
             max_fsi_primary_response_constraint_force_solid_mobility_ratio
         ),
@@ -14870,6 +15317,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "fsi_coupling_mode": fsi_coupling_mode,
         "fsi_coupling_mode_report": fsi_coupling_mode_report,
+        "fsi_stabilization_preset": fsi_stabilization_preset,
+        "fsi_stabilization_preset_conflict_policy": (
+            FSI_STABILIZATION_PRESET_CONFLICT_POLICY
+        ),
+        "fsi_stabilization_effective_parameters": (
+            fsi_stabilization_effective_parameters
+        ),
         "fsi_coupling_iterations_requested": fsi_coupling_iterations,
         "max_fsi_coupling_iterations_requested": (
             max_fsi_coupling_iterations_requested
@@ -14897,6 +15351,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "fsi_coupling_same_step_rerun_residual_threshold_n": (
             fsi_coupling_same_step_rerun_residual_threshold_n
+        ),
+        "fsi_coupling_same_step_rerun_fluid_substep_factor": (
+            fsi_coupling_same_step_rerun_fluid_substep_factor
         ),
         "total_fsi_coupling_same_step_rerun_triggered": (
             total_fsi_coupling_same_step_rerun_triggered
@@ -15114,6 +15571,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "fsi_coupling_not_converged_count": fsi_coupling_not_converged_count,
         "reuse_accepted_fsi_trial_state": reuse_accepted_fsi_trial_state,
         "accepted_fsi_trial_state_reuse_count": accepted_fsi_trial_state_reuse_count,
+        "accepted_fsi_trial_state_readvance_count": (
+            accepted_fsi_trial_state_readvance_count
+        ),
+        "fsi_all_trials_rejected_count": fsi_all_trials_rejected_count,
+        "fsi_zero_force_commit_blocked_count": fsi_zero_force_commit_blocked_count,
         "fsi_coupling_note": (
             "Physical MPM solid models use Taichi device-side reduced-state, solid, and "
             "fluid snapshots for step-internal interface-reaction fixed-point iterations when "
@@ -15434,11 +15896,23 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "max_abs_fsi_volume_source_m3s": max_abs_fsi_volume_source_m3s,
         "final_fsi_volume_source_m3s": final_fsi_volume_source_m3s,
         "final_pressure_outlet_source_volume_flux_m3s": final_pressure_outlet_source_volume_flux_m3s,
+        "final_pressure_outlet_positive_source_volume_flux_m3s": (
+            final_pressure_outlet_positive_source_volume_flux_m3s
+        ),
+        "final_pressure_outlet_abs_source_volume_flux_m3s": (
+            final_pressure_outlet_abs_source_volume_flux_m3s
+        ),
         "final_pressure_outlet_reachable_source_volume_flux_m3s": (
             final_pressure_outlet_reachable_source_volume_flux_m3s
         ),
         "final_pressure_outlet_unreached_source_volume_flux_m3s": (
             final_pressure_outlet_unreached_source_volume_flux_m3s
+        ),
+        "final_pressure_outlet_reachability_valid": (
+            final_pressure_outlet_reachability_valid
+        ),
+        "final_pressure_outlet_reachability_revision": (
+            final_pressure_outlet_reachability_revision
         ),
         "final_pressure_outlet_reachable_source_cell_count": (
             final_pressure_outlet_reachable_source_cell_count
@@ -15480,9 +15954,27 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "final_pressure_outlet_velocity_to_source_ratio": (
             final_pressure_outlet_velocity_to_source_ratio
         ),
+        "final_pressure_outlet_velocity_to_net_source_ratio": (
+            final_pressure_outlet_velocity_to_net_source_ratio
+        ),
+        "final_pressure_outlet_velocity_to_positive_source_ratio": (
+            final_pressure_outlet_velocity_to_positive_source_ratio
+        ),
+        "final_pressure_outlet_velocity_to_abs_source_ratio": (
+            final_pressure_outlet_velocity_to_abs_source_ratio
+        ),
         "final_pressure_outlet_pressure_flux_m3s": final_pressure_outlet_pressure_flux_m3s,
         "final_pressure_outlet_pressure_to_source_ratio": (
             final_pressure_outlet_pressure_to_source_ratio
+        ),
+        "final_pressure_outlet_pressure_to_net_source_ratio": (
+            final_pressure_outlet_pressure_to_net_source_ratio
+        ),
+        "final_pressure_outlet_pressure_to_positive_source_ratio": (
+            final_pressure_outlet_pressure_to_positive_source_ratio
+        ),
+        "final_pressure_outlet_pressure_to_abs_source_ratio": (
+            final_pressure_outlet_pressure_to_abs_source_ratio
         ),
         "final_pressure_outlet_projection_pre_velocity_flux_m3s": (
             final_pressure_outlet_projection_pre_velocity_flux_m3s
@@ -16224,6 +16716,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--fsi-coupling-same-step-rerun-fluid-substep-factor",
+        type=float,
+        default=1.0,
+        help=(
+            "Optional same-step fluid-substep multiplier used when every "
+            "projected/reduced FSI trial is rejected by safety gates. Values "
+            "above 1 rerun the current step with more fluid substeps, capped by "
+            "--adaptive-fluid-substeps-max; 1 disables this path."
+        ),
+    )
+    parser.add_argument(
         "--fsi-coupling-residual-continuation-iterations-max",
         type=int,
         default=0,
@@ -16297,6 +16800,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "sharp-interface HIBM-MPM solver path. legacy_projected_reduced is an "
             "explicit legacy diagnostic option that keeps the old projected-IBM "
             "plus reduced region-reaction path."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-stabilization-preset",
+        choices=FSI_STABILIZATION_PRESET_CHOICES,
+        default="off",
+        help=(
+            "Auditable bundle of existing FSI fixed-point stabilization controls. "
+            "off preserves the current explicit defaults; conservative and "
+            "aggressive expand to target-map relaxation, residual growth gates, "
+            "and force-increment trust-region settings without prescribing "
+            "pressure, velocity, or flow."
         ),
     )
     parser.add_argument(
@@ -16579,6 +17094,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     raw_args = sys.argv[1:] if argv is None else list(argv)
+    _apply_fsi_stabilization_preset(args, raw_args=raw_args, parser=parser)
     args.divergence_cleanup_iterations_explicit = any(
         token == "--divergence-cleanup-iterations"
         or token.startswith("--divergence-cleanup-iterations=")

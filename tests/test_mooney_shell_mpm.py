@@ -727,6 +727,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             bounds_padding_fraction=0.5,
             primary_region_id=1,
             secondary_region_id=2,
+            out_of_bounds_particle_tolerance=1,
         )
         rigid_translation = np.array([0.2, -0.1, 0.3], dtype=np.float32)
         translated_vertices = rest_vertices.astype(np.float32) + rigid_translation
@@ -762,6 +763,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             bounds_padding_fraction=0.5,
             primary_region_id=1,
             secondary_region_id=2,
+            out_of_bounds_particle_tolerance=1,
         )
         rigid_translation = np.array([0.2, -0.1, 0.3], dtype=np.float32)
         translated_vertices = rest_vertices.astype(np.float32) + rigid_translation
@@ -804,6 +806,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             secondary_region_id=8,
             grid_nodes=(16, 16, 16),
             bounds_padding_fraction=1.0,
+            out_of_bounds_particle_tolerance=1,
         )
         current = rest_vertices.astype(np.float32)
         displacement = np.zeros_like(current)
@@ -859,6 +862,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             bounds_padding_fraction=0.25,
             primary_region_id=1,
             secondary_region_id=2,
+            out_of_bounds_particle_tolerance=1,
         )
         positions = state.x.to_numpy()
         positions[0, 0] = float(state.bounds_max[0] + state.dx[0])
@@ -890,6 +894,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             bounds_padding_fraction=0.25,
             primary_region_id=1,
             secondary_region_id=2,
+            out_of_bounds_particle_tolerance=1,
         )
         positions = state.x.to_numpy()
         positions[0, 0] = float(state.bounds_max[0] + state.dx[0])
@@ -928,6 +933,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             bounds_padding_fraction=0.25,
             primary_region_id=1,
             secondary_region_id=2,
+            out_of_bounds_particle_tolerance=1,
         )
         dt_s = 0.1
         positions = state.x.to_numpy()
@@ -984,6 +990,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             face_region_id=np.array([7], dtype=np.int32),
             primary_region_id=7,
             secondary_region_id=8,
+            require_nonempty_region_counts=False,
             grid_nodes=(16, 16, 16),
         )
 
@@ -1071,6 +1078,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             secondary_region_id=8,
             primary_thickness_m=0.003,
             secondary_thickness_m=0.0025,
+            require_nonempty_region_counts=False,
             grid_nodes=(16, 16, 16),
             bounds_padding_fraction=1.0,
         )
@@ -1114,6 +1122,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             secondary_region_id=8,
             primary_thickness_m=0.003,
             secondary_thickness_m=0.0025,
+            require_nonempty_region_counts=False,
             grid_nodes=(16, 16, 16),
             bounds_padding_fraction=1.0,
         )
@@ -1152,6 +1161,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             fixed_region_id=5,
             primary_thickness_m=0.003,
             secondary_thickness_m=0.0025,
+            require_nonempty_region_counts=False,
             grid_nodes=(8, 8, 8),
             bounds_padding_fraction=10.0,
         )
@@ -1247,6 +1257,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             secondary_region_id=8,
             primary_thickness_m=0.003,
             secondary_thickness_m=0.0025,
+            require_nonempty_region_counts=False,
             grid_nodes=(16, 16, 16),
             bounds_padding_fraction=1.0,
         )
@@ -1357,6 +1368,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             secondary_region_id=8,
             primary_thickness_m=0.003,
             secondary_thickness_m=0.0025,
+            require_nonempty_region_counts=False,
             grid_nodes=(16, 16, 16),
             bounds_padding_fraction=1.0,
         )
@@ -1421,6 +1433,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             secondary_region_id=8,
             primary_thickness_m=0.003,
             secondary_thickness_m=0.0025,
+            require_nonempty_region_counts=False,
             grid_nodes=(16, 16, 16),
             bounds_padding_fraction=1.0,
         )
@@ -1464,6 +1477,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             secondary_region_id=8,
             primary_thickness_m=0.003,
             secondary_thickness_m=0.0025,
+            require_nonempty_region_counts=False,
             grid_nodes=(16, 16, 16),
             bounds_padding_fraction=1.0,
         )
@@ -1512,6 +1526,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             secondary_region_id=8,
             primary_thickness_m=0.003,
             secondary_thickness_m=0.0025,
+            require_nonempty_region_counts=False,
             grid_nodes=(16, 16, 16),
             bounds_padding_fraction=1.0,
         )
@@ -1601,6 +1616,7 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             fixed_region_id=5,
             primary_thickness_m=0.003,
             secondary_thickness_m=0.0025,
+            require_nonempty_region_counts=False,
             grid_nodes=(16, 16, 16),
             bounds_padding_fraction=1.0,
         )
@@ -1623,6 +1639,76 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
 
 
 class MooneyShellFullOutOfBoundsGuardTests(unittest.TestCase):
+    def test_tri_mooney_partial_out_of_bounds_raises(self) -> None:
+        mesh = SurfaceMesh(
+            vertices=np.array(
+                [
+                    [-0.004, -0.004, 0.0],
+                    [0.004, -0.004, 0.0],
+                    [-0.004, 0.004, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+            faces=np.array([[0, 1, 2]], dtype=np.int32),
+        )
+        state = TriMooneyShellMpmState(
+            mesh,
+            thickness_m=0.003,
+            density_kgm3=1040.0,
+            c1_pa=20.0,
+            c2_pa=10.0,
+            face_region_id=np.array([7], dtype=np.int32),
+            primary_region_id=7,
+            secondary_region_id=8,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.0025,
+            grid_nodes=(16, 16, 16),
+            bounds_padding_fraction=1.0,
+        )
+        positions = state.x.to_numpy()
+        positions[0, 0] = float(state.bounds_max[0] + 2.0 * state.dx[0])
+        state.x.from_numpy(positions.astype(np.float32))
+
+        with self.assertRaisesRegex(RuntimeError, "outside the background grid"):
+            state.advance_region_loads(
+                dt_s=1.0e-4,
+                primary_region_id=7,
+                secondary_region_id=8,
+                primary_area_load_npm2=(0.0, 0.0, -1000.0),
+                primary_interface_reaction_n=(0.0, 0.0, 0.0),
+                secondary_interface_reaction_n=(0.0, 0.0, 0.0),
+            )
+
+    def test_shell_region_counts_must_be_nonzero(self) -> None:
+        mesh = SurfaceMesh(
+            vertices=np.array(
+                [
+                    [-0.004, -0.004, 0.0],
+                    [0.004, -0.004, 0.0],
+                    [-0.004, 0.004, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+            faces=np.array([[0, 1, 2]], dtype=np.int32),
+        )
+        state = TriMooneyShellMpmState(
+            mesh,
+            thickness_m=0.003,
+            density_kgm3=1040.0,
+            c1_pa=20.0,
+            c2_pa=10.0,
+            face_region_id=np.array([7], dtype=np.int32),
+            primary_region_id=7,
+            secondary_region_id=8,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.0025,
+            grid_nodes=(16, 16, 16),
+            bounds_padding_fraction=1.0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "secondary shell region"):
+            state.step(dt_s=0.0, pressure_pa=0.0, velocity_damping=1.0)
+
     def test_tri_full_out_of_bounds_particle_set_raises_instead_of_zombie_zeroing(self) -> None:
         mesh = SurfaceMesh(
             vertices=np.array(

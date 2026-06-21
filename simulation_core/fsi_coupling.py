@@ -81,6 +81,9 @@ class InterfaceReactionFixedPointResult:
     accepted_trial_index: int | None = None
     accepted_state_reusable: bool = False
     accepted_payload: object | None = None
+    all_trials_rejected: bool = False
+    zero_force_commit_blocked: bool = False
+    fallback_force_source: str = ""
     rejected_trial_count: int = 0
     rejected_trial_backtrack_count: int = 0
     residual_growth_rejected_trial_count: int = 0
@@ -735,6 +738,7 @@ def solve_interface_reaction_fixed_point(
     residual_continuation_rebound_secant_from_best: bool = False,
     residual_continuation_rebound_secant_factor: float = math.inf,
     residual_continuation_rebound_secant_evaluation_extensions_max: int = 0,
+    all_rejected_trial_policy: str = "raise",
 ) -> InterfaceReactionFixedPointResult:
     """Run an interface-reaction fixed-point solve around caller-managed snapshots."""
     if max_iterations < 1:
@@ -768,6 +772,10 @@ def solve_interface_reaction_fixed_point(
     )
     if not 0.0 < rejected_trial_backtrack_value <= 1.0:
         raise ValueError("rejected_trial_backtrack must be finite and in (0, 1]")
+    if all_rejected_trial_policy not in {"raise", "initial_force"}:
+        raise ValueError(
+            "all_rejected_trial_policy must be 'raise' or 'initial_force'"
+        )
     residual_growth_rejection_factor_value = float(residual_growth_rejection_factor)
     if not (
         math.isinf(residual_growth_rejection_factor_value)
@@ -894,8 +902,9 @@ def solve_interface_reaction_fixed_point(
     )
 
     reaction_guess = _force_vector(initial_force_n, name="initial_force_n")
+    initial_reaction_force_n = reaction_guess
     previous_residual: ForceVector | None = None
-    previous_trial_residual_norm_n: float | None = None
+    previous_accepted_residual_norm_n: float | None = None
     relaxation = _finite_float(initial_relaxation, name="initial_relaxation")
     residual_norm_n = 0.0
     converged = False
@@ -982,28 +991,6 @@ def solve_interface_reaction_fixed_point(
         diagnostic_target_force_history.append(diagnostic_target)
         diagnostic_residual_history.append(diagnostic_residual)
         residual_norm_n = math.sqrt(sum(component * component for component in physical_residual))
-        if (
-            trust_region_adaptive_enabled
-            and previous_trial_residual_norm_n is not None
-        ):
-            if residual_norm_n > previous_trial_residual_norm_n:
-                updated_increment = (
-                    trust_region_effective_force_increment_n
-                    * trust_region_shrink_factor_value
-                )
-                if updated_increment < trust_region_effective_force_increment_n:
-                    trust_region_shrink_count += 1
-                trust_region_effective_force_increment_n = updated_increment
-            elif residual_norm_n < previous_trial_residual_norm_n:
-                updated_increment = min(
-                    trust_region_force_increment_value,
-                    trust_region_effective_force_increment_n
-                    * trust_region_growth_factor_value,
-                )
-                if updated_increment > trust_region_effective_force_increment_n:
-                    trust_region_growth_count += 1
-                trust_region_effective_force_increment_n = updated_increment
-        previous_trial_residual_norm_n = residual_norm_n
         iterations_used = iteration + 1
         trial_accepted_by_predicate = (
             True if accept_evaluation is None else bool(accept_evaluation(evaluation))
@@ -1039,6 +1026,29 @@ def solve_interface_reaction_fixed_point(
         )
         if not trial_accepted:
             rejected_trial_count += 1
+        if (
+            trust_region_adaptive_enabled
+            and previous_accepted_residual_norm_n is not None
+        ):
+            if residual_norm_n > previous_accepted_residual_norm_n:
+                updated_increment = (
+                    trust_region_effective_force_increment_n
+                    * trust_region_shrink_factor_value
+                )
+                if updated_increment < trust_region_effective_force_increment_n:
+                    trust_region_shrink_count += 1
+                trust_region_effective_force_increment_n = updated_increment
+            elif trial_accepted and residual_norm_n < previous_accepted_residual_norm_n:
+                updated_increment = min(
+                    trust_region_force_increment_value,
+                    trust_region_effective_force_increment_n
+                    * trust_region_growth_factor_value,
+                )
+                if updated_increment > trust_region_effective_force_increment_n:
+                    trust_region_growth_count += 1
+                trust_region_effective_force_increment_n = updated_increment
+        if trial_accepted:
+            previous_accepted_residual_norm_n = residual_norm_n
         if trial_accepted and residual_norm_n <= accepted_residual_norm_n:
             accepted_force_n = reaction_guess
             accepted_velocity_mps = velocity
@@ -1212,18 +1222,21 @@ def solve_interface_reaction_fixed_point(
             trust_region_limited_update_count += 1
         iteration += 1
 
-    if (
-        accepted_trial_index is None
-        and rejected_trial_count > 0
-        and rejected_trial_backtrack_value < 1.0
-    ):
-        # All evaluated trials violated the caller's safety predicate; do not
-        # commit the unsafe initial/rejected force.
-        accepted_force_n = tuple(0.0 for _ in reaction_guess)
-        accepted_velocity_mps = tuple(0.0 for _ in reaction_guess)
-        accepted_target_force_n = accepted_force_n
-        accepted_residual_norm_n = math.inf
+    all_trials_rejected = accepted_trial_index is None and rejected_trial_count > 0
+    zero_force_commit_blocked = False
+    fallback_force_source = ""
+    if all_trials_rejected:
+        zero_force_commit_blocked = True
         converged = False
+        if all_rejected_trial_policy == "raise":
+            raise RuntimeError(
+                "all FSI trials rejected; refusing to commit zero interface force"
+            )
+        accepted_force_n = initial_reaction_force_n
+        accepted_velocity_mps = tuple(0.0 for _ in initial_reaction_force_n)
+        accepted_target_force_n = initial_reaction_force_n
+        accepted_residual_norm_n = math.inf
+        fallback_force_source = "initial_force"
 
     if passivity_limit and accepted_trial_index is not None:
         force_before_passivity = accepted_force_n
@@ -1294,6 +1307,9 @@ def solve_interface_reaction_fixed_point(
         accepted_trial_index=accepted_trial_index,
         accepted_state_reusable=accepted_state_reusable,
         accepted_payload=accepted_payload,
+        all_trials_rejected=all_trials_rejected,
+        zero_force_commit_blocked=zero_force_commit_blocked,
+        fallback_force_source=fallback_force_source,
         rejected_trial_count=rejected_trial_count,
         rejected_trial_backtrack_count=rejected_trial_backtrack_count,
         residual_growth_rejected_trial_count=residual_growth_rejected_trial_count,
@@ -1381,6 +1397,7 @@ def solve_and_apply_interface_reaction_step(
     residual_continuation_rebound_secant_from_best: bool = False,
     residual_continuation_rebound_secant_factor: float = math.inf,
     residual_continuation_rebound_secant_evaluation_extensions_max: int = 0,
+    all_rejected_trial_policy: str = "raise",
 ) -> InterfaceReactionFixedPointResult:
     """Solve one partitioned FSI step and commit the accepted interface force.
 
@@ -1433,6 +1450,7 @@ def solve_and_apply_interface_reaction_step(
             residual_continuation_rebound_secant_evaluation_extensions_max=(
                 residual_continuation_rebound_secant_evaluation_extensions_max
             ),
+            all_rejected_trial_policy=all_rejected_trial_policy,
         )
     finally:
         if (

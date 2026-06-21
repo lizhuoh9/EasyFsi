@@ -352,6 +352,7 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
             bounds_min_m=(-1.0, -1.0, 0.5),
             bounds_max_m=(1.0, 1.0, 2.0),
             grid_nodes=(16, 16, 16),
+            out_of_bounds_particle_tolerance=1,
         )
         state.initialize_box(
             particle_counts=(2, 2, 2),
@@ -380,6 +381,7 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
             bounds_min_m=(-1.0, -1.0, 0.5),
             bounds_max_m=(1.0, 1.0, 2.0),
             grid_nodes=(16, 16, 16),
+            out_of_bounds_particle_tolerance=1,
         )
         state.initialize_box(
             particle_counts=(2, 2, 2),
@@ -415,6 +417,7 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
             bounds_min_m=(-0.02, -0.02, -0.02),
             bounds_max_m=(0.02, 0.02, 0.02),
             grid_nodes=(8, 8, 8),
+            out_of_bounds_particle_tolerance=1,
         )
         state.initialize_box(
             particle_counts=(2, 2, 2),
@@ -450,6 +453,7 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
             bounds_min_m=(-0.02, -0.02, -0.02),
             bounds_max_m=(0.02, 0.02, 0.02),
             grid_nodes=(12, 12, 12),
+            out_of_bounds_particle_tolerance=1,
         )
         state.initialize_box(
             particle_counts=(3, 1, 1),
@@ -998,7 +1002,7 @@ class NeoHookeanFullOutOfBoundsGuardTests(unittest.TestCase):
                 secondary_region_id=2,
             )
 
-    def test_partial_out_of_bounds_remains_a_counted_diagnostic(self) -> None:
+    def test_neo_hookean_partial_out_of_bounds_raises(self) -> None:
         material = ecoflex_0010_material()
         state = NeoHookeanMpmState(
             particle_capacity=8,
@@ -1016,17 +1020,53 @@ class NeoHookeanFullOutOfBoundsGuardTests(unittest.TestCase):
         translated[0, 0] = float(state.bounds_max[0] + 2.0 * state.dx[0])
         state.x.from_numpy(translated.astype(np.float32))
 
-        report = state.step(
-            dt_s=1.0e-5,
-            mu_pa=material.shear_modulus_pa,
-            lambda_pa=material.lame_lambda_pa,
-            primary_region_id=1,
-            secondary_region_id=2,
+        with self.assertRaisesRegex(RuntimeError, "outside the background grid"):
+            state.step(
+                dt_s=1.0e-5,
+                mu_pa=material.shear_modulus_pa,
+                lambda_pa=material.lame_lambda_pa,
+                primary_region_id=1,
+                secondary_region_id=2,
+            )
+
+    def test_neo_hookean_shell_region_counts_must_be_nonzero(self) -> None:
+        mesh = SurfaceMesh(
+            vertices=np.array(
+                [
+                    [0.20, 0.20, 0.20],
+                    [0.40, 0.20, 0.20],
+                    [0.20, 0.40, 0.20],
+                ],
+                dtype=np.float32,
+            ),
+            faces=np.array([[0, 1, 2]], dtype=np.int32),
+        )
+        tri_surface = _tri_surface_from_mesh(mesh, region_id=7)
+        material = ecoflex_0010_material()
+        state = NeoHookeanMpmState(
+            particle_capacity=1,
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            grid_nodes=(8, 8, 8),
+        )
+        state.initialize_layered_tri_surface(
+            tri_surface,
+            layer_count=1,
+            primary_region_id=7,
+            secondary_region_id=8,
+            density_kgm3=material.density_kgm3,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.0025,
         )
 
-        self.assertIsNotNone(report)
-        self.assertEqual(report.particle_count, 8)
-        self.assertEqual(report.grid_out_of_bounds_particle_count, 1)
+        with self.assertRaisesRegex(RuntimeError, "secondary shell region"):
+            state.step(
+                dt_s=0.0,
+                mu_pa=material.shear_modulus_pa,
+                lambda_pa=material.lame_lambda_pa,
+                primary_region_id=7,
+                secondary_region_id=8,
+            )
 
 
 class NeoHookeanFixedRegionConstraintTests(unittest.TestCase):
@@ -1316,6 +1356,7 @@ class NeoHookeanFixedRegionConstraintTests(unittest.TestCase):
                     lambda_pa=material.lame_lambda_pa,
                     primary_region_id=7,
                     secondary_region_id=8,
+                    read_report=False,
                 )
         coupled_displacement_m = float(
             coupled.x.to_numpy()[0, 0] - coupled.rest_x.to_numpy()[0, 0]

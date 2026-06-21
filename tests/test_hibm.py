@@ -4,6 +4,7 @@ import math
 import inspect
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import taichi as ti
@@ -32,7 +33,12 @@ from simulation_core.hibm import (
     classify_hibm_near_boundary_nodes,
     compute_hibm_surface_tractions,
 )
-from simulation_core.hibm_mpm import HibmMpmPressureNeumannMatrixReport
+from simulation_core.hibm_mpm import (
+    HibmMpmExternalForceClearReport,
+    HibmMpmMpmForceScatterReport,
+    HibmMpmPressureNeumannMatrixReport,
+    hibm_mpm_external_force_fresh_for_solid_step,
+)
 from simulation_core.pressure_interface import PRESSURE_INTERFACE_COUPLING_SLOT_COUNT
 
 
@@ -4219,14 +4225,14 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
         boundary.marker_pressure_neumann_gradient_field[0] = 25.0
         fluid = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
+            runtime=TaichiRuntimeConfig(arch="cpu"),
         )
         solid = NeoHookeanMpmState(
             particle_capacity=1,
             bounds_min_m=(0.0, 0.0, 0.0),
             bounds_max_m=(1.0, 1.0, 1.0),
             grid_nodes=(4, 4, 4),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
+            runtime=TaichiRuntimeConfig(arch="cpu"),
         )
         solid.initialize_box(
             particle_counts=(1, 1, 1),
@@ -4342,6 +4348,32 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             rtol=0.0,
             atol=1.0e-7,
         )
+
+    def test_mpm_external_force_clear_counts_all_particles_with_zero_stale_force(
+        self,
+    ) -> None:
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        solid = NeoHookeanMpmState(
+            particle_capacity=2,
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            grid_nodes=(4, 4, 4),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        solid.initialize_box(
+            particle_counts=(2, 1, 1),
+            box_min_m=(0.0, 0.0, 0.0),
+            box_max_m=(1.0, 1.0, 1.0),
+            density_kgm3=1000.0,
+        )
+
+        report = markers.clear_mpm_external_forces(
+            solid.external_force_n,
+            particle_count=solid.particle_count,
+        )
+
+        self.assertEqual(report.cleared_particle_count, 2)
+        self.assertEqual(report.max_abs_external_force_before_n, 0.0)
 
     def test_mpm_force_scatter_reports_applied_mpm_force_after_adapter_cast(
         self,
@@ -5410,6 +5442,9 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             "hibm_marker_secondary_stress_invalid_count",
             "hibm_marker_total_force_n",
             "hibm_marker_action_reaction_residual_n",
+            "hibm_mpm_external_force_clear_particle_count",
+            "hibm_mpm_external_force_clear_max_abs_before_n",
+            "hibm_mpm_external_force_fresh_for_solid_step",
             "hibm_mpm_scatter_action_reaction_residual_n",
             "hibm_surface_updated_marker_count",
             "hibm_next_ib_node_count",
@@ -5455,6 +5490,16 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             "hibm_interior_pressure_fixed_divergence_l2",
             "hibm_interior_pressure_fixed_divergence_max_abs",
             "hibm_interior_pressure_fixed_divergence_cell_count",
+            "hibm_post_solid_divergence_l2",
+            "hibm_post_solid_divergence_max_abs",
+            "hibm_post_solid_interior_divergence_l2",
+            "hibm_post_solid_interior_divergence_max_abs",
+            "hibm_post_solid_projection_divergence_l2",
+            "hibm_post_solid_projection_divergence_max_abs",
+            "hibm_post_solid_post_boundary_divergence_l2",
+            "hibm_post_solid_post_boundary_divergence_max_abs",
+            "hibm_post_solid_post_constraint_divergence_l2",
+            "hibm_post_solid_post_constraint_divergence_max_abs",
             "hibm_post_solid_no_slip_residual_direct_sample_marker_count",
             "hibm_post_solid_no_slip_residual_normal_walk_sample_marker_count",
             "hibm_post_solid_no_slip_residual_nearest_fluid_sample_marker_count",
@@ -5501,6 +5546,15 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             summary["hibm_marker_secondary_stress_invalid_count"],
             report.fluid_to_mpm_loads.marker_forces.secondary_stress_invalid_marker_count,
         )
+        self.assertEqual(
+            summary["hibm_mpm_external_force_clear_particle_count"],
+            report.fluid_to_mpm_loads.mpm_external_force_clear.cleared_particle_count,
+        )
+        self.assertEqual(
+            summary["hibm_mpm_external_force_clear_max_abs_before_n"],
+            report.fluid_to_mpm_loads.mpm_external_force_clear.max_abs_external_force_before_n,
+        )
+        self.assertTrue(summary["hibm_mpm_external_force_fresh_for_solid_step"])
         self.assertEqual(
             summary["hibm_full_stress_viscous_gradient_invalid_marker_count"],
             report.fluid_to_mpm_loads.fluid_stress.viscous_gradient_invalid_marker_count,
@@ -5691,6 +5745,69 @@ class HibmMpmSharpPathFailFastTests(unittest.TestCase):
             with self.subTest(primitive=primitive.__name__):
                 with self.assertRaisesRegex(NotImplementedError, "Taichi-resident"):
                     primitive()
+
+    def test_sharp_mpm_step_requires_fresh_external_force_before_solid_advance(
+        self,
+    ) -> None:
+        def load_report(
+            *,
+            cleared_particle_count: int,
+            active_marker_count: int,
+            active_particle_count: int,
+            residual_n: float,
+        ):
+            return SimpleNamespace(
+                mpm_external_force_clear=HibmMpmExternalForceClearReport(
+                    cleared_particle_count=cleared_particle_count,
+                    max_abs_external_force_before_n=3.0,
+                ),
+                mpm_force_scatter=HibmMpmMpmForceScatterReport(
+                    active_marker_count=active_marker_count,
+                    invalid_marker_count=0,
+                    active_particle_count=active_particle_count,
+                    total_marker_force_n=(0.0, 0.0, 0.0),
+                    total_mpm_external_force_n=(0.0, 0.0, 0.0),
+                    action_reaction_residual_n=residual_n,
+                ),
+            )
+
+        self.assertTrue(
+            hibm_mpm_external_force_fresh_for_solid_step(
+                load_report(
+                    cleared_particle_count=1,
+                    active_marker_count=1,
+                    active_particle_count=1,
+                    residual_n=0.0,
+                )
+            )
+        )
+        self.assertFalse(
+            hibm_mpm_external_force_fresh_for_solid_step(
+                load_report(
+                    cleared_particle_count=1,
+                    active_marker_count=1,
+                    active_particle_count=0,
+                    residual_n=0.0,
+                )
+            )
+        )
+        self.assertFalse(
+            hibm_mpm_external_force_fresh_for_solid_step(
+                load_report(
+                    cleared_particle_count=1,
+                    active_marker_count=1,
+                    active_particle_count=1,
+                    residual_n=float("nan"),
+                )
+            )
+        )
+
+        source = inspect.getsource(advance_hibm_mpm_sharp_mpm_step)
+        guard_index = source.index(
+            "if not hibm_mpm_external_force_fresh_for_solid_step(load_report):"
+        )
+        solid_step_index = source.index("mpm_report = solid_step()")
+        self.assertLess(guard_index, solid_step_index)
 
 
 class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
@@ -7104,6 +7221,7 @@ class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
         )
         self.assertIn('"hibm_next_solid_band_mask_protected_cell_count"', source)
         self.assertIn('"hibm_post_solid_kinematic_projection_applied"', source)
+        self.assertIn('"hibm_post_solid_interior_divergence_l2"', source)
         self.assertIn('"hibm_post_solid_no_slip_residual_l2_mps"', source)
         self.assertIn(
             '"hibm_projection_stage": "post_solid_kinematic_consistency"',
@@ -7635,9 +7753,40 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
             "fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells",
             post_air_conversion,
         )
+        self.assertIn(
+            "convert_next_projection_topology_cleanup_until_saturated()",
+            post_air_conversion,
+        )
         self.assertNotIn(
             "Refresh the post-step rows and reachability after air-backed conversion",
             post_air_conversion,
+        )
+
+    def test_projection_topology_cleanup_starts_with_row_cloud_sweep(self) -> None:
+        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        fluid_cleanup = source.split(
+            "def convert_projection_topology_cleanup_until_saturated() -> None:",
+            1,
+        )[1].split('_debug_stage_progress("fluid_substeps:start")', 1)[0]
+        post_solid_cleanup = source.split(
+            "def convert_next_projection_topology_cleanup_until_saturated() -> None:",
+            1,
+        )[1].split(
+            "if (\n        int(next_solid_band_nonprojectable_cell_count) > 0",
+            1,
+        )[0]
+
+        self.assertLess(
+            fluid_cleanup.index("convert_row_cloud_orphans_until_saturated()"),
+            fluid_cleanup.index("convert_overflow_singletons_without_row_reload()"),
+        )
+        self.assertLess(
+            post_solid_cleanup.index(
+                "convert_next_row_cloud_orphans_until_saturated()"
+            ),
+            post_solid_cleanup.index(
+                "convert_next_overflow_singletons_without_row_reload()"
+            ),
         )
 
     def _sealed_chamber_fixture(self):
@@ -8162,6 +8311,38 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         self.assertEqual(int(fluid.obstacle[2, 2, 5]), 1)
         self.assertEqual(int(fluid.obstacle[5, 2, 4]), 0)
         self.assertEqual(int(fluid.obstacle[5, 2, 5]), 0)
+
+    def test_row_cloud_orphan_conversion_uses_pressure_component_barriers(
+        self,
+    ) -> None:
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 6), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((5, 5, 6), dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        obstacle[2, 2, 3] = 0
+        obstacle[2, 2, 4] = 0
+        fluid.obstacle.from_numpy(obstacle)
+        fluid.velocity_dirichlet_boundary_active.fill(0)
+        fluid.velocity_dirichlet_boundary_active[2, 2, 4] = 1
+        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
+        fluid.velocity_dirichlet_boundary_marker_region_id[2, 2, 4] = 8
+
+        unreached = fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        self.assertEqual(unreached, 2)
+        self.assertEqual(fluid.last_hibm_pressure_unreached_component_raw_count, 2)
+
+        converted = fluid.convert_hibm_row_cloud_orphan_components(
+            max_component_cells=1,
+        )
+
+        self.assertEqual(converted, 2)
+        self.assertEqual(fluid.last_hibm_row_cloud_orphan_component_count, 2)
+        self.assertEqual(int(fluid.obstacle[2, 2, 3]), 1)
+        self.assertEqual(int(fluid.obstacle[2, 2, 4]), 1)
 
     def test_row_cloud_orphan_conversion_cleans_overflow_singletons_without_row_stamp(
         self,

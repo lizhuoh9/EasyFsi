@@ -4428,6 +4428,8 @@ class HibmMpmSurfaceMarkers:
                 # single normal side to avoid selecting isolated water pockets.
                 for side in range(2):
                     crossed_base = 0
+                    if base_obstacle_field[i_near, j_near, k_near] != 0:
+                        crossed_base = 1
                     direction = 1.0
                     scan_side = 1
                     if ti.abs(air_probe_normal_sign) > 0.5:
@@ -5342,13 +5344,12 @@ class HibmMpmSurfaceMarkers:
         external_force_n: ti.template(),
         particle_count: ti.i32,
     ):
-        self.report_mpm_external_force_clear_count[None] = 0
+        self.report_mpm_external_force_clear_count[None] = particle_count
         self.report_mpm_external_force_clear_max_abs_n[None] = 0.0
         for particle in range(particle_count):
             force = external_force_n[particle]
             force_norm = force.norm()
             if force_norm > 0.0:
-                ti.atomic_add(self.report_mpm_external_force_clear_count[None], 1)
                 ti.atomic_max(
                     self.report_mpm_external_force_clear_max_abs_n[None],
                     force_norm,
@@ -11251,6 +11252,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     row_cloud_orphan_component_count = 0
     overflow_singleton_cleanup_cell_count = 0
     overflow_singleton_cleanup_component_count = 0
+    projection_tiny_unreached_cleanup_cell_count = 0
+    projection_tiny_unreached_cleanup_component_count = 0
 
     def convert_row_cloud_orphans_until_saturated() -> None:
         nonlocal pressure_disconnected_nonprojectable_cell_count
@@ -11299,6 +11302,52 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             )
         )
         return True
+
+    def convert_projection_topology_cleanup_until_saturated() -> None:
+        nonlocal pressure_disconnected_nonprojectable_cell_count
+        nonlocal velocity_report
+        nonlocal projection_tiny_unreached_cleanup_cell_count
+        nonlocal projection_tiny_unreached_cleanup_component_count
+        convert_row_cloud_orphans_until_saturated()
+        tiny_unreached_cleanup_threshold = max(
+            0,
+            HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS,
+        )
+        for _projection_cleanup_pass in range(8):
+            mutated = convert_overflow_singletons_without_row_reload()
+            if tiny_unreached_cleanup_threshold > 0:
+                for _tiny_unreached_cleanup_pass in range(8):
+                    converted_tiny_unreached = (
+                        fluid.convert_hibm_row_cloud_orphan_components(
+                            max_component_cells=tiny_unreached_cleanup_threshold,
+                            convert_unstamped_small_components=True,
+                            protect_velocity_dirichlet_radius_cells=0,
+                            protect_solid_band_mask=False,
+                        )
+                    )
+                    if int(converted_tiny_unreached) <= 0:
+                        break
+                    mutated = True
+                    projection_tiny_unreached_cleanup_cell_count += int(
+                        converted_tiny_unreached
+                    )
+                    projection_tiny_unreached_cleanup_component_count += int(
+                        getattr(fluid, "last_hibm_row_cloud_orphan_component_count", 0)
+                    )
+                    pressure_disconnected_nonprojectable_cell_count = (
+                        fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                            pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                        )
+                    )
+            if not mutated:
+                break
+            velocity_report = assemble_velocity_dirichlet_rows()
+            pressure_disconnected_nonprojectable_cell_count = (
+                fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                    pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                )
+            )
+            convert_row_cloud_orphans_until_saturated()
 
     _debug_stage_progress("fluid_substeps:start")
     for _ in range(substeps):
@@ -11361,7 +11410,17 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             )
             convert_row_cloud_orphans_until_saturated()
 
-        convert_overflow_singletons_without_row_reload()
+        projection_overflow_cell_count_before = overflow_singleton_cleanup_cell_count
+        projection_overflow_component_count_before = (
+            overflow_singleton_cleanup_component_count
+        )
+        projection_tiny_cell_count_before = (
+            projection_tiny_unreached_cleanup_cell_count
+        )
+        projection_tiny_component_count_before = (
+            projection_tiny_unreached_cleanup_component_count
+        )
+        convert_projection_topology_cleanup_until_saturated()
         pressure_report = assemble_pressure_neumann_rows()
         requested_pressure_solver = str(pressure_solver)
         effective_pressure_solver = requested_pressure_solver
@@ -11386,13 +11445,41 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 cg_tolerance=float(cg_tolerance),
                 cg_preconditioner=str(cg_preconditioner),
                 pressure_solve_failure_policy=pressure_solve_failure_policy_name,
-                hibm_tiny_unreached_cleanup_component_cells=(
-                    HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS
-                ),
+                hibm_tiny_unreached_cleanup_component_cells=0,
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
             )
+        )
+        project_report["hibm_projection_overflow_singleton_cleanup_cell_count"] = (
+            int(project_report.get("hibm_projection_overflow_singleton_cleanup_cell_count", 0))
+            + int(overflow_singleton_cleanup_cell_count)
+            - int(projection_overflow_cell_count_before)
+        )
+        project_report["hibm_projection_overflow_singleton_cleanup_component_count"] = (
+            int(
+                project_report.get(
+                    "hibm_projection_overflow_singleton_cleanup_component_count",
+                    0,
+                )
+            )
+            + int(overflow_singleton_cleanup_component_count)
+            - int(projection_overflow_component_count_before)
+        )
+        project_report["hibm_projection_tiny_unreached_cleanup_cell_count"] = (
+            int(project_report.get("hibm_projection_tiny_unreached_cleanup_cell_count", 0))
+            + int(projection_tiny_unreached_cleanup_cell_count)
+            - int(projection_tiny_cell_count_before)
+        )
+        project_report["hibm_projection_tiny_unreached_cleanup_component_count"] = (
+            int(
+                project_report.get(
+                    "hibm_projection_tiny_unreached_cleanup_component_count",
+                    0,
+                )
+            )
+            + int(projection_tiny_unreached_cleanup_component_count)
+            - int(projection_tiny_component_count_before)
         )
         project_report.update(
             {
@@ -11420,7 +11507,17 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 pressure_outlet_zmin=bool(pressure_outlet_zmin),
             )
         )
-        convert_overflow_singletons_without_row_reload()
+        projection_overflow_cell_count_before = overflow_singleton_cleanup_cell_count
+        projection_overflow_component_count_before = (
+            overflow_singleton_cleanup_component_count
+        )
+        projection_tiny_cell_count_before = (
+            projection_tiny_unreached_cleanup_cell_count
+        )
+        projection_tiny_component_count_before = (
+            projection_tiny_unreached_cleanup_component_count
+        )
+        convert_projection_topology_cleanup_until_saturated()
         if int(velocity_report.active_velocity_dirichlet_rows) <= 0:
             break
         pressure_report = assemble_pressure_neumann_rows()
@@ -11447,13 +11544,59 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 cg_tolerance=float(cg_tolerance),
                 cg_preconditioner=str(cg_preconditioner),
                 pressure_solve_failure_policy=pressure_solve_failure_policy_name,
-                hibm_tiny_unreached_cleanup_component_cells=(
-                    HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS
-                ),
+                hibm_tiny_unreached_cleanup_component_cells=0,
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
             )
+        )
+        consistency_project_report[
+            "hibm_projection_overflow_singleton_cleanup_cell_count"
+        ] = (
+            int(
+                consistency_project_report.get(
+                    "hibm_projection_overflow_singleton_cleanup_cell_count",
+                    0,
+                )
+            )
+            + int(overflow_singleton_cleanup_cell_count)
+            - int(projection_overflow_cell_count_before)
+        )
+        consistency_project_report[
+            "hibm_projection_overflow_singleton_cleanup_component_count"
+        ] = (
+            int(
+                consistency_project_report.get(
+                    "hibm_projection_overflow_singleton_cleanup_component_count",
+                    0,
+                )
+            )
+            + int(overflow_singleton_cleanup_component_count)
+            - int(projection_overflow_component_count_before)
+        )
+        consistency_project_report[
+            "hibm_projection_tiny_unreached_cleanup_cell_count"
+        ] = (
+            int(
+                consistency_project_report.get(
+                    "hibm_projection_tiny_unreached_cleanup_cell_count",
+                    0,
+                )
+            )
+            + int(projection_tiny_unreached_cleanup_cell_count)
+            - int(projection_tiny_cell_count_before)
+        )
+        consistency_project_report[
+            "hibm_projection_tiny_unreached_cleanup_component_count"
+        ] = (
+            int(
+                consistency_project_report.get(
+                    "hibm_projection_tiny_unreached_cleanup_component_count",
+                    0,
+                )
+            )
+            + int(projection_tiny_unreached_cleanup_component_count)
+            - int(projection_tiny_component_count_before)
         )
         consistency_project_report.update(
             {
@@ -11749,6 +11892,25 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     )
 
 
+def hibm_mpm_external_force_fresh_for_solid_step(
+    load_report: HibmMpmSharpFluidToMpmLoadReport,
+) -> bool:
+    clear = load_report.mpm_external_force_clear
+    scatter = load_report.mpm_force_scatter
+    force_values = (
+        *scatter.total_marker_force_n,
+        *scatter.total_mpm_external_force_n,
+        scatter.action_reaction_residual_n,
+        clear.max_abs_external_force_before_n,
+    )
+    return (
+        clear.cleared_particle_count > 0
+        and scatter.active_marker_count > 0
+        and scatter.active_particle_count > 0
+        and all(math.isfinite(float(value)) for value in force_values)
+    )
+
+
 def advance_hibm_mpm_sharp_mpm_step(
     *,
     fluid: Any,
@@ -11890,6 +12052,16 @@ def advance_hibm_mpm_sharp_mpm_step(
             diagnostic_disable_pressure_neumann_matrix_rows
         ),
     )
+    if not hibm_mpm_external_force_fresh_for_solid_step(load_report):
+        scatter = load_report.mpm_force_scatter
+        clear = load_report.mpm_external_force_clear
+        raise RuntimeError(
+            "solid_step requires a fresh HIBM-MPM external force scatter: "
+            f"cleared_particles={clear.cleared_particle_count}, "
+            f"active_markers={scatter.active_marker_count}, "
+            f"active_particles={scatter.active_particle_count}, "
+            f"action_reaction_residual_n={scatter.action_reaction_residual_n}"
+        )
     mpm_report = solid_step()
     feedback_report = markers.update_surface_feedback_from_mpm_surface_particles(
         mpm_particle_position_m,
@@ -11979,6 +12151,8 @@ def advance_hibm_mpm_sharp_mpm_step(
     next_row_cloud_orphan_component_count = 0
     next_overflow_singleton_cleanup_cell_count = 0
     next_overflow_singleton_cleanup_component_count = 0
+    next_projection_tiny_unreached_cleanup_cell_count = 0
+    next_projection_tiny_unreached_cleanup_component_count = 0
 
     def convert_next_row_cloud_orphans_until_saturated() -> None:
         nonlocal next_pressure_disconnected_nonprojectable_cell_count
@@ -12047,6 +12221,75 @@ def advance_hibm_mpm_sharp_mpm_step(
             )
         )
         return True
+
+    def rebuild_next_velocity_rows() -> None:
+        nonlocal next_velocity_report
+        next_velocity_report = ib_boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
+            fluid.velocity_dirichlet_boundary_active,
+            fluid.velocity_dirichlet_boundary_value_mps,
+            fluid.velocity_dirichlet_boundary_projection_weight,
+            fluid.obstacle,
+            fluid.velocity,
+            ib_search,
+            cell_face_x_m=fluid.cell_face_x_m,
+            cell_face_y_m=fluid.cell_face_y_m,
+            cell_face_z_m=fluid.cell_face_z_m,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            grid_nodes=fluid.grid.grid_nodes,
+            velocity_dirichlet_marker_region_id=(
+                fluid.velocity_dirichlet_boundary_marker_region_id
+            ),
+            marker_region_id=markers.region_id,
+            primary_region_id=primary_region_id,
+            secondary_region_id=secondary_region_id,
+        )
+
+    def convert_next_projection_topology_cleanup_until_saturated() -> None:
+        nonlocal next_pressure_disconnected_nonprojectable_cell_count
+        nonlocal next_projection_tiny_unreached_cleanup_cell_count
+        nonlocal next_projection_tiny_unreached_cleanup_component_count
+        convert_next_row_cloud_orphans_until_saturated()
+        tiny_unreached_cleanup_threshold = max(
+            0,
+            HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS,
+        )
+        for _projection_cleanup_pass in range(8):
+            mutated = convert_next_overflow_singletons_without_row_reload()
+            if tiny_unreached_cleanup_threshold > 0:
+                for _tiny_unreached_cleanup_pass in range(8):
+                    converted_tiny_unreached = (
+                        fluid.convert_hibm_row_cloud_orphan_components(
+                            max_component_cells=tiny_unreached_cleanup_threshold,
+                            convert_unstamped_small_components=True,
+                            protect_velocity_dirichlet_radius_cells=0,
+                            protect_solid_band_mask=False,
+                        )
+                    )
+                    if int(converted_tiny_unreached) <= 0:
+                        break
+                    mutated = True
+                    next_projection_tiny_unreached_cleanup_cell_count += int(
+                        converted_tiny_unreached
+                    )
+                    next_projection_tiny_unreached_cleanup_component_count += int(
+                        getattr(fluid, "last_hibm_row_cloud_orphan_component_count", 0)
+                    )
+                    next_pressure_disconnected_nonprojectable_cell_count = (
+                        fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                            pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                        )
+                    )
+            if not mutated:
+                break
+            rebuild_next_velocity_rows()
+            next_pressure_disconnected_nonprojectable_cell_count = (
+                fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                    pressure_outlet_zmin=bool(pressure_outlet_zmin),
+                )
+            )
+            convert_next_row_cloud_orphans_until_saturated()
 
     if (
         int(next_solid_band_nonprojectable_cell_count) > 0
@@ -12211,7 +12454,19 @@ def advance_hibm_mpm_sharp_mpm_step(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
         )
     )
-    convert_next_overflow_singletons_without_row_reload()
+    next_projection_overflow_cell_count_before = (
+        next_overflow_singleton_cleanup_cell_count
+    )
+    next_projection_overflow_component_count_before = (
+        next_overflow_singleton_cleanup_component_count
+    )
+    next_projection_tiny_cell_count_before = (
+        next_projection_tiny_unreached_cleanup_cell_count
+    )
+    next_projection_tiny_component_count_before = (
+        next_projection_tiny_unreached_cleanup_component_count
+    )
+    convert_next_projection_topology_cleanup_until_saturated()
     # Final-sweep band populations for the post-step rebuild (S2-A8'):
     # -1 when the band ran without a split (default mode).
     next_solid_band_interior_cell_count = int(
@@ -12304,13 +12559,59 @@ def advance_hibm_mpm_sharp_mpm_step(
                 cg_tolerance=float(cg_tolerance),
                 cg_preconditioner=str(cg_preconditioner),
                 pressure_solve_failure_policy=str(pressure_solve_failure_policy),
-                hibm_tiny_unreached_cleanup_component_cells=(
-                    HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS
-                ),
+                hibm_tiny_unreached_cleanup_component_cells=0,
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
             )
+        )
+        post_solid_project_report[
+            "hibm_projection_overflow_singleton_cleanup_cell_count"
+        ] = (
+            int(
+                post_solid_project_report.get(
+                    "hibm_projection_overflow_singleton_cleanup_cell_count",
+                    0,
+                )
+            )
+            + int(next_overflow_singleton_cleanup_cell_count)
+            - int(next_projection_overflow_cell_count_before)
+        )
+        post_solid_project_report[
+            "hibm_projection_overflow_singleton_cleanup_component_count"
+        ] = (
+            int(
+                post_solid_project_report.get(
+                    "hibm_projection_overflow_singleton_cleanup_component_count",
+                    0,
+                )
+            )
+            + int(next_overflow_singleton_cleanup_component_count)
+            - int(next_projection_overflow_component_count_before)
+        )
+        post_solid_project_report[
+            "hibm_projection_tiny_unreached_cleanup_cell_count"
+        ] = (
+            int(
+                post_solid_project_report.get(
+                    "hibm_projection_tiny_unreached_cleanup_cell_count",
+                    0,
+                )
+            )
+            + int(next_projection_tiny_unreached_cleanup_cell_count)
+            - int(next_projection_tiny_cell_count_before)
+        )
+        post_solid_project_report[
+            "hibm_projection_tiny_unreached_cleanup_component_count"
+        ] = (
+            int(
+                post_solid_project_report.get(
+                    "hibm_projection_tiny_unreached_cleanup_component_count",
+                    0,
+                )
+            )
+            + int(next_projection_tiny_unreached_cleanup_component_count)
+            - int(next_projection_tiny_component_count_before)
         )
         post_solid_project_report.update(
             {
@@ -12392,6 +12693,7 @@ def hibm_mpm_sharp_step_summary(
 ) -> dict[str, Any]:
     load = report.fluid_to_mpm_loads
     marker_forces = load.marker_forces
+    clear = load.mpm_external_force_clear
     scatter = load.mpm_force_scatter
     feedback = report.surface_feedback
     pressure_gradient = load.pressure_neumann_gradient
@@ -12809,6 +13111,40 @@ def hibm_mpm_sharp_step_summary(
         "hibm_post_solid_pressure_projection_cg_relative_residual_max": (
             post_projection.get("cg_relative_residual_max", 0.0)
         ),
+        "hibm_post_solid_divergence_l2": post_projection.get("l2", 0.0),
+        "hibm_post_solid_divergence_max_abs": post_projection.get("max_abs", 0.0),
+        "hibm_post_solid_interior_divergence_l2": post_projection.get(
+            "interior_l2",
+            0.0,
+        ),
+        "hibm_post_solid_interior_divergence_max_abs": post_projection.get(
+            "interior_max_abs",
+            0.0,
+        ),
+        "hibm_post_solid_projection_divergence_l2": post_projection.get(
+            "projection_l2",
+            0.0,
+        ),
+        "hibm_post_solid_projection_divergence_max_abs": post_projection.get(
+            "projection_max_abs",
+            0.0,
+        ),
+        "hibm_post_solid_post_boundary_divergence_l2": post_projection.get(
+            "post_boundary_l2",
+            0.0,
+        ),
+        "hibm_post_solid_post_boundary_divergence_max_abs": post_projection.get(
+            "post_boundary_max_abs",
+            0.0,
+        ),
+        "hibm_post_solid_post_constraint_divergence_l2": post_projection.get(
+            "post_constraint_l2",
+            0.0,
+        ),
+        "hibm_post_solid_post_constraint_divergence_max_abs": post_projection.get(
+            "post_constraint_max_abs",
+            0.0,
+        ),
         "hibm_post_solid_velocity_dirichlet_apply_calls": (
             post_projection.get("velocity_dirichlet_boundary_apply_calls", 0)
         ),
@@ -12960,6 +13296,15 @@ def hibm_mpm_sharp_step_summary(
         "hibm_marker_fluid_reaction_force_n": marker_forces.fluid_reaction_force_n,
         "hibm_marker_action_reaction_residual_n": (
             marker_forces.action_reaction_residual_n
+        ),
+        "hibm_mpm_external_force_clear_particle_count": (
+            clear.cleared_particle_count
+        ),
+        "hibm_mpm_external_force_clear_max_abs_before_n": (
+            clear.max_abs_external_force_before_n
+        ),
+        "hibm_mpm_external_force_fresh_for_solid_step": (
+            hibm_mpm_external_force_fresh_for_solid_step(load)
         ),
         "hibm_mpm_scatter_active_marker_count": scatter.active_marker_count,
         "hibm_mpm_scatter_invalid_marker_count": scatter.invalid_marker_count,

@@ -17,6 +17,11 @@ CG_PRECONDITIONER_CHOICES = ("auto", "jacobi", "fv_multigrid", "fv_multigrid_lig
 HIBM_PRESSURE_COMPONENT_CAPACITY = 768
 HIBM_UNREACHED_COMPONENT_SMALL_THRESHOLD_CELLS = 128
 HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS = 4
+PRESSURE_OUTLET_AUTO_CLEANUP_TARGET_REDUCTION = 0.25
+PRESSURE_OUTLET_AUTO_CLEANUP_NO_REGRESSION_MARGIN = 1.05
+PRESSURE_OUTLET_AUTO_CLEANUP_ACCEPTANCE_MARGIN = 1.001
+PRESSURE_OUTLET_AUTO_CLEANUP_MIN_L2 = 1.0e-8
+PRESSURE_OUTLET_AUTO_CLEANUP_MAX_PASSES = 3
 
 
 @dataclass(frozen=True)
@@ -970,6 +975,8 @@ class CartesianFluidSolver:
             shape=(),
         )
         self.report_source_volume_flux_m3s = ti.field(dtype=ti.f32, shape=())
+        self.report_positive_source_volume_flux_m3s = ti.field(dtype=ti.f32, shape=())
+        self.report_abs_source_volume_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.report_zmin_reachable_source_volume_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.report_zmin_unreached_source_volume_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.report_zmin_reachable_source_cell_count = ti.field(dtype=ti.i32, shape=())
@@ -1121,6 +1128,9 @@ class CartesianFluidSolver:
         self.last_hibm_pressure_reachability_reused = False
         self._hibm_pressure_unreached_count = 0
         self._hibm_reachability_checksum = None
+        self.hibm_reachability_revision = 0
+        self.last_hibm_reachability_revision = 0
+        self.last_hibm_reachability_valid = False
         self.last_hibm_pressure_unreached_component_count = 0
         self._hibm_pressure_unreached_component_count = 0
         self.last_hibm_pressure_unreached_component_overflow = False
@@ -1315,6 +1325,8 @@ class CartesianFluidSolver:
         self.report_velocity_dirichlet_boundary_delta_max[None] = 0.0
         self.report_velocity_dirichlet_boundary_momentum_delta_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_source_volume_flux_m3s[None] = 0.0
+        self.report_positive_source_volume_flux_m3s[None] = 0.0
+        self.report_abs_source_volume_flux_m3s[None] = 0.0
         self.report_zmin_reachable_source_volume_flux_m3s[None] = 0.0
         self.report_zmin_unreached_source_volume_flux_m3s[None] = 0.0
         self.report_zmin_reachable_source_cell_count[None] = 0
@@ -1368,6 +1380,10 @@ class CartesianFluidSolver:
     def clear(self) -> None:
         self._clear_kernel()
         self._hibm_base_obstacle_initialized = False
+        self.hibm_reachability_revision = 0
+        self.last_hibm_reachability_revision = 0
+        self.last_hibm_reachability_valid = False
+        self._hibm_reachability_checksum = None
 
     @ti.kernel
     def _snapshot_hibm_base_obstacle_kernel(self):
@@ -1937,6 +1953,24 @@ class CartesianFluidSolver:
         self.last_hibm_pressure_unreached_component_small_count = 0
         self.last_hibm_pressure_unreached_component_small_cell_count = 0
 
+    def _invalidate_hibm_pressure_reachability(self) -> None:
+        if bool(self.last_hibm_reachability_valid):
+            self.hibm_reachability_revision += 1
+        self.last_hibm_reachability_valid = False
+        self.last_hibm_reachability_revision = int(self.hibm_reachability_revision)
+        self._hibm_reachability_checksum = None
+
+    def _mark_hibm_pressure_reachability_valid(
+        self,
+        *,
+        fresh_flood: bool,
+        valid: bool = True,
+    ) -> None:
+        if bool(fresh_flood):
+            self.hibm_reachability_revision += 1
+        self.last_hibm_reachability_revision = int(self.hibm_reachability_revision)
+        self.last_hibm_reachability_valid = bool(valid)
+
     def mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
         self,
         *,
@@ -1967,6 +2001,7 @@ class CartesianFluidSolver:
             self.last_hibm_unreached_cells_with_interface_coupling = 0
             self.last_hibm_unreached_components_with_interface_hits = 0
             self._hibm_reachability_checksum = None
+            self._invalidate_hibm_pressure_reachability()
             if not bool(use_existing_reachability_barrier):
                 self._prepare_hibm_pressure_reachability_barrier(
                     None,
@@ -1991,8 +2026,12 @@ class CartesianFluidSolver:
             if (
                 self._hibm_reachability_checksum is not None
                 and pattern_checksum == self._hibm_reachability_checksum
+                and bool(self.last_hibm_reachability_valid)
             ):
                 self.last_hibm_pressure_reachability_reused = True
+                self.last_hibm_reachability_revision = int(
+                    self.hibm_reachability_revision
+                )
                 return int(self._hibm_pressure_unreached_count)
         self._hibm_reachability_checksum = None
         self.last_hibm_pressure_unreached_cell_count = 0
@@ -2040,6 +2079,10 @@ class CartesianFluidSolver:
             self.last_hibm_pressure_unreached_component_count = component_count
             self._hibm_pressure_unreached_component_count = component_count
         self._hibm_reachability_checksum = pattern_checksum
+        self._mark_hibm_pressure_reachability_valid(
+            fresh_flood=True,
+            valid=bool(converged),
+        )
         return unreached
 
     @ti.kernel
@@ -2236,52 +2279,80 @@ class CartesianFluidSolver:
             convert_mask = valid & np.isin(labels, small_labels)
             selected_component_count = int(small_labels.size)
         else:
-            for seed_i, seed_j, seed_k in np.argwhere(valid):
-                seed = (int(seed_i), int(seed_j), int(seed_k))
-                if visited[seed]:
-                    continue
-                stack = [seed]
-                visited[seed] = True
-                cells: list[tuple[int, int, int]] = []
-                touches_row = False
-                touches_protected = False
-                while stack:
-                    i, j, k = stack.pop()
-                    cells.append((i, j, k))
-                    touches_row = touches_row or bool(stencil_touch[i, j, k])
-                    touches_protected = touches_protected or bool(
-                        protected[i, j, k]
+            labels = self.hibm_pressure_unreached_component_label.to_numpy()
+            label_values = labels[valid]
+            label_values = label_values[label_values < (1 << 30)]
+            use_component_labels = (
+                bool(self.last_hibm_pressure_component_labels_converged)
+                and label_values.size > 0
+            )
+            if use_component_labels:
+                component_labels, component_sizes = np.unique(
+                    label_values,
+                    return_counts=True,
+                )
+                for component_label, component_size in zip(
+                    component_labels,
+                    component_sizes,
+                ):
+                    if int(component_size) > max_cells:
+                        continue
+                    component_mask = valid & (labels == int(component_label))
+                    if not np.any(component_mask):
+                        continue
+                    touches_row = bool(np.any(component_mask & stencil_touch))
+                    touches_protected = bool(np.any(component_mask & protected))
+                    is_overflow_singleton = (
+                        overflow_singleton_cleanup and int(component_size) == 1
                     )
-                    for ni, nj, nk in (
-                        (i - 1, j, k),
-                        (i + 1, j, k),
-                        (i, j - 1, k),
-                        (i, j + 1, k),
-                        (i, j, k - 1),
-                        (i, j, k + 1),
-                    ):
-                        if (
-                            0 <= ni < nx
-                            and 0 <= nj < ny
-                            and 0 <= nk < nz
-                            and valid[ni, nj, nk]
-                            and not visited[ni, nj, nk]
+                    selected = (touches_row or is_overflow_singleton)
+                    selected = selected and not touches_protected
+                    if selected:
+                        selected_component_count += 1
+                        convert_mask |= component_mask
+            else:
+                for seed_i, seed_j, seed_k in np.argwhere(valid):
+                    seed = (int(seed_i), int(seed_j), int(seed_k))
+                    if visited[seed]:
+                        continue
+                    stack = [seed]
+                    visited[seed] = True
+                    cells: list[tuple[int, int, int]] = []
+                    touches_row = False
+                    touches_protected = False
+                    while stack:
+                        i, j, k = stack.pop()
+                        cells.append((i, j, k))
+                        touches_row = touches_row or bool(stencil_touch[i, j, k])
+                        touches_protected = touches_protected or bool(
+                            protected[i, j, k]
+                        )
+                        for ni, nj, nk in (
+                            (i - 1, j, k),
+                            (i + 1, j, k),
+                            (i, j - 1, k),
+                            (i, j + 1, k),
+                            (i, j, k - 1),
+                            (i, j, k + 1),
                         ):
-                            visited[ni, nj, nk] = True
-                            stack.append((ni, nj, nk))
-                is_overflow_singleton = (
-                    overflow_singleton_cleanup and len(cells) == 1
-                )
-                selected = (
-                    touches_row
-                    or is_overflow_singleton
-                    or bool(convert_unstamped_small_components)
-                )
-                selected = selected and not touches_protected
-                if len(cells) <= max_cells and selected:
-                    selected_component_count += 1
-                    for cell in cells:
-                        convert_mask[cell] = True
+                            if (
+                                0 <= ni < nx
+                                and 0 <= nj < ny
+                                and 0 <= nk < nz
+                                and valid[ni, nj, nk]
+                                and not visited[ni, nj, nk]
+                            ):
+                                visited[ni, nj, nk] = True
+                                stack.append((ni, nj, nk))
+                    is_overflow_singleton = (
+                        overflow_singleton_cleanup and len(cells) == 1
+                    )
+                    selected = touches_row or is_overflow_singleton
+                    selected = selected and not touches_protected
+                    if len(cells) <= max_cells and selected:
+                        selected_component_count += 1
+                        for cell in cells:
+                            convert_mask[cell] = True
         converted = int(np.count_nonzero(convert_mask))
         if converted <= 0:
             return 0
@@ -2510,6 +2581,20 @@ class CartesianFluidSolver:
             self.saved_pressure[i, j, k] = self.pressure[i, j, k]
 
     @ti.kernel
+    def _snapshot_projection_cleanup_state_kernel(self):
+        for i, j, k in self.velocity:
+            self.saved_velocity[i, j, k] = self.velocity[i, j, k]
+            self.saved_pressure[i, j, k] = self.pressure[i, j, k]
+
+    @ti.kernel
+    def _restore_projection_cleanup_state_kernel(self):
+        for i, j, k in self.velocity:
+            self.velocity[i, j, k] = self.saved_velocity[i, j, k]
+            self.pressure[i, j, k] = self.saved_pressure[i, j, k]
+            self.pressure_tmp[i, j, k] = self.saved_pressure[i, j, k]
+            self.pressure_accum[i, j, k] = self.saved_pressure[i, j, k]
+
+    @ti.kernel
     def _restore_state_kernel(self):
         for i, j, k in self.velocity:
             self.velocity[i, j, k] = self.saved_velocity[i, j, k]
@@ -2582,6 +2667,7 @@ class CartesianFluidSolver:
         self.last_hibm_row_cloud_orphan_cell_count = 0
         self.last_hibm_row_cloud_orphan_component_count = 0
         self._hibm_reachability_checksum = None
+        self._invalidate_hibm_pressure_reachability()
 
     @ti.kernel
     def _clear_pressure_interface_matrix_terms_kernel(self):
@@ -2852,35 +2938,33 @@ class CartesianFluidSolver:
                 self.velocity_dirichlet_boundary_active[i, j, k] != 0
                 and self.obstacle[i, j, k] == 0
             ):
-                should_apply = 1
-                if should_apply:
-                    old_velocity = self.velocity[i, j, k]
-                    new_velocity = self.velocity_dirichlet_boundary_value_mps[i, j, k]
-                    velocity_delta = new_velocity - old_velocity
-                    self.velocity[i, j, k] = new_velocity
-                    if read_report != 0:
-                        delta = velocity_delta.norm()
-                        momentum_delta = (
-                            self.rho
-                            * velocity_delta
-                            * self._cell_volume_m3(i, j, k)
-                        )
-                        ti.atomic_add(
-                            self.report_velocity_dirichlet_boundary_cells[None],
-                            1,
-                        )
-                        ti.atomic_add(
-                            self.report_velocity_dirichlet_boundary_delta_sum[None],
-                            delta,
-                        )
-                        ti.atomic_max(
-                            self.report_velocity_dirichlet_boundary_delta_max[None],
-                            delta,
-                        )
-                        self._atomic_add_report_vector(
-                            self.report_velocity_dirichlet_boundary_momentum_delta_n_s,
-                            momentum_delta,
-                        )
+                old_velocity = self.velocity[i, j, k]
+                new_velocity = self.velocity_dirichlet_boundary_value_mps[i, j, k]
+                velocity_delta = new_velocity - old_velocity
+                self.velocity[i, j, k] = new_velocity
+                if read_report != 0:
+                    delta = velocity_delta.norm()
+                    momentum_delta = (
+                        self.rho
+                        * velocity_delta
+                        * self._cell_volume_m3(i, j, k)
+                    )
+                    ti.atomic_add(
+                        self.report_velocity_dirichlet_boundary_cells[None],
+                        1,
+                    )
+                    ti.atomic_add(
+                        self.report_velocity_dirichlet_boundary_delta_sum[None],
+                        delta,
+                    )
+                    ti.atomic_max(
+                        self.report_velocity_dirichlet_boundary_delta_max[None],
+                        delta,
+                    )
+                    self._atomic_add_report_vector(
+                        self.report_velocity_dirichlet_boundary_momentum_delta_n_s,
+                        momentum_delta,
+                    )
 
     def apply_velocity_dirichlet_boundary_rows(
         self,
@@ -5779,6 +5863,8 @@ class CartesianFluidSolver:
         dt_over_rho: ti.f32,
     ):
         self.report_source_volume_flux_m3s[None] = 0.0
+        self.report_positive_source_volume_flux_m3s[None] = 0.0
+        self.report_abs_source_volume_flux_m3s[None] = 0.0
         self.report_zmin_reachable_source_volume_flux_m3s[None] = 0.0
         self.report_zmin_unreached_source_volume_flux_m3s[None] = 0.0
         self.report_zmin_reachable_source_cell_count[None] = 0
@@ -5803,6 +5889,15 @@ class CartesianFluidSolver:
                 ti.atomic_add(
                     self.report_source_volume_flux_m3s[None],
                     source_flux_m3s,
+                )
+                if source_flux_m3s > 0.0:
+                    ti.atomic_add(
+                        self.report_positive_source_volume_flux_m3s[None],
+                        source_flux_m3s,
+                    )
+                ti.atomic_add(
+                    self.report_abs_source_volume_flux_m3s[None],
+                    ti.abs(source_flux_m3s),
                 )
                 if self.hibm_pressure_outlet_reachable[i, j, k] != 0:
                     ti.atomic_add(
@@ -7249,12 +7344,50 @@ class CartesianFluidSolver:
             float(step_dt_s / self.rho),
         )
         snapshot = self.pressure_outlet_report_snapshot[None]
+        source_volume_flux_m3s = float(snapshot[0])
+        pressure_outlet_flux_m3s = float(snapshot[1])
+        velocity_outlet_flux_m3s = float(snapshot[2])
+        positive_source_volume_flux_m3s = float(
+            self.report_positive_source_volume_flux_m3s[None]
+        )
+        abs_source_volume_flux_m3s = float(
+            self.report_abs_source_volume_flux_m3s[None]
+        )
+        pressure_outlet_to_net_source_ratio = 0.0
+        velocity_outlet_to_net_source_ratio = 0.0
+        pressure_outlet_to_positive_source_ratio = 0.0
+        velocity_outlet_to_positive_source_ratio = 0.0
+        pressure_outlet_to_abs_source_ratio = 0.0
+        velocity_outlet_to_abs_source_ratio = 0.0
+        if abs(source_volume_flux_m3s) > 1.0e-18:
+            pressure_outlet_to_net_source_ratio = (
+                pressure_outlet_flux_m3s / source_volume_flux_m3s
+            )
+            velocity_outlet_to_net_source_ratio = (
+                velocity_outlet_flux_m3s / source_volume_flux_m3s
+            )
+        if positive_source_volume_flux_m3s > 1.0e-18:
+            pressure_outlet_to_positive_source_ratio = (
+                pressure_outlet_flux_m3s / positive_source_volume_flux_m3s
+            )
+            velocity_outlet_to_positive_source_ratio = (
+                velocity_outlet_flux_m3s / positive_source_volume_flux_m3s
+            )
+        if abs_source_volume_flux_m3s > 1.0e-18:
+            pressure_outlet_to_abs_source_ratio = (
+                pressure_outlet_flux_m3s / abs_source_volume_flux_m3s
+            )
+            velocity_outlet_to_abs_source_ratio = (
+                velocity_outlet_flux_m3s / abs_source_volume_flux_m3s
+            )
         unreached_abs_flux_m3s = float(
             self.report_zmin_unreached_source_abs_flux_m3s[None]
         )
         unreached_source_cell_count = int(
             self.report_zmin_unreached_source_cell_count[None]
         )
+        reachability_valid = bool(self.last_hibm_reachability_valid)
+        reachability_revision = int(self.last_hibm_reachability_revision)
         unreached_source_centroid_x_m = math.nan
         unreached_source_centroid_y_m = math.nan
         unreached_source_centroid_z_m = math.nan
@@ -7264,7 +7397,11 @@ class CartesianFluidSolver:
         unreached_source_max_x_m = math.nan
         unreached_source_max_y_m = math.nan
         unreached_source_max_z_m = math.nan
-        if unreached_source_cell_count > 0 and unreached_abs_flux_m3s > 1.0e-30:
+        if (
+            reachability_valid
+            and unreached_source_cell_count > 0
+            and unreached_abs_flux_m3s > 1.0e-30
+        ):
             unreached_source_centroid_x_m = float(
                 self.report_zmin_unreached_source_weighted_x_m[None]
             ) / unreached_abs_flux_m3s
@@ -7282,11 +7419,31 @@ class CartesianFluidSolver:
             unreached_source_max_z_m = float(self.report_zmin_unreached_source_max_z_m[None])
         self.last_pressure_outlet_report_host_reads = 1
         return {
-            "source_volume_flux_m3s": float(snapshot[0]),
-            "zmin_pressure_outlet_flux_m3s": float(snapshot[1]),
-            "zmin_velocity_outlet_flux_m3s": float(snapshot[2]),
+            "source_volume_flux_m3s": source_volume_flux_m3s,
+            "positive_source_volume_flux_m3s": positive_source_volume_flux_m3s,
+            "abs_source_volume_flux_m3s": abs_source_volume_flux_m3s,
+            "zmin_pressure_outlet_flux_m3s": pressure_outlet_flux_m3s,
+            "zmin_velocity_outlet_flux_m3s": velocity_outlet_flux_m3s,
             "zmin_pressure_outlet_to_source_ratio": float(snapshot[3]),
             "zmin_velocity_outlet_to_source_ratio": float(snapshot[4]),
+            "zmin_pressure_outlet_to_net_source_ratio": (
+                pressure_outlet_to_net_source_ratio
+            ),
+            "zmin_velocity_outlet_to_net_source_ratio": (
+                velocity_outlet_to_net_source_ratio
+            ),
+            "zmin_pressure_outlet_to_positive_source_ratio": (
+                pressure_outlet_to_positive_source_ratio
+            ),
+            "zmin_velocity_outlet_to_positive_source_ratio": (
+                velocity_outlet_to_positive_source_ratio
+            ),
+            "zmin_pressure_outlet_to_abs_source_ratio": (
+                pressure_outlet_to_abs_source_ratio
+            ),
+            "zmin_velocity_outlet_to_abs_source_ratio": (
+                velocity_outlet_to_abs_source_ratio
+            ),
             "zmin_projection_pre_velocity_outlet_flux_m3s": float(snapshot[5]),
             "zmin_projection_post_pressure_velocity_outlet_flux_m3s": float(snapshot[6]),
             "zmin_projection_post_boundary_velocity_outlet_flux_m3s": float(snapshot[7]),
@@ -7296,6 +7453,8 @@ class CartesianFluidSolver:
                 self.report_zmin_reachable_source_cell_count[None]
             ),
             "zmin_unreached_source_cell_count": unreached_source_cell_count,
+            "zmin_reachability_valid": reachability_valid,
+            "zmin_reachability_revision": reachability_revision,
             "zmin_unreached_source_abs_flux_m3s": unreached_abs_flux_m3s,
             "zmin_unreached_source_centroid_x_m": unreached_source_centroid_x_m,
             "zmin_unreached_source_centroid_y_m": unreached_source_centroid_y_m,
@@ -7444,6 +7603,7 @@ class CartesianFluidSolver:
         hibm_projection_overflow_singleton_cleanup_component_count = 0
         hibm_projection_tiny_unreached_cleanup_cell_count = 0
         hibm_projection_tiny_unreached_cleanup_component_count = 0
+        hibm_projection_topology_mutated = False
 
         def record_cg_stats() -> None:
             nonlocal pressure_solve_failed
@@ -7664,6 +7824,7 @@ class CartesianFluidSolver:
                 )
             )
             if int(converted_overflow_singletons) > 0:
+                hibm_projection_topology_mutated = True
                 hibm_projection_overflow_singleton_cleanup_cell_count += int(
                     converted_overflow_singletons
                 )
@@ -7689,6 +7850,7 @@ class CartesianFluidSolver:
                     )
                     if int(converted_tiny_unreached) <= 0:
                         break
+                    hibm_projection_topology_mutated = True
                     hibm_projection_tiny_unreached_cleanup_cell_count += int(
                         converted_tiny_unreached
                     )
@@ -7698,6 +7860,16 @@ class CartesianFluidSolver:
                     self.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
                         pressure_outlet_zmin=True,
                     )
+            if (
+                hibm_projection_topology_mutated
+                and pressure_interface_matrix_active
+            ):
+                raise RuntimeError(
+                    "HIBM topology cleanup mutated obstacle topology inside "
+                    "project() after pressure matrix terms were already active; "
+                    "move cleanup before HIBM row/matrix assembly and rebuild "
+                    "velocity/pressure rows before projection"
+                )
         if pressure_outlet_zmin:
             self._record_zmin_projection_pre_velocity_flux_kernel()
         self.compute_divergence(pressure_outlet_zmin=pressure_outlet_zmin)
@@ -7707,6 +7879,17 @@ class CartesianFluidSolver:
         else:
             pre_projection_raw_stats = empty_stats
             pre_projection_stats = empty_stats
+            if pressure_outlet_zmin:
+                self._divergence_residual_stats_kernel(
+                    0,
+                    1 if int(self._hibm_pressure_unreached_count) > 0 else 0,
+                )
+                self._store_cleanup_target_l2_sq_from_reduction_kernel(
+                    PRESSURE_OUTLET_AUTO_CLEANUP_TARGET_REDUCTION
+                    * PRESSURE_OUTLET_AUTO_CLEANUP_TARGET_REDUCTION,
+                    PRESSURE_OUTLET_AUTO_CLEANUP_MIN_L2
+                    * PRESSURE_OUTLET_AUTO_CLEANUP_MIN_L2,
+                )
         if reset_pressure:
             self._clear_pressure_kernel()
         rhs_scale = self.rho / step_dt_s
@@ -7754,10 +7937,6 @@ class CartesianFluidSolver:
                 0,
                 1 if int(self._hibm_pressure_unreached_count) > 0 else 0,
             )
-            self._store_cleanup_target_l2_sq_from_reduction_kernel(
-                1.05 * 1.05,
-                1.0e-16,
-            )
         else:
             projection_raw_stats = empty_stats
             projection_stats = empty_stats
@@ -7770,18 +7949,31 @@ class CartesianFluidSolver:
             if report_requested:
                 post_boundary_raw_stats = self.divergence_stats()
                 post_boundary_stats = self.divergence_residual_stats()
-                cleanup_target_l2 = max(float(projection_stats["l2"]) * 1.05, 1.0e-8)
+                cleanup_target_l2 = max(
+                    min(
+                        float(projection_stats["l2"])
+                        * PRESSURE_OUTLET_AUTO_CLEANUP_NO_REGRESSION_MARGIN,
+                        float(pre_projection_stats["l2"])
+                        * PRESSURE_OUTLET_AUTO_CLEANUP_TARGET_REDUCTION,
+                    ),
+                    PRESSURE_OUTLET_AUTO_CLEANUP_MIN_L2,
+                )
             else:
                 post_boundary_raw_stats = empty_stats
                 post_boundary_stats = empty_stats
                 cleanup_needed = cleanup_required_from_current_residual()
             cleanup_iterations = max(1, min(int(iterations), 256))
-            for _ in range(3):
+            for _ in range(PRESSURE_OUTLET_AUTO_CLEANUP_MAX_PASSES):
                 if report_requested:
                     if post_boundary_stats["l2"] <= cleanup_target_l2:
                         break
                 elif not cleanup_needed:
                     break
+                previous_post_boundary_l2 = (
+                    float(post_boundary_stats["l2"]) if report_requested else math.inf
+                )
+                if report_requested:
+                    self._snapshot_projection_cleanup_state_kernel()
                 self._clear_pressure_correction_kernel()
                 self._clear_pressure_interface_matrix_rhs_kernel()
                 self._solve_pressure_poisson_with_solver(
@@ -7819,10 +8011,28 @@ class CartesianFluidSolver:
                 if report_requested:
                     post_boundary_raw_stats = self.divergence_stats()
                     post_boundary_stats = self.divergence_residual_stats()
+                    if (
+                        post_boundary_stats["l2"]
+                        > previous_post_boundary_l2
+                        * PRESSURE_OUTLET_AUTO_CLEANUP_ACCEPTANCE_MARGIN
+                    ):
+                        self._restore_projection_cleanup_state_kernel()
+                        self._update_pressure_interface_projection_divergence_kernel(
+                            float(step_dt_s / self.rho),
+                        )
+                        self.compute_divergence(
+                            pressure_outlet_zmin=pressure_outlet_zmin
+                        )
+                        post_boundary_raw_stats = self.divergence_stats()
+                        post_boundary_stats = self.divergence_residual_stats()
+                        break
                 else:
                     post_boundary_raw_stats = empty_stats
                     post_boundary_stats = empty_stats
                     cleanup_needed = cleanup_required_from_current_residual()
+            if report_requested:
+                projection_raw_stats = post_boundary_raw_stats
+                projection_stats = post_boundary_stats
         if preserve_velocity_constraints:
             self._apply_velocity_constraints_kernel(
                 constraint_blend,
@@ -8063,6 +8273,9 @@ class CartesianFluidSolver:
             "hibm_projection_tiny_unreached_cleanup_component_count": int(
                 hibm_projection_tiny_unreached_cleanup_component_count
             ),
+            "hibm_projection_topology_mutated": bool(
+                hibm_projection_topology_mutated
+            ),
             "cg_project_calls": int(self.last_project_cg_project_calls),
             "cg_iterations_total": int(self.last_project_cg_iterations_total),
             "cg_iterations_max": int(self.last_project_cg_iterations_max),
@@ -8079,6 +8292,12 @@ class CartesianFluidSolver:
             ),
             "hibm_pressure_reachability_converged": bool(
                 self.last_hibm_pressure_reachability_converged
+            ),
+            "hibm_pressure_reachability_valid": bool(
+                self.last_hibm_reachability_valid
+            ),
+            "hibm_pressure_reachability_revision": int(
+                self.last_hibm_reachability_revision
             ),
             "cg_unreached_component_count": int(
                 self.last_hibm_pressure_unreached_component_count
