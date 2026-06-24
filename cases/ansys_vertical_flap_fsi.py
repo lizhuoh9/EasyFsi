@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from simulation_core.fsi_driver import FsiCaseSpec
@@ -38,6 +38,12 @@ ANSYS_VERTICAL_FLAP_REFERENCE_RESULTS: dict[str, float | int | tuple[float, floa
 }
 
 
+ANSYS_VERTICAL_FLAP_THIN_WALL_PRESSURE_SAMPLING: dict[str, float | str] = {
+    "model": "two-sided-fluid-pressure",
+    "probe_max_multiplier": 12.0,
+}
+
+
 ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
     "source": {
         "name": "ANSYS Fluent v242 two-way intrinsic FSI vertical-flap tutorial",
@@ -69,6 +75,7 @@ ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
     "fsi_interface": {
         "flap_wall": "two-way intrinsic FSI",
         "flap_wall_shadow": "two-way intrinsic FSI",
+        "thin_wall_pressure_sampling": ANSYS_VERTICAL_FLAP_THIN_WALL_PRESSURE_SAMPLING,
     },
     "time_integration": {
         "dt_s": 5.0e-4,
@@ -130,8 +137,48 @@ class VerticalFlapFsiConfig:
     velocity_peak_tolerance: float = 0.05
 
 
+def thin_wall_pressure_probe_max_multiplier(config: VerticalFlapFsiConfig) -> float:
+    base_multiplier = float(
+        ANSYS_VERTICAL_FLAP_THIN_WALL_PRESSURE_SAMPLING["probe_max_multiplier"]
+    )
+    streamwise_spacing_m = float(config.duct_length_m) / float(config.grid_nodes[2])
+    max_spacing_m = max(
+        float(config.span_m) / float(config.grid_nodes[0]),
+        float(config.duct_height_m) / float(config.grid_nodes[1]),
+        streamwise_spacing_m,
+    )
+    hibm_search_envelope_m = 3.0 * max_spacing_m
+    # The probe must remain long enough to cross the physical wall thickness
+    # and the classified HIBM row-cloud envelope after mesh refinement; a
+    # fixed cell-count reach shrinks with dz and can stop inside dead row-cloud
+    # pressure instead of reaching the opposite water side.
+    thickness_multiplier = (
+        float(config.flap_thickness_m) + hibm_search_envelope_m
+    ) / streamwise_spacing_m + 2.5
+    return max(base_multiplier, thickness_multiplier)
+
+
+def surface_force_support_radius_m(config: VerticalFlapFsiConfig) -> float:
+    solid_dy = float(config.flap_height_m) / float(config.solid_particle_counts[1])
+    solid_dz = float(config.flap_thickness_m) / float(config.solid_particle_counts[2])
+    grid_dy = float(config.duct_height_m) / float(config.grid_nodes[1])
+    grid_dz = float(config.duct_length_m) / float(config.grid_nodes[2])
+    local_radius = max(2.5 * solid_dy, 2.5 * solid_dz, 2.0 * grid_dy, 2.0 * grid_dz)
+    thickness_limited_radius = min(local_radius, 0.5 * float(config.flap_thickness_m))
+    return max(thickness_limited_radius, 1.25 * max(solid_dy, solid_dz))
+
+
+def with_local_surface_force_support(
+    config: VerticalFlapFsiConfig,
+) -> VerticalFlapFsiConfig:
+    return replace(
+        config,
+        mpm_support_radius_m=surface_force_support_radius_m(config),
+    )
+
+
 def run_vertical_flap_fsi_smoke(config: VerticalFlapFsiConfig | None = None) -> dict[str, object]:
-    cfg = config or VerticalFlapFsiConfig()
+    cfg = with_local_surface_force_support(config or VerticalFlapFsiConfig())
     return run_official_fsi_benchmark(
         OfficialBenchmarkRunSpec(
             case_spec=CASE_SPEC,

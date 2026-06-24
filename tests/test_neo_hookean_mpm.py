@@ -130,6 +130,35 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
         self.assertGreater(report.total_mass_kg, 0.0)
         self.assertAlmostEqual(report.max_abs_j, 1.0, places=4)
 
+    def test_small_substep_position_increments_accumulate(self) -> None:
+        state = NeoHookeanMpmState(
+            particle_capacity=1,
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(0.1, 0.1, 0.1),
+            grid_nodes=(8, 8, 8),
+        )
+        state.initialize_box(
+            particle_counts=(1, 1, 1),
+            box_min_m=(0.049, 0.049, 0.049),
+            box_max_m=(0.051, 0.051, 0.051),
+            density_kgm3=1000.0,
+        )
+        state.set_uniform_velocity((0.0, 0.0, 1.0e-3))
+        initial = state.x.to_numpy().copy()
+
+        for _ in range(2000):
+            state.step(
+                dt_s=1.0e-7,
+                mu_pa=0.0,
+                lambda_pa=0.0,
+                primary_region_id=0,
+                secondary_region_id=-1,
+                read_report=False,
+            )
+
+        displacement_z = float(state.x.to_numpy()[0, 2] - initial[0, 2])
+        self.assertAlmostEqual(displacement_z, 2.0e-7, delta=5.0e-8)
+
     def test_non_cubic_grid_uses_axis_spacing_for_particle_mapping(self) -> None:
         material = ecoflex_0010_material()
         state = NeoHookeanMpmState(

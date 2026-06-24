@@ -37,6 +37,16 @@ PRESSURE_NEUMANN_INVALID_REASON_NAMES = {
     PRESSURE_NEUMANN_INVALID_REASON_BAD_MARKER: "bad_marker",
     PRESSURE_NEUMANN_INVALID_REASON_NONPOSITIVE_VOLUME: "nonpositive_volume",
 }
+STRESS_INVALID_REASON_NONE = 0
+STRESS_INVALID_REASON_BASE_PRESSURE_MISSING = 1
+STRESS_INVALID_REASON_TWO_SIDED_PRESSURE_MISSING = 2
+STRESS_INVALID_REASON_VISCOUS_GRADIENT_MISSING = 3
+STRESS_INVALID_REASON_NAMES = {
+    STRESS_INVALID_REASON_NONE: "none",
+    STRESS_INVALID_REASON_BASE_PRESSURE_MISSING: "base_pressure_missing",
+    STRESS_INVALID_REASON_TWO_SIDED_PRESSURE_MISSING: "two_sided_pressure_missing",
+    STRESS_INVALID_REASON_VISCOUS_GRADIENT_MISSING: "viscous_gradient_missing",
+}
 
 
 def _debug_stage_progress(message: str) -> None:
@@ -92,6 +102,7 @@ class HibmMpmFluidStressSampleReport:
     one_sided_pressure_marker_count: int = 0
     one_sided_extended_marker_count: int = 0
     one_sided_gradient_missing_marker_count: int = 0
+    marker_diagnostics: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -162,6 +173,8 @@ class HibmMpmVelocityDirichletBoundaryReport:
     active_velocity_dirichlet_rows: int
     inactive_obstacle_rows: int
     max_abs_velocity_mps: float
+    raw_reconstructed_max_abs_velocity_mps: float = 0.0
+    boundary_velocity_only_row_count: int = 0
     primary_region_active_rows: int = 0
     secondary_region_active_rows: int = 0
     other_region_active_rows: int = 0
@@ -499,6 +512,26 @@ class HibmMpmSurfaceMarkers:
             shape=self.marker_capacity,
         )
         self._stress_viscous_mode = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_base_pressure_found = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_inside_pressure_found = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_outside_pressure_found = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_marker_anchor_available = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_invalid_reason_code = ti.field(
             dtype=ti.i32,
             shape=self.marker_capacity,
         )
@@ -1571,6 +1604,14 @@ class HibmMpmSurfaceMarkers:
             )
             pressure_traction = -pressure * normal
             pressure_sample_valid = pressure_weight > 1.0e-12
+            diagnostic_base_pressure_found = 0
+            if pressure_sample_valid:
+                diagnostic_base_pressure_found = 1
+            diagnostic_inside_pressure_found = 0
+            diagnostic_outside_pressure_found = 0
+            diagnostic_marker_anchor_available = 0
+            if marker_pressure_anchor_cell[marker].x >= 0:
+                diagnostic_marker_anchor_available = 1
             gradient = ti.Matrix.zero(ti.f32, 3, 3)
             gradient_valid = 1
             viscous_mode = 1
@@ -1879,12 +1920,11 @@ class HibmMpmSurfaceMarkers:
                 # extension above and their branch priority below. The
                 # S2-A8'' dedicated sampling view can starve genuinely thin
                 # features that sit entirely inside their own row-cloud
-                # envelope, so BOTH standard walks (max 3.0x) run dry and
-                # the marker silently drops to zero traction. When armed
-                # (two_sided_probe_max_multiplier > 3.0) and ONLY when the
-                # standard
-                # ladder found nothing on EITHER side, re-walk BOTH sides
-                # out to the requested multiplier with the same
+                # envelope, so one or both standard walks (max 3.0x) can run
+                # dry and leave a physically two-sided marker invalid. When
+                # armed (two_sided_probe_max_multiplier > 3.0), re-walk each
+                # still-missing side out to the requested multiplier with the
+                # same
                 # 5-candidate ladder spacing, the same sampling view and
                 # the S2-A4 decoupled acceptance the closure extension
                 # uses. H1-type crossing guard, applied per side: an
@@ -1911,10 +1951,12 @@ class HibmMpmSurfaceMarkers:
                     extended_probe_max_multiplier = one_sided_probe_max_multiplier
                 if (
                     closure_region_marker == 0
-                    and inside_pressure_found == 0
-                    and outside_pressure_found == 0
+                    and (inside_pressure_found == 0 or outside_pressure_found == 0)
                     and extended_probe_max_multiplier > 3.0
                 ):
+                    marker_near_is_obstacle = 0
+                    if obstacle_field[i_near, j_near, k_near] != 0:
+                        marker_near_is_obstacle = 1
                     outside_crossed_solid = 0
                     inside_crossed_solid = 0
                     for extension_index in range(10):
@@ -1981,10 +2023,14 @@ class HibmMpmSurfaceMarkers:
                                 ]
                                 != 0
                             ):
-                                if side_is_inside == 1:
-                                    inside_crossed_solid = 1
-                                else:
-                                    outside_crossed_solid = 1
+                                if (
+                                    marker_near_is_obstacle == 0
+                                    and use_sampling_obstacle == 0
+                                ):
+                                    if side_is_inside == 1:
+                                        inside_crossed_solid = 1
+                                    else:
+                                        outside_crossed_solid = 1
                             else:
                                 sample_pressure, sample_weight = self._sample_pressure_trilinear_sampling_view(
                                     pressure_field,
@@ -2439,6 +2485,8 @@ class HibmMpmSurfaceMarkers:
                             ],
                             1,
                         )
+                diagnostic_inside_pressure_found = inside_pressure_found
+                diagnostic_outside_pressure_found = outside_pressure_found
             else:
                 if ti.static(viscosity_pa_s <= 0.0):
                     gradient = ti.Matrix.zero(ti.f32, 3, 3)
@@ -2467,6 +2515,28 @@ class HibmMpmSurfaceMarkers:
                         self.report_stress_viscous_gradient_invalid_marker_count[None],
                         1,
                     )
+            invalid_reason = STRESS_INVALID_REASON_NONE
+            if not stress_sample_valid:
+                if diagnostic_base_pressure_found == 0:
+                    invalid_reason = STRESS_INVALID_REASON_BASE_PRESSURE_MISSING
+                if two_sided_pressure != 0 and (
+                    diagnostic_inside_pressure_found == 0
+                    or diagnostic_outside_pressure_found == 0
+                ):
+                    invalid_reason = STRESS_INVALID_REASON_TWO_SIDED_PRESSURE_MISSING
+                if (
+                    pressure_sample_valid
+                    and ti.static(viscosity_pa_s > 0.0)
+                    and gradient_valid == 0
+                ):
+                    invalid_reason = STRESS_INVALID_REASON_VISCOUS_GRADIENT_MISSING
+            self._stress_base_pressure_found[marker] = diagnostic_base_pressure_found
+            self._stress_inside_pressure_found[marker] = diagnostic_inside_pressure_found
+            self._stress_outside_pressure_found[marker] = diagnostic_outside_pressure_found
+            self._stress_marker_anchor_available[marker] = (
+                diagnostic_marker_anchor_available
+            )
+            self._stress_invalid_reason_code[marker] = invalid_reason
             if stress_sample_valid:
                 traction = pressure_traction
                 if ti.static(viscosity_pa_s > 0.0):
@@ -3011,10 +3081,11 @@ class HibmMpmSurfaceMarkers:
                                     ]
                                     != 0
                                 ):
-                                    if side_is_inside == 1:
-                                        inside_crossed_solid = 1
-                                    else:
-                                        outside_crossed_solid = 1
+                                    if use_sampling_obstacle == 0:
+                                        if side_is_inside == 1:
+                                            inside_crossed_solid = 1
+                                        else:
+                                            outside_crossed_solid = 1
                                 else:
                                     _, sample_weight = self._sample_pressure_trilinear_sampling_view(
                                         pressure_field,
@@ -3469,10 +3540,11 @@ class HibmMpmSurfaceMarkers:
                                     nz - 1,
                                 )
                                 if obstacle_field[near_i, near_j, near_k] != 0:
-                                    if side_is_inside == 1:
-                                        inside_crossed_solid = 1
-                                    else:
-                                        outside_crossed_solid = 1
+                                    if use_sampling_obstacle == 0:
+                                        if side_is_inside == 1:
+                                            inside_crossed_solid = 1
+                                        else:
+                                            outside_crossed_solid = 1
                                 else:
                                     sample_gradient, sample_gradient_valid = (
                                         self._sample_velocity_gradient_sampling_view(
@@ -3864,10 +3936,11 @@ class HibmMpmSurfaceMarkers:
                                         nz - 1,
                                     )
                                     if obstacle_field[near_i, near_j, near_k] != 0:
-                                        if side_is_inside == 1:
-                                            inside_crossed_solid = 1
-                                        else:
-                                            outside_crossed_solid = 1
+                                        if use_sampling_obstacle == 0:
+                                            if side_is_inside == 1:
+                                                inside_crossed_solid = 1
+                                            else:
+                                                outside_crossed_solid = 1
                                     else:
                                         sample_gradient, sample_gradient_valid = (
                                             self._sample_velocity_gradient_sampling_view(
@@ -4354,7 +4427,59 @@ class HibmMpmSurfaceMarkers:
             one_sided_gradient_missing_marker_count=int(
                 self.report_stress_one_sided_gradient_missing_marker_count[None]
             ),
+            marker_diagnostics=self.stress_marker_diagnostics(),
         )
+
+    def stress_marker_diagnostics(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        marker_count = int(self.marker_count)
+        if limit is not None:
+            marker_count = min(marker_count, max(0, int(limit)))
+        valid = self._stress_pressure_valid.to_numpy()[:marker_count]
+        base_pressure_found = self._stress_base_pressure_found.to_numpy()[:marker_count]
+        inside_pressure_found = self._stress_inside_pressure_found.to_numpy()[
+            :marker_count
+        ]
+        outside_pressure_found = self._stress_outside_pressure_found.to_numpy()[
+            :marker_count
+        ]
+        marker_anchor_available = self._stress_marker_anchor_available.to_numpy()[
+            :marker_count
+        ]
+        invalid_reason_code = self._stress_invalid_reason_code.to_numpy()[
+            :marker_count
+        ]
+        positions = self.x_gamma_m.to_numpy()[:marker_count]
+        normals = self.n_gamma.to_numpy()[:marker_count]
+        regions = self.region_id.to_numpy()[:marker_count]
+        diagnostics: list[dict[str, Any]] = []
+        for marker in range(marker_count):
+            reason_code = int(invalid_reason_code[marker])
+            diagnostics.append(
+                {
+                    "marker_index": int(marker),
+                    "valid": bool(int(valid[marker])),
+                    "invalid_reason": STRESS_INVALID_REASON_NAMES.get(
+                        reason_code,
+                        f"unknown_{reason_code}",
+                    ),
+                    "base_pressure_found": bool(int(base_pressure_found[marker])),
+                    "inside_pressure_found": bool(int(inside_pressure_found[marker])),
+                    "outside_pressure_found": bool(
+                        int(outside_pressure_found[marker])
+                    ),
+                    "pressure_anchor_available": bool(
+                        int(marker_anchor_available[marker])
+                    ),
+                    "position_m": [float(value) for value in positions[marker]],
+                    "normal": [float(value) for value in normals[marker]],
+                    "region_id": int(regions[marker]),
+                }
+            )
+        return tuple(diagnostics)
 
     @ti.kernel
     def _mark_far_pressure_air_backed_seed_components_kernel(
@@ -6869,6 +6994,14 @@ class HibmMpmIbBoundaryConditions:
             dtype=ti.f32,
             shape=(),
         )
+        self.report_velocity_dirichlet_raw_max_abs_velocity = ti.field(
+            dtype=ti.f32,
+            shape=(),
+        )
+        self.report_velocity_dirichlet_boundary_velocity_only_rows = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.report_velocity_dirichlet_invalid_reconstruction_rows = ti.field(
             dtype=ti.i32,
             shape=(),
@@ -7134,6 +7267,8 @@ class HibmMpmIbBoundaryConditions:
         self.report_velocity_dirichlet_boundary_rows[None] = 0
         self.report_velocity_dirichlet_obstacle_rows[None] = 0
         self.report_velocity_dirichlet_max_abs_velocity[None] = 0.0
+        self.report_velocity_dirichlet_raw_max_abs_velocity[None] = 0.0
+        self.report_velocity_dirichlet_boundary_velocity_only_rows[None] = 0
         self.report_velocity_dirichlet_invalid_reconstruction_rows[None] = 0
         self.report_velocity_dirichlet_invalid_no_fluid_sample_rows[None] = 0
         self.report_velocity_dirichlet_invalid_nonpositive_gap_rows[None] = 0
@@ -7186,6 +7321,12 @@ class HibmMpmIbBoundaryConditions:
             ),
             max_abs_velocity_mps=float(
                 self.report_velocity_dirichlet_max_abs_velocity[None]
+            ),
+            raw_reconstructed_max_abs_velocity_mps=float(
+                self.report_velocity_dirichlet_raw_max_abs_velocity[None]
+            ),
+            boundary_velocity_only_row_count=int(
+                self.report_velocity_dirichlet_boundary_velocity_only_rows[None]
             ),
             unassigned_region_active_rows=int(
                 self.report_velocity_dirichlet_boundary_rows[None]
@@ -7435,10 +7576,14 @@ class HibmMpmIbBoundaryConditions:
         nx: ti.i32,
         ny: ti.i32,
         nz: ti.i32,
+        preserve_existing_rows: ti.i32,
+        interpolate_interior_velocity: ti.i32,
     ):
         self.report_velocity_dirichlet_boundary_rows[None] = 0
         self.report_velocity_dirichlet_obstacle_rows[None] = 0
         self.report_velocity_dirichlet_max_abs_velocity[None] = 0.0
+        self.report_velocity_dirichlet_raw_max_abs_velocity[None] = 0.0
+        self.report_velocity_dirichlet_boundary_velocity_only_rows[None] = 0
         self.report_velocity_dirichlet_invalid_reconstruction_rows[None] = 0
         self.report_velocity_dirichlet_invalid_no_fluid_sample_rows[None] = 0
         self.report_velocity_dirichlet_invalid_nonpositive_gap_rows[None] = 0
@@ -7448,9 +7593,10 @@ class HibmMpmIbBoundaryConditions:
         self.report_velocity_dirichlet_min_projection_weight[None] = 1.0e30
         self.report_velocity_dirichlet_max_projection_weight[None] = 0.0
         for node in ti.grouped(velocity_dirichlet_active):
-            velocity_dirichlet_active[node] = 0
-            velocity_dirichlet_value_mps[node] = ti.Vector([0.0, 0.0, 0.0])
-            velocity_dirichlet_projection_weight[node] = 0.0
+            if preserve_existing_rows == 0:
+                velocity_dirichlet_active[node] = 0
+                velocity_dirichlet_value_mps[node] = ti.Vector([0.0, 0.0, 0.0])
+                velocity_dirichlet_projection_weight[node] = 0.0
             if self.active_ib_node[node] == 1:
                 if obstacle_field[node] == 0:
                     boundary_velocity = self.velocity_dirichlet_mps_field[node]
@@ -7626,10 +7772,30 @@ class HibmMpmIbBoundaryConditions:
                             1.0,
                         )
                         reconstruction_alpha = alpha
-                        target_velocity = (
+                        raw_target_velocity = (
                             boundary_velocity
                             + (interior_velocity - boundary_velocity) * alpha
                         )
+                        ti.atomic_max(
+                            self.report_velocity_dirichlet_raw_max_abs_velocity[None],
+                            ti.max(
+                                ti.max(
+                                    ti.abs(raw_target_velocity.x),
+                                    ti.abs(raw_target_velocity.y),
+                                ),
+                                ti.abs(raw_target_velocity.z),
+                            ),
+                        )
+                        if interpolate_interior_velocity != 0:
+                            target_velocity = raw_target_velocity
+                        else:
+                            target_velocity = boundary_velocity
+                            ti.atomic_add(
+                                self.report_velocity_dirichlet_boundary_velocity_only_rows[
+                                    None
+                                ],
+                                1,
+                            )
                         velocity_dirichlet_active[node] = 1
                         velocity_dirichlet_value_mps[node] = target_velocity
                         velocity_dirichlet_projection_weight[node] = (
@@ -7717,11 +7883,31 @@ class HibmMpmIbBoundaryConditions:
                         )
                     elif fallback_reconstructable != 0:
                         reconstruction_alpha = fallback_alpha
-                        target_velocity = (
+                        raw_target_velocity = (
                             boundary_velocity
                             + (fallback_velocity - boundary_velocity)
                             * reconstruction_alpha
                         )
+                        ti.atomic_max(
+                            self.report_velocity_dirichlet_raw_max_abs_velocity[None],
+                            ti.max(
+                                ti.max(
+                                    ti.abs(raw_target_velocity.x),
+                                    ti.abs(raw_target_velocity.y),
+                                ),
+                                ti.abs(raw_target_velocity.z),
+                            ),
+                        )
+                        if interpolate_interior_velocity != 0:
+                            target_velocity = raw_target_velocity
+                        else:
+                            target_velocity = boundary_velocity
+                            ti.atomic_add(
+                                self.report_velocity_dirichlet_boundary_velocity_only_rows[
+                                    None
+                                ],
+                                1,
+                            )
                         velocity_dirichlet_active[node] = 1
                         velocity_dirichlet_value_mps[node] = target_velocity
                         velocity_dirichlet_projection_weight[node] = (
@@ -8063,6 +8249,21 @@ class HibmMpmIbBoundaryConditions:
                     )
 
     @ti.kernel
+    def _clear_owned_velocity_dirichlet_rows_kernel(
+        self,
+        velocity_dirichlet_active: ti.template(),
+        velocity_dirichlet_value_mps: ti.template(),
+        velocity_dirichlet_projection_weight: ti.template(),
+        velocity_dirichlet_marker_region_id: ti.template(),
+    ):
+        for node in ti.grouped(velocity_dirichlet_active):
+            if velocity_dirichlet_marker_region_id[node] >= 0:
+                velocity_dirichlet_active[node] = 0
+                velocity_dirichlet_value_mps[node] = ti.Vector([0.0, 0.0, 0.0])
+                velocity_dirichlet_projection_weight[node] = 0.0
+                velocity_dirichlet_marker_region_id[node] = -1
+
+    @ti.kernel
     def _reset_and_prefill_node_anchor_cells_kernel(
         self,
         node_anchor_cell: ti.template(),
@@ -8187,12 +8388,21 @@ class HibmMpmIbBoundaryConditions:
         marker_region_id=None,
         primary_region_id: int | None = None,
         secondary_region_id: int | None = None,
+        interpolate_interior_velocity: bool = True,
     ) -> HibmMpmVelocityDirichletBoundaryReport:
         if tuple(search.grid_nodes) != self.grid_nodes:
             raise ValueError("search.grid_nodes must match boundary grid_nodes")
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
             raise ValueError("grid_nodes must contain three values >= 2")
+        preserve_existing_rows = velocity_dirichlet_marker_region_id is not None
+        if preserve_existing_rows:
+            self._clear_owned_velocity_dirichlet_rows_kernel(
+                velocity_dirichlet_active,
+                velocity_dirichlet_value_mps,
+                velocity_dirichlet_projection_weight,
+                velocity_dirichlet_marker_region_id,
+            )
         _debug_stage_progress("velocity_rows:prefill_anchor:start")
         # S2-A7: full-field sentinel reset + interior-point prefill,
         # strictly before the row assembly so the success paths overwrite
@@ -8231,6 +8441,8 @@ class HibmMpmIbBoundaryConditions:
             int(nodes[0]),
             int(nodes[1]),
             int(nodes[2]),
+            1 if preserve_existing_rows else 0,
+            1 if bool(interpolate_interior_velocity) else 0,
         )
         _debug_stage_progress("velocity_rows:assemble_reconstructed:done")
         _debug_stage_progress("velocity_rows:relocate_masked:start")
@@ -8300,6 +8512,12 @@ class HibmMpmIbBoundaryConditions:
             ),
             max_abs_velocity_mps=float(
                 self.report_velocity_dirichlet_max_abs_velocity[None]
+            ),
+            raw_reconstructed_max_abs_velocity_mps=float(
+                self.report_velocity_dirichlet_raw_max_abs_velocity[None]
+            ),
+            boundary_velocity_only_row_count=int(
+                self.report_velocity_dirichlet_boundary_velocity_only_rows[None]
             ),
             primary_region_active_rows=primary_rows,
             secondary_region_active_rows=secondary_rows,
@@ -10026,6 +10244,15 @@ class HibmMpmIbBoundaryConditions:
         self._summarize_pressure_neumann_rows_by_marker_kernel(
             int(markers.marker_count),
         )
+        if bool(row_list_enabled):
+            compacted_row_count = self._compact_pressure_interface_row_list(
+                pressure_interface_row_count,
+                pressure_interface_row_owner,
+                pressure_interface_row_neighbor,
+                pressure_interface_row_transmissibility,
+                pressure_interface_row_capacity=int(pressure_interface_row_capacity),
+            )
+            self.report_pressure_neumann_matrix_rows[None] = int(compacted_row_count)
         active_rows = int(self.report_pressure_neumann_matrix_rows[None])
         min_reconstruction_gap_m = 0.0
         if active_rows > 0:
@@ -10103,6 +10330,61 @@ class HibmMpmIbBoundaryConditions:
                 self.report_pressure_neumann_max_diagonal_per_m2[None]
             ),
         )
+
+    def _compact_pressure_interface_row_list(
+        self,
+        pressure_interface_row_count,
+        pressure_interface_row_owner,
+        pressure_interface_row_neighbor,
+        pressure_interface_row_transmissibility,
+        *,
+        pressure_interface_row_capacity: int,
+    ) -> int:
+        raw_row_count = int(pressure_interface_row_count[None])
+        row_capacity = max(0, int(pressure_interface_row_capacity))
+        if raw_row_count <= 1 or row_capacity <= 1:
+            return raw_row_count
+        if raw_row_count > row_capacity:
+            return raw_row_count
+
+        owners = pressure_interface_row_owner.to_numpy()
+        neighbors = pressure_interface_row_neighbor.to_numpy()
+        transmissibility = pressure_interface_row_transmissibility.to_numpy()
+        pair_to_compact_index: dict[tuple[tuple[int, int, int], tuple[int, int, int]], int] = {}
+        compact_count = 0
+
+        for row_index in range(raw_row_count):
+            owner = tuple(int(value) for value in owners[row_index])
+            neighbor = tuple(int(value) for value in neighbors[row_index])
+            coefficient = float(transmissibility[row_index])
+            if coefficient <= 0.0:
+                owners[compact_count] = owners[row_index]
+                neighbors[compact_count] = neighbors[row_index]
+                transmissibility[compact_count] = transmissibility[row_index]
+                compact_count += 1
+                continue
+            pair_key = (owner, neighbor)
+            compact_index = pair_to_compact_index.get(pair_key)
+            if compact_index is None:
+                pair_to_compact_index[pair_key] = compact_count
+                owners[compact_count] = owners[row_index]
+                neighbors[compact_count] = neighbors[row_index]
+                transmissibility[compact_count] = transmissibility[row_index]
+                compact_count += 1
+            else:
+                transmissibility[compact_index] += transmissibility[row_index]
+
+        if compact_count == raw_row_count:
+            return raw_row_count
+
+        owners[compact_count:raw_row_count] = -1
+        neighbors[compact_count:raw_row_count] = -1
+        transmissibility[compact_count:raw_row_count] = 0.0
+        pressure_interface_row_owner.from_numpy(owners)
+        pressure_interface_row_neighbor.from_numpy(neighbors)
+        pressure_interface_row_transmissibility.from_numpy(transmissibility)
+        pressure_interface_row_count[None] = int(compact_count)
+        return int(compact_count)
 
     def is_active(self, node_index: tuple[int, int, int]) -> bool:
         return bool(int(self.active_ib_node[self._node_index(node_index)]))
@@ -10821,6 +11103,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     convert_internal_nodes_to_obstacles: bool = True,
     post_dirichlet_consistency_projection_iterations: int = 3,
     diagnostic_disable_pressure_neumann_matrix_rows: bool = False,
+    interpolate_velocity_dirichlet_with_interior: bool = True,
 ) -> HibmMpmSharpFluidToMpmLoadReport:
     """Run the sharp-interface fluid solve up to marker traction MPM loading.
 
@@ -10890,6 +11173,9 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             marker_region_id=markers.region_id,
             primary_region_id=primary_region_id,
             secondary_region_id=secondary_region_id,
+            interpolate_interior_velocity=bool(
+                interpolate_velocity_dirichlet_with_interior
+            ),
         )
 
     def assemble_pressure_neumann_rows() -> HibmMpmPressureNeumannMatrixReport:
@@ -11004,9 +11290,17 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 for report in projection_reports
             )
             combined["pressure_solve_failed"] = failed
-            combined["pressure_solve_failure_action"] = (
-                "reported" if failed else "none"
-            )
+            if failed:
+                actions = [
+                    str(report.get("pressure_solve_failure_action", "reported"))
+                    for report in projection_reports
+                    if bool(report.get("pressure_solve_failed", False))
+                ]
+                combined["pressure_solve_failure_action"] = (
+                    ",".join(dict.fromkeys(actions)) if actions else "reported"
+                )
+            else:
+                combined["pressure_solve_failure_action"] = "none"
         if any(
             "pressure_projection_physical_failure" in report
             for report in projection_reports
@@ -11089,6 +11383,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
             node_kind_code=ib_search.node_kind_code,
             unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+            protect_velocity_dirichlet_radius_cells=0,
+            protect_unstamped_velocity_dirichlet_rows=True,
             protect_solid_band_mask=True,
         )
         if int(band_increment) <= 0:
@@ -11218,6 +11514,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                     pressure_outlet_zmin=bool(pressure_outlet_zmin),
                     node_kind_code=ib_search.node_kind_code,
                     unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+                    protect_velocity_dirichlet_radius_cells=0,
+                    protect_unstamped_velocity_dirichlet_rows=True,
                     protect_solid_band_mask=True,
                 )
                 if int(band_increment) <= 0:
@@ -11711,6 +12009,17 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         ),
     }
     _debug_stage_progress("final_divergence_and_partition_stats:done")
+    if bool(projection_report.get("pressure_solve_failed", False)):
+        failure_action = str(
+            projection_report.get("pressure_solve_failure_action", "reported")
+        )
+        residual = float(projection_report.get("cg_relative_residual_max", math.nan))
+        raise RuntimeError(
+            "HIBM-MPM pressure solve failed before stress sampling; refusing to "
+            "sample marker tractions or scatter MPM forces from an invalid pressure "
+            f"field (action={failure_action}, "
+            f"cg_relative_residual_max={residual:.6g})"
+        )
     _debug_stage_progress("sample_no_slip_residual:start")
     no_slip_sampling_obstacle = fluid.build_hibm_no_slip_sampling_obstacle()
     no_slip_report = markers.sample_no_slip_residual(
@@ -11727,24 +12036,13 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         secondary_region_id=int(secondary_region_id),
     )
     _debug_stage_progress("sample_no_slip_residual:done")
-    # S2-A8'' closure sampling preparation, strictly after the LAST
-    # fluid.project(...) (including the post-Dirichlet consistency
-    # projection) and strictly before the stress sampling, and only when
-    # the far-pressure closure is enabled - the default path runs neither
-    # call and passes None below (bitwise-unchanged sampling).
-    #
-    # (a) Back-fill the stale pressures of band/internal-converted cells
-    #     (obstacle != 0, hibm_base_obstacle == 0) by iterative neighbor
-    #     averaging from the solved water - they dropped out of the
-    #     pressure solve when the band correctly converted them (the
-    #     A4->A8' chain established the conversion itself must not
-    #     change: zero-correctable cells are zero matrix rows).
-    # (b) Build the dedicated sampling view: base geometry plus the
-    #     row-cloud envelope (every cell the IB node search classified,
-    #     node_kind_code != _NODE_NONE) stays dry - the A8 experiment
-    #     proved opening the envelope kills the drive - while the
-    #     NONE-classified converted sealed water becomes samplable with
-    #     its back-filled pressure.
+    # S2-A8'' sampling preparation, strictly after the LAST fluid.project(...)
+    # (including the post-Dirichlet consistency projection) and strictly before
+    # the stress sampling. Pressure fill is a closure-only operation: it gives
+    # declared far-pressure pockets a readable p_far value. Ordinary two-sided
+    # thin-wall sampling must walk through projected solid-band obstacles to the
+    # next real solved fluid cell; otherwise it can stop on back-filled interior
+    # cells and artificially erase the pressure jump across the flap.
     stress_sampling_obstacle_field = None
     if int(far_pressure_region_id) != -1:
         _debug_stage_progress("sampling_obstacle_and_pressure_fill:start")
@@ -11761,6 +12059,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         )
         stress_sampling_obstacle_field = fluid.sampling_obstacle
         _debug_stage_progress("sampling_obstacle_and_pressure_fill:done")
+    elif bool(convert_internal_nodes_to_obstacles):
+        _debug_stage_progress("plain_two_sided_sampling_uses_projected_obstacle")
     _debug_stage_progress("sample_fluid_stress_to_marker_tractions:start")
     stress_report = markers.sample_fluid_stress_to_marker_tractions(
         fluid.velocity,
@@ -11778,8 +12078,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         fluid.grid.grid_nodes,
         viscosity_pa_s=fluid.mu,
         two_sided_pressure=True,
-        # S2-A8'': None when the closure is disabled (the default
-        # bitwise path); the dedicated view otherwise.
+        # S2-A8'': None only when no HIBM internal projection conversion is
+        # active; converted thin-wall cases use the dedicated sampling view.
         sampling_obstacle_field=stress_sampling_obstacle_field,
         far_pressure_region_id=int(far_pressure_region_id),
         far_pressure_pa=float(far_pressure_pa),
@@ -11962,6 +12262,8 @@ def advance_hibm_mpm_sharp_mpm_step(
     convert_internal_nodes_to_obstacles: bool = True,
     post_dirichlet_consistency_projection_iterations: int = 3,
     diagnostic_disable_pressure_neumann_matrix_rows: bool = False,
+    update_surface_geometry_from_mpm: bool = True,
+    interpolate_velocity_dirichlet_with_interior: bool = True,
 ) -> HibmMpmSharpMpmStepReport:
     if not callable(solid_step):
         raise ValueError("solid_step must be callable")
@@ -12051,6 +12353,9 @@ def advance_hibm_mpm_sharp_mpm_step(
         diagnostic_disable_pressure_neumann_matrix_rows=bool(
             diagnostic_disable_pressure_neumann_matrix_rows
         ),
+        interpolate_velocity_dirichlet_with_interior=bool(
+            interpolate_velocity_dirichlet_with_interior
+        ),
     )
     if not hibm_mpm_external_force_fresh_for_solid_step(load_report):
         scatter = load_report.mpm_force_scatter
@@ -12063,15 +12368,24 @@ def advance_hibm_mpm_sharp_mpm_step(
             f"action_reaction_residual_n={scatter.action_reaction_residual_n}"
         )
     mpm_report = solid_step()
-    feedback_report = markers.update_surface_feedback_from_mpm_surface_particles(
-        mpm_particle_position_m,
-        mpm_particle_velocity_mps,
-        mpm_particle_normal,
-        mpm_particle_area_m2,
-        particle_count=particles,
-        support_radius_m=float(mpm_support_radius_m),
-        dt_s=feedback_dt,
-    )
+    if bool(update_surface_geometry_from_mpm):
+        feedback_report = markers.update_surface_feedback_from_mpm_surface_particles(
+            mpm_particle_position_m,
+            mpm_particle_velocity_mps,
+            mpm_particle_normal,
+            mpm_particle_area_m2,
+            particle_count=particles,
+            support_radius_m=float(mpm_support_radius_m),
+            dt_s=feedback_dt,
+        )
+    else:
+        feedback_report = markers.update_surface_feedback_from_mpm_particles(
+            mpm_particle_position_m,
+            mpm_particle_velocity_mps,
+            particle_count=particles,
+            support_radius_m=float(mpm_support_radius_m),
+            dt_s=feedback_dt,
+        )
     next_ib_report = ib_search.search_and_classify_grid_fields(
         markers,
         cell_center_x_m=fluid.cell_center_x_m,
@@ -12133,12 +12447,17 @@ def advance_hibm_mpm_sharp_mpm_step(
         marker_region_id=markers.region_id,
         primary_region_id=primary_region_id,
         secondary_region_id=secondary_region_id,
+        interpolate_interior_velocity=bool(
+            interpolate_velocity_dirichlet_with_interior
+        ),
     )
     next_solid_band_nonprojectable_cell_count = (
         fluid.mark_hibm_solid_band_nonprojectable_cells(
             pressure_outlet_zmin=bool(pressure_outlet_zmin),
             node_kind_code=ib_search.node_kind_code,
             unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+            protect_velocity_dirichlet_radius_cells=0,
+            protect_unstamped_velocity_dirichlet_rows=True,
             protect_solid_band_mask=True,
         )
     )
@@ -12191,6 +12510,9 @@ def advance_hibm_mpm_sharp_mpm_step(
                 marker_region_id=markers.region_id,
                 primary_region_id=primary_region_id,
                 secondary_region_id=secondary_region_id,
+                interpolate_interior_velocity=bool(
+                    interpolate_velocity_dirichlet_with_interior
+                ),
             )
             next_pressure_disconnected_nonprojectable_cell_count = (
                 fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
@@ -12244,6 +12566,9 @@ def advance_hibm_mpm_sharp_mpm_step(
             marker_region_id=markers.region_id,
             primary_region_id=primary_region_id,
             secondary_region_id=secondary_region_id,
+            interpolate_interior_velocity=bool(
+                interpolate_velocity_dirichlet_with_interior
+            ),
         )
 
     def convert_next_projection_topology_cleanup_until_saturated() -> None:
@@ -12315,6 +12640,9 @@ def advance_hibm_mpm_sharp_mpm_step(
             marker_region_id=markers.region_id,
             primary_region_id=primary_region_id,
             secondary_region_id=secondary_region_id,
+            interpolate_interior_velocity=bool(
+                interpolate_velocity_dirichlet_with_interior
+            ),
         )
         for _next_band_pass in range(8):
             next_band_increment = (
@@ -12322,6 +12650,8 @@ def advance_hibm_mpm_sharp_mpm_step(
                     pressure_outlet_zmin=bool(pressure_outlet_zmin),
                     node_kind_code=ib_search.node_kind_code,
                     unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+                    protect_velocity_dirichlet_radius_cells=0,
+                    protect_unstamped_velocity_dirichlet_rows=True,
                     protect_solid_band_mask=True,
                 )
             )
@@ -12350,6 +12680,9 @@ def advance_hibm_mpm_sharp_mpm_step(
                 marker_region_id=markers.region_id,
                 primary_region_id=primary_region_id,
                 secondary_region_id=secondary_region_id,
+                interpolate_interior_velocity=bool(
+                    interpolate_velocity_dirichlet_with_interior
+                ),
             )
         next_pressure_disconnected_nonprojectable_cell_count = (
             fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
@@ -12418,6 +12751,8 @@ def advance_hibm_mpm_sharp_mpm_step(
                         pressure_outlet_zmin=bool(pressure_outlet_zmin),
                         node_kind_code=ib_search.node_kind_code,
                         unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
+                        protect_velocity_dirichlet_radius_cells=0,
+                        protect_unstamped_velocity_dirichlet_rows=True,
                         protect_solid_band_mask=True,
                     )
                 )
@@ -12446,6 +12781,9 @@ def advance_hibm_mpm_sharp_mpm_step(
                     marker_region_id=markers.region_id,
                     primary_region_id=primary_region_id,
                     secondary_region_id=secondary_region_id,
+                    interpolate_interior_velocity=bool(
+                        interpolate_velocity_dirichlet_with_interior
+                    ),
                 )
     # Air conversion changes pressure reachability; keep current-step velocity
     # rows intact so the post-solid projection does not consume diagnostic rows.
@@ -12832,6 +13170,12 @@ def hibm_mpm_sharp_step_summary(
         ),
         "hibm_velocity_dirichlet_max_abs_velocity_mps": (
             load.velocity_dirichlet.max_abs_velocity_mps
+        ),
+        "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": (
+            load.velocity_dirichlet.raw_reconstructed_max_abs_velocity_mps
+        ),
+        "hibm_velocity_dirichlet_boundary_velocity_only_rows": (
+            load.velocity_dirichlet.boundary_velocity_only_row_count
         ),
         "hibm_velocity_dirichlet_invalid_reconstruction_count": (
             load.velocity_dirichlet.invalid_reconstruction_row_count
@@ -13451,6 +13795,12 @@ def hibm_mpm_sharp_step_summary(
         ),
         "hibm_next_velocity_dirichlet_max_abs_velocity_mps": (
             report.next_velocity_dirichlet.max_abs_velocity_mps
+        ),
+        "hibm_next_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": (
+            report.next_velocity_dirichlet.raw_reconstructed_max_abs_velocity_mps
+        ),
+        "hibm_next_velocity_dirichlet_boundary_velocity_only_rows": (
+            report.next_velocity_dirichlet.boundary_velocity_only_row_count
         ),
         "hibm_next_velocity_dirichlet_invalid_reconstruction_count": (
             report.next_velocity_dirichlet.invalid_reconstruction_row_count

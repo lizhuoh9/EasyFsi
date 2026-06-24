@@ -114,10 +114,20 @@ class NeoHookeanMpmState:
 
         self.x = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
         self.rest_x = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
+        self.position_increment_residual_m = ti.Vector.field(
+            3,
+            dtype=ti.f32,
+            shape=self.particle_capacity,
+        )
         self.v = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
         self.C = ti.Matrix.field(3, 3, dtype=ti.f32, shape=self.particle_capacity)
         self.F = ti.Matrix.field(3, 3, dtype=ti.f32, shape=self.particle_capacity)
         self.saved_x = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
+        self.saved_position_increment_residual_m = ti.Vector.field(
+            3,
+            dtype=ti.f32,
+            shape=self.particle_capacity,
+        )
         self.saved_v = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
         self.saved_C = ti.Matrix.field(3, 3, dtype=ti.f32, shape=self.particle_capacity)
         self.saved_F = ti.Matrix.field(3, 3, dtype=ti.f32, shape=self.particle_capacity)
@@ -135,6 +145,7 @@ class NeoHookeanMpmState:
         self.grid_mass_kg = ti.field(dtype=ti.f32, shape=self.grid_nodes)
         self.grid_velocity_mps = ti.Vector.field(3, dtype=ti.f32, shape=self.grid_nodes)
         self.grid_force_n = ti.Vector.field(3, dtype=ti.f32, shape=self.grid_nodes)
+        self.grid_fixed_node = ti.field(dtype=ti.i32, shape=self.grid_nodes)
 
         self.report_total_mass_kg = ti.field(dtype=ti.f32, shape=())
         self.report_total_volume_m3 = ti.field(dtype=ti.f32, shape=())
@@ -199,6 +210,7 @@ class NeoHookeanMpmState:
                 z = min_z + (ti.cast(iz, ti.f32) + 0.5) * (max_z - min_z) / ti.cast(nzp, ti.f32)
                 self.x[p] = ti.Vector([x, y, z])
                 self.rest_x[p] = ti.Vector([x, y, z])
+                self.position_increment_residual_m[p] = ti.Vector([0.0, 0.0, 0.0])
                 self.v[p] = ti.Vector([0.0, 0.0, 0.0])
                 self.C[p] = ti.Matrix.zero(ti.f32, 3, 3)
                 self.F[p] = self._identity()
@@ -301,6 +313,7 @@ class NeoHookeanMpmState:
                 position = centroid_m[face] + normal[face] * (layer_fraction * thickness)
                 self.x[p] = position
                 self.rest_x[p] = position
+                self.position_increment_residual_m[p] = ti.Vector([0.0, 0.0, 0.0])
                 self.v[p] = ti.Vector([0.0, 0.0, 0.0])
                 self.C[p] = ti.Matrix.zero(ti.f32, 3, 3)
                 self.F[p] = self._identity()
@@ -578,6 +591,7 @@ class NeoHookeanMpmState:
         for p in range(self.particle_capacity):
             if p < particle_count:
                 self.x[p].x = self.rest_x[p].x
+                self.position_increment_residual_m[p].x = 0.0
                 self.v[p].x = 0.0
                 self.C[p][0, 0] = 0.0
                 self.C[p][0, 1] = 0.0
@@ -596,6 +610,7 @@ class NeoHookeanMpmState:
         for p in range(self.particle_capacity):
             if p < particle_count:
                 self.x[p].z = self.rest_x[p].z
+                self.position_increment_residual_m[p].z = 0.0
                 self.v[p].z = 0.0
                 self.C[p][0, 2] = 0.0
                 self.C[p][1, 2] = 0.0
@@ -744,6 +759,7 @@ class NeoHookeanMpmState:
             self.grid_mass_kg[i, j, k] = 0.0
             self.grid_velocity_mps[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.grid_force_n[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            self.grid_fixed_node[i, j, k] = 0
         self._clear_report_func()
 
         for p in range(self.particle_capacity):
@@ -836,6 +852,8 @@ class NeoHookeanMpmState:
                         ti.atomic_add(self.grid_force_n[node].x, force.x)
                         ti.atomic_add(self.grid_force_n[node].y, force.y)
                         ti.atomic_add(self.grid_force_n[node].z, force.z)
+                        if self.fixed_particle[p] != 0 and weight > 0.0:
+                            self.grid_fixed_node[node] = 1
 
         for i, j, k in self.grid_mass_kg:
             mass = self.grid_mass_kg[i, j, k]
@@ -844,6 +862,8 @@ class NeoHookeanMpmState:
                 velocity += dt_s * self.grid_force_n[i, j, k] / mass
                 transfer_velocity = velocity
                 velocity *= velocity_damping
+                if self.grid_fixed_node[i, j, k] != 0:
+                    velocity = ti.Vector([0.0, 0.0, 0.0])
                 self.grid_velocity_mps[i, j, k] = velocity
                 self._atomic_add_vector(
                     self.report_transfer_grid_momentum_kg_mps,
@@ -890,7 +910,20 @@ class NeoHookeanMpmState:
                     if self.fixed_particle[p] == 0:
                         self.v[p] = new_v
                         self.C[p] = new_C
-                        self.x[p] += dt_s * new_v
+                        position_increment = (
+                            self.position_increment_residual_m[p] + dt_s * new_v
+                        )
+                        new_x = self.x[p]
+                        for axis in ti.static(range(3)):
+                            min_resolvable_increment = ti.max(
+                                ti.cast(1.0e-9, ti.f32),
+                                ti.abs(new_x[axis]) * ti.cast(5.0e-7, ti.f32),
+                            )
+                            if ti.abs(position_increment[axis]) >= min_resolvable_increment:
+                                new_x[axis] += position_increment[axis]
+                                position_increment[axis] = 0.0
+                        self.x[p] = new_x
+                        self.position_increment_residual_m[p] = position_increment
                         self.F[p] = (self._identity() + dt_s * new_C) @ self.F[p]
                 if self.fixed_particle[p] != 0:
                     # Fixed particles stay frozen: zero velocity, frozen
@@ -898,6 +931,7 @@ class NeoHookeanMpmState:
                     self.v[p] = ti.Vector([0.0, 0.0, 0.0])
                     self.C[p] = ti.Matrix.zero(ti.f32, 3, 3)
                     self.F[p] = self._identity()
+                    self.position_increment_residual_m[p] = ti.Vector([0.0, 0.0, 0.0])
                 self._update_surface_geometry_from_deformation(p)
                 report_coord = self._particle_grid_coordinate(p)
                 if self._particle_grid_stencil_out_of_bounds(report_coord) == 0:
@@ -1026,6 +1060,9 @@ class NeoHookeanMpmState:
     def _save_state_kernel(self, particle_count: ti.i32):
         for p in range(particle_count):
             self.saved_x[p] = self.x[p]
+            self.saved_position_increment_residual_m[p] = (
+                self.position_increment_residual_m[p]
+            )
             self.saved_v[p] = self.v[p]
             self.saved_C[p] = self.C[p]
             self.saved_F[p] = self.F[p]
@@ -1034,6 +1071,9 @@ class NeoHookeanMpmState:
     def _restore_state_kernel(self, particle_count: ti.i32):
         for p in range(particle_count):
             self.x[p] = self.saved_x[p]
+            self.position_increment_residual_m[p] = (
+                self.saved_position_increment_residual_m[p]
+            )
             self.v[p] = self.saved_v[p]
             self.C[p] = self.saved_C[p]
             self.F[p] = self.saved_F[p]

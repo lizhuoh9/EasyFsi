@@ -13,6 +13,7 @@ from simulation_core.fluid import (
     GradedGridSpec,
     RefinementRegion,
     build_graded_grid,
+    pressure_outlet_cleanup_iteration_budget,
 )
 
 
@@ -92,6 +93,31 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         self.assertEqual(grid.uniform_spacing_m, (0.25, 0.4, 0.5))
         np.testing.assert_allclose(grid.cell_centers_x_m, (1.125, 1.375, 1.625, 1.875))
         np.testing.assert_allclose(grid.center_distances_z_m, (0.5, 0.5, 0.5, 0.5, 0.5, 0.5))
+
+    def test_pressure_outlet_cleanup_budget_uses_full_interface_matrix_budget(
+        self,
+    ) -> None:
+        self.assertEqual(
+            pressure_outlet_cleanup_iteration_budget(
+                iterations=1920,
+                pressure_interface_matrix_active=True,
+            ),
+            1920,
+        )
+        self.assertEqual(
+            pressure_outlet_cleanup_iteration_budget(
+                iterations=1920,
+                pressure_interface_matrix_active=False,
+            ),
+            256,
+        )
+        self.assertEqual(
+            pressure_outlet_cleanup_iteration_budget(
+                iterations=12,
+                pressure_interface_matrix_active=True,
+            ),
+            12,
+        )
 
     def test_solver_loads_uniform_cartesian_grid_axis_fields(self) -> None:
         grid = CartesianGrid.uniform(
@@ -2165,6 +2191,37 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         self.assertGreater(report["pre_projection_l2"], 1.0e-4)
         self.assertLess(report["projection_l2"], report["pre_projection_l2"] * 0.25)
         self.assertLess(report["l2"], report["pre_projection_l2"] * 0.25)
+
+    def test_zmax_velocity_inlet_source_drives_pressure_outlet_throughflow(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 8, 16), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+
+        solver.add_zmax_velocity_inlet_volume_source(normal_velocity_mps=-0.2)
+        report = solver.project(
+            iterations=512,
+            pressure_outlet_zmin=True,
+            pressure_solver="fv_cg",
+            cg_tolerance=1.0e-8,
+            reset_pressure=True,
+            read_report=True,
+        )
+
+        velocity = solver.velocity.to_numpy()
+        self.assertLess(report["l2"], 1.0e-4)
+        self.assertAlmostEqual(
+            float(np.mean(velocity[:, :, 0, 2])),
+            -0.2,
+            delta=2.0e-3,
+        )
+        self.assertAlmostEqual(
+            float(np.mean(velocity[:, :, 8, 2])),
+            -0.2,
+            delta=2.0e-3,
+        )
 
     def test_fv_cg_laplacian_applies_neumann_row_at_hibm_dirichlet(self) -> None:
         solver = CartesianFluidSolver(

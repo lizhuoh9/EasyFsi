@@ -24,6 +24,17 @@ PRESSURE_OUTLET_AUTO_CLEANUP_MIN_L2 = 1.0e-8
 PRESSURE_OUTLET_AUTO_CLEANUP_MAX_PASSES = 3
 
 
+def pressure_outlet_cleanup_iteration_budget(
+    *,
+    iterations: int,
+    pressure_interface_matrix_active: bool,
+) -> int:
+    iteration_count = max(1, int(iterations))
+    if bool(pressure_interface_matrix_active):
+        return iteration_count
+    return min(iteration_count, 256)
+
+
 @dataclass(frozen=True)
 class CartesianGrid:
     bounds_min_m: tuple[float, float, float]
@@ -1544,6 +1555,7 @@ class CartesianFluidSolver:
         interior_only: ti.i32,
         protect_velocity_dirichlet_radius_cells: ti.i32,
         protect_velocity_dirichlet_marker_region_id: ti.i32,
+        protect_unstamped_velocity_dirichlet_rows: ti.i32,
         protect_solid_band_mask: ti.i32,
     ):
         self.report_hibm_solid_band_nonprojectable_cells[None] = 0
@@ -1600,18 +1612,37 @@ class CartesianFluidSolver:
                                         kk,
                                     ]
                                     != 0
-                                    and (
-                                        protect_velocity_dirichlet_marker_region_id
-                                        < 0
-                                        or self.velocity_dirichlet_boundary_marker_region_id[
+                                ):
+                                    row_region = (
+                                        self.velocity_dirichlet_boundary_marker_region_id[
                                             ii,
                                             jj,
                                             kk,
                                         ]
-                                        == protect_velocity_dirichlet_marker_region_id
                                     )
-                                ):
-                                    protected_velocity_dirichlet = 1
+                                    region_matches = 0
+                                    if (
+                                        protect_unstamped_velocity_dirichlet_rows
+                                        != 0
+                                        and row_region < 0
+                                    ):
+                                        region_matches = 1
+                                    if (
+                                        protect_unstamped_velocity_dirichlet_rows
+                                        == 0
+                                        and protect_velocity_dirichlet_marker_region_id
+                                        < 0
+                                    ):
+                                        region_matches = 1
+                                    if (
+                                        protect_velocity_dirichlet_marker_region_id
+                                        >= 0
+                                        and row_region
+                                        == protect_velocity_dirichlet_marker_region_id
+                                    ):
+                                        region_matches = 1
+                                    if region_matches != 0:
+                                        protected_velocity_dirichlet = 1
                                 dk += 1
                             dj += 1
                         di += 1
@@ -1646,15 +1677,22 @@ class CartesianFluidSolver:
                         self.report_hibm_solid_band_enclosed_water_cells[None],
                         1,
                     )
-                if convert_to_obstacle == 1 and (
-                    interior_only == 0 or is_interior_sliver == 1
+                if (
+                    convert_to_obstacle == 1
+                    and protected_velocity_dirichlet == 0
+                    and protected_solid_band_mask == 0
+                    and (interior_only == 0 or is_interior_sliver == 1)
                 ):
                     self.obstacle[i, j, k] = 1
                     self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
                     self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
                     self.volume_source_s[i, j, k] = 0.0
                     self.divergence[i, j, k] = 0.0
-                if interior_only == 0 or is_interior_sliver == 1:
+                if (
+                    protected_velocity_dirichlet == 0
+                    and protected_solid_band_mask == 0
+                    and (interior_only == 0 or is_interior_sliver == 1)
+                ):
                     ti.atomic_add(
                         self.report_hibm_solid_band_nonprojectable_cells[None],
                         1,
@@ -1668,6 +1706,7 @@ class CartesianFluidSolver:
         unclassified_node_code: int = 0,
         protect_velocity_dirichlet_radius_cells: int = -1,
         protect_velocity_dirichlet_marker_region_id: int = -1,
+        protect_unstamped_velocity_dirichlet_rows: bool = False,
         protect_solid_band_mask: bool = False,
     ) -> int:
         """Mark one band sweep and return the newly marked cell count.
@@ -1717,9 +1756,12 @@ class CartesianFluidSolver:
         stamped with that marker region qualify. The sharp HIBM path uses this
         for primary water-side interface samples: those cells are part of the
         active fluid boundary condition, not membrane-interior slivers.
-        ``protect_solid_band_mask=True`` also preserves cells explicitly marked
-        in ``hibm_solid_band_protection_cell`` (source-config normal-probe
-        fluid cells).
+        ``protect_unstamped_velocity_dirichlet_rows=True`` restricts a negative
+        region filter to external rows left unstamped with marker region ``-1``,
+        such as inlet velocity boundaries. ``protect_solid_band_mask=True``
+        also preserves cells explicitly marked in
+        ``hibm_solid_band_protection_cell`` (source-config normal-probe fluid
+        cells).
 
         ``last_hibm_solid_band_interior_cells`` /
         ``last_hibm_solid_band_enclosed_water_cells`` /
@@ -1758,6 +1800,7 @@ class CartesianFluidSolver:
                 1 if preserve_enclosed_water else 0,
                 int(protect_velocity_dirichlet_radius_cells),
                 int(protect_velocity_dirichlet_marker_region_id),
+                1 if protect_unstamped_velocity_dirichlet_rows else 0,
                 1 if protect_solid_band_mask else 0,
             )
             self.last_hibm_solid_band_interior_cells = int(
@@ -1820,6 +1863,18 @@ class CartesianFluidSolver:
         )
 
     @ti.func
+    def _velocity_dirichlet_pressure_barrier(
+        self,
+        i: ti.i32,
+        j: ti.i32,
+        k: ti.i32,
+    ):
+        return (
+            self.velocity_dirichlet_boundary_active[i, j, k] != 0
+            and self.velocity_dirichlet_boundary_marker_region_id[i, j, k] >= 0
+        )
+
+    @ti.func
     def _pressure_outlet_reachable_neighbor_exists(
         self,
         i: ti.i32,
@@ -1830,43 +1885,43 @@ class CartesianFluidSolver:
         if (
             i > 0
             and self.hibm_pressure_outlet_reachable[i - 1, j, k] != 0
-            and self.velocity_dirichlet_boundary_active[i, j, k] == 0
+            and not self._velocity_dirichlet_pressure_barrier(i, j, k)
             and self.hibm_pressure_reachability_barrier[i, j, k] == 0
         ):
             reachable = True
         if (
             i < self.nx - 1
             and self.hibm_pressure_outlet_reachable[i + 1, j, k] != 0
-            and self.velocity_dirichlet_boundary_active[i + 1, j, k] == 0
-            and self.hibm_pressure_reachability_barrier[i + 1, j, k] == 0
+            and not self._velocity_dirichlet_pressure_barrier(i, j, k)
+            and self.hibm_pressure_reachability_barrier[i, j, k] == 0
         ):
             reachable = True
         if (
             j > 0
             and self.hibm_pressure_outlet_reachable[i, j - 1, k] != 0
-            and self.velocity_dirichlet_boundary_active[i, j, k] == 0
+            and not self._velocity_dirichlet_pressure_barrier(i, j, k)
             and self.hibm_pressure_reachability_barrier[i, j, k] == 0
         ):
             reachable = True
         if (
             j < self.ny - 1
             and self.hibm_pressure_outlet_reachable[i, j + 1, k] != 0
-            and self.velocity_dirichlet_boundary_active[i, j + 1, k] == 0
-            and self.hibm_pressure_reachability_barrier[i, j + 1, k] == 0
+            and not self._velocity_dirichlet_pressure_barrier(i, j, k)
+            and self.hibm_pressure_reachability_barrier[i, j, k] == 0
         ):
             reachable = True
         if (
             k > 0
             and self.hibm_pressure_outlet_reachable[i, j, k - 1] != 0
-            and self.velocity_dirichlet_boundary_active[i, j, k] == 0
+            and not self._velocity_dirichlet_pressure_barrier(i, j, k)
             and self.hibm_pressure_reachability_barrier[i, j, k] == 0
         ):
             reachable = True
         if (
             k < self.nz - 1
             and self.hibm_pressure_outlet_reachable[i, j, k + 1] != 0
-            and self.velocity_dirichlet_boundary_active[i, j, k + 1] == 0
-            and self.hibm_pressure_reachability_barrier[i, j, k + 1] == 0
+            and not self._velocity_dirichlet_pressure_barrier(i, j, k)
+            and self.hibm_pressure_reachability_barrier[i, j, k] == 0
         ):
             reachable = True
         return reachable
@@ -1893,7 +1948,7 @@ class CartesianFluidSolver:
                 self.obstacle[i, j, k] == 0
                 and self.hibm_pressure_reachability_barrier[i, j, k] == 0
                 and k == 0
-                and self.velocity_dirichlet_boundary_active[i, j, k] == 0
+                and not self._velocity_dirichlet_pressure_barrier(i, j, k)
             ):
                 self.hibm_pressure_outlet_reachable[i, j, k] = 1
                 self.hibm_pressure_outlet_reachable_next[i, j, k] = 1
@@ -1936,6 +1991,7 @@ class CartesianFluidSolver:
             if (
                 self.obstacle[i, j, k] == 0
                 and self.hibm_pressure_reachability_barrier[i, j, k] == 0
+                and not self._velocity_dirichlet_pressure_barrier(i, j, k)
                 and self.hibm_pressure_outlet_reachable[i, j, k] == 0
             ):
                 ti.atomic_add(
@@ -2098,6 +2154,7 @@ class CartesianFluidSolver:
             if (
                 self.obstacle[i, j, k] == 0
                 and self.hibm_pressure_reachability_barrier[i, j, k] == 0
+                and not self._velocity_dirichlet_pressure_barrier(i, j, k)
                 and self.hibm_pressure_outlet_reachable[i, j, k] == 0
             ):
                 label = self.hibm_pressure_unreached_component_label[i, j, k]
@@ -2199,7 +2256,7 @@ class CartesianFluidSolver:
         nx, ny, nz = valid.shape
         protected = np.zeros(valid.shape, dtype=bool)
         protect_radius = max(0, int(protect_velocity_dirichlet_radius_cells))
-        if protect_radius > 0:
+        if int(protect_velocity_dirichlet_radius_cells) >= 0:
             row_active = self.velocity_dirichlet_boundary_active.to_numpy() != 0
             for row_i, row_j, row_k in np.argwhere(row_active):
                 i0 = max(0, int(row_i) - protect_radius)
@@ -2749,6 +2806,28 @@ class CartesianFluidSolver:
 
     def clear_volume_source(self) -> None:
         self._clear_volume_source_kernel()
+
+    @ti.kernel
+    def _add_zmax_velocity_inlet_volume_source_kernel(
+        self,
+        normal_velocity_mps: ti.f32,
+    ):
+        k = self.nz - 1
+        for i, j in ti.ndrange(self.nx, self.ny):
+            self.volume_source_s[i, j, k] += (
+                -normal_velocity_mps / self.cell_width_z_m[k]
+            )
+
+    def add_zmax_velocity_inlet_volume_source(
+        self,
+        *,
+        normal_velocity_mps: float,
+    ) -> None:
+        if not math.isfinite(float(normal_velocity_mps)):
+            raise ValueError("normal_velocity_mps must be finite")
+        self._add_zmax_velocity_inlet_volume_source_kernel(
+            float(normal_velocity_mps)
+        )
 
     @ti.kernel
     def _copy_velocity_to_prev_kernel(self):
@@ -5107,6 +5186,7 @@ class CartesianFluidSolver:
             if (
                 self.obstacle[i, j, k] == 0
                 and self.hibm_pressure_reachability_barrier[i, j, k] == 0
+                and not self._velocity_dirichlet_pressure_barrier(i, j, k)
                 and self.hibm_pressure_outlet_reachable[i, j, k] == 0
             ):
                 volume_m3 = (
@@ -5160,9 +5240,9 @@ class CartesianFluidSolver:
                 if (
                     i > 0
                     and self.obstacle[i - 1, j, k] == 0
-                    and self.hibm_pressure_reachability_barrier[i, j, k] == 0
+                    and self.hibm_pressure_reachability_barrier[i - 1, j, k] == 0
                     and self.hibm_pressure_outlet_reachable[i - 1, j, k] == 0
-                    and self.velocity_dirichlet_boundary_active[i, j, k] == 0
+                    and not self._velocity_dirichlet_pressure_barrier(i - 1, j, k)
                 ):
                     best = ti.min(
                         best,
@@ -5173,7 +5253,7 @@ class CartesianFluidSolver:
                     and self.obstacle[i + 1, j, k] == 0
                     and self.hibm_pressure_reachability_barrier[i + 1, j, k] == 0
                     and self.hibm_pressure_outlet_reachable[i + 1, j, k] == 0
-                    and self.velocity_dirichlet_boundary_active[i + 1, j, k] == 0
+                    and not self._velocity_dirichlet_pressure_barrier(i + 1, j, k)
                 ):
                     best = ti.min(
                         best,
@@ -5182,9 +5262,9 @@ class CartesianFluidSolver:
                 if (
                     j > 0
                     and self.obstacle[i, j - 1, k] == 0
-                    and self.hibm_pressure_reachability_barrier[i, j, k] == 0
+                    and self.hibm_pressure_reachability_barrier[i, j - 1, k] == 0
                     and self.hibm_pressure_outlet_reachable[i, j - 1, k] == 0
-                    and self.velocity_dirichlet_boundary_active[i, j, k] == 0
+                    and not self._velocity_dirichlet_pressure_barrier(i, j - 1, k)
                 ):
                     best = ti.min(
                         best,
@@ -5195,7 +5275,7 @@ class CartesianFluidSolver:
                     and self.obstacle[i, j + 1, k] == 0
                     and self.hibm_pressure_reachability_barrier[i, j + 1, k] == 0
                     and self.hibm_pressure_outlet_reachable[i, j + 1, k] == 0
-                    and self.velocity_dirichlet_boundary_active[i, j + 1, k] == 0
+                    and not self._velocity_dirichlet_pressure_barrier(i, j + 1, k)
                 ):
                     best = ti.min(
                         best,
@@ -5204,9 +5284,9 @@ class CartesianFluidSolver:
                 if (
                     k > 0
                     and self.obstacle[i, j, k - 1] == 0
-                    and self.hibm_pressure_reachability_barrier[i, j, k] == 0
+                    and self.hibm_pressure_reachability_barrier[i, j, k - 1] == 0
                     and self.hibm_pressure_outlet_reachable[i, j, k - 1] == 0
-                    and self.velocity_dirichlet_boundary_active[i, j, k] == 0
+                    and not self._velocity_dirichlet_pressure_barrier(i, j, k - 1)
                 ):
                     best = ti.min(
                         best,
@@ -5217,7 +5297,7 @@ class CartesianFluidSolver:
                     and self.obstacle[i, j, k + 1] == 0
                     and self.hibm_pressure_reachability_barrier[i, j, k + 1] == 0
                     and self.hibm_pressure_outlet_reachable[i, j, k + 1] == 0
-                    and self.velocity_dirichlet_boundary_active[i, j, k + 1] == 0
+                    and not self._velocity_dirichlet_pressure_barrier(i, j, k + 1)
                 ):
                     best = ti.min(
                         best,
@@ -7962,7 +8042,10 @@ class CartesianFluidSolver:
                 post_boundary_raw_stats = empty_stats
                 post_boundary_stats = empty_stats
                 cleanup_needed = cleanup_required_from_current_residual()
-            cleanup_iterations = max(1, min(int(iterations), 256))
+            cleanup_iterations = pressure_outlet_cleanup_iteration_budget(
+                iterations=int(iterations),
+                pressure_interface_matrix_active=pressure_interface_matrix_active,
+            )
             for _ in range(PRESSURE_OUTLET_AUTO_CLEANUP_MAX_PASSES):
                 if report_requested:
                     if post_boundary_stats["l2"] <= cleanup_target_l2:
