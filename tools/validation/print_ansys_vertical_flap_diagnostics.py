@@ -51,6 +51,13 @@ HISTORY_COLUMNS = [
     "max_displacement_m",
     "root_max_displacement_m",
     "surface_feedback_max_marker_displacement_m",
+    "fluid_recomputed_after_feedback",
+    "fluid_recompute_step",
+    "post_feedback_local_velocity_peak_mps",
+    "post_feedback_pressure_min_pa",
+    "post_feedback_pressure_max_pa",
+    "post_feedback_obstacle_cell_count",
+    "post_feedback_fluid_cell_count",
 ]
 
 COMPARE_COLUMNS = [
@@ -245,6 +252,25 @@ def build_history_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
                 "surface_feedback_max_marker_displacement_m": _number(
                     entry.get("surface_feedback_max_marker_displacement_m")
                 ),
+                "fluid_recomputed_after_feedback": _bool_text(
+                    entry.get("fluid_recomputed_after_feedback")
+                ),
+                "fluid_recompute_step": _int(entry.get("fluid_recompute_step")),
+                "post_feedback_local_velocity_peak_mps": _number(
+                    entry.get("post_feedback_local_velocity_peak_mps")
+                ),
+                "post_feedback_pressure_min_pa": _number(
+                    entry.get("post_feedback_pressure_min_pa")
+                ),
+                "post_feedback_pressure_max_pa": _number(
+                    entry.get("post_feedback_pressure_max_pa")
+                ),
+                "post_feedback_obstacle_cell_count": _int(
+                    entry.get("post_feedback_obstacle_cell_count")
+                ),
+                "post_feedback_fluid_cell_count": _int(
+                    entry.get("post_feedback_fluid_cell_count")
+                ),
             }
         )
     return rows
@@ -315,7 +341,13 @@ def build_stage_check(
             f"updated_markers = {_format_value(report.get('surface_feedback_updated_marker_count'))}",
             f"invalid_markers = {_format_value(report.get('surface_feedback_invalid_marker_count'))}",
             f"max_marker_displacement_m = {_format_value(report.get('surface_feedback_max_marker_displacement_m'))}",
-            "fluid_recomputed_after_feedback = false",
+            (
+                "fluid_recomputed_after_feedback = "
+                f"{_bool_text(report.get('fluid_recomputed_after_feedback'))}"
+            ),
+            f"fluid_recompute_count = {_format_value(report.get('fluid_recompute_count'))}",
+            f"fluid_recompute_steps = {_format_value(report.get('fluid_recompute_steps'))}",
+            f"fluid_feedback_coupling_mode = {report.get('fluid_feedback_coupling_mode', '')}",
             f"diagnosis = {_feedback_diagnosis(status)}",
             "",
             "[COORDINATE_MAPPING]",
@@ -573,6 +605,10 @@ def _format_value(value: Any) -> str:
     if parsed is not None:
         return f"{parsed:.12g}"
     return "" if value is None else str(value)
+
+
+def _bool_text(value: Any) -> str:
+    return "true" if bool(value) else "false"
 
 
 def _projection_residual(projection: dict[str, Any]) -> Any:

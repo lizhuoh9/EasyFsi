@@ -45,6 +45,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     latest_scatter_report = None
     latest_solid_report = None
     latest_feedback_report = None
+    latest_feedback_flow_report = flow_report
+    initial_flow_report = flow_report
+    fluid_recompute_steps: list[int] = []
     history: list[dict[str, object]] = []
 
     for step_index in range(config.step_count):
@@ -87,6 +90,12 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             support_radius_m=config.mpm_support_radius_m,
             dt_s=config.dt_s,
         )
+        latest_feedback_flow_report = _recompute_flow_after_solid_feedback(
+            fluid,
+            solid,
+            config,
+        )
+        fluid_recompute_steps.append(step_index + 1)
         step_displacement = _solid_displacement_report(solid, fixed_mask, tip_mask)
         history.append(
             {
@@ -104,6 +113,23 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "tip_mean_displacement_m": step_displacement[
                     "tip_mean_displacement_m"
                 ],
+                "fluid_recomputed_after_feedback": True,
+                "fluid_recompute_step": step_index + 1,
+                "post_feedback_local_velocity_peak_mps": (
+                    latest_feedback_flow_report["local_velocity_peak_mps"]
+                ),
+                "post_feedback_pressure_min_pa": (
+                    latest_feedback_flow_report["pressure_min_pa"]
+                ),
+                "post_feedback_pressure_max_pa": (
+                    latest_feedback_flow_report["pressure_max_pa"]
+                ),
+                "post_feedback_obstacle_cell_count": (
+                    latest_feedback_flow_report["obstacle_cell_count"]
+                ),
+                "post_feedback_fluid_cell_count": (
+                    latest_feedback_flow_report["fluid_cell_count"]
+                ),
             }
         )
 
@@ -123,6 +149,8 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     displacement_relative_error = (
         abs(max_displacement - reference_displacement) / reference_displacement
     )
+    final_flow_report = latest_feedback_flow_report
+    local_velocity_peak_mps = float(final_flow_report["local_velocity_peak_mps"])
     velocity_relative_error = (
         abs(local_velocity_peak_mps - reference_velocity_peak) / reference_velocity_peak
     )
@@ -142,12 +170,18 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         },
         "boundary_conditions": dict(boundary_conditions),
         "reference_results": dict(reference_results),
-        "flow_projection_report": flow_report["projection_report"],
-        "flow_obstacle_cell_count": flow_report["obstacle_cell_count"],
-        "flow_fluid_cell_count": flow_report["fluid_cell_count"],
-        "computed_pressure_min_pa": flow_report["pressure_min_pa"],
-        "computed_pressure_max_pa": flow_report["pressure_max_pa"],
-        "pressure_sign_convention": flow_report["pressure_sign_convention"],
+        "flow_projection_report": final_flow_report["projection_report"],
+        "initial_flow_projection_report": initial_flow_report["projection_report"],
+        "final_flow_projection_report": final_flow_report["projection_report"],
+        "fluid_recomputed_after_feedback": bool(fluid_recompute_steps),
+        "fluid_recompute_count": len(fluid_recompute_steps),
+        "fluid_recompute_steps": list(fluid_recompute_steps),
+        "fluid_feedback_coupling_mode": "solid-particle-obstacle-reprojection",
+        "flow_obstacle_cell_count": final_flow_report["obstacle_cell_count"],
+        "flow_fluid_cell_count": final_flow_report["fluid_cell_count"],
+        "computed_pressure_min_pa": final_flow_report["pressure_min_pa"],
+        "computed_pressure_max_pa": final_flow_report["pressure_max_pa"],
+        "pressure_sign_convention": final_flow_report["pressure_sign_convention"],
         "local_velocity_peak_mps": local_velocity_peak_mps,
         "local_velocity_peak_relative_error": velocity_relative_error,
         "velocity_peak_tolerance": config.velocity_peak_tolerance,
@@ -273,9 +307,17 @@ def _cell_interval_overlaps(
 
 
 def _solid_obstacle(config: Any) -> np.ndarray:
+    solid_min, solid_max = _solid_box(config)
+    return _solid_obstacle_from_box(config, solid_min, solid_max)
+
+
+def _solid_obstacle_from_box(
+    config: Any,
+    solid_min: tuple[float, float, float],
+    solid_max: tuple[float, float, float],
+) -> np.ndarray:
     nx, ny, nz = config.grid_nodes
     bounds_min, bounds_max = _domain_bounds(config)
-    solid_min, solid_max = _solid_box(config)
     dx = (bounds_max[0] - bounds_min[0]) / nx
     dy = (bounds_max[1] - bounds_min[1]) / ny
     dz = (bounds_max[2] - bounds_min[2]) / nz
@@ -298,6 +340,34 @@ def _solid_obstacle(config: Any) -> np.ndarray:
                 ):
                     obstacle[i, j, k] = 1
     return obstacle
+
+
+def _solid_obstacle_from_current_particles(
+    solid: NeoHookeanMpmState,
+    config: Any,
+) -> np.ndarray:
+    positions = solid.x.to_numpy()[: solid.particle_count]
+    if positions.size == 0:
+        raise RuntimeError("cannot rebuild fluid obstacle from an empty solid")
+    current_min = positions.min(axis=0)
+    current_max = positions.max(axis=0)
+    solid_min, solid_max = _solid_box(config)
+    half_padding = np.asarray(
+        [
+            0.5 * (solid_max[0] - solid_min[0]) / float(config.solid_particle_counts[0]),
+            0.5 * (solid_max[1] - solid_min[1]) / float(config.solid_particle_counts[1]),
+            0.5 * (solid_max[2] - solid_min[2]) / float(config.solid_particle_counts[2]),
+        ],
+        dtype=np.float64,
+    )
+    bounds_min, bounds_max = _domain_bounds(config)
+    padded_min = np.maximum(current_min - half_padding, np.asarray(bounds_min))
+    padded_max = np.minimum(current_max + half_padding, np.asarray(bounds_max))
+    return _solid_obstacle_from_box(
+        config,
+        tuple(float(v) for v in padded_min),
+        tuple(float(v) for v in padded_max),
+    )
 
 
 def _initialize_inlet_flow(
@@ -352,6 +422,15 @@ def _solve_computed_flow(
         "pressure_max_pa": float(pressure[non_obstacle].max(initial=0.0)),
         "pressure_sign_convention": "fluid.pressure projection field is sampled directly",
     }
+
+
+def _recompute_flow_after_solid_feedback(
+    fluid: CartesianFluidSolver,
+    solid: NeoHookeanMpmState,
+    config: Any,
+) -> dict[str, object]:
+    fluid.obstacle.from_numpy(_solid_obstacle_from_current_particles(solid, config))
+    return _solve_computed_flow(fluid, config)
 
 
 def _build_markers(

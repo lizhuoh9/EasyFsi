@@ -203,6 +203,54 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertNotIn("solid.step(", preflow_block)
         self.assertNotIn("pressure_scale", preflow_block)
 
+    def test_rectangular_runner_recomputes_fluid_after_surface_feedback(self):
+        runner_source = Path(
+            "benchmarks/official/solid_mpm_fsi_runner.py"
+        ).read_text(encoding="utf-8")
+
+        feedback_update = runner_source.index(
+            "latest_feedback_report = markers.update_surface_feedback_from_mpm_surface_particles"
+        )
+        fluid_recompute = runner_source.index(
+            "latest_feedback_flow_report = _recompute_flow_after_solid_feedback"
+        )
+        history_append = runner_source.index("history.append(")
+
+        self.assertLess(feedback_update, fluid_recompute)
+        self.assertLess(fluid_recompute, history_append)
+
+    def test_smoke_report_records_feedback_fluid_recompute_contract(self):
+        report = run_vertical_flap_fsi_smoke(
+            VerticalFlapFsiConfig(
+                step_count=2,
+                flow_projection_iterations=8,
+            )
+        )
+
+        self.assertTrue(report["fluid_recomputed_after_feedback"])
+        self.assertEqual(report["fluid_recompute_count"], 2)
+        self.assertEqual(report["fluid_recompute_steps"], [1, 2])
+        self.assertEqual(
+            report["fluid_feedback_coupling_mode"],
+            "solid-particle-obstacle-reprojection",
+        )
+        self.assertIn("initial_flow_projection_report", report)
+        self.assertIn("final_flow_projection_report", report)
+        self.assertEqual(
+            report["flow_projection_report"],
+            report["final_flow_projection_report"],
+        )
+        self.assertTrue(
+            all(
+                step["fluid_recomputed_after_feedback"]
+                and step["fluid_recompute_step"] == step["step"]
+                and step["post_feedback_obstacle_cell_count"] > 0
+                and step["post_feedback_fluid_cell_count"] > 0
+                and math.isfinite(step["post_feedback_local_velocity_peak_mps"])
+                for step in report["history"]
+            )
+        )
+
     def test_smoke_fsi_chain_matches_reference_displacement_tolerance(self):
         report = run_vertical_flap_fsi_smoke(
             VerticalFlapFsiConfig(step_count=50, displacement_tolerance=0.05)

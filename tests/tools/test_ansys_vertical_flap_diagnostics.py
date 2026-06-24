@@ -63,6 +63,15 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
 
             self.assertEqual(summary_rows[0]["status"], "FAIL_MAGNITUDE")
             self.assertEqual(history_rows[1]["step"], "2")
+            self.assertEqual(
+                history_rows[1]["fluid_recomputed_after_feedback"],
+                "true",
+            )
+            self.assertEqual(history_rows[1]["fluid_recompute_step"], "2")
+            self.assertEqual(
+                history_rows[1]["post_feedback_obstacle_cell_count"],
+                "12",
+            )
             self.assertIn("[SETUP]", stage_check)
             self.assertIn("[FLOW_ONLY]", stage_check)
             self.assertIn("[INTERFACE_FORCE]", stage_check)
@@ -70,6 +79,9 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             self.assertIn("[FSI_FEEDBACK]", stage_check)
             self.assertIn("[COORDINATE_MAPPING]", stage_check)
             self.assertIn("Fluent x <-> EasyFsi z", stage_check)
+            self.assertIn("fluid_recomputed_after_feedback = true", stage_check)
+            self.assertIn("fluid_recompute_count = 2", stage_check)
+            self.assertIn("fluid_recompute_steps = [1, 2]", stage_check)
             self.assertIn("fluent_comparison = not run", stage_check)
             self.assertEqual(summary_json[0]["status"], "FAIL_MAGNITUDE")
 
@@ -180,6 +192,10 @@ def _fixture_report() -> dict:
         "surface_feedback_updated_marker_count": 12,
         "surface_feedback_invalid_marker_count": 0,
         "surface_feedback_max_marker_displacement_m": 4.0e-5,
+        "fluid_recomputed_after_feedback": True,
+        "fluid_recompute_count": 2,
+        "fluid_recompute_steps": [1, 2],
+        "fluid_feedback_coupling_mode": "solid-particle-obstacle-reprojection",
         "total_marker_force_n": [0.0, 0.0, -1.2],
         "mpm_external_force_n": [0.0, 0.0, -1.2],
         "scatter_action_reaction_residual_n": 0.0,
@@ -199,6 +215,13 @@ def _fixture_report() -> dict:
                 "mpm_external_force_n": [0.0, 0.0, -0.6],
                 "max_displacement_m": 2.0e-5,
                 "tip_mean_displacement_m": [0.0, 5.0e-7, -2.0e-5],
+                "fluid_recomputed_after_feedback": True,
+                "fluid_recompute_step": 1,
+                "post_feedback_local_velocity_peak_mps": 28.0,
+                "post_feedback_pressure_min_pa": -10.0,
+                "post_feedback_pressure_max_pa": 40.0,
+                "post_feedback_obstacle_cell_count": 12,
+                "post_feedback_fluid_cell_count": 8076,
             },
             {
                 "step": 2,
@@ -209,6 +232,13 @@ def _fixture_report() -> dict:
                 "mpm_external_force_n": [0.0, 0.0, -1.2],
                 "max_displacement_m": 6.0e-5,
                 "tip_mean_displacement_m": [0.0, 1.0e-6, -4.0e-5],
+                "fluid_recomputed_after_feedback": True,
+                "fluid_recompute_step": 2,
+                "post_feedback_local_velocity_peak_mps": 28.0,
+                "post_feedback_pressure_min_pa": -12.0,
+                "post_feedback_pressure_max_pa": 42.0,
+                "post_feedback_obstacle_cell_count": 12,
+                "post_feedback_fluid_cell_count": 8076,
             },
         ],
     }
