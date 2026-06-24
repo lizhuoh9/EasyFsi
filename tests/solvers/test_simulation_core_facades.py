@@ -60,6 +60,31 @@ class SimulationCoreFacadeTests(unittest.TestCase):
             tri_surface.TriSurfaceForcePairReport,
         )
 
+    def test_hibm_mpm_package_exports_legacy_api(self) -> None:
+        package = importlib.import_module("simulation_core.coupling.hibm_mpm")
+        legacy = importlib.import_module("simulation_core.hibm_mpm")
+
+        self.assertIs(
+            package.HibmMpmSharpCouplingState,
+            legacy.HibmMpmSharpCouplingState,
+        )
+        self.assertIs(package.HibmMpmSurfaceMarkers, legacy.HibmMpmSurfaceMarkers)
+        self.assertIs(package.HibmMpmIbNodeSearch, legacy.HibmMpmIbNodeSearch)
+        self.assertIs(
+            package.advance_hibm_mpm_sharp_mpm_step,
+            legacy.advance_hibm_mpm_sharp_mpm_step,
+        )
+
+    def test_coupling_facade_uses_hibm_mpm_package_exports(self) -> None:
+        coupling = importlib.import_module("simulation_core.coupling")
+        package = importlib.import_module("simulation_core.coupling.hibm_mpm")
+
+        self.assertIs(
+            coupling.HibmMpmSharpCouplingState,
+            package.HibmMpmSharpCouplingState,
+        )
+        self.assertIs(coupling.HibmMpmSurfaceMarkers, package.HibmMpmSurfaceMarkers)
+
     def test_geometry_materials_diagnostics_facades_import(self) -> None:
         geometry_tools = importlib.import_module("simulation_core.geometry_tools")
         materials = importlib.import_module("simulation_core.materials")

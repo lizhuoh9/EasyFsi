@@ -4,10 +4,13 @@
 
 - `runtime.py`: GPU-only Taichi initialization.
 - `geometry.py`: surface mesh and analytic UV sphere helpers.
-- `fluid.py`: 3D Cartesian fluid state, pressure projection, force spreading, and diagnostics.
+- `fluid.py`: compatibility shim for the package-backed Cartesian fluid solver.
+- `fluids/`: 3D Cartesian fluid state, pressure projection, force spreading, and diagnostics.
 - `tri_surface.py`: region-based surface diagnostics, IBM force spreading, and velocity constraints.
 - `projected_ibm.py`: projected immersed-boundary fluid step for a pair of surface regions.
 - `fsi_coupling.py`: action/reaction interface-force balance and fixed-point relaxation.
+- `hibm_mpm.py`: compatibility shim for the package-backed HIBM-MPM coupling solver.
+- `coupling/hibm_mpm/`: sharp HIBM-MPM coupling implementation and support definitions.
 - `mooney_shell_mpm.py`: triangular and UV Mooney membrane MPM states.
 - `neo_hookean_mpm.py`: volumetric Neo-Hookean MLS-MPM state.
 - `hyperelastic.py`: Neo-Hookean material cards, including Ecoflex 00-10 defaults.
@@ -66,6 +69,9 @@ Legacy imports such as `from simulation_core.fluid import CartesianFluidSolver`
 remain supported during the migration.
 The Cartesian fluid implementation is package-backed under `simulation_core.fluids`;
 `simulation_core.fluid` remains a compatibility shim.
+The HIBM-MPM implementation is package-backed under
+`simulation_core.coupling.hibm_mpm`; `simulation_core.hibm_mpm` remains a
+compatibility shim.
 
 ## Basic Fluid State
 

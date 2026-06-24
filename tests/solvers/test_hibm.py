@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import math
 import inspect
@@ -42,9 +42,12 @@ from simulation_core.hibm_mpm import (
 from simulation_core.pressure_interface import PRESSURE_INTERFACE_COUPLING_SLOT_COUNT
 
 
+HIBM_MPM_CORE_SOURCE = Path("simulation_core/coupling/hibm_mpm/core.py")
+
+
 class HibmMpmSurfaceMarkerTests(unittest.TestCase):
     def test_pressure_sampling_accumulates_pressure_in_f64(self) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
 
         self.assertGreaterEqual(source.count("value = ti.cast(0.0, ti.f64)"), 2)
         self.assertGreaterEqual(source.count("fluid_weight = ti.cast(0.0, ti.f64)"), 2)
@@ -64,7 +67,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         self.assertEqual(markers.report_mpm_scatter_external_force_n.dtype, ti.f64)
 
     def test_pressure_neumann_rows_force_fv_multigrid_to_fv_cg(self) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn(
             'effective_pressure_solver in {"jacobi", "compact_jacobi", "fv_multigrid"}',
@@ -117,7 +120,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
     def test_internal_obstacle_stress_sampling_keeps_plain_two_sided_walk_real_fluid_only(
         self,
     ) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
         branch_start = source.index("elif bool(convert_internal_nodes_to_obstacles):")
         branch_end = source.index(
             '_debug_stage_progress("sample_fluid_stress_to_marker_tractions:start")',
@@ -136,7 +139,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
     def test_far_pressure_stress_sampling_keeps_dedicated_sampling_view(
         self,
     ) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
         branch_start = source.index("if int(far_pressure_region_id) != -1:")
         branch_end = source.index(
             "elif bool(convert_internal_nodes_to_obstacles):",
@@ -8217,7 +8220,7 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         )
 
     def test_post_step_next_rebuild_applies_air_backed_conversion(self) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
         next_rebuild = source.split("next_internal_obstacle_cell_count =", 1)[1]
         next_rebuild = next_rebuild.split("next_pressure_report =", 1)[0]
 
@@ -8250,7 +8253,7 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         )
 
     def test_projection_topology_cleanup_starts_with_row_cloud_sweep(self) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
         fluid_cleanup = source.split(
             "def convert_projection_topology_cleanup_until_saturated() -> None:",
             1,

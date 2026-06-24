@@ -23,6 +23,7 @@ from tests._paths import REPO_ROOT
 SQUID_CASE_ROOT = REPO_ROOT / "cases" / "squid_soft_robot"
 SQUID_RUNNER_SOURCE = SQUID_CASE_ROOT / "runner.py"
 SQUID_STEP_LOOP_SOURCE = SQUID_CASE_ROOT / "step_loop.py"
+HIBM_MPM_CORE_SOURCE = REPO_ROOT / "simulation_core" / "coupling" / "hibm_mpm" / "core.py"
 
 
 def _read_squid_sources() -> str:
@@ -455,7 +456,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self,
     ) -> None:
         case_source = _read_squid_sources()
-        core_source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        core_source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
 
         trial_function = case_source.index("def advance_sharp_trial_once():")
         external_force_arg = case_source.index(
@@ -688,7 +689,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertEqual(report.other_region_active_rows, 1)
         self.assertEqual(report.unassigned_region_active_rows, 1)
 
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
         for key in (
             "hibm_velocity_dirichlet_primary_region_active_rows",
             "hibm_velocity_dirichlet_secondary_region_active_rows",
@@ -798,7 +799,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
     def test_hibm_sharp_rechecks_row_cloud_orphans_after_predictor_rows(
         self,
     ) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
 
         self.assertGreaterEqual(
             source.count("convert_row_cloud_orphans_until_saturated()"),
@@ -806,7 +807,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         )
 
     def test_hibm_sharp_reports_next_row_cloud_orphan_cleanup(self) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("next_row_cloud_orphan_cell_count", source)
         self.assertIn("hibm_next_row_cloud_orphan_cell_count", source)

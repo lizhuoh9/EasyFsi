@@ -19,7 +19,7 @@ from simulation_core.fsi_coupling import (
     solve_interface_reaction_fixed_point,
     update_interface_reaction_for_next_step,
 )
-from simulation_core.hibm_mpm import (
+from simulation_core.coupling.hibm_mpm import (
     FSI_COUPLING_MODE_CHOICES,
     FSI_COUPLING_MODE_HIBM_MPM_SHARP,
     FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,

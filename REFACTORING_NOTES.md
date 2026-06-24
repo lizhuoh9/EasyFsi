@@ -219,3 +219,21 @@ package while preserving `simulation_core.fluid` as a compatibility shim.
 - Old and new public fluid imports remain identity-compatible.
 - Solver physics, pressure projection formulas, Taichi kernel math, defaults,
   report fields, cases, and benchmarks were not changed.
+
+## Step 8: HIBM-MPM package split
+
+Moved the sharp HIBM-MPM implementation behind the
+`simulation_core.coupling.hibm_mpm` package while preserving
+`simulation_core.hibm_mpm` as a compatibility shim.
+
+- `simulation_core.coupling.hibm_mpm.core` owns the existing HIBM-MPM classes,
+  Taichi kernels, and sharp-step orchestration.
+- `simulation_core.coupling.hibm_mpm.constants`, `modes`,
+  `paper_requirements`, and `reports` own low-risk support definitions.
+- `simulation_core.coupling` now imports HIBM-MPM exports from the package
+  instead of the legacy shim.
+- Old and new public HIBM-MPM imports remain identity-compatible.
+- HIBM/MPM physics, IB node search, inside/outside classification, pressure
+  Neumann assembly, stress sampling, force scatter, step ordering, defaults,
+  report fields, cases, benchmarks, and fluid/solid solver modules were not
+  changed.

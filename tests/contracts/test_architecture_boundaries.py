@@ -110,6 +110,42 @@ class ArchitectureBoundaryTests(unittest.TestCase):
 
         self.assertIn("class CartesianFluidSolver", source)
 
+    def test_hibm_mpm_legacy_module_is_shim_after_step8(self) -> None:
+        source = (REPO_ROOT / "simulation_core" / "hibm_mpm.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("from simulation_core.coupling.hibm_mpm import", source)
+        self.assertNotIn("@ti.kernel", source)
+        self.assertNotIn("class HibmMpmSurfaceMarkers", source)
+        self.assertNotIn("class HibmMpmSharpCouplingState", source)
+
+    def test_hibm_mpm_implementation_lives_under_coupling_package(self) -> None:
+        source = (
+            REPO_ROOT / "simulation_core" / "coupling" / "hibm_mpm" / "core.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("class HibmMpmSurfaceMarkers", source)
+        self.assertIn("class HibmMpmSharpCouplingState", source)
+
+    def test_hibm_mpm_support_modules_do_not_import_core(self) -> None:
+        for name in (
+            "constants.py",
+            "modes.py",
+            "paper_requirements.py",
+            "reports.py",
+        ):
+            source = (
+                REPO_ROOT / "simulation_core" / "coupling" / "hibm_mpm" / name
+            ).read_text(encoding="utf-8")
+
+            self.assertNotIn("import simulation_core.coupling.hibm_mpm.core", source)
+            self.assertNotIn(
+                "from simulation_core.coupling.hibm_mpm.core",
+                source,
+            )
+            self.assertNotIn("from .core", source)
+
     def test_fluid_support_modules_do_not_import_solver(self) -> None:
         for name in (
             "constants.py",

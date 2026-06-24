@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from simulation_core import (
     FluidDomainSpec,
     FluidDomain,
     GradedGridSpec,
+    HibmMpmSurfaceMarkers,
     InterfaceReactionFixedPointResult,
     InterfaceReactionTargetEvaluation,
     InterfaceReactionUpdate,
@@ -41,6 +43,13 @@ from simulation_core import (
     solve_interface_reaction_fixed_point,
 )
 from simulation_core.geometry import make_uv_sphere, orient_faces_outward
+
+
+HIBM_MPM_CORE_SOURCE = Path("simulation_core/coupling/hibm_mpm/core.py")
+HIBM_MPM_PAPER_REQUIREMENTS_SOURCE = Path(
+    "simulation_core/coupling/hibm_mpm/paper_requirements.py"
+)
+FLUID_SOLVER_SOURCE = Path("simulation_core/fluids/solver.py")
 
 
 class SimulationCorePackageTests(unittest.TestCase):
@@ -117,7 +126,7 @@ class SimulationCorePackageTests(unittest.TestCase):
         )
 
     def test_hibm_mpm_contract_does_not_use_numpy_cpu_solver_path(self) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_PAPER_REQUIREMENTS_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("Taichi-resident solver path", source)
         self.assertIn("NumPy loops", source)
@@ -129,8 +138,8 @@ class SimulationCorePackageTests(unittest.TestCase):
     def test_hibm_no_slip_dirichlet_uses_fluid_boundary_rows_not_legacy_constraints(
         self,
     ) -> None:
-        hibm_source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
-        fluid_source = Path("simulation_core/fluid.py").read_text(encoding="utf-8")
+        hibm_source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
+        fluid_source = FLUID_SOLVER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("assemble_velocity_dirichlet_boundary_rows", hibm_source)
         self.assertIn("velocity_dirichlet_boundary_active", fluid_source)
@@ -141,7 +150,16 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertNotIn("solid_mobility_ratio", hibm_source)
 
     def test_hibm_surface_feedback_is_marker_to_mpm_taichi_field_path(self) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = "\n".join(
+            inspect.getsource(method)
+            for method in (
+                HibmMpmSurfaceMarkers._load_markers_from_surface_fields_kernel,
+                HibmMpmSurfaceMarkers._load_markers_from_surface_velocity_fields_kernel,
+                HibmMpmSurfaceMarkers.load_markers_from_surface_fields,
+                HibmMpmSurfaceMarkers.update_surface_feedback_from_mpm_particles,
+                HibmMpmSurfaceMarkers.update_surface_feedback_from_mpm_surface_particles,
+            )
+        )
 
         self.assertIn("load_markers_from_surface_fields", source)
         self.assertIn("_load_markers_from_surface_fields_kernel", source)
@@ -163,7 +181,7 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertNotIn(".from_numpy(", source)
 
     def test_hibm_sharp_load_assembly_is_core_marker_to_mpm_path(self) -> None:
-        source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
         mooney_source = Path("simulation_core/mooney_shell_mpm.py").read_text(
             encoding="utf-8"
         )
@@ -256,7 +274,7 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertTrue(report["case_runner_available"])
         self.assertTrue(report["paper_hibm_mpm"])
         self.assertFalse(report["phase5_validation_complete"])
-        self.assertEqual(report["missing"], ["Phase 5 fine-nozzle validation"])
+        self.assertEqual(report["missing"], ["long-run validation"])
 
         legacy_report = require_implemented_fsi_coupling_mode(
             FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED
