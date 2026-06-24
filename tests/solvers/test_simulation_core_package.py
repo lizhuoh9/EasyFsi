@@ -167,7 +167,7 @@ class SimulationCorePackageTests(unittest.TestCase):
         mooney_source = Path("simulation_core/mooney_shell_mpm.py").read_text(
             encoding="utf-8"
         )
-        hibm_tests = Path("tests/test_hibm.py").read_text(encoding="utf-8")
+        hibm_tests = Path("tests/solvers/test_hibm.py").read_text(encoding="utf-8")
 
         self.assertTrue(callable(assemble_hibm_mpm_sharp_fluid_to_mpm_loads))
         self.assertTrue(callable(HibmMpmSharpCouplingState))

@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass
 
-from simulation_core.benchmarking.inlet_flow import TimeWindowedInletFlow
+from benchmarks.official.inlet_flow import TimeWindowedInletFlow
 from simulation_core.geometry import UvSphereResolution
 from simulation_core.mooney_shell_mpm import UvMooneyShellMpmState
 from simulation_core.runtime import TaichiRuntimeConfig

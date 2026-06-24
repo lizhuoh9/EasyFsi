@@ -4,11 +4,11 @@ import math
 from dataclasses import dataclass
 
 from simulation_core.fsi_driver import FsiCaseSpec
-from simulation_core.benchmarking.multibody_pair_fsi import (
+from benchmarks.official.multibody_pair_fsi import (
     PairHingeMultibodyFsiConfig,
     run_pair_hinge_multibody_fsi_smoke,
 )
-from simulation_core.benchmarking.official_benchmark_solver import (
+from benchmarks.official.official_benchmark_solver import (
     OfficialBenchmarkRunSpec,
     run_official_fsi_benchmark,
 )

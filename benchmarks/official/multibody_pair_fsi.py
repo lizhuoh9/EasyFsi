@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from simulation_core.fsi_coupling import action_reaction_balance
 from simulation_core.interface_pair import InterfacePairMap, PairMapEntry
 from simulation_core.moving_boundary import MovingBoundaryCondition
-from simulation_core.benchmarking.rigid_multibody import EqualOppositeHingePair
+from benchmarks.official.rigid_multibody import EqualOppositeHingePair
 
 
 @dataclass(frozen=True)

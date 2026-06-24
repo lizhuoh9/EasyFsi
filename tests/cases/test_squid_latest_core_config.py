@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import contextlib
 import hashlib
@@ -16,6 +16,11 @@ from unittest.mock import patch
 
 import numpy as np
 import taichi as ti
+
+from tests._paths import REPO_ROOT
+
+
+SQUID_RUNNER_SOURCE = REPO_ROOT / "cases" / "squid_soft_robot" / "runner.py"
 
 from cases.squid_soft_robot import (
     CHECKPOINT_ARG_FINGERPRINT_FIELDS,
@@ -384,7 +389,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             self.assertIn(measured_field, sharp_fields)
 
     def test_fsi_trial_replay_and_rejection_fields_are_reported(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         for token in (
             'row["accepted_fsi_trial_state_readvanced"]',
@@ -398,7 +403,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             self.assertIn(token, source)
 
     def test_nonlast_best_trial_is_readvanced_before_commit(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         fallback_branch = source.index("if accepted_fsi_trial_payload is not None:")
         readvance_flag = source.index(
@@ -435,7 +440,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
     def test_replayed_sharp_trial_rescatters_external_force_before_solid_advance(
         self,
     ) -> None:
-        case_source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        case_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         core_source = Path("simulation_core/hibm_mpm.py").read_text(encoding="utf-8")
 
         trial_function = case_source.index("def advance_sharp_trial_once():")
@@ -857,7 +862,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn('Name="divergence"', vti_text)
 
     def test_sharp_coupling_failure_writes_partial_history_before_row_build(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_block = source.split("if sharp_case_runner_enabled:", 1)[1]
         advance_block = sharp_block.split(
             "fluid_wall_started_at = time.perf_counter()",
@@ -875,7 +880,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn("raise", advance_block)
 
     def test_sharp_sampling_uses_fluid_substep_dt_for_cfl(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_block = source.split("if sharp_case_runner_enabled:", 1)[1]
         sample_block = sharp_block.split(
             "sample_report = simulator.sample_after_projection(",
@@ -886,7 +891,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertNotIn("dt_s=spec.dt_s", sample_block)
 
     def test_sharp_sampling_uses_latest_post_solid_projection_when_available(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_block = source.split("if sharp_case_runner_enabled:", 1)[1]
         sample_block = sharp_block.split(
             "latest_fluid_projection_report =",
@@ -1219,7 +1224,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
     def test_sharp_completed_step_checks_include_pressure_and_force_drive(
         self,
     ) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_summary_source = source.split("if sharp_case_runner_enabled:", 1)[
             1
         ].split("diagnostic_checks = {", 1)[0]
@@ -1232,7 +1237,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
     def test_sharp_completed_step_checks_require_pre_projection_measurement(
         self,
     ) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_summary_source = source[source.index("if sharp_case_runner_enabled:") :]
 
         self.assertIn(
@@ -1256,7 +1261,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn("force_required=solid_mpm_force_required", sharp_summary_source)
 
     def test_sharp_summary_reports_projection_stage_growth_ratios(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_summary_source = source[source.index("if sharp_case_runner_enabled:") :]
 
         self.assertIn("max_projection_to_pre_divergence_l2_ratio", sharp_summary_source)
@@ -1274,7 +1279,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
     def test_sharp_completed_step_checks_reject_invalid_hibm_reconstruction_rows(
         self,
     ) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_checks_source = source.split("if sharp_case_runner_enabled:", 1)[
             1
         ].split("diagnostic_checks = {", 1)[0]
@@ -1305,7 +1310,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
     def test_sharp_completed_step_checks_reject_unmeasured_no_slip_residual(
         self,
     ) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_checks_source = source.split("if sharp_case_runner_enabled:", 1)[
             1
         ].split("diagnostic_checks = {", 1)[0]
@@ -1348,7 +1353,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
 
         self.assertTrue(args.diagnostic_dump_pressure_neumann_invalid_rows)
 
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         self.assertIn("args.diagnostic_dump_pressure_neumann_invalid_rows", source)
         self.assertIn("_write_hibm_pressure_neumann_invalid_row_dump", source)
 
@@ -4890,7 +4895,7 @@ END-ISO-10303-21;
         self.assertEqual(diagnostics["max_marker_region_id"], 8)
 
     def test_sharp_marker_fixed_point_uses_velocity_units_not_force_units(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn(
             "velocity_residual_norm_mps <= fsi_marker_coupling_tolerance_mps",
@@ -4937,7 +4942,7 @@ END-ISO-10303-21;
     def test_sharp_marker_fixed_point_checks_projection_failure_before_converged(
         self,
     ) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         block = source.split("def advance_sharp_marker_fixed_point_step():", 1)[1]
         loop_block = block.split("if report is None:", 1)[0]
 
@@ -4951,7 +4956,7 @@ END-ISO-10303-21;
         self.assertLess(failure_check, convergence_check)
 
     def test_completed_step_gate_accepts_sharp_physical_convergence(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         block = source.split('"fsi_coupling_convergence_not_claimed":', 1)[1]
         block = block.split('"finite_primary_diagnostics":', 1)[0]
 
@@ -4964,7 +4969,7 @@ END-ISO-10303-21;
         )
 
     def test_sharp_completed_step_gate_uses_downstream_jet_sections(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         checks_block = source.split("checks = {", 1)[1].split(
             "completed_step_checks_passed",
             1,
@@ -5052,7 +5057,7 @@ END-ISO-10303-21;
     def test_sharp_fixed_point_trial_restore_resets_pressure_neumann_gradient(
         self,
     ) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         block = source.split("def advance_sharp_marker_fixed_point_step():", 1)[1]
         self.assertIn(
             "pressure_gradient_state = (",
@@ -5154,7 +5159,7 @@ END-ISO-10303-21;
             args = parse_args()
 
         self.assertAlmostEqual(args.fsi_velocity_constraint_solid_mobility_ratio, 2.5)
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         self.assertIn('"fsi_velocity_constraint_solid_mobility_ratio"', source)
         self.assertIn(
             "velocity_constraint_solid_mobility_ratio=fsi_velocity_constraint_solid_mobility_ratio",
@@ -5177,7 +5182,7 @@ END-ISO-10303-21;
             args = parse_args()
 
         self.assertAlmostEqual(args.fsi_constraint_force_solid_mobility_ratio, 2.5)
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         self.assertIn('"fsi_constraint_force_solid_mobility_ratio"', source)
         self.assertIn(
             "constraint_force_solid_mobility_ratio=fsi_constraint_force_solid_mobility_ratio",
@@ -5803,7 +5808,7 @@ END-ISO-10303-21;
     def test_default_output_directory_is_gitignored(self) -> None:
         with patch("sys.argv", ["squid_soft_robot.py"]):
             args = parse_args()
-        repo_root = Path(__file__).resolve().parents[1]
+        repo_root = REPO_ROOT
         output_path = Path(args.output_dir).resolve()
         candidate = output_path / "run_process.json"
 
@@ -5818,7 +5823,7 @@ END-ISO-10303-21;
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_runner_has_no_old_feedback_api_names(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         forbidden_tokens = (
             "Feedback",
@@ -5852,7 +5857,7 @@ END-ISO-10303-21;
             self.assertNotIn(token, source, msg=token)
 
     def test_validation_gates_real_fluid_flux_and_projection_divergence(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('"final_outlet_to_fsi_volume_source_ratio_physical"', source)
         self.assertIn("physical_outlet_to_fsi_volume_source_passes", source)
@@ -5869,19 +5874,19 @@ END-ISO-10303-21;
         self.assertIn("validation uses the sampled outlet-to-FSI-volume-source flux ratio", source)
 
     def test_active_squid_case_is_not_legacy_wrapper(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertNotIn("squid_soft_robot_latest_core_20260603", source)
         self.assertNotIn("run_squid_latest_core", source)
 
     def test_interface_reaction_summary_key_is_not_double_renamed(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('"fluid_to_solid_interface_reaction_enabled"', source)
         self.assertNotIn("interface_reaction_interface_reaction", source)
 
     def test_runner_reports_fixed_point_interface_map_amplification(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("fixed_point_result.interface_map_amplification_max", source)
         self.assertIn("fixed_point_result.residual_jacobian_amplification_max", source)
@@ -5972,7 +5977,7 @@ END-ISO-10303-21;
         self.assertEqual(masked["status"], "masked_by_stabilizer")
 
     def test_completed_checks_include_raw_physical_interface_map_stability_gate(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('"fsi_physical_interface_map_stable"', source)
         self.assertIn("fsi_physical_interface_map_stability_report", source)
@@ -6008,13 +6013,13 @@ END-ISO-10303-21;
         self.assertTrue(legacy_report["legacy"])
 
     def test_squid_history_uses_generic_region_pair_reaction_key(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("region_pair_reaction_diagnostic_only", source)
         self.assertNotIn("main_tail_region_reaction_diagnostic_only", source)
 
     def test_squid_case_wires_core_fsi_coupling_mode_without_owning_solver(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         args = parse_args(["--fsi-coupling-mode", FSI_COUPLING_MODE_HIBM_MPM_SHARP])
         self.assertEqual(args.fsi_coupling_mode, FSI_COUPLING_MODE_HIBM_MPM_SHARP)
@@ -6023,7 +6028,7 @@ END-ISO-10303-21;
         self.assertIn("require_implemented_fsi_coupling_mode", source)
 
     def test_sharp_mode_does_not_enable_legacy_reduced_fixed_point(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertTrue(
             legacy_projected_reduced_fsi_coupling_enabled(
@@ -6066,7 +6071,7 @@ END-ISO-10303-21;
         )
 
     def test_squid_case_builds_sharp_coupling_from_core_taichi_fields(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         fluid = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
             runtime=TaichiRuntimeConfig(arch="cuda"),
@@ -6165,7 +6170,7 @@ END-ISO-10303-21;
         # enters as the known far-side pressure of the marker traction
         # closure, and the direct area load is forbidden to prevent double
         # counting the air pressure.
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_solid_step = source.split("def advance_sharp_solid_substeps():", 1)[
             1
         ].split("fluid_wall_started_at", 1)[0]
@@ -6216,7 +6221,7 @@ END-ISO-10303-21;
         )
 
     def test_sharp_case_forwards_divergence_cleanup_to_core_projection(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_call = source.split(
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
@@ -6242,7 +6247,7 @@ END-ISO-10303-21;
         self.assertNotIn("fluid_substeps=1", sharp_call)
 
     def test_pressure_schedule_is_reported_as_prescribed_boundary_drive(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         self.assertIn(
             "prescribed_pressure_or_flow_boundary=max_abs_pressure_load_pa > 0.0",
             source,
@@ -6277,7 +6282,7 @@ END-ISO-10303-21;
         for actual, expected in zip(bounds_max, (0.029, 0.076, 1.058), strict=True):
             self.assertAlmostEqual(actual, expected)
 
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         self.assertIn("solid_mpm_bounds_from_surface_metadata", source)
         self.assertIn("bounds_min_m=solid_mpm_bounds_min_m", source)
         self.assertIn("bounds_max_m=solid_mpm_bounds_max_m", source)
@@ -6838,7 +6843,7 @@ END-ISO-10303-21;
         self.assertNotIn("fsi_force_probe_valid_fraction", row)
 
     def test_pressure_outlet_positive_abs_source_fields_are_reported(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         for token in (
             'row["pressure_outlet_positive_source_volume_flux_m3s"]',
@@ -7082,7 +7087,7 @@ END-ISO-10303-21;
             )
 
     def test_solid_response_mobility_coupling_is_forwarded_to_projected_ibm(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("solid_response_constraint_force_mobility_ratio", source)
         self.assertIn("primary_response_constraint_force_solid_mobility_ratio", source)
@@ -7095,7 +7100,7 @@ END-ISO-10303-21;
         self.assertIn('"max_fsi_primary_velocity_target_solid_mobility_ratio"', source)
 
     def test_legacy_mobility_ratio_uses_solid_response_dt(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("solid_response_dt_s = float(spec.dt_s)", source)
         self.assertGreaterEqual(source.count("dt_s=solid_response_dt_s"), 4)
@@ -7208,13 +7213,13 @@ END-ISO-10303-21;
             )
 
     def test_velocity_constraint_equivalent_force_uses_correction_dt(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("/ max(float(ibm_correction_dt_s), 1.0e-30)", source)
         self.assertNotIn("/ max(float(fluid_substep_dt_s), 1.0e-30)", source)
 
     def test_runner_delegates_accepted_reaction_update_to_core(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("update_interface_reaction_for_next_step", source)
         self.assertNotIn("aitken_relaxation_factor(", source)
@@ -7223,7 +7228,7 @@ END-ISO-10303-21;
         self.assertNotIn("current_interface_reaction_relaxation", source)
 
     def test_runner_reports_nonuniform_spacing_without_pretending_uniform_grid(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('"fluid_grid_min_spacing_m"', source)
         self.assertIn('"fluid_grid_max_spacing_m"', source)
@@ -7236,7 +7241,7 @@ END-ISO-10303-21;
         )
 
     def test_runner_delegates_fixed_point_commit_lifecycle_to_core(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("solve_and_apply_interface_reaction_step", source)
         self.assertNotIn("solve_interface_reaction_step(", source)
@@ -7244,7 +7249,7 @@ END-ISO-10303-21;
         self.assertNotIn("fixed_point_result.force_n[1]", source)
 
     def test_runner_uses_projected_ibm_force_balance_report(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("primary_interface_reaction_balance", source)
         self.assertIn("secondary_interface_reaction_balance", source)
@@ -7258,7 +7263,7 @@ END-ISO-10303-21;
         )
 
     def test_runner_action_reaction_uses_step_equivalent_ibm_force(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn(
             "primary_fluid_force_n = fluid_step_report.primary_equivalent_fluid_force_n",
@@ -7275,7 +7280,7 @@ END-ISO-10303-21;
         self.assertIn('"fsi_last_correction_grid_force_x_n"', source)
 
     def test_primary_action_reaction_metric_is_not_pressure_grid_balance(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertNotIn("pressure_grid_balance = action_reaction_balance", source)
         self.assertNotIn('"fsi_action_reaction_note": (', source)
@@ -7290,7 +7295,7 @@ END-ISO-10303-21;
         self.assertNotIn('"solid_mpm_transfer_conservative"', source)
 
     def test_runner_reaction_target_comes_from_projected_ibm_not_pressure_traction(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn(
             "stabilized_primary_reaction_target_n = _vector3(\n"
@@ -7328,7 +7333,7 @@ END-ISO-10303-21;
         )
 
     def test_runner_records_full_3d_per_region_fsi_force_components(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         for field in (
             '"main_fsi_fluid_force_x_n"',
@@ -7347,7 +7352,7 @@ END-ISO-10303-21;
             self.assertIn(field, source)
 
     def test_runner_passes_water_viscosity_to_surface_stress_diagnostics(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("viscosity_pa_s=spec.water_viscosity_pa_s", source)
         self.assertIn('"viscous_traction_force_x_n"', source)
@@ -7361,7 +7366,7 @@ END-ISO-10303-21;
         self.assertIn("Surface force spreading adds the opposite of sampled -pI + viscous", source)
 
     def test_runner_does_not_silently_zero_missing_projected_ibm_reports(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("required_projected_ibm_force_report", source)
         self.assertIn("required_fluid_impulse_report", source)
@@ -7379,7 +7384,7 @@ END-ISO-10303-21;
             self.assertNotIn(token, source, msg=token)
 
     def test_runner_does_not_silently_zero_missing_final_summary_fields(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         for token in (
             'last.get("main_volume_flux_to_outlet_ratio", 0.0)',
@@ -7397,7 +7402,7 @@ END-ISO-10303-21;
         self.assertIn("_final_row_number(last, \"outlet_flow_negative_z_m3s\")", source)
 
     def test_reduced_squid_state_has_no_unused_taichi_pressure_schedule(self) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertNotIn("def _pressure_schedule(self, t)", source)
 
@@ -7915,10 +7920,12 @@ class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
     def test_step_guard_blocks_check_solid_out_of_bounds_particles(self) -> None:
         # M3 wiring: both per-step guard blocks (sharp + legacy) must call the
         # out-of-bounds guard inside the failure-artifact try block.
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("def _raise_for_step_solid_out_of_bounds_guard(", source)
-        guard_call_segments = source.split("cfl_limit=0.5,")[1:]
+        guard_call_segments = source.split(
+            "_raise_for_step_solid_out_of_bounds_guard(row)"
+        )[1:]
         self.assertEqual(
             len(guard_call_segments),
             2,
@@ -7926,16 +7933,14 @@ class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
         )
         for guard_call_segment in guard_call_segments:
             guard_block = guard_call_segment.split("except Exception as exc:", 1)[0]
-            self.assertIn(
-                "_raise_for_step_solid_out_of_bounds_guard(row)",
-                guard_block,
-            )
+            self.assertIn("except Exception as exc:", guard_call_segment)
+            self.assertNotIn("rows.append(row)", guard_block)
 
     def test_run_loop_exit_and_resume_wire_sharp_marker_checkpoint_state(self) -> None:
         # C1 wiring + M1: the in-loop checkpoint writes and the resume load
         # must pass the sharp coupling state, and the loop exit (wall-time
         # break or normal completion) must persist a closing checkpoint.
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         resume_block = source.split("if args.resume_from_checkpoint:", 1)[1].split(
             "first_step = completed_step + 1",
@@ -7966,7 +7971,7 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
         # pressure_closure, which pins the closure 12.0 on the same call
         # slice (the case's single sharp advance site; the checkpoint-resume
         # path re-enters the same loop).
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_advance_call = source.split(
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
@@ -7983,7 +7988,7 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
     def test_sharp_case_treats_internal_nodes_as_thin_interface_not_obstacle(
         self,
     ) -> None:
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_advance_call = source.split(
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
@@ -8127,7 +8132,7 @@ class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
         # trip still writes step failure artifacts), and the neo_hookean_mpm
         # construction must honor the case's Fixed Support rim region the way
         # the tri_mooney_shell_mpm construction already does.
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_step_tail = source.split("if sharp_case_runner_enabled:", 1)[1].split(
             "reused_fluid_step_report = None",
             1,
@@ -8163,7 +8168,7 @@ class SquidNeoSolidSubsetContractTests(unittest.TestCase):
         # the membrane edge. The neo construction must consume a solid-subset
         # diagnostics object (rim faces present: the constraint binds, and
         # the rim markers' velocity-Dirichlet rows seal the annulus).
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
 
         builder = source.split("def build_tri_surface_diagnostics(", 1)[1]
         builder = builder.split("\ndef ", 1)[0]
@@ -8189,7 +8194,7 @@ class SquidSharpAirBackedClosureContractTests(unittest.TestCase):
         # generic HIBM air-backed classification. The case configures the
         # closure region, pressure, and probe reach; the solver computes the
         # selected cells and resulting flow at run time.
-        source = Path("cases/squid_soft_robot.py").read_text(encoding="utf-8")
+        source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         sharp_advance_call = source.split(
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,

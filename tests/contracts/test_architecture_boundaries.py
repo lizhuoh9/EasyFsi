@@ -4,8 +4,7 @@ import ast
 import unittest
 from pathlib import Path
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests._paths import REPO_ROOT
 
 
 def _python_files(root: Path) -> list[Path]:
@@ -53,6 +52,36 @@ class ArchitectureBoundaryTests(unittest.TestCase):
                 leaked,
                 msg=f"{path} imports forbidden top-level packages: {sorted(leaked)}",
             )
+
+    def test_benchmarks_do_not_import_cases_or_tools(self) -> None:
+        forbidden = {"cases", "tools"}
+
+        for path in _python_files(REPO_ROOT / "benchmarks"):
+            roots = _import_roots(path)
+            leaked = roots & forbidden
+            self.assertFalse(
+                leaked,
+                msg=f"{path} imports forbidden top-level packages: {sorted(leaked)}",
+            )
+
+    def test_simulation_core_has_no_benchmarking_package(self) -> None:
+        self.assertFalse((REPO_ROOT / "simulation_core" / "benchmarking").exists())
+
+    def test_legacy_top_level_tool_scripts_are_not_present(self) -> None:
+        for name in (
+            "inspect_latest_progress.py",
+            "inspect_visit_stats.py",
+            "summarize_preflight_log.py",
+            "_finalize_copy.py",
+        ):
+            self.assertFalse((REPO_ROOT / name).exists())
+
+    def test_cases_contains_no_rendering_helpers(self) -> None:
+        for name in (
+            "squid_jet_render.py",
+            "squid_current_visit_render.py",
+        ):
+            self.assertFalse((REPO_ROOT / "cases" / name).exists())
 
 
 if __name__ == "__main__":

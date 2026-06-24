@@ -22,6 +22,8 @@ It intentionally excludes:
 - output plotting scripts
 - any module named for a specific benchmark or vendor example
 
+Official/vendor benchmark runners live under `benchmarks/official/`.
+
 ## Generic Simulation Entrypoint
 
 Use the generic entrypoint for end-to-end case runs:

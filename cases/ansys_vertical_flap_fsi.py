@@ -6,11 +6,11 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from simulation_core.fsi_driver import FsiCaseSpec
-from simulation_core.benchmarking.official_benchmark_solver import (
+from benchmarks.official.official_benchmark_solver import (
     OfficialBenchmarkRunSpec,
     run_official_fsi_benchmark,
 )
-from simulation_core.benchmarking.solid_mpm_fsi_runner import (
+from benchmarks.official.solid_mpm_fsi_runner import (
     run_rectangular_solid_marker_mpm_fsi_smoke,
 )
 

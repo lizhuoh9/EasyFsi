@@ -12,7 +12,7 @@
 - 这是一份**保守、可验证**的重构：所有修改都以"行为不变"为第一原则，逐条列在
   [REFACTORING_NOTES.md](REFACTORING_NOTES.md) 中，并按风险分级。
 - 大文件（`fluid.py`、`hibm_mpm.py`、`tri_surface.py`、`mooney_shell_mpm.py`、
-  `cases/squid_soft_robot.py`）**未做结构性大改**——对 3.5 万行的数值代码做整体改写
+  `cases/squid_soft_robot/runner.py`）**未做结构性大改**——对 3.5 万行的数值代码做整体改写
   无法在不跑长仿真验证的情况下保证功能不变。对它们的重构按
   [REFACTORING_NOTES.md](REFACTORING_NOTES.md) 中的分阶段蓝图执行。
 - 一次性调试脚本（`tools_*.py`、`run_phase0_raw_map_scaling.py`）按审计结论归档到
@@ -36,10 +36,11 @@
 在本目录（`refactored/`）下运行：
 
 ```powershell
-& "D:/TOOL/Anaconda/python.exe" -m unittest tests.test_validation tests.test_fsi_coupling tests.test_generic_entrypoint -v
-& "D:/TOOL/Anaconda/python.exe" -m unittest tests.test_source_static_contracts -v
+& "D:/TOOL/Anaconda/python.exe" -m unittest discover -s tests/contracts -p "test_*.py" -v
+& "D:/TOOL/Anaconda/python.exe" -m unittest discover -s tests/integration -p "test_*.py" -v
+& "D:/TOOL/Anaconda/python.exe" -m unittest discover -s tests/tools -p "test_*.py" -v
 # 需要 CUDA GPU：
-& "D:/TOOL/Anaconda/python.exe" -m unittest tests.test_simulation_core_package tests.test_hyperelastic_ecoflex -v
+& "D:/TOOL/Anaconda/python.exe" -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 测试目录是随副本一起拷贝的，`test_source_static_contracts.py` 的源码契约检查在本目录内自洽。
@@ -55,8 +56,9 @@
 ## Repository layout
 
 - `simulation_core/`: reusable solver core.
+- `benchmarks/`: official/vendor benchmark adapters and benchmark runners built on `simulation_core/`.
 - `cases/`: runnable simulation cases registered by `run_simulation.py`.
-- `tests/`: unit, regression, integration, and architecture-boundary tests.
+- `tests/`: tests grouped by `solvers/`, `cases/`, `benchmarks/`, `tools/`, `integration/`, and `contracts/`.
 - `tools/`: diagnostics, rendering, and post-processing helpers.
 - `archive/`: historical one-shot maintenance scripts.
 

@@ -5,7 +5,7 @@ import unittest
 
 class MembraneInflationFsiTests(unittest.TestCase):
     def test_uv_membrane_inflation_computes_pressure_volume_and_stretch(self) -> None:
-        from simulation_core.benchmarking.membrane_inflation_fsi import (
+        from benchmarks.official.membrane_inflation_fsi import (
             MembraneInflationConfig,
             run_uv_membrane_inflation_smoke,
         )

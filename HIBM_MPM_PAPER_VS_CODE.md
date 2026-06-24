@@ -2,7 +2,7 @@
 
 Reference: `Numerical Methods in Fluids - 2007 - Gilmanov - A hybrid immersed boundary and material point method for simulating 3D.pdf`.
 
-Scope: compare the solver-level requirements in Gilmanov and Acharya Sections 2-4 against the current implementation in this checkout. Squid is only a validation case. The solver work belongs in `simulation_core`; `cases/squid_soft_robot.py` may only select a coupling mode and report diagnostics.
+Scope: compare the solver-level requirements in Gilmanov and Acharya Sections 2-4 against the current implementation in this checkout. Squid is only a validation case. The solver work belongs in `simulation_core`; `cases/squid_soft_robot/runner.py` may only select a coupling mode and report diagnostics.
 
 Implementation constraint: every production HIBM-MPM solver operation must be Taichi-resident. IB search, inside/outside classification, normal reconstruction, pressure/velocity boundary rows, stress sampling, traction, and MPM force scatter must use Taichi fields/kernels. NumPy loops, `.to_numpy()`, `.from_numpy()`, or host round-trips may be used only for offline tests or one-time initialization, not for the runtime solver path.
 

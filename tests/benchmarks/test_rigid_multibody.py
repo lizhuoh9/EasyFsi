@@ -6,7 +6,7 @@ import unittest
 
 class RigidMultibodyTests(unittest.TestCase):
     def test_hinge_rotation_schedule_interpolates_then_holds(self) -> None:
-        from simulation_core.benchmarking.rigid_multibody import HingeRotationSchedule
+        from benchmarks.official.rigid_multibody import HingeRotationSchedule
 
         schedule = HingeRotationSchedule(
             start_time_s=0.0,
@@ -20,7 +20,7 @@ class RigidMultibodyTests(unittest.TestCase):
         self.assertEqual(schedule.angle_at(0.5), 1.0)
 
     def test_hinge_rotation_schedule_supports_quarter_sine_profile(self) -> None:
-        from simulation_core.benchmarking.rigid_multibody import HingeRotationSchedule
+        from benchmarks.official.rigid_multibody import HingeRotationSchedule
 
         schedule = HingeRotationSchedule(
             start_time_s=0.0,
@@ -34,7 +34,7 @@ class RigidMultibodyTests(unittest.TestCase):
         self.assertEqual(schedule.angle_at(0.5), 1.0)
 
     def test_equal_opposite_fin_pair_motion_is_case_agnostic(self) -> None:
-        from simulation_core.benchmarking.rigid_multibody import EqualOppositeHingePair
+        from benchmarks.official.rigid_multibody import EqualOppositeHingePair
 
         pair = EqualOppositeHingePair(
             positive_name="left-fin",

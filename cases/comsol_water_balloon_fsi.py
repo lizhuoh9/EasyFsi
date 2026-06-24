@@ -3,23 +3,23 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from simulation_core.benchmarking.axisymmetric_geometry import (
+from benchmarks.official.axisymmetric_geometry import (
     AxisymmetricNeckedEllipseProfile,
 )
-from simulation_core.benchmarking.axisymmetric_membrane import (
+from benchmarks.official.axisymmetric_membrane import (
     SmoothAxisymmetricMembraneStressConfig,
     smooth_axisymmetric_membrane_stress_report,
 )
-from simulation_core.benchmarking.inlet_flow import TimeWindowedInletFlow
-from simulation_core.benchmarking.membrane_inflation_fsi import (
+from benchmarks.official.inlet_flow import TimeWindowedInletFlow
+from benchmarks.official.membrane_inflation_fsi import (
     MembraneInflationConfig,
     run_uv_membrane_inflation_smoke,
 )
-from simulation_core.benchmarking.official_benchmark_solver import (
+from benchmarks.official.official_benchmark_solver import (
     OfficialBenchmarkRunSpec,
     run_official_fsi_benchmark,
 )
-from simulation_core.benchmarking.ogden_membrane import (
+from benchmarks.official.ogden_membrane import (
     OgdenMembraneMaterial,
     stretch_from_volume_ratio,
 )

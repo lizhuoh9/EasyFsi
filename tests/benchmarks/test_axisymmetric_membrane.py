@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from simulation_core.benchmarking.axisymmetric_membrane import (
+from benchmarks.official.axisymmetric_membrane import (
     SmoothAxisymmetricMembraneStressConfig,
     smooth_axisymmetric_membrane_stress_report,
 )
-from simulation_core.benchmarking.ogden_membrane import (
+from benchmarks.official.ogden_membrane import (
     OgdenMembraneMaterial,
     stretch_from_volume_ratio,
 )

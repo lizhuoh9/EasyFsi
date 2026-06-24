@@ -130,7 +130,7 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
             self.assertIn("CASE_SPEC", source)
             self.assertIn("run_official_fsi_benchmark(", source)
             self.assertIn("OfficialBenchmarkRunSpec(", source)
-            self.assertIn("simulation_core.benchmarking", source)
+            self.assertIn("benchmarks.official", source)
             self.assertNotIn("cases.official_benchmarks", source)
             self.assertNotIn("CartesianFluidSolver(", source)
             self.assertNotIn("NeoHookeanMpmState(", source)
@@ -139,8 +139,8 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
             self.assertNotIn("for step_index in range", source)
             self.assertNotIn(".to_numpy()", source)
 
-    def test_generic_benchmark_helpers_live_in_simulation_core_not_cases(self) -> None:
-        core_benchmarking = Path("simulation_core") / "benchmarking"
+    def test_generic_benchmark_helpers_live_in_benchmarks_not_solver_core(self) -> None:
+        official_benchmarking = Path("benchmarks") / "official"
         expected_modules = {
             "axisymmetric_geometry.py",
             "axisymmetric_membrane.py",
@@ -153,12 +153,13 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
             "solid_mpm_fsi_runner.py",
         }
 
-        self.assertTrue(core_benchmarking.is_dir())
+        self.assertTrue(official_benchmarking.is_dir())
         self.assertTrue(
             expected_modules.issubset(
-                path.name for path in core_benchmarking.glob("*.py")
+                path.name for path in official_benchmarking.glob("*.py")
             )
         )
+        self.assertFalse((Path("simulation_core") / "benchmarking").exists())
         case_benchmarking = Path("cases") / "official_benchmarks"
         self.assertFalse(
             any(path.suffix == ".py" for path in case_benchmarking.glob("*.py"))

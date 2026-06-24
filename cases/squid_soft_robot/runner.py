@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import csv
 import json
 import math
@@ -15,7 +15,7 @@ import numpy as np
 import taichi as ti
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -16133,7 +16133,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "surface mesh cache records matching STEP and cache SHA256 hashes."
         ),
     )
-    parser.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "output_008step"))
+    parser.add_argument("--output-dir", default=str(REPO_ROOT / "cases" / "output_008step"))
     parser.add_argument(
         "--steps",
         type=int,

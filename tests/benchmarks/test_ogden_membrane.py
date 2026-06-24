@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from simulation_core.benchmarking.ogden_membrane import (
+from benchmarks.official.ogden_membrane import (
     OgdenMembraneMaterial,
     stretch_from_volume_ratio,
 )

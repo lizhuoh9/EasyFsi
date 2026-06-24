@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 
 import numpy as np
 
+from tests._paths import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 LEGACY_PACKAGE_TOKEN = "simulation" + "_code"
 
 
@@ -257,7 +256,7 @@ class SourceStaticContractTests(unittest.TestCase):
     def test_tri_surface_uses_cartesian_grid_fields_for_probe_mapping(self) -> None:
         source = _read("simulation_core/tri_surface.py")
         projected_ibm_source = _read("simulation_core/projected_ibm.py")
-        squid_source = _read("cases/squid_soft_robot.py")
+        squid_source = _read("cases/squid_soft_robot/runner.py")
 
         self.assertIn("_grid_coordinate_from_fields", source)
         self.assertIn("cell_width_x_m[ii] * cell_width_y_m[jj] * cell_width_z_m[kk]", source)
@@ -292,7 +291,7 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertIn("secondary_equivalent_fluid_force_n", source)
 
     def test_core_fluid_b52_regressions_cover_global_mass_and_deep_graded_mg(self) -> None:
-        source = _read("tests/test_core_fluid.py")
+        source = _read("tests/solvers/test_core_fluid.py")
 
         self.assertIn(
             "test_fv_jacobi_obstacle_adjacent_volume_source_is_globally_conservative",
@@ -329,7 +328,7 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertNotIn("self.assertLess(errors[-1], errors[0])", source)
 
     def test_squid_case_validates_real_outlet_flux_and_projection_tolerance(self) -> None:
-        source = _read("cases/squid_soft_robot.py")
+        source = _read("cases/squid_soft_robot/runner.py")
 
         self.assertIn('"final_outlet_to_fsi_volume_source_ratio_physical"', source)
         self.assertIn("physical_outlet_to_fsi_volume_source_passes(", source)
