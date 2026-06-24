@@ -40,6 +40,25 @@ $compileTargets += Get-ChildItem -Path `
 & $python -m unittest tests.solvers.test_fluid -v
 ```
 
+## ANSYS Vertical-flap Solver-validation Diagnostics
+
+Use this after writing an EasyFsi JSON report with
+`run_simulation.py ansys-vertical-flap-fsi --steps N --json`. The diagnostic
+script records the current flow/interface/scatter/solid/feedback layer status
+without changing solver behavior:
+
+```powershell
+& $python -m tools.validation.print_ansys_vertical_flap_diagnostics `
+  --easyfsi-json validation_runs\ansys_vertical_flap_fsi\easyfsi\easyfsi_step050.json `
+  --output-dir validation_runs\ansys_vertical_flap_fsi\compare
+```
+
+If a Fluent tip-displacement report file is available, add:
+
+```powershell
+--fluent-tip-csv validation_runs\ansys_vertical_flap_fsi\fluent\fluent_tip_displacement.csv
+```
+
 ## Known Non-Gating Historical Failures
 
 - ANSYS vertical-flap displacement tolerance smoke.
