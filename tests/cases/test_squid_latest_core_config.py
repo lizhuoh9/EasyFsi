@@ -30,6 +30,11 @@ def _read_squid_sources() -> str:
         for path in sorted(SQUID_CASE_ROOT.glob("*.py"))
     )
 
+
+def _read_sharp_summary_source() -> str:
+    source = (SQUID_CASE_ROOT / "summary.py").read_text(encoding="utf-8")
+    return source.split("def build_sharp_case_run_report", 1)[1]
+
 from cases.squid_soft_robot import (
     CHECKPOINT_ARG_FINGERPRINT_FIELDS,
     DEFAULT_SOURCE_CONFIG,
@@ -1232,10 +1237,10 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
     def test_sharp_completed_step_checks_include_pressure_and_force_drive(
         self,
     ) -> None:
-        source = _read_squid_sources()
-        sharp_summary_source = source.split("if sharp_case_runner_enabled:", 1)[
-            1
-        ].split("diagnostic_checks = {", 1)[0]
+        sharp_summary_source = _read_sharp_summary_source().split(
+            "diagnostic_checks = {",
+            1,
+        )[0]
 
         self.assertIn(
             '"pressure_schedule_applied": pressure_schedule_applied_in_history(rows)',
@@ -1245,8 +1250,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
     def test_sharp_completed_step_checks_require_pre_projection_measurement(
         self,
     ) -> None:
-        source = _read_squid_sources()
-        sharp_summary_source = source[source.index("if sharp_case_runner_enabled:") :]
+        sharp_summary_source = _read_sharp_summary_source()
 
         self.assertIn(
             "pre_projection_divergence_measured_all",
@@ -1269,8 +1273,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn("force_required=solid_mpm_force_required", sharp_summary_source)
 
     def test_sharp_summary_reports_projection_stage_growth_ratios(self) -> None:
-        source = _read_squid_sources()
-        sharp_summary_source = source[source.index("if sharp_case_runner_enabled:") :]
+        sharp_summary_source = _read_sharp_summary_source()
 
         self.assertIn("max_projection_to_pre_divergence_l2_ratio", sharp_summary_source)
         self.assertIn(
@@ -1288,9 +1291,10 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self,
     ) -> None:
         source = _read_squid_sources()
-        sharp_checks_source = source.split("if sharp_case_runner_enabled:", 1)[
-            1
-        ].split("diagnostic_checks = {", 1)[0]
+        sharp_checks_source = _read_sharp_summary_source().split(
+            "diagnostic_checks = {",
+            1,
+        )[0]
 
         self.assertIn(
             '"hibm_velocity_dirichlet_reconstruction_valid": (',
@@ -1319,9 +1323,10 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self,
     ) -> None:
         source = _read_squid_sources()
-        sharp_checks_source = source.split("if sharp_case_runner_enabled:", 1)[
-            1
-        ].split("diagnostic_checks = {", 1)[0]
+        sharp_checks_source = _read_sharp_summary_source().split(
+            "diagnostic_checks = {",
+            1,
+        )[0]
 
         self.assertIn(
             '"hibm_no_slip_residual_samples_present": (',
@@ -4977,7 +4982,7 @@ END-ISO-10303-21;
         )
 
     def test_sharp_completed_step_gate_uses_downstream_jet_sections(self) -> None:
-        source = _read_squid_sources()
+        source = _read_sharp_summary_source()
         checks_block = source.split("checks = {", 1)[1].split(
             "completed_step_checks_passed",
             1,

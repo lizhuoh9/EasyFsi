@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+# Transitional compatibility layer while the historical single-file squid case
+# is being split. New code should import from explicit submodules.
+
 from . import checkpointing as _checkpointing
 from . import cli as _cli
+from . import coupling_common as _coupling_common
+from . import coupling_legacy as _coupling_legacy
+from . import coupling_sharp as _coupling_sharp
 from . import diagnostics as _diagnostics
 from . import history as _history
 from . import outputs as _outputs
+from . import rows as _rows
 from . import runner as _runner
+from . import runtime_state as _runtime_state
 from . import schedules as _schedules
+from . import setup as _setup
 from . import snapshots as _snapshots
 from . import source_config as _source_config
 from . import spec as _spec
+from . import step_context as _step_context
+from . import summary as _summary
 
 
 _EXPORT_MODULES = (
@@ -23,6 +34,14 @@ _EXPORT_MODULES = (
     _diagnostics,
     _snapshots,
     _outputs,
+    _runtime_state,
+    _setup,
+    _summary,
+    _rows,
+    _step_context,
+    _coupling_common,
+    _coupling_legacy,
+    _coupling_sharp,
 )
 
 

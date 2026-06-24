@@ -97,6 +97,27 @@ class ArchitectureBoundaryTests(unittest.TestCase):
 
         self.assertNotIn("argparse.ArgumentParser(", source)
 
+    def test_squid_runner_does_not_define_runtime_state_class_after_split(self) -> None:
+        source = (
+            REPO_ROOT / "cases" / "squid_soft_robot" / "runner.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("class ReducedSquidFSI", source)
+
+    def test_squid_runner_does_not_hold_final_summary_bulk_after_split(self) -> None:
+        source = (
+            REPO_ROOT / "cases" / "squid_soft_robot" / "runner.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn(
+            "final_pressure_outlet_velocity_to_source_ratio =",
+            source,
+        )
+        self.assertNotIn(
+            "max_velocity_constraint_equivalent_force_norm_n =",
+            source,
+        )
+
     def test_squid_case_modules_do_not_import_runner_except_init(self) -> None:
         root = REPO_ROOT / "cases" / "squid_soft_robot"
 
