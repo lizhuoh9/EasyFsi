@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import tempfile
@@ -72,6 +73,56 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             self.assertIn("Fluent x <-> EasyFsi z", stage_check)
             self.assertIn("fluent_comparison = not run", stage_check)
             self.assertEqual(summary_json[0]["status"], "FAIL_MAGNITUDE")
+
+    def test_summary_records_tip_history_monotonic_violation(self) -> None:
+        report = _history_violation_report()
+
+        summary = build_summary_row(report)
+
+        self.assertAlmostEqual(summary["tip_dz_final_m"], -3.0e-5)
+        self.assertAlmostEqual(summary["tip_dz_min_m"], -4.0e-5)
+        self.assertAlmostEqual(summary["tip_dz_max_m"], -2.0e-5)
+        self.assertEqual(summary["tip_dz_monotonic_violation_count"], 1)
+        self.assertEqual(summary["first_tip_dz_violation_step"], 3)
+        self.assertAlmostEqual(summary["max_tip_dz_rebound_m"], 1.0e-5)
+        self.assertEqual(summary["tip_dz_sign_violation_count"], 0)
+        self.assertEqual(summary["status"], "FAIL_SOLID_HISTORY")
+
+    def test_status_returns_fail_solid_history_before_fail_magnitude(self) -> None:
+        report = _history_violation_report()
+        report["max_displacement_relative_error"] = 4.0
+        report["displacement_tolerance"] = 0.05
+
+        summary = build_summary_row(report)
+
+        self.assertEqual(summary["status"], "FAIL_SOLID_HISTORY")
+
+    def test_stage_check_reports_open_loop_load_reuse(self) -> None:
+        report = _history_violation_report()
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+
+            write_diagnostics([report], output_dir)
+
+            stage_check = (output_dir / "stage_check.md").read_text(encoding="utf-8")
+            self.assertIn("fluid_recomputed_after_feedback = false", stage_check)
+            self.assertIn("feedback_closure_status = OPEN_LOOP_LOAD_REUSE", stage_check)
+            self.assertIn("tip_dz_monotonic_violation_count = 1", stage_check)
+            self.assertIn("diagnosis = check solid history monotonicity", stage_check)
+
+    def test_history_health_metrics_are_blank_or_zero_for_missing_history(self) -> None:
+        report = _fixture_report()
+        report.pop("history")
+
+        summary = build_summary_row(report)
+
+        self.assertEqual(summary["tip_dz_final_m"], "")
+        self.assertEqual(summary["tip_dz_min_m"], "")
+        self.assertEqual(summary["tip_dz_max_m"], "")
+        self.assertEqual(summary["tip_dz_monotonic_violation_count"], 0)
+        self.assertEqual(summary["first_tip_dz_violation_step"], "")
+        self.assertEqual(summary["max_tip_dz_rebound_m"], "")
+        self.assertEqual(summary["tip_dz_sign_violation_count"], 0)
 
     def test_optional_fluent_tip_csv_writes_displacement_compare(self) -> None:
         report = _fixture_report()
@@ -212,6 +263,45 @@ def _fixture_report() -> dict:
             },
         ],
     }
+
+
+def _history_violation_report() -> dict:
+    report = copy.deepcopy(_fixture_report())
+    report["config"]["step_count"] = 3
+    report["tip_mean_displacement_m"] = [0.0, 1.0e-6, -3.0e-5]
+    report["history"] = [
+        {
+            "step": 1,
+            "stress_valid_marker_count": 12,
+            "scatter_invalid_marker_count": 0,
+            "feedback_invalid_marker_count": 0,
+            "total_marker_force_n": [0.0, 0.0, -0.6],
+            "mpm_external_force_n": [0.0, 0.0, -0.6],
+            "max_displacement_m": 2.0e-5,
+            "tip_mean_displacement_m": [0.0, 5.0e-7, -2.0e-5],
+        },
+        {
+            "step": 2,
+            "stress_valid_marker_count": 12,
+            "scatter_invalid_marker_count": 0,
+            "feedback_invalid_marker_count": 0,
+            "total_marker_force_n": [0.0, 0.0, -1.2],
+            "mpm_external_force_n": [0.0, 0.0, -1.2],
+            "max_displacement_m": 6.0e-5,
+            "tip_mean_displacement_m": [0.0, 1.0e-6, -4.0e-5],
+        },
+        {
+            "step": 3,
+            "stress_valid_marker_count": 12,
+            "scatter_invalid_marker_count": 0,
+            "feedback_invalid_marker_count": 0,
+            "total_marker_force_n": [0.0, 0.0, -1.0],
+            "mpm_external_force_n": [0.0, 0.0, -1.0],
+            "max_displacement_m": 6.0e-5,
+            "tip_mean_displacement_m": [0.0, 1.0e-6, -3.0e-5],
+        },
+    ]
+    return report
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:

@@ -23,6 +23,13 @@ SUMMARY_COLUMNS = [
     "ref_max_disp_m",
     "disp_relerr",
     "root_max_disp_m",
+    "tip_dz_final_m",
+    "tip_dz_min_m",
+    "tip_dz_max_m",
+    "tip_dz_monotonic_violation_count",
+    "first_tip_dz_violation_step",
+    "max_tip_dz_rebound_m",
+    "tip_dz_sign_violation_count",
     "stress_invalid",
     "scatter_invalid",
     "feedback_invalid",
@@ -68,6 +75,7 @@ COMPARE_COLUMNS = [
 
 SCATTER_RESIDUAL_TOLERANCE_N = 1.0e-9
 ROOT_DISPLACEMENT_TOLERANCE_M = 1.0e-8
+TIP_DZ_MONOTONIC_TOLERANCE_M = 1.0e-8
 
 
 def load_report(path: Path) -> dict[str, Any]:
@@ -92,6 +100,7 @@ def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
     marker_force = _vector(report.get("total_marker_force_n"))
     external_force = _vector(report.get("mpm_external_force_n"))
     history = _list(report.get("history"))
+    tip_health = _tip_history_health(report)
     steps = _int(config.get("step_count"), len(history))
 
     row = {
@@ -111,6 +120,15 @@ def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "disp_relerr": _number(report.get("max_displacement_relative_error")),
         "root_max_disp_m": _number(report.get("root_max_displacement_m")),
+        "tip_dz_final_m": tip_health["tip_dz_final_m"],
+        "tip_dz_min_m": tip_health["tip_dz_min_m"],
+        "tip_dz_max_m": tip_health["tip_dz_max_m"],
+        "tip_dz_monotonic_violation_count": tip_health[
+            "tip_dz_monotonic_violation_count"
+        ],
+        "first_tip_dz_violation_step": tip_health["first_tip_dz_violation_step"],
+        "max_tip_dz_rebound_m": tip_health["max_tip_dz_rebound_m"],
+        "tip_dz_sign_violation_count": tip_health["tip_dz_sign_violation_count"],
         "stress_invalid": _int(report.get("stress_invalid_marker_count")),
         "scatter_invalid": _int(report.get("scatter_invalid_marker_count")),
         "feedback_invalid": _int(report.get("surface_feedback_invalid_marker_count")),
@@ -141,6 +159,7 @@ def classify_status(report: dict[str, Any], row: dict[str, Any] | None = None) -
             "root_max_disp_m": _number(report.get("root_max_displacement_m")),
             "disp_relerr": _number(report.get("max_displacement_relative_error")),
         }
+        summary.update(_tip_history_health(report))
     else:
         summary = row
     reference = _dict(report.get("reference_results"))
@@ -183,8 +202,15 @@ def classify_status(report: dict[str, Any], row: dict[str, Any] | None = None) -
         return "FAIL_SOLID_ROOT"
 
     tip = _vector(report.get("tip_mean_displacement_m"))
-    if _finite_or_none(tip[2]) is None or tip[2] >= 0.0:
+    tip_dz = _finite_or_none(tip[2])
+    if (
+        _int(summary.get("tip_dz_sign_violation_count")) > 0
+        or tip_dz is None
+        or tip_dz >= 0.0
+    ):
         return "FAIL_SOLID_SIGN"
+    if _int(summary.get("tip_dz_monotonic_violation_count")) > 0:
+        return "FAIL_SOLID_HISTORY"
 
     displacement_relerr = _finite_or_none(summary.get("disp_relerr"))
     displacement_tolerance = _finite_or_none(report.get("displacement_tolerance"))
@@ -250,6 +276,59 @@ def build_history_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _tip_history_health(report: dict[str, Any]) -> dict[str, Any]:
+    history: list[tuple[int, float]] = []
+    for entry in _list(report.get("history")):
+        if not isinstance(entry, dict):
+            continue
+        step = _optional_int(entry.get("step"))
+        if step is None:
+            step = len(history) + 1
+        tip = _vector(entry.get("tip_mean_displacement_m"))
+        dz = _finite_or_none(tip[2])
+        if dz is None:
+            continue
+        history.append((step, dz))
+
+    if not history:
+        return {
+            "tip_dz_final_m": "",
+            "tip_dz_min_m": "",
+            "tip_dz_max_m": "",
+            "tip_dz_monotonic_violation_count": 0,
+            "first_tip_dz_violation_step": "",
+            "max_tip_dz_rebound_m": "",
+            "tip_dz_sign_violation_count": 0,
+        }
+
+    first_violation_step: int | None = None
+    max_rebound: float | None = None
+    monotonic_violation_count = 0
+    for previous, current in zip(history, history[1:]):
+        previous_dz = previous[1]
+        current_step, current_dz = current
+        rebound = current_dz - previous_dz
+        if rebound > TIP_DZ_MONOTONIC_TOLERANCE_M:
+            monotonic_violation_count += 1
+            if first_violation_step is None:
+                first_violation_step = current_step
+            if max_rebound is None or rebound > max_rebound:
+                max_rebound = rebound
+
+    values = [dz for _, dz in history]
+    return {
+        "tip_dz_final_m": values[-1],
+        "tip_dz_min_m": min(values),
+        "tip_dz_max_m": max(values),
+        "tip_dz_monotonic_violation_count": monotonic_violation_count,
+        "first_tip_dz_violation_step": first_violation_step
+        if first_violation_step is not None
+        else "",
+        "max_tip_dz_rebound_m": max_rebound if max_rebound is not None else "",
+        "tip_dz_sign_violation_count": sum(1 for dz in values if dz > 0.0),
+    }
+
+
 def build_stage_check(
     report: dict[str, Any],
     summary: dict[str, Any],
@@ -265,6 +344,12 @@ def build_stage_check(
     tip = _vector(report.get("tip_mean_displacement_m"))
     marker_force = _vector(report.get("total_marker_force_n"))
     status = str(summary["status"])
+    fluid_recomputed = _bool(report.get("fluid_recomputed_after_feedback"))
+    feedback_closure_status = (
+        "CLOSED_LOOP_RECOMPUTED_FLOW"
+        if fluid_recomputed
+        else "OPEN_LOOP_LOAD_REUSE"
+    )
 
     compare_line = (
         f"fluent_comparison = {fluent_csv}"
@@ -309,13 +394,33 @@ def build_stage_check(
             f"max_disp_m = {_format_value(report.get('max_displacement_m'))}",
             f"reference_m = {_format_value(report.get('reference_max_displacement_m'))}",
             f"relative_error = {_format_value(report.get('max_displacement_relative_error'))}",
+            f"tip_dz_final_m = {_format_value(summary.get('tip_dz_final_m'))}",
+            f"tip_dz_min_m = {_format_value(summary.get('tip_dz_min_m'))}",
+            f"tip_dz_max_m = {_format_value(summary.get('tip_dz_max_m'))}",
+            (
+                "tip_dz_monotonic_violation_count = "
+                f"{_format_value(summary.get('tip_dz_monotonic_violation_count'))}"
+            ),
+            (
+                "first_tip_dz_violation_step = "
+                f"{_format_value(summary.get('first_tip_dz_violation_step'))}"
+            ),
+            (
+                "max_tip_dz_rebound_m = "
+                f"{_format_value(summary.get('max_tip_dz_rebound_m'))}"
+            ),
+            (
+                "tip_dz_sign_violation_count = "
+                f"{_format_value(summary.get('tip_dz_sign_violation_count'))}"
+            ),
             f"diagnosis = {_solid_diagnosis(status)}",
             "",
             "[FSI_FEEDBACK]",
             f"updated_markers = {_format_value(report.get('surface_feedback_updated_marker_count'))}",
             f"invalid_markers = {_format_value(report.get('surface_feedback_invalid_marker_count'))}",
             f"max_marker_displacement_m = {_format_value(report.get('surface_feedback_max_marker_displacement_m'))}",
-            "fluid_recomputed_after_feedback = false",
+            f"fluid_recomputed_after_feedback = {_bool_text(fluid_recomputed)}",
+            f"feedback_closure_status = {feedback_closure_status}",
             f"diagnosis = {_feedback_diagnosis(status)}",
             "",
             "[COORDINATE_MAPPING]",
@@ -533,6 +638,20 @@ def _optional_int(value: Any) -> int | None:
     return int(parsed)
 
 
+def _bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    if value is None:
+        return False
+    return bool(value)
+
+
+def _bool_text(value: Any) -> str:
+    return "true" if _bool(value) else "false"
+
+
 def _finite_or_none(value: Any) -> float | None:
     try:
         if value == "":
@@ -659,6 +778,8 @@ def _solid_diagnosis(status: str) -> str:
         return "check fixed root constraint"
     if status == "FAIL_SOLID_SIGN":
         return "check displacement sign and axis mapping"
+    if status == "FAIL_SOLID_HISTORY":
+        return "check solid history monotonicity / load persistence / time integration"
     if status == "FAIL_MAGNITUDE":
         return "check MPM material / substeps / damping / support radius"
     return "solid-response gate passed"
