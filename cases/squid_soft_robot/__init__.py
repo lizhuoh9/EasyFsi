@@ -9,6 +9,7 @@ from . import coupling_common as _coupling_common
 from . import coupling_legacy as _coupling_legacy
 from . import coupling_sharp as _coupling_sharp
 from . import diagnostics as _diagnostics
+from . import fluid_step as _fluid_step
 from . import history as _history
 from . import outputs as _outputs
 from . import rows as _rows
@@ -17,10 +18,13 @@ from . import runtime_state as _runtime_state
 from . import schedules as _schedules
 from . import setup as _setup
 from . import snapshots as _snapshots
+from . import solid_step as _solid_step
 from . import source_config as _source_config
 from . import spec as _spec
 from . import step_context as _step_context
+from . import step_loop as _step_loop
 from . import summary as _summary
+from . import trial_replay as _trial_replay
 
 
 _EXPORT_MODULES = (
@@ -39,6 +43,10 @@ _EXPORT_MODULES = (
     _summary,
     _rows,
     _step_context,
+    _step_loop,
+    _trial_replay,
+    _solid_step,
+    _fluid_step,
     _coupling_common,
     _coupling_legacy,
     _coupling_sharp,

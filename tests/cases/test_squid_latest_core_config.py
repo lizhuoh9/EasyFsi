@@ -22,6 +22,7 @@ from tests._paths import REPO_ROOT
 
 SQUID_CASE_ROOT = REPO_ROOT / "cases" / "squid_soft_robot"
 SQUID_RUNNER_SOURCE = SQUID_CASE_ROOT / "runner.py"
+SQUID_STEP_LOOP_SOURCE = SQUID_CASE_ROOT / "step_loop.py"
 
 
 def _read_squid_sources() -> str:
@@ -893,7 +894,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertIn("raise", advance_block)
 
     def test_sharp_sampling_uses_fluid_substep_dt_for_cfl(self) -> None:
-        source = _read_squid_sources()
+        source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
         sharp_block = source.split("if sharp_case_runner_enabled:", 1)[1]
         sample_block = sharp_block.split(
             "sample_report = simulator.sample_after_projection(",
@@ -904,7 +905,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertNotIn("dt_s=spec.dt_s", sample_block)
 
     def test_sharp_sampling_uses_latest_post_solid_projection_when_available(self) -> None:
-        source = _read_squid_sources()
+        source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
         sharp_block = source.split("if sharp_case_runner_enabled:", 1)[1]
         sample_block = sharp_block.split(
             "latest_fluid_projection_report =",
@@ -7954,17 +7955,25 @@ class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
         # must pass the sharp coupling state, and the loop exit (wall-time
         # break or normal completion) must persist a closing checkpoint.
         source = _read_squid_sources()
+        runner_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
+        step_loop_source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
 
-        resume_block = source.split("if args.resume_from_checkpoint:", 1)[1].split(
+        resume_block = runner_source.split("if args.resume_from_checkpoint:", 1)[1].split(
             "first_step = completed_step + 1",
             1,
         )[0]
         self.assertIn("sharp_coupling_state=sharp_coupling_state", resume_block)
 
-        closing_block = source.split(
+        loop_exit_block = step_loop_source.split(
             'partial_run_reason = "max_wall_time_s"',
-            2,
-        )[2].split("if sharp_case_runner_enabled:", 1)[0]
+            1,
+        )[1].split("return dict(locals())", 1)[0]
+        self.assertIn("break", loop_exit_block)
+
+        closing_block = runner_source.split(
+            "step_loop_result = run_squid_step_loop",
+            1,
+        )[1].split("if sharp_case_runner_enabled:", 1)[0]
         self.assertIn("write_run_checkpoint(", closing_block)
         self.assertIn("sharp_coupling_state=sharp_coupling_state", closing_block)
         self.assertIn('completed_step=int(rows[-1]["step"])', closing_block)

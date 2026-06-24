@@ -1,6 +1,28 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from simulation_core import FSI_COUPLING_MODE_HIBM_MPM_SHARP, HibmMpmSharpCouplingState, TaichiRuntimeConfig
+
+
+@dataclass(frozen=True)
+class SharpCouplingModeControl:
+    enabled: bool
+    mode: str
+
+
+def hibm_mpm_sharp_case_enabled(*, fsi_coupling_mode: str) -> bool:
+    return str(fsi_coupling_mode) == FSI_COUPLING_MODE_HIBM_MPM_SHARP
+
+
+def hibm_mpm_sharp_coupling_control(
+    *,
+    fsi_coupling_mode: str,
+) -> SharpCouplingModeControl:
+    return SharpCouplingModeControl(
+        enabled=hibm_mpm_sharp_case_enabled(fsi_coupling_mode=fsi_coupling_mode),
+        mode=str(fsi_coupling_mode),
+    )
 
 
 def raise_for_unsupported_hibm_mpm_sharp_robin_options(

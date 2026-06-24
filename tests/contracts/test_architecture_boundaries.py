@@ -118,6 +118,27 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             source,
         )
 
+    def test_squid_runner_does_not_hold_main_step_loop_after_step5_split(self) -> None:
+        source = (
+            REPO_ROOT / "cases" / "squid_soft_robot" / "runner.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("for step in range(first_step, step_count + 1):", source)
+
+    def test_squid_step_loop_module_owns_main_step_loop_after_step5_split(self) -> None:
+        source = (
+            REPO_ROOT / "cases" / "squid_soft_robot" / "step_loop.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("for step in range(", source)
+
+    def test_squid_runner_does_not_define_sharp_trial_closure_after_step5_split(self) -> None:
+        source = (
+            REPO_ROOT / "cases" / "squid_soft_robot" / "runner.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("def advance_sharp_trial_once", source)
+
     def test_squid_case_modules_do_not_import_runner_except_init(self) -> None:
         root = REPO_ROOT / "cases" / "squid_soft_robot"
 
