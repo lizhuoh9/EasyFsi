@@ -85,10 +85,15 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         for name in (
             "fluid.py",
             "hibm_mpm.py",
-            "mooney_shell_mpm.py",
-            "neo_hookean_mpm.py",
+            "cad_import.py",
+            "cad_tessellation.py",
+            "coordinate_models.py",
+            "fluid_domain.py",
             "geometry.py",
             "hyperelastic.py",
+            "mooney_shell_mpm.py",
+            "neo_hookean_mpm.py",
+            "time_stepping.py",
             "validation.py",
         ):
             self.assertTrue(
@@ -127,6 +132,59 @@ class ArchitectureBoundaryTests(unittest.TestCase):
 
         self.assertIn("class HibmMpmSurfaceMarkers", source)
         self.assertIn("class HibmMpmSharpCouplingState", source)
+
+    def test_solver_support_legacy_modules_are_shims_after_step9(self) -> None:
+        expected_imports = {
+            "cad_import.py": "from simulation_core.geometry_tools.cad_import import",
+            "cad_tessellation.py": "from simulation_core.geometry_tools.cad_tessellation import",
+            "coordinate_models.py": "from simulation_core.geometry_tools.coordinate_models import",
+            "fluid_domain.py": "from simulation_core.geometry_tools.fluid_domain import",
+            "geometry.py": "from simulation_core.geometry_tools.surface_mesh import",
+            "hyperelastic.py": "from simulation_core.materials.hyperelastic import",
+            "mooney_shell_mpm.py": "from simulation_core.solids.mooney_shell import",
+            "neo_hookean_mpm.py": "from simulation_core.solids.neo_hookean_mpm import",
+            "time_stepping.py": "from simulation_core.diagnostics.time_stepping import",
+            "validation.py": "from simulation_core.diagnostics.validation import",
+        }
+        forbidden_tokens = (
+            "@ti.kernel",
+            "class NeoHookeanMpmState",
+            "class TriMooneyShellMpmState",
+            "class UvMooneyShellMpmState",
+            "class SurfaceMesh",
+            "class NeoHookeanMaterial",
+            "class ReferenceCurve",
+            "class CflSubstepController",
+        )
+
+        for name, import_line in expected_imports.items():
+            source = (REPO_ROOT / "simulation_core" / name).read_text(encoding="utf-8")
+
+            self.assertIn(import_line, source)
+            for token in forbidden_tokens:
+                self.assertNotIn(token, source, msg=f"{name}: {token}")
+
+    def test_solver_support_implementations_live_under_layered_packages(self) -> None:
+        expected_tokens = {
+            ("solids", "neo_hookean_mpm.py"): "class NeoHookeanMpmState",
+            ("solids", "mooney_shell", "core.py"): "class TriMooneyShellMpmState",
+            ("solids", "mooney_shell", "reports.py"): "class TriMooneyShellMpmReport",
+            ("geometry_tools", "surface_mesh.py"): "class SurfaceMesh",
+            ("geometry_tools", "coordinate_models.py"): "class Cartesian3DCoordinateModel",
+            ("geometry_tools", "fluid_domain.py"): "class FluidDomain",
+            ("geometry_tools", "cad_import.py"): "class StepCadSummary",
+            ("geometry_tools", "cad_tessellation.py"): "class StepTessellationSettings",
+            ("materials", "hyperelastic.py"): "class NeoHookeanMaterial",
+            ("diagnostics", "validation.py"): "class ReferenceCurve",
+            ("diagnostics", "time_stepping.py"): "class CflSubstepController",
+        }
+
+        for parts, token in expected_tokens.items():
+            source = (REPO_ROOT / "simulation_core" / Path(*parts)).read_text(
+                encoding="utf-8"
+            )
+
+            self.assertIn(token, source, msg=f"{parts}: {token}")
 
     def test_hibm_mpm_support_modules_do_not_import_core(self) -> None:
         for name in (

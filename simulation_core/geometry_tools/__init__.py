@@ -1,35 +1,44 @@
 from __future__ import annotations
 
-from simulation_core.cad_import import (
+from simulation_core.geometry_tools.cad_import import (
     StepBrep,
     StepCadSummary,
     cad_provenance_report,
     parse_step_cad_summary,
 )
-from simulation_core.cad_tessellation import (
+from simulation_core.geometry_tools.cad_tessellation import (
     StepCurveEntity,
     StepPartEntity,
     StepSurfaceEntity,
     StepTessellationResult,
     StepTessellationSettings,
     build_step_derived_source_config,
+    build_triangle_edge_face_map,
+    face_ids_for_step_curve_edges,
+    face_ids_for_step_curve_tags,
+    face_ids_for_step_part_or_surface_tags,
+    face_ids_for_step_surface_tags,
+    file_sha256,
+    is_step_path,
+    normalize_step_curve_edge_pairs,
     remap_step_named_selection_face_ids,
+    resolve_step_part_face_claims,
     step_tessellation_report,
     tessellate_step_cad,
     write_step_surface_mesh_cache,
 )
-from simulation_core.coordinate_models import (
+from simulation_core.geometry_tools.coordinate_models import (
     Axisymmetric2DCoordinateModel,
     Cartesian2DCoordinateModel,
     Cartesian3DCoordinateModel,
     CoordinateModel,
 )
-from simulation_core.fluid_domain import (
+from simulation_core.geometry_tools.fluid_domain import (
     AxisAlignedBoundary,
     BoundaryRegion,
     FluidDomain,
 )
-from simulation_core.geometry import (
+from simulation_core.geometry_tools.surface_mesh import (
     PAPER_SPHERE_MESHES,
     REPRODUCTION_UV_SPHERE_MESHES,
     SurfaceMesh,
@@ -59,12 +68,21 @@ __all__ = [
     "SurfaceMesh",
     "UvSphereResolution",
     "build_step_derived_source_config",
+    "build_triangle_edge_face_map",
     "cad_provenance_report",
+    "face_ids_for_step_curve_edges",
+    "face_ids_for_step_curve_tags",
+    "face_ids_for_step_part_or_surface_tags",
+    "face_ids_for_step_surface_tags",
+    "file_sha256",
     "infer_uv_sphere_resolution",
+    "is_step_path",
     "make_uv_sphere",
+    "normalize_step_curve_edge_pairs",
     "orient_faces_outward",
     "parse_step_cad_summary",
     "remap_step_named_selection_face_ids",
+    "resolve_step_part_face_claims",
     "step_tessellation_report",
     "tessellate_step_cad",
     "write_step_surface_mesh_cache",

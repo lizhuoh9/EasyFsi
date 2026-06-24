@@ -56,7 +56,7 @@
 ## Repository layout
 
 - `simulation_core/`: reusable solver core.
-- `simulation_core/fluids`, `simulation_core/solids`, `simulation_core/coupling`, `simulation_core/geometry_tools`, `simulation_core/materials`, and `simulation_core/diagnostics`: layered facade packages for new imports; `simulation_core/fluids` owns the Cartesian fluid package implementation and `simulation_core/coupling/hibm_mpm` owns the HIBM-MPM package implementation while legacy module paths remain supported during migration.
+- `simulation_core/fluids`, `simulation_core/solids`, `simulation_core/coupling`, `simulation_core/geometry_tools`, `simulation_core/materials`, and `simulation_core/diagnostics`: layered packages for new imports; `simulation_core/fluids` owns the Cartesian fluid implementation, `simulation_core/coupling/hibm_mpm` owns the HIBM-MPM implementation, and the solver support implementations now live under the matching solids, geometry, materials, and diagnostics packages while legacy module paths remain supported during migration.
 - `benchmarks/`: official/vendor benchmark adapters and benchmark runners built on `simulation_core/`.
 - `cases/`: runnable simulation cases registered by `run_simulation.py`.
 - `tests/`: tests grouped by `solvers/`, `cases/`, `benchmarks/`, `tools/`, `integration/`, and `contracts/`.

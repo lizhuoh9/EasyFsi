@@ -30,35 +30,33 @@ from .fsi_coupling import (
     solve_interface_reaction_fixed_point,
     update_interface_reaction_for_next_step,
 )
-from .fluid_domain import AxisAlignedBoundary, BoundaryRegion, FluidDomain
-from .geometry import (
+from .geometry_tools import (
+    AxisAlignedBoundary,
+    BoundaryRegion,
+    FluidDomain,
     PAPER_SPHERE_MESHES,
     REPRODUCTION_UV_SPHERE_MESHES,
     SurfaceMesh,
     UvSphereResolution,
-    infer_uv_sphere_resolution,
-    make_uv_sphere,
-    orient_faces_outward,
-)
-from .cad_import import (
     StepBrep,
     StepCadSummary,
-    cad_provenance_report,
-    parse_step_cad_summary,
-)
-from .cad_tessellation import (
     StepCurveEntity,
     StepPartEntity,
     StepSurfaceEntity,
     StepTessellationResult,
     StepTessellationSettings,
     build_step_derived_source_config,
+    cad_provenance_report,
+    infer_uv_sphere_resolution,
+    make_uv_sphere,
+    orient_faces_outward,
+    parse_step_cad_summary,
     remap_step_named_selection_face_ids,
     step_tessellation_report,
     tessellate_step_cad,
     write_step_surface_mesh_cache,
 )
-from .hyperelastic import (
+from .materials import (
     NeoHookeanMaterial,
     NeoHookeanStressProbe,
     NeoHookeanStressReport,
@@ -96,28 +94,29 @@ from .hibm_mpm import (
     hibm_mpm_paper_requirements,
     require_implemented_fsi_coupling_mode,
 )
-from .mooney_shell_mpm import (
+from .solids import (
+    NeoHookeanMpmReport,
+    NeoHookeanMpmState,
     TriMooneyShellMpmReport,
     TriMooneyShellMpmState,
     UvMooneyShellMpmReport,
     UvMooneyShellMpmState,
 )
-from .neo_hookean_mpm import NeoHookeanMpmReport, NeoHookeanMpmState
 from .projected_ibm import (
     ProjectedIbmRegionPairStepConfig,
     ProjectedIbmRegionPairStepReport,
     advance_projected_ibm_region_pair_fluid_step,
 )
 from .runtime import TaichiRuntimeConfig, init_taichi
-from .time_stepping import CflSubstepController
-from .tri_surface import TriSurfaceDiagnosticReport, TriSurfaceRegionDiagnostics
-from .validation import (
+from .diagnostics import (
+    CflSubstepController,
     boundary_drive_compliance_report,
     checks_passed,
     finite_field_diagnostics,
     force_nonzero_when_loaded,
     vector_norm,
 )
+from .tri_surface import TriSurfaceDiagnosticReport, TriSurfaceRegionDiagnostics
 
 __all__ = [
     "CartesianFluidSolver",

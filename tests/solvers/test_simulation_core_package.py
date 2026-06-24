@@ -50,6 +50,7 @@ HIBM_MPM_PAPER_REQUIREMENTS_SOURCE = Path(
     "simulation_core/coupling/hibm_mpm/paper_requirements.py"
 )
 FLUID_SOLVER_SOURCE = Path("simulation_core/fluids/solver.py")
+MOONEY_SHELL_CORE_SOURCE = Path("simulation_core/solids/mooney_shell/core.py")
 
 
 class SimulationCorePackageTests(unittest.TestCase):
@@ -182,9 +183,7 @@ class SimulationCorePackageTests(unittest.TestCase):
 
     def test_hibm_sharp_load_assembly_is_core_marker_to_mpm_path(self) -> None:
         source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
-        mooney_source = Path("simulation_core/mooney_shell_mpm.py").read_text(
-            encoding="utf-8"
-        )
+        mooney_source = MOONEY_SHELL_CORE_SOURCE.read_text(encoding="utf-8")
         hibm_tests = Path("tests/solvers/test_hibm.py").read_text(encoding="utf-8")
 
         self.assertTrue(callable(assemble_hibm_mpm_sharp_fluid_to_mpm_loads))

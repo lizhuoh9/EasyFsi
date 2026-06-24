@@ -36,6 +36,51 @@ class SimulationCoreFacadeTests(unittest.TestCase):
         self.assertIs(solids.TriMooneyShellMpmState, mooney.TriMooneyShellMpmState)
         self.assertIs(solids.UvMooneyShellMpmState, mooney.UvMooneyShellMpmState)
 
+    def test_solver_support_package_exports_match_legacy_shims(self) -> None:
+        solids = importlib.import_module("simulation_core.solids")
+        neo_impl = importlib.import_module("simulation_core.solids.neo_hookean_mpm")
+        mooney_pkg = importlib.import_module("simulation_core.solids.mooney_shell")
+        geometry_tools = importlib.import_module("simulation_core.geometry_tools")
+        surface_mesh = importlib.import_module("simulation_core.geometry_tools.surface_mesh")
+        coordinate_models = importlib.import_module(
+            "simulation_core.geometry_tools.coordinate_models"
+        )
+        fluid_domain = importlib.import_module("simulation_core.geometry_tools.fluid_domain")
+        materials = importlib.import_module("simulation_core.materials")
+        hyperelastic = importlib.import_module("simulation_core.materials.hyperelastic")
+        diagnostics = importlib.import_module("simulation_core.diagnostics")
+        validation = importlib.import_module("simulation_core.diagnostics.validation")
+        time_stepping = importlib.import_module("simulation_core.diagnostics.time_stepping")
+
+        legacy_neo = importlib.import_module("simulation_core.neo_hookean_mpm")
+        legacy_mooney = importlib.import_module("simulation_core.mooney_shell_mpm")
+        legacy_geometry = importlib.import_module("simulation_core.geometry")
+        legacy_coordinates = importlib.import_module("simulation_core.coordinate_models")
+        legacy_domain = importlib.import_module("simulation_core.fluid_domain")
+        legacy_hyperelastic = importlib.import_module("simulation_core.hyperelastic")
+        legacy_validation = importlib.import_module("simulation_core.validation")
+        legacy_time_stepping = importlib.import_module("simulation_core.time_stepping")
+
+        self.assertIs(solids.NeoHookeanMpmState, neo_impl.NeoHookeanMpmState)
+        self.assertIs(legacy_neo.NeoHookeanMpmState, neo_impl.NeoHookeanMpmState)
+        self.assertIs(legacy_mooney.TriMooneyShellMpmState, mooney_pkg.TriMooneyShellMpmState)
+        self.assertIs(legacy_mooney.TriMooneyShellMpmReport, mooney_pkg.TriMooneyShellMpmReport)
+        self.assertIs(geometry_tools.SurfaceMesh, surface_mesh.SurfaceMesh)
+        self.assertIs(legacy_geometry.SurfaceMesh, surface_mesh.SurfaceMesh)
+        self.assertIs(
+            legacy_coordinates.Cartesian3DCoordinateModel,
+            coordinate_models.Cartesian3DCoordinateModel,
+        )
+        self.assertIs(legacy_domain.FluidDomain, fluid_domain.FluidDomain)
+        self.assertIs(materials.NeoHookeanMaterial, hyperelastic.NeoHookeanMaterial)
+        self.assertIs(legacy_hyperelastic.NeoHookeanMaterial, hyperelastic.NeoHookeanMaterial)
+        self.assertIs(diagnostics.ReferenceCurve, validation.ReferenceCurve)
+        self.assertIs(legacy_validation.ReferenceCurve, validation.ReferenceCurve)
+        self.assertIs(
+            legacy_time_stepping.CflSubstepController,
+            time_stepping.CflSubstepController,
+        )
+
     def test_coupling_facade_exports_existing_coupling_api(self) -> None:
         coupling = importlib.import_module("simulation_core.coupling")
         fsi = importlib.import_module("simulation_core.fsi_coupling")

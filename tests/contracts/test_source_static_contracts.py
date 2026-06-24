@@ -11,6 +11,7 @@ SQUID_CASE_ROOT = REPO_ROOT / "cases" / "squid_soft_robot"
 LEGACY_PACKAGE_TOKEN = "simulation" + "_code"
 FLUID_GRID_SOURCE = "simulation_core/fluids/grid.py"
 FLUID_SOLVER_SOURCE = "simulation_core/fluids/solver.py"
+NEO_HOOKEAN_MPM_SOURCE = "simulation_core/solids/neo_hookean_mpm.py"
 
 
 def _read(path: str) -> str:
@@ -258,7 +259,7 @@ class SourceStaticContractTests(unittest.TestCase):
 
     def test_neo_hookean_region_normal_pressure_matches_fsi_traction_sign(self) -> None:
         tri_surface_source = _read("simulation_core/tri_surface.py")
-        neo_hookean_source = _read("simulation_core/neo_hookean_mpm.py")
+        neo_hookean_source = _read(NEO_HOOKEAN_MPM_SOURCE)
 
         self.assertIn(
             "pressure_force_on_solid = -sampled_pressure * n * sample_area",

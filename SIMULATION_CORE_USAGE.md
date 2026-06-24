@@ -3,18 +3,21 @@
 `simulation_core/` is the case-free Taichi simulation package. It contains only reusable solver primitives:
 
 - `runtime.py`: GPU-only Taichi initialization.
-- `geometry.py`: surface mesh and analytic UV sphere helpers.
+- `geometry.py`: compatibility shim for package-backed surface mesh helpers.
 - `fluid.py`: compatibility shim for the package-backed Cartesian fluid solver.
 - `fluids/`: 3D Cartesian fluid state, pressure projection, force spreading, and diagnostics.
+- `geometry_tools/`: surface mesh, coordinate model, fluid-domain, and CAD helpers.
 - `tri_surface.py`: region-based surface diagnostics, IBM force spreading, and velocity constraints.
 - `projected_ibm.py`: projected immersed-boundary fluid step for a pair of surface regions.
 - `fsi_coupling.py`: action/reaction interface-force balance and fixed-point relaxation.
 - `hibm_mpm.py`: compatibility shim for the package-backed HIBM-MPM coupling solver.
 - `coupling/hibm_mpm/`: sharp HIBM-MPM coupling implementation and support definitions.
-- `mooney_shell_mpm.py`: triangular and UV Mooney membrane MPM states.
-- `neo_hookean_mpm.py`: volumetric Neo-Hookean MLS-MPM state.
-- `hyperelastic.py`: Neo-Hookean material cards, including Ecoflex 00-10 defaults.
-- `validation.py`: lightweight validation result helpers.
+- `mooney_shell_mpm.py` and `neo_hookean_mpm.py`: compatibility shims for package-backed solid solvers.
+- `solids/`: volumetric Neo-Hookean MLS-MPM and triangular/UV Mooney membrane MPM states.
+- `hyperelastic.py`: compatibility shim for package-backed material cards.
+- `materials/`: Neo-Hookean material cards, including Ecoflex 00-10 defaults.
+- `validation.py` and `time_stepping.py`: compatibility shims for package-backed diagnostics.
+- `diagnostics/`: lightweight validation result helpers and CFL substep control.
 
 It intentionally excludes:
 
@@ -72,6 +75,10 @@ The Cartesian fluid implementation is package-backed under `simulation_core.flui
 The HIBM-MPM implementation is package-backed under
 `simulation_core.coupling.hibm_mpm`; `simulation_core.hibm_mpm` remains a
 compatibility shim.
+Solid, geometry, material, validation, and time-stepping support APIs are now
+package-backed under `simulation_core.solids`, `simulation_core.geometry_tools`,
+`simulation_core.materials`, and `simulation_core.diagnostics`; their legacy
+top-level modules remain compatibility shims.
 
 ## Basic Fluid State
 

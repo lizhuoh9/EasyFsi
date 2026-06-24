@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from simulation_core.time_stepping import CflSubstepController
-from simulation_core.validation import (
+from simulation_core.diagnostics.time_stepping import CflSubstepController
+from simulation_core.diagnostics.validation import (
     BoundaryDriveComplianceReport,
     FieldDiagnostic,
     ReferenceCurve,

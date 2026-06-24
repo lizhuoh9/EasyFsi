@@ -14,6 +14,9 @@ from simulation_core.neo_hookean_mpm import NeoHookeanMpmState
 from simulation_core.tri_surface import TriSurfaceRegionDiagnostics
 
 
+NEO_HOOKEAN_MPM_SOURCE = Path("simulation_core/solids/neo_hookean_mpm.py")
+
+
 def _tri_surface_from_mesh(mesh, region_id: int = 1) -> TriSurfaceRegionDiagnostics:
     vertices = mesh.vertices
     faces = mesh.faces
@@ -653,7 +656,7 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
         self.assertLessEqual(float(np.max(singular_values)), 1.0e2)
 
     def test_stress_jacobian_uses_corrected_deformation_gradient_without_unilateral_clamp(self) -> None:
-        source = Path("simulation_core/neo_hookean_mpm.py").read_text(encoding="utf-8")
+        source = NEO_HOOKEAN_MPM_SOURCE.read_text(encoding="utf-8")
 
         self.assertNotIn("ti.max(Fp.determinant(), 1.0e-12)", source)
         self.assertIn("J = Fp.determinant()", source)

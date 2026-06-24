@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from simulation_core.mooney_shell_mpm import (
+from simulation_core.solids.mooney_shell import (
     TriMooneyShellMpmReport,
     TriMooneyShellMpmState,
     UvMooneyShellMpmReport,
     UvMooneyShellMpmState,
 )
-from simulation_core.neo_hookean_mpm import (
+from simulation_core.solids.neo_hookean_mpm import (
     NeoHookeanMpmReport,
     NeoHookeanMpmState,
 )

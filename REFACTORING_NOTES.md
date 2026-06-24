@@ -237,3 +237,23 @@ Moved the sharp HIBM-MPM implementation behind the
   Neumann assembly, stress sampling, force scatter, step ordering, defaults,
   report fields, cases, benchmarks, and fluid/solid solver modules were not
   changed.
+
+## Step 9: solver support package split
+
+Moved remaining solver support implementations into the layered support
+packages while preserving legacy module imports as compatibility shims.
+
+- `simulation_core.solids.neo_hookean_mpm` owns the existing Neo-Hookean MPM
+  implementation.
+- `simulation_core.solids.mooney_shell.core` owns the existing triangular and
+  UV Mooney shell MPM implementation, with report dataclasses split into
+  `simulation_core.solids.mooney_shell.reports`.
+- `simulation_core.geometry_tools` owns surface mesh, coordinate model,
+  fluid-domain, CAD import, and CAD tessellation support modules.
+- `simulation_core.materials.hyperelastic` owns Neo-Hookean material cards and
+  Ecoflex defaults.
+- `simulation_core.diagnostics` owns validation helpers and CFL substep control.
+- Old and new public support imports remain identity-compatible.
+- Solver formulas, Taichi kernel math, material constants, geometry generation,
+  CAD tessellation behavior, diagnostics semantics, defaults, cases, benchmarks,
+  fluid solver modules, and HIBM-MPM coupling modules were not changed.
