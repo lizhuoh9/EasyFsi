@@ -96,6 +96,36 @@ class ArchitectureBoundaryTests(unittest.TestCase):
                 msg=f"missing legacy simulation_core module: {name}",
             )
 
+    def test_fluid_legacy_module_is_shim_after_step7(self) -> None:
+        source = (REPO_ROOT / "simulation_core" / "fluid.py").read_text(encoding="utf-8")
+
+        self.assertIn("from simulation_core.fluids import", source)
+        self.assertNotIn("@ti.kernel", source)
+        self.assertNotIn("class CartesianFluidSolver", source)
+
+    def test_fluid_solver_implementation_lives_under_fluids_package(self) -> None:
+        source = (
+            REPO_ROOT / "simulation_core" / "fluids" / "solver.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("class CartesianFluidSolver", source)
+
+    def test_fluid_support_modules_do_not_import_solver(self) -> None:
+        for name in (
+            "constants.py",
+            "grid.py",
+            "spec.py",
+            "reports.py",
+            "pressure_outlet.py",
+        ):
+            source = (
+                REPO_ROOT / "simulation_core" / "fluids" / name
+            ).read_text(encoding="utf-8")
+
+            self.assertNotIn("import simulation_core.fluids.solver", source)
+            self.assertNotIn("from simulation_core.fluids.solver", source)
+            self.assertNotIn("from .solver", source)
+
     def test_legacy_top_level_tool_scripts_are_not_present(self) -> None:
         for name in (
             "inspect_latest_progress.py",

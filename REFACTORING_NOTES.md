@@ -206,3 +206,16 @@ implementations:
 
 Legacy module paths remain supported. No solver code, Taichi kernels, numerical
 formulas, benchmark formulas, or case defaults changed.
+
+## Step 7: fluid package split
+
+Moved the Cartesian fluid implementation behind the `simulation_core.fluids`
+package while preserving `simulation_core.fluid` as a compatibility shim.
+
+- `simulation_core.fluids.solver` owns `CartesianFluidSolver` and the existing
+  Taichi kernels/methods.
+- `simulation_core.fluids.constants`, `grid`, `spec`, `reports`, and
+  `pressure_outlet` own the low-risk support definitions.
+- Old and new public fluid imports remain identity-compatible.
+- Solver physics, pressure projection formulas, Taichi kernel math, defaults,
+  report fields, cases, and benchmarks were not changed.

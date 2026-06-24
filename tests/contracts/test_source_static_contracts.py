@@ -9,6 +9,8 @@ from tests._paths import REPO_ROOT
 SQUID_CASE_ROOT = REPO_ROOT / "cases" / "squid_soft_robot"
 
 LEGACY_PACKAGE_TOKEN = "simulation" + "_code"
+FLUID_GRID_SOURCE = "simulation_core/fluids/grid.py"
+FLUID_SOLVER_SOURCE = "simulation_core/fluids/solver.py"
 
 
 def _read(path: str) -> str:
@@ -69,7 +71,12 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertFalse((REPO_ROOT / "squid_soft_robot_ecoflex0010_run_20260603").exists())
 
     def test_fluid_projection_source_uses_consistent_compact_anisotropic_operator(self) -> None:
-        source = _read("simulation_core/fluid.py")
+        source = "\n".join(
+            (
+                _read(FLUID_GRID_SOURCE),
+                _read(FLUID_SOLVER_SOURCE),
+            )
+        )
 
         self.assertIn(
             ") / self.cell_width_x_m[i]",

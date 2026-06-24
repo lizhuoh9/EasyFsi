@@ -64,6 +64,8 @@ from simulation_core.diagnostics import ReferenceCurve
 
 Legacy imports such as `from simulation_core.fluid import CartesianFluidSolver`
 remain supported during the migration.
+The Cartesian fluid implementation is package-backed under `simulation_core.fluids`;
+`simulation_core.fluid` remains a compatibility shim.
 
 ## Basic Fluid State
 

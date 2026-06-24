@@ -14,6 +14,18 @@ class SimulationCoreFacadeTests(unittest.TestCase):
         self.assertIs(fluids.CartesianGrid, legacy.CartesianGrid)
         self.assertIs(fluids.ForceSpreadingReport, legacy.ForceSpreadingReport)
 
+    def test_fluid_implementation_lives_under_fluids_package(self) -> None:
+        solver = importlib.import_module("simulation_core.fluids.solver")
+
+        self.assertTrue(hasattr(solver, "CartesianFluidSolver"))
+
+    def test_legacy_fluid_module_is_compatibility_shim(self) -> None:
+        legacy = importlib.import_module("simulation_core.fluid")
+        fluids = importlib.import_module("simulation_core.fluids")
+
+        self.assertIs(legacy.CartesianFluidSolver, fluids.CartesianFluidSolver)
+        self.assertIs(legacy.FluidDomainSpec, fluids.FluidDomainSpec)
+
     def test_solids_facade_exports_existing_solid_api(self) -> None:
         solids = importlib.import_module("simulation_core.solids")
         neo = importlib.import_module("simulation_core.neo_hookean_mpm")
