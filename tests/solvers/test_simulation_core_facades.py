@@ -81,6 +81,52 @@ class SimulationCoreFacadeTests(unittest.TestCase):
             time_stepping.CflSubstepController,
         )
 
+    def test_root_public_api_uses_package_backed_objects(self) -> None:
+        import simulation_core
+
+        fluids = importlib.import_module("simulation_core.fluids")
+        coupling = importlib.import_module("simulation_core.coupling")
+        solids = importlib.import_module("simulation_core.solids")
+        geometry_tools = importlib.import_module("simulation_core.geometry_tools")
+        materials = importlib.import_module("simulation_core.materials")
+        diagnostics = importlib.import_module("simulation_core.diagnostics")
+
+        self.assertIs(simulation_core.CartesianFluidSolver, fluids.CartesianFluidSolver)
+        self.assertIs(
+            simulation_core.HibmMpmSharpCouplingState,
+            coupling.HibmMpmSharpCouplingState,
+        )
+        self.assertIs(simulation_core.NeoHookeanMpmState, solids.NeoHookeanMpmState)
+        self.assertIs(simulation_core.SurfaceMesh, geometry_tools.SurfaceMesh)
+        self.assertIs(simulation_core.NeoHookeanMaterial, materials.NeoHookeanMaterial)
+        self.assertIs(simulation_core.vector_norm, diagnostics.vector_norm)
+
+    def test_legacy_package_and_root_imports_are_identity_compatible(self) -> None:
+        import simulation_core
+
+        legacy_fluid = importlib.import_module("simulation_core.fluid")
+        legacy_hibm = importlib.import_module("simulation_core.hibm_mpm")
+        legacy_neo = importlib.import_module("simulation_core.neo_hookean_mpm")
+        legacy_geometry = importlib.import_module("simulation_core.geometry")
+        legacy_material = importlib.import_module("simulation_core.hyperelastic")
+        legacy_validation = importlib.import_module("simulation_core.validation")
+
+        self.assertIs(
+            simulation_core.CartesianFluidSolver,
+            legacy_fluid.CartesianFluidSolver,
+        )
+        self.assertIs(
+            simulation_core.HibmMpmSharpCouplingState,
+            legacy_hibm.HibmMpmSharpCouplingState,
+        )
+        self.assertIs(simulation_core.NeoHookeanMpmState, legacy_neo.NeoHookeanMpmState)
+        self.assertIs(simulation_core.SurfaceMesh, legacy_geometry.SurfaceMesh)
+        self.assertIs(
+            simulation_core.NeoHookeanMaterial,
+            legacy_material.NeoHookeanMaterial,
+        )
+        self.assertIs(simulation_core.vector_norm, legacy_validation.vector_norm)
+
     def test_coupling_facade_exports_existing_coupling_api(self) -> None:
         coupling = importlib.import_module("simulation_core.coupling")
         fsi = importlib.import_module("simulation_core.fsi_coupling")

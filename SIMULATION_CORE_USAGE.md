@@ -79,6 +79,11 @@ Solid, geometry, material, validation, and time-stepping support APIs are now
 package-backed under `simulation_core.solids`, `simulation_core.geometry_tools`,
 `simulation_core.materials`, and `simulation_core.diagnostics`; their legacy
 top-level modules remain compatibility shims.
+The root `simulation_core` package imports its public API through these layered
+packages/facades while preserving object identity with legacy imports.
+
+See `ARCHITECTURE.md` for dependency direction and `docs/VALIDATION.md` for
+structure-only validation commands.
 
 ## Basic Fluid State
 

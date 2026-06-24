@@ -3,8 +3,8 @@
 本目录是对上级目录 HIBM-MPM 代码的**功能等价重构副本**。原目录代码未被修改。
 
 > 当前同步说明：本仓库已经包含 refactored 副本之后继续推进的 sharp HIBM-MPM / squid FSI 收敛修复与验证工作。最新目标和审查记录见
-> [SHARP_HIBM_MPM_CONVERGENCE_FIX_GOAL_2026-06-18.md](SHARP_HIBM_MPM_CONVERGENCE_FIX_GOAL_2026-06-18.md)、
-> [SQUID_2S_SIMULATION_GOAL_2026-06-17.md](SQUID_2S_SIMULATION_GOAL_2026-06-17.md) 和
+> [SHARP_HIBM_MPM_CONVERGENCE_FIX_GOAL_2026-06-18.md](docs/refactoring/SHARP_HIBM_MPM_CONVERGENCE_FIX_GOAL_2026-06-18.md)、
+> [SQUID_2S_SIMULATION_GOAL_2026-06-17.md](docs/refactoring/SQUID_2S_SIMULATION_GOAL_2026-06-17.md) 和
 > [SQUID_JET_FSI_COUPLING_REVIEW.md](SQUID_JET_FSI_COUPLING_REVIEW.md)。
 
 ## 目录性质
@@ -55,12 +55,17 @@
 
 ## Repository layout
 
-- `simulation_core/`: reusable solver core.
-- `simulation_core/fluids`, `simulation_core/solids`, `simulation_core/coupling`, `simulation_core/geometry_tools`, `simulation_core/materials`, and `simulation_core/diagnostics`: layered packages for new imports; `simulation_core/fluids` owns the Cartesian fluid implementation, `simulation_core/coupling/hibm_mpm` owns the HIBM-MPM implementation, and the solver support implementations now live under the matching solids, geometry, materials, and diagnostics packages while legacy module paths remain supported during migration.
-- `benchmarks/`: official/vendor benchmark adapters and benchmark runners built on `simulation_core/`.
+- `simulation_core/`: reusable solver package. Implementation lives under layered packages; top-level legacy modules are compatibility shims.
 - `cases/`: runnable simulation cases registered by `run_simulation.py`.
-- `tests/`: tests grouped by `solvers/`, `cases/`, `benchmarks/`, `tools/`, `integration/`, and `contracts/`.
+- `benchmarks/`: official/vendor benchmark adapters and reusable benchmark runners.
 - `tools/`: diagnostics, rendering, and post-processing helpers.
+- `tests/`: tests grouped by `solvers/`, `cases/`, `benchmarks/`, `tools/`, `integration/`, and `contracts/`.
+- `docs/`: architecture, validation, and refactoring records.
 - `archive/`: historical one-shot maintenance scripts.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for dependency direction and legacy
+compatibility policy. See [docs/VALIDATION.md](docs/VALIDATION.md) for the
+current structure validation matrix. Detailed refactoring step records live in
+`docs/refactoring/`.
 
 Use `python -m tools.diagnostics...` or `python -m tools.rendering...` for helper scripts.

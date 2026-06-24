@@ -257,3 +257,18 @@ packages while preserving legacy module imports as compatibility shims.
 - Solver formulas, Taichi kernel math, material constants, geometry generation,
   CAD tessellation behavior, diagnostics semantics, defaults, cases, benchmarks,
   fluid solver modules, and HIBM-MPM coupling modules were not changed.
+
+## Step 10: final layout closure
+
+Finalized documentation, compatibility shim policy, architecture contracts, and
+validation matrix.
+
+- Moved refactoring goal records into `docs/refactoring/`.
+- Added `ARCHITECTURE.md` and `docs/VALIDATION.md`.
+- Routed `simulation_core` root public API imports through layered
+  packages/facades instead of legacy shims.
+- Added a lightweight structure import smoke script at
+  `scripts/validate_structure.py`.
+- Unified legacy-shim and package-implementation architecture contracts.
+- Solver physics, Taichi kernels, benchmark formulas, numerical defaults,
+  report fields, cases, and CLI behavior were not changed.

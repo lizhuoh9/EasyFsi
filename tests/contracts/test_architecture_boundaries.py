@@ -30,6 +30,58 @@ def _import_roots(path: Path) -> set[str]:
     return roots
 
 
+LEGACY_SHIMS = {
+    "fluid.py": "simulation_core.fluids",
+    "hibm_mpm.py": "simulation_core.coupling.hibm_mpm",
+    "neo_hookean_mpm.py": "simulation_core.solids.neo_hookean_mpm",
+    "mooney_shell_mpm.py": "simulation_core.solids.mooney_shell",
+    "geometry.py": "simulation_core.geometry_tools.surface_mesh",
+    "coordinate_models.py": "simulation_core.geometry_tools.coordinate_models",
+    "fluid_domain.py": "simulation_core.geometry_tools.fluid_domain",
+    "cad_import.py": "simulation_core.geometry_tools.cad_import",
+    "cad_tessellation.py": "simulation_core.geometry_tools.cad_tessellation",
+    "hyperelastic.py": "simulation_core.materials.hyperelastic",
+    "validation.py": "simulation_core.diagnostics.validation",
+    "time_stepping.py": "simulation_core.diagnostics.time_stepping",
+}
+
+PACKAGE_IMPLEMENTATIONS = {
+    ("fluids", "solver.py"): "class CartesianFluidSolver",
+    ("coupling", "hibm_mpm", "core.py"): "class HibmMpmSharpCouplingState",
+    ("solids", "neo_hookean_mpm.py"): "class NeoHookeanMpmState",
+    ("solids", "mooney_shell", "core.py"): "class TriMooneyShellMpmState",
+    ("geometry_tools", "surface_mesh.py"): "class SurfaceMesh",
+    ("geometry_tools", "cad_tessellation.py"): "class StepTessellationSettings",
+    ("materials", "hyperelastic.py"): "class NeoHookeanMaterial",
+    ("diagnostics", "validation.py"): "class ReferenceCurve",
+    ("diagnostics", "time_stepping.py"): "class CflSubstepController",
+}
+
+PACKAGE_IMPLEMENTATION_ROOTS = (
+    REPO_ROOT / "simulation_core" / "fluids",
+    REPO_ROOT / "simulation_core" / "coupling" / "hibm_mpm",
+    REPO_ROOT / "simulation_core" / "solids",
+    REPO_ROOT / "simulation_core" / "geometry_tools",
+    REPO_ROOT / "simulation_core" / "materials",
+    REPO_ROOT / "simulation_core" / "diagnostics",
+)
+
+LEGACY_SHIM_IMPORTS = (
+    "from simulation_core.fluid import",
+    "from simulation_core.hibm_mpm import",
+    "from simulation_core.neo_hookean_mpm import",
+    "from simulation_core.mooney_shell_mpm import",
+    "from simulation_core.geometry import",
+    "from simulation_core.coordinate_models import",
+    "from simulation_core.fluid_domain import",
+    "from simulation_core.cad_import import",
+    "from simulation_core.cad_tessellation import",
+    "from simulation_core.hyperelastic import",
+    "from simulation_core.validation import",
+    "from simulation_core.time_stepping import",
+)
+
+
 class ArchitectureBoundaryTests(unittest.TestCase):
     def test_simulation_core_does_not_import_cases_tools_or_benchmarks(self) -> None:
         forbidden = {"cases", "tools", "benchmarks"}
@@ -82,72 +134,19 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             )
 
     def test_simulation_core_legacy_modules_still_exist_during_facade_migration(self) -> None:
-        for name in (
-            "fluid.py",
-            "hibm_mpm.py",
-            "cad_import.py",
-            "cad_tessellation.py",
-            "coordinate_models.py",
-            "fluid_domain.py",
-            "geometry.py",
-            "hyperelastic.py",
-            "mooney_shell_mpm.py",
-            "neo_hookean_mpm.py",
-            "time_stepping.py",
-            "validation.py",
-        ):
+        for name in LEGACY_SHIMS:
             self.assertTrue(
                 (REPO_ROOT / "simulation_core" / name).exists(),
                 msg=f"missing legacy simulation_core module: {name}",
             )
 
-    def test_fluid_legacy_module_is_shim_after_step7(self) -> None:
-        source = (REPO_ROOT / "simulation_core" / "fluid.py").read_text(encoding="utf-8")
-
-        self.assertIn("from simulation_core.fluids import", source)
-        self.assertNotIn("@ti.kernel", source)
-        self.assertNotIn("class CartesianFluidSolver", source)
-
-    def test_fluid_solver_implementation_lives_under_fluids_package(self) -> None:
-        source = (
-            REPO_ROOT / "simulation_core" / "fluids" / "solver.py"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("class CartesianFluidSolver", source)
-
-    def test_hibm_mpm_legacy_module_is_shim_after_step8(self) -> None:
-        source = (REPO_ROOT / "simulation_core" / "hibm_mpm.py").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("from simulation_core.coupling.hibm_mpm import", source)
-        self.assertNotIn("@ti.kernel", source)
-        self.assertNotIn("class HibmMpmSurfaceMarkers", source)
-        self.assertNotIn("class HibmMpmSharpCouplingState", source)
-
-    def test_hibm_mpm_implementation_lives_under_coupling_package(self) -> None:
-        source = (
-            REPO_ROOT / "simulation_core" / "coupling" / "hibm_mpm" / "core.py"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("class HibmMpmSurfaceMarkers", source)
-        self.assertIn("class HibmMpmSharpCouplingState", source)
-
-    def test_solver_support_legacy_modules_are_shims_after_step9(self) -> None:
-        expected_imports = {
-            "cad_import.py": "from simulation_core.geometry_tools.cad_import import",
-            "cad_tessellation.py": "from simulation_core.geometry_tools.cad_tessellation import",
-            "coordinate_models.py": "from simulation_core.geometry_tools.coordinate_models import",
-            "fluid_domain.py": "from simulation_core.geometry_tools.fluid_domain import",
-            "geometry.py": "from simulation_core.geometry_tools.surface_mesh import",
-            "hyperelastic.py": "from simulation_core.materials.hyperelastic import",
-            "mooney_shell_mpm.py": "from simulation_core.solids.mooney_shell import",
-            "neo_hookean_mpm.py": "from simulation_core.solids.neo_hookean_mpm import",
-            "time_stepping.py": "from simulation_core.diagnostics.time_stepping import",
-            "validation.py": "from simulation_core.diagnostics.validation import",
-        }
+    def test_legacy_simulation_core_modules_are_shims(self) -> None:
         forbidden_tokens = (
             "@ti.kernel",
+            "@ti.data_oriented",
+            "class CartesianFluidSolver",
+            "class HibmMpmSurfaceMarkers",
+            "class HibmMpmSharpCouplingState",
             "class NeoHookeanMpmState",
             "class TriMooneyShellMpmState",
             "class UvMooneyShellMpmState",
@@ -157,34 +156,43 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             "class CflSubstepController",
         )
 
-        for name, import_line in expected_imports.items():
-            source = (REPO_ROOT / "simulation_core" / name).read_text(encoding="utf-8")
+        for filename, import_target in LEGACY_SHIMS.items():
+            source = (REPO_ROOT / "simulation_core" / filename).read_text(
+                encoding="utf-8"
+            )
 
-            self.assertIn(import_line, source)
+            self.assertIn(import_target, source, msg=filename)
             for token in forbidden_tokens:
-                self.assertNotIn(token, source, msg=f"{name}: {token}")
+                self.assertNotIn(token, source, msg=f"{filename}: {token}")
 
-    def test_solver_support_implementations_live_under_layered_packages(self) -> None:
-        expected_tokens = {
-            ("solids", "neo_hookean_mpm.py"): "class NeoHookeanMpmState",
-            ("solids", "mooney_shell", "core.py"): "class TriMooneyShellMpmState",
-            ("solids", "mooney_shell", "reports.py"): "class TriMooneyShellMpmReport",
-            ("geometry_tools", "surface_mesh.py"): "class SurfaceMesh",
-            ("geometry_tools", "coordinate_models.py"): "class Cartesian3DCoordinateModel",
-            ("geometry_tools", "fluid_domain.py"): "class FluidDomain",
-            ("geometry_tools", "cad_import.py"): "class StepCadSummary",
-            ("geometry_tools", "cad_tessellation.py"): "class StepTessellationSettings",
-            ("materials", "hyperelastic.py"): "class NeoHookeanMaterial",
-            ("diagnostics", "validation.py"): "class ReferenceCurve",
-            ("diagnostics", "time_stepping.py"): "class CflSubstepController",
-        }
-
-        for parts, token in expected_tokens.items():
+    def test_package_implementations_live_under_layered_packages(self) -> None:
+        for parts, token in PACKAGE_IMPLEMENTATIONS.items():
             source = (REPO_ROOT / "simulation_core" / Path(*parts)).read_text(
                 encoding="utf-8"
             )
 
-            self.assertIn(token, source, msg=f"{parts}: {token}")
+            self.assertIn(token, source, msg="/".join(parts))
+
+    def test_package_implementation_modules_do_not_import_legacy_shims(self) -> None:
+        for root in PACKAGE_IMPLEMENTATION_ROOTS:
+            for path in _python_files(root):
+                source = path.read_text(encoding="utf-8")
+                for token in LEGACY_SHIM_IMPORTS:
+                    self.assertNotIn(token, source, msg=f"{path}: {token}")
+
+    def test_root_public_api_imports_use_layered_facades(self) -> None:
+        source = (REPO_ROOT / "simulation_core" / "__init__.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("from .fluids import", source)
+        self.assertIn("from .coupling import", source)
+        self.assertIn("from .solids import", source)
+        self.assertIn("from .geometry_tools import", source)
+        self.assertIn("from .materials import", source)
+        self.assertIn("from .diagnostics import", source)
+        self.assertNotIn("from .fluid import", source)
+        self.assertNotIn("from .hibm_mpm import", source)
 
     def test_hibm_mpm_support_modules_do_not_import_core(self) -> None:
         for name in (

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .fluid import (
+from .fluids import (
     CG_PRECONDITIONER_CHOICES,
     CartesianFluidSolver,
     CartesianGrid,
@@ -11,20 +11,53 @@ from .fluid import (
     VelocityDirichletBoundaryReport,
     build_graded_grid,
 )
-from .fsi_coupling import (
+from .coupling import (
+    FSI_COUPLING_MODE_CHOICES,
+    FSI_COUPLING_MODE_HIBM_MPM_SHARP,
+    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
     ForceBalanceReport,
+    HibmMpmExternalForceClearReport,
+    HibmMpmIbBoundaryConditionReport,
+    HibmMpmIbBoundaryConditions,
+    HibmMpmIbNodeSearch,
+    HibmMpmIbNodeSearchReport,
+    HibmMpmFluidStressSampleReport,
+    HibmMpmMpmForceScatterReport,
+    HibmMpmNoSlipResidualReport,
+    HibmMpmPressureNeumannGradientReport,
+    HibmMpmPressureNeumannMatrixReport,
+    HibmMpmSharpCouplingState,
+    HibmMpmSharpFluidToMpmLoadReport,
+    HibmMpmSharpMpmStepReport,
+    HibmMpmSharpNeoHookeanStepReport,
+    HibmMpmSurfaceMarkerForceReport,
+    HibmMpmSurfaceMarkers,
+    HibmMpmSurfaceUpdateReport,
+    HibmMpmVelocityDirichletBoundaryReport,
     INTERFACE_REACTION_SOLVER_CHOICES,
     InterfaceReactionFixedPointResult,
     InterfaceReactionRelaxationState,
     InterfaceReactionStepUpdate,
     InterfaceReactionTargetEvaluation,
     InterfaceReactionUpdate,
+    ProjectedIbmRegionPairStepConfig,
+    ProjectedIbmRegionPairStepReport,
     RegionPairInterfaceReactionTarget,
+    TriSurfaceDiagnosticReport,
+    TriSurfaceRegionDiagnostics,
     action_reaction_balance,
+    advance_hibm_mpm_sharp_mpm_step,
+    advance_hibm_mpm_sharp_neo_hookean_step,
+    advance_projected_ibm_region_pair_fluid_step,
     aitken_relaxation_factor,
+    assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
+    fsi_coupling_mode_report,
+    hibm_mpm_sharp_step_summary,
+    hibm_mpm_paper_requirements,
     interface_reaction_force,
     region_pair_interface_reaction_forces,
     relax_interface_reaction_forces,
+    require_implemented_fsi_coupling_mode,
     robin_neumann_impedance_force,
     solve_and_apply_interface_reaction_step,
     solve_interface_reaction_fixed_point,
@@ -64,36 +97,6 @@ from .materials import (
     incompressible_uniaxial_nominal_stress_pa,
     psi_to_pa,
 )
-from .hibm_mpm import (
-    FSI_COUPLING_MODE_CHOICES,
-    FSI_COUPLING_MODE_HIBM_MPM_SHARP,
-    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
-    HibmMpmExternalForceClearReport,
-    HibmMpmIbBoundaryConditionReport,
-    HibmMpmIbBoundaryConditions,
-    HibmMpmIbNodeSearch,
-    HibmMpmIbNodeSearchReport,
-    HibmMpmFluidStressSampleReport,
-    HibmMpmMpmForceScatterReport,
-    HibmMpmNoSlipResidualReport,
-    HibmMpmPressureNeumannGradientReport,
-    HibmMpmPressureNeumannMatrixReport,
-    HibmMpmSharpCouplingState,
-    HibmMpmSharpFluidToMpmLoadReport,
-    HibmMpmSharpMpmStepReport,
-    HibmMpmSharpNeoHookeanStepReport,
-    HibmMpmSurfaceMarkerForceReport,
-    HibmMpmSurfaceMarkers,
-    HibmMpmSurfaceUpdateReport,
-    HibmMpmVelocityDirichletBoundaryReport,
-    advance_hibm_mpm_sharp_mpm_step,
-    advance_hibm_mpm_sharp_neo_hookean_step,
-    assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
-    fsi_coupling_mode_report,
-    hibm_mpm_sharp_step_summary,
-    hibm_mpm_paper_requirements,
-    require_implemented_fsi_coupling_mode,
-)
 from .solids import (
     NeoHookeanMpmReport,
     NeoHookeanMpmState,
@@ -101,11 +104,6 @@ from .solids import (
     TriMooneyShellMpmState,
     UvMooneyShellMpmReport,
     UvMooneyShellMpmState,
-)
-from .projected_ibm import (
-    ProjectedIbmRegionPairStepConfig,
-    ProjectedIbmRegionPairStepReport,
-    advance_projected_ibm_region_pair_fluid_step,
 )
 from .runtime import TaichiRuntimeConfig, init_taichi
 from .diagnostics import (
@@ -116,7 +114,6 @@ from .diagnostics import (
     force_nonzero_when_loaded,
     vector_norm,
 )
-from .tri_surface import TriSurfaceDiagnosticReport, TriSurfaceRegionDiagnostics
 
 __all__ = [
     "CartesianFluidSolver",
