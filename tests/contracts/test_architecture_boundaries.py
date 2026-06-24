@@ -67,6 +67,35 @@ class ArchitectureBoundaryTests(unittest.TestCase):
     def test_simulation_core_has_no_benchmarking_package(self) -> None:
         self.assertFalse((REPO_ROOT / "simulation_core" / "benchmarking").exists())
 
+    def test_simulation_core_layered_facade_packages_exist(self) -> None:
+        for name in (
+            "fluids",
+            "solids",
+            "coupling",
+            "geometry_tools",
+            "materials",
+            "diagnostics",
+        ):
+            self.assertTrue(
+                (REPO_ROOT / "simulation_core" / name / "__init__.py").exists(),
+                msg=f"missing simulation_core facade package: {name}",
+            )
+
+    def test_simulation_core_legacy_modules_still_exist_during_facade_migration(self) -> None:
+        for name in (
+            "fluid.py",
+            "hibm_mpm.py",
+            "mooney_shell_mpm.py",
+            "neo_hookean_mpm.py",
+            "geometry.py",
+            "hyperelastic.py",
+            "validation.py",
+        ):
+            self.assertTrue(
+                (REPO_ROOT / "simulation_core" / name).exists(),
+                msg=f"missing legacy simulation_core module: {name}",
+            )
+
     def test_legacy_top_level_tool_scripts_are_not_present(self) -> None:
         for name in (
             "inspect_latest_progress.py",

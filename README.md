@@ -56,6 +56,7 @@
 ## Repository layout
 
 - `simulation_core/`: reusable solver core.
+- `simulation_core/fluids`, `simulation_core/solids`, `simulation_core/coupling`, `simulation_core/geometry_tools`, `simulation_core/materials`, and `simulation_core/diagnostics`: layered facade packages for new imports; legacy module paths remain supported during migration.
 - `benchmarks/`: official/vendor benchmark adapters and benchmark runners built on `simulation_core/`.
 - `cases/`: runnable simulation cases registered by `run_simulation.py`.
 - `tests/`: tests grouped by `solvers/`, `cases/`, `benchmarks/`, `tools/`, `integration/`, and `contracts/`.

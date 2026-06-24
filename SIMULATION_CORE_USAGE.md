@@ -49,6 +49,22 @@ Run from this folder:
 & 'D:/TOOL/Anaconda/python.exe' -c "import simulation_core; print(simulation_core.__version__)"
 ```
 
+## Layered Import Facades
+
+New code may import reusable primitives from layered facade packages:
+
+```python
+from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec
+from simulation_core.solids import NeoHookeanMpmState, TriMooneyShellMpmState
+from simulation_core.coupling import HibmMpmSharpCouplingState, ProjectedIbmRegionPairStepConfig
+from simulation_core.geometry_tools import SurfaceMesh
+from simulation_core.materials import NeoHookeanMaterial
+from simulation_core.diagnostics import ReferenceCurve
+```
+
+Legacy imports such as `from simulation_core.fluid import CartesianFluidSolver`
+remain supported during the migration.
+
 ## Basic Fluid State
 
 ```python
