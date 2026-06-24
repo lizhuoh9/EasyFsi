@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from inspect_latest_progress import _compact_payload
+from tools.diagnostics.inspect_latest_progress import _compact_payload
 
 
 class InspectLatestProgressTests(unittest.TestCase):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from cases.squid_jet_render import render
+from tools.rendering.squid_jet_render import render
 
 
 def main() -> int:

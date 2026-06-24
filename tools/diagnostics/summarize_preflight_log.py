@@ -19,7 +19,10 @@ def _projected_residual_mps(sim: dict) -> float | None:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print("usage: summarize_preflight_log.py <stderr-log>", file=sys.stderr)
+        print(
+            "usage: python -m tools.diagnostics.summarize_preflight_log <stderr-log>",
+            file=sys.stderr,
+        )
         return 2
     path = Path(argv[1])
     rows: list[dict] = []

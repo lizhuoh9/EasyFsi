@@ -1,11 +1,14 @@
-"""One-shot helper: copy the unchanged big files from the parent tree into refactored/.
+"""Archived one-shot helper retained for historical refactored/ bootstrap only.
+
+Archived script. Paths reflect the original refactored/ bootstrap workflow and
+are not part of the active runtime/test workflow.
 
 The refactored/ tree already contains every MODIFIED module (see
-REFACTORING_NOTES.md). This script fills in the unchanged files so the copy is
-complete and the test suite can run self-contained. Running it twice is safe:
-existing files in refactored/ are never overwritten.
+REFACTORING_NOTES.md). This script filled in the unchanged files so the copy was
+complete and the test suite could run self-contained. Running it twice was safe:
+existing files in refactored/ were never overwritten.
 
-Usage:
+Original usage:
     "D:/TOOL/Anaconda/python.exe" refactored/_finalize_copy.py
 """
 from __future__ import annotations

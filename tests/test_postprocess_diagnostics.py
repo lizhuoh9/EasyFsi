@@ -4,9 +4,9 @@ import unittest
 
 import numpy as np
 
-from inspect_visit_stats import _safe_percentiles_and_max
-from cases.squid_jet_render import _mask_nonphysical_and_floor_values
-from summarize_preflight_log import _projected_residual_mps
+from tools.diagnostics.inspect_visit_stats import _safe_percentiles_and_max
+from tools.diagnostics.summarize_preflight_log import _projected_residual_mps
+from tools.rendering.squid_jet_render import _mask_nonphysical_and_floor_values
 
 
 class PostprocessDiagnosticsTests(unittest.TestCase):

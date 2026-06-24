@@ -51,3 +51,13 @@
 ```powershell
 & "D:/TOOL/Anaconda/python.exe" run_simulation.py squid-soft-robot --steps 8
 ```
+
+## Repository layout
+
+- `simulation_core/`: reusable solver core.
+- `cases/`: runnable simulation cases registered by `run_simulation.py`.
+- `tests/`: unit, regression, integration, and architecture-boundary tests.
+- `tools/`: diagnostics, rendering, and post-processing helpers.
+- `archive/`: historical one-shot maintenance scripts.
+
+Use `python -m tools.diagnostics...` or `python -m tools.rendering...` for helper scripts.
