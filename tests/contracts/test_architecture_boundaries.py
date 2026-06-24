@@ -83,6 +83,30 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         ):
             self.assertFalse((REPO_ROOT / "cases" / name).exists())
 
+    def test_squid_case_package_has_no_sys_modules_alias(self) -> None:
+        source = (
+            REPO_ROOT / "cases" / "squid_soft_robot" / "__init__.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("sys.modules", source)
+
+    def test_squid_runner_does_not_define_argparse_bulk_after_cli_split(self) -> None:
+        source = (
+            REPO_ROOT / "cases" / "squid_soft_robot" / "runner.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("argparse.ArgumentParser(", source)
+
+    def test_squid_case_modules_do_not_import_runner_except_init(self) -> None:
+        root = REPO_ROOT / "cases" / "squid_soft_robot"
+
+        for path in root.glob("*.py"):
+            if path.name == "__init__.py":
+                continue
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn("from . import runner", source)
+            self.assertNotIn("from cases.squid_soft_robot import runner", source)
+
 
 if __name__ == "__main__":
     unittest.main()

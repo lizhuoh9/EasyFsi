@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import unittest
 
@@ -6,11 +6,20 @@ import numpy as np
 
 from tests._paths import REPO_ROOT
 
+SQUID_CASE_ROOT = REPO_ROOT / "cases" / "squid_soft_robot"
+
 LEGACY_PACKAGE_TOKEN = "simulation" + "_code"
 
 
 def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+
+def _read_squid_sources() -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(SQUID_CASE_ROOT.glob("*.py"))
+    )
 
 
 class SourceStaticContractTests(unittest.TestCase):
@@ -256,7 +265,7 @@ class SourceStaticContractTests(unittest.TestCase):
     def test_tri_surface_uses_cartesian_grid_fields_for_probe_mapping(self) -> None:
         source = _read("simulation_core/tri_surface.py")
         projected_ibm_source = _read("simulation_core/projected_ibm.py")
-        squid_source = _read("cases/squid_soft_robot/runner.py")
+        squid_source = _read_squid_sources()
 
         self.assertIn("_grid_coordinate_from_fields", source)
         self.assertIn("cell_width_x_m[ii] * cell_width_y_m[jj] * cell_width_z_m[kk]", source)
@@ -328,7 +337,7 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertNotIn("self.assertLess(errors[-1], errors[0])", source)
 
     def test_squid_case_validates_real_outlet_flux_and_projection_tolerance(self) -> None:
-        source = _read("cases/squid_soft_robot/runner.py")
+        source = _read_squid_sources()
 
         self.assertIn('"final_outlet_to_fsi_volume_source_ratio_physical"', source)
         self.assertIn("physical_outlet_to_fsi_volume_source_passes(", source)
