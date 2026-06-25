@@ -33,8 +33,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     _validate_rectangular_solid_config(config)
     runtime = TaichiRuntimeConfig(arch="cuda")
     fluid = _build_fluid(config, runtime)
-    flow_report = _solve_computed_flow(fluid, config)
-    local_velocity_peak_mps = float(flow_report["local_velocity_peak_mps"])
+    _initialize_computed_flow(fluid, config)
     markers = _build_markers(config, runtime)
     solid = _build_solid(config, runtime)
     fixed_mask, tip_mask = _solid_masks(solid, config)
@@ -45,9 +44,17 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     latest_scatter_report = None
     latest_solid_report = None
     latest_feedback_report = None
+    latest_flow_report = None
+    fluid_recompute_count = 0
     history: list[dict[str, object]] = []
 
     for step_index in range(config.step_count):
+        latest_flow_report = _project_current_flow(
+            fluid,
+            config,
+            reset_pressure=(step_index == 0),
+        )
+        fluid_recompute_count += 1
         latest_stress_report = _sample_stress_to_marker_forces(markers, fluid)
         latest_force_report = markers.aggregate_region_forces(
             primary_region_id=PRIMARY_REGION_ID,
@@ -91,6 +98,13 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         history.append(
             {
                 "step": step_index + 1,
+                "fluid_recomputed": True,
+                "local_velocity_peak_mps": latest_flow_report[
+                    "local_velocity_peak_mps"
+                ],
+                "pressure_min_pa": latest_flow_report["pressure_min_pa"],
+                "pressure_max_pa": latest_flow_report["pressure_max_pa"],
+                "flow_projection_report": latest_flow_report["projection_report"],
                 "stress_valid_marker_count": latest_stress_report.valid_marker_count,
                 "scatter_invalid_marker_count": (
                     latest_scatter_report.invalid_marker_count
@@ -113,6 +127,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         or latest_scatter_report is None
         or latest_solid_report is None
         or latest_feedback_report is None
+        or latest_flow_report is None
     ):
         raise RuntimeError("rectangular solid marker-MPM FSI smoke did not advance")
 
@@ -120,6 +135,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     reference_displacement = float(reference_results["max_displacement_m"])
     reference_velocity_peak = float(reference_results["local_velocity_peak_mps"])
     max_displacement = float(displacement["max_displacement_m"])
+    local_velocity_peak_mps = float(latest_flow_report["local_velocity_peak_mps"])
     displacement_relative_error = (
         abs(max_displacement - reference_displacement) / reference_displacement
     )
@@ -142,15 +158,22 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         },
         "boundary_conditions": dict(boundary_conditions),
         "reference_results": dict(reference_results),
-        "flow_projection_report": flow_report["projection_report"],
-        "flow_obstacle_cell_count": flow_report["obstacle_cell_count"],
-        "flow_fluid_cell_count": flow_report["fluid_cell_count"],
-        "computed_pressure_min_pa": flow_report["pressure_min_pa"],
-        "computed_pressure_max_pa": flow_report["pressure_max_pa"],
-        "pressure_sign_convention": flow_report["pressure_sign_convention"],
+        "flow_projection_report": latest_flow_report["projection_report"],
+        "flow_obstacle_cell_count": latest_flow_report["obstacle_cell_count"],
+        "flow_fluid_cell_count": latest_flow_report["fluid_cell_count"],
+        "computed_pressure_min_pa": latest_flow_report["pressure_min_pa"],
+        "computed_pressure_max_pa": latest_flow_report["pressure_max_pa"],
+        "pressure_sign_convention": latest_flow_report["pressure_sign_convention"],
         "local_velocity_peak_mps": local_velocity_peak_mps,
         "local_velocity_peak_relative_error": velocity_relative_error,
         "velocity_peak_tolerance": config.velocity_peak_tolerance,
+        "fluid_recomputed_after_feedback": fluid_recompute_count > 0,
+        "feedback_closure_status": (
+            "CLOSED_LOOP_RECOMPUTED_FLOW"
+            if fluid_recompute_count > 0
+            else "OPEN_LOOP_LOAD_REUSE"
+        ),
+        "fluid_recompute_count": fluid_recompute_count,
         "stress_valid_marker_count": latest_stress_report.valid_marker_count,
         "stress_invalid_marker_count": latest_stress_report.invalid_marker_count,
         "two_sided_pressure_marker_count": (
@@ -325,19 +348,35 @@ def _initialize_inlet_flow(
     return obstacle
 
 
-def _solve_computed_flow(
+def _initialize_computed_flow(
     fluid: CartesianFluidSolver,
     config: Any,
+) -> np.ndarray:
+    return _initialize_inlet_flow(fluid, config)
+
+
+def _project_current_flow(
+    fluid: CartesianFluidSolver,
+    config: Any,
+    *,
+    reset_pressure: bool,
 ) -> dict[str, object]:
-    obstacle = _initialize_inlet_flow(fluid, config)
     projection_report = fluid.project(
         iterations=config.flow_projection_iterations,
         pressure_outlet_zmin=True,
-        reset_pressure=True,
+        reset_pressure=reset_pressure,
         pressure_solver=config.flow_pressure_solver,
         cg_tolerance=config.flow_cg_tolerance,
         divergence_cleanup_iterations=config.flow_divergence_cleanup_iterations,
     )
+    return _flow_state_report(fluid, projection_report)
+
+
+def _flow_state_report(
+    fluid: CartesianFluidSolver,
+    projection_report: Any,
+) -> dict[str, object]:
+    obstacle = fluid.obstacle.to_numpy()
     velocity = fluid.velocity.to_numpy()
     pressure = fluid.pressure.to_numpy()
     non_obstacle = obstacle == 0

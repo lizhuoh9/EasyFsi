@@ -8,16 +8,13 @@ RUNNER_SOURCE = Path("benchmarks") / "official" / "solid_mpm_fsi_runner.py"
 
 
 class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
-    def test_current_runner_solves_computed_flow_before_fsi_loop(self) -> None:
-        source = _runner_source()
-        solve_index = source.index("_solve_computed_flow(fluid, config)")
-        loop_index = source.index("for step_index in range(config.step_count):")
-        stress_index = source.index("_sample_stress_to_marker_forces(markers, fluid)")
+    def test_runner_projects_flow_inside_fsi_loop_before_stress_sampling(self) -> None:
+        loop_body = _fsi_loop_body(_runner_source())
+        project_index = loop_body.index("_project_current_flow(")
+        stress_index = loop_body.index("_sample_stress_to_marker_forces(markers, fluid)")
 
-        self.assertLess(solve_index, loop_index)
-        self.assertGreater(stress_index, loop_index)
+        self.assertLess(project_index, stress_index)
 
-    @unittest.expectedFailure
     def test_closed_loop_solver_must_report_fluid_recompute_count(self) -> None:
         source = _runner_source()
 
@@ -26,7 +23,6 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
         self.assertIn('"CLOSED_LOOP_RECOMPUTED_FLOW"', source)
         self.assertIn('"fluid_recompute_count"', source)
 
-    @unittest.expectedFailure
     def test_closed_loop_solver_must_record_per_step_flow_recompute_fields(self) -> None:
         history_body = _history_append_body(_runner_source())
 
@@ -36,7 +32,6 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
         self.assertIn('"pressure_max_pa"', history_body)
         self.assertIn('"flow_projection_report"', history_body)
 
-    @unittest.expectedFailure
     def test_closed_loop_solver_must_project_fluid_inside_fsi_loop(self) -> None:
         loop_body = _fsi_loop_body(_runner_source())
         stress_index = loop_body.index("_sample_stress_to_marker_forces(markers, fluid)")

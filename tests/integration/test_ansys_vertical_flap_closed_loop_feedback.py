@@ -12,6 +12,7 @@ from tools.validation.print_ansys_vertical_flap_diagnostics import (
 
 
 BASELINE_DIR = Path("validation_runs") / "ansys_vertical_flap_fsi"
+REPORT_JSON = BASELINE_DIR / "easyfsi" / "easyfsi_step050.json"
 SUMMARY_JSON = BASELINE_DIR / "compare" / "easyfsi_summary.json"
 STAGE_CHECK = BASELINE_DIR / "compare" / "stage_check.md"
 DISPLACEMENT_COMPARE = BASELINE_DIR / "compare" / "displacement_compare.csv"
@@ -33,19 +34,31 @@ class AnsysVerticalFlapClosedLoopFeedbackTests(unittest.TestCase):
         )
 
     def test_current_web_baseline_artifacts_are_available(self) -> None:
+        self.assertTrue(REPORT_JSON.is_file())
         self.assertTrue(SUMMARY_JSON.is_file())
         self.assertTrue(STAGE_CHECK.is_file())
         self.assertTrue(DISPLACEMENT_COMPARE.is_file())
 
-    @unittest.expectedFailure
-    def test_current_web_baseline_requires_closed_loop_feedback(self) -> None:
+    def test_regenerated_web_baseline_reports_closed_loop_feedback(self) -> None:
         stage_check = STAGE_CHECK.read_text(encoding="utf-8")
+        report = _read_report()
+        history = report.get("history", [])
 
         self.assertIn("fluid_recomputed_after_feedback = true", stage_check)
         self.assertIn(
             "feedback_closure_status = CLOSED_LOOP_RECOMPUTED_FLOW",
             stage_check,
         )
+        self.assertIs(report["fluid_recomputed_after_feedback"], True)
+        self.assertEqual(report["feedback_closure_status"], "CLOSED_LOOP_RECOMPUTED_FLOW")
+        self.assertEqual(report["fluid_recompute_count"], len(history))
+        self.assertEqual(report["fluid_recompute_count"], 50)
+        self.assertTrue(all(entry["fluid_recomputed"] is True for entry in history))
+        for entry in history:
+            self.assertIn("local_velocity_peak_mps", entry)
+            self.assertIn("pressure_min_pa", entry)
+            self.assertIn("pressure_max_pa", entry)
+            self.assertIn("flow_projection_report", entry)
 
     @unittest.expectedFailure
     def test_current_web_baseline_requires_no_solid_history_rebound(self) -> None:
@@ -145,6 +158,15 @@ def _read_summary() -> dict:
     if not rows:
         raise AssertionError(f"{SUMMARY_JSON} is empty")
     return rows[0]
+
+
+def _read_report() -> dict:
+    text = REPORT_JSON.read_text(encoding="utf-8", errors="replace")
+    start = text.find("{")
+    if start < 0:
+        raise AssertionError(f"{REPORT_JSON} does not contain a JSON object")
+    report, _ = json.JSONDecoder().raw_decode(text[start:])
+    return report
 
 
 def _read_displacement_compare() -> dict[str, str]:
