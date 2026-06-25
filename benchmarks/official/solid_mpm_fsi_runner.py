@@ -27,6 +27,7 @@ FLOW_DRIVER_SUSTAINED_SOURCE = "sustained_volume_source_inlet"
 FLOW_DRIVER_SUSTAINED_PREDICTOR = "sustained_inlet_predictor"
 FLOW_DRIVER_SHARP_REFERENCE = "sharp_hibm_mpm_reference"
 FLOW_INLET_SOURCE_PROFILES = {"constant", "linear_ramp"}
+FLOW_INLET_SOURCE_SCHEDULE_SCOPES = {"global", "phase_local"}
 FLOW_OUTLET_BALANCE_POLICIES = {"report_only"}
 SUPPORTED_FORMAL_FLOW_DRIVER_MODES = {
     FLOW_DRIVER_PROJECTION_ONLY,
@@ -205,6 +206,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "flow_inlet_source_ramp_steps": int(
                     getattr(config, "flow_inlet_source_ramp_steps", 0)
                 ),
+                "flow_inlet_source_schedule_scope": str(
+                    getattr(config, "flow_inlet_source_schedule_scope", "global")
+                ),
                 "flow_inlet_source_factor": latest_flow_report[
                     "flow_inlet_source_factor"
                 ],
@@ -226,6 +230,18 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 ],
                 "flow_inlet_boundary_obstacle_cell_count": latest_flow_report[
                     "flow_inlet_boundary_obstacle_cell_count"
+                ],
+                "flow_step_index_local": latest_flow_report[
+                    "flow_step_index_local"
+                ],
+                "flow_step_index_global": latest_flow_report[
+                    "flow_step_index_global"
+                ],
+                "flow_source_schedule_scope": latest_flow_report[
+                    "flow_source_schedule_scope"
+                ],
+                "flow_source_ramp_restarted_after_preflow": latest_flow_report[
+                    "flow_source_ramp_restarted_after_preflow"
                 ],
                 "flow_reset_pressure_each_step": bool(
                     getattr(config, "flow_reset_pressure_each_step", False)
@@ -381,6 +397,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "flow_inlet_source_ramp_steps": int(
             getattr(config, "flow_inlet_source_ramp_steps", 0)
         ),
+        "flow_inlet_source_schedule_scope": str(
+            getattr(config, "flow_inlet_source_schedule_scope", "global")
+        ),
         "flow_pressure_outlet_enabled": bool(
             getattr(config, "flow_pressure_outlet_enabled", True)
         ),
@@ -433,6 +452,12 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "boundary_conditions": dict(boundary_conditions),
         "reference_results": dict(reference_results),
         "flow_projection_report": latest_flow_report["projection_report"],
+        "flow_step_index_local": latest_flow_report["flow_step_index_local"],
+        "flow_step_index_global": latest_flow_report["flow_step_index_global"],
+        "flow_source_schedule_scope": latest_flow_report["flow_source_schedule_scope"],
+        "flow_source_ramp_restarted_after_preflow": latest_flow_report[
+            "flow_source_ramp_restarted_after_preflow"
+        ],
         **_flow_source_report_fields(latest_flow_report),
         "flow_obstacle_cell_count": latest_flow_report["obstacle_cell_count"],
         "flow_fluid_cell_count": latest_flow_report["fluid_cell_count"],
@@ -594,6 +619,9 @@ def _preflow_only_report(
         "flow_inlet_source_ramp_steps": int(
             getattr(config, "flow_inlet_source_ramp_steps", 0)
         ),
+        "flow_inlet_source_schedule_scope": str(
+            getattr(config, "flow_inlet_source_schedule_scope", "global")
+        ),
         "flow_pressure_outlet_enabled": bool(
             getattr(config, "flow_pressure_outlet_enabled", True)
         ),
@@ -646,6 +674,12 @@ def _preflow_only_report(
         "boundary_conditions": dict(boundary_conditions),
         "reference_results": dict(reference_results),
         "flow_projection_report": projection_report,
+        "flow_step_index_local": latest_preflow["flow_step_index_local"],
+        "flow_step_index_global": latest_preflow["flow_step_index_global"],
+        "flow_source_schedule_scope": latest_preflow["flow_source_schedule_scope"],
+        "flow_source_ramp_restarted_after_preflow": latest_preflow[
+            "flow_source_ramp_restarted_after_preflow"
+        ],
         **_flow_source_report_fields(latest_preflow),
         "computed_pressure_min_pa": latest_preflow["pressure_min_pa"],
         "computed_pressure_max_pa": latest_preflow["pressure_max_pa"],
@@ -714,6 +748,11 @@ def _validate_rectangular_solid_config(config: Any) -> None:
     source_profile = str(getattr(config, "flow_inlet_source_profile", "constant"))
     if source_profile not in FLOW_INLET_SOURCE_PROFILES:
         raise ValueError(f"unsupported flow_inlet_source_profile: {source_profile!r}")
+    source_scope = str(getattr(config, "flow_inlet_source_schedule_scope", "global"))
+    if source_scope not in FLOW_INLET_SOURCE_SCHEDULE_SCOPES:
+        raise ValueError(
+            f"unsupported flow_inlet_source_schedule_scope: {source_scope!r}"
+        )
     ramp_steps = int(getattr(config, "flow_inlet_source_ramp_steps", 0))
     if ramp_steps < 0:
         raise ValueError("flow_inlet_source_ramp_steps must be non-negative")
@@ -1008,7 +1047,12 @@ def _flow_advance_current_step(
         )
     elif mode in {FLOW_DRIVER_SUSTAINED_SOURCE, FLOW_DRIVER_SUSTAINED_PREDICTOR}:
         boundary_report = _refresh_zmax_inlet_boundary(fluid, config)
-        source_factor = _flow_inlet_source_factor(config, step_index)
+        source_step_index = _flow_source_schedule_step_index(
+            config,
+            step_index=step_index,
+            preflow_history=preflow_history,
+        )
+        source_factor = _flow_inlet_source_factor(config, source_step_index)
         source_normal_velocity_mps = -float(config.inlet_velocity_mps) * source_factor
         fluid.add_zmax_velocity_inlet_volume_source(
             normal_velocity_mps=source_normal_velocity_mps,
@@ -1041,7 +1085,24 @@ def _flow_advance_current_step(
         reset_pressure=reset_pressure,
     )
     flow_report.update(driver_report)
+    source_schedule_scope = _flow_source_schedule_scope(config)
+    flow_step_index_global = _flow_source_schedule_step_index(
+        config,
+        step_index=step_index,
+        preflow_history=preflow_history,
+    )
     flow_report["flow_step_index"] = int(step_index)
+    flow_report["flow_step_index_local"] = int(step_index)
+    flow_report["flow_step_index_global"] = int(flow_step_index_global)
+    flow_report["flow_source_schedule_scope"] = source_schedule_scope
+    flow_report["flow_source_ramp_restarted_after_preflow"] = (
+        _flow_source_ramp_restarted_after_preflow(
+            config,
+            step_index_local=step_index,
+            step_index_global=flow_step_index_global,
+            preflow_history=preflow_history,
+        )
+    )
     flow_report["flow_preflow_history_rows"] = len(preflow_history)
     return flow_report
 
@@ -1066,6 +1127,40 @@ def _flow_inlet_source_factor(config: Any, step_index: int) -> float:
         ramp_fraction = min(1.0, max(0.0, float(step_index + 1) / float(ramp_steps)))
         return strength * ramp_fraction
     raise ValueError(f"unsupported flow_inlet_source_profile: {profile!r}")
+
+
+def _flow_source_schedule_scope(config: Any) -> str:
+    return str(getattr(config, "flow_inlet_source_schedule_scope", "global"))
+
+
+def _flow_source_schedule_step_index(
+    config: Any,
+    *,
+    step_index: int,
+    preflow_history: list[dict[str, object]],
+) -> int:
+    if _flow_source_schedule_scope(config) == "global":
+        return len(preflow_history) + int(step_index)
+    return int(step_index)
+
+
+def _flow_source_ramp_restarted_after_preflow(
+    config: Any,
+    *,
+    step_index_local: int,
+    step_index_global: int,
+    preflow_history: list[dict[str, object]],
+) -> bool:
+    if not preflow_history:
+        return False
+    if _flow_source_schedule_scope(config) != "phase_local":
+        return False
+    if str(getattr(config, "flow_inlet_source_profile", "constant")) != "linear_ramp":
+        return False
+    ramp_steps = int(getattr(config, "flow_inlet_source_ramp_steps", 0))
+    if ramp_steps <= 0:
+        return False
+    return int(step_index_global) >= ramp_steps and int(step_index_local) < ramp_steps
 
 
 def _flow_driver_report(
@@ -1196,6 +1291,9 @@ def _run_fixed_solid_preflow(
             "flow_inlet_source_ramp_steps": int(
                 getattr(config, "flow_inlet_source_ramp_steps", 0)
             ),
+            "flow_inlet_source_schedule_scope": str(
+                getattr(config, "flow_inlet_source_schedule_scope", "global")
+            ),
             "flow_inlet_source_factor": flow_report["flow_inlet_source_factor"],
             "flow_inlet_source_normal_velocity_mps": flow_report[
                 "flow_inlet_source_normal_velocity_mps"
@@ -1213,6 +1311,12 @@ def _run_fixed_solid_preflow(
             ],
             "flow_inlet_boundary_obstacle_cell_count": flow_report[
                 "flow_inlet_boundary_obstacle_cell_count"
+            ],
+            "flow_step_index_local": flow_report["flow_step_index_local"],
+            "flow_step_index_global": flow_report["flow_step_index_global"],
+            "flow_source_schedule_scope": flow_report["flow_source_schedule_scope"],
+            "flow_source_ramp_restarted_after_preflow": flow_report[
+                "flow_source_ramp_restarted_after_preflow"
             ],
             "solid_fixed": True,
             "solid_advanced": False,

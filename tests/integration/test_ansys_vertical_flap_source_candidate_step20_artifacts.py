@@ -24,6 +24,7 @@ REQUIRED_SCENARIOS = {
     "source_0p75_reset_pressure_step20",
     "source_0p75_ramp2_step20",
     "source_0p80_ramp2_step20",
+    "source_0p75_ramp5_step20",
 }
 
 HISTORY_FIELDS = {
@@ -31,6 +32,10 @@ HISTORY_FIELDS = {
     "step",
     "source_factor",
     "source_normal_velocity_mps",
+    "flow_step_index_local",
+    "flow_step_index_global",
+    "flow_source_schedule_scope",
+    "flow_source_ramp_restarted_after_preflow",
     "velocity_peak_mps",
     "velocity_p999_mps",
     "velocity_outlet_flux_ratio",
@@ -64,8 +69,14 @@ class AnsysVerticalFlapSourceCandidateStep20ArtifactTests(unittest.TestCase):
         )
         self.assertIn("best_final_gate_candidate", payload)
         self.assertIn("best_temporal_candidate", payload)
+        self.assertIn("best_flow_temporal_candidate", payload)
+        self.assertIn("best_combined_temporal_candidate", payload)
+        self.assertIn("promotion_candidate", payload)
+        self.assertIn("promotion_candidate_status", payload)
+        self.assertIn("diagnostic_fallback_candidate", payload)
         self.assertIn("temporal_candidate_status", payload)
         self.assertIn("temporal_candidate_count", payload)
+        self.assertIn("flow_temporal_candidate_count", payload)
         self.assertEqual(
             payload["mass_balance_primary_metric"],
             "velocity_outlet_flux_ratio",
@@ -88,6 +99,10 @@ class AnsysVerticalFlapSourceCandidateStep20ArtifactTests(unittest.TestCase):
             self.assertIn("candidate_status", row)
             self.assertIn("temporal_candidate_status", row)
             self.assertIn("temporal_fail_reasons", row)
+            self.assertIn("flow_temporal_status", row)
+            self.assertIn("flow_temporal_fail_reasons", row)
+            self.assertIn("coupling_settling_status", row)
+            self.assertIn("promotion_candidate_status", row)
             if row["candidate_status"] == "candidate":
                 _assert_step20_candidate_gate(self, row)
 

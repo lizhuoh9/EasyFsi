@@ -145,6 +145,7 @@ class VerticalFlapFsiConfig:
     flow_inlet_source_strength: float = 1.0
     flow_inlet_source_ramp_steps: int = 0
     flow_inlet_source_profile: str = "constant"
+    flow_inlet_source_schedule_scope: str = "global"
     flow_pressure_outlet_enabled: bool = True
     flow_outlet_balance_policy: str = "report_only"
     enforce_plane_strain_x: bool = True
@@ -281,6 +282,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Sustained inlet source temporal profile.",
     )
     parser.add_argument(
+        "--flow-inlet-source-schedule-scope",
+        default=VerticalFlapFsiConfig.flow_inlet_source_schedule_scope,
+        choices=("global", "phase_local"),
+        help="Whether source ramps continue across preflow/FSI phases.",
+    )
+    parser.add_argument(
         "--disable-pressure-outlet",
         action="store_true",
         help="Diagnostic mode: disable zmin pressure outlet during projection.",
@@ -309,6 +316,7 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
             flow_inlet_source_strength=args.flow_inlet_source_strength,
             flow_inlet_source_ramp_steps=args.flow_inlet_source_ramp_steps,
             flow_inlet_source_profile=args.flow_inlet_source_profile,
+            flow_inlet_source_schedule_scope=args.flow_inlet_source_schedule_scope,
             flow_pressure_outlet_enabled=not args.disable_pressure_outlet,
             flow_outlet_balance_policy=args.flow_outlet_balance_policy,
         )

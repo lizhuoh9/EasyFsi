@@ -39,7 +39,8 @@ jobs:
             benchmarks\official\solid_mpm_fsi_runner.py `
             tools\validation\print_ansys_vertical_flap_diagnostics.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_source_outlet_balance_matrix.py `
-            validation_runs\ansys_vertical_flap_fsi\scripts\run_source_candidate_step20_matrix.py
+            validation_runs\ansys_vertical_flap_fsi\scripts\run_source_candidate_step20_matrix.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\run_fixed_solid_source_temporal_matrix.py
 
       - name: Run archive and artifact consistency tests
         shell: pwsh
@@ -52,6 +53,7 @@ jobs:
             tests.integration.test_ansys_vertical_flap_source_outlet_balance_artifacts `
             tests.integration.test_ansys_vertical_flap_source_candidate_step20_artifacts `
             tests.integration.test_ansys_vertical_flap_source_candidate_temporal_gate_artifacts `
+            tests.integration.test_ansys_vertical_flap_fixed_solid_source_temporal_artifacts `
             -v
 
       - name: Run source-level runner contracts
@@ -66,9 +68,13 @@ jobs:
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_fixed_solid_preflow_reports_diagnostics_without_mpm_advance `
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_sustained_flow_driver_modes_are_explicit_and_default_safe `
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_source_strength_factor_supports_constant_and_ramp_profiles `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_source_ramp_schedule_continues_from_preflow_by_default `
             tests.integration.test_ansys_vertical_flap_runner_loop_contract
 
       - name: Run diagnostics unit tests
         shell: pwsh
         run: |
-          python -m unittest tests.tools.test_ansys_vertical_flap_diagnostics -v
+          python -m unittest `
+            tests.tools.test_ansys_vertical_flap_diagnostics `
+            tests.tools.test_ansys_vertical_flap_temporal_gate `
+            -v

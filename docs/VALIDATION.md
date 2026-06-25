@@ -151,12 +151,36 @@ over 20 steps before any 50-step run. It records per-step histories, uses
 `velocity_outlet_flux_ratio` as the primary mass-balance sanity metric, keeps
 pressure-outlet flux diagnostic-only, and does not claim Fluent parity.
 
-The STEP20 artifacts now include a temporal candidate gate in addition to the
-final-row gate. A final-row candidate is not enough to approve a 50-step run:
-post-warmup and last-window p999, peak velocity, outlet ratio, marker-force
-sign, tip-displacement sign, and invalid-count checks must be reviewed first.
-If no STEP20 temporal candidate exists, the next action is source/outlet model
-refinement or a STEP30 temporal matrix, not a 50-step run.
+The STEP20 artifacts now separate three gates:
+
+- `flow_temporal_status` checks source/outlet flow over the post-warmup and
+  last-window history.
+- `coupling_settling_status` checks whether force and tip signs have settled.
+- `promotion_candidate` remains tied to the original combined temporal gate.
+
+A final-row candidate or flow-temporal candidate is not enough to approve a
+50-step run. If `promotion_candidate = none`, the best candidate history is a
+diagnostic fallback only. In the current archive, `source_0p80_ramp2_step20` is
+the best flow-temporal diagnostic candidate, while `source_0p75_ramp5_step20`
+is the final-gate diagnostic fallback; neither is a promotion-ready Fluent
+parity result.
+
+For the fixed-solid STEP30 flow-only diagnostic, run:
+
+```powershell
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_fixed_solid_source_temporal_matrix.py
+```
+
+This writes fixed-solid/preflow-only source artifacts under:
+
+```text
+validation_runs\ansys_vertical_flap_fsi\fixed_solid_source_temporal_diagnostics\
+```
+
+The fixed-solid matrix uses `step_count=0` and `preflow_steps=30`; it does not
+advance the MPM solid, apply marker feedback, run coupled FSI, or claim Fluent
+parity. It is only evidence about the source/outlet flow before coupled
+release.
 
 ## Known Non-Gating Historical Failures
 

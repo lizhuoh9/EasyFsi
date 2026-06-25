@@ -262,6 +262,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(config.flow_driver_mode, "projection_only")
         self.assertEqual(config.flow_inlet_source_strength, 1.0)
         self.assertEqual(config.flow_inlet_source_profile, "constant")
+        self.assertEqual(config.flow_inlet_source_schedule_scope, "global")
 
         run_source = inspect.getsource(
             solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
@@ -326,6 +327,60 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(
             solid_mpm_fsi_runner._flow_inlet_source_factor(ramp, 10),
             0.6,
+        )
+
+    def test_source_ramp_schedule_continues_from_preflow_by_default(self):
+        ramp = VerticalFlapFsiConfig(
+            flow_inlet_source_strength=0.75,
+            flow_inlet_source_profile="linear_ramp",
+            flow_inlet_source_ramp_steps=5,
+            flow_inlet_source_schedule_scope="global",
+        )
+        preflow_history = [{} for _ in range(5)]
+        global_step = solid_mpm_fsi_runner._flow_source_schedule_step_index(
+            ramp,
+            step_index=0,
+            preflow_history=preflow_history,
+        )
+
+        self.assertEqual(global_step, 5)
+        self.assertAlmostEqual(
+            solid_mpm_fsi_runner._flow_inlet_source_factor(ramp, global_step),
+            0.75,
+        )
+        self.assertFalse(
+            solid_mpm_fsi_runner._flow_source_ramp_restarted_after_preflow(
+                ramp,
+                step_index_local=0,
+                step_index_global=global_step,
+                preflow_history=preflow_history,
+            )
+        )
+
+        phase_local = VerticalFlapFsiConfig(
+            flow_inlet_source_strength=0.75,
+            flow_inlet_source_profile="linear_ramp",
+            flow_inlet_source_ramp_steps=5,
+            flow_inlet_source_schedule_scope="phase_local",
+        )
+        local_step = solid_mpm_fsi_runner._flow_source_schedule_step_index(
+            phase_local,
+            step_index=0,
+            preflow_history=preflow_history,
+        )
+
+        self.assertEqual(local_step, 0)
+        self.assertAlmostEqual(
+            solid_mpm_fsi_runner._flow_inlet_source_factor(phase_local, local_step),
+            0.15,
+        )
+        self.assertTrue(
+            solid_mpm_fsi_runner._flow_source_ramp_restarted_after_preflow(
+                phase_local,
+                step_index_local=0,
+                step_index_global=len(preflow_history),
+                preflow_history=preflow_history,
+            )
         )
 
     def test_thin_wall_probe_reach_tracks_refined_streamwise_spacing(self):
