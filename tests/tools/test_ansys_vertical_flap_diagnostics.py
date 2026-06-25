@@ -34,6 +34,12 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
         self.assertEqual(summary["preflow_status"], "max_steps")
         self.assertEqual(summary["flow_driver_mode"], "sustained_volume_source_inlet")
         self.assertEqual(summary["flow_driver_diagnostic_only"], "false")
+        self.assertAlmostEqual(summary["flow_inlet_source_strength"], 0.5)
+        self.assertEqual(summary["flow_inlet_source_profile"], "linear_ramp")
+        self.assertEqual(summary["flow_inlet_source_ramp_steps"], 5)
+        self.assertEqual(summary["flow_pressure_outlet_enabled"], "true")
+        self.assertEqual(summary["flow_outlet_balance_policy"], "report_only")
+        self.assertEqual(summary["flow_predictor_applied"], "false")
         self.assertEqual(summary["solid_substeps_selected"], 1600)
         self.assertAlmostEqual(summary["solid_estimated_cfl"], 0.31)
         self.assertAlmostEqual(summary["velocity_p99_mps"], 27.5)
@@ -41,7 +47,9 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
         self.assertLess(summary["marker_force_z_N"], 0.0)
         self.assertAlmostEqual(summary["source_volume_flux_m3s"], 1.25e-4)
         self.assertAlmostEqual(summary["zmin_pressure_outlet_flux_m3s"], 1.0e-4)
+        self.assertAlmostEqual(summary["zmin_velocity_outlet_flux_m3s"], 1.2e-4)
         self.assertAlmostEqual(summary["pressure_outlet_flux_ratio"], 0.8)
+        self.assertAlmostEqual(summary["velocity_outlet_flux_ratio"], 0.96)
         self.assertEqual(summary["status"], "FAIL_MAGNITUDE")
 
     def test_history_rows_extract_vectors_and_derive_time(self) -> None:
@@ -162,8 +170,12 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             self.assertIn("projection_l2 = 1e-07", stage_check)
             self.assertIn("projection_max_abs = 2e-07", stage_check)
             self.assertIn("flow_driver_mode = sustained_volume_source_inlet", stage_check)
+            self.assertIn("flow_inlet_source_strength = 0.5", stage_check)
+            self.assertIn("flow_inlet_source_profile = linear_ramp", stage_check)
             self.assertIn("source_volume_flux_m3s = 0.000125", stage_check)
             self.assertIn("zmin_pressure_outlet_flux_m3s = 0.0001", stage_check)
+            self.assertIn("zmin_velocity_outlet_flux_m3s = 0.00012", stage_check)
+            self.assertIn("velocity_outlet_flux_ratio = 0.96", stage_check)
             self.assertIn("fluid_projection_consumed_feedback = true", stage_check)
             self.assertIn("fluid_feedback_constraint_marker_count = 12", stage_check)
             self.assertIn("fluid_feedback_constraint_active_cell_count = 7", stage_check)
@@ -361,7 +373,13 @@ def _fixture_report() -> dict:
             "marker_count": 12,
             "mpm_support_radius_m": 0.0015,
             "flow_driver_mode": "sustained_volume_source_inlet",
+            "flow_inlet_source_strength": 0.5,
+            "flow_inlet_source_profile": "linear_ramp",
+            "flow_inlet_source_ramp_steps": 5,
+            "flow_pressure_outlet_enabled": True,
+            "flow_outlet_balance_policy": "report_only",
         },
+        "flow_predictor_applied": False,
         "marker_count_per_face": 12,
         "marker_count_actual": 24,
         "reference_results": {
@@ -380,8 +398,9 @@ def _fixture_report() -> dict:
             "positive_source_volume_flux_m3s": 1.25e-4,
             "abs_source_volume_flux_m3s": 1.25e-4,
             "zmin_pressure_outlet_flux_m3s": 1.0e-4,
-            "zmin_velocity_outlet_flux_m3s": 9.0e-5,
+            "zmin_velocity_outlet_flux_m3s": 1.2e-4,
             "zmin_pressure_outlet_to_abs_source_ratio": 0.8,
+            "zmin_velocity_outlet_to_abs_source_ratio": 0.96,
         },
         "computed_pressure_min_pa": -12.0,
         "computed_pressure_max_pa": 42.0,

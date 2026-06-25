@@ -142,6 +142,11 @@ class VerticalFlapFsiConfig:
     flow_reset_pressure_each_step: bool = False
     flow_reinitialize_inlet_each_step: bool = False
     flow_driver_mode: str = "projection_only"
+    flow_inlet_source_strength: float = 1.0
+    flow_inlet_source_ramp_steps: int = 0
+    flow_inlet_source_profile: str = "constant"
+    flow_pressure_outlet_enabled: bool = True
+    flow_outlet_balance_policy: str = "report_only"
     enforce_plane_strain_x: bool = True
     mpm_support_radius_m: float = 0.006
     displacement_tolerance: float = 0.05
@@ -257,6 +262,35 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         help="Explicit flow driver path for ANSYS vertical-flap diagnostics.",
     )
+    parser.add_argument(
+        "--flow-inlet-source-strength",
+        type=float,
+        default=VerticalFlapFsiConfig.flow_inlet_source_strength,
+        help="Sustained inlet source strength multiplier.",
+    )
+    parser.add_argument(
+        "--flow-inlet-source-ramp-steps",
+        type=int,
+        default=VerticalFlapFsiConfig.flow_inlet_source_ramp_steps,
+        help="Ramp sustained inlet source over this many steps; 0 disables ramp.",
+    )
+    parser.add_argument(
+        "--flow-inlet-source-profile",
+        default=VerticalFlapFsiConfig.flow_inlet_source_profile,
+        choices=("constant", "linear_ramp"),
+        help="Sustained inlet source temporal profile.",
+    )
+    parser.add_argument(
+        "--disable-pressure-outlet",
+        action="store_true",
+        help="Diagnostic mode: disable zmin pressure outlet during projection.",
+    )
+    parser.add_argument(
+        "--flow-outlet-balance-policy",
+        default=VerticalFlapFsiConfig.flow_outlet_balance_policy,
+        choices=("report_only",),
+        help="Outlet balance policy; this diagnostic step is report-only.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -272,6 +306,11 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
             flow_reset_pressure_each_step=args.flow_reset_pressure_each_step,
             flow_reinitialize_inlet_each_step=args.flow_reinitialize_inlet_each_step,
             flow_driver_mode=args.flow_driver_mode,
+            flow_inlet_source_strength=args.flow_inlet_source_strength,
+            flow_inlet_source_ramp_steps=args.flow_inlet_source_ramp_steps,
+            flow_inlet_source_profile=args.flow_inlet_source_profile,
+            flow_pressure_outlet_enabled=not args.disable_pressure_outlet,
+            flow_outlet_balance_policy=args.flow_outlet_balance_policy,
         )
     )
     if args.json:

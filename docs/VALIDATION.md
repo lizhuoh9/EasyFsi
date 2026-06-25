@@ -117,6 +117,23 @@ diagnostic full-field reinitialize upper bound, and non-full-reset sustained
 boundary/source/predictor drivers. It is a 10-step coarse EasyFsi diagnostic and
 does not claim Fluent parity.
 
+For the source/outlet balance diagnostic baseline, run:
+
+```powershell
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_source_outlet_balance_matrix.py
+```
+
+This writes source-strength and outlet-balance artifacts under:
+
+```text
+validation_runs\ansys_vertical_flap_fsi\source_outlet_balance_diagnostics\
+```
+
+The source/outlet balance matrix parameterizes the non-full-reset sustained
+inlet source strength and records pressure-outlet and velocity-outlet flux
+ratios separately. It is a 10-step calibration diagnostic only; it does not run
+50 steps and does not claim Fluent parity.
+
 ## Known Non-Gating Historical Failures
 
 - ANSYS vertical-flap displacement tolerance smoke.

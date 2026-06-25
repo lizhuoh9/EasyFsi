@@ -24,6 +24,12 @@ SUMMARY_COLUMNS = [
     "preflow_status",
     "flow_driver_mode",
     "flow_driver_diagnostic_only",
+    "flow_inlet_source_strength",
+    "flow_inlet_source_profile",
+    "flow_inlet_source_ramp_steps",
+    "flow_pressure_outlet_enabled",
+    "flow_outlet_balance_policy",
+    "flow_predictor_applied",
     "solid_substeps_selected",
     "solid_estimated_cfl",
     "velocity_peak_mps",
@@ -53,6 +59,7 @@ SUMMARY_COLUMNS = [
     "zmin_pressure_outlet_flux_m3s",
     "zmin_velocity_outlet_flux_m3s",
     "pressure_outlet_flux_ratio",
+    "velocity_outlet_flux_ratio",
     "status",
 ]
 
@@ -173,6 +180,39 @@ def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "flow_driver_diagnostic_only": _bool_text(
             report.get("flow_driver_diagnostic_only")
         ),
+        "flow_inlet_source_strength": _source_config_value(
+            report,
+            config,
+            "flow_inlet_source_strength",
+            1.0,
+        ),
+        "flow_inlet_source_profile": _source_config_value(
+            report,
+            config,
+            "flow_inlet_source_profile",
+            "constant",
+        ),
+        "flow_inlet_source_ramp_steps": _source_config_value(
+            report,
+            config,
+            "flow_inlet_source_ramp_steps",
+            0,
+        ),
+        "flow_pressure_outlet_enabled": _bool_text(
+            _source_config_value(
+                report,
+                config,
+                "flow_pressure_outlet_enabled",
+                True,
+            )
+        ),
+        "flow_outlet_balance_policy": _source_config_value(
+            report,
+            config,
+            "flow_outlet_balance_policy",
+            "report_only",
+        ),
+        "flow_predictor_applied": _bool_text(report.get("flow_predictor_applied")),
         "solid_substeps_selected": _int(report.get("solid_substeps_selected")),
         "solid_estimated_cfl": _number(report.get("solid_estimated_cfl")),
         "velocity_peak_mps": _number(report.get("local_velocity_peak_mps")),
@@ -232,6 +272,11 @@ def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
             report,
             projection,
             "pressure_outlet_flux_ratio",
+        ),
+        "velocity_outlet_flux_ratio": _source_number(
+            report,
+            projection,
+            "velocity_outlet_flux_ratio",
         ),
     }
     row["status"] = classify_status(report, row)
@@ -533,9 +578,14 @@ def build_stage_check(
             *_projection_diagnostic_lines(projection),
             f"flow_driver_mode = {_format_value(summary.get('flow_driver_mode'))}",
             f"flow_driver_diagnostic_only = {_format_value(summary.get('flow_driver_diagnostic_only'))}",
+            f"flow_inlet_source_strength = {_format_value(summary.get('flow_inlet_source_strength'))}",
+            f"flow_inlet_source_profile = {_format_value(summary.get('flow_inlet_source_profile'))}",
+            f"flow_pressure_outlet_enabled = {_format_value(summary.get('flow_pressure_outlet_enabled'))}",
             f"source_volume_flux_m3s = {_format_value(summary.get('source_volume_flux_m3s'))}",
             f"zmin_pressure_outlet_flux_m3s = {_format_value(summary.get('zmin_pressure_outlet_flux_m3s'))}",
+            f"zmin_velocity_outlet_flux_m3s = {_format_value(summary.get('zmin_velocity_outlet_flux_m3s'))}",
             f"pressure_outlet_flux_ratio = {_format_value(summary.get('pressure_outlet_flux_ratio'))}",
+            f"velocity_outlet_flux_ratio = {_format_value(summary.get('velocity_outlet_flux_ratio'))}",
             f"diagnosis = {_flow_diagnosis(status)}",
             "",
             "[INTERFACE_FORCE]",
@@ -924,7 +974,24 @@ def _source_number(
             "zmin_pressure_outlet_to_abs_source_ratio",
             projection.get("zmin_pressure_outlet_to_positive_source_ratio"),
         )
+    if key == "velocity_outlet_flux_ratio" and value in (None, ""):
+        value = projection.get(
+            "zmin_velocity_outlet_to_abs_source_ratio",
+            projection.get("zmin_velocity_outlet_to_positive_source_ratio"),
+        )
     return _number(value)
+
+
+def _source_config_value(
+    report: dict[str, Any],
+    config: dict[str, Any],
+    key: str,
+    default: Any,
+) -> Any:
+    value = report.get(key)
+    if value in (None, ""):
+        value = config.get(key, default)
+    return value
 
 
 def _finite_or_none(value: Any) -> float | None:

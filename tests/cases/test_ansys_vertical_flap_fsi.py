@@ -178,6 +178,11 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertFalse(config.flow_reset_pressure_each_step)
         self.assertFalse(config.flow_reinitialize_inlet_each_step)
         self.assertEqual(config.flow_driver_mode, "projection_only")
+        self.assertEqual(config.flow_inlet_source_strength, 1.0)
+        self.assertEqual(config.flow_inlet_source_ramp_steps, 0)
+        self.assertEqual(config.flow_inlet_source_profile, "constant")
+        self.assertTrue(config.flow_pressure_outlet_enabled)
+        self.assertEqual(config.flow_outlet_balance_policy, "report_only")
 
         parser = vertical_flap_case._build_parser()
         args = parser.parse_args(
@@ -193,6 +198,15 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 "--flow-reinitialize-inlet-each-step",
                 "--flow-driver-mode",
                 "sustained_volume_source_inlet",
+                "--flow-inlet-source-strength",
+                "0.5",
+                "--flow-inlet-source-ramp-steps",
+                "5",
+                "--flow-inlet-source-profile",
+                "linear_ramp",
+                "--disable-pressure-outlet",
+                "--flow-outlet-balance-policy",
+                "report_only",
                 "--json",
             ]
         )
@@ -204,6 +218,11 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertTrue(args.flow_reset_pressure_each_step)
         self.assertTrue(args.flow_reinitialize_inlet_each_step)
         self.assertEqual(args.flow_driver_mode, "sustained_volume_source_inlet")
+        self.assertAlmostEqual(args.flow_inlet_source_strength, 0.5)
+        self.assertEqual(args.flow_inlet_source_ramp_steps, 5)
+        self.assertEqual(args.flow_inlet_source_profile, "linear_ramp")
+        self.assertTrue(args.disable_pressure_outlet)
+        self.assertEqual(args.flow_outlet_balance_policy, "report_only")
 
     def test_fixed_solid_preflow_reports_diagnostics_without_mpm_advance(self):
         source = inspect.getsource(solid_mpm_fsi_runner._run_fixed_solid_preflow)
@@ -241,6 +260,8 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertFalse(config.flow_reset_pressure_each_step)
         self.assertFalse(config.flow_reinitialize_inlet_each_step)
         self.assertEqual(config.flow_driver_mode, "projection_only")
+        self.assertEqual(config.flow_inlet_source_strength, 1.0)
+        self.assertEqual(config.flow_inlet_source_profile, "constant")
 
         run_source = inspect.getsource(
             solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
@@ -276,6 +297,36 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertIn("add_zmax_velocity_inlet_volume_source", advance_source)
         self.assertIn("FLOW_DRIVER_SUSTAINED_SOURCE", advance_source)
         self.assertIn("FLOW_DRIVER_SUSTAINED_PREDICTOR", advance_source)
+        self.assertIn("_flow_inlet_source_factor", advance_source)
+        self.assertIn(
+            "flow_predictor_applied",
+            inspect.getsource(solid_mpm_fsi_runner._flow_driver_report),
+        )
+
+    def test_source_strength_factor_supports_constant_and_ramp_profiles(self):
+        constant = VerticalFlapFsiConfig(flow_inlet_source_strength=0.4)
+        ramp = VerticalFlapFsiConfig(
+            flow_inlet_source_strength=0.6,
+            flow_inlet_source_profile="linear_ramp",
+            flow_inlet_source_ramp_steps=3,
+        )
+
+        self.assertAlmostEqual(
+            solid_mpm_fsi_runner._flow_inlet_source_factor(constant, 0),
+            0.4,
+        )
+        self.assertAlmostEqual(
+            solid_mpm_fsi_runner._flow_inlet_source_factor(ramp, 0),
+            0.2,
+        )
+        self.assertAlmostEqual(
+            solid_mpm_fsi_runner._flow_inlet_source_factor(ramp, 2),
+            0.6,
+        )
+        self.assertAlmostEqual(
+            solid_mpm_fsi_runner._flow_inlet_source_factor(ramp, 10),
+            0.6,
+        )
 
     def test_thin_wall_probe_reach_tracks_refined_streamwise_spacing(self):
         coarse = VerticalFlapFsiConfig(grid_nodes=(4, 80, 160))

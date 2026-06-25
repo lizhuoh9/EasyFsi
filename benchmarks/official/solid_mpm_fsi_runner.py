@@ -26,6 +26,8 @@ FLOW_DRIVER_SUSTAINED_BOUNDARY = "sustained_boundary_inlet"
 FLOW_DRIVER_SUSTAINED_SOURCE = "sustained_volume_source_inlet"
 FLOW_DRIVER_SUSTAINED_PREDICTOR = "sustained_inlet_predictor"
 FLOW_DRIVER_SHARP_REFERENCE = "sharp_hibm_mpm_reference"
+FLOW_INLET_SOURCE_PROFILES = {"constant", "linear_ramp"}
+FLOW_OUTLET_BALANCE_POLICIES = {"report_only"}
 SUPPORTED_FORMAL_FLOW_DRIVER_MODES = {
     FLOW_DRIVER_PROJECTION_ONLY,
     FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC,
@@ -49,6 +51,7 @@ FLOW_SOURCE_REPORT_KEYS = (
     "zmin_pressure_outlet_to_abs_source_ratio",
     "zmin_velocity_outlet_to_abs_source_ratio",
     "pressure_outlet_flux_ratio",
+    "velocity_outlet_flux_ratio",
 )
 
 
@@ -193,6 +196,31 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "flow_volume_source_applied": latest_flow_report[
                     "flow_volume_source_applied"
                 ],
+                "flow_inlet_source_strength": float(
+                    getattr(config, "flow_inlet_source_strength", 1.0)
+                ),
+                "flow_inlet_source_profile": str(
+                    getattr(config, "flow_inlet_source_profile", "constant")
+                ),
+                "flow_inlet_source_ramp_steps": int(
+                    getattr(config, "flow_inlet_source_ramp_steps", 0)
+                ),
+                "flow_inlet_source_factor": latest_flow_report[
+                    "flow_inlet_source_factor"
+                ],
+                "flow_inlet_source_normal_velocity_mps": latest_flow_report[
+                    "flow_inlet_source_normal_velocity_mps"
+                ],
+                "flow_pressure_outlet_enabled": bool(
+                    getattr(config, "flow_pressure_outlet_enabled", True)
+                ),
+                "flow_outlet_balance_policy": str(
+                    getattr(config, "flow_outlet_balance_policy", "report_only")
+                ),
+                "flow_predictor_applied": latest_flow_report[
+                    "flow_predictor_applied"
+                ],
+                "flow_predictor_note": latest_flow_report["flow_predictor_note"],
                 "flow_inlet_boundary_active_cell_count": latest_flow_report[
                     "flow_inlet_boundary_active_cell_count"
                 ],
@@ -343,6 +371,21 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "flow_driver_mode": flow_driver_mode,
         "flow_driver_diagnostic_only": (
             flow_driver_mode == FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC
+        ),
+        "flow_inlet_source_strength": float(
+            getattr(config, "flow_inlet_source_strength", 1.0)
+        ),
+        "flow_inlet_source_profile": str(
+            getattr(config, "flow_inlet_source_profile", "constant")
+        ),
+        "flow_inlet_source_ramp_steps": int(
+            getattr(config, "flow_inlet_source_ramp_steps", 0)
+        ),
+        "flow_pressure_outlet_enabled": bool(
+            getattr(config, "flow_pressure_outlet_enabled", True)
+        ),
+        "flow_outlet_balance_policy": str(
+            getattr(config, "flow_outlet_balance_policy", "report_only")
         ),
         "flow_reset_pressure_each_step": bool(
             getattr(config, "flow_reset_pressure_each_step", False)
@@ -542,6 +585,21 @@ def _preflow_only_report(
         "flow_driver_diagnostic_only": (
             flow_driver_mode == FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC
         ),
+        "flow_inlet_source_strength": float(
+            getattr(config, "flow_inlet_source_strength", 1.0)
+        ),
+        "flow_inlet_source_profile": str(
+            getattr(config, "flow_inlet_source_profile", "constant")
+        ),
+        "flow_inlet_source_ramp_steps": int(
+            getattr(config, "flow_inlet_source_ramp_steps", 0)
+        ),
+        "flow_pressure_outlet_enabled": bool(
+            getattr(config, "flow_pressure_outlet_enabled", True)
+        ),
+        "flow_outlet_balance_policy": str(
+            getattr(config, "flow_outlet_balance_policy", "report_only")
+        ),
         "flow_reset_pressure_each_step": bool(
             getattr(config, "flow_reset_pressure_each_step", False)
         ),
@@ -650,6 +708,18 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError(
             "sharp_hibm_mpm_reference is reserved for a later sharp-path runner"
         )
+    source_strength = float(getattr(config, "flow_inlet_source_strength", 1.0))
+    if not math.isfinite(source_strength) or source_strength < 0.0:
+        raise ValueError("flow_inlet_source_strength must be finite and non-negative")
+    source_profile = str(getattr(config, "flow_inlet_source_profile", "constant"))
+    if source_profile not in FLOW_INLET_SOURCE_PROFILES:
+        raise ValueError(f"unsupported flow_inlet_source_profile: {source_profile!r}")
+    ramp_steps = int(getattr(config, "flow_inlet_source_ramp_steps", 0))
+    if ramp_steps < 0:
+        raise ValueError("flow_inlet_source_ramp_steps must be non-negative")
+    outlet_policy = str(getattr(config, "flow_outlet_balance_policy", "report_only"))
+    if outlet_policy not in FLOW_OUTLET_BALANCE_POLICIES:
+        raise ValueError(f"unsupported flow_outlet_balance_policy: {outlet_policy!r}")
     if config.step_count < 0:
         raise ValueError("step_count must be non-negative")
     if config.step_count == 0 and int(getattr(config, "preflow_steps", 0)) <= 0:
@@ -887,7 +957,9 @@ def _project_current_flow(
     projection_report = dict(
         fluid.project(
             iterations=config.flow_projection_iterations,
-            pressure_outlet_zmin=True,
+            pressure_outlet_zmin=bool(
+                getattr(config, "flow_pressure_outlet_enabled", True)
+            ),
             reset_pressure=reset_pressure,
             pressure_solver=config.flow_pressure_solver,
             cg_tolerance=config.flow_cg_tolerance,
@@ -936,14 +1008,25 @@ def _flow_advance_current_step(
         )
     elif mode in {FLOW_DRIVER_SUSTAINED_SOURCE, FLOW_DRIVER_SUSTAINED_PREDICTOR}:
         boundary_report = _refresh_zmax_inlet_boundary(fluid, config)
+        source_factor = _flow_inlet_source_factor(config, step_index)
+        source_normal_velocity_mps = -float(config.inlet_velocity_mps) * source_factor
         fluid.add_zmax_velocity_inlet_volume_source(
-            normal_velocity_mps=-float(config.inlet_velocity_mps),
+            normal_velocity_mps=source_normal_velocity_mps,
         )
         driver_report = _flow_driver_report(
             mode=mode,
             full_field_reinitialized=False,
             inlet_boundary_report=boundary_report,
             volume_source_applied=True,
+            source_factor=source_factor,
+            source_normal_velocity_mps=source_normal_velocity_mps,
+            predictor_applied=False,
+            predictor_note=(
+                "diagnostic source-driven projection path; no separate "
+                "predictor/advection step is applied yet"
+                if mode == FLOW_DRIVER_SUSTAINED_PREDICTOR
+                else ""
+            ),
         )
     elif mode == FLOW_DRIVER_SHARP_REFERENCE:
         raise RuntimeError(
@@ -973,12 +1056,28 @@ def _flow_driver_requires_full_field_reinitialize(mode: str) -> bool:
     return mode == FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC
 
 
+def _flow_inlet_source_factor(config: Any, step_index: int) -> float:
+    strength = float(getattr(config, "flow_inlet_source_strength", 1.0))
+    profile = str(getattr(config, "flow_inlet_source_profile", "constant"))
+    ramp_steps = int(getattr(config, "flow_inlet_source_ramp_steps", 0))
+    if profile == "constant" or ramp_steps <= 0:
+        return strength
+    if profile == "linear_ramp":
+        ramp_fraction = min(1.0, max(0.0, float(step_index + 1) / float(ramp_steps)))
+        return strength * ramp_fraction
+    raise ValueError(f"unsupported flow_inlet_source_profile: {profile!r}")
+
+
 def _flow_driver_report(
     *,
     mode: str,
     full_field_reinitialized: bool,
     inlet_boundary_report: Mapping[str, object],
     volume_source_applied: bool,
+    source_factor: float = 0.0,
+    source_normal_velocity_mps: float = 0.0,
+    predictor_applied: bool = False,
+    predictor_note: str = "",
 ) -> dict[str, object]:
     inlet_reapplied = bool(inlet_boundary_report)
     return {
@@ -994,6 +1093,10 @@ def _flow_driver_report(
         "flow_inlet_boundary_obstacle_cell_count": int(
             inlet_boundary_report.get("flow_inlet_boundary_obstacle_cell_count", 0)
         ),
+        "flow_inlet_source_factor": float(source_factor),
+        "flow_inlet_source_normal_velocity_mps": float(source_normal_velocity_mps),
+        "flow_predictor_applied": bool(predictor_applied),
+        "flow_predictor_note": str(predictor_note),
     }
 
 
@@ -1084,6 +1187,27 @@ def _run_fixed_solid_preflow(
                 "flow_inlet_boundary_reapplied"
             ],
             "flow_volume_source_applied": flow_report["flow_volume_source_applied"],
+            "flow_inlet_source_strength": float(
+                getattr(config, "flow_inlet_source_strength", 1.0)
+            ),
+            "flow_inlet_source_profile": str(
+                getattr(config, "flow_inlet_source_profile", "constant")
+            ),
+            "flow_inlet_source_ramp_steps": int(
+                getattr(config, "flow_inlet_source_ramp_steps", 0)
+            ),
+            "flow_inlet_source_factor": flow_report["flow_inlet_source_factor"],
+            "flow_inlet_source_normal_velocity_mps": flow_report[
+                "flow_inlet_source_normal_velocity_mps"
+            ],
+            "flow_pressure_outlet_enabled": bool(
+                getattr(config, "flow_pressure_outlet_enabled", True)
+            ),
+            "flow_outlet_balance_policy": str(
+                getattr(config, "flow_outlet_balance_policy", "report_only")
+            ),
+            "flow_predictor_applied": flow_report["flow_predictor_applied"],
+            "flow_predictor_note": flow_report["flow_predictor_note"],
             "flow_inlet_boundary_active_cell_count": flow_report[
                 "flow_inlet_boundary_active_cell_count"
             ],
@@ -1338,6 +1462,11 @@ def _flow_source_report_fields(report: Any) -> dict[str, object]:
         fields["pressure_outlet_flux_ratio"] = report.get(
             "zmin_pressure_outlet_to_abs_source_ratio",
             report.get("zmin_pressure_outlet_to_positive_source_ratio", ""),
+        )
+    if fields["velocity_outlet_flux_ratio"] == "":
+        fields["velocity_outlet_flux_ratio"] = report.get(
+            "zmin_velocity_outlet_to_abs_source_ratio",
+            report.get("zmin_velocity_outlet_to_positive_source_ratio", ""),
         )
     return fields
 
