@@ -397,7 +397,7 @@ def build_stage_check(
             f"official_range_mps = {_format_value(reference.get('local_velocity_peak_range_mps'))}",
             f"pressure_min_pa = {_format_value(report.get('computed_pressure_min_pa'))}",
             f"pressure_max_pa = {_format_value(report.get('computed_pressure_max_pa'))}",
-            f"projection_final_residual = {_format_value(_projection_residual(projection))}",
+            *_projection_residual_lines(projection),
             *_projection_diagnostic_lines(projection),
             f"diagnosis = {_flow_diagnosis(status)}",
             "",
@@ -738,6 +738,13 @@ def _projection_residual(projection: dict[str, Any]) -> Any:
         if key in projection:
             return projection[key]
     return ""
+
+
+def _projection_residual_lines(projection: dict[str, Any]) -> list[str]:
+    formatted = _format_value(_projection_residual(projection))
+    if formatted == "":
+        return []
+    return [f"projection_final_residual = {formatted}"]
 
 
 def _projection_diagnostic_lines(projection: dict[str, Any]) -> list[str]:

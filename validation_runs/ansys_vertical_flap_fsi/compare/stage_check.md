@@ -8,7 +8,6 @@ velocity_peak_mps = 10.4172229767
 official_range_mps = [20, 29]
 pressure_min_pa = -136.474249776
 pressure_max_pa = 16.4704247666
-projection_final_residual = 
 projection_l2 = 1144.05692371
 projection_max_abs = 6400
 pre_projection_l2 = 1146.05694984
