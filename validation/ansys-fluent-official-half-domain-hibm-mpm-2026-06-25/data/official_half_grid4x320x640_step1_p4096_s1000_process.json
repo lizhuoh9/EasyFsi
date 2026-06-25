@@ -1,0 +1,27 @@
+{
+  "completed_preflow_steps": 0,
+  "completed_steps": 1,
+  "elapsed_s": 725.1035966000054,
+  "field_snapshot_npz": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_fields.npz",
+  "grid_nodes": [
+    4,
+    320,
+    640
+  ],
+  "history_csv": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_history.csv",
+  "markers_per_face": 84,
+  "mpm_support_radius_m": 0.0003125,
+  "preflow_steps": 0,
+  "report_json": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_report.json",
+  "requested_steps": 1,
+  "solid_particle_counts": [
+    1,
+    80,
+    24
+  ],
+  "solid_substeps": 1000,
+  "solver_path": "advance_hibm_mpm_sharp_mpm_step",
+  "status": "completed",
+  "terminated_early": false,
+  "termination_reason": ""
+}

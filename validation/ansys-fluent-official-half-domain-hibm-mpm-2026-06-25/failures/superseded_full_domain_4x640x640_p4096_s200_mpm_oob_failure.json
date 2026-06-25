@@ -1,0 +1,31 @@
+{
+  "case": "full-domain-two-flap-true-sharp-fsi",
+  "elapsed_s": 578.878198499995,
+  "error": "108 of 3840 MPM particles are outside the background grid; refusing to advance a partial solid",
+  "fluid_substeps": 2,
+  "grid_nodes": [
+    4,
+    640,
+    640
+  ],
+  "inlet_velocity_mps": 10.0,
+  "markers_per_face": 84,
+  "outputs": {
+    "fields_npz": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_true_full_domain_two_flap_fine_grid_4x640x640_step1_p4096\\true_sharp_fsi_4x640x640_step1_p4096_fields.npz",
+    "history_csv": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_true_full_domain_two_flap_fine_grid_4x640x640_step1_p4096\\true_sharp_fsi_4x640x640_step1_p4096_history.csv",
+    "log": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_true_full_domain_two_flap_fine_grid_4x640x640_step1_p4096\\true_sharp_fsi_4x640x640_step1_p4096.log",
+    "process_json": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_true_full_domain_two_flap_fine_grid_4x640x640_step1_p4096\\true_sharp_fsi_4x640x640_step1_p4096_process.json",
+    "report_json": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_true_full_domain_two_flap_fine_grid_4x640x640_step1_p4096\\true_sharp_fsi_4x640x640_step1_p4096_report.json"
+  },
+  "projection_iterations": 4096,
+  "runner": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\_codex_validation\\official_ansys_fluent_vertical_flap_full_domain_solve_20260622\\run_full_domain_two_flap_true_sharp_fsi.py",
+  "solid_particle_counts": [
+    1,
+    80,
+    24
+  ],
+  "solid_substeps": 200,
+  "status": "failed",
+  "step_count": 1,
+  "traceback": "Traceback (most recent call last):\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\tmp\\run_true_full_domain_fine_grid_4x640x640_step1.py\", line 83, in main\n    report = runner.run(\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\_codex_validation\\official_ansys_fluent_vertical_flap_full_domain_solve_20260622\\run_full_domain_two_flap_true_sharp_fsi.py\", line 697, in run\n    latest_report = advance_hibm_mpm_sharp_mpm_step(\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\simulation_core\\coupling\\hibm_mpm\\core.py\", line 12101, in advance_hibm_mpm_sharp_mpm_step\n    mpm_report = solid_step()\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\_codex_validation\\official_ansys_fluent_vertical_flap_full_domain_solve_20260622\\run_full_domain_two_flap_true_sharp_fsi.py\", line 560, in solid_step\n    latest = solid.step(\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\simulation_core\\solids\\neo_hookean_mpm.py\", line 1057, in step\n    return self.report()\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\simulation_core\\solids\\neo_hookean_mpm.py\", line 1098, in report\n    _raise_if_out_of_bounds_exceeds_tolerance(\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\simulation_core\\solids\\neo_hookean_mpm.py\", line 35, in _raise_if_out_of_bounds_exceeds_tolerance\n    raise RuntimeError(\nRuntimeError: 108 of 3840 MPM particles are outside the background grid; refusing to advance a partial solid\n"
+}

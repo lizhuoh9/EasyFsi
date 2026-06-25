@@ -1,0 +1,31 @@
+{
+  "case": "full-domain-two-flap-true-sharp-fsi",
+  "elapsed_s": 527.0610559000052,
+  "error": "HIBM-MPM pressure solve failed before stress sampling; refusing to sample marker tractions or scatter MPM forces from an invalid pressure field (action=reported_cleared_pressure_correction, cg_relative_residual_max=0.015882)",
+  "fluid_substeps": 2,
+  "grid_nodes": [
+    4,
+    640,
+    640
+  ],
+  "inlet_velocity_mps": 10.0,
+  "markers_per_face": 84,
+  "outputs": {
+    "fields_npz": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_true_full_domain_two_flap_fine_grid_4x640x640_step1\\true_sharp_fsi_4x640x640_step1_fields.npz",
+    "history_csv": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_true_full_domain_two_flap_fine_grid_4x640x640_step1\\true_sharp_fsi_4x640x640_step1_history.csv",
+    "log": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_true_full_domain_two_flap_fine_grid_4x640x640_step1\\true_sharp_fsi_4x640x640_step1.log",
+    "process_json": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_true_full_domain_two_flap_fine_grid_4x640x640_step1\\true_sharp_fsi_4x640x640_step1_process.json",
+    "report_json": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_true_full_domain_two_flap_fine_grid_4x640x640_step1\\true_sharp_fsi_4x640x640_step1_report.json"
+  },
+  "projection_iterations": 1080,
+  "runner": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\_codex_validation\\official_ansys_fluent_vertical_flap_full_domain_solve_20260622\\run_full_domain_two_flap_true_sharp_fsi.py",
+  "solid_particle_counts": [
+    1,
+    80,
+    24
+  ],
+  "solid_substeps": 200,
+  "status": "failed",
+  "step_count": 1,
+  "traceback": "Traceback (most recent call last):\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\tmp\\run_true_full_domain_fine_grid_4x640x640_step1.py\", line 69, in main\n    report = runner.run(\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\_codex_validation\\official_ansys_fluent_vertical_flap_full_domain_solve_20260622\\run_full_domain_two_flap_true_sharp_fsi.py\", line 697, in run\n    latest_report = advance_hibm_mpm_sharp_mpm_step(\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\simulation_core\\coupling\\hibm_mpm\\core.py\", line 12030, in advance_hibm_mpm_sharp_mpm_step\n    load_report = assemble_hibm_mpm_sharp_fluid_to_mpm_loads(\n  File \"D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\simulation_core\\coupling\\hibm_mpm\\core.py\", line 11748, in assemble_hibm_mpm_sharp_fluid_to_mpm_loads\n    raise RuntimeError(\nRuntimeError: HIBM-MPM pressure solve failed before stress sampling; refusing to sample marker tractions or scatter MPM forces from an invalid pressure field (action=reported_cleared_pressure_correction, cg_relative_residual_max=0.015882)\n"
+}

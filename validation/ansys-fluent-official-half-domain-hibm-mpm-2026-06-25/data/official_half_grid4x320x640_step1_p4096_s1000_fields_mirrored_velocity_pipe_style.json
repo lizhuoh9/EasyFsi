@@ -1,0 +1,27 @@
+{
+  "display_grid_after_symmetry_mirror": [
+    4,
+    640,
+    640
+  ],
+  "duct_length_m": 0.1,
+  "fields_npz": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_fields.npz",
+  "flap_count_displayed": 2,
+  "flap_count_modeled": 1,
+  "flip_z_for_reference": true,
+  "full_duct_height_m": 0.04,
+  "grid_nodes_modeled_half": [
+    4,
+    320,
+    640
+  ],
+  "inlet_velocity_mps": 10.0,
+  "model": "ANSYS Fluent official half-domain, mirrored for display",
+  "modeled_half_height_m": 0.02,
+  "png": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_fields_mirrored_velocity_pipe_style.png",
+  "solver": "local HIBM-MPM advance_hibm_mpm_sharp_mpm_step",
+  "speed_max_mps": 57.63432607421225,
+  "speed_p999_mps": 28.28245465502133,
+  "speed_p99_mps": 25.493638472964392,
+  "x_index": 2
+}

@@ -1,0 +1,63 @@
+{
+  "ansys_tutorial": {
+    "title": "Modeling Two-Way Fluid-Structure Interaction (FSI) Within Fluent",
+    "url": "https://ansyshelp.ansys.com/public/views/secured/corp/v251/en/flu_tg/flu_tg_fsi_2way.html"
+  },
+  "official_assets": {
+    "downloaded_locally_for_measurement": "fsi_2way.zip",
+    "not_committed_reason": "The raw ANSYS tutorial zip, mesh, and journal are third-party tutorial assets; this validation package commits only extracted parameters and locally generated HIBM-MPM outputs."
+  },
+  "extracted_from_tutorial_and_journal": {
+    "duct_length_m": 0.1,
+    "full_duct_height_m": 0.04,
+    "modeled_domain": "lower-symmetry-half",
+    "modeled_half_height_m": 0.02,
+    "flap_height_m": 0.01,
+    "flap_thickness_m": 0.003,
+    "flap_streamwise_min_m": 0.05,
+    "flap_streamwise_max_m": 0.053,
+    "fluid": "air",
+    "inlet_velocity_mps": 10.0,
+    "outlet": "pressure-outlet",
+    "symmetry_display": "Mirror the half-domain about the centerline for the two-flap view.",
+    "solid_material": "silicone rubber",
+    "solid_density_kgm3": 1600.0,
+    "young_modulus_pa": 1000000.0,
+    "poisson_ratio": 0.47,
+    "fluent_display_velocity_range_mps": [
+      0.0,
+      28.0219
+    ],
+    "fluent_animation_velocity_range_mps": [
+      20.0,
+      29.0
+    ],
+    "time_step_s": 0.0005,
+    "tutorial_time_steps": 50,
+    "max_iterations_per_time_step": 40
+  },
+  "local_hibm_mpm_run": {
+    "solver": "advance_hibm_mpm_sharp_mpm_step",
+    "interpreter": "D:/working/taichi/env/python.exe",
+    "modeled_grid_nodes": [
+      4,
+      320,
+      640
+    ],
+    "display_grid_after_symmetry_mirror": [
+      4,
+      640,
+      640
+    ],
+    "step_count": 1,
+    "projection_iterations_actual": 4096,
+    "fluid_substeps": 2,
+    "solid_substeps": 1000,
+    "solid_particle_counts": [
+      1,
+      80,
+      24
+    ],
+    "markers_per_face": 84
+  }
+}

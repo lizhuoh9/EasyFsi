@@ -1,0 +1,59 @@
+{
+  "boundary_conditions": {
+    "pressure_outlet_zmin_pa": 0.0,
+    "symmetry_boundary": "modeled half-domain top boundary y=0.02 m, mirrored only for display",
+    "velocity_inlet_zmax_mps": 10.0
+  },
+  "case": "ansys-fluent-official-half-domain-single-flap",
+  "completed_steps": 1,
+  "elapsed_s": 738.2633276999986,
+  "flap_count_displayed_after_symmetry_mirror": 2,
+  "flap_count_modeled": 1,
+  "fluid_speed_max_mps": 60.13129425048828,
+  "fluid_speed_p999_mps": 28.5929762916567,
+  "fluid_speed_p99_mps": 25.523324451446538,
+  "fluid_substeps": 2,
+  "full_domain_two_flap": false,
+  "grid_nodes": [
+    4,
+    320,
+    640
+  ],
+  "marker_force_z_n": -0.00037221164064638377,
+  "markers_per_face": 84,
+  "max_displacement_m": 6.000609005241131e-07,
+  "official_geometry_m": {
+    "duct_length": 0.1,
+    "flap_height": 0.01,
+    "flap_thickness": 0.003,
+    "flap_z_max": 0.053,
+    "flap_z_min": 0.05,
+    "full_duct_height": 0.04,
+    "modeled_half_height": 0.02
+  },
+  "official_half_domain": true,
+  "official_source": {
+    "journal": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\_codex_validation\\official_ansys_fluent_fsi_2way_source_20260625\\unzipped\\fsi_2way\\steady_fluid_flow.jou",
+    "mesh": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\_codex_validation\\official_ansys_fluent_fsi_2way_source_20260625\\unzipped\\fsi_2way\\flap.msh",
+    "tutorial_url": "https://ansyshelp.ansys.com/public/views/secured/corp/v251/en/flu_tg/flu_tg_fsi_2way.html"
+  },
+  "outputs": {
+    "fields_npz": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_fields.npz",
+    "history_csv": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_history.csv",
+    "log": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000.log",
+    "process_json": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_process.json",
+    "report_json": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_report.json"
+  },
+  "projection_iterations": 4096,
+  "solid_particle_counts": [
+    1,
+    80,
+    24
+  ],
+  "solid_substeps": 1000,
+  "solver": "local HIBM-MPM advance_hibm_mpm_sharp_mpm_step",
+  "status": "completed",
+  "step_count": 1,
+  "stress_invalid_marker_count": 0,
+  "stress_valid_marker_count": 168
+}

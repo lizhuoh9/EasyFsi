@@ -1,0 +1,4226 @@
+{
+  "case": "full-domain-two-flap-true-sharp-fsi",
+  "completed_steps": 1,
+  "config": {
+    "air_density_kgm3": 1.225,
+    "air_viscosity_pa_s": 1.8e-05,
+    "displacement_tolerance": 0.05,
+    "dt_s": 0.0005,
+    "duct_height_m": 0.04,
+    "duct_length_m": 0.1,
+    "enforce_plane_strain_x": true,
+    "flap_height_m": 0.01,
+    "flap_thickness_m": 0.003,
+    "flow_cg_tolerance": 1e-06,
+    "flow_divergence_cleanup_iterations": 0,
+    "flow_pressure_solver": "fv_cg",
+    "flow_projection_iterations": 1080,
+    "grid_nodes": [
+      4,
+      320,
+      640
+    ],
+    "inlet_velocity_mps": 10.0,
+    "marker_count": 336,
+    "mpm_support_radius_m": 0.0003125,
+    "poisson_ratio": 0.47,
+    "solid_density_kgm3": 1600.0,
+    "solid_particle_counts": [
+      1,
+      80,
+      24
+    ],
+    "solid_substeps": 1000,
+    "span_m": 0.003,
+    "step_count": 1,
+    "velocity_damping": 0.995,
+    "velocity_peak_tolerance": 0.05,
+    "young_modulus_pa": 1000000.0
+  },
+  "field_snapshot_npz": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_fields.npz",
+  "field_speed_metrics": {
+    "fluid_speed_max_mps": 60.13129425048828,
+    "fluid_speed_p999_mps": 28.5929762916567,
+    "fluid_speed_p99_mps": 25.523324451446538
+  },
+  "fixed_end_definition": {
+    "lower": "bottom root row fixed",
+    "upper": "top root row fixed"
+  },
+  "fixed_root_max_displacement_m": 0.0,
+  "flap_count": 2,
+  "full_domain_two_flap": true,
+  "history": [
+    {
+      "fixed_root_max_displacement_m": 0.0,
+      "fluid_speed_max_mps": 60.13129425048828,
+      "fluid_speed_p999_mps": 28.5929762916567,
+      "fluid_speed_p99_mps": 25.523324451446538,
+      "lower_tip_mean_displacement_m": [
+        0.0,
+        3.880510579534757e-09,
+        -5.389253487919632e-07
+      ],
+      "marker_face_diagnostics": {
+        "lower_minus_z": {
+          "base_pressure_found_count": 0,
+          "force_n": [
+            0.0,
+            0.0,
+            -0.0001860586092825842
+          ],
+          "inside_pressure_found_count": 84,
+          "invalid_marker_count": 0,
+          "invalid_reason_counts": {},
+          "marker_count": 84,
+          "max_abs_traction_pa": 11.346274204516158,
+          "outside_pressure_found_count": 84,
+          "pressure_anchor_available_count": 84,
+          "valid_marker_count": 84
+        },
+        "lower_plus_z": {
+          "base_pressure_found_count": 0,
+          "force_n": [
+            0.0,
+            0.0,
+            -0.00018615303136379957
+          ],
+          "inside_pressure_found_count": 84,
+          "invalid_marker_count": 0,
+          "invalid_reason_counts": {},
+          "marker_count": 84,
+          "max_abs_traction_pa": 11.655470912828017,
+          "outside_pressure_found_count": 84,
+          "pressure_anchor_available_count": 84,
+          "valid_marker_count": 84
+        }
+      },
+      "marker_force_z_n": -0.00037221164064638377,
+      "max_displacement_m": 6.000609005241131e-07,
+      "next_pressure_neumann_max_abs_rhs": 0.0,
+      "next_velocity_dirichlet_boundary_velocity_only_rows": 1429,
+      "next_velocity_dirichlet_max_abs_velocity_mps": 0.0023190479259938,
+      "next_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": 7.935100078582764,
+      "no_slip_max_residual_mps": 0.0,
+      "post_solid_no_slip_max_residual_mps": 3.520450263749808e-06,
+      "pressure_neumann_max_abs_rhs": 120260464.0,
+      "projection_l2": 755.6967834523954,
+      "projection_max_abs": 105204.671875,
+      "scatter_active_particle_count": 1664,
+      "step": 1,
+      "stress_invalid_marker_count": 0,
+      "stress_valid_marker_count": 168,
+      "surface_feedback_max_marker_speed_mps": 0.002319385763257742,
+      "time_s": 0.0005,
+      "velocity_dirichlet_boundary_velocity_only_rows": 1430,
+      "velocity_dirichlet_max_abs_velocity_mps": 0.0,
+      "velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": 7.829057693481445
+    }
+  ],
+  "latest_preflow_load_report": null,
+  "latest_step_report": {
+    "fluid_to_mpm_loads": {
+      "air_backed_cell_count": -1,
+      "air_backed_cell_volume_m3": -1.0,
+      "air_backed_component_count": -1,
+      "air_backed_reachability_barrier_cell_count": -1,
+      "air_backed_seed_fallback_cell_count": -1,
+      "air_backed_seed_marker_count": -1,
+      "air_backed_seed_missed_marker_count": -1,
+      "boundary_conditions": {
+        "inactive_internal_node_count": 15868,
+        "max_abs_velocity_mps": 0.0,
+        "no_slip_dirichlet_count": 19244,
+        "pressure_neumann_count": 19244
+      },
+      "fluid_predictor_applied": true,
+      "fluid_projection": {
+        "cg_breakdown": "",
+        "cg_breakdown_code": 0,
+        "cg_breakdown_count": 0,
+        "cg_breakdown_dAd": 0.0,
+        "cg_converged_all": true,
+        "cg_host_residual_checks": 21110,
+        "cg_initial_relative_residual_max": 3.8673839142110107,
+        "cg_iterations_max": 5587.0,
+        "cg_iterations_total": 42234,
+        "cg_mean_host_reads": 0,
+        "cg_mean_projection_count": 0,
+        "cg_project_calls": 8,
+        "cg_relative_residual_max": 9.968245429508608e-07,
+        "cg_restart_count": 45,
+        "cg_restart_count_measured": true,
+        "cg_restart_policy": "periodic_exact_residual+bicgstab_fallback",
+        "cg_unreached_component_count": 0,
+        "cg_unreached_component_largest_cell_count": 0,
+        "cg_unreached_component_overflow": false,
+        "cg_unreached_component_raw_count": 0,
+        "cg_unreached_component_singleton_count": 0,
+        "cg_unreached_component_small_cell_count": 0,
+        "cg_unreached_component_small_count": 0,
+        "cg_unreached_component_small_threshold_cells": 128,
+        "cg_unreached_set_mean_projection_count": 0,
+        "fluid_advection_scheme": "rk2",
+        "fluid_substeps": 2,
+        "hibm_post_dirichlet_consistency_projection_applied": true,
+        "hibm_post_dirichlet_consistency_projection_count": 1,
+        "hibm_post_dirichlet_consistency_projection_index": 1,
+        "hibm_pressure_component_labels_converged": true,
+        "hibm_pressure_filled_cell_count": -1,
+        "hibm_pressure_reachability_converged": true,
+        "hibm_pressure_reachability_revision": 9,
+        "hibm_pressure_reachability_valid": true,
+        "hibm_pressure_unreached_cell_count": 0,
+        "hibm_projection_overflow_singleton_cleanup_cell_count": 0,
+        "hibm_projection_overflow_singleton_cleanup_component_count": 0,
+        "hibm_projection_stage": "post_dirichlet_reconstruction_consistency",
+        "hibm_projection_tiny_unreached_cleanup_cell_count": 0,
+        "hibm_projection_tiny_unreached_cleanup_component_count": 0,
+        "hibm_projection_topology_mutated": false,
+        "hibm_solid_band_enclosed_water_cells": 0,
+        "hibm_solid_band_interior_cells": 0,
+        "hibm_solid_band_last_marked_increment": 0,
+        "hibm_solid_band_mask_protected_cells": 0,
+        "hibm_solid_band_velocity_dirichlet_protected_cells": 0,
+        "hibm_unreached_component_rhs_integral_max_abs": 0.0,
+        "hibm_unreached_component_rhs_mean_max_abs": 0.0,
+        "hibm_unreached_incompatible_component_count": 0,
+        "interior_l2": 686.8090927413608,
+        "interior_max_abs": 101380.0625,
+        "interior_pressure_correctable_cell_count": 388413,
+        "interior_pressure_correctable_l2": 686.8090927413706,
+        "interior_pressure_correctable_max_abs": 101380.0625,
+        "interior_pressure_correctable_raw_l2": 686.8090927413691,
+        "interior_pressure_correctable_raw_max_abs": 101380.0625,
+        "interior_pressure_fixed_cell_count": 0,
+        "interior_pressure_fixed_l2": 0.0,
+        "interior_pressure_fixed_max_abs": 0.0,
+        "interior_pressure_fixed_raw_l2": 0.0,
+        "interior_pressure_fixed_raw_max_abs": 0.0,
+        "interior_raw_l2": 686.809092741359,
+        "interior_raw_max_abs": 101380.0625,
+        "l2": 755.6967834523954,
+        "max_abs": 105204.671875,
+        "post_boundary_l2": 755.6967834540221,
+        "post_boundary_max_abs": 105204.671875,
+        "post_boundary_raw_l2": 2691.7469013154573,
+        "post_boundary_raw_max_abs": 105204.671875,
+        "post_constraint_l2": 755.6967834523954,
+        "post_constraint_max_abs": 105204.671875,
+        "post_constraint_raw_l2": 2691.746901315045,
+        "post_constraint_raw_max_abs": 105204.671875,
+        "pre_projection_l2": 1660.8217060689187,
+        "pre_projection_max_abs": 295229.0625,
+        "pre_projection_raw_l2": 3071.2787162762697,
+        "pre_projection_raw_max_abs": 295229.0625,
+        "pressure_correctable_cell_count": 785518,
+        "pressure_correctable_l2": 755.6967834523937,
+        "pressure_correctable_max_abs": 105204.671875,
+        "pressure_correctable_raw_l2": 2691.746901315045,
+        "pressure_correctable_raw_max_abs": 105204.671875,
+        "pressure_fixed_cell_count": 0,
+        "pressure_fixed_l2": 0.0,
+        "pressure_fixed_max_abs": 0.0,
+        "pressure_fixed_raw_l2": 0.0,
+        "pressure_fixed_raw_max_abs": 0.0,
+        "pressure_interface_matrix_active": true,
+        "pressure_interface_matrix_active_cells": 2322,
+        "pressure_interface_matrix_diagonal_integral": 0.7383581183144996,
+        "pressure_interface_matrix_max_abs_diagonal": 113787196.546875,
+        "pressure_interface_matrix_rhs_integral": 0.0,
+        "pressure_interface_matrix_row_active_count": 1972,
+        "pressure_interface_matrix_row_count": 1972,
+        "pressure_interface_matrix_row_diagonal_integral": 0.7383581426879573,
+        "pressure_interface_matrix_row_diagonal_integral_abs_mismatch": 2.437346346245988e-08,
+        "pressure_interface_matrix_row_diagonal_max_abs_density_mismatch": 4.7742593586444855,
+        "pressure_interface_matrix_row_invalid_count": 0,
+        "pressure_interface_matrix_row_max_transmissibility": 0.0006287357246037573,
+        "pressure_interface_matrix_row_overflow_count": 0,
+        "pressure_interface_neumann_active_rows": 1972,
+        "pressure_nullspace_compatibility_measured": true,
+        "pressure_nullspace_policy": "pressure_outlet_dirichlet",
+        "pressure_nullspace_zero_mean_projection_applied": false,
+        "pressure_projection_physical_failure": false,
+        "pressure_projection_physical_failure_action": "none",
+        "pressure_projection_physical_failure_reason": "",
+        "pressure_solve_failed": false,
+        "pressure_solve_failure_action": "none",
+        "pressure_solve_failure_policy": "report",
+        "pressure_solver": "fv_cg",
+        "pressure_solver_force_reason": "",
+        "pressure_solver_forced_to_fv_cg": false,
+        "pressure_solver_requested": "fv_cg",
+        "pressure_system_anchored_by_interface_matrix": false,
+        "projection_l2": 755.6967834540221,
+        "projection_max_abs": 105204.671875,
+        "projection_raw_l2": 2691.7469013154573,
+        "projection_raw_max_abs": 105204.671875,
+        "raw_l2": 2691.746901315045,
+        "raw_max_abs": 105204.671875,
+        "unreached_cell_count": 0,
+        "unreached_cells_with_interface_coupling": 0,
+        "unreached_cells_with_interface_diagonal": 0,
+        "unreached_components_with_interface_hits": 0,
+        "unreached_l2": 0.0,
+        "unreached_max_abs": 0.0,
+        "velocity_dirichlet_boundary_active_cells_max": 1430,
+        "velocity_dirichlet_boundary_active_cells_total": 7150,
+        "velocity_dirichlet_boundary_apply_calls": 5,
+        "velocity_dirichlet_boundary_max_delta_mps": 9.926048278808594,
+        "velocity_dirichlet_boundary_mean_delta_mps": 0.2097319020091237,
+        "velocity_dirichlet_boundary_momentum_delta_n_s": [
+          1.2023698562398794e-10,
+          -2.6242002043597168e-09,
+          -5.105776246239202e-09
+        ],
+        "velocity_dirichlet_far_l2": 343.7030337003994,
+        "velocity_dirichlet_far_max_abs": 79395.78401472112,
+        "velocity_dirichlet_far_raw_l2": 2609.300364402474,
+        "velocity_dirichlet_far_raw_max_abs": 79395.78401472112,
+        "velocity_dirichlet_near_l2": 13812.741577442825,
+        "velocity_dirichlet_near_max_abs": 105204.671875,
+        "velocity_dirichlet_near_raw_l2": 13812.741577442826,
+        "velocity_dirichlet_near_raw_max_abs": 105204.671875
+      },
+      "fluid_stress": {
+        "closure_gradient_missing_marker_count": 0,
+        "far_pressure_anchor_closed_marker_count": 0,
+        "far_pressure_closed_extended_marker_count": 0,
+        "far_pressure_closed_marker_count": 0,
+        "far_pressure_node_anchor_closed_marker_count": 0,
+        "far_pressure_outside_suppressed_marker_count": 0,
+        "invalid_marker_count": 0,
+        "marker_diagnostics": [
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 0,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              5.952380888629705e-05,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 1,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.00017857142665889114,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 2,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.00029761905898340046,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 3,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.00041666667675599456,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 4,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0005357142654247582,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 5,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0006547619123011827,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 6,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0007738095009699464,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 7,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0008928571478463709,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 8,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0010119047947227955,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 9,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0011309523833915591,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 10,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0012499999720603228,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 11,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0013690476771444082,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 12,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0014880952658131719,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 13,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0016071428544819355,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 14,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0017261904431506991,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 15,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0018452381482347846,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 16,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0019642857369035482,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 17,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0020833334419876337,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 18,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0022023809142410755,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 19,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.002321428619325161,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 20,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.002440476091578603,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 21,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0025595237966626883,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 22,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0026785715017467737,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 23,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0027976189740002155,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 24,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.002916666679084301,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 25,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0030357143841683865,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 26,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0031547618564218283,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 27,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0032738095615059137,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 28,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0033928570337593555,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 29,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.003511904738843441,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 30,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0036309524439275265,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 31,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0037499999161809683,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 32,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0038690476212650537,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 33,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0039880950935184956,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 34,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004107142798602581,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 35,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0042261905036866665,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 36,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004345238208770752,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 37,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004464285913854837,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 38,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004583333153277636,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 39,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004702380858361721,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 40,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0048214285634458065,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 41,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004940476268529892,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 42,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005059523973613977,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 43,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005178571213036776,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 44,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005297618918120861,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 45,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0054166666232049465,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 46,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005535714328289032,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 47,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0056547620333731174,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 48,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005773809738457203,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 49,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005892856977880001,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 50,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0060119046829640865,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 51,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.006130952388048172,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 52,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0062500000931322575,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 53,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.006369047798216343,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 54,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.006488095037639141,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 55,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0066071427427232265,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 56,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.006726190447807312,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 57,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0068452381528913975,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 58,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.006964285857975483,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 59,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007083333563059568,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 60,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0072023808024823666,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 61,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007321428507566452,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 62,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0074404762126505375,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 63,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007559523917734623,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 64,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007678571622818708,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 65,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007797618862241507,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 66,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007916666567325592,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 67,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008035714738070965,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 68,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008154761977493763,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 69,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008273809216916561,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 70,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008392857387661934,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 71,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008511904627084732,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 72,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008630952797830105,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 73,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008750000037252903,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 74,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008869047276675701,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 75,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008988095447421074,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 76,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009107142686843872,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 77,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009226190857589245,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 78,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009345238097012043,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 79,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009464285336434841,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 80,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009583333507180214,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 81,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009702380746603012,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 82,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009821428917348385,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 83,
+            "normal": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009940476156771183,
+              0.05307968705892563
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 84,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              5.952380888629705e-05,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 85,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.00017857142665889114,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 86,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.00029761905898340046,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 87,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.00041666667675599456,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 88,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0005357142654247582,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 89,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0006547619123011827,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 90,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0007738095009699464,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 91,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0008928571478463709,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 92,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0010119047947227955,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 93,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0011309523833915591,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 94,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0012499999720603228,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 95,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0013690476771444082,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 96,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0014880952658131719,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 97,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0016071428544819355,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 98,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0017261904431506991,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 99,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0018452381482347846,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 100,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0019642857369035482,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 101,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0020833334419876337,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 102,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0022023809142410755,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 103,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.002321428619325161,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 104,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.002440476091578603,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 105,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0025595237966626883,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 106,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0026785715017467737,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 107,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0027976189740002155,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 108,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.002916666679084301,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 109,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0030357143841683865,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 110,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0031547618564218283,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 111,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0032738095615059137,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 112,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0033928570337593555,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 113,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.003511904738843441,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 114,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0036309524439275265,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 115,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0037499999161809683,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 116,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0038690476212650537,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 117,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0039880950935184956,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 118,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004107142798602581,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 119,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0042261905036866665,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 120,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004345238208770752,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 121,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004464285913854837,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 122,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004583333153277636,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 123,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004702380858361721,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 124,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0048214285634458065,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 125,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.004940476268529892,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 126,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005059523973613977,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 127,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005178571213036776,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 128,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005297618918120861,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 129,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0054166666232049465,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 130,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005535714328289032,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 131,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0056547620333731174,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 132,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005773809738457203,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 133,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.005892856977880001,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 134,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0060119046829640865,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 135,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.006130952388048172,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 136,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0062500000931322575,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 137,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.006369047798216343,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 138,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.006488095037639141,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 139,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0066071427427232265,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 140,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.006726190447807312,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 141,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0068452381528913975,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 142,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.006964285857975483,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 143,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007083333563059568,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 144,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0072023808024823666,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 145,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007321428507566452,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 146,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.0074404762126505375,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 147,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007559523917734623,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 148,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007678571622818708,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 149,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007797618862241507,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 150,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.007916666567325592,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 151,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008035714738070965,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 152,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008154761977493763,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 153,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008273809216916561,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 154,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008392857387661934,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 155,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008511904627084732,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 156,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008630952797830105,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 157,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008750000037252903,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 158,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008869047276675701,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 159,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.008988095447421074,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 160,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009107142686843872,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 161,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009226190857589245,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 162,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009345238097012043,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 163,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009464285336434841,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 164,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009583333507180214,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 165,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009702380746603012,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 166,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009821428917348385,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          },
+          {
+            "base_pressure_found": false,
+            "inside_pressure_found": true,
+            "invalid_reason": "none",
+            "marker_index": 167,
+            "normal": [
+              0.0,
+              0.0,
+              -1.0
+            ],
+            "outside_pressure_found": true,
+            "position_m": [
+              0.001500000013038516,
+              0.009940476156771183,
+              0.04992031306028366
+            ],
+            "pressure_anchor_available": true,
+            "region_id": 101,
+            "valid": true
+          }
+        ],
+        "max_abs_traction_pa": 11.655470912828017,
+        "one_sided_extended_marker_count": 0,
+        "one_sided_gradient_missing_marker_count": 0,
+        "one_sided_pressure_marker_count": 0,
+        "two_sided_extended_marker_count": 168,
+        "two_sided_pressure_marker_count": 168,
+        "valid_marker_count": 168,
+        "viscous_gradient_invalid_marker_count": 0
+      },
+      "ib_node_search": {
+        "external_ib_node_count": 19244,
+        "internal_node_count": 15868,
+        "invalid_projection_count": 0,
+        "near_boundary_node_count": 35112
+      },
+      "internal_obstacle_cell_count": 15868,
+      "marker_forces": {
+        "action_reaction_residual_n": 0.0,
+        "fluid_reaction_force_n": [
+          -0.0,
+          -0.0,
+          0.00037221164064638377
+        ],
+        "primary_marker_count": 168,
+        "primary_marker_force_n": [
+          0.0,
+          0.0,
+          -0.0003722116406463838
+        ],
+        "primary_marker_force_norm_max_n": 4.1626681253190784e-06,
+        "primary_marker_force_norm_sum_n": 0.0003722116406463838,
+        "primary_stress_invalid_marker_count": 0,
+        "primary_stress_valid_marker_count": 168,
+        "secondary_marker_count": 0,
+        "secondary_marker_force_n": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "secondary_marker_force_norm_max_n": 0.0,
+        "secondary_marker_force_norm_sum_n": 0.0,
+        "secondary_stress_invalid_marker_count": 0,
+        "secondary_stress_valid_marker_count": 0,
+        "total_marker_count": 168,
+        "total_marker_force_n": [
+          0.0,
+          0.0,
+          -0.00037221164064638377
+        ],
+        "total_marker_force_norm_max_n": 4.1626681253190784e-06,
+        "total_marker_force_norm_sum_n": 0.0003722116406463839
+      },
+      "mpm_external_force_clear": {
+        "cleared_particle_count": 1920,
+        "max_abs_external_force_before_n": 0.0
+      },
+      "mpm_force_scatter": {
+        "action_reaction_residual_n": 2.2584684773382935e-12,
+        "active_marker_count": 168,
+        "active_particle_count": 1664,
+        "invalid_marker_count": 0,
+        "total_marker_force_n": [
+          0.0,
+          0.0,
+          -0.0003722116406463837
+        ],
+        "total_mpm_external_force_n": [
+          0.0,
+          0.0,
+          -0.0003722116429048522
+        ]
+      },
+      "no_slip_residual": {
+        "direct_sample_marker_count": 0,
+        "invalid_marker_count": 0,
+        "l2_no_slip_residual_mps": 0.0,
+        "max_no_slip_residual_mps": 0.0,
+        "nearest_fluid_sample_marker_count": 0,
+        "no_fluid_sample_marker_count": 0,
+        "normal_walk_sample_marker_count": 168,
+        "other_region_invalid_marker_count": 0,
+        "other_region_valid_marker_count": 0,
+        "primary_region_invalid_marker_count": 0,
+        "primary_region_valid_marker_count": 168,
+        "secondary_region_invalid_marker_count": 0,
+        "secondary_region_valid_marker_count": 0,
+        "valid_marker_count": 168,
+        "zero_normal_marker_count": 0
+      },
+      "overflow_singleton_cleanup_cell_count": 0,
+      "overflow_singleton_cleanup_component_count": 0,
+      "pressure_disconnected_nonprojectable_cell_count": 0,
+      "pressure_disconnected_region": {
+        "cell_count": 1430,
+        "component_count": 0,
+        "component_labels_converged": true,
+        "component_overflow": false,
+        "component_raw_count": 0,
+        "largest_component_cell_count": 0,
+        "max_i": 3,
+        "max_j": 193,
+        "max_k": 353,
+        "min_i": 0,
+        "min_j": 0,
+        "min_k": 305,
+        "other_region_stencil_cell_count": 0,
+        "primary_region_stencil_cell_count": 1430,
+        "secondary_region_stencil_cell_count": 0,
+        "singleton_component_count": 0,
+        "small_component_cell_count": 0,
+        "small_component_count": 0,
+        "small_component_threshold_cells": 128,
+        "unassigned_region_stencil_cell_count": 0
+      },
+      "pressure_neumann": {
+        "active_pressure_neumann_marker_count": 168,
+        "active_pressure_neumann_rows": 1972,
+        "duplicate_owner_row_count": 16501,
+        "invalid_bad_marker_row_count": 0,
+        "invalid_nonpositive_volume_row_count": 0,
+        "invalid_reconstruction_row_count": 0,
+        "invalid_unreconstructable_row_count": 0,
+        "max_abs_rhs": 120260464.0,
+        "max_diagonal_per_m2": 6001470.5,
+        "max_owner_slot_count": 384,
+        "max_pressure_neumann_rows_per_marker": 1412,
+        "max_raw_transmissibility_m": 4.395608266349882e-05,
+        "max_reconstruction_gap_m": 0.00015625357627868652,
+        "max_transmissibility_limit_m": 0.0008791208383627236,
+        "max_transmissibility_m": 4.395608266349882e-05,
+        "min_reconstruction_gap_m": 0.00015624985098838806,
+        "overflow_owner_row_count": 0,
+        "pressure_interface_row_list_count": 1972,
+        "pressure_interface_row_list_enabled": true,
+        "relocated_obstacle_owner_row_count": 17061,
+        "rhs_integral": 0.0,
+        "skipped_obstacle_owner_row_count": 0,
+        "skipped_pressure_boundary_adjacent_row_count": 771,
+        "skipped_velocity_dirichlet_row_count": 0,
+        "transmissibility_capped_row_count": 0
+      },
+      "pressure_neumann_gradient": {
+        "active_marker_count": 16172,
+        "limited_gradient_count": 0,
+        "max_abs_gradient_pa_per_m": 133587.3125,
+        "max_raw_abs_gradient_pa_per_m": 133587.3125
+      },
+      "pressure_neumann_invalid_diagnostic_rows": [],
+      "row_cloud_orphan_cell_count": 0,
+      "row_cloud_orphan_component_count": 0,
+      "solid_band_enclosed_water_cell_count": 0,
+      "solid_band_interior_cell_count": 0,
+      "solid_band_mask_protected_cell_count": 0,
+      "solid_band_nonprojectable_cell_count": 17814,
+      "solid_band_velocity_dirichlet_protected_cell_count": 0,
+      "velocity_dirichlet": {
+        "active_velocity_dirichlet_rows": 1430,
+        "boundary_velocity_only_row_count": 1430,
+        "inactive_obstacle_rows": 0,
+        "invalid_no_fluid_sample_row_count": 0,
+        "invalid_node_behind_boundary_row_count": 0,
+        "invalid_node_beyond_interior_row_count": 0,
+        "invalid_nonpositive_gap_row_count": 0,
+        "invalid_reconstruction_row_count": 0,
+        "max_abs_velocity_mps": 0.0,
+        "max_projection_weight": 0.5930479764938354,
+        "min_projection_weight": 0.06644241511821747,
+        "narrow_gap_boundary_velocity_row_count": 0,
+        "other_region_active_rows": 0,
+        "primary_region_active_rows": 1430,
+        "raw_reconstructed_max_abs_velocity_mps": 7.829057693481445,
+        "relocated_row_count": 0,
+        "relocation_blocked_row_count": 0,
+        "relocation_merged_row_count": 17814,
+        "secondary_region_active_rows": 0,
+        "unassigned_region_active_rows": 0
+      }
+    },
+    "mpm": {
+      "active_grid_nodes": 10428,
+      "deformation_clamp_count": 0,
+      "external_force_n": [
+        0.0,
+        0.0,
+        -0.00036932926741428673
+      ],
+      "grid_momentum_kg_mps": [
+        1.5982029407030952e-17,
+        2.46803827375075e-10,
+        -1.724188791740744e-07
+      ],
+      "grid_out_of_bounds_particle_count": 0,
+      "grid_spacing_m": [
+        0.00075,
+        6.367187500000001e-05,
+        0.00015625
+      ],
+      "max_abs_j": 1.000003457069397,
+      "max_radial_stretch_error": 0.001113295555114746,
+      "max_speed_mps": 0.002474850043654442,
+      "mean_radial_stretch": 1.0000035603841146,
+      "particle_count": 1920,
+      "particle_momentum_kg_mps": [
+        0.0,
+        2.3980151198088606e-10,
+        -1.7224975579210877e-07
+      ],
+      "particle_spacing_m": 0.0003605614062046638,
+      "primary_mean_displacement_m": [
+        0.0,
+        6.278772464914558e-10,
+        -2.907996531575918e-07
+      ],
+      "primary_mean_velocity_mps": [
+        -9.494009311356023e-14,
+        1.7139146317883084e-06,
+        -0.0011973573515812557
+      ],
+      "primary_particle_count": 1920,
+      "secondary_mean_displacement_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "secondary_mean_velocity_mps": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "secondary_particle_count": 0,
+      "total_mass_kg": 0.00014400093641597778,
+      "total_volume_m3": 8.999926137676084e-08,
+      "transfer_relative_error": 1.4834362218607566e-06
+    },
+    "next_boundary_conditions": {
+      "inactive_internal_node_count": 15868,
+      "max_abs_velocity_mps": 0.0023190479259938,
+      "no_slip_dirichlet_count": 19242,
+      "pressure_neumann_count": 19242
+    },
+    "next_ib_node_search": {
+      "external_ib_node_count": 19242,
+      "internal_node_count": 15868,
+      "invalid_projection_count": 0,
+      "near_boundary_node_count": 35110
+    },
+    "next_internal_obstacle_cell_count": 15868,
+    "next_overflow_singleton_cleanup_cell_count": 0,
+    "next_overflow_singleton_cleanup_component_count": 0,
+    "next_pressure_disconnected_nonprojectable_cell_count": 0,
+    "next_pressure_disconnected_region": {
+      "cell_count": 1429,
+      "component_count": 0,
+      "component_labels_converged": true,
+      "component_overflow": false,
+      "component_raw_count": 0,
+      "largest_component_cell_count": 0,
+      "max_i": 3,
+      "max_j": 193,
+      "max_k": 353,
+      "min_i": 0,
+      "min_j": 0,
+      "min_k": 305,
+      "other_region_stencil_cell_count": 0,
+      "primary_region_stencil_cell_count": 1429,
+      "secondary_region_stencil_cell_count": 0,
+      "singleton_component_count": 0,
+      "small_component_cell_count": 0,
+      "small_component_count": 0,
+      "small_component_threshold_cells": 128,
+      "unassigned_region_stencil_cell_count": 0
+    },
+    "next_pressure_neumann": {
+      "active_pressure_neumann_marker_count": 168,
+      "active_pressure_neumann_rows": 1972,
+      "duplicate_owner_row_count": 16499,
+      "invalid_bad_marker_row_count": 0,
+      "invalid_nonpositive_volume_row_count": 0,
+      "invalid_reconstruction_row_count": 0,
+      "invalid_unreconstructable_row_count": 0,
+      "max_abs_rhs": 0.0,
+      "max_diagonal_per_m2": 6001470.5,
+      "max_owner_slot_count": 384,
+      "max_pressure_neumann_rows_per_marker": 1410,
+      "max_raw_transmissibility_m": 4.395608266349882e-05,
+      "max_reconstruction_gap_m": 0.00015625357627868652,
+      "max_transmissibility_limit_m": 0.0008791208383627236,
+      "max_transmissibility_m": 4.395608266349882e-05,
+      "min_reconstruction_gap_m": 0.00015624985098838806,
+      "overflow_owner_row_count": 0,
+      "pressure_interface_row_list_count": 1972,
+      "pressure_interface_row_list_enabled": true,
+      "relocated_obstacle_owner_row_count": 17060,
+      "rhs_integral": 0.0,
+      "skipped_obstacle_owner_row_count": 0,
+      "skipped_pressure_boundary_adjacent_row_count": 771,
+      "skipped_velocity_dirichlet_row_count": 0,
+      "transmissibility_capped_row_count": 0
+    },
+    "next_pressure_neumann_gradient": {
+      "active_marker_count": 16172,
+      "limited_gradient_count": 0,
+      "max_abs_gradient_pa_per_m": 24458.40234375,
+      "max_raw_abs_gradient_pa_per_m": 24458.40234375
+    },
+    "next_pressure_neumann_invalid_diagnostic_rows": [],
+    "next_row_cloud_orphan_cell_count": 0,
+    "next_row_cloud_orphan_component_count": 0,
+    "next_solid_band_enclosed_water_cell_count": 0,
+    "next_solid_band_interior_cell_count": 0,
+    "next_solid_band_mask_protected_cell_count": 0,
+    "next_solid_band_nonprojectable_cell_count": 17813,
+    "next_solid_band_velocity_dirichlet_protected_cell_count": 0,
+    "next_velocity_dirichlet": {
+      "active_velocity_dirichlet_rows": 1429,
+      "boundary_velocity_only_row_count": 1429,
+      "inactive_obstacle_rows": 0,
+      "invalid_no_fluid_sample_row_count": 0,
+      "invalid_node_behind_boundary_row_count": 0,
+      "invalid_node_beyond_interior_row_count": 0,
+      "invalid_nonpositive_gap_row_count": 0,
+      "invalid_reconstruction_row_count": 0,
+      "max_abs_velocity_mps": 0.0023190479259938,
+      "max_projection_weight": 0.5930483937263489,
+      "min_projection_weight": 0.06699058413505554,
+      "narrow_gap_boundary_velocity_row_count": 0,
+      "other_region_active_rows": 0,
+      "primary_region_active_rows": 1429,
+      "raw_reconstructed_max_abs_velocity_mps": 7.935100078582764,
+      "relocated_row_count": 0,
+      "relocation_blocked_row_count": 0,
+      "relocation_merged_row_count": 17813,
+      "secondary_region_active_rows": 0,
+      "unassigned_region_active_rows": 0
+    },
+    "post_solid_fluid_projection": {
+      "cg_breakdown": "",
+      "cg_breakdown_code": 0,
+      "cg_breakdown_count": 0,
+      "cg_breakdown_dAd": 0.0,
+      "cg_converged_all": true,
+      "cg_host_residual_checks": 8943,
+      "cg_initial_relative_residual_max": 3.0094177033960636,
+      "cg_iterations_max": 5203,
+      "cg_iterations_total": 20311,
+      "cg_mean_host_reads": 0,
+      "cg_mean_projection_count": 0,
+      "cg_project_calls": 4,
+      "cg_relative_residual_max": 9.883146060464214e-07,
+      "cg_restart_count": 60,
+      "cg_restart_count_measured": true,
+      "cg_restart_policy": "periodic_exact_residual+bicgstab_fallback",
+      "cg_unreached_component_count": 0,
+      "cg_unreached_component_largest_cell_count": 0,
+      "cg_unreached_component_overflow": false,
+      "cg_unreached_component_raw_count": 0,
+      "cg_unreached_component_singleton_count": 0,
+      "cg_unreached_component_small_cell_count": 0,
+      "cg_unreached_component_small_count": 0,
+      "cg_unreached_component_small_threshold_cells": 128,
+      "cg_unreached_set_mean_projection_count": 0,
+      "hibm_post_solid_kinematic_projection_applied": true,
+      "hibm_post_solid_kinematic_projection_count": 1,
+      "hibm_pressure_component_labels_converged": true,
+      "hibm_pressure_filled_cell_count": -1,
+      "hibm_pressure_reachability_converged": true,
+      "hibm_pressure_reachability_revision": 14,
+      "hibm_pressure_reachability_valid": true,
+      "hibm_pressure_unreached_cell_count": 0,
+      "hibm_projection_overflow_singleton_cleanup_cell_count": 0,
+      "hibm_projection_overflow_singleton_cleanup_component_count": 0,
+      "hibm_projection_stage": "post_solid_kinematic_consistency",
+      "hibm_projection_tiny_unreached_cleanup_cell_count": 0,
+      "hibm_projection_tiny_unreached_cleanup_component_count": 0,
+      "hibm_projection_topology_mutated": false,
+      "hibm_solid_band_enclosed_water_cells": 0,
+      "hibm_solid_band_interior_cells": 0,
+      "hibm_solid_band_last_marked_increment": 0,
+      "hibm_solid_band_mask_protected_cells": 0,
+      "hibm_solid_band_velocity_dirichlet_protected_cells": 0,
+      "hibm_unreached_component_rhs_integral_max_abs": 0.0,
+      "hibm_unreached_component_rhs_mean_max_abs": 0.0,
+      "hibm_unreached_incompatible_component_count": 0,
+      "interior_l2": 325.48673046779277,
+      "interior_max_abs": 58466.0703125,
+      "interior_pressure_correctable_cell_count": 388414,
+      "interior_pressure_correctable_l2": 325.48673046779624,
+      "interior_pressure_correctable_max_abs": 58466.0703125,
+      "interior_pressure_correctable_raw_l2": 325.48673046779567,
+      "interior_pressure_correctable_raw_max_abs": 58466.0703125,
+      "interior_pressure_fixed_cell_count": 0,
+      "interior_pressure_fixed_l2": 0.0,
+      "interior_pressure_fixed_max_abs": 0.0,
+      "interior_pressure_fixed_raw_l2": 0.0,
+      "interior_pressure_fixed_raw_max_abs": 0.0,
+      "interior_raw_l2": 325.4867304677926,
+      "interior_raw_max_abs": 58466.0703125,
+      "l2": 342.4545254562149,
+      "max_abs": 58466.0703125,
+      "post_boundary_l2": 342.4545254566874,
+      "post_boundary_max_abs": 58466.0703125,
+      "post_boundary_raw_l2": 2606.087178186263,
+      "post_boundary_raw_max_abs": 64000.00390625,
+      "post_constraint_l2": 342.4545254562149,
+      "post_constraint_max_abs": 58466.0703125,
+      "post_constraint_raw_l2": 2606.0871781858978,
+      "post_constraint_raw_max_abs": 64000.00390625,
+      "pre_projection_l2": 695.6210040419671,
+      "pre_projection_max_abs": 105204.671875,
+      "pre_projection_raw_l2": 2675.500670276505,
+      "pre_projection_raw_max_abs": 105204.671875,
+      "pressure_correctable_cell_count": 785519,
+      "pressure_correctable_l2": 342.45452545621345,
+      "pressure_correctable_max_abs": 58466.0703125,
+      "pressure_correctable_raw_l2": 2606.0871781858996,
+      "pressure_correctable_raw_max_abs": 64000.00390625,
+      "pressure_fixed_cell_count": 0,
+      "pressure_fixed_l2": 0.0,
+      "pressure_fixed_max_abs": 0.0,
+      "pressure_fixed_raw_l2": 0.0,
+      "pressure_fixed_raw_max_abs": 0.0,
+      "pressure_interface_matrix_active": true,
+      "pressure_interface_matrix_active_cells": 2322,
+      "pressure_interface_matrix_diagonal_integral": 0.7383581004658379,
+      "pressure_interface_matrix_max_abs_diagonal": 113787196.546875,
+      "pressure_interface_matrix_rhs_integral": 0.0,
+      "pressure_interface_matrix_row_active_count": 1972,
+      "pressure_interface_matrix_row_count": 1972,
+      "pressure_interface_matrix_row_diagonal_integral": 0.7383581247299844,
+      "pressure_interface_matrix_row_diagonal_integral_abs_mismatch": 2.4264153269193063e-08,
+      "pressure_interface_matrix_row_diagonal_max_abs_density_mismatch": 3.207616448402405,
+      "pressure_interface_matrix_row_invalid_count": 0,
+      "pressure_interface_matrix_row_max_transmissibility": 0.0006287357246037573,
+      "pressure_interface_matrix_row_overflow_count": 0,
+      "pressure_interface_neumann_active_rows": 1972,
+      "pressure_nullspace_compatibility_measured": true,
+      "pressure_nullspace_policy": "pressure_outlet_dirichlet",
+      "pressure_nullspace_zero_mean_projection_applied": false,
+      "pressure_projection_physical_failure": false,
+      "pressure_projection_physical_failure_action": "none",
+      "pressure_projection_physical_failure_reason": "",
+      "pressure_solve_failed": false,
+      "pressure_solve_failure_action": "none",
+      "pressure_solve_failure_policy": "report",
+      "pressure_solver": "fv_cg",
+      "pressure_solver_force_reason": "",
+      "pressure_solver_forced_to_fv_cg": false,
+      "pressure_solver_requested": "fv_cg",
+      "pressure_system_anchored_by_interface_matrix": false,
+      "projection_l2": 342.4545254566874,
+      "projection_max_abs": 58466.0703125,
+      "projection_raw_l2": 2606.087178186263,
+      "projection_raw_max_abs": 64000.00390625,
+      "raw_l2": 2606.0871781858978,
+      "raw_max_abs": 64000.00390625,
+      "unreached_cells_with_interface_coupling": 0,
+      "unreached_cells_with_interface_diagonal": 0,
+      "unreached_components_with_interface_hits": 0,
+      "velocity_dirichlet_boundary_active_cells_max": 1429,
+      "velocity_dirichlet_boundary_active_cells_total": 8574,
+      "velocity_dirichlet_boundary_apply_calls": 6,
+      "velocity_dirichlet_boundary_max_delta_mps": 6.550485610961914,
+      "velocity_dirichlet_boundary_mean_delta_mps": 0.1496395926620274,
+      "velocity_dirichlet_boundary_momentum_delta_n_s": [
+        1.677100559122069e-11,
+        1.1793917984136555e-11,
+        -6.338185106966043e-09
+      ],
+      "velocity_dirichlet_far_l2": 146.36660170262866,
+      "velocity_dirichlet_far_max_abs": 27788.53870498275,
+      "velocity_dirichlet_far_raw_l2": 2590.69927754853,
+      "velocity_dirichlet_far_raw_max_abs": 64000.00390625,
+      "velocity_dirichlet_near_l2": 6355.570418258496,
+      "velocity_dirichlet_near_max_abs": 58466.0703125,
+      "velocity_dirichlet_near_raw_l2": 6355.570418258496,
+      "velocity_dirichlet_near_raw_max_abs": 58466.0703125
+    },
+    "post_solid_kinematic_projection_applied": true,
+    "post_solid_no_slip_residual": {
+      "direct_sample_marker_count": 0,
+      "invalid_marker_count": 0,
+      "l2_no_slip_residual_mps": 5.230301707357848e-07,
+      "max_no_slip_residual_mps": 3.520450263749808e-06,
+      "nearest_fluid_sample_marker_count": 0,
+      "no_fluid_sample_marker_count": 0,
+      "normal_walk_sample_marker_count": 168,
+      "other_region_invalid_marker_count": 0,
+      "other_region_valid_marker_count": 0,
+      "primary_region_invalid_marker_count": 0,
+      "primary_region_valid_marker_count": 168,
+      "secondary_region_invalid_marker_count": 0,
+      "secondary_region_valid_marker_count": 0,
+      "valid_marker_count": 168,
+      "zero_normal_marker_count": 0
+    },
+    "surface_feedback": {
+      "geometry_invalid_marker_count": 0,
+      "geometry_updated_marker_count": 0,
+      "invalid_marker_count": 0,
+      "max_marker_area_change_m2": 0.0,
+      "max_marker_displacement_m": 1.159692942565016e-06,
+      "max_marker_normal_change": 0.0,
+      "max_marker_speed_mps": 0.002319385763257742,
+      "updated_marker_count": 168
+    }
+  },
+  "lower_tip_mean_displacement_m": [
+    0.0,
+    3.880510579534757e-09,
+    -5.389253487919632e-07
+  ],
+  "marker_face_diagnostics": {
+    "lower_minus_z": {
+      "base_pressure_found_count": 0,
+      "force_n": [
+        0.0,
+        0.0,
+        -0.0001860586092825842
+      ],
+      "inside_pressure_found_count": 84,
+      "invalid_marker_count": 0,
+      "invalid_reason_counts": {},
+      "marker_count": 84,
+      "max_abs_traction_pa": 11.346274204516158,
+      "outside_pressure_found_count": 84,
+      "pressure_anchor_available_count": 84,
+      "valid_marker_count": 84
+    },
+    "lower_plus_z": {
+      "base_pressure_found_count": 0,
+      "force_n": [
+        0.0,
+        0.0,
+        -0.00018615303136379957
+      ],
+      "inside_pressure_found_count": 84,
+      "invalid_marker_count": 0,
+      "invalid_reason_counts": {},
+      "marker_count": 84,
+      "max_abs_traction_pa": 11.655470912828017,
+      "outside_pressure_found_count": 84,
+      "pressure_anchor_available_count": 84,
+      "valid_marker_count": 84
+    }
+  },
+  "max_displacement_m": 6.000609005241131e-07,
+  "mpm_support_radius_m": 0.0003125,
+  "preflow_history": [],
+  "preflow_steps": 0,
+  "reference_comparison": {
+    "displacement_within_tolerance": false,
+    "fluid_speed_max_mps": 60.13129425048828,
+    "fluid_speed_p999_mps": 28.5929762916567,
+    "max_displacement_relative_error": 0.9882340999897232,
+    "reference_local_velocity_peak_range_mps": [
+      20.0,
+      29.0
+    ],
+    "reference_max_displacement_m": 5.1e-05,
+    "velocity_peak_metric": "fluid_speed_p999_mps",
+    "velocity_peak_within_reference_range": true
+  },
+  "solver_path": "advance_hibm_mpm_sharp_mpm_step",
+  "terminated_early": false,
+  "termination_reason": "",
+  "thin_wall_pressure_sampling": {
+    "model": "two-sided-fluid-pressure",
+    "one_sided_pressure_region_id": -1,
+    "probe_max_multiplier": 12.0,
+    "two_sided_probe_max_multiplier": 36.1
+  }
+}
