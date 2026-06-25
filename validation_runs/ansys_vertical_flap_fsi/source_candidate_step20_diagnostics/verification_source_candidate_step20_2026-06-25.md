@@ -45,6 +45,23 @@ git diff --check
 - `git diff --check` passed with Windows LF-to-CRLF warnings only.
 - Changed-file credential scan found no credential values; the only match was explanatory verification text about token-pattern scanning.
 
+## Remote CI Query Status
+
+The STEP20 implementation commit was pushed to
+`origin/solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`:
+
+```text
+21d1eb1f4de1f6196af715c799222b1ce5c26d14
+```
+
+Remote GitHub Actions status could not be queried from this workstation because
+GitHub CLI is not authenticated:
+
+```text
+To get started with GitHub CLI, please run:  gh auth login
+Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.
+```
+
 ## Result
 
 best_candidate = source_0p75_ramp5_step20
