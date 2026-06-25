@@ -54,8 +54,14 @@ FEEDBACK_CONSTRAINT_COLUMNS = [
     "fluid_projection_consumed_feedback",
     "fluid_feedback_constraint_marker_count",
     "fluid_feedback_constraint_active_cell_count",
+    "fluid_feedback_constraint_cleared_cell_count",
+    "fluid_feedback_constraint_obstacle_cell_count",
+    "fluid_feedback_constraint_non_obstacle_cell_count",
+    "fluid_feedback_constraint_projection_participating_cell_count",
     "no_slip_residual_before_mps",
     "no_slip_residual_after_mps",
+    "no_slip_target_residual_after_assembly_mps",
+    "no_slip_projected_residual_after_projection_mps",
 ]
 
 HISTORY_COLUMNS = [
@@ -316,11 +322,31 @@ def build_history_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
                 "fluid_feedback_constraint_active_cell_count": _int(
                     entry.get("fluid_feedback_constraint_active_cell_count")
                 ),
+                "fluid_feedback_constraint_cleared_cell_count": _int(
+                    entry.get("fluid_feedback_constraint_cleared_cell_count")
+                ),
+                "fluid_feedback_constraint_obstacle_cell_count": _int(
+                    entry.get("fluid_feedback_constraint_obstacle_cell_count")
+                ),
+                "fluid_feedback_constraint_non_obstacle_cell_count": _int(
+                    entry.get("fluid_feedback_constraint_non_obstacle_cell_count")
+                ),
+                "fluid_feedback_constraint_projection_participating_cell_count": _int(
+                    entry.get(
+                        "fluid_feedback_constraint_projection_participating_cell_count"
+                    )
+                ),
                 "no_slip_residual_before_mps": _number(
                     entry.get("no_slip_residual_before_mps")
                 ),
                 "no_slip_residual_after_mps": _number(
                     entry.get("no_slip_residual_after_mps")
+                ),
+                "no_slip_target_residual_after_assembly_mps": _number(
+                    entry.get("no_slip_target_residual_after_assembly_mps")
+                ),
+                "no_slip_projected_residual_after_projection_mps": _number(
+                    entry.get("no_slip_projected_residual_after_projection_mps")
                 ),
             }
         )
@@ -489,12 +515,36 @@ def build_stage_check(
                 f"{_format_value(report.get('fluid_feedback_constraint_active_cell_count'))}"
             ),
             (
+                "fluid_feedback_constraint_cleared_cell_count = "
+                f"{_format_value(report.get('fluid_feedback_constraint_cleared_cell_count'))}"
+            ),
+            (
+                "fluid_feedback_constraint_obstacle_cell_count = "
+                f"{_format_value(report.get('fluid_feedback_constraint_obstacle_cell_count'))}"
+            ),
+            (
+                "fluid_feedback_constraint_non_obstacle_cell_count = "
+                f"{_format_value(report.get('fluid_feedback_constraint_non_obstacle_cell_count'))}"
+            ),
+            (
+                "fluid_feedback_constraint_projection_participating_cell_count = "
+                f"{_format_value(report.get('fluid_feedback_constraint_projection_participating_cell_count'))}"
+            ),
+            (
                 "no_slip_residual_before_mps = "
                 f"{_format_value(report.get('no_slip_residual_before_mps'))}"
             ),
             (
                 "no_slip_residual_after_mps = "
                 f"{_format_value(report.get('no_slip_residual_after_mps'))}"
+            ),
+            (
+                "no_slip_target_residual_after_assembly_mps = "
+                f"{_format_value(report.get('no_slip_target_residual_after_assembly_mps'))}"
+            ),
+            (
+                "no_slip_projected_residual_after_projection_mps = "
+                f"{_format_value(report.get('no_slip_projected_residual_after_projection_mps'))}"
             ),
             f"diagnosis = {_feedback_diagnosis(status)}",
             "",

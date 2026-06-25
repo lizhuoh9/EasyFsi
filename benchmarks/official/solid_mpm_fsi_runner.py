@@ -50,6 +50,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     fluid_projection_after_feedback_count = 0
     fluid_projection_consumed_feedback_count = 0
     feedback_available_for_projection = False
+    feedback_constraint_cells: set[tuple[int, int, int]] = set()
     history: list[dict[str, object]] = []
 
     for step_index in range(config.step_count):
@@ -59,11 +60,25 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             fluid,
             config,
             feedback_available=feedback_available_before_projection,
+            previous_feedback_constraint_cells=feedback_constraint_cells,
         )
+        feedback_constraint_cells = latest_feedback_constraint_report["_feedback_constraint_cells"]
         latest_flow_report = _project_current_flow(
             fluid,
             config,
             reset_pressure=(step_index == 0),
+        )
+        latest_feedback_constraint_report[
+            "no_slip_projected_residual_after_projection_mps"
+        ] = _measure_projected_no_slip_residual(
+            markers,
+            fluid,
+            config,
+            feedback_consumed=bool(
+                latest_feedback_constraint_report[
+                    "fluid_projection_consumed_feedback"
+                ]
+            ),
         )
         fluid_projection_count += 1
         if feedback_available_before_projection:
@@ -136,12 +151,42 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                         "fluid_feedback_constraint_active_cell_count"
                     ]
                 ),
+                "fluid_feedback_constraint_cleared_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_cleared_cell_count"
+                    ]
+                ),
+                "fluid_feedback_constraint_obstacle_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_obstacle_cell_count"
+                    ]
+                ),
+                "fluid_feedback_constraint_non_obstacle_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_non_obstacle_cell_count"
+                    ]
+                ),
+                "fluid_feedback_constraint_projection_participating_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_projection_participating_cell_count"
+                    ]
+                ),
                 "no_slip_residual_before_mps": latest_feedback_constraint_report[
                     "no_slip_residual_before_mps"
                 ],
                 "no_slip_residual_after_mps": latest_feedback_constraint_report[
                     "no_slip_residual_after_mps"
                 ],
+                "no_slip_target_residual_after_assembly_mps": (
+                    latest_feedback_constraint_report[
+                        "no_slip_target_residual_after_assembly_mps"
+                    ]
+                ),
+                "no_slip_projected_residual_after_projection_mps": (
+                    latest_feedback_constraint_report[
+                        "no_slip_projected_residual_after_projection_mps"
+                    ]
+                ),
                 "local_velocity_peak_mps": latest_flow_report[
                     "local_velocity_peak_mps"
                 ],
@@ -240,12 +285,42 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "fluid_feedback_constraint_active_cell_count"
             ]
         ),
+        "fluid_feedback_constraint_cleared_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_cleared_cell_count"
+            ]
+        ),
+        "fluid_feedback_constraint_obstacle_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_obstacle_cell_count"
+            ]
+        ),
+        "fluid_feedback_constraint_non_obstacle_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_non_obstacle_cell_count"
+            ]
+        ),
+        "fluid_feedback_constraint_projection_participating_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_projection_participating_cell_count"
+            ]
+        ),
         "no_slip_residual_before_mps": latest_feedback_constraint_report[
             "no_slip_residual_before_mps"
         ],
         "no_slip_residual_after_mps": latest_feedback_constraint_report[
             "no_slip_residual_after_mps"
         ],
+        "no_slip_target_residual_after_assembly_mps": (
+            latest_feedback_constraint_report[
+                "no_slip_target_residual_after_assembly_mps"
+            ]
+        ),
+        "no_slip_projected_residual_after_projection_mps": (
+            latest_feedback_constraint_report[
+                "no_slip_projected_residual_after_projection_mps"
+            ]
+        ),
         "stress_valid_marker_count": latest_stress_report.valid_marker_count,
         "stress_invalid_marker_count": latest_stress_report.invalid_marker_count,
         "two_sided_pressure_marker_count": (
@@ -450,28 +525,37 @@ def _apply_marker_feedback_to_fluid(
     config: Any,
     *,
     feedback_available: bool,
+    previous_feedback_constraint_cells: set[tuple[int, int, int]],
 ) -> dict[str, object]:
-    if not feedback_available:
-        return _empty_feedback_constraint_report()
-
-    marker_count = int(markers.marker_count)
-    if marker_count <= 0:
-        return _empty_feedback_constraint_report()
-
-    marker_positions = markers.x_gamma_m.to_numpy()[:marker_count]
-    marker_velocities = markers.v_gamma_mps.to_numpy()[:marker_count]
     active = fluid.velocity_dirichlet_boundary_active.to_numpy()
     values = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
     weights = fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+
+    cleared_cell_count = 0
+    for i, j, k in previous_feedback_constraint_cells:
+        active[i, j, k] = 0
+        values[i, j, k] = 0.0
+        weights[i, j, k] = 0.0
+        cleared_cell_count += 1
+
+    if not feedback_available:
+        fluid.velocity_dirichlet_boundary_active.from_numpy(active)
+        fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
+        fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+        return _empty_feedback_constraint_report(cleared_cell_count)
+
+    marker_count = int(markers.marker_count)
+    if marker_count <= 0:
+        fluid.velocity_dirichlet_boundary_active.from_numpy(active)
+        fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
+        fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+        return _empty_feedback_constraint_report(cleared_cell_count)
+
+    marker_positions = markers.x_gamma_m.to_numpy()[:marker_count]
+    marker_velocities = markers.v_gamma_mps.to_numpy()[:marker_count]
     velocity = fluid.velocity.to_numpy()
 
-    bounds_min, bounds_max = _domain_bounds(config)
-    lower = np.asarray(bounds_min, dtype=np.float64)
-    upper = np.asarray(bounds_max, dtype=np.float64)
-    grid_nodes = np.asarray(config.grid_nodes, dtype=np.int32)
-    cell_width = (upper - lower) / grid_nodes.astype(np.float64)
-    marker_cells = np.floor((marker_positions - lower) / cell_width).astype(np.int32)
-    marker_cells = np.clip(marker_cells, 0, grid_nodes - 1)
+    marker_cells = _marker_grid_cells(marker_positions, config)
 
     target_sum: dict[tuple[int, int, int], np.ndarray] = {}
     target_count: dict[tuple[int, int, int], int] = {}
@@ -500,24 +584,87 @@ def _apply_marker_feedback_to_fluid(
     fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
     fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
 
+    obstacle = fluid.obstacle.to_numpy()
     active_cell_count = len(target_sum)
+    obstacle_cell_count = sum(1 for i, j, k in target_sum if obstacle[i, j, k] != 0)
+    non_obstacle_cell_count = active_cell_count - obstacle_cell_count
     return {
         "fluid_projection_consumed_feedback": active_cell_count > 0,
         "fluid_feedback_constraint_marker_count": marker_count,
         "fluid_feedback_constraint_active_cell_count": active_cell_count,
+        "fluid_feedback_constraint_cleared_cell_count": cleared_cell_count,
+        "fluid_feedback_constraint_obstacle_cell_count": obstacle_cell_count,
+        "fluid_feedback_constraint_non_obstacle_cell_count": non_obstacle_cell_count,
+        "fluid_feedback_constraint_projection_participating_cell_count": (
+            non_obstacle_cell_count
+        ),
         "no_slip_residual_before_mps": max(before_residuals, default=0.0),
         "no_slip_residual_after_mps": max(after_residuals, default=0.0),
+        "no_slip_target_residual_after_assembly_mps": max(
+            after_residuals,
+            default=0.0,
+        ),
+        "no_slip_projected_residual_after_projection_mps": 0.0,
+        "_feedback_constraint_cells": set(target_sum),
     }
 
 
-def _empty_feedback_constraint_report() -> dict[str, object]:
+def _empty_feedback_constraint_report(
+    cleared_cell_count: int = 0,
+) -> dict[str, object]:
     return {
         "fluid_projection_consumed_feedback": False,
         "fluid_feedback_constraint_marker_count": 0,
         "fluid_feedback_constraint_active_cell_count": 0,
+        "fluid_feedback_constraint_cleared_cell_count": cleared_cell_count,
+        "fluid_feedback_constraint_obstacle_cell_count": 0,
+        "fluid_feedback_constraint_non_obstacle_cell_count": 0,
+        "fluid_feedback_constraint_projection_participating_cell_count": 0,
         "no_slip_residual_before_mps": "",
         "no_slip_residual_after_mps": "",
+        "no_slip_target_residual_after_assembly_mps": "",
+        "no_slip_projected_residual_after_projection_mps": 0.0,
+        "_feedback_constraint_cells": set(),
     }
+
+
+def _measure_projected_no_slip_residual(
+    markers: HibmMpmSurfaceMarkers,
+    fluid: CartesianFluidSolver,
+    config: Any,
+    *,
+    feedback_consumed: bool,
+) -> float:
+    if not feedback_consumed:
+        return 0.0
+
+    marker_count = int(markers.marker_count)
+    if marker_count <= 0:
+        return 0.0
+
+    marker_positions = markers.x_gamma_m.to_numpy()[:marker_count]
+    marker_velocities = markers.v_gamma_mps.to_numpy()[:marker_count]
+    marker_cells = _marker_grid_cells(marker_positions, config)
+    velocity = fluid.velocity.to_numpy()
+
+    residuals = []
+    for cell, marker_velocity in zip(marker_cells, marker_velocities):
+        i, j, k = (int(cell[0]), int(cell[1]), int(cell[2]))
+        residuals.append(float(np.linalg.norm(velocity[i, j, k] - marker_velocity)))
+    return max(residuals, default=0.0)
+
+
+def _marker_grid_cells(
+    marker_positions: np.ndarray,
+    config: Any,
+) -> np.ndarray:
+    bounds_min, bounds_max = _domain_bounds(config)
+    lower = np.asarray(bounds_min, dtype=np.float64)
+    upper = np.asarray(bounds_max, dtype=np.float64)
+    grid_nodes = np.asarray(config.grid_nodes, dtype=np.int32)
+    cell_width = (upper - lower) / grid_nodes.astype(np.float64)
+    marker_cells = np.floor((marker_positions - lower) / cell_width).astype(np.int32)
+    return np.clip(marker_cells, 0, grid_nodes - 1)
 
 
 def _flow_state_report(
