@@ -84,6 +84,7 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             self.assertIn("[SOLID_RESPONSE]", stage_check)
             self.assertIn("[FSI_FEEDBACK]", stage_check)
             self.assertIn("[COORDINATE_MAPPING]", stage_check)
+            self.assertNotIn("projection_final_residual =", stage_check)
             self.assertIn("projection_l2 = 1e-07", stage_check)
             self.assertIn("projection_max_abs = 2e-07", stage_check)
             self.assertIn("Fluent x <-> EasyFsi z", stage_check)
