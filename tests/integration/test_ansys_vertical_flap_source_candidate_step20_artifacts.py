@@ -53,7 +53,19 @@ class AnsysVerticalFlapSourceCandidateStep20ArtifactTests(unittest.TestCase):
 
         self.assertEqual(payload["step_count"], 20)
         self.assertTrue(REQUIRED_SCENARIOS.issubset(scenarios))
-        self.assertIn(payload["candidate_status"], {"candidate_found", "no_candidate"})
+        self.assertIn(
+            payload["candidate_status"],
+            {
+                "temporal_candidate_found",
+                "no_temporal_candidate",
+                "candidate_found",
+                "no_candidate",
+            },
+        )
+        self.assertIn("best_final_gate_candidate", payload)
+        self.assertIn("best_temporal_candidate", payload)
+        self.assertIn("temporal_candidate_status", payload)
+        self.assertIn("temporal_candidate_count", payload)
         self.assertEqual(
             payload["mass_balance_primary_metric"],
             "velocity_outlet_flux_ratio",
@@ -74,6 +86,8 @@ class AnsysVerticalFlapSourceCandidateStep20ArtifactTests(unittest.TestCase):
             self.assertIn("velocity_outlet_flux_ratio", row)
             self.assertIn("max_velocity_peak_mps", row)
             self.assertIn("candidate_status", row)
+            self.assertIn("temporal_candidate_status", row)
+            self.assertIn("temporal_fail_reasons", row)
             if row["candidate_status"] == "candidate":
                 _assert_step20_candidate_gate(self, row)
 

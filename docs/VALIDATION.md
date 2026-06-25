@@ -147,10 +147,16 @@ validation_runs\ansys_vertical_flap_fsi\source_candidate_step20_diagnostics\
 ```
 
 The STEP20 matrix checks whether the 10-step source candidate remains credible
-over 20 steps before any 50-step run. It records per-step history for the
-`source_0p75_constant_step20` path, uses `velocity_outlet_flux_ratio` as the
-primary mass-balance sanity metric, keeps pressure-outlet flux diagnostic-only,
-and does not claim Fluent parity.
+over 20 steps before any 50-step run. It records per-step histories, uses
+`velocity_outlet_flux_ratio` as the primary mass-balance sanity metric, keeps
+pressure-outlet flux diagnostic-only, and does not claim Fluent parity.
+
+The STEP20 artifacts now include a temporal candidate gate in addition to the
+final-row gate. A final-row candidate is not enough to approve a 50-step run:
+post-warmup and last-window p999, peak velocity, outlet ratio, marker-force
+sign, tip-displacement sign, and invalid-count checks must be reviewed first.
+If no STEP20 temporal candidate exists, the next action is source/outlet model
+refinement or a STEP30 temporal matrix, not a 50-step run.
 
 ## Known Non-Gating Historical Failures
 

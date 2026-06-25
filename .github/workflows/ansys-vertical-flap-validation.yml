@@ -51,6 +51,7 @@ jobs:
             tests.integration.test_ansys_vertical_flap_sustained_flow_driver_artifacts `
             tests.integration.test_ansys_vertical_flap_source_outlet_balance_artifacts `
             tests.integration.test_ansys_vertical_flap_source_candidate_step20_artifacts `
+            tests.integration.test_ansys_vertical_flap_source_candidate_temporal_gate_artifacts `
             -v
 
       - name: Run source-level runner contracts

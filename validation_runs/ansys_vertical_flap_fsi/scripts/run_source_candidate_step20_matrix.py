@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import sys
@@ -26,6 +27,9 @@ MATRIX_CSV = OUTPUT_DIR / "source_candidate_step20_matrix.csv"
 SUMMARY_PATH = OUTPUT_DIR / "source_candidate_step20_summary.md"
 HISTORY_JSON = OUTPUT_DIR / "source_candidate_step20_history.json"
 CANDIDATE_HISTORY_CSV = OUTPUT_DIR / "source_strength_0p75_step20_history.csv"
+HISTORIES_DIR = OUTPUT_DIR / "histories"
+BEST_CANDIDATE_HISTORY_CSV = OUTPUT_DIR / "best_candidate_step20_history.csv"
+ALL_CANDIDATE_HISTORIES_CSV = OUTPUT_DIR / "all_candidate_step20_histories.csv"
 VERIFICATION_PATH = OUTPUT_DIR / "verification_source_candidate_step20_2026-06-25.md"
 
 STEP_COUNT = 20
@@ -33,6 +37,12 @@ MASS_BALANCE_PRIMARY_METRIC = "velocity_outlet_flux_ratio"
 PRESSURE_OUTLET_INTERPRETATION = (
     "diagnostic_only_until_pressure_outlet_model_reviewed"
 )
+TEMPORAL_LAST_WINDOW_STEPS = 5
+TEMPORAL_SOFT_ALLOWED_POST_WARMUP_FAILURES = 2
+TEMPORAL_STRICT = "temporal_strict"
+TEMPORAL_SOFT = "temporal_soft"
+TEMPORAL_FAILED = "temporal_failed"
+TEMPORAL_NOT_APPLICABLE = "temporal_not_applicable"
 
 REQUIRED_SCENARIOS = (
     "projection_only_step20_baseline",
@@ -82,6 +92,17 @@ CSV_COLUMNS = [
     "stress_invalid_marker_count",
     "scatter_invalid_marker_count",
     "feedback_invalid_marker_count",
+    "temporal_warmup_steps",
+    "temporal_evaluation_start_step",
+    "temporal_last_window_steps",
+    "temporal_candidate_status",
+    "temporal_fail_reasons",
+    "temporal_post_warmup_failed_step_count",
+    "temporal_last_window_failed_step_count",
+    "temporal_last_window_min_p999_mps",
+    "temporal_last_window_mean_velocity_outlet_flux_ratio",
+    "temporal_last_window_force_sign_ok",
+    "temporal_last_window_tip_sign_ok",
     "candidate_status",
     "elapsed_s",
     "error",
@@ -106,7 +127,16 @@ HISTORY_COLUMNS = [
 ]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    if args.reclassify_existing:
+        rows, histories = _load_existing_artifacts()
+        _apply_temporal_classification(rows, histories)
+        payload = _payload(rows=rows)
+        _write_outputs(payload, histories)
+        _print_payload_summary(payload)
+        return 0
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     cache: dict[str, dict[str, Any]] = {}
     rows: list[dict[str, Any]] = []
@@ -117,7 +147,48 @@ def main() -> int:
         rows.append(row)
         histories[scenario] = history
 
+    _apply_temporal_classification(rows, histories)
     payload = _payload(rows=rows)
+    _write_outputs(payload, histories)
+    _print_payload_summary(payload)
+    return 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run or reclassify the ANSYS vertical-flap STEP20 source-candidate "
+            "matrix."
+        )
+    )
+    parser.add_argument(
+        "--reclassify-existing",
+        action="store_true",
+        help=(
+            "Read existing STEP20 matrix/history artifacts and recompute "
+            "derived temporal fields without rerunning the solver."
+        ),
+    )
+    return parser
+
+
+def _load_existing_artifacts() -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    matrix = json.loads(MATRIX_JSON.read_text(encoding="utf-8"))
+    history_payload = json.loads(HISTORY_JSON.read_text(encoding="utf-8"))
+    rows = [dict(row) for row in matrix["rows"]]
+    histories = {
+        str(scenario): [dict(row) for row in rows]
+        for scenario, rows in history_payload["histories"].items()
+    }
+    return rows, histories
+
+
+def _write_outputs(
+    payload: dict[str, Any],
+    histories: dict[str, list[dict[str, Any]]],
+) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    HISTORIES_DIR.mkdir(parents=True, exist_ok=True)
     MATRIX_JSON.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -136,17 +207,28 @@ def main() -> int:
         + "\n",
         encoding="utf-8",
     )
-    _write_csv(MATRIX_CSV, rows, CSV_COLUMNS)
+    _write_csv(MATRIX_CSV, list(payload["rows"]), CSV_COLUMNS)
     _write_csv(
         CANDIDATE_HISTORY_CSV,
         histories.get("source_0p75_constant_step20", []),
         HISTORY_COLUMNS,
     )
+    best_candidate = str(payload.get("best_candidate", "none"))
+    _write_csv(
+        BEST_CANDIDATE_HISTORY_CSV,
+        histories.get(best_candidate, []),
+        HISTORY_COLUMNS,
+    )
+    _write_per_scenario_history_csvs(payload, histories)
+    _write_all_candidate_histories(payload, histories)
     SUMMARY_PATH.write_text(_summary_markdown(payload), encoding="utf-8")
     VERIFICATION_PATH.write_text(
         _verification_markdown(payload),
         encoding="utf-8",
     )
+
+
+def _print_payload_summary(payload: dict[str, Any]) -> None:
     print(
         json.dumps(
             {
@@ -154,13 +236,13 @@ def main() -> int:
                 "candidate_status": payload["candidate_status"],
                 "primary_observation": payload["primary_observation"],
                 "next_action": payload["next_action"],
+                "temporal_candidate_status": payload["temporal_candidate_status"],
             },
             indent=2,
             sort_keys=True,
         ),
         flush=True,
     )
-    return 0
 
 
 def _matrix_specs() -> list[tuple[str, VerticalFlapFsiConfig]]:
@@ -431,10 +513,175 @@ def _history_rows(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _apply_temporal_classification(
+    rows: list[dict[str, Any]],
+    histories: dict[str, list[dict[str, Any]]],
+) -> None:
+    for row in rows:
+        row.update(
+            _temporal_report(
+                row,
+                histories.get(str(row.get("scenario")), []),
+            )
+        )
+
+
+def _temporal_report(
+    row: dict[str, Any],
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    ramp_steps = int(row.get("source_ramp_steps") or 0)
+    warmup_steps = max(ramp_steps + 2, 5)
+    evaluation_start_step = warmup_steps + 1
+    base = {
+        "temporal_warmup_steps": warmup_steps,
+        "temporal_evaluation_start_step": evaluation_start_step,
+        "temporal_last_window_steps": TEMPORAL_LAST_WINDOW_STEPS,
+        "temporal_candidate_status": TEMPORAL_NOT_APPLICABLE,
+        "temporal_fail_reasons": [],
+        "temporal_post_warmup_failed_step_count": "",
+        "temporal_last_window_failed_step_count": "",
+        "temporal_last_window_min_p999_mps": "",
+        "temporal_last_window_mean_velocity_outlet_flux_ratio": "",
+        "temporal_last_window_force_sign_ok": "",
+        "temporal_last_window_tip_sign_ok": "",
+    }
+    if row.get("run_status") != "completed":
+        return {**base, "temporal_fail_reasons": ["run_not_completed"]}
+    if bool(row.get("flow_driver_uses_full_velocity_reset")):
+        return {**base, "temporal_fail_reasons": ["diagnostic_full_field_reset"]}
+    if not history:
+        return {**base, "temporal_fail_reasons": ["missing_history"]}
+
+    post_warmup = [
+        item for item in history if int(item.get("step") or 0) >= evaluation_start_step
+    ]
+    if not post_warmup:
+        return {**base, "temporal_fail_reasons": ["missing_post_warmup_history"]}
+
+    last_window = history[-TEMPORAL_LAST_WINDOW_STEPS:]
+    post_failures = _temporal_failures(post_warmup)
+    last_failures = _temporal_failures(last_window)
+    fail_reasons = _unique_reasons(post_failures + last_failures)
+    last_p999_values = [
+        value
+        for value in (_float_or_none(item.get("velocity_p999_mps")) for item in last_window)
+        if value is not None
+    ]
+    last_outlet_values = [
+        value
+        for value in (
+            _float_or_none(item.get("velocity_outlet_flux_ratio"))
+            for item in last_window
+        )
+        if value is not None
+    ]
+    last_force_sign_ok = all(
+        (_float_or_none(item.get("marker_force_z_N")) or 0.0) < 0.0
+        for item in last_window
+    )
+    last_tip_sign_ok = all(
+        (_float_or_none(item.get("tip_dz_m")) or 0.0) < 0.0
+        for item in last_window
+    )
+    if len(post_failures) == 0:
+        status = TEMPORAL_STRICT
+    elif (
+        len(post_failures) <= TEMPORAL_SOFT_ALLOWED_POST_WARMUP_FAILURES
+        and len(last_failures) == 0
+    ):
+        status = TEMPORAL_SOFT
+    else:
+        status = TEMPORAL_FAILED
+    return {
+        **base,
+        "temporal_candidate_status": status,
+        "temporal_fail_reasons": fail_reasons,
+        "temporal_post_warmup_failed_step_count": len(post_failures),
+        "temporal_last_window_failed_step_count": len(last_failures),
+        "temporal_last_window_min_p999_mps": (
+            min(last_p999_values) if last_p999_values else ""
+        ),
+        "temporal_last_window_mean_velocity_outlet_flux_ratio": (
+            sum(last_outlet_values) / len(last_outlet_values)
+            if last_outlet_values
+            else ""
+        ),
+        "temporal_last_window_force_sign_ok": last_force_sign_ok,
+        "temporal_last_window_tip_sign_ok": last_tip_sign_ok,
+    }
+
+
+def _temporal_failures(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for item in rows:
+        reasons = _temporal_step_fail_reasons(item)
+        if reasons:
+            failures.append(
+                {
+                    "step": int(item.get("step") or 0),
+                    "reasons": reasons,
+                }
+            )
+    return failures
+
+
+def _temporal_step_fail_reasons(row: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    p999 = _float_or_none(row.get("velocity_p999_mps"))
+    if p999 is None or p999 < 20.0:
+        reasons.append("p999_below_20")
+    peak = _float_or_none(row.get("velocity_peak_mps"))
+    if peak is None or peak > 40.0:
+        reasons.append("peak_above_40")
+    outlet_ratio = _float_or_none(row.get("velocity_outlet_flux_ratio"))
+    if outlet_ratio is None or outlet_ratio < 0.75 or outlet_ratio > 1.25:
+        reasons.append("velocity_outlet_ratio_outside_0p75_1p25")
+    force_z = _float_or_none(row.get("marker_force_z_N"))
+    if force_z is None or force_z >= 0.0:
+        reasons.append("marker_force_z_nonnegative")
+    tip_dz = _float_or_none(row.get("tip_dz_m"))
+    if tip_dz is None or tip_dz >= 0.0:
+        reasons.append("tip_dz_nonnegative")
+    if any(
+        int(float(row.get(key) or 0)) != 0
+        for key in (
+            "stress_invalid_marker_count",
+            "scatter_invalid_marker_count",
+            "feedback_invalid_marker_count",
+        )
+    ):
+        reasons.append("invalid_marker_count_nonzero")
+    return reasons
+
+
+def _unique_reasons(failures: list[dict[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    reasons: list[str] = []
+    for failure in failures:
+        for reason in failure.get("reasons", []):
+            if reason not in seen:
+                seen.add(reason)
+                reasons.append(reason)
+    return reasons
+
+
 def _payload(*, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    candidates = [row for row in rows if row.get("candidate_status") == "candidate"]
-    best = _best_candidate(candidates)
+    final_candidates = [
+        row for row in rows if row.get("candidate_status") == "candidate"
+    ]
+    temporal_candidates = [
+        row
+        for row in final_candidates
+        if row.get("temporal_candidate_status") in {TEMPORAL_STRICT, TEMPORAL_SOFT}
+    ]
+    best_final = _best_candidate(final_candidates)
+    best_temporal = _best_temporal_candidate(temporal_candidates)
+    best = best_temporal or best_final
     nearest = _nearest_diagnostic(rows)
+    candidate_status = (
+        "temporal_candidate_found" if best_temporal else "no_temporal_candidate"
+    )
     return {
         "case": "ansys-vertical-flap-fsi",
         "purpose": "20-step source candidate validation before any 50-step run",
@@ -442,8 +689,21 @@ def _payload(*, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "rows": rows,
         "required_scenarios": list(REQUIRED_SCENARIOS),
         "best_candidate": best.get("scenario") if best else "none",
+        "best_final_gate_candidate": (
+            best_final.get("scenario") if best_final else "none"
+        ),
+        "best_temporal_candidate": (
+            best_temporal.get("scenario") if best_temporal else "none"
+        ),
         "nearest_non_candidate": nearest.get("scenario") if nearest else "none",
-        "candidate_status": "candidate_found" if best else "no_candidate",
+        "candidate_status": candidate_status,
+        "temporal_candidate_status": candidate_status,
+        "temporal_best_candidate_status": (
+            best_temporal.get("temporal_candidate_status")
+            if best_temporal
+            else "none"
+        ),
+        "temporal_candidate_count": len(temporal_candidates),
         "mass_balance_primary_metric": MASS_BALANCE_PRIMARY_METRIC,
         "pressure_outlet_flux_interpretation": PRESSURE_OUTLET_INTERPRETATION,
         "primary_observation": _primary_observation(rows, best),
@@ -495,6 +755,12 @@ def _best_candidate(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     return min(rows, key=_candidate_penalty)
 
 
+def _best_temporal_candidate(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return min(rows, key=_temporal_candidate_penalty)
+
+
 def _nearest_diagnostic(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     completed = [
         row
@@ -506,6 +772,24 @@ def _nearest_diagnostic(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not completed:
         return None
     return min(completed, key=_candidate_penalty)
+
+
+def _temporal_candidate_penalty(row: dict[str, Any]) -> float:
+    strict_penalty = 0.0 if row.get("temporal_candidate_status") == TEMPORAL_STRICT else 1.0
+    p999 = _float_or_zero(row.get("final_velocity_p999_mps"))
+    max_peak = _float_or_zero(row.get("max_velocity_peak_mps"))
+    last_p999 = _float_or_zero(row.get("temporal_last_window_min_p999_mps"))
+    last_outlet = _float_or_none(
+        row.get("temporal_last_window_mean_velocity_outlet_flux_ratio")
+    )
+    outlet_penalty = 5.0 if last_outlet is None else abs(last_outlet - 1.0) * 2.0
+    return (
+        strict_penalty
+        + abs(p999 - 24.5)
+        + max(0.0, 20.0 - last_p999) * 2.0
+        + max(0.0, max_peak - 40.0) * 2.0
+        + outlet_penalty
+    )
 
 
 def _candidate_penalty(row: dict[str, Any]) -> float:
@@ -521,6 +805,43 @@ def _candidate_penalty(row: dict[str, Any]) -> float:
     force_penalty = 5.0 if force_z is None or force_z >= 0.0 else 0.0
     tip_penalty = 5.0 if tip_dz is None or tip_dz >= 0.0 else 0.0
     return p999_penalty + 2.0 * peak_penalty + outlet_penalty + force_penalty + tip_penalty
+
+
+def _write_per_scenario_history_csvs(
+    payload: dict[str, Any],
+    histories: dict[str, list[dict[str, Any]]],
+) -> None:
+    scenarios = {
+        str(row.get("scenario"))
+        for row in payload["rows"]
+        if row.get("candidate_status") == "candidate"
+        or row.get("temporal_candidate_status") in {TEMPORAL_STRICT, TEMPORAL_SOFT}
+    }
+    best_candidate = str(payload.get("best_candidate", "none"))
+    if best_candidate != "none":
+        scenarios.add(best_candidate)
+    for scenario in sorted(scenarios):
+        _write_csv(
+            HISTORIES_DIR / f"{scenario}_history.csv",
+            histories.get(scenario, []),
+            HISTORY_COLUMNS,
+        )
+
+
+def _write_all_candidate_histories(
+    payload: dict[str, Any],
+    histories: dict[str, list[dict[str, Any]]],
+) -> None:
+    scenario_order = [
+        str(row.get("scenario"))
+        for row in payload["rows"]
+        if row.get("candidate_status") == "candidate"
+        or row.get("temporal_candidate_status") in {TEMPORAL_STRICT, TEMPORAL_SOFT}
+    ]
+    rows: list[dict[str, Any]] = []
+    for scenario in scenario_order:
+        rows.extend(histories.get(scenario, []))
+    _write_csv(ALL_CANDIDATE_HISTORIES_CSV, rows, HISTORY_COLUMNS)
 
 
 def _primary_observation(
@@ -544,8 +865,13 @@ def _current_best_hypothesis(
     rows: list[dict[str, Any]],
     best: dict[str, Any] | None,
 ) -> str:
-    if best:
-        return "at least one non-full-reset source candidate remained inside the 20-step flow and sign gates"
+    if best and best.get("temporal_candidate_status") in {TEMPORAL_STRICT, TEMPORAL_SOFT}:
+        return "at least one non-full-reset source candidate satisfies the STEP20 temporal gate"
+    final_candidates = [
+        row for row in rows if row.get("candidate_status") == "candidate"
+    ]
+    if final_candidates:
+        return "final-row source candidates exist, but none satisfies the STEP20 temporal gate"
     statuses = {str(row.get("candidate_status")) for row in rows}
     if "force_sign_failed" in statuses or "displacement_sign_failed" in statuses:
         return "one or more rows may satisfy flow magnitude gates but fail force/displacement sign gates"
@@ -559,9 +885,9 @@ def _current_best_hypothesis(
 
 
 def _next_action(best: dict[str, Any] | None) -> str:
-    if best:
-        return "review STEP20 history, then consider a coarse 50-step flow-gate candidate"
-    return "stop before 50-step; refine source/outlet model or switch to sharp HIBM-MPM validation path"
+    if best and best.get("temporal_candidate_status") in {TEMPORAL_STRICT, TEMPORAL_SOFT}:
+        return "run a STEP30 temporal matrix before any coarse 50-step flow-gate candidate"
+    return "stop before 50-step; refine source/outlet model or run STEP30 temporal matrix"
 
 
 def _summary_markdown(payload: dict[str, Any]) -> str:
@@ -569,8 +895,14 @@ def _summary_markdown(payload: dict[str, Any]) -> str:
         "# ANSYS Vertical-Flap Source Candidate STEP20 Diagnostics",
         "",
         f"best_candidate = {payload['best_candidate']}",
+        f"best_final_gate_candidate = {payload['best_final_gate_candidate']}",
+        f"best_temporal_candidate = {payload['best_temporal_candidate']}",
         f"nearest_non_candidate = {payload['nearest_non_candidate']}",
         f"candidate_status = {payload['candidate_status']}",
+        f"temporal_candidate_status = {payload['temporal_candidate_status']}",
+        f"temporal_best_candidate_status = {payload['temporal_best_candidate_status']}",
+        f"temporal_candidate_count = {payload['temporal_candidate_count']}",
+        f"best_candidate_history_csv = {BEST_CANDIDATE_HISTORY_CSV.as_posix()}",
         f"mass_balance_primary_metric = {payload['mass_balance_primary_metric']}",
         (
             "pressure_outlet_flux_interpretation = "
@@ -582,9 +914,10 @@ def _summary_markdown(payload: dict[str, Any]) -> str:
         "",
         "## STEP20 Matrix",
         "",
-        "| scenario | status | strength | profile | ramp | peak m/s | p999 m/s | "
-        "max peak m/s | velocity ratio | pressure ratio | force z N | tip dz m |",
-        "|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| scenario | final status | temporal status | strength | profile | ramp | "
+        "peak m/s | p999 m/s | max peak m/s | last-5 min p999 | "
+        "last-5 velocity ratio mean | force z N | tip dz m |",
+        "|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in payload["rows"]:
         lines.append(_summary_row(row))
@@ -596,14 +929,15 @@ def _summary_row(row: dict[str, Any]) -> str:
         "| "
         f"{row.get('scenario')} | "
         f"{row.get('candidate_status')} | "
+        f"{row.get('temporal_candidate_status')} | "
         f"{row.get('source_strength')} | "
         f"{row.get('source_profile')} | "
         f"{row.get('source_ramp_steps')} | "
         f"{row.get('final_velocity_peak_mps')} | "
         f"{row.get('final_velocity_p999_mps')} | "
         f"{row.get('max_velocity_peak_mps')} | "
-        f"{row.get('velocity_outlet_flux_ratio')} | "
-        f"{row.get('pressure_outlet_flux_ratio')} | "
+        f"{row.get('temporal_last_window_min_p999_mps')} | "
+        f"{row.get('temporal_last_window_mean_velocity_outlet_flux_ratio')} | "
         f"{row.get('marker_force_z_N')} | "
         f"{row.get('tip_dz_final_m')} |"
     )
@@ -613,9 +947,9 @@ def _verification_markdown(payload: dict[str, Any]) -> str:
     return (
         "# ANSYS Vertical-Flap Source Candidate STEP20 Verification\n\n"
         "Date: 2026-06-25\n\n"
-        "This EasyFsi diagnostic checks whether the previous 10-step "
-        "`source_strength=0.75` candidate remains credible for 20 steps. It "
-        "does not run 50 steps and does not claim Fluent parity.\n\n"
+        "This EasyFsi diagnostic checks whether previous final-row STEP20 "
+        "source candidates also satisfy a temporal gate over their per-step "
+        "history. It does not run 50 steps and does not claim Fluent parity.\n\n"
         "## Goal Reference\n\n"
         "`docs/refactoring/ANSYS_VERTICAL_FLAP_SOURCE_CANDIDATE_STEP20_GOAL_2026-06-25.md`\n\n"
         "## Prior Remote State\n\n"
@@ -627,30 +961,43 @@ def _verification_markdown(payload: dict[str, Any]) -> str:
         "```text\n"
         "02723dd54643f79da5fda6e3b9ed559eee22e993\n"
         "```\n\n"
+        "STEP20 implementation commit before this temporal-gate pass:\n\n"
+        "```text\n"
+        "21d1eb1f4de1f6196af715c799222b1ce5c26d14\n"
+        "```\n\n"
+        "Pre-goal remote HEAD before this temporal-gate pass:\n\n"
+        "```text\n"
+        "d7f7e84b696c9390f45c1f9bf34a8efbfb7a3b42\n"
+        "```\n\n"
         "## Commands Run\n\n"
         "```powershell\n"
-        "& 'D:\\working\\taichi\\env\\python.exe' validation_runs\\ansys_vertical_flap_fsi\\scripts\\run_source_candidate_step20_matrix.py\n"
-        "& 'D:\\working\\taichi\\env\\python.exe' -m py_compile validation_runs\\ansys_vertical_flap_fsi\\scripts\\run_source_candidate_step20_matrix.py tests\\integration\\test_ansys_vertical_flap_source_candidate_step20_artifacts.py\n"
-        "& 'D:\\working\\taichi\\env\\python.exe' -m unittest -v tests.integration.test_ansys_vertical_flap_source_candidate_step20_artifacts\n"
-        "& 'D:\\working\\taichi\\env\\python.exe' -m unittest tests.integration.test_ansys_official_half_domain_archive_consistency tests.integration.test_ansys_vertical_flap_postrepair_artifacts tests.integration.test_ansys_vertical_flap_flow_collapse_artifacts tests.integration.test_ansys_vertical_flap_sustained_flow_driver_artifacts tests.integration.test_ansys_vertical_flap_source_outlet_balance_artifacts tests.integration.test_ansys_vertical_flap_source_candidate_step20_artifacts -v\n"
+        "& 'D:\\working\\taichi\\env\\python.exe' validation_runs\\ansys_vertical_flap_fsi\\scripts\\run_source_candidate_step20_matrix.py --reclassify-existing\n"
+        "& 'D:\\working\\taichi\\env\\python.exe' -m py_compile validation_runs\\ansys_vertical_flap_fsi\\scripts\\run_source_candidate_step20_matrix.py tests\\integration\\test_ansys_vertical_flap_source_candidate_step20_artifacts.py tests\\integration\\test_ansys_vertical_flap_source_candidate_temporal_gate_artifacts.py\n"
+        "& 'D:\\working\\taichi\\env\\python.exe' -m unittest -v tests.integration.test_ansys_vertical_flap_source_candidate_step20_artifacts tests.integration.test_ansys_vertical_flap_source_candidate_temporal_gate_artifacts\n"
+        "& 'D:\\working\\taichi\\env\\python.exe' -m unittest tests.integration.test_ansys_official_half_domain_archive_consistency tests.integration.test_ansys_vertical_flap_postrepair_artifacts tests.integration.test_ansys_vertical_flap_flow_collapse_artifacts tests.integration.test_ansys_vertical_flap_sustained_flow_driver_artifacts tests.integration.test_ansys_vertical_flap_source_outlet_balance_artifacts tests.integration.test_ansys_vertical_flap_source_candidate_step20_artifacts tests.integration.test_ansys_vertical_flap_source_candidate_temporal_gate_artifacts -v\n"
         "& 'D:\\working\\taichi\\env\\python.exe' -m unittest -v tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_case_metadata_matches_ansys_tutorial_boundaries_and_targets tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_formal_runner_uses_official_full_span_flap_box tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_formal_runner_places_both_streamwise_marker_faces tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_solid_substep_cfl_report_preserves_explicit_higher_count tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_preflow_controls_are_exposed_without_changing_default_smoke tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_fixed_solid_preflow_reports_diagnostics_without_mpm_advance tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_sustained_flow_driver_modes_are_explicit_and_default_safe tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_source_strength_factor_supports_constant_and_ramp_profiles tests.integration.test_ansys_vertical_flap_runner_loop_contract\n"
         "& 'D:\\working\\taichi\\env\\python.exe' -m unittest tests.tools.test_ansys_vertical_flap_diagnostics -v\n"
         "git diff --check\n"
         "```\n\n"
         "## Local Verification Status\n\n"
-        "- STEP20 matrix generation completed and wrote artifacts.\n"
+        "- STEP20 existing artifacts were reclassified with temporal gates.\n"
         "- `py_compile` passed.\n"
-        "- STEP20 artifact contract tests passed: 2 tests.\n"
-        "- Archive/artifact consistency tests passed: 15 tests.\n"
+        "- STEP20 artifact and temporal-gate contract tests passed.\n"
+        "- Archive/artifact consistency tests passed.\n"
         "- Source-level runner contract tests passed: 12 tests.\n"
         "- Diagnostics unit tests passed: 11 tests.\n"
         "- `git diff --check` passed with Windows LF-to-CRLF warnings only.\n"
-        "- Changed-file credential scan found no credential values; the only "
-        "match was explanatory verification text about token-pattern scanning.\n\n"
+        "- Changed-file credential scan found no sensitive credential values.\n\n"
         "## Result\n\n"
         f"best_candidate = {payload['best_candidate']}\n\n"
+        f"best_final_gate_candidate = {payload['best_final_gate_candidate']}\n\n"
+        f"best_temporal_candidate = {payload['best_temporal_candidate']}\n\n"
         f"nearest_non_candidate = {payload['nearest_non_candidate']}\n\n"
         f"candidate_status = {payload['candidate_status']}\n\n"
+        f"temporal_candidate_status = {payload['temporal_candidate_status']}\n\n"
+        f"temporal_best_candidate_status = {payload['temporal_best_candidate_status']}\n\n"
+        f"temporal_candidate_count = {payload['temporal_candidate_count']}\n\n"
+        f"best_candidate_history_csv = {BEST_CANDIDATE_HISTORY_CSV.as_posix()}\n\n"
         f"mass_balance_primary_metric = {payload['mass_balance_primary_metric']}\n\n"
         f"pressure_outlet_flux_interpretation = {payload['pressure_outlet_flux_interpretation']}\n\n"
         f"primary_observation = {payload['primary_observation']}\n\n"
@@ -663,6 +1010,8 @@ def _verification_markdown(payload: dict[str, Any]) -> str:
         "- Full-field reinitialize rows are diagnostic-only and excluded from "
         "candidate selection.\n"
         "- `sustained_inlet_predictor` is not treated as a real predictor path.\n"
+        "- A passing STEP20 temporal gate still requires STEP30 review before "
+        "any coarse 50-step flow-gate run.\n"
     )
 
 
