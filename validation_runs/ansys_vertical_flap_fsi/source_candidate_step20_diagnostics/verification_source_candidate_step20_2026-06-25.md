@@ -61,6 +61,23 @@ git diff --check
 - `git diff --check` passed with Windows LF-to-CRLF warnings only.
 - Changed-file credential scan found no sensitive credential values.
 
+## Remote CI Query Status
+
+The temporal-gate implementation commit was pushed to
+`origin/solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`:
+
+```text
+b6da51f9bbbdf498ccc5ab56ca45ed2ff4e93ed9
+```
+
+Remote GitHub Actions status could not be queried from this workstation because
+GitHub CLI is not authenticated:
+
+```text
+To get started with GitHub CLI, please run:  gh auth login
+Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.
+```
+
 ## Result
 
 best_candidate = source_0p75_ramp5_step20
