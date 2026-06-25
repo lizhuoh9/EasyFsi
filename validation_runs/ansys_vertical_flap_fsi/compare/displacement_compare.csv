@@ -1,2 +1,2 @@
-step,time_s,fluent_tip_total_m,easyfsi_tip_total_m,abs_error,rel_error,fluent_tip_x_m,fluent_tip_y_m,easyfsi_tip_streamwise_m,easyfsi_tip_vertical_m
-50,0.025,5.1e-05,9.911241564379145e-06,4.1088758435620856e-05,0.8056619301102129,,,-1.1967495083808899e-06,9.838724508881569e-06
+step,time_s,fluent_tip_total_m,easyfsi_tip_total_m,abs_error,rel_error,fluent_tip_x_m,fluent_tip_y_m,easyfsi_tip_streamwise_m,easyfsi_tip_vertical_m,local_velocity_peak_mps,pressure_min_pa,pressure_max_pa,projection_l2,projection_max_abs,pre_projection_l2,post_boundary_l2,velocity_dirichlet_boundary_max_delta_mps
+50,0.025,5.1e-05,9.911241564379145e-06,4.1088758435620856e-05,0.8056619301102129,,,-1.1967495083808899e-06,9.838724508881569e-06,10.41722297668457,-136.47424977588406,16.470424766644825,1144.056923710821,6400.0,1146.0569498438833,1144.056923710821,10.072233200073242

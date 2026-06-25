@@ -45,16 +45,21 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     latest_solid_report = None
     latest_feedback_report = None
     latest_flow_report = None
-    fluid_recompute_count = 0
+    fluid_projection_count = 0
+    fluid_projection_after_feedback_count = 0
+    feedback_available_for_projection = False
     history: list[dict[str, object]] = []
 
     for step_index in range(config.step_count):
+        feedback_available_before_projection = feedback_available_for_projection
         latest_flow_report = _project_current_flow(
             fluid,
             config,
             reset_pressure=(step_index == 0),
         )
-        fluid_recompute_count += 1
+        fluid_projection_count += 1
+        if feedback_available_before_projection:
+            fluid_projection_after_feedback_count += 1
         latest_stress_report = _sample_stress_to_marker_forces(markers, fluid)
         latest_force_report = markers.aggregate_region_forces(
             primary_region_id=PRIMARY_REGION_ID,
@@ -94,11 +99,18 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             support_radius_m=config.mpm_support_radius_m,
             dt_s=config.dt_s,
         )
+        feedback_available_for_projection = True
         step_displacement = _solid_displacement_report(solid, fixed_mask, tip_mask)
         history.append(
             {
                 "step": step_index + 1,
                 "fluid_recomputed": True,
+                "fluid_recomputed_after_feedback": (
+                    feedback_available_before_projection
+                ),
+                "feedback_available_before_projection": (
+                    feedback_available_before_projection
+                ),
                 "local_velocity_peak_mps": latest_flow_report[
                     "local_velocity_peak_mps"
                 ],
@@ -167,13 +179,19 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "local_velocity_peak_mps": local_velocity_peak_mps,
         "local_velocity_peak_relative_error": velocity_relative_error,
         "velocity_peak_tolerance": config.velocity_peak_tolerance,
-        "fluid_recomputed_after_feedback": fluid_recompute_count > 0,
-        "feedback_closure_status": (
-            "CLOSED_LOOP_RECOMPUTED_FLOW"
-            if fluid_recompute_count > 0
-            else "OPEN_LOOP_LOAD_REUSE"
+        "fluid_recomputed_after_feedback": (
+            fluid_projection_after_feedback_count > 0
         ),
-        "fluid_recompute_count": fluid_recompute_count,
+        "feedback_closure_status": (
+            "CLOSED_LOOP_RECOMPUTED_AFTER_FEEDBACK"
+            if fluid_projection_after_feedback_count > 0
+            else "OPEN_LOOP_OR_PREFEEDBACK_ONLY"
+        ),
+        "fluid_recompute_count": fluid_projection_count,
+        "fluid_projection_count": fluid_projection_count,
+        "fluid_projection_after_feedback_count": (
+            fluid_projection_after_feedback_count
+        ),
         "stress_valid_marker_count": latest_stress_report.valid_marker_count,
         "stress_invalid_marker_count": latest_stress_report.invalid_marker_count,
         "two_sided_pressure_marker_count": (

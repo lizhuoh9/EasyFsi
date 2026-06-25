@@ -39,6 +39,17 @@ SUMMARY_COLUMNS = [
     "status",
 ]
 
+FLOW_DIAGNOSTIC_COLUMNS = [
+    "local_velocity_peak_mps",
+    "pressure_min_pa",
+    "pressure_max_pa",
+    "projection_l2",
+    "projection_max_abs",
+    "pre_projection_l2",
+    "post_boundary_l2",
+    "velocity_dirichlet_boundary_max_delta_mps",
+]
+
 HISTORY_COLUMNS = [
     "step",
     "time_s",
@@ -58,6 +69,7 @@ HISTORY_COLUMNS = [
     "max_displacement_m",
     "root_max_displacement_m",
     "surface_feedback_max_marker_displacement_m",
+    *FLOW_DIAGNOSTIC_COLUMNS,
 ]
 
 COMPARE_COLUMNS = [
@@ -71,6 +83,7 @@ COMPARE_COLUMNS = [
     "fluent_tip_y_m",
     "easyfsi_tip_streamwise_m",
     "easyfsi_tip_vertical_m",
+    *FLOW_DIAGNOSTIC_COLUMNS,
 ]
 
 SCATTER_RESIDUAL_TOLERANCE_N = 1.0e-9
@@ -231,6 +244,7 @@ def build_history_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
     for entry in _list(report.get("history")):
         if not isinstance(entry, dict):
             continue
+        projection = _dict(entry.get("flow_projection_report"))
         step = _int(entry.get("step"), len(rows) + 1)
         marker_force = _vector(entry.get("total_marker_force_n"))
         external_force = _vector(entry.get("mpm_external_force_n"))
@@ -270,6 +284,18 @@ def build_history_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
                 ),
                 "surface_feedback_max_marker_displacement_m": _number(
                     entry.get("surface_feedback_max_marker_displacement_m")
+                ),
+                "local_velocity_peak_mps": _number(
+                    entry.get("local_velocity_peak_mps")
+                ),
+                "pressure_min_pa": _number(entry.get("pressure_min_pa")),
+                "pressure_max_pa": _number(entry.get("pressure_max_pa")),
+                "projection_l2": _number(projection.get("projection_l2")),
+                "projection_max_abs": _number(projection.get("projection_max_abs")),
+                "pre_projection_l2": _number(projection.get("pre_projection_l2")),
+                "post_boundary_l2": _number(projection.get("post_boundary_l2")),
+                "velocity_dirichlet_boundary_max_delta_mps": _number(
+                    projection.get("velocity_dirichlet_boundary_max_delta_mps")
                 ),
             }
         )
@@ -345,10 +371,13 @@ def build_stage_check(
     marker_force = _vector(report.get("total_marker_force_n"))
     status = str(summary["status"])
     fluid_recomputed = _bool(report.get("fluid_recomputed_after_feedback"))
-    feedback_closure_status = (
-        "CLOSED_LOOP_RECOMPUTED_FLOW"
-        if fluid_recomputed
-        else "OPEN_LOOP_LOAD_REUSE"
+    feedback_closure_status = str(
+        report.get(
+            "feedback_closure_status",
+            "CLOSED_LOOP_RECOMPUTED_AFTER_FEEDBACK"
+            if fluid_recomputed
+            else "OPEN_LOOP_OR_PREFEEDBACK_ONLY",
+        )
     )
 
     compare_line = (
@@ -369,6 +398,7 @@ def build_stage_check(
             f"pressure_min_pa = {_format_value(report.get('computed_pressure_min_pa'))}",
             f"pressure_max_pa = {_format_value(report.get('computed_pressure_max_pa'))}",
             f"projection_final_residual = {_format_value(_projection_residual(projection))}",
+            *_projection_diagnostic_lines(projection),
             f"diagnosis = {_flow_diagnosis(status)}",
             "",
             "[INTERFACE_FORCE]",
@@ -526,6 +556,10 @@ def build_displacement_compare_rows(
                 "fluent_tip_y_m": _number(fluent.get("tip_y_displacement_m")),
                 "easyfsi_tip_streamwise_m": easy.get("tip_mean_dz_m", ""),
                 "easyfsi_tip_vertical_m": easy.get("tip_mean_dy_m", ""),
+                **{
+                    column: easy.get(column, "")
+                    for column in FLOW_DIAGNOSTIC_COLUMNS
+                },
             }
         )
     return compare_rows
@@ -704,6 +738,20 @@ def _projection_residual(projection: dict[str, Any]) -> Any:
         if key in projection:
             return projection[key]
     return ""
+
+
+def _projection_diagnostic_lines(projection: dict[str, Any]) -> list[str]:
+    return [
+        f"{key} = {_format_value(projection.get(key))}"
+        for key in (
+            "projection_l2",
+            "projection_max_abs",
+            "pre_projection_l2",
+            "post_boundary_l2",
+            "velocity_dirichlet_boundary_max_delta_mps",
+        )
+        if key in projection
+    ]
 
 
 def _geometry_ok(geometry: dict[str, Any]) -> bool:

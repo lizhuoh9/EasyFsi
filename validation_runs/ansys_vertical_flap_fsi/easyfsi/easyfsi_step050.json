@@ -1,5 +1,3 @@
-﻿[Taichi] version 1.7.4, llvm 15.0.1, commit b4b956fd, win, python 3.10.18
-[Taichi] Starting on arch=cuda
 {
   "acceptance_tolerance": 0.05,
   "boundary_conditions": {
@@ -152,7 +150,7 @@
     "young_modulus_pa": 1000000.0
   },
   "displacement_tolerance": 0.05,
-  "feedback_closure_status": "CLOSED_LOOP_RECOMPUTED_FLOW",
+  "feedback_closure_status": "CLOSED_LOOP_RECOMPUTED_AFTER_FEEDBACK",
   "flow_fluid_cell_count": 8064,
   "flow_obstacle_cell_count": 128,
   "flow_projection_report": {
@@ -294,6 +292,8 @@
     "velocity_dirichlet_near_raw_max_abs": 6400.0
   },
   "flow_solution_mode": "computed_projection",
+  "fluid_projection_after_feedback_count": 49,
+  "fluid_projection_count": 50,
   "fluid_reaction_force_n": [
     -0.0,
     -6.642947379604778e-09,
@@ -303,6 +303,7 @@
   "fluid_recomputed_after_feedback": true,
   "history": [
     {
+      "feedback_available_before_projection": false,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -443,6 +444,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": false,
       "local_velocity_peak_mps": 28.15654945373535,
       "max_displacement_m": 7.317648851312697e-06,
       "mpm_external_force_n": [
@@ -467,6 +469,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -607,6 +610,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 31.904436111450195,
       "max_displacement_m": 2.3322179913520813e-05,
       "mpm_external_force_n": [
@@ -631,6 +635,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -771,6 +776,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 28.980199813842773,
       "max_displacement_m": 2.6416902983328328e-05,
       "mpm_external_force_n": [
@@ -795,6 +801,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -935,6 +942,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 22.91345977783203,
       "max_displacement_m": 2.111259163939394e-05,
       "mpm_external_force_n": [
@@ -959,6 +967,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -1099,6 +1108,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 16.47804832458496,
       "max_displacement_m": 9.983908967114985e-06,
       "mpm_external_force_n": [
@@ -1123,6 +1133,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -1263,6 +1274,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 11.122832298278809,
       "max_displacement_m": 1.5423177046614e-06,
       "mpm_external_force_n": [
@@ -1287,6 +1299,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -1427,6 +1440,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.347023963928223,
       "max_displacement_m": 8.665913810546044e-06,
       "mpm_external_force_n": [
@@ -1451,6 +1465,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -1591,6 +1606,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.018343925476074,
       "max_displacement_m": 1.2004667951259762e-05,
       "mpm_external_force_n": [
@@ -1615,6 +1631,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -1755,6 +1772,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.102964401245117,
       "max_displacement_m": 1.1433384315751027e-05,
       "mpm_external_force_n": [
@@ -1779,6 +1797,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -1919,6 +1938,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.592989921569824,
       "max_displacement_m": 8.187397725123446e-06,
       "mpm_external_force_n": [
@@ -1943,6 +1963,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -2083,6 +2104,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 12.039587020874023,
       "max_displacement_m": 4.720512606581906e-06,
       "mpm_external_force_n": [
@@ -2107,6 +2129,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -2247,6 +2270,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6425.70068359375
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 15.714466094970703,
       "max_displacement_m": 2.718918949540239e-06,
       "mpm_external_force_n": [
@@ -2271,6 +2295,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -2411,6 +2436,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6462.35595703125
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 18.48656463623047,
       "max_displacement_m": 2.765821818684344e-06,
       "mpm_external_force_n": [
@@ -2435,6 +2461,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -2575,6 +2602,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6487.19970703125
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 20.226381301879883,
       "max_displacement_m": 3.3898222682182677e-06,
       "mpm_external_force_n": [
@@ -2599,6 +2627,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -2739,6 +2768,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6497.26953125
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 20.92318344116211,
       "max_displacement_m": 3.949823167204158e-06,
       "mpm_external_force_n": [
@@ -2763,6 +2793,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -2903,6 +2934,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6492.92529296875
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 20.64934730529785,
       "max_displacement_m": 4.543585419014562e-06,
       "mpm_external_force_n": [
@@ -2927,6 +2959,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -3067,6 +3100,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6476.81396484375
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 19.532503128051758,
       "max_displacement_m": 5.332191904017236e-06,
       "mpm_external_force_n": [
@@ -3091,6 +3125,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -3231,6 +3266,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6452.408203125
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 17.730945587158203,
       "max_displacement_m": 6.440033757826313e-06,
       "mpm_external_force_n": [
@@ -3255,6 +3291,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -3395,6 +3432,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6422.8583984375
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 15.411380767822266,
       "max_displacement_m": 7.877764801378362e-06,
       "mpm_external_force_n": [
@@ -3419,6 +3457,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -3559,6 +3598,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 12.732245445251465,
       "max_displacement_m": 9.65860908763716e-06,
       "mpm_external_force_n": [
@@ -3583,6 +3623,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -3723,6 +3764,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.942748069763184,
       "max_displacement_m": 1.1769972843467258e-05,
       "mpm_external_force_n": [
@@ -3747,6 +3789,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -3887,6 +3930,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.466665267944336,
       "max_displacement_m": 1.3990381376061123e-05,
       "mpm_external_force_n": [
@@ -3911,6 +3955,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -4051,6 +4096,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.150960922241211,
       "max_displacement_m": 1.6201052858377807e-05,
       "mpm_external_force_n": [
@@ -4075,6 +4121,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -4215,6 +4262,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.010038375854492,
       "max_displacement_m": 1.8062835806631483e-05,
       "mpm_external_force_n": [
@@ -4239,6 +4287,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -4379,6 +4428,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.028663635253906,
       "max_displacement_m": 1.9588229406508617e-05,
       "mpm_external_force_n": [
@@ -4403,6 +4453,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -4543,6 +4594,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.167692184448242,
       "max_displacement_m": 2.0780191334779374e-05,
       "mpm_external_force_n": [
@@ -4567,6 +4619,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -4707,6 +4760,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.378167152404785,
       "max_displacement_m": 2.1636096789734438e-05,
       "mpm_external_force_n": [
@@ -4731,6 +4785,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -4871,6 +4926,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.618311882019043,
       "max_displacement_m": 2.207742909376975e-05,
       "mpm_external_force_n": [
@@ -4895,6 +4951,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -5035,6 +5092,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.85511302947998,
       "max_displacement_m": 2.2181146050570533e-05,
       "mpm_external_force_n": [
@@ -5059,6 +5117,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -5199,6 +5258,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 11.058526992797852,
       "max_displacement_m": 2.189479891967494e-05,
       "mpm_external_force_n": [
@@ -5223,6 +5283,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -5363,6 +5424,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 11.201639175415039,
       "max_displacement_m": 2.127325933543034e-05,
       "mpm_external_force_n": [
@@ -5387,6 +5449,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -5527,6 +5590,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 11.468441009521484,
       "max_displacement_m": 2.0266807041480206e-05,
       "mpm_external_force_n": [
@@ -5551,6 +5615,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -5691,6 +5756,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 11.335906982421875,
       "max_displacement_m": 1.8964601622428745e-05,
       "mpm_external_force_n": [
@@ -5715,6 +5781,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -5855,6 +5922,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 11.12287712097168,
       "max_displacement_m": 1.7431761079933494e-05,
       "mpm_external_force_n": [
@@ -5879,6 +5947,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -6019,6 +6088,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.937410354614258,
       "max_displacement_m": 1.5821917259017937e-05,
       "mpm_external_force_n": [
@@ -6043,6 +6113,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -6183,6 +6254,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.707871437072754,
       "max_displacement_m": 1.4245209968066774e-05,
       "mpm_external_force_n": [
@@ -6207,6 +6279,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -6347,6 +6420,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.468461990356445,
       "max_displacement_m": 1.2796353075827938e-05,
       "mpm_external_force_n": [
@@ -6371,6 +6445,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -6511,6 +6586,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.254562377929688,
       "max_displacement_m": 1.1509881915117148e-05,
       "mpm_external_force_n": [
@@ -6535,6 +6611,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -6675,6 +6752,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.096144676208496,
       "max_displacement_m": 1.0463088983669877e-05,
       "mpm_external_force_n": [
@@ -6699,6 +6777,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -6839,6 +6918,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.012141227722168,
       "max_displacement_m": 9.74466820480302e-06,
       "mpm_external_force_n": [
@@ -6863,6 +6943,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -7003,6 +7084,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.00739860534668,
       "max_displacement_m": 9.282142855226994e-06,
       "mpm_external_force_n": [
@@ -7027,6 +7109,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -7167,6 +7250,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.072790145874023,
       "max_displacement_m": 9.10051130631473e-06,
       "mpm_external_force_n": [
@@ -7191,6 +7275,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -7331,6 +7416,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.18659496307373,
       "max_displacement_m": 9.186166607833002e-06,
       "mpm_external_force_n": [
@@ -7355,6 +7441,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -7495,6 +7582,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.317790985107422,
       "max_displacement_m": 9.399504051543772e-06,
       "mpm_external_force_n": [
@@ -7519,6 +7607,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -7659,6 +7748,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.435532569885254,
       "max_displacement_m": 9.693501851870678e-06,
       "mpm_external_force_n": [
@@ -7683,6 +7773,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -7823,6 +7914,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.517919540405273,
       "max_displacement_m": 9.965653589460999e-06,
       "mpm_external_force_n": [
@@ -7847,6 +7939,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -7987,6 +8080,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.554438591003418,
       "max_displacement_m": 1.0179829587286804e-05,
       "mpm_external_force_n": [
@@ -8011,6 +8105,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -8151,6 +8246,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.544553756713867,
       "max_displacement_m": 1.0368866242060903e-05,
       "mpm_external_force_n": [
@@ -8175,6 +8271,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -8315,6 +8412,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.495059967041016,
       "max_displacement_m": 1.0545199074840639e-05,
       "mpm_external_force_n": [
@@ -8339,6 +8437,7 @@
       ]
     },
     {
+      "feedback_available_before_projection": true,
       "feedback_invalid_marker_count": 0,
       "flow_projection_report": {
         "cg_breakdown": "",
@@ -8479,6 +8578,7 @@
         "velocity_dirichlet_near_raw_max_abs": 6400.0
       },
       "fluid_recomputed": true,
+      "fluid_recomputed_after_feedback": true,
       "local_velocity_peak_mps": 10.41722297668457,
       "max_displacement_m": 1.0789924090204295e-05,
       "mpm_external_force_n": [

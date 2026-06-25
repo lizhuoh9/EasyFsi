@@ -29,7 +29,7 @@ class AnsysVerticalFlapClosedLoopFeedbackTests(unittest.TestCase):
         self.assertEqual(summary["tip_dz_monotonic_violation_count"], 0)
         self.assertIn("fluid_recomputed_after_feedback = true", stage_check)
         self.assertIn(
-            "feedback_closure_status = CLOSED_LOOP_RECOMPUTED_FLOW",
+            "feedback_closure_status = CLOSED_LOOP_RECOMPUTED_AFTER_FEEDBACK",
             stage_check,
         )
 
@@ -46,14 +46,24 @@ class AnsysVerticalFlapClosedLoopFeedbackTests(unittest.TestCase):
 
         self.assertIn("fluid_recomputed_after_feedback = true", stage_check)
         self.assertIn(
-            "feedback_closure_status = CLOSED_LOOP_RECOMPUTED_FLOW",
+            "feedback_closure_status = CLOSED_LOOP_RECOMPUTED_AFTER_FEEDBACK",
             stage_check,
         )
         self.assertIs(report["fluid_recomputed_after_feedback"], True)
-        self.assertEqual(report["feedback_closure_status"], "CLOSED_LOOP_RECOMPUTED_FLOW")
+        self.assertEqual(
+            report["feedback_closure_status"],
+            "CLOSED_LOOP_RECOMPUTED_AFTER_FEEDBACK",
+        )
         self.assertEqual(report["fluid_recompute_count"], len(history))
+        self.assertEqual(report["fluid_projection_count"], len(history))
+        self.assertEqual(report["fluid_projection_after_feedback_count"], len(history) - 1)
         self.assertEqual(report["fluid_recompute_count"], 50)
         self.assertTrue(all(entry["fluid_recomputed"] is True for entry in history))
+        self.assertIs(history[0]["fluid_recomputed_after_feedback"], False)
+        self.assertIs(history[0]["feedback_available_before_projection"], False)
+        for entry in history[1:]:
+            self.assertIs(entry["fluid_recomputed_after_feedback"], True)
+            self.assertIs(entry["feedback_available_before_projection"], True)
         for entry in history:
             self.assertIn("local_velocity_peak_mps", entry)
             self.assertIn("pressure_min_pa", entry)
@@ -127,6 +137,10 @@ def _closed_loop_report() -> dict:
         "max_displacement_relative_error": 0.0196078431372549,
         "displacement_tolerance": 0.05,
         "fluid_recomputed_after_feedback": True,
+        "feedback_closure_status": "CLOSED_LOOP_RECOMPUTED_AFTER_FEEDBACK",
+        "fluid_recompute_count": 3,
+        "fluid_projection_count": 3,
+        "fluid_projection_after_feedback_count": 2,
         "history": [
             _history_entry(1, -2.0e-5, -0.4),
             _history_entry(2, -3.5e-5, -0.8),
@@ -146,6 +160,8 @@ def _history_entry(step: int, tip_dz_m: float, force_z_n: float) -> dict:
         "max_displacement_m": abs(tip_dz_m),
         "tip_mean_displacement_m": [0.0, 1.0e-6, tip_dz_m],
         "fluid_recomputed": True,
+        "fluid_recomputed_after_feedback": step > 1,
+        "feedback_available_before_projection": step > 1,
         "local_velocity_peak_mps": 28.0,
         "pressure_min_pa": -100.0,
         "pressure_max_pa": 200.0,

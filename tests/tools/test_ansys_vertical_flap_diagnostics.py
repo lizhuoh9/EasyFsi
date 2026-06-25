@@ -122,7 +122,10 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
 
             stage_check = (output_dir / "stage_check.md").read_text(encoding="utf-8")
             self.assertIn("fluid_recomputed_after_feedback = false", stage_check)
-            self.assertIn("feedback_closure_status = OPEN_LOOP_LOAD_REUSE", stage_check)
+            self.assertIn(
+                "feedback_closure_status = OPEN_LOOP_OR_PREFEEDBACK_ONLY",
+                stage_check,
+            )
             self.assertIn("tip_dz_monotonic_violation_count = 1", stage_check)
             self.assertIn("diagnosis = check solid history monotonicity", stage_check)
 

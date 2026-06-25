@@ -8,7 +8,12 @@ velocity_peak_mps = 10.4172229767
 official_range_mps = [20, 29]
 pressure_min_pa = -136.474249776
 pressure_max_pa = 16.4704247666
-projection_final_residual =
+projection_final_residual = 
+projection_l2 = 1144.05692371
+projection_max_abs = 6400
+pre_projection_l2 = 1146.05694984
+post_boundary_l2 = 1144.05692371
+velocity_dirichlet_boundary_max_delta_mps = 10.0722332001
 diagnosis = check fluid solver / BC / obstacle / outlet / projection
 
 [INTERFACE_FORCE]
@@ -40,7 +45,7 @@ updated_markers = 12
 invalid_markers = 0
 max_marker_displacement_m = 1.02023579984e-06
 fluid_recomputed_after_feedback = true
-feedback_closure_status = CLOSED_LOOP_RECOMPUTED_FLOW
+feedback_closure_status = CLOSED_LOOP_RECOMPUTED_AFTER_FEEDBACK
 diagnosis = feedback is downstream of current failing gate
 
 [COORDINATE_MAPPING]
