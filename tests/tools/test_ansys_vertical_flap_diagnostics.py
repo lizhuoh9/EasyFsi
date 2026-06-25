@@ -26,9 +26,12 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
         self.assertEqual(summary["steps"], 2)
         self.assertEqual(summary["grid"], "4x32x64")
         self.assertEqual(summary["particles"], "1x12x4")
-        self.assertEqual(summary["markers"], 12)
+        self.assertEqual(summary["markers"], 24)
+        self.assertEqual(summary["markers_per_face"], 12)
+        self.assertEqual(summary["markers_actual"], 24)
         self.assertEqual(summary["preflow_steps_completed"], 1)
         self.assertEqual(summary["preflow_converged"], "false")
+        self.assertEqual(summary["preflow_status"], "max_steps")
         self.assertEqual(summary["solid_substeps_selected"], 1600)
         self.assertAlmostEqual(summary["solid_estimated_cfl"], 0.31)
         self.assertAlmostEqual(summary["velocity_p99_mps"], 27.5)
@@ -147,6 +150,7 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             self.assertIn("[COORDINATE_MAPPING]", stage_check)
             self.assertNotIn("projection_final_residual =", stage_check)
             self.assertIn("steps_completed = 1", stage_check)
+            self.assertIn("status = max_steps", stage_check)
             self.assertIn("history_rows = 1", stage_check)
             self.assertIn("velocity_p99_mps = 27.5", stage_check)
             self.assertIn("solid_substeps_selected = 1600", stage_check)
@@ -228,6 +232,20 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
         self.assertEqual(summary["first_tip_dz_violation_step"], "")
         self.assertEqual(summary["max_tip_dz_rebound_m"], "")
         self.assertEqual(summary["tip_dz_sign_violation_count"], 0)
+
+    def test_preflow_status_reports_not_requested_without_convergence_claim(self) -> None:
+        report = _fixture_report()
+        report["preflow_steps_requested"] = 0
+        report["preflow_steps_completed"] = 0
+        report["preflow_converged"] = True
+        report["preflow_stop_reason"] = "not_requested"
+        report.pop("preflow_status", None)
+
+        summary = build_summary_row(report)
+
+        self.assertEqual(summary["preflow_steps_completed"], 0)
+        self.assertEqual(summary["preflow_converged"], "true")
+        self.assertEqual(summary["preflow_status"], "not_requested")
 
     def test_optional_fluent_tip_csv_writes_displacement_compare(self) -> None:
         report = _fixture_report()
@@ -335,6 +353,8 @@ def _fixture_report() -> dict:
             "marker_count": 12,
             "mpm_support_radius_m": 0.0015,
         },
+        "marker_count_per_face": 12,
+        "marker_count_actual": 24,
         "reference_results": {
             "max_displacement_m": 5.1e-5,
             "local_velocity_peak_mps": 28.1,
@@ -358,6 +378,7 @@ def _fixture_report() -> dict:
         "preflow_steps_requested": 1,
         "preflow_steps_completed": 1,
         "preflow_converged": False,
+        "preflow_status": "max_steps",
         "preflow_stop_reason": "max_steps",
         "preflow_history": [
             {

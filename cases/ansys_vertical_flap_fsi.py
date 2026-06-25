@@ -138,6 +138,9 @@ class VerticalFlapFsiConfig:
     solid_cfl_target: float = 0.5
     preflow_steps: int = 0
     preflow_convergence_tolerance: float = 0.0
+    apply_marker_feedback_to_fluid: bool = True
+    flow_reset_pressure_each_step: bool = False
+    flow_reinitialize_inlet_each_step: bool = False
     enforce_plane_strain_x: bool = True
     mpm_support_radius_m: float = 0.006
     displacement_tolerance: float = 0.05
@@ -225,6 +228,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=VerticalFlapFsiConfig.preflow_convergence_tolerance,
         help="Relative p/velocity tolerance for early preflow stop; 0 disables.",
     )
+    parser.add_argument(
+        "--disable-marker-feedback",
+        action="store_true",
+        help="Diagnostic mode: do not impose marker velocity feedback on fluid.",
+    )
+    parser.add_argument(
+        "--flow-reset-pressure-each-step",
+        action="store_true",
+        help="Diagnostic mode: reset pressure before every flow projection.",
+    )
+    parser.add_argument(
+        "--flow-reinitialize-inlet-each-step",
+        action="store_true",
+        help="Diagnostic mode: reinitialize inlet flow before every projection.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -236,6 +254,9 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
             step_count=args.steps,
             preflow_steps=args.preflow_steps,
             preflow_convergence_tolerance=args.preflow_convergence_tolerance,
+            apply_marker_feedback_to_fluid=not args.disable_marker_feedback,
+            flow_reset_pressure_each_step=args.flow_reset_pressure_each_step,
+            flow_reinitialize_inlet_each_step=args.flow_reinitialize_inlet_each_step,
         )
     )
     if args.json:

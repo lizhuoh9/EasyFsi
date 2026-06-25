@@ -174,6 +174,9 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
         self.assertEqual(config.preflow_steps, 0)
         self.assertEqual(config.preflow_convergence_tolerance, 0.0)
+        self.assertTrue(config.apply_marker_feedback_to_fluid)
+        self.assertFalse(config.flow_reset_pressure_each_step)
+        self.assertFalse(config.flow_reinitialize_inlet_each_step)
 
         parser = vertical_flap_case._build_parser()
         args = parser.parse_args(
@@ -184,6 +187,9 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 "2",
                 "--preflow-convergence-tolerance",
                 "0.01",
+                "--disable-marker-feedback",
+                "--flow-reset-pressure-each-step",
+                "--flow-reinitialize-inlet-each-step",
                 "--json",
             ]
         )
@@ -191,12 +197,16 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(args.steps, 3)
         self.assertEqual(args.preflow_steps, 2)
         self.assertAlmostEqual(args.preflow_convergence_tolerance, 0.01)
+        self.assertTrue(args.disable_marker_feedback)
+        self.assertTrue(args.flow_reset_pressure_each_step)
+        self.assertTrue(args.flow_reinitialize_inlet_each_step)
 
     def test_fixed_solid_preflow_reports_diagnostics_without_mpm_advance(self):
         source = inspect.getsource(solid_mpm_fsi_runner._run_fixed_solid_preflow)
 
         self.assertIn('"preflow_steps_requested"', source)
         self.assertIn('"preflow_steps_completed"', source)
+        self.assertIn('"preflow_status"', source)
         self.assertIn('"preflow_history"', source)
         self.assertIn('"solid_fixed": True', source)
         self.assertIn('"solid_advanced": False', source)
@@ -204,6 +214,35 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertIn("_sample_stress_to_marker_forces(markers, fluid)", source)
         self.assertNotIn("solid.step(", source)
         self.assertNotIn("scatter_marker_forces_to_mpm_particles", source)
+
+    def test_preflow_only_step_count_zero_is_diagnostic_only(self):
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            VerticalFlapFsiConfig(step_count=0, preflow_steps=1)
+        )
+        with self.assertRaisesRegex(ValueError, "preflow-only"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(step_count=0, preflow_steps=0)
+            )
+
+        run_source = inspect.getsource(
+            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+        )
+        self.assertIn("config.step_count == 0 and preflow_history", run_source)
+        self.assertIn("_preflow_only_report", run_source)
+
+    def test_diagnostic_flow_controls_are_explicit_and_default_safe(self):
+        config = VerticalFlapFsiConfig()
+
+        self.assertTrue(config.apply_marker_feedback_to_fluid)
+        self.assertFalse(config.flow_reset_pressure_each_step)
+        self.assertFalse(config.flow_reinitialize_inlet_each_step)
+
+        run_source = inspect.getsource(
+            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+        )
+        self.assertIn("apply_marker_feedback_to_fluid", run_source)
+        self.assertIn("flow_reset_pressure_each_step", run_source)
+        self.assertIn("flow_reinitialize_inlet_each_step", run_source)
 
     def test_thin_wall_probe_reach_tracks_refined_streamwise_spacing(self):
         coarse = VerticalFlapFsiConfig(grid_nodes=(4, 80, 160))

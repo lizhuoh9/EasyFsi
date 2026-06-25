@@ -57,9 +57,15 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     feedback_available_for_projection = False
     feedback_constraint_cells: set[tuple[int, int, int]] = set()
     history: list[dict[str, object]] = []
+    apply_feedback = bool(getattr(config, "apply_marker_feedback_to_fluid", True))
 
     for step_index in range(config.step_count):
-        feedback_available_before_projection = feedback_available_for_projection
+        if bool(getattr(config, "flow_reinitialize_inlet_each_step", False)):
+            _initialize_computed_flow(fluid, config)
+            feedback_constraint_cells = set()
+        feedback_available_before_projection = (
+            feedback_available_for_projection and apply_feedback
+        )
         latest_feedback_constraint_report = _apply_marker_feedback_to_fluid(
             markers,
             fluid,
@@ -71,7 +77,10 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         latest_flow_report = _project_current_flow(
             fluid,
             config,
-            reset_pressure=(step_index == 0 and not preflow_history),
+            reset_pressure=(
+                bool(getattr(config, "flow_reset_pressure_each_step", False))
+                or (step_index == 0 and not preflow_history)
+            ),
         )
         latest_feedback_constraint_report[
             "no_slip_projected_residual_after_projection_mps"
@@ -134,6 +143,13 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         history.append(
             {
                 "step": step_index + 1,
+                "apply_marker_feedback_to_fluid": apply_feedback,
+                "flow_reset_pressure_each_step": bool(
+                    getattr(config, "flow_reset_pressure_each_step", False)
+                ),
+                "flow_reinitialize_inlet_each_step": bool(
+                    getattr(config, "flow_reinitialize_inlet_each_step", False)
+                ),
                 "fluid_recomputed": True,
                 "fluid_recomputed_after_feedback": (
                     feedback_available_before_projection
@@ -203,6 +219,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "solid_substeps_selected": solid_substeps,
                 "solid_estimated_cfl": solid_substep_cfl["solid_estimated_cfl"],
                 "stress_valid_marker_count": latest_stress_report.valid_marker_count,
+                "stress_invalid_marker_count": (
+                    latest_stress_report.invalid_marker_count
+                ),
                 "scatter_invalid_marker_count": (
                     latest_scatter_report.invalid_marker_count
                 ),
@@ -216,6 +235,21 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                     "tip_mean_displacement_m"
                 ],
             }
+        )
+
+    if config.step_count == 0 and preflow_history:
+        return _preflow_only_report(
+            case_id=case_id,
+            case_metadata=case_metadata,
+            boundary_conditions=boundary_conditions,
+            reference_results=reference_results,
+            config=config,
+            markers=markers,
+            solid=solid,
+            fixed_mask=fixed_mask,
+            tip_mask=tip_mask,
+            solid_substep_cfl=solid_substep_cfl,
+            preflow_report=preflow_report,
         )
 
     if (
@@ -249,6 +283,13 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "streamwise_axis": AXIS_NAMES[STREAMWISE_AXIS_INDEX],
         "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
         **preflow_report,
+        "apply_marker_feedback_to_fluid": apply_feedback,
+        "flow_reset_pressure_each_step": bool(
+            getattr(config, "flow_reset_pressure_each_step", False)
+        ),
+        "flow_reinitialize_inlet_each_step": bool(
+            getattr(config, "flow_reinitialize_inlet_each_step", False)
+        ),
         "official_half_domain": _is_official_half_domain(case_metadata),
         "full_domain_two_flap": False,
         "flap_count_modeled": 1,
@@ -400,9 +441,143 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     }
 
 
+def _preflow_only_report(
+    *,
+    case_id: str,
+    case_metadata: Mapping[str, Any],
+    boundary_conditions: Mapping[str, Any],
+    reference_results: Mapping[str, Any],
+    config: Any,
+    markers: HibmMpmSurfaceMarkers,
+    solid: NeoHookeanMpmState,
+    fixed_mask: np.ndarray,
+    tip_mask: np.ndarray,
+    solid_substep_cfl: Mapping[str, object],
+    preflow_report: Mapping[str, object],
+) -> dict[str, object]:
+    preflow_history = list(preflow_report["preflow_history"])
+    latest_preflow = dict(preflow_history[-1])
+    projection_report = latest_preflow["flow_projection_report"]
+    displacement = _solid_displacement_report(solid, fixed_mask, tip_mask)
+    marker_force = tuple(latest_preflow["total_marker_force_n"])
+    reference_velocity_peak = float(reference_results["local_velocity_peak_mps"])
+    local_velocity_peak_mps = float(latest_preflow["local_velocity_peak_mps"])
+    velocity_relative_error = (
+        abs(local_velocity_peak_mps - reference_velocity_peak) / reference_velocity_peak
+    )
+    return {
+        "case": case_id,
+        "case_metadata": dict(case_metadata),
+        "config": asdict(config),
+        "flow_solution_mode": FLOW_SOLUTION_MODE,
+        "streamwise_axis": AXIS_NAMES[STREAMWISE_AXIS_INDEX],
+        "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
+        **preflow_report,
+        "apply_marker_feedback_to_fluid": bool(
+            getattr(config, "apply_marker_feedback_to_fluid", True)
+        ),
+        "flow_reset_pressure_each_step": bool(
+            getattr(config, "flow_reset_pressure_each_step", False)
+        ),
+        "flow_reinitialize_inlet_each_step": bool(
+            getattr(config, "flow_reinitialize_inlet_each_step", False)
+        ),
+        "official_half_domain": _is_official_half_domain(case_metadata),
+        "full_domain_two_flap": False,
+        "flap_count_modeled": 1,
+        "flap_count_displayed_after_symmetry_mirror": (
+            2 if _is_official_half_domain(case_metadata) else 1
+        ),
+        "modeled_grid_nodes": list(config.grid_nodes),
+        "display_grid_after_symmetry_mirror": _display_grid_after_symmetry_mirror(
+            config,
+            case_metadata,
+        ),
+        "flap_box_m": {
+            "min": list(_solid_box(config)[0]),
+            "max": list(_solid_box(config)[1]),
+        },
+        "marker_face_count": 2,
+        "marker_count_per_face": int(config.marker_count),
+        "marker_count_actual": int(markers.marker_count),
+        "flow_projection_iterations_actual": int(config.flow_projection_iterations),
+        "solid_substep_cfl_report": dict(solid_substep_cfl),
+        "solid_substeps_requested": solid_substep_cfl["solid_substeps_requested"],
+        "solid_substeps_selected": solid_substep_cfl["solid_substeps_selected"],
+        "solid_substeps_cfl_minimum": solid_substep_cfl[
+            "solid_substeps_cfl_minimum"
+        ],
+        "solid_estimated_cfl": solid_substep_cfl["solid_estimated_cfl"],
+        "solid_elastic_wave_speed_mps": solid_substep_cfl[
+            "solid_elastic_wave_speed_mps"
+        ],
+        "solid_min_grid_spacing_m": solid_substep_cfl["solid_min_grid_spacing_m"],
+        "solid_cfl_target": solid_substep_cfl["solid_cfl_target"],
+        "computed_result_sources": {
+            "pressure_pa": "fluid.pressure",
+            "local_velocity_peak_mps": "max(norm(fluid.velocity))",
+            "fluid_interface_force_n": "HIBM marker traction integral",
+            "max_displacement_m": "solid.x-rest_x",
+        },
+        "boundary_conditions": dict(boundary_conditions),
+        "reference_results": dict(reference_results),
+        "flow_projection_report": projection_report,
+        "computed_pressure_min_pa": latest_preflow["pressure_min_pa"],
+        "computed_pressure_max_pa": latest_preflow["pressure_max_pa"],
+        "pressure_sign_convention": "fluid.pressure projection field is sampled directly",
+        "local_velocity_peak_mps": local_velocity_peak_mps,
+        "fluid_speed_p99_mps": latest_preflow["fluid_speed_p99_mps"],
+        "fluid_speed_p999_mps": latest_preflow["fluid_speed_p999_mps"],
+        "local_velocity_peak_relative_error": velocity_relative_error,
+        "velocity_peak_tolerance": config.velocity_peak_tolerance,
+        "fluid_recomputed_after_feedback": False,
+        "feedback_closure_status": "PREFLOW_ONLY_FIXED_SOLID",
+        "fluid_recompute_count": int(preflow_report["preflow_steps_completed"]),
+        "fluid_projection_count": int(preflow_report["preflow_steps_completed"]),
+        "fluid_projection_after_feedback_count": 0,
+        "fluid_projection_consumed_feedback_count": 0,
+        "fluid_projection_consumed_feedback": False,
+        "fluid_feedback_constraint_marker_count": 0,
+        "fluid_feedback_constraint_active_cell_count": 0,
+        "fluid_feedback_constraint_cleared_cell_count": 0,
+        "fluid_feedback_constraint_obstacle_cell_count": 0,
+        "fluid_feedback_constraint_non_obstacle_cell_count": 0,
+        "fluid_feedback_constraint_projection_participating_cell_count": 0,
+        "no_slip_residual_before_mps": "",
+        "no_slip_residual_after_mps": "",
+        "no_slip_target_residual_after_assembly_mps": "",
+        "no_slip_projected_residual_after_projection_mps": 0.0,
+        "stress_valid_marker_count": latest_preflow["stress_valid_marker_count"],
+        "stress_invalid_marker_count": latest_preflow["stress_invalid_marker_count"],
+        "two_sided_pressure_marker_count": latest_preflow[
+            "two_sided_pressure_marker_count"
+        ],
+        "max_abs_traction_pa": 0.0,
+        "total_marker_force_n": marker_force,
+        "fluid_reaction_force_n": tuple(-float(v) for v in marker_force),
+        "marker_action_reaction_residual_n": 0.0,
+        "scatter_invalid_marker_count": 0,
+        "scatter_active_marker_count": 0,
+        "scatter_active_particle_count": 0,
+        "scatter_action_reaction_residual_n": 0.0,
+        "mpm_external_force_n": (0.0, 0.0, 0.0),
+        "surface_feedback_updated_marker_count": 0,
+        "surface_feedback_invalid_marker_count": 0,
+        "surface_feedback_max_marker_displacement_m": 0.0,
+        "history": [],
+        "max_displacement_m": displacement["max_displacement_m"],
+        "reference_max_displacement_m": float(reference_results["max_displacement_m"]),
+        "max_displacement_relative_error": 1.0,
+        "displacement_tolerance": config.displacement_tolerance,
+        **displacement,
+    }
+
+
 def _validate_rectangular_solid_config(config: Any) -> None:
-    if config.step_count <= 0:
-        raise ValueError("step_count must be positive")
+    if config.step_count < 0:
+        raise ValueError("step_count must be non-negative")
+    if config.step_count == 0 and int(getattr(config, "preflow_steps", 0)) <= 0:
+        raise ValueError("step_count=0 is only valid for preflow-only diagnostics")
     if min(config.grid_nodes) < 4:
         raise ValueError("grid_nodes must be at least 4 in each direction")
     if min(config.solid_particle_counts) <= 0:
@@ -657,10 +832,15 @@ def _run_fixed_solid_preflow(
     stop_reason = "not_requested" if requested_steps == 0 else "max_steps"
 
     for preflow_index in range(requested_steps):
+        if bool(getattr(config, "flow_reinitialize_inlet_each_step", False)):
+            _initialize_computed_flow(fluid, config)
         flow_report = _project_current_flow(
             fluid,
             config,
-            reset_pressure=(preflow_index == 0),
+            reset_pressure=(
+                bool(getattr(config, "flow_reset_pressure_each_step", False))
+                or preflow_index == 0
+            ),
         )
         stress_report = _sample_stress_to_marker_forces(markers, fluid)
         force_report = markers.aggregate_region_forces(
@@ -713,6 +893,7 @@ def _run_fixed_solid_preflow(
         "preflow_steps_completed": len(history),
         "preflow_convergence_tolerance": tolerance,
         "preflow_converged": converged,
+        "preflow_status": stop_reason,
         "preflow_stop_reason": stop_reason,
         "preflow_history": history,
     }

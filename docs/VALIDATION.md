@@ -83,6 +83,23 @@ flow field is established before the MPM body advances:
 The reviewable CI/local gate for this ANSYS validation surface lives in
 `.github\workflows\ansys-vertical-flap-validation.yml`.
 
+For the coarse flow-collapse diagnostic baseline, run:
+
+```powershell
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_only_sweep_after_halfdomain_repair.py
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_flow_collapse_diagnostic_matrix.py
+```
+
+These write preflow-only and 10-step matrix artifacts under:
+
+```text
+validation_runs\ansys_vertical_flap_fsi\flow_collapse_diagnostics\
+```
+
+The diagnostic matrix is intended to answer whether the coarse velocity decay
+is projection-only / inlet-driving behavior or marker-feedback behavior. It is
+not an L-level Fluent parity run.
+
 ## Known Non-Gating Historical Failures
 
 - ANSYS vertical-flap displacement tolerance smoke.

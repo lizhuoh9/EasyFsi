@@ -7,6 +7,7 @@ PASS time: dt=0.0005, steps=50
 steps_requested = 0
 steps_completed = 0
 converged = true
+status = not_requested
 stop_reason = not_requested
 history_rows = 0
 

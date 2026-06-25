@@ -1,6 +1,7 @@
 name: ANSYS vertical flap validation contracts
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -44,6 +45,7 @@ jobs:
           python -m unittest `
             tests.integration.test_ansys_official_half_domain_archive_consistency `
             tests.integration.test_ansys_vertical_flap_postrepair_artifacts `
+            tests.integration.test_ansys_vertical_flap_flow_collapse_artifacts `
             -v
 
       - name: Run source-level runner contracts

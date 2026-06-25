@@ -16,9 +16,12 @@ SUMMARY_COLUMNS = [
     "grid",
     "particles",
     "markers",
+    "markers_per_face",
+    "markers_actual",
     "support_radius_m",
     "preflow_steps_completed",
     "preflow_converged",
+    "preflow_status",
     "solid_substeps_selected",
     "solid_estimated_cfl",
     "velocity_peak_mps",
@@ -141,6 +144,8 @@ def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
     history = _list(report.get("history"))
     tip_health = _tip_history_health(report)
     steps = _int(config.get("step_count"), len(history))
+    markers_per_face = _int(report.get("marker_count_per_face"), config.get("marker_count"))
+    markers_actual = _marker_count_actual(report, markers_per_face)
 
     row = {
         "case": report.get("case", ""),
@@ -148,10 +153,13 @@ def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "dt_s": _number(config.get("dt_s")),
         "grid": _shape(config.get("grid_nodes")),
         "particles": _shape(config.get("solid_particle_counts")),
-        "markers": _int(config.get("marker_count"), report.get("stress_valid_marker_count")),
+        "markers": markers_actual,
+        "markers_per_face": markers_per_face,
+        "markers_actual": markers_actual,
         "support_radius_m": _number(config.get("mpm_support_radius_m")),
         "preflow_steps_completed": _int(report.get("preflow_steps_completed")),
         "preflow_converged": _bool_text(report.get("preflow_converged")),
+        "preflow_status": _preflow_status(report),
         "solid_substeps_selected": _int(report.get("solid_substeps_selected")),
         "solid_estimated_cfl": _number(report.get("solid_estimated_cfl")),
         "velocity_peak_mps": _number(report.get("local_velocity_peak_mps")),
@@ -467,6 +475,7 @@ def build_stage_check(
             f"steps_requested = {_format_value(report.get('preflow_steps_requested'))}",
             f"steps_completed = {_format_value(report.get('preflow_steps_completed'))}",
             f"converged = {_bool_text(report.get('preflow_converged'))}",
+            f"status = {_format_value(summary.get('preflow_status'))}",
             f"stop_reason = {_format_value(report.get('preflow_stop_reason'))}",
             f"history_rows = {len(_list(report.get('preflow_history')))}",
             "",
@@ -819,6 +828,29 @@ def _bool(value: Any) -> bool:
 
 def _bool_text(value: Any) -> str:
     return "true" if _bool(value) else "false"
+
+
+def _marker_count_actual(report: dict[str, Any], markers_per_face: int) -> int:
+    actual = _optional_int(report.get("marker_count_actual"))
+    if actual is not None:
+        return actual
+    valid = _optional_int(report.get("stress_valid_marker_count"))
+    invalid = _optional_int(report.get("stress_invalid_marker_count"))
+    if valid is not None or invalid is not None:
+        return int(valid or 0) + int(invalid or 0)
+    return markers_per_face
+
+
+def _preflow_status(report: dict[str, Any]) -> str:
+    explicit = report.get("preflow_status")
+    if explicit:
+        return str(explicit)
+    stop_reason = report.get("preflow_stop_reason")
+    if stop_reason:
+        return str(stop_reason)
+    if _int(report.get("preflow_steps_requested")) == 0:
+        return "not_requested"
+    return "converged" if _bool(report.get("preflow_converged")) else "max_steps"
 
 
 def _finite_or_none(value: Any) -> float | None:

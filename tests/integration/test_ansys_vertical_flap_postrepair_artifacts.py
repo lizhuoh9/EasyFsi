@@ -28,6 +28,10 @@ class AnsysVerticalFlapPostRepairArtifactTests(unittest.TestCase):
         self.assertEqual(len(report["history"]), 50)
         self.assertEqual(summary["steps"], 50)
         self.assertEqual(summary["status"], "FAIL_FLOW")
+        self.assertEqual(summary["markers_per_face"], 12)
+        self.assertEqual(summary["markers_actual"], 24)
+        self.assertEqual(summary["markers"], 24)
+        self.assertEqual(summary["preflow_status"], "not_requested")
         self.assertLess(summary["velocity_peak_mps"], 20.0)
         self.assertLess(summary["velocity_p999_mps"], 20.0)
         self.assertIn(
@@ -72,6 +76,7 @@ class AnsysVerticalFlapPostRepairArtifactTests(unittest.TestCase):
         self.assertFalse(report["preflow_history"][0]["solid_advanced"])
         self.assertEqual(len(report["history"]), 1)
         self.assertIn("steps_requested = 1", stage_check)
+        self.assertIn("status = max_steps", stage_check)
         self.assertIn("history_rows = 1", stage_check)
 
 
