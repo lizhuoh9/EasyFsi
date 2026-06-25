@@ -27,6 +27,12 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
         self.assertEqual(summary["grid"], "4x32x64")
         self.assertEqual(summary["particles"], "1x12x4")
         self.assertEqual(summary["markers"], 12)
+        self.assertEqual(summary["preflow_steps_completed"], 1)
+        self.assertEqual(summary["preflow_converged"], "false")
+        self.assertEqual(summary["solid_substeps_selected"], 1600)
+        self.assertAlmostEqual(summary["solid_estimated_cfl"], 0.31)
+        self.assertAlmostEqual(summary["velocity_p99_mps"], 27.5)
+        self.assertAlmostEqual(summary["velocity_p999_mps"], 27.9)
         self.assertLess(summary["marker_force_z_N"], 0.0)
         self.assertEqual(summary["status"], "FAIL_MAGNITUDE")
 
@@ -43,7 +49,11 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
         self.assertAlmostEqual(rows[1]["tip_mean_dz_m"], -4.0e-5)
         self.assertAlmostEqual(rows[1]["tip_norm_m"], 4.001249804748512e-5)
         self.assertEqual(rows[0]["root_max_displacement_m"], "")
+        self.assertEqual(rows[1]["solid_substeps_selected"], 1600)
+        self.assertAlmostEqual(rows[1]["solid_estimated_cfl"], 0.31)
         self.assertAlmostEqual(rows[1]["local_velocity_peak_mps"], 28.0)
+        self.assertAlmostEqual(rows[1]["fluid_speed_p99_mps"], 27.5)
+        self.assertAlmostEqual(rows[1]["fluid_speed_p999_mps"], 27.9)
         self.assertAlmostEqual(rows[1]["pressure_min_pa"], -12.0)
         self.assertAlmostEqual(rows[1]["pressure_max_pa"], 42.0)
         self.assertAlmostEqual(rows[1]["projection_l2"], 2.0e-7)
@@ -129,12 +139,17 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
                 "5",
             )
             self.assertIn("[SETUP]", stage_check)
+            self.assertIn("[PREFLOW]", stage_check)
             self.assertIn("[FLOW_ONLY]", stage_check)
             self.assertIn("[INTERFACE_FORCE]", stage_check)
             self.assertIn("[SOLID_RESPONSE]", stage_check)
             self.assertIn("[FSI_FEEDBACK]", stage_check)
             self.assertIn("[COORDINATE_MAPPING]", stage_check)
             self.assertNotIn("projection_final_residual =", stage_check)
+            self.assertIn("steps_completed = 1", stage_check)
+            self.assertIn("history_rows = 1", stage_check)
+            self.assertIn("velocity_p99_mps = 27.5", stage_check)
+            self.assertIn("solid_substeps_selected = 1600", stage_check)
             self.assertIn("projection_l2 = 1e-07", stage_check)
             self.assertIn("projection_max_abs = 2e-07", stage_check)
             self.assertIn("fluid_projection_consumed_feedback = true", stage_check)
@@ -336,8 +351,31 @@ def _fixture_report() -> dict:
         "computed_pressure_min_pa": -12.0,
         "computed_pressure_max_pa": 42.0,
         "local_velocity_peak_mps": 28.0,
+        "fluid_speed_p99_mps": 27.5,
+        "fluid_speed_p999_mps": 27.9,
         "local_velocity_peak_relative_error": 0.0035587188612099642,
         "velocity_peak_tolerance": 0.05,
+        "preflow_steps_requested": 1,
+        "preflow_steps_completed": 1,
+        "preflow_converged": False,
+        "preflow_stop_reason": "max_steps",
+        "preflow_history": [
+            {
+                "preflow_step": 1,
+                "solid_fixed": True,
+                "solid_advanced": False,
+                "local_velocity_peak_mps": 26.0,
+                "fluid_speed_p99_mps": 25.0,
+                "fluid_speed_p999_mps": 25.8,
+                "pressure_min_pa": -8.0,
+                "pressure_max_pa": 35.0,
+                "stress_valid_marker_count": 12,
+                "stress_invalid_marker_count": 0,
+                "total_marker_force_n": [0.0, 0.0, -0.5],
+            }
+        ],
+        "solid_substeps_selected": 1600,
+        "solid_estimated_cfl": 0.31,
         "stress_valid_marker_count": 12,
         "stress_invalid_marker_count": 0,
         "two_sided_pressure_marker_count": 12,
@@ -377,6 +415,8 @@ def _fixture_report() -> dict:
                 "max_displacement_m": 2.0e-5,
                 "tip_mean_displacement_m": [0.0, 5.0e-7, -2.0e-5],
                 "local_velocity_peak_mps": 27.0,
+                "fluid_speed_p99_mps": 26.5,
+                "fluid_speed_p999_mps": 26.9,
                 "pressure_min_pa": -10.0,
                 "pressure_max_pa": 40.0,
                 "flow_projection_report": {
@@ -408,6 +448,8 @@ def _fixture_report() -> dict:
                 "max_displacement_m": 6.0e-5,
                 "tip_mean_displacement_m": [0.0, 1.0e-6, -4.0e-5],
                 "local_velocity_peak_mps": 28.0,
+                "fluid_speed_p99_mps": 27.5,
+                "fluid_speed_p999_mps": 27.9,
                 "pressure_min_pa": -12.0,
                 "pressure_max_pa": 42.0,
                 "flow_projection_report": {
@@ -417,6 +459,8 @@ def _fixture_report() -> dict:
                     "post_boundary_l2": 5.0e-7,
                     "velocity_dirichlet_boundary_max_delta_mps": 6.0e-7,
                 },
+                "solid_substeps_selected": 1600,
+                "solid_estimated_cfl": 0.31,
                 "fluid_projection_consumed_feedback": True,
                 "fluid_feedback_constraint_marker_count": 12,
                 "fluid_feedback_constraint_active_cell_count": 7,

@@ -17,7 +17,13 @@ SUMMARY_COLUMNS = [
     "particles",
     "markers",
     "support_radius_m",
+    "preflow_steps_completed",
+    "preflow_converged",
+    "solid_substeps_selected",
+    "solid_estimated_cfl",
     "velocity_peak_mps",
+    "velocity_p99_mps",
+    "velocity_p999_mps",
     "velocity_peak_relerr",
     "max_disp_m",
     "ref_max_disp_m",
@@ -41,6 +47,8 @@ SUMMARY_COLUMNS = [
 
 FLOW_DIAGNOSTIC_COLUMNS = [
     "local_velocity_peak_mps",
+    "fluid_speed_p99_mps",
+    "fluid_speed_p999_mps",
     "pressure_min_pa",
     "pressure_max_pa",
     "projection_l2",
@@ -82,6 +90,8 @@ HISTORY_COLUMNS = [
     "tip_norm_m",
     "max_displacement_m",
     "root_max_displacement_m",
+    "solid_substeps_selected",
+    "solid_estimated_cfl",
     "surface_feedback_max_marker_displacement_m",
     *FLOW_DIAGNOSTIC_COLUMNS,
     *FEEDBACK_CONSTRAINT_COLUMNS,
@@ -140,7 +150,13 @@ def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "particles": _shape(config.get("solid_particle_counts")),
         "markers": _int(config.get("marker_count"), report.get("stress_valid_marker_count")),
         "support_radius_m": _number(config.get("mpm_support_radius_m")),
+        "preflow_steps_completed": _int(report.get("preflow_steps_completed")),
+        "preflow_converged": _bool_text(report.get("preflow_converged")),
+        "solid_substeps_selected": _int(report.get("solid_substeps_selected")),
+        "solid_estimated_cfl": _number(report.get("solid_estimated_cfl")),
         "velocity_peak_mps": _number(report.get("local_velocity_peak_mps")),
+        "velocity_p99_mps": _number(report.get("fluid_speed_p99_mps")),
+        "velocity_p999_mps": _number(report.get("fluid_speed_p999_mps")),
         "velocity_peak_relerr": _number(report.get("local_velocity_peak_relative_error")),
         "max_disp_m": _number(report.get("max_displacement_m")),
         "ref_max_disp_m": _number(
@@ -298,12 +314,16 @@ def build_history_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
                 "root_max_displacement_m": _number(
                     entry.get("root_max_displacement_m")
                 ),
+                "solid_substeps_selected": _int(entry.get("solid_substeps_selected")),
+                "solid_estimated_cfl": _number(entry.get("solid_estimated_cfl")),
                 "surface_feedback_max_marker_displacement_m": _number(
                     entry.get("surface_feedback_max_marker_displacement_m")
                 ),
                 "local_velocity_peak_mps": _number(
                     entry.get("local_velocity_peak_mps")
                 ),
+                "fluid_speed_p99_mps": _number(entry.get("fluid_speed_p99_mps")),
+                "fluid_speed_p999_mps": _number(entry.get("fluid_speed_p999_mps")),
                 "pressure_min_pa": _number(entry.get("pressure_min_pa")),
                 "pressure_max_pa": _number(entry.get("pressure_max_pa")),
                 "projection_l2": _number(projection.get("projection_l2")),
@@ -443,8 +463,17 @@ def build_stage_check(
             _setup_line("material", _material_ok(solid), _material_text(solid)),
             _setup_line("time", _time_ok(config, reference), _time_text(config)),
             "",
+            "[PREFLOW]",
+            f"steps_requested = {_format_value(report.get('preflow_steps_requested'))}",
+            f"steps_completed = {_format_value(report.get('preflow_steps_completed'))}",
+            f"converged = {_bool_text(report.get('preflow_converged'))}",
+            f"stop_reason = {_format_value(report.get('preflow_stop_reason'))}",
+            f"history_rows = {len(_list(report.get('preflow_history')))}",
+            "",
             "[FLOW_ONLY]",
             f"velocity_peak_mps = {_format_value(summary['velocity_peak_mps'])}",
+            f"velocity_p99_mps = {_format_value(summary.get('velocity_p99_mps'))}",
+            f"velocity_p999_mps = {_format_value(summary.get('velocity_p999_mps'))}",
             f"official_range_mps = {_format_value(reference.get('local_velocity_peak_range_mps'))}",
             f"pressure_min_pa = {_format_value(report.get('computed_pressure_min_pa'))}",
             f"pressure_max_pa = {_format_value(report.get('computed_pressure_max_pa'))}",
@@ -475,6 +504,8 @@ def build_stage_check(
             f"max_disp_m = {_format_value(report.get('max_displacement_m'))}",
             f"reference_m = {_format_value(report.get('reference_max_displacement_m'))}",
             f"relative_error = {_format_value(report.get('max_displacement_relative_error'))}",
+            f"solid_substeps_selected = {_format_value(report.get('solid_substeps_selected'))}",
+            f"solid_estimated_cfl = {_format_value(report.get('solid_estimated_cfl'))}",
             f"tip_dz_final_m = {_format_value(summary.get('tip_dz_final_m'))}",
             f"tip_dz_min_m = {_format_value(summary.get('tip_dz_min_m'))}",
             f"tip_dz_max_m = {_format_value(summary.get('tip_dz_max_m'))}",
@@ -583,8 +614,13 @@ def write_diagnostics(
     _write_csv(history_csv, HISTORY_COLUMNS, history_rows)
 
     stage_check = output_dir / "stage_check.md"
+    stage_check_text = build_stage_check(
+        reports[-1],
+        summaries[-1],
+        fluent_csv=fluent_csv,
+    )
     stage_check.write_text(
-        build_stage_check(reports[-1], summaries[-1], fluent_csv=fluent_csv),
+        "\n".join(line.rstrip() for line in stage_check_text.splitlines()) + "\n",
         encoding="utf-8",
     )
 

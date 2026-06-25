@@ -1,0 +1,64 @@
+name: ANSYS vertical flap validation contracts
+
+on:
+  push:
+    branches:
+      - main
+      - solver/**
+      - codex/**
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  contracts:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install minimal runtime dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy taichi pillow
+
+      - name: Compile ANSYS validation modules
+        shell: pwsh
+        run: |
+          python -m py_compile `
+            cases\ansys_vertical_flap_fsi.py `
+            benchmarks\official\solid_mpm_fsi_runner.py `
+            tools\validation\print_ansys_vertical_flap_diagnostics.py
+
+      - name: Run archive and artifact consistency tests
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.integration.test_ansys_official_half_domain_archive_consistency `
+            tests.integration.test_ansys_vertical_flap_postrepair_artifacts `
+            -v
+
+      - name: Run source-level runner contracts
+        shell: pwsh
+        run: |
+          python -m unittest -v `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_case_metadata_matches_ansys_tutorial_boundaries_and_targets `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_formal_runner_uses_official_full_span_flap_box `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_formal_runner_places_both_streamwise_marker_faces `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_solid_substep_cfl_report_preserves_explicit_higher_count `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_preflow_controls_are_exposed_without_changing_default_smoke `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_fixed_solid_preflow_reports_diagnostics_without_mpm_advance `
+            tests.integration.test_ansys_vertical_flap_runner_loop_contract
+
+      - name: Run diagnostics unit tests
+        shell: pwsh
+        run: |
+          python -m unittest tests.tools.test_ansys_vertical_flap_diagnostics -v

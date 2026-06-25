@@ -59,6 +59,30 @@ If a Fluent tip-displacement report file is available, add:
 --fluent-tip-csv validation_runs\ansys_vertical_flap_fsi\fluent\fluent_tip_displacement.csv
 ```
 
+For the post-half-domain-repair baseline, run the committed coarse 50-step
+smoke wrapper and diagnostics:
+
+```powershell
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_step050_after_halfdomain_repair.py
+& $python -m tools.validation.print_ansys_vertical_flap_diagnostics `
+  --easyfsi-json validation_runs\ansys_vertical_flap_fsi\easyfsi\easyfsi_step050_after_halfdomain_repair.json `
+  --fluent-tip-csv validation_runs\ansys_vertical_flap_fsi\official_web\fluent_tip_displacement_web_final.csv `
+  --output-dir validation_runs\ansys_vertical_flap_fsi\compare_after_halfdomain_repair
+```
+
+The case also exposes fixed-solid preflow controls for diagnosing whether a
+flow field is established before the MPM body advances:
+
+```powershell
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_step001_preflow001_after_halfdomain_repair.py
+& $python -m tools.validation.print_ansys_vertical_flap_diagnostics `
+  --easyfsi-json validation_runs\ansys_vertical_flap_fsi\easyfsi\easyfsi_step001_preflow001_after_halfdomain_repair.json `
+  --output-dir validation_runs\ansys_vertical_flap_fsi\compare_preflow001_smoke
+```
+
+The reviewable CI/local gate for this ANSYS validation surface lives in
+`.github\workflows\ansys-vertical-flap-validation.yml`.
+
 ## Known Non-Gating Historical Failures
 
 - ANSYS vertical-flap displacement tolerance smoke.

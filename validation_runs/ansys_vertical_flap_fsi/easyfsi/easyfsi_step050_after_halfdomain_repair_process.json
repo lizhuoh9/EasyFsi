@@ -1,0 +1,15 @@
+{
+  "case": "ansys-vertical-flap-fsi",
+  "elapsed_s": 229.60347210001783,
+  "fluid_speed_p999_mps": 10.1898175573349,
+  "history_rows": 50,
+  "local_velocity_peak_mps": 10.68154239654541,
+  "max_displacement_m": 1.1592121154535562e-05,
+  "preflow_steps": 0,
+  "preflow_steps_completed": 0,
+  "report_json": "validation_runs\\ansys_vertical_flap_fsi\\easyfsi\\easyfsi_step050_after_halfdomain_repair.json",
+  "solid_estimated_cfl": 0.03064175637198511,
+  "solid_substeps_selected": 1600,
+  "status": "completed",
+  "step_count": 50
+}

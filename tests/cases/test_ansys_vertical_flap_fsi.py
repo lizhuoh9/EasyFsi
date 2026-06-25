@@ -169,6 +169,42 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(explicit_report["solid_substeps_selected"], 1200)
         self.assertFalse(explicit_report["solid_substeps_auto_applied"])
 
+    def test_preflow_controls_are_exposed_without_changing_default_smoke(self):
+        config = VerticalFlapFsiConfig()
+
+        self.assertEqual(config.preflow_steps, 0)
+        self.assertEqual(config.preflow_convergence_tolerance, 0.0)
+
+        parser = vertical_flap_case._build_parser()
+        args = parser.parse_args(
+            [
+                "--steps",
+                "3",
+                "--preflow-steps",
+                "2",
+                "--preflow-convergence-tolerance",
+                "0.01",
+                "--json",
+            ]
+        )
+
+        self.assertEqual(args.steps, 3)
+        self.assertEqual(args.preflow_steps, 2)
+        self.assertAlmostEqual(args.preflow_convergence_tolerance, 0.01)
+
+    def test_fixed_solid_preflow_reports_diagnostics_without_mpm_advance(self):
+        source = inspect.getsource(solid_mpm_fsi_runner._run_fixed_solid_preflow)
+
+        self.assertIn('"preflow_steps_requested"', source)
+        self.assertIn('"preflow_steps_completed"', source)
+        self.assertIn('"preflow_history"', source)
+        self.assertIn('"solid_fixed": True', source)
+        self.assertIn('"solid_advanced": False', source)
+        self.assertIn("_project_current_flow(", source)
+        self.assertIn("_sample_stress_to_marker_forces(markers, fluid)", source)
+        self.assertNotIn("solid.step(", source)
+        self.assertNotIn("scatter_marker_forces_to_mpm_particles", source)
+
     def test_thin_wall_probe_reach_tracks_refined_streamwise_spacing(self):
         coarse = VerticalFlapFsiConfig(grid_nodes=(4, 80, 160))
         fine = VerticalFlapFsiConfig(grid_nodes=(4, 224, 448))

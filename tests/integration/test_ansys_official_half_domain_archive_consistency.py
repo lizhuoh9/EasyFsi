@@ -91,6 +91,28 @@ class AnsysOfficialHalfDomainArchiveConsistencyTests(unittest.TestCase):
         self.assertEqual(self.render["marker_count_actual"], MARKER_COUNT_ACTUAL)
         self.assertAlmostEqual(self.render["inlet_velocity_mps"], 10.0)
 
+    def test_gate_a_b_archive_artifact_quality_is_non_expected(self):
+        history = self.report["history"][-1]
+        self.assertEqual(history["stress_invalid_marker_count"], 0)
+        self.assertEqual(self.summary["stress_invalid_marker_count"], 0)
+        self.assertAlmostEqual(history["fixed_root_max_displacement_m"], 0.0)
+        self.assertLess(history["marker_force_z_n"], 0.0)
+        self.assertLess(history["lower_tip_mean_displacement_m"][2], 0.0)
+
+        finite_values = [
+            history["projection_l2"],
+            history["projection_max_abs"],
+            self.summary["fluid_speed_p99_mps"],
+            self.summary["fluid_speed_p999_mps"],
+            self.summary["max_displacement_m"],
+            self.summary["marker_force_z_n"],
+        ]
+        for value in finite_values:
+            self.assertTrue(np.isfinite(float(value)))
+
+        self.assertGreaterEqual(self.summary["fluid_speed_p999_mps"], 20.0)
+        self.assertLessEqual(self.summary["fluid_speed_p999_mps"], 29.0)
+
 
 if __name__ == "__main__":
     unittest.main()

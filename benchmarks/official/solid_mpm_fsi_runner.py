@@ -41,6 +41,8 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     mu_pa, lambda_pa = _lame_parameters(config)
     solid_substep_cfl = solid_substep_cfl_report(config)
     solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])
+    preflow_report = _run_fixed_solid_preflow(markers, fluid, config)
+    preflow_history = preflow_report["preflow_history"]
 
     latest_stress_report = None
     latest_force_report = None
@@ -69,7 +71,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         latest_flow_report = _project_current_flow(
             fluid,
             config,
-            reset_pressure=(step_index == 0),
+            reset_pressure=(step_index == 0 and not preflow_history),
         )
         latest_feedback_constraint_report[
             "no_slip_projected_residual_after_projection_mps"
@@ -193,6 +195,8 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "local_velocity_peak_mps": latest_flow_report[
                     "local_velocity_peak_mps"
                 ],
+                "fluid_speed_p99_mps": latest_flow_report["fluid_speed_p99_mps"],
+                "fluid_speed_p999_mps": latest_flow_report["fluid_speed_p999_mps"],
                 "pressure_min_pa": latest_flow_report["pressure_min_pa"],
                 "pressure_max_pa": latest_flow_report["pressure_max_pa"],
                 "flow_projection_report": latest_flow_report["projection_report"],
@@ -244,6 +248,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "flow_solution_mode": FLOW_SOLUTION_MODE,
         "streamwise_axis": AXIS_NAMES[STREAMWISE_AXIS_INDEX],
         "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
+        **preflow_report,
         "official_half_domain": _is_official_half_domain(case_metadata),
         "full_domain_two_flap": False,
         "flap_count_modeled": 1,
@@ -290,6 +295,8 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "computed_pressure_max_pa": latest_flow_report["pressure_max_pa"],
         "pressure_sign_convention": latest_flow_report["pressure_sign_convention"],
         "local_velocity_peak_mps": local_velocity_peak_mps,
+        "fluid_speed_p99_mps": latest_flow_report["fluid_speed_p99_mps"],
+        "fluid_speed_p999_mps": latest_flow_report["fluid_speed_p999_mps"],
         "local_velocity_peak_relative_error": velocity_relative_error,
         "velocity_peak_tolerance": config.velocity_peak_tolerance,
         "fluid_recomputed_after_feedback": (
@@ -406,6 +413,10 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError("dt_s must be positive")
     if config.solid_substeps <= 0:
         raise ValueError("solid_substeps must be positive")
+    if int(getattr(config, "preflow_steps", 0)) < 0:
+        raise ValueError("preflow_steps must be non-negative")
+    if float(getattr(config, "preflow_convergence_tolerance", 0.0)) < 0.0:
+        raise ValueError("preflow_convergence_tolerance must be non-negative")
     if float(getattr(config, "solid_cfl_target", DEFAULT_SOLID_CFL_TARGET)) <= 0.0:
         raise ValueError("solid_cfl_target must be positive")
     flap_streamwise_min_m = getattr(config, "flap_streamwise_min_m", None)
@@ -633,6 +644,91 @@ def _project_current_flow(
     return _flow_state_report(fluid, projection_report)
 
 
+def _run_fixed_solid_preflow(
+    markers: HibmMpmSurfaceMarkers,
+    fluid: CartesianFluidSolver,
+    config: Any,
+) -> dict[str, object]:
+    requested_steps = int(getattr(config, "preflow_steps", 0))
+    tolerance = float(getattr(config, "preflow_convergence_tolerance", 0.0))
+    history: list[dict[str, object]] = []
+    previous_row: dict[str, object] | None = None
+    converged = requested_steps == 0
+    stop_reason = "not_requested" if requested_steps == 0 else "max_steps"
+
+    for preflow_index in range(requested_steps):
+        flow_report = _project_current_flow(
+            fluid,
+            config,
+            reset_pressure=(preflow_index == 0),
+        )
+        stress_report = _sample_stress_to_marker_forces(markers, fluid)
+        force_report = markers.aggregate_region_forces(
+            primary_region_id=PRIMARY_REGION_ID,
+            secondary_region_id=SECONDARY_UNUSED_REGION_ID,
+        )
+        row = {
+            "preflow_step": preflow_index + 1,
+            "fluid_recomputed": True,
+            "solid_fixed": True,
+            "solid_advanced": False,
+            "local_velocity_peak_mps": flow_report["local_velocity_peak_mps"],
+            "fluid_speed_p99_mps": flow_report["fluid_speed_p99_mps"],
+            "fluid_speed_p999_mps": flow_report["fluid_speed_p999_mps"],
+            "pressure_min_pa": flow_report["pressure_min_pa"],
+            "pressure_max_pa": flow_report["pressure_max_pa"],
+            "flow_projection_report": flow_report["projection_report"],
+            "stress_valid_marker_count": stress_report.valid_marker_count,
+            "stress_invalid_marker_count": stress_report.invalid_marker_count,
+            "two_sided_pressure_marker_count": (
+                stress_report.two_sided_pressure_marker_count
+            ),
+            "total_marker_force_n": force_report.total_marker_force_n,
+        }
+        if previous_row is not None:
+            row["velocity_peak_relative_delta"] = _relative_delta(
+                row["local_velocity_peak_mps"],
+                previous_row["local_velocity_peak_mps"],
+            )
+            row["pressure_range_relative_delta"] = _relative_delta(
+                _pressure_range(row),
+                _pressure_range(previous_row),
+            )
+            if tolerance > 0.0 and (
+                float(row["velocity_peak_relative_delta"]) <= tolerance
+                and float(row["pressure_range_relative_delta"]) <= tolerance
+            ):
+                converged = True
+                stop_reason = "converged"
+                history.append(row)
+                break
+        else:
+            row["velocity_peak_relative_delta"] = ""
+            row["pressure_range_relative_delta"] = ""
+        history.append(row)
+        previous_row = row
+
+    return {
+        "preflow_steps_requested": requested_steps,
+        "preflow_steps_completed": len(history),
+        "preflow_convergence_tolerance": tolerance,
+        "preflow_converged": converged,
+        "preflow_stop_reason": stop_reason,
+        "preflow_history": history,
+    }
+
+
+def _pressure_range(row: Mapping[str, object]) -> float:
+    return float(row["pressure_max_pa"]) - float(row["pressure_min_pa"])
+
+
+def _relative_delta(current: object, previous: object) -> float:
+    current_value = float(current)
+    previous_value = float(previous)
+    scale = max(abs(current_value), abs(previous_value), 1.0e-30)
+    return abs(current_value - previous_value) / scale
+
+
 def _apply_marker_feedback_to_fluid(
     markers: HibmMpmSurfaceMarkers,
     fluid: CartesianFluidSolver,
@@ -790,12 +886,21 @@ def _flow_state_report(
     pressure = fluid.pressure.to_numpy()
     non_obstacle = obstacle == 0
     speed = np.linalg.norm(velocity, axis=3)
+    active_speed = speed[non_obstacle]
+    if active_speed.size:
+        speed_p99 = float(np.percentile(active_speed, 99.0))
+        speed_p999 = float(np.percentile(active_speed, 99.9))
+    else:
+        speed_p99 = 0.0
+        speed_p999 = 0.0
     return {
         "mode": FLOW_SOLUTION_MODE,
         "projection_report": projection_report,
         "obstacle_cell_count": int(obstacle.sum()),
         "fluid_cell_count": int(non_obstacle.sum()),
-        "local_velocity_peak_mps": float(speed[non_obstacle].max(initial=0.0)),
+        "local_velocity_peak_mps": float(active_speed.max(initial=0.0)),
+        "fluid_speed_p99_mps": speed_p99,
+        "fluid_speed_p999_mps": speed_p999,
         "pressure_min_pa": float(pressure[non_obstacle].min(initial=0.0)),
         "pressure_max_pa": float(pressure[non_obstacle].max(initial=0.0)),
         "pressure_sign_convention": "fluid.pressure projection field is sampled directly",

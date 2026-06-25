@@ -136,6 +136,8 @@ class VerticalFlapFsiConfig:
     velocity_damping: float = 0.995
     solid_substeps: int = 1600
     solid_cfl_target: float = 0.5
+    preflow_steps: int = 0
+    preflow_convergence_tolerance: float = 0.0
     enforce_plane_strain_x: bool = True
     mpm_support_radius_m: float = 0.006
     displacement_tolerance: float = 0.05
@@ -211,6 +213,18 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Run the ANSYS vertical-flap two-way FSI smoke benchmark."
     )
     parser.add_argument("--steps", type=int, default=VerticalFlapFsiConfig.step_count)
+    parser.add_argument(
+        "--preflow-steps",
+        type=int,
+        default=VerticalFlapFsiConfig.preflow_steps,
+        help="Project flow around a fixed flap before FSI steps.",
+    )
+    parser.add_argument(
+        "--preflow-convergence-tolerance",
+        type=float,
+        default=VerticalFlapFsiConfig.preflow_convergence_tolerance,
+        help="Relative p/velocity tolerance for early preflow stop; 0 disables.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -220,6 +234,8 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
     report = run_vertical_flap_fsi_smoke(
         VerticalFlapFsiConfig(
             step_count=args.steps,
+            preflow_steps=args.preflow_steps,
+            preflow_convergence_tolerance=args.preflow_convergence_tolerance,
         )
     )
     if args.json:
