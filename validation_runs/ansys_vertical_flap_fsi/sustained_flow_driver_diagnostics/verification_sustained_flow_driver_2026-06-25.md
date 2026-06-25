@@ -107,3 +107,24 @@ flow recovery or over-acceleration.
   was tuned.
 - No Fluent parity claim is made.
 - No 50-step or L-level validation claim is made.
+
+## Remote CI Evidence
+
+After pushing commit `6e5e337e36962fc541acb887537129a703de578d`, I attempted to
+query GitHub Actions with:
+
+```powershell
+gh run list --repo lizhuoh9/EasyFsi --branch solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25 --limit 10 --json databaseId,headSha,status,conclusion,url,workflowName,createdAt,updatedAt
+```
+
+The query did not return run evidence because GitHub CLI is not authenticated in
+this environment:
+
+```text
+To get started with GitHub CLI, please run: gh auth login
+Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.
+```
+
+Therefore the committed local verification commands and artifacts above remain
+the current evidence basis from this environment. The workflow is configured to
+run on `solver/**` branch pushes and also supports `workflow_dispatch`.
