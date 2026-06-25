@@ -45,13 +45,21 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     latest_solid_report = None
     latest_feedback_report = None
     latest_flow_report = None
+    latest_feedback_constraint_report = None
     fluid_projection_count = 0
     fluid_projection_after_feedback_count = 0
+    fluid_projection_consumed_feedback_count = 0
     feedback_available_for_projection = False
     history: list[dict[str, object]] = []
 
     for step_index in range(config.step_count):
         feedback_available_before_projection = feedback_available_for_projection
+        latest_feedback_constraint_report = _apply_marker_feedback_to_fluid(
+            markers,
+            fluid,
+            config,
+            feedback_available=feedback_available_before_projection,
+        )
         latest_flow_report = _project_current_flow(
             fluid,
             config,
@@ -60,6 +68,8 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         fluid_projection_count += 1
         if feedback_available_before_projection:
             fluid_projection_after_feedback_count += 1
+        if latest_feedback_constraint_report["fluid_projection_consumed_feedback"]:
+            fluid_projection_consumed_feedback_count += 1
         latest_stress_report = _sample_stress_to_marker_forces(markers, fluid)
         latest_force_report = markers.aggregate_region_forces(
             primary_region_id=PRIMARY_REGION_ID,
@@ -111,6 +121,27 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "feedback_available_before_projection": (
                     feedback_available_before_projection
                 ),
+                "fluid_projection_consumed_feedback": (
+                    latest_feedback_constraint_report[
+                        "fluid_projection_consumed_feedback"
+                    ]
+                ),
+                "fluid_feedback_constraint_marker_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_marker_count"
+                    ]
+                ),
+                "fluid_feedback_constraint_active_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_active_cell_count"
+                    ]
+                ),
+                "no_slip_residual_before_mps": latest_feedback_constraint_report[
+                    "no_slip_residual_before_mps"
+                ],
+                "no_slip_residual_after_mps": latest_feedback_constraint_report[
+                    "no_slip_residual_after_mps"
+                ],
                 "local_velocity_peak_mps": latest_flow_report[
                     "local_velocity_peak_mps"
                 ],
@@ -140,6 +171,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         or latest_solid_report is None
         or latest_feedback_report is None
         or latest_flow_report is None
+        or latest_feedback_constraint_report is None
     ):
         raise RuntimeError("rectangular solid marker-MPM FSI smoke did not advance")
 
@@ -192,6 +224,28 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "fluid_projection_after_feedback_count": (
             fluid_projection_after_feedback_count
         ),
+        "fluid_projection_consumed_feedback_count": (
+            fluid_projection_consumed_feedback_count
+        ),
+        "fluid_projection_consumed_feedback": latest_feedback_constraint_report[
+            "fluid_projection_consumed_feedback"
+        ],
+        "fluid_feedback_constraint_marker_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_marker_count"
+            ]
+        ),
+        "fluid_feedback_constraint_active_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_active_cell_count"
+            ]
+        ),
+        "no_slip_residual_before_mps": latest_feedback_constraint_report[
+            "no_slip_residual_before_mps"
+        ],
+        "no_slip_residual_after_mps": latest_feedback_constraint_report[
+            "no_slip_residual_after_mps"
+        ],
         "stress_valid_marker_count": latest_stress_report.valid_marker_count,
         "stress_invalid_marker_count": latest_stress_report.invalid_marker_count,
         "two_sided_pressure_marker_count": (
@@ -388,6 +442,82 @@ def _project_current_flow(
         divergence_cleanup_iterations=config.flow_divergence_cleanup_iterations,
     )
     return _flow_state_report(fluid, projection_report)
+
+
+def _apply_marker_feedback_to_fluid(
+    markers: HibmMpmSurfaceMarkers,
+    fluid: CartesianFluidSolver,
+    config: Any,
+    *,
+    feedback_available: bool,
+) -> dict[str, object]:
+    if not feedback_available:
+        return _empty_feedback_constraint_report()
+
+    marker_count = int(markers.marker_count)
+    if marker_count <= 0:
+        return _empty_feedback_constraint_report()
+
+    marker_positions = markers.x_gamma_m.to_numpy()[:marker_count]
+    marker_velocities = markers.v_gamma_mps.to_numpy()[:marker_count]
+    active = fluid.velocity_dirichlet_boundary_active.to_numpy()
+    values = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
+    weights = fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+    velocity = fluid.velocity.to_numpy()
+
+    bounds_min, bounds_max = _domain_bounds(config)
+    lower = np.asarray(bounds_min, dtype=np.float64)
+    upper = np.asarray(bounds_max, dtype=np.float64)
+    grid_nodes = np.asarray(config.grid_nodes, dtype=np.int32)
+    cell_width = (upper - lower) / grid_nodes.astype(np.float64)
+    marker_cells = np.floor((marker_positions - lower) / cell_width).astype(np.int32)
+    marker_cells = np.clip(marker_cells, 0, grid_nodes - 1)
+
+    target_sum: dict[tuple[int, int, int], np.ndarray] = {}
+    target_count: dict[tuple[int, int, int], int] = {}
+    before_residuals: list[float] = []
+    for cell, marker_velocity in zip(marker_cells, marker_velocities):
+        i, j, k = (int(cell[0]), int(cell[1]), int(cell[2]))
+        key = (i, j, k)
+        target_sum[key] = target_sum.get(key, np.zeros(3, dtype=np.float64)) + np.asarray(
+            marker_velocity,
+            dtype=np.float64,
+        )
+        target_count[key] = target_count.get(key, 0) + 1
+        before_residuals.append(float(np.linalg.norm(velocity[i, j, k] - marker_velocity)))
+
+    for (i, j, k), summed_velocity in target_sum.items():
+        active[i, j, k] = 1
+        values[i, j, k] = summed_velocity / float(target_count[(i, j, k)])
+        weights[i, j, k] = 1.0
+
+    after_residuals: list[float] = []
+    for cell, marker_velocity in zip(marker_cells, marker_velocities):
+        i, j, k = (int(cell[0]), int(cell[1]), int(cell[2]))
+        after_residuals.append(float(np.linalg.norm(values[i, j, k] - marker_velocity)))
+
+    fluid.velocity_dirichlet_boundary_active.from_numpy(active)
+    fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
+    fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+
+    active_cell_count = len(target_sum)
+    return {
+        "fluid_projection_consumed_feedback": active_cell_count > 0,
+        "fluid_feedback_constraint_marker_count": marker_count,
+        "fluid_feedback_constraint_active_cell_count": active_cell_count,
+        "no_slip_residual_before_mps": max(before_residuals, default=0.0),
+        "no_slip_residual_after_mps": max(after_residuals, default=0.0),
+    }
+
+
+def _empty_feedback_constraint_report() -> dict[str, object]:
+    return {
+        "fluid_projection_consumed_feedback": False,
+        "fluid_feedback_constraint_marker_count": 0,
+        "fluid_feedback_constraint_active_cell_count": 0,
+        "no_slip_residual_before_mps": "",
+        "no_slip_residual_after_mps": "",
+    }
 
 
 def _flow_state_report(

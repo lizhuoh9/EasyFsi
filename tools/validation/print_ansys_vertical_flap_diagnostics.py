@@ -50,6 +50,14 @@ FLOW_DIAGNOSTIC_COLUMNS = [
     "velocity_dirichlet_boundary_max_delta_mps",
 ]
 
+FEEDBACK_CONSTRAINT_COLUMNS = [
+    "fluid_projection_consumed_feedback",
+    "fluid_feedback_constraint_marker_count",
+    "fluid_feedback_constraint_active_cell_count",
+    "no_slip_residual_before_mps",
+    "no_slip_residual_after_mps",
+]
+
 HISTORY_COLUMNS = [
     "step",
     "time_s",
@@ -70,6 +78,7 @@ HISTORY_COLUMNS = [
     "root_max_displacement_m",
     "surface_feedback_max_marker_displacement_m",
     *FLOW_DIAGNOSTIC_COLUMNS,
+    *FEEDBACK_CONSTRAINT_COLUMNS,
 ]
 
 COMPARE_COLUMNS = [
@@ -84,6 +93,7 @@ COMPARE_COLUMNS = [
     "easyfsi_tip_streamwise_m",
     "easyfsi_tip_vertical_m",
     *FLOW_DIAGNOSTIC_COLUMNS,
+    *FEEDBACK_CONSTRAINT_COLUMNS,
 ]
 
 SCATTER_RESIDUAL_TOLERANCE_N = 1.0e-9
@@ -297,6 +307,21 @@ def build_history_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
                 "velocity_dirichlet_boundary_max_delta_mps": _number(
                     projection.get("velocity_dirichlet_boundary_max_delta_mps")
                 ),
+                "fluid_projection_consumed_feedback": (
+                    entry.get("fluid_projection_consumed_feedback") or ""
+                ),
+                "fluid_feedback_constraint_marker_count": _int(
+                    entry.get("fluid_feedback_constraint_marker_count")
+                ),
+                "fluid_feedback_constraint_active_cell_count": _int(
+                    entry.get("fluid_feedback_constraint_active_cell_count")
+                ),
+                "no_slip_residual_before_mps": _number(
+                    entry.get("no_slip_residual_before_mps")
+                ),
+                "no_slip_residual_after_mps": _number(
+                    entry.get("no_slip_residual_after_mps")
+                ),
             }
         )
     return rows
@@ -451,6 +476,26 @@ def build_stage_check(
             f"max_marker_displacement_m = {_format_value(report.get('surface_feedback_max_marker_displacement_m'))}",
             f"fluid_recomputed_after_feedback = {_bool_text(fluid_recomputed)}",
             f"feedback_closure_status = {feedback_closure_status}",
+            (
+                "fluid_projection_consumed_feedback = "
+                f"{_bool_text(report.get('fluid_projection_consumed_feedback'))}"
+            ),
+            (
+                "fluid_feedback_constraint_marker_count = "
+                f"{_format_value(report.get('fluid_feedback_constraint_marker_count'))}"
+            ),
+            (
+                "fluid_feedback_constraint_active_cell_count = "
+                f"{_format_value(report.get('fluid_feedback_constraint_active_cell_count'))}"
+            ),
+            (
+                "no_slip_residual_before_mps = "
+                f"{_format_value(report.get('no_slip_residual_before_mps'))}"
+            ),
+            (
+                "no_slip_residual_after_mps = "
+                f"{_format_value(report.get('no_slip_residual_after_mps'))}"
+            ),
             f"diagnosis = {_feedback_diagnosis(status)}",
             "",
             "[COORDINATE_MAPPING]",
@@ -559,6 +604,10 @@ def build_displacement_compare_rows(
                 **{
                     column: easy.get(column, "")
                     for column in FLOW_DIAGNOSTIC_COLUMNS
+                },
+                **{
+                    column: easy.get(column, "")
+                    for column in FEEDBACK_CONSTRAINT_COLUMNS
                 },
             }
         )
