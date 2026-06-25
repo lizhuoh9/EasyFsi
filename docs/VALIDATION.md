@@ -100,6 +100,23 @@ The diagnostic matrix is intended to answer whether the coarse velocity decay
 is projection-only / inlet-driving behavior or marker-feedback behavior. It is
 not an L-level Fluent parity run.
 
+For the sustained-flow driver diagnostic baseline, run:
+
+```powershell
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_sustained_flow_driver_matrix.py
+```
+
+This writes explicit flow-driver-mode artifacts under:
+
+```text
+validation_runs\ansys_vertical_flap_fsi\sustained_flow_driver_diagnostics\
+```
+
+The sustained-flow matrix compares the projection-only collapse baseline, the
+diagnostic full-field reinitialize upper bound, and non-full-reset sustained
+boundary/source/predictor drivers. It is a 10-step coarse EasyFsi diagnostic and
+does not claim Fluent parity.
+
 ## Known Non-Gating Historical Failures
 
 - ANSYS vertical-flap displacement tolerance smoke.

@@ -10,10 +10,11 @@ RUNNER_SOURCE = Path("benchmarks") / "official" / "solid_mpm_fsi_runner.py"
 class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
     def test_runner_projects_flow_inside_fsi_loop_before_stress_sampling(self) -> None:
         loop_body = _fsi_loop_body(_runner_source())
-        project_index = loop_body.index("_project_current_flow(")
+        project_index = loop_body.index("_flow_advance_current_step(")
         stress_index = loop_body.index("_sample_stress_to_marker_forces(markers, fluid)")
 
         self.assertLess(project_index, stress_index)
+        self.assertIn("_project_current_flow(", _flow_advance_body(_runner_source()))
 
     def test_closed_loop_solver_must_report_fluid_recompute_count(self) -> None:
         source = _runner_source()
@@ -50,6 +51,7 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
             for token in (
                 "fluid.project(",
                 "_project_current_flow(",
+                "_flow_advance_current_step(",
                 "_recompute_current_flow(",
                 "_project_flow_for_step(",
                 "_recompute_flow_for_step(",
@@ -78,6 +80,12 @@ def _history_append_body(source: str) -> str:
     append_start = loop_body.index("history.append(")
     append_end = loop_body.index("\n        )", append_start) + len("\n        )")
     return loop_body[append_start:append_end]
+
+
+def _flow_advance_body(source: str) -> str:
+    start = source.index("def _flow_advance_current_step(")
+    end = source.index("\ndef _effective_flow_driver_mode", start)
+    return source[start:end]
 
 
 if __name__ == "__main__":

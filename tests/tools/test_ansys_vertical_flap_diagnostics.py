@@ -32,11 +32,16 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
         self.assertEqual(summary["preflow_steps_completed"], 1)
         self.assertEqual(summary["preflow_converged"], "false")
         self.assertEqual(summary["preflow_status"], "max_steps")
+        self.assertEqual(summary["flow_driver_mode"], "sustained_volume_source_inlet")
+        self.assertEqual(summary["flow_driver_diagnostic_only"], "false")
         self.assertEqual(summary["solid_substeps_selected"], 1600)
         self.assertAlmostEqual(summary["solid_estimated_cfl"], 0.31)
         self.assertAlmostEqual(summary["velocity_p99_mps"], 27.5)
         self.assertAlmostEqual(summary["velocity_p999_mps"], 27.9)
         self.assertLess(summary["marker_force_z_N"], 0.0)
+        self.assertAlmostEqual(summary["source_volume_flux_m3s"], 1.25e-4)
+        self.assertAlmostEqual(summary["zmin_pressure_outlet_flux_m3s"], 1.0e-4)
+        self.assertAlmostEqual(summary["pressure_outlet_flux_ratio"], 0.8)
         self.assertEqual(summary["status"], "FAIL_MAGNITUDE")
 
     def test_history_rows_extract_vectors_and_derive_time(self) -> None:
@@ -156,6 +161,9 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             self.assertIn("solid_substeps_selected = 1600", stage_check)
             self.assertIn("projection_l2 = 1e-07", stage_check)
             self.assertIn("projection_max_abs = 2e-07", stage_check)
+            self.assertIn("flow_driver_mode = sustained_volume_source_inlet", stage_check)
+            self.assertIn("source_volume_flux_m3s = 0.000125", stage_check)
+            self.assertIn("zmin_pressure_outlet_flux_m3s = 0.0001", stage_check)
             self.assertIn("fluid_projection_consumed_feedback = true", stage_check)
             self.assertIn("fluid_feedback_constraint_marker_count = 12", stage_check)
             self.assertIn("fluid_feedback_constraint_active_cell_count = 7", stage_check)
@@ -352,6 +360,7 @@ def _fixture_report() -> dict:
             "solid_particle_counts": [1, 12, 4],
             "marker_count": 12,
             "mpm_support_radius_m": 0.0015,
+            "flow_driver_mode": "sustained_volume_source_inlet",
         },
         "marker_count_per_face": 12,
         "marker_count_actual": 24,
@@ -367,6 +376,12 @@ def _fixture_report() -> dict:
             "pre_projection_l2": 3.0e-7,
             "post_boundary_l2": 4.0e-7,
             "velocity_dirichlet_boundary_max_delta_mps": 5.0e-7,
+            "source_volume_flux_m3s": 1.25e-4,
+            "positive_source_volume_flux_m3s": 1.25e-4,
+            "abs_source_volume_flux_m3s": 1.25e-4,
+            "zmin_pressure_outlet_flux_m3s": 1.0e-4,
+            "zmin_velocity_outlet_flux_m3s": 9.0e-5,
+            "zmin_pressure_outlet_to_abs_source_ratio": 0.8,
         },
         "computed_pressure_min_pa": -12.0,
         "computed_pressure_max_pa": 42.0,

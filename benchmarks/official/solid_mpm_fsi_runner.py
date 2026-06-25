@@ -20,6 +20,36 @@ OUT_OF_PLANE_AXIS_INDEX = 0
 AXIS_NAMES = ("x", "y", "z")
 FLOW_SOLUTION_MODE = "computed_projection"
 DEFAULT_SOLID_CFL_TARGET = 0.5
+FLOW_DRIVER_PROJECTION_ONLY = "projection_only"
+FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC = "reinitialize_inlet_each_step_diagnostic"
+FLOW_DRIVER_SUSTAINED_BOUNDARY = "sustained_boundary_inlet"
+FLOW_DRIVER_SUSTAINED_SOURCE = "sustained_volume_source_inlet"
+FLOW_DRIVER_SUSTAINED_PREDICTOR = "sustained_inlet_predictor"
+FLOW_DRIVER_SHARP_REFERENCE = "sharp_hibm_mpm_reference"
+SUPPORTED_FORMAL_FLOW_DRIVER_MODES = {
+    FLOW_DRIVER_PROJECTION_ONLY,
+    FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC,
+    FLOW_DRIVER_SUSTAINED_BOUNDARY,
+    FLOW_DRIVER_SUSTAINED_SOURCE,
+    FLOW_DRIVER_SUSTAINED_PREDICTOR,
+    FLOW_DRIVER_SHARP_REFERENCE,
+}
+FLOW_SOURCE_REPORT_KEYS = (
+    "source_volume_flux_m3s",
+    "positive_source_volume_flux_m3s",
+    "abs_source_volume_flux_m3s",
+    "zmin_pressure_outlet_flux_m3s",
+    "zmin_velocity_outlet_flux_m3s",
+    "zmin_pressure_outlet_to_source_ratio",
+    "zmin_velocity_outlet_to_source_ratio",
+    "zmin_pressure_outlet_to_net_source_ratio",
+    "zmin_velocity_outlet_to_net_source_ratio",
+    "zmin_pressure_outlet_to_positive_source_ratio",
+    "zmin_velocity_outlet_to_positive_source_ratio",
+    "zmin_pressure_outlet_to_abs_source_ratio",
+    "zmin_velocity_outlet_to_abs_source_ratio",
+    "pressure_outlet_flux_ratio",
+)
 
 
 def run_rectangular_solid_marker_mpm_fsi_smoke(
@@ -58,9 +88,10 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     feedback_constraint_cells: set[tuple[int, int, int]] = set()
     history: list[dict[str, object]] = []
     apply_feedback = bool(getattr(config, "apply_marker_feedback_to_fluid", True))
+    flow_driver_mode = _effective_flow_driver_mode(config)
 
     for step_index in range(config.step_count):
-        if bool(getattr(config, "flow_reinitialize_inlet_each_step", False)):
+        if _flow_driver_requires_full_field_reinitialize(flow_driver_mode):
             _initialize_computed_flow(fluid, config)
             feedback_constraint_cells = set()
         feedback_available_before_projection = (
@@ -74,9 +105,11 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             previous_feedback_constraint_cells=feedback_constraint_cells,
         )
         feedback_constraint_cells = latest_feedback_constraint_report["_feedback_constraint_cells"]
-        latest_flow_report = _project_current_flow(
+        latest_flow_report = _flow_advance_current_step(
             fluid,
             config,
+            step_index=step_index,
+            preflow_history=preflow_history,
             reset_pressure=(
                 bool(getattr(config, "flow_reset_pressure_each_step", False))
                 or (step_index == 0 and not preflow_history)
@@ -144,6 +177,28 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             {
                 "step": step_index + 1,
                 "apply_marker_feedback_to_fluid": apply_feedback,
+                "flow_driver_mode": latest_flow_report["flow_driver_mode"],
+                "flow_driver_diagnostic_only": latest_flow_report[
+                    "flow_driver_diagnostic_only"
+                ],
+                "flow_driver_uses_full_velocity_reset": latest_flow_report[
+                    "flow_driver_uses_full_velocity_reset"
+                ],
+                "flow_full_field_reinitialized": latest_flow_report[
+                    "flow_full_field_reinitialized"
+                ],
+                "flow_inlet_boundary_reapplied": latest_flow_report[
+                    "flow_inlet_boundary_reapplied"
+                ],
+                "flow_volume_source_applied": latest_flow_report[
+                    "flow_volume_source_applied"
+                ],
+                "flow_inlet_boundary_active_cell_count": latest_flow_report[
+                    "flow_inlet_boundary_active_cell_count"
+                ],
+                "flow_inlet_boundary_obstacle_cell_count": latest_flow_report[
+                    "flow_inlet_boundary_obstacle_cell_count"
+                ],
                 "flow_reset_pressure_each_step": bool(
                     getattr(config, "flow_reset_pressure_each_step", False)
                 ),
@@ -216,6 +271,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "pressure_min_pa": latest_flow_report["pressure_min_pa"],
                 "pressure_max_pa": latest_flow_report["pressure_max_pa"],
                 "flow_projection_report": latest_flow_report["projection_report"],
+                **_flow_source_report_fields(latest_flow_report),
                 "solid_substeps_selected": solid_substeps,
                 "solid_estimated_cfl": solid_substep_cfl["solid_estimated_cfl"],
                 "stress_valid_marker_count": latest_stress_report.valid_marker_count,
@@ -284,6 +340,10 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
         **preflow_report,
         "apply_marker_feedback_to_fluid": apply_feedback,
+        "flow_driver_mode": flow_driver_mode,
+        "flow_driver_diagnostic_only": (
+            flow_driver_mode == FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC
+        ),
         "flow_reset_pressure_each_step": bool(
             getattr(config, "flow_reset_pressure_each_step", False)
         ),
@@ -330,6 +390,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "boundary_conditions": dict(boundary_conditions),
         "reference_results": dict(reference_results),
         "flow_projection_report": latest_flow_report["projection_report"],
+        **_flow_source_report_fields(latest_flow_report),
         "flow_obstacle_cell_count": latest_flow_report["obstacle_cell_count"],
         "flow_fluid_cell_count": latest_flow_report["fluid_cell_count"],
         "computed_pressure_min_pa": latest_flow_report["pressure_min_pa"],
@@ -465,6 +526,7 @@ def _preflow_only_report(
     velocity_relative_error = (
         abs(local_velocity_peak_mps - reference_velocity_peak) / reference_velocity_peak
     )
+    flow_driver_mode = _effective_flow_driver_mode(config)
     return {
         "case": case_id,
         "case_metadata": dict(case_metadata),
@@ -475,6 +537,10 @@ def _preflow_only_report(
         **preflow_report,
         "apply_marker_feedback_to_fluid": bool(
             getattr(config, "apply_marker_feedback_to_fluid", True)
+        ),
+        "flow_driver_mode": flow_driver_mode,
+        "flow_driver_diagnostic_only": (
+            flow_driver_mode == FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC
         ),
         "flow_reset_pressure_each_step": bool(
             getattr(config, "flow_reset_pressure_each_step", False)
@@ -522,6 +588,7 @@ def _preflow_only_report(
         "boundary_conditions": dict(boundary_conditions),
         "reference_results": dict(reference_results),
         "flow_projection_report": projection_report,
+        **_flow_source_report_fields(latest_preflow),
         "computed_pressure_min_pa": latest_preflow["pressure_min_pa"],
         "computed_pressure_max_pa": latest_preflow["pressure_max_pa"],
         "pressure_sign_convention": "fluid.pressure projection field is sampled directly",
@@ -574,6 +641,15 @@ def _preflow_only_report(
 
 
 def _validate_rectangular_solid_config(config: Any) -> None:
+    flow_driver_mode = str(
+        getattr(config, "flow_driver_mode", FLOW_DRIVER_PROJECTION_ONLY)
+    )
+    if flow_driver_mode not in SUPPORTED_FORMAL_FLOW_DRIVER_MODES:
+        raise ValueError(f"unsupported flow_driver_mode: {flow_driver_mode!r}")
+    if flow_driver_mode == FLOW_DRIVER_SHARP_REFERENCE:
+        raise ValueError(
+            "sharp_hibm_mpm_reference is reserved for a later sharp-path runner"
+        )
     if config.step_count < 0:
         raise ValueError("step_count must be non-negative")
     if config.step_count == 0 and int(getattr(config, "preflow_steps", 0)) <= 0:
@@ -808,15 +884,157 @@ def _project_current_flow(
     *,
     reset_pressure: bool,
 ) -> dict[str, object]:
-    projection_report = fluid.project(
-        iterations=config.flow_projection_iterations,
-        pressure_outlet_zmin=True,
-        reset_pressure=reset_pressure,
-        pressure_solver=config.flow_pressure_solver,
-        cg_tolerance=config.flow_cg_tolerance,
-        divergence_cleanup_iterations=config.flow_divergence_cleanup_iterations,
+    projection_report = dict(
+        fluid.project(
+            iterations=config.flow_projection_iterations,
+            pressure_outlet_zmin=True,
+            reset_pressure=reset_pressure,
+            pressure_solver=config.flow_pressure_solver,
+            cg_tolerance=config.flow_cg_tolerance,
+            divergence_cleanup_iterations=config.flow_divergence_cleanup_iterations,
+        )
+    )
+    projection_report.update(
+        fluid.pressure_outlet_fv_flux_report(dt_s=float(config.dt_s))
     )
     return _flow_state_report(fluid, projection_report)
+
+
+def _flow_advance_current_step(
+    fluid: CartesianFluidSolver,
+    config: Any,
+    *,
+    step_index: int,
+    preflow_history: list[dict[str, object]],
+    reset_pressure: bool,
+) -> dict[str, object]:
+    mode = _effective_flow_driver_mode(config)
+    fluid.clear_volume_source()
+    driver_report = _flow_driver_report(
+        mode=mode,
+        full_field_reinitialized=_flow_driver_requires_full_field_reinitialize(mode),
+        inlet_boundary_report={},
+        volume_source_applied=False,
+    )
+
+    if mode == FLOW_DRIVER_PROJECTION_ONLY:
+        pass
+    elif mode == FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC:
+        driver_report = _flow_driver_report(
+            mode=mode,
+            full_field_reinitialized=True,
+            inlet_boundary_report=_zmax_inlet_boundary_report(fluid),
+            volume_source_applied=False,
+        )
+    elif mode == FLOW_DRIVER_SUSTAINED_BOUNDARY:
+        boundary_report = _refresh_zmax_inlet_boundary(fluid, config)
+        driver_report = _flow_driver_report(
+            mode=mode,
+            full_field_reinitialized=False,
+            inlet_boundary_report=boundary_report,
+            volume_source_applied=False,
+        )
+    elif mode in {FLOW_DRIVER_SUSTAINED_SOURCE, FLOW_DRIVER_SUSTAINED_PREDICTOR}:
+        boundary_report = _refresh_zmax_inlet_boundary(fluid, config)
+        fluid.add_zmax_velocity_inlet_volume_source(
+            normal_velocity_mps=-float(config.inlet_velocity_mps),
+        )
+        driver_report = _flow_driver_report(
+            mode=mode,
+            full_field_reinitialized=False,
+            inlet_boundary_report=boundary_report,
+            volume_source_applied=True,
+        )
+    elif mode == FLOW_DRIVER_SHARP_REFERENCE:
+        raise RuntimeError(
+            "sharp_hibm_mpm_reference is reserved for a sharp-path runner"
+        )
+    else:  # pragma: no cover - protected by config validation.
+        raise RuntimeError(f"unsupported flow_driver_mode: {mode!r}")
+
+    flow_report = _project_current_flow(
+        fluid,
+        config,
+        reset_pressure=reset_pressure,
+    )
+    flow_report.update(driver_report)
+    flow_report["flow_step_index"] = int(step_index)
+    flow_report["flow_preflow_history_rows"] = len(preflow_history)
+    return flow_report
+
+
+def _effective_flow_driver_mode(config: Any) -> str:
+    if bool(getattr(config, "flow_reinitialize_inlet_each_step", False)):
+        return FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC
+    return str(getattr(config, "flow_driver_mode", FLOW_DRIVER_PROJECTION_ONLY))
+
+
+def _flow_driver_requires_full_field_reinitialize(mode: str) -> bool:
+    return mode == FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC
+
+
+def _flow_driver_report(
+    *,
+    mode: str,
+    full_field_reinitialized: bool,
+    inlet_boundary_report: Mapping[str, object],
+    volume_source_applied: bool,
+) -> dict[str, object]:
+    inlet_reapplied = bool(inlet_boundary_report)
+    return {
+        "flow_driver_mode": mode,
+        "flow_driver_diagnostic_only": mode == FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC,
+        "flow_driver_uses_full_velocity_reset": bool(full_field_reinitialized),
+        "flow_full_field_reinitialized": bool(full_field_reinitialized),
+        "flow_inlet_boundary_reapplied": inlet_reapplied,
+        "flow_volume_source_applied": bool(volume_source_applied),
+        "flow_inlet_boundary_active_cell_count": int(
+            inlet_boundary_report.get("flow_inlet_boundary_active_cell_count", 0)
+        ),
+        "flow_inlet_boundary_obstacle_cell_count": int(
+            inlet_boundary_report.get("flow_inlet_boundary_obstacle_cell_count", 0)
+        ),
+    }
+
+
+def _refresh_zmax_inlet_boundary(
+    fluid: CartesianFluidSolver,
+    config: Any,
+) -> dict[str, object]:
+    active = fluid.velocity_dirichlet_boundary_active.to_numpy()
+    values = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
+    weights = fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+    obstacle = fluid.obstacle.to_numpy()
+    k = int(config.grid_nodes[2]) - 1
+    fluid_mask = obstacle[:, :, k] == 0
+
+    active[:, :, k] = fluid_mask.astype(np.int32)
+    values[:, :, k, :] = 0.0
+    values[:, :, k, STREAMWISE_AXIS_INDEX] = (
+        -float(config.inlet_velocity_mps) * fluid_mask.astype(np.float32)
+    )
+    weights[:, :, k] = fluid_mask.astype(np.float32)
+
+    fluid.velocity_dirichlet_boundary_active.from_numpy(active)
+    fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
+    fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+    return _zmax_inlet_boundary_report(fluid)
+
+
+def _zmax_inlet_boundary_report(
+    fluid: CartesianFluidSolver,
+) -> dict[str, object]:
+    active = fluid.velocity_dirichlet_boundary_active.to_numpy()
+    obstacle = fluid.obstacle.to_numpy()
+    k = active.shape[2] - 1
+    active_slice = active[:, :, k] != 0
+    obstacle_slice = obstacle[:, :, k] != 0
+    return {
+        "flow_inlet_boundary_active_cell_count": int(active_slice.sum()),
+        "flow_inlet_boundary_obstacle_cell_count": int(
+            np.logical_and(active_slice, obstacle_slice).sum()
+        ),
+    }
 
 
 def _run_fixed_solid_preflow(
@@ -832,11 +1050,15 @@ def _run_fixed_solid_preflow(
     stop_reason = "not_requested" if requested_steps == 0 else "max_steps"
 
     for preflow_index in range(requested_steps):
-        if bool(getattr(config, "flow_reinitialize_inlet_each_step", False)):
+        if _flow_driver_requires_full_field_reinitialize(
+            _effective_flow_driver_mode(config)
+        ):
             _initialize_computed_flow(fluid, config)
-        flow_report = _project_current_flow(
+        flow_report = _flow_advance_current_step(
             fluid,
             config,
+            step_index=preflow_index,
+            preflow_history=history,
             reset_pressure=(
                 bool(getattr(config, "flow_reset_pressure_each_step", False))
                 or preflow_index == 0
@@ -850,6 +1072,24 @@ def _run_fixed_solid_preflow(
         row = {
             "preflow_step": preflow_index + 1,
             "fluid_recomputed": True,
+            "flow_driver_mode": flow_report["flow_driver_mode"],
+            "flow_driver_diagnostic_only": flow_report["flow_driver_diagnostic_only"],
+            "flow_driver_uses_full_velocity_reset": flow_report[
+                "flow_driver_uses_full_velocity_reset"
+            ],
+            "flow_full_field_reinitialized": flow_report[
+                "flow_full_field_reinitialized"
+            ],
+            "flow_inlet_boundary_reapplied": flow_report[
+                "flow_inlet_boundary_reapplied"
+            ],
+            "flow_volume_source_applied": flow_report["flow_volume_source_applied"],
+            "flow_inlet_boundary_active_cell_count": flow_report[
+                "flow_inlet_boundary_active_cell_count"
+            ],
+            "flow_inlet_boundary_obstacle_cell_count": flow_report[
+                "flow_inlet_boundary_obstacle_cell_count"
+            ],
             "solid_fixed": True,
             "solid_advanced": False,
             "local_velocity_peak_mps": flow_report["local_velocity_peak_mps"],
@@ -858,6 +1098,7 @@ def _run_fixed_solid_preflow(
             "pressure_min_pa": flow_report["pressure_min_pa"],
             "pressure_max_pa": flow_report["pressure_max_pa"],
             "flow_projection_report": flow_report["projection_report"],
+            **_flow_source_report_fields(flow_report),
             "stress_valid_marker_count": stress_report.valid_marker_count,
             "stress_invalid_marker_count": stress_report.invalid_marker_count,
             "two_sided_pressure_marker_count": (
@@ -1085,7 +1326,20 @@ def _flow_state_report(
         "pressure_min_pa": float(pressure[non_obstacle].min(initial=0.0)),
         "pressure_max_pa": float(pressure[non_obstacle].max(initial=0.0)),
         "pressure_sign_convention": "fluid.pressure projection field is sampled directly",
+        **_flow_source_report_fields(projection_report),
     }
+
+
+def _flow_source_report_fields(report: Any) -> dict[str, object]:
+    if not isinstance(report, Mapping):
+        return {key: "" for key in FLOW_SOURCE_REPORT_KEYS}
+    fields = {key: report.get(key, "") for key in FLOW_SOURCE_REPORT_KEYS}
+    if fields["pressure_outlet_flux_ratio"] == "":
+        fields["pressure_outlet_flux_ratio"] = report.get(
+            "zmin_pressure_outlet_to_abs_source_ratio",
+            report.get("zmin_pressure_outlet_to_positive_source_ratio", ""),
+        )
+    return fields
 
 
 def _build_markers(

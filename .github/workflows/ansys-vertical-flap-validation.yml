@@ -46,6 +46,7 @@ jobs:
             tests.integration.test_ansys_official_half_domain_archive_consistency `
             tests.integration.test_ansys_vertical_flap_postrepair_artifacts `
             tests.integration.test_ansys_vertical_flap_flow_collapse_artifacts `
+            tests.integration.test_ansys_vertical_flap_sustained_flow_driver_artifacts `
             -v
 
       - name: Run source-level runner contracts
@@ -58,6 +59,7 @@ jobs:
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_solid_substep_cfl_report_preserves_explicit_higher_count `
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_preflow_controls_are_exposed_without_changing_default_smoke `
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_fixed_solid_preflow_reports_diagnostics_without_mpm_advance `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_sustained_flow_driver_modes_are_explicit_and_default_safe `
             tests.integration.test_ansys_vertical_flap_runner_loop_contract
 
       - name: Run diagnostics unit tests

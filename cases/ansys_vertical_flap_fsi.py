@@ -141,6 +141,7 @@ class VerticalFlapFsiConfig:
     apply_marker_feedback_to_fluid: bool = True
     flow_reset_pressure_each_step: bool = False
     flow_reinitialize_inlet_each_step: bool = False
+    flow_driver_mode: str = "projection_only"
     enforce_plane_strain_x: bool = True
     mpm_support_radius_m: float = 0.006
     displacement_tolerance: float = 0.05
@@ -243,6 +244,19 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Diagnostic mode: reinitialize inlet flow before every projection.",
     )
+    parser.add_argument(
+        "--flow-driver-mode",
+        default=VerticalFlapFsiConfig.flow_driver_mode,
+        choices=(
+            "projection_only",
+            "reinitialize_inlet_each_step_diagnostic",
+            "sustained_boundary_inlet",
+            "sustained_volume_source_inlet",
+            "sustained_inlet_predictor",
+            "sharp_hibm_mpm_reference",
+        ),
+        help="Explicit flow driver path for ANSYS vertical-flap diagnostics.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -257,6 +271,7 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
             apply_marker_feedback_to_fluid=not args.disable_marker_feedback,
             flow_reset_pressure_each_step=args.flow_reset_pressure_each_step,
             flow_reinitialize_inlet_each_step=args.flow_reinitialize_inlet_each_step,
+            flow_driver_mode=args.flow_driver_mode,
         )
     )
     if args.json:

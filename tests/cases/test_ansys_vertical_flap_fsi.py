@@ -177,6 +177,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertTrue(config.apply_marker_feedback_to_fluid)
         self.assertFalse(config.flow_reset_pressure_each_step)
         self.assertFalse(config.flow_reinitialize_inlet_each_step)
+        self.assertEqual(config.flow_driver_mode, "projection_only")
 
         parser = vertical_flap_case._build_parser()
         args = parser.parse_args(
@@ -190,6 +191,8 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 "--disable-marker-feedback",
                 "--flow-reset-pressure-each-step",
                 "--flow-reinitialize-inlet-each-step",
+                "--flow-driver-mode",
+                "sustained_volume_source_inlet",
                 "--json",
             ]
         )
@@ -200,6 +203,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertTrue(args.disable_marker_feedback)
         self.assertTrue(args.flow_reset_pressure_each_step)
         self.assertTrue(args.flow_reinitialize_inlet_each_step)
+        self.assertEqual(args.flow_driver_mode, "sustained_volume_source_inlet")
 
     def test_fixed_solid_preflow_reports_diagnostics_without_mpm_advance(self):
         source = inspect.getsource(solid_mpm_fsi_runner._run_fixed_solid_preflow)
@@ -210,7 +214,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertIn('"preflow_history"', source)
         self.assertIn('"solid_fixed": True', source)
         self.assertIn('"solid_advanced": False', source)
-        self.assertIn("_project_current_flow(", source)
+        self.assertIn("_flow_advance_current_step(", source)
         self.assertIn("_sample_stress_to_marker_forces(markers, fluid)", source)
         self.assertNotIn("solid.step(", source)
         self.assertNotIn("scatter_marker_forces_to_mpm_particles", source)
@@ -236,6 +240,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertTrue(config.apply_marker_feedback_to_fluid)
         self.assertFalse(config.flow_reset_pressure_each_step)
         self.assertFalse(config.flow_reinitialize_inlet_each_step)
+        self.assertEqual(config.flow_driver_mode, "projection_only")
 
         run_source = inspect.getsource(
             solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
@@ -243,6 +248,34 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertIn("apply_marker_feedback_to_fluid", run_source)
         self.assertIn("flow_reset_pressure_each_step", run_source)
         self.assertIn("flow_reinitialize_inlet_each_step", run_source)
+        self.assertIn("_flow_advance_current_step", run_source)
+
+    def test_sustained_flow_driver_modes_are_explicit_and_default_safe(self):
+        self.assertIn(
+            "sustained_volume_source_inlet",
+            solid_mpm_fsi_runner.SUPPORTED_FORMAL_FLOW_DRIVER_MODES,
+        )
+        self.assertIn(
+            "reinitialize_inlet_each_step_diagnostic",
+            solid_mpm_fsi_runner.SUPPORTED_FORMAL_FLOW_DRIVER_MODES,
+        )
+        self.assertEqual(
+            solid_mpm_fsi_runner._effective_flow_driver_mode(VerticalFlapFsiConfig()),
+            "projection_only",
+        )
+        self.assertEqual(
+            solid_mpm_fsi_runner._effective_flow_driver_mode(
+                VerticalFlapFsiConfig(flow_reinitialize_inlet_each_step=True)
+            ),
+            "reinitialize_inlet_each_step_diagnostic",
+        )
+
+        advance_source = inspect.getsource(
+            solid_mpm_fsi_runner._flow_advance_current_step
+        )
+        self.assertIn("add_zmax_velocity_inlet_volume_source", advance_source)
+        self.assertIn("FLOW_DRIVER_SUSTAINED_SOURCE", advance_source)
+        self.assertIn("FLOW_DRIVER_SUSTAINED_PREDICTOR", advance_source)
 
     def test_thin_wall_probe_reach_tracks_refined_streamwise_spacing(self):
         coarse = VerticalFlapFsiConfig(grid_nodes=(4, 80, 160))

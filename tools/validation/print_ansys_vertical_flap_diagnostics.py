@@ -22,6 +22,8 @@ SUMMARY_COLUMNS = [
     "preflow_steps_completed",
     "preflow_converged",
     "preflow_status",
+    "flow_driver_mode",
+    "flow_driver_diagnostic_only",
     "solid_substeps_selected",
     "solid_estimated_cfl",
     "velocity_peak_mps",
@@ -45,6 +47,12 @@ SUMMARY_COLUMNS = [
     "marker_force_z_N",
     "mpm_external_force_z_N",
     "scatter_action_reaction_residual_N",
+    "source_volume_flux_m3s",
+    "positive_source_volume_flux_m3s",
+    "abs_source_volume_flux_m3s",
+    "zmin_pressure_outlet_flux_m3s",
+    "zmin_velocity_outlet_flux_m3s",
+    "pressure_outlet_flux_ratio",
     "status",
 ]
 
@@ -139,6 +147,7 @@ def load_report(path: Path) -> dict[str, Any]:
 def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
     config = _dict(report.get("config"))
     reference = _dict(report.get("reference_results"))
+    projection = _dict(report.get("flow_projection_report"))
     marker_force = _vector(report.get("total_marker_force_n"))
     external_force = _vector(report.get("mpm_external_force_n"))
     history = _list(report.get("history"))
@@ -160,6 +169,10 @@ def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "preflow_steps_completed": _int(report.get("preflow_steps_completed")),
         "preflow_converged": _bool_text(report.get("preflow_converged")),
         "preflow_status": _preflow_status(report),
+        "flow_driver_mode": _flow_driver_mode(report),
+        "flow_driver_diagnostic_only": _bool_text(
+            report.get("flow_driver_diagnostic_only")
+        ),
         "solid_substeps_selected": _int(report.get("solid_substeps_selected")),
         "solid_estimated_cfl": _number(report.get("solid_estimated_cfl")),
         "velocity_peak_mps": _number(report.get("local_velocity_peak_mps")),
@@ -189,6 +202,36 @@ def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "mpm_external_force_z_N": _number(external_force[2]),
         "scatter_action_reaction_residual_N": _number(
             report.get("scatter_action_reaction_residual_n")
+        ),
+        "source_volume_flux_m3s": _source_number(
+            report,
+            projection,
+            "source_volume_flux_m3s",
+        ),
+        "positive_source_volume_flux_m3s": _source_number(
+            report,
+            projection,
+            "positive_source_volume_flux_m3s",
+        ),
+        "abs_source_volume_flux_m3s": _source_number(
+            report,
+            projection,
+            "abs_source_volume_flux_m3s",
+        ),
+        "zmin_pressure_outlet_flux_m3s": _source_number(
+            report,
+            projection,
+            "zmin_pressure_outlet_flux_m3s",
+        ),
+        "zmin_velocity_outlet_flux_m3s": _source_number(
+            report,
+            projection,
+            "zmin_velocity_outlet_flux_m3s",
+        ),
+        "pressure_outlet_flux_ratio": _source_number(
+            report,
+            projection,
+            "pressure_outlet_flux_ratio",
         ),
     }
     row["status"] = classify_status(report, row)
@@ -488,6 +531,11 @@ def build_stage_check(
             f"pressure_max_pa = {_format_value(report.get('computed_pressure_max_pa'))}",
             *_projection_residual_lines(projection),
             *_projection_diagnostic_lines(projection),
+            f"flow_driver_mode = {_format_value(summary.get('flow_driver_mode'))}",
+            f"flow_driver_diagnostic_only = {_format_value(summary.get('flow_driver_diagnostic_only'))}",
+            f"source_volume_flux_m3s = {_format_value(summary.get('source_volume_flux_m3s'))}",
+            f"zmin_pressure_outlet_flux_m3s = {_format_value(summary.get('zmin_pressure_outlet_flux_m3s'))}",
+            f"pressure_outlet_flux_ratio = {_format_value(summary.get('pressure_outlet_flux_ratio'))}",
             f"diagnosis = {_flow_diagnosis(status)}",
             "",
             "[INTERFACE_FORCE]",
@@ -851,6 +899,32 @@ def _preflow_status(report: dict[str, Any]) -> str:
     if _int(report.get("preflow_steps_requested")) == 0:
         return "not_requested"
     return "converged" if _bool(report.get("preflow_converged")) else "max_steps"
+
+
+def _flow_driver_mode(report: dict[str, Any]) -> str:
+    explicit = report.get("flow_driver_mode")
+    if explicit:
+        return str(explicit)
+    config = _dict(report.get("config"))
+    if _bool(config.get("flow_reinitialize_inlet_each_step")):
+        return "reinitialize_inlet_each_step_diagnostic"
+    return str(config.get("flow_driver_mode", "projection_only"))
+
+
+def _source_number(
+    report: dict[str, Any],
+    projection: dict[str, Any],
+    key: str,
+) -> Any:
+    value = report.get(key)
+    if value in (None, ""):
+        value = projection.get(key)
+    if key == "pressure_outlet_flux_ratio" and value in (None, ""):
+        value = projection.get(
+            "zmin_pressure_outlet_to_abs_source_ratio",
+            projection.get("zmin_pressure_outlet_to_positive_source_ratio"),
+        )
+    return _number(value)
 
 
 def _finite_or_none(value: Any) -> float | None:
