@@ -19,6 +19,7 @@ STREAMWISE_AXIS_INDEX = 2
 OUT_OF_PLANE_AXIS_INDEX = 0
 AXIS_NAMES = ("x", "y", "z")
 FLOW_SOLUTION_MODE = "computed_projection"
+DEFAULT_SOLID_CFL_TARGET = 0.5
 
 
 def run_rectangular_solid_marker_mpm_fsi_smoke(
@@ -38,6 +39,8 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     solid = _build_solid(config, runtime)
     fixed_mask, tip_mask = _solid_masks(solid, config)
     mu_pa, lambda_pa = _lame_parameters(config)
+    solid_substep_cfl = solid_substep_cfl_report(config)
+    solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])
 
     latest_stress_report = None
     latest_force_report = None
@@ -100,11 +103,11 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             particle_count=solid.particle_count,
             support_radius_m=config.mpm_support_radius_m,
         )
-        solid_substep_dt_s = config.dt_s / float(config.solid_substeps)
+        solid_substep_dt_s = config.dt_s / float(solid_substeps)
         solid_substep_velocity_damping = config.velocity_damping ** (
-            1.0 / float(config.solid_substeps)
+            1.0 / float(solid_substeps)
         )
-        for _solid_substep in range(config.solid_substeps):
+        for _solid_substep in range(solid_substeps):
             latest_solid_report = solid.step(
                 dt_s=solid_substep_dt_s,
                 mu_pa=mu_pa,
@@ -193,6 +196,8 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "pressure_min_pa": latest_flow_report["pressure_min_pa"],
                 "pressure_max_pa": latest_flow_report["pressure_max_pa"],
                 "flow_projection_report": latest_flow_report["projection_report"],
+                "solid_substeps_selected": solid_substeps,
+                "solid_estimated_cfl": solid_substep_cfl["solid_estimated_cfl"],
                 "stress_valid_marker_count": latest_stress_report.valid_marker_count,
                 "scatter_invalid_marker_count": (
                     latest_scatter_report.invalid_marker_count
@@ -239,6 +244,37 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "flow_solution_mode": FLOW_SOLUTION_MODE,
         "streamwise_axis": AXIS_NAMES[STREAMWISE_AXIS_INDEX],
         "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
+        "official_half_domain": _is_official_half_domain(case_metadata),
+        "full_domain_two_flap": False,
+        "flap_count_modeled": 1,
+        "flap_count_displayed_after_symmetry_mirror": (
+            2 if _is_official_half_domain(case_metadata) else 1
+        ),
+        "modeled_grid_nodes": list(config.grid_nodes),
+        "display_grid_after_symmetry_mirror": _display_grid_after_symmetry_mirror(
+            config,
+            case_metadata,
+        ),
+        "flap_box_m": {
+            "min": list(_solid_box(config)[0]),
+            "max": list(_solid_box(config)[1]),
+        },
+        "marker_face_count": 2,
+        "marker_count_per_face": int(config.marker_count),
+        "marker_count_actual": int(markers.marker_count),
+        "flow_projection_iterations_actual": int(config.flow_projection_iterations),
+        "solid_substep_cfl_report": solid_substep_cfl,
+        "solid_substeps_requested": solid_substep_cfl["solid_substeps_requested"],
+        "solid_substeps_selected": solid_substep_cfl["solid_substeps_selected"],
+        "solid_substeps_cfl_minimum": solid_substep_cfl[
+            "solid_substeps_cfl_minimum"
+        ],
+        "solid_estimated_cfl": solid_substep_cfl["solid_estimated_cfl"],
+        "solid_elastic_wave_speed_mps": solid_substep_cfl[
+            "solid_elastic_wave_speed_mps"
+        ],
+        "solid_min_grid_spacing_m": solid_substep_cfl["solid_min_grid_spacing_m"],
+        "solid_cfl_target": solid_substep_cfl["solid_cfl_target"],
         "computed_result_sources": {
             "pressure_pa": "fluid.pressure",
             "local_velocity_peak_mps": "max(norm(fluid.velocity))",
@@ -370,6 +406,19 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError("dt_s must be positive")
     if config.solid_substeps <= 0:
         raise ValueError("solid_substeps must be positive")
+    if float(getattr(config, "solid_cfl_target", DEFAULT_SOLID_CFL_TARGET)) <= 0.0:
+        raise ValueError("solid_cfl_target must be positive")
+    flap_streamwise_min_m = getattr(config, "flap_streamwise_min_m", None)
+    flap_streamwise_max_m = getattr(config, "flap_streamwise_max_m", None)
+    if (flap_streamwise_min_m is None) != (flap_streamwise_max_m is None):
+        raise ValueError("flap streamwise bounds must be configured as a pair")
+    if flap_streamwise_min_m is not None:
+        if (
+            float(flap_streamwise_min_m) < 0.0
+            or float(flap_streamwise_max_m) > float(config.duct_length_m)
+            or float(flap_streamwise_min_m) >= float(flap_streamwise_max_m)
+        ):
+            raise ValueError("flap streamwise bounds must lie inside the duct")
     if config.flow_projection_iterations <= 0:
         raise ValueError("flow_projection_iterations must be positive")
     if config.flow_cg_tolerance < 0.0:
@@ -393,17 +442,22 @@ def _domain_bounds(config: Any) -> tuple[tuple[float, float, float], tuple[float
 
 def _solid_box(config: Any) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
     center_z = 0.5 * config.duct_length_m
+    z_min = getattr(config, "flap_streamwise_min_m", None)
+    z_max = getattr(config, "flap_streamwise_max_m", None)
+    if z_min is None or z_max is None:
+        z_min = center_z - 0.5 * config.flap_thickness_m
+        z_max = center_z + 0.5 * config.flap_thickness_m
     root_y = 0.0
     return (
         (
-            0.15 * config.span_m,
+            0.0,
             root_y,
-            center_z - 0.5 * config.flap_thickness_m,
+            float(z_min),
         ),
         (
-            0.85 * config.span_m,
+            config.span_m,
             root_y + config.flap_height_m,
-            center_z + 0.5 * config.flap_thickness_m,
+            float(z_max),
         ),
     )
 
@@ -414,6 +468,66 @@ def _lame_parameters(config: Any) -> tuple[float, float]:
     mu = young / (2.0 * (1.0 + nu))
     lam = young * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
     return mu, lam
+
+
+def solid_substep_cfl_report(config: Any) -> dict[str, object]:
+    mu, lam = _lame_parameters(config)
+    wave_speed_mps = math.sqrt(
+        (lam + 2.0 * mu) / float(config.solid_density_kgm3)
+    )
+    min_spacing_m = min(_grid_spacing_m(config))
+    cfl_target = float(getattr(config, "solid_cfl_target", DEFAULT_SOLID_CFL_TARGET))
+    requested_substeps = int(config.solid_substeps)
+    cfl_minimum = max(
+        1,
+        int(
+            math.ceil(
+                wave_speed_mps
+                * float(config.dt_s)
+                / (cfl_target * min_spacing_m)
+            )
+        ),
+    )
+    selected_substeps = max(requested_substeps, cfl_minimum)
+    substep_dt_s = float(config.dt_s) / float(selected_substeps)
+    estimated_cfl = wave_speed_mps * substep_dt_s / min_spacing_m
+    return {
+        "solid_substeps_requested": requested_substeps,
+        "solid_substeps_cfl_minimum": cfl_minimum,
+        "solid_substeps_selected": selected_substeps,
+        "solid_substeps_auto_applied": selected_substeps != requested_substeps,
+        "solid_elastic_wave_speed_mps": wave_speed_mps,
+        "solid_min_grid_spacing_m": min_spacing_m,
+        "solid_cfl_target": cfl_target,
+        "solid_estimated_cfl": estimated_cfl,
+        "solid_substep_dt_s": substep_dt_s,
+    }
+
+
+def _grid_spacing_m(config: Any) -> tuple[float, float, float]:
+    bounds_min, bounds_max = _domain_bounds(config)
+    return tuple(
+        (float(bounds_max[axis]) - float(bounds_min[axis]))
+        / float(config.grid_nodes[axis])
+        for axis in range(3)
+    )
+
+
+def _is_official_half_domain(case_metadata: Mapping[str, Any]) -> bool:
+    geometry = case_metadata.get("geometry", {})
+    if not isinstance(geometry, Mapping):
+        return False
+    return geometry.get("modeled_domain") == "lower-symmetry-half"
+
+
+def _display_grid_after_symmetry_mirror(
+    config: Any,
+    case_metadata: Mapping[str, Any],
+) -> list[int]:
+    grid = list(config.grid_nodes)
+    if _is_official_half_domain(case_metadata):
+        grid[1] *= 2
+    return grid
 
 
 def _build_fluid(config: Any, runtime: TaichiRuntimeConfig) -> CartesianFluidSolver:
@@ -692,23 +806,33 @@ def _build_markers(
     config: Any,
     runtime: TaichiRuntimeConfig,
 ) -> HibmMpmSurfaceMarkers:
-    markers = HibmMpmSurfaceMarkers(marker_capacity=config.marker_count, runtime=runtime)
+    markers_per_face = int(config.marker_count)
+    markers = HibmMpmSurfaceMarkers(
+        marker_capacity=2 * markers_per_face,
+        runtime=runtime,
+    )
     solid_min, solid_max = _solid_box(config)
     x_center = 0.5 * (solid_min[0] + solid_max[0])
-    segment = config.flap_height_m / config.marker_count
-    area = config.flap_height_m * (solid_max[0] - solid_min[0]) / config.marker_count
+    segment = config.flap_height_m / markers_per_face
+    area = config.flap_height_m * (solid_max[0] - solid_min[0]) / markers_per_face
+    dz = _grid_spacing_m(config)[2]
+    face_specs = (
+        (solid_max[2] + 0.51 * dz, (0.0, 0.0, 1.0)),
+        (solid_min[2] - 0.51 * dz, (0.0, 0.0, -1.0)),
+    )
     positions = []
     velocities = []
     normals = []
     areas = []
     regions = []
-    for marker in range(config.marker_count):
-        y = solid_min[1] + (float(marker) + 0.5) * segment
-        positions.append((x_center, y, solid_max[2]))
-        velocities.append((0.0, 0.0, 0.0))
-        normals.append((0.0, 0.0, 1.0))
-        areas.append(area)
-        regions.append(PRIMARY_REGION_ID)
+    for z, normal in face_specs:
+        for marker in range(markers_per_face):
+            y = solid_min[1] + (float(marker) + 0.5) * segment
+            positions.append((x_center, y, z))
+            velocities.append((0.0, 0.0, 0.0))
+            normals.append(normal)
+            areas.append(area)
+            regions.append(PRIMARY_REGION_ID)
     markers.load_markers(
         positions_m=positions,
         velocities_mps=velocities,
@@ -757,13 +881,18 @@ def _configure_solid_fields(
     solid_min, solid_max = _solid_box(config)
     root_row_height = config.flap_height_m / float(config.solid_particle_counts[1])
     root_limit = solid_min[1] + 1.01 * root_row_height
+    mid_z = 0.5 * (solid_min[2] + solid_max[2])
     particle_area = config.flap_height_m * (solid_max[0] - solid_min[0]) / max(
         float(particle_count),
         1.0,
     )
     for particle in range(particle_count):
         region_ids[particle] = PRIMARY_REGION_ID
-        normals[particle] = (0.0, 0.0, 1.0)
+        normals[particle] = (
+            0.0,
+            0.0,
+            -1.0 if positions[particle, 2] < mid_z else 1.0,
+        )
         areas[particle] = particle_area
         if positions[particle, 1] <= root_limit:
             fixed[particle] = 1

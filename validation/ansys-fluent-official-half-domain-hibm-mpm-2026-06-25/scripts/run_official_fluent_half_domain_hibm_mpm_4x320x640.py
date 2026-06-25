@@ -244,6 +244,75 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
+def _official_half_domain_fields() -> dict[str, Any]:
+    return {
+        "case": "ansys-fluent-official-half-domain-single-flap",
+        "official_half_domain": True,
+        "full_domain_two_flap": False,
+        "flap_count_modeled": 1,
+        "flap_count_displayed_after_symmetry_mirror": 2,
+        "marker_face_count": 2,
+        "marker_count_per_face": MARKERS_PER_FACE,
+        "markers_per_face": MARKERS_PER_FACE,
+        "marker_count_actual": 2 * MARKERS_PER_FACE,
+        "modeled_grid_nodes": list(GRID_NODES),
+        "display_grid_after_symmetry_mirror": [
+            GRID_NODES[0],
+            2 * GRID_NODES[1],
+            GRID_NODES[2],
+        ],
+        "flow_projection_iterations_actual": PROJECTION_ITERATIONS,
+        "projection_iterations": PROJECTION_ITERATIONS,
+        "solid_substeps": SOLID_SUBSTEPS,
+        "solid_particle_counts": list(SOLID_PARTICLE_COUNTS),
+    }
+
+
+def _canonical_report(report: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    canonical = {
+        **report,
+        **_official_half_domain_fields(),
+        "solver_path": "advance_hibm_mpm_sharp_mpm_step",
+        "official_source": manifest["official_source"],
+        "official_geometry_m": manifest["official_geometry_m"],
+        "boundary_conditions": manifest["boundary_conditions"],
+        "flap_count": 1,
+        "fixed_end_definition": {"lower": "bottom root row fixed"},
+    }
+    config = dict(canonical.get("config", {}))
+    config.update(
+        {
+            "duct_height_m": FULL_DUCT_HEIGHT_M,
+            "full_duct_height_m": FULL_DUCT_HEIGHT_M,
+            "modeled_height_m": MODELED_HEIGHT_M,
+            "flap_streamwise_min_m": FLAP_Z_MIN_M,
+            "flap_streamwise_max_m": FLAP_Z_MAX_M,
+            "flow_projection_iterations": PROJECTION_ITERATIONS,
+            "flow_projection_iterations_actual": PROJECTION_ITERATIONS,
+            "marker_count": 2 * MARKERS_PER_FACE,
+            "markers_per_face": MARKERS_PER_FACE,
+            "marker_count_actual": 2 * MARKERS_PER_FACE,
+            "grid_nodes": list(GRID_NODES),
+            "solid_substeps": SOLID_SUBSTEPS,
+            "solid_particle_counts": list(SOLID_PARTICLE_COUNTS),
+        }
+    )
+    canonical["config"] = config
+    return canonical
+
+
+def _canonicalize_process(path: Path) -> None:
+    if not path.exists():
+        return
+    process = json.loads(path.read_text(encoding="utf-8"))
+    process.update(_official_half_domain_fields())
+    process["grid_nodes"] = list(GRID_NODES)
+    path.write_text(
+        json.dumps(_jsonable(process), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     runner = _load_runner()
@@ -256,7 +325,7 @@ def main() -> int:
     runner.FIELDS_PATH = OUTPUT_DIR / f"{RUN_LABEL}_fields.npz"
 
     manifest = {
-        "case": "ansys-fluent-official-half-domain-single-flap",
+        **_official_half_domain_fields(),
         "solver": "local HIBM-MPM advance_hibm_mpm_sharp_mpm_step",
         "official_source": {
             "tutorial_url": "https://ansyshelp.ansys.com/public/views/secured/corp/v251/en/flu_tg/flu_tg_fsi_2way.html",
@@ -279,11 +348,7 @@ def main() -> int:
         },
         "grid_nodes": list(GRID_NODES),
         "step_count": STEP_COUNT,
-        "projection_iterations": PROJECTION_ITERATIONS,
         "fluid_substeps": FLUID_SUBSTEPS,
-        "solid_substeps": SOLID_SUBSTEPS,
-        "solid_particle_counts": list(SOLID_PARTICLE_COUNTS),
-        "markers_per_face": MARKERS_PER_FACE,
         "outputs": {
             "log": str(runner.LOG_PATH),
             "process_json": str(runner.PROCESS_PATH),
@@ -313,6 +378,12 @@ def main() -> int:
             preflow_steps=0,
             stop_on_speed_mps=None,
         )
+        report = _canonical_report(dict(report), manifest)
+        runner.REPORT_PATH.write_text(
+            json.dumps(_jsonable(report), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        _canonicalize_process(runner.PROCESS_PATH)
     except Exception as exc:
         failure = {
             **manifest,
@@ -334,10 +405,6 @@ def main() -> int:
         "status": "completed",
         "elapsed_s": time.perf_counter() - start,
         "completed_steps": len(report["history"]),
-        "flap_count_modeled": 1,
-        "flap_count_displayed_after_symmetry_mirror": 2,
-        "full_domain_two_flap": False,
-        "official_half_domain": True,
         "fluid_speed_max_mps": latest.get("fluid_speed_max_mps"),
         "fluid_speed_p99_mps": latest.get("fluid_speed_p99_mps"),
         "fluid_speed_p999_mps": latest.get("fluid_speed_p999_mps"),

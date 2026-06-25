@@ -5,13 +5,30 @@
     "velocity_inlet_zmax_mps": 10.0
   },
   "case": "ansys-fluent-official-half-domain-single-flap",
+  "display_grid_after_symmetry_mirror": [
+    4,
+    640,
+    640
+  ],
+  "flap_count_displayed_after_symmetry_mirror": 2,
+  "flap_count_modeled": 1,
+  "flow_projection_iterations_actual": 4096,
   "fluid_substeps": 2,
+  "full_domain_two_flap": false,
   "grid_nodes": [
     4,
     320,
     640
   ],
+  "marker_count_actual": 168,
+  "marker_count_per_face": 84,
+  "marker_face_count": 2,
   "markers_per_face": 84,
+  "modeled_grid_nodes": [
+    4,
+    320,
+    640
+  ],
   "official_geometry_m": {
     "duct_length": 0.1,
     "flap_height": 0.01,
@@ -21,6 +38,7 @@
     "full_duct_height": 0.04,
     "modeled_half_height": 0.02
   },
+  "official_half_domain": true,
   "official_source": {
     "journal": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\_codex_validation\\official_ansys_fluent_fsi_2way_source_20260625\\unzipped\\fsi_2way\\steady_fluid_flow.jou",
     "mesh": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\_codex_validation\\official_ansys_fluent_fsi_2way_source_20260625\\unzipped\\fsi_2way\\flap.msh",

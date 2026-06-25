@@ -46,8 +46,8 @@ ANSYS_VERTICAL_FLAP_THIN_WALL_PRESSURE_SAMPLING: dict[str, float | str] = {
 
 ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
     "source": {
-        "name": "ANSYS Fluent v242 two-way intrinsic FSI vertical-flap tutorial",
-        "url": "https://ansyshelp.ansys.com/public/Views/Secured/corp/v242/en/flu_tg/flu_tg_fsi_2way.html",
+        "name": "ANSYS Fluent v251 two-way intrinsic FSI vertical-flap tutorial",
+        "url": "https://ansyshelp.ansys.com/public/views/secured/corp/v251/en/flu_tg/flu_tg_fsi_2way.html",
     },
     "geometry": {
         "duct_length_m": 0.10,
@@ -56,6 +56,8 @@ ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
         "modeled_height_m": 0.02,
         "flap_height_m": 0.01,
         "flap_thickness_m": 0.003,
+        "flap_streamwise_min_m": 0.050,
+        "flap_streamwise_max_m": 0.053,
     },
     "fluid": {
         "material": "air",
@@ -114,6 +116,8 @@ class VerticalFlapFsiConfig:
     span_m: float = 0.003
     flap_height_m: float = 0.01
     flap_thickness_m: float = 0.003
+    flap_streamwise_min_m: float = 0.050
+    flap_streamwise_max_m: float = 0.053
     inlet_velocity_mps: float = 10.0
     air_density_kgm3: float = 1.225
     air_viscosity_pa_s: float = 1.8e-5
@@ -131,6 +135,7 @@ class VerticalFlapFsiConfig:
     flow_divergence_cleanup_iterations: int = 0
     velocity_damping: float = 0.995
     solid_substeps: int = 1600
+    solid_cfl_target: float = 0.5
     enforce_plane_strain_x: bool = True
     mpm_support_radius_m: float = 0.006
     displacement_tolerance: float = 0.05

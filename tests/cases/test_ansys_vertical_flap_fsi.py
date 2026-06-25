@@ -3,7 +3,9 @@ import math
 import unittest
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
+from benchmarks.official import solid_mpm_fsi_runner
 import cases.ansys_vertical_flap_fsi as vertical_flap_case
 from cases import CASE_MODULES
 from cases.ansys_vertical_flap_fsi import (
@@ -41,6 +43,8 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(metadata["geometry"]["modeled_domain"], "lower-symmetry-half")
         self.assertAlmostEqual(metadata["geometry"]["flap_height_m"], 0.01)
         self.assertAlmostEqual(metadata["geometry"]["flap_thickness_m"], 0.003)
+        self.assertAlmostEqual(metadata["geometry"]["flap_streamwise_min_m"], 0.050)
+        self.assertAlmostEqual(metadata["geometry"]["flap_streamwise_max_m"], 0.053)
         self.assertEqual(metadata["fluid"]["material"], "air")
         self.assertAlmostEqual(metadata["fluid"]["inlet_velocity_mps"], 10.0)
         self.assertAlmostEqual(metadata["solid"]["density_kgm3"], 1600.0)
@@ -82,6 +86,88 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(reference["step_count"], 50)
         self.assertGreaterEqual(reference["local_velocity_peak_mps"], 20.0)
         self.assertLessEqual(reference["local_velocity_peak_mps"], 29.0)
+
+    def test_formal_runner_uses_official_full_span_flap_box(self):
+        config = VerticalFlapFsiConfig()
+        solid_min, solid_max = solid_mpm_fsi_runner._solid_box(config)
+
+        self.assertAlmostEqual(solid_min[0], 0.0)
+        self.assertAlmostEqual(solid_max[0], config.span_m)
+        self.assertAlmostEqual(solid_min[2], config.flap_streamwise_min_m)
+        self.assertAlmostEqual(solid_max[2], config.flap_streamwise_max_m)
+
+    def test_formal_runner_places_both_streamwise_marker_faces(self):
+        class FakeMarkers:
+            def __init__(self, marker_capacity, runtime):
+                self.marker_capacity = marker_capacity
+                self.runtime = runtime
+                self.marker_count = 0
+                self.positions_m = []
+                self.normals = []
+                self.areas_m2 = []
+
+            def load_markers(
+                self,
+                *,
+                positions_m,
+                velocities_mps,
+                normals,
+                areas_m2,
+                region_ids,
+            ):
+                self.positions_m = list(positions_m)
+                self.normals = list(normals)
+                self.areas_m2 = list(areas_m2)
+                self.marker_count = len(self.positions_m)
+
+        config = VerticalFlapFsiConfig(marker_count=3)
+        dz = config.duct_length_m / float(config.grid_nodes[2])
+        with patch.object(solid_mpm_fsi_runner, "HibmMpmSurfaceMarkers", FakeMarkers):
+            markers = solid_mpm_fsi_runner._build_markers(config, runtime=None)
+
+        self.assertEqual(markers.marker_capacity, 6)
+        self.assertEqual(markers.marker_count, 6)
+        self.assertEqual(markers.normals[:3], [(0.0, 0.0, 1.0)] * 3)
+        self.assertEqual(markers.normals[3:], [(0.0, 0.0, -1.0)] * 3)
+        self.assertTrue(
+            all(
+                math.isclose(position[2], config.flap_streamwise_max_m + 0.51 * dz)
+                for position in markers.positions_m[:3]
+            )
+        )
+        self.assertTrue(
+            all(
+                math.isclose(position[2], config.flap_streamwise_min_m - 0.51 * dz)
+                for position in markers.positions_m[3:]
+            )
+        )
+
+    def test_solid_substep_cfl_report_preserves_explicit_higher_count(self):
+        unstable = VerticalFlapFsiConfig(
+            grid_nodes=(4, 320, 640),
+            solid_substeps=200,
+        )
+        unstable_report = solid_mpm_fsi_runner.solid_substep_cfl_report(unstable)
+
+        self.assertGreater(unstable_report["solid_substeps_cfl_minimum"], 900)
+        self.assertEqual(
+            unstable_report["solid_substeps_selected"],
+            unstable_report["solid_substeps_cfl_minimum"],
+        )
+        self.assertTrue(unstable_report["solid_substeps_auto_applied"])
+        self.assertLessEqual(
+            unstable_report["solid_estimated_cfl"],
+            unstable_report["solid_cfl_target"],
+        )
+
+        explicit = VerticalFlapFsiConfig(
+            grid_nodes=(4, 320, 640),
+            solid_substeps=1200,
+        )
+        explicit_report = solid_mpm_fsi_runner.solid_substep_cfl_report(explicit)
+
+        self.assertEqual(explicit_report["solid_substeps_selected"], 1200)
+        self.assertFalse(explicit_report["solid_substeps_auto_applied"])
 
     def test_thin_wall_probe_reach_tracks_refined_streamwise_spacing(self):
         coarse = VerticalFlapFsiConfig(grid_nodes=(4, 80, 160))

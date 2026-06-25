@@ -1,4 +1,5 @@
 {
+  "case": "ansys-fluent-official-half-domain-single-flap",
   "display_grid_after_symmetry_mirror": [
     4,
     640,
@@ -7,8 +8,11 @@
   "duct_length_m": 0.1,
   "fields_npz": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_fields.npz",
   "flap_count_displayed": 2,
+  "flap_count_displayed_after_symmetry_mirror": 2,
   "flap_count_modeled": 1,
   "flip_z_for_reference": true,
+  "flow_projection_iterations_actual": 4096,
+  "full_domain_two_flap": false,
   "full_duct_height_m": 0.04,
   "grid_nodes_modeled_half": [
     4,
@@ -16,8 +20,16 @@
     640
   ],
   "inlet_velocity_mps": 10.0,
+  "marker_count_actual": 168,
+  "markers_per_face": 84,
   "model": "ANSYS Fluent official half-domain, mirrored for display",
+  "modeled_grid_nodes": [
+    4,
+    320,
+    640
+  ],
   "modeled_half_height_m": 0.02,
+  "official_half_domain": true,
   "png": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\rendered\\ansys_fluent_official_half_domain_official_half_grid4x320x640_step1_p4096_s1000\\official_half_grid4x320x640_step1_p4096_s1000_fields_mirrored_velocity_pipe_style.png",
   "solver": "local HIBM-MPM advance_hibm_mpm_sharp_mpm_step",
   "speed_max_mps": 57.63432607421225,

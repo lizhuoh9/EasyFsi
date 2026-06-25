@@ -47,7 +47,8 @@ Run parameters:
 - Fluid substeps: `2`.
 - Solid substeps: `1000`.
 - Solid particles: `1 x 80 x 24`.
-- Markers per face: `84`.
+- Markers per streamwise face: `84`.
+- Actual pressure/force markers: `168` (`+z` and `-z` flap faces).
 
 Result:
 
@@ -115,11 +116,13 @@ $env:FIELDS_NPZ='validation\ansys-fluent-official-half-domain-hibm-mpm-2026-06-2
 5. Increasing the superseded full-domain solid substeps to `1000` made that
    non-official geometry run complete, which motivated using `solid_substeps=1000`
    for the official half-domain rerun.
-6. The copied base runner serializes `config.flow_projection_iterations` with
-   the dataclass default (`1080`) inside the nested config report, while the
-   actual sharp-step call used the explicit manifest/summary value (`4096`).
-   For this archive, use `*_manifest.json` and `*_summary.json` as the source of
-   truth for the actual projection-iteration count.
+6. The archived manifest, summary, report, process, render metadata, and field
+   snapshot now use one official-half-domain schema: one modeled flap, mirrored
+   two-flap display, `168` actual markers, and `4096` actual pressure
+   projection iterations.
+7. The formal `benchmarks/official/solid_mpm_fsi_runner.py` path was repaired
+   after this archive review to use a full-span planar flap, two streamwise
+   marker faces, and a reported solid elastic-wave CFL substep estimate.
 
 ## Scope boundary
 
