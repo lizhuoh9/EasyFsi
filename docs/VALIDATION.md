@@ -134,6 +134,24 @@ inlet source strength and records pressure-outlet and velocity-outlet flux
 ratios separately. It is a 10-step calibration diagnostic only; it does not run
 50 steps and does not claim Fluent parity.
 
+For the 20-step source candidate check, run:
+
+```powershell
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_source_candidate_step20_matrix.py
+```
+
+This writes STEP20 candidate artifacts under:
+
+```text
+validation_runs\ansys_vertical_flap_fsi\source_candidate_step20_diagnostics\
+```
+
+The STEP20 matrix checks whether the 10-step source candidate remains credible
+over 20 steps before any 50-step run. It records per-step history for the
+`source_0p75_constant_step20` path, uses `velocity_outlet_flux_ratio` as the
+primary mass-balance sanity metric, keeps pressure-outlet flux diagnostic-only,
+and does not claim Fluent parity.
+
 ## Known Non-Gating Historical Failures
 
 - ANSYS vertical-flap displacement tolerance smoke.

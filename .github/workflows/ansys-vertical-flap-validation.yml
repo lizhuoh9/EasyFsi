@@ -38,7 +38,8 @@ jobs:
             cases\ansys_vertical_flap_fsi.py `
             benchmarks\official\solid_mpm_fsi_runner.py `
             tools\validation\print_ansys_vertical_flap_diagnostics.py `
-            validation_runs\ansys_vertical_flap_fsi\scripts\run_source_outlet_balance_matrix.py
+            validation_runs\ansys_vertical_flap_fsi\scripts\run_source_outlet_balance_matrix.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\run_source_candidate_step20_matrix.py
 
       - name: Run archive and artifact consistency tests
         shell: pwsh
@@ -49,6 +50,7 @@ jobs:
             tests.integration.test_ansys_vertical_flap_flow_collapse_artifacts `
             tests.integration.test_ansys_vertical_flap_sustained_flow_driver_artifacts `
             tests.integration.test_ansys_vertical_flap_source_outlet_balance_artifacts `
+            tests.integration.test_ansys_vertical_flap_source_candidate_step20_artifacts `
             -v
 
       - name: Run source-level runner contracts
