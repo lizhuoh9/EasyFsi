@@ -30,6 +30,19 @@ git diff --check
 - `git diff --check` passed with Windows LF-to-CRLF warnings only.
 - Changed-file credential scan found no API key, password, private-key, or GitHub token patterns.
 
+## Remote CI Query Status
+
+The implementation commit `02723dd` was pushed to
+`origin/solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`.
+
+Remote GitHub Actions status could not be queried from this workstation because
+GitHub CLI is not authenticated:
+
+```text
+To get started with GitHub CLI, please run:  gh auth login
+Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.
+```
+
 ## Result
 
 best_candidate = source_strength_0p75_step10
