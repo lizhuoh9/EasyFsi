@@ -18,15 +18,24 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
     def test_closed_loop_solver_must_report_fluid_recompute_count(self) -> None:
         source = _runner_source()
 
+        self.assertIn("fluid_projection_count = 0", source)
+        self.assertIn("fluid_projection_after_feedback_count = 0", source)
+        self.assertIn("feedback_available_for_projection = False", source)
+        self.assertIn("fluid_projection_after_feedback_count > 0", source)
         self.assertIn('"fluid_recomputed_after_feedback"', source)
         self.assertIn('"feedback_closure_status"', source)
-        self.assertIn('"CLOSED_LOOP_RECOMPUTED_FLOW"', source)
+        self.assertIn('"CLOSED_LOOP_RECOMPUTED_AFTER_FEEDBACK"', source)
+        self.assertIn('"OPEN_LOOP_OR_PREFEEDBACK_ONLY"', source)
         self.assertIn('"fluid_recompute_count"', source)
+        self.assertIn('"fluid_projection_count"', source)
+        self.assertIn('"fluid_projection_after_feedback_count"', source)
 
     def test_closed_loop_solver_must_record_per_step_flow_recompute_fields(self) -> None:
         history_body = _history_append_body(_runner_source())
 
         self.assertIn('"fluid_recomputed"', history_body)
+        self.assertIn('"fluid_recomputed_after_feedback"', history_body)
+        self.assertIn('"feedback_available_before_projection"', history_body)
         self.assertIn('"local_velocity_peak_mps"', history_body)
         self.assertIn('"pressure_min_pa"', history_body)
         self.assertIn('"pressure_max_pa"', history_body)

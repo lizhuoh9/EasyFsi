@@ -43,6 +43,17 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
         self.assertAlmostEqual(rows[1]["tip_mean_dz_m"], -4.0e-5)
         self.assertAlmostEqual(rows[1]["tip_norm_m"], 4.001249804748512e-5)
         self.assertEqual(rows[0]["root_max_displacement_m"], "")
+        self.assertAlmostEqual(rows[1]["local_velocity_peak_mps"], 28.0)
+        self.assertAlmostEqual(rows[1]["pressure_min_pa"], -12.0)
+        self.assertAlmostEqual(rows[1]["pressure_max_pa"], 42.0)
+        self.assertAlmostEqual(rows[1]["projection_l2"], 2.0e-7)
+        self.assertAlmostEqual(rows[1]["projection_max_abs"], 3.0e-7)
+        self.assertAlmostEqual(rows[1]["pre_projection_l2"], 4.0e-7)
+        self.assertAlmostEqual(rows[1]["post_boundary_l2"], 5.0e-7)
+        self.assertAlmostEqual(
+            rows[1]["velocity_dirichlet_boundary_max_delta_mps"],
+            6.0e-7,
+        )
 
     def test_write_diagnostics_creates_summary_history_and_stage_check(self) -> None:
         report = _fixture_report()
@@ -64,12 +75,17 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
 
             self.assertEqual(summary_rows[0]["status"], "FAIL_MAGNITUDE")
             self.assertEqual(history_rows[1]["step"], "2")
+            self.assertEqual(history_rows[1]["local_velocity_peak_mps"], "28.0")
+            self.assertEqual(history_rows[1]["projection_l2"], "2e-07")
+            self.assertEqual(history_rows[1]["projection_max_abs"], "3e-07")
             self.assertIn("[SETUP]", stage_check)
             self.assertIn("[FLOW_ONLY]", stage_check)
             self.assertIn("[INTERFACE_FORCE]", stage_check)
             self.assertIn("[SOLID_RESPONSE]", stage_check)
             self.assertIn("[FSI_FEEDBACK]", stage_check)
             self.assertIn("[COORDINATE_MAPPING]", stage_check)
+            self.assertIn("projection_l2 = 1e-07", stage_check)
+            self.assertIn("projection_max_abs = 2e-07", stage_check)
             self.assertIn("Fluent x <-> EasyFsi z", stage_check)
             self.assertIn("fluent_comparison = not run", stage_check)
             self.assertEqual(summary_json[0]["status"], "FAIL_MAGNITUDE")
@@ -157,6 +173,8 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             self.assertEqual(compare_rows[0]["fluent_tip_total_m"], "5.1e-05")
             self.assertEqual(compare_rows[0]["easyfsi_tip_streamwise_m"], "-4e-05")
             self.assertEqual(compare_rows[0]["easyfsi_tip_vertical_m"], "1e-06")
+            self.assertEqual(compare_rows[0]["local_velocity_peak_mps"], "28.0")
+            self.assertEqual(compare_rows[0]["projection_l2"], "2e-07")
             self.assertGreater(float(compare_rows[0]["rel_error"]), 0.0)
 
     def test_load_report_accepts_prefix_text_before_json(self) -> None:
@@ -218,7 +236,13 @@ def _fixture_report() -> dict:
             "local_velocity_peak_range_mps": [20.0, 29.0],
             "time_step_s": 5.0e-4,
         },
-        "flow_projection_report": {"final_residual": 1.0e-7},
+        "flow_projection_report": {
+            "projection_l2": 1.0e-7,
+            "projection_max_abs": 2.0e-7,
+            "pre_projection_l2": 3.0e-7,
+            "post_boundary_l2": 4.0e-7,
+            "velocity_dirichlet_boundary_max_delta_mps": 5.0e-7,
+        },
         "computed_pressure_min_pa": -12.0,
         "computed_pressure_max_pa": 42.0,
         "local_velocity_peak_mps": 28.0,
@@ -250,6 +274,16 @@ def _fixture_report() -> dict:
                 "mpm_external_force_n": [0.0, 0.0, -0.6],
                 "max_displacement_m": 2.0e-5,
                 "tip_mean_displacement_m": [0.0, 5.0e-7, -2.0e-5],
+                "local_velocity_peak_mps": 27.0,
+                "pressure_min_pa": -10.0,
+                "pressure_max_pa": 40.0,
+                "flow_projection_report": {
+                    "projection_l2": 1.0e-7,
+                    "projection_max_abs": 2.0e-7,
+                    "pre_projection_l2": 3.0e-7,
+                    "post_boundary_l2": 4.0e-7,
+                    "velocity_dirichlet_boundary_max_delta_mps": 5.0e-7,
+                },
             },
             {
                 "step": 2,
@@ -260,6 +294,16 @@ def _fixture_report() -> dict:
                 "mpm_external_force_n": [0.0, 0.0, -1.2],
                 "max_displacement_m": 6.0e-5,
                 "tip_mean_displacement_m": [0.0, 1.0e-6, -4.0e-5],
+                "local_velocity_peak_mps": 28.0,
+                "pressure_min_pa": -12.0,
+                "pressure_max_pa": 42.0,
+                "flow_projection_report": {
+                    "projection_l2": 2.0e-7,
+                    "projection_max_abs": 3.0e-7,
+                    "pre_projection_l2": 4.0e-7,
+                    "post_boundary_l2": 5.0e-7,
+                    "velocity_dirichlet_boundary_max_delta_mps": 6.0e-7,
+                },
             },
         ],
     }
