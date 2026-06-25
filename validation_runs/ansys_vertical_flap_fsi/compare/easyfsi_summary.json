@@ -1,0 +1,31 @@
+[
+  {
+    "case": "ansys-vertical-flap-fsi",
+    "disp_relerr": 0.4457557120625222,
+    "dt_s": 0.0005,
+    "feedback_invalid": 0,
+    "first_tip_dz_violation_step": 5,
+    "grid": "4x32x64",
+    "marker_force_z_N": -0.0017353596337774798,
+    "markers": 12,
+    "max_disp_m": 2.826645868481137e-05,
+    "max_tip_dz_rebound_m": 5.472451448440552e-06,
+    "mpm_external_force_z_N": -0.001574252499267459,
+    "particles": "1x12x4",
+    "ref_max_disp_m": 5.1e-05,
+    "root_max_disp_m": 0.0,
+    "scatter_action_reaction_residual_N": 2.7931894112982456e-11,
+    "scatter_invalid": 0,
+    "status": "FAIL_SOLID_HISTORY",
+    "steps": 50,
+    "stress_invalid": 0,
+    "support_radius_m": 0.0015,
+    "tip_dz_final_m": -2.560298889875412e-05,
+    "tip_dz_max_m": -7.167458534240723e-06,
+    "tip_dz_min_m": -3.392063081264496e-05,
+    "tip_dz_monotonic_violation_count": 23,
+    "tip_dz_sign_violation_count": 0,
+    "velocity_peak_mps": 28.15654945373535,
+    "velocity_peak_relerr": 0.002012436075991108
+  }
+]

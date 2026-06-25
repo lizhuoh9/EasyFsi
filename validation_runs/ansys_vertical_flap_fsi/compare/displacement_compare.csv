@@ -1,0 +1,2 @@
+step,time_s,fluent_tip_total_m,easyfsi_tip_total_m,abs_error,rel_error,fluent_tip_x_m,fluent_tip_y_m,easyfsi_tip_streamwise_m,easyfsi_tip_vertical_m
+50,0.025,5.1e-05,2.703296924203968e-05,2.396703075796032e-05,0.4699417795678494,,,-2.560298889875412e-05,8.67573544383049e-06
