@@ -54,6 +54,16 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             rows[1]["velocity_dirichlet_boundary_max_delta_mps"],
             6.0e-7,
         )
+        self.assertEqual(rows[0]["fluid_projection_consumed_feedback"], "")
+        self.assertEqual(rows[0]["fluid_feedback_constraint_marker_count"], 0)
+        self.assertEqual(rows[0]["fluid_feedback_constraint_active_cell_count"], 0)
+        self.assertEqual(rows[0]["no_slip_residual_before_mps"], "")
+        self.assertEqual(rows[0]["no_slip_residual_after_mps"], "")
+        self.assertEqual(rows[1]["fluid_projection_consumed_feedback"], True)
+        self.assertEqual(rows[1]["fluid_feedback_constraint_marker_count"], 12)
+        self.assertEqual(rows[1]["fluid_feedback_constraint_active_cell_count"], 7)
+        self.assertAlmostEqual(rows[1]["no_slip_residual_before_mps"], 0.015)
+        self.assertAlmostEqual(rows[1]["no_slip_residual_after_mps"], 0.0)
 
     def test_write_diagnostics_creates_summary_history_and_stage_check(self) -> None:
         report = _fixture_report()
@@ -78,6 +88,14 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             self.assertEqual(history_rows[1]["local_velocity_peak_mps"], "28.0")
             self.assertEqual(history_rows[1]["projection_l2"], "2e-07")
             self.assertEqual(history_rows[1]["projection_max_abs"], "3e-07")
+            self.assertEqual(
+                history_rows[1]["fluid_projection_consumed_feedback"],
+                "True",
+            )
+            self.assertEqual(
+                history_rows[1]["fluid_feedback_constraint_marker_count"],
+                "12",
+            )
             self.assertIn("[SETUP]", stage_check)
             self.assertIn("[FLOW_ONLY]", stage_check)
             self.assertIn("[INTERFACE_FORCE]", stage_check)
@@ -87,6 +105,11 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             self.assertNotIn("projection_final_residual =", stage_check)
             self.assertIn("projection_l2 = 1e-07", stage_check)
             self.assertIn("projection_max_abs = 2e-07", stage_check)
+            self.assertIn("fluid_projection_consumed_feedback = true", stage_check)
+            self.assertIn("fluid_feedback_constraint_marker_count = 12", stage_check)
+            self.assertIn("fluid_feedback_constraint_active_cell_count = 7", stage_check)
+            self.assertIn("no_slip_residual_before_mps = 0.015", stage_check)
+            self.assertIn("no_slip_residual_after_mps = 0", stage_check)
             self.assertIn("Fluent x <-> EasyFsi z", stage_check)
             self.assertIn("fluent_comparison = not run", stage_check)
             self.assertEqual(summary_json[0]["status"], "FAIL_MAGNITUDE")
@@ -179,6 +202,14 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
             self.assertEqual(compare_rows[0]["easyfsi_tip_vertical_m"], "1e-06")
             self.assertEqual(compare_rows[0]["local_velocity_peak_mps"], "28.0")
             self.assertEqual(compare_rows[0]["projection_l2"], "2e-07")
+            self.assertEqual(
+                compare_rows[0]["fluid_projection_consumed_feedback"],
+                "True",
+            )
+            self.assertEqual(
+                compare_rows[0]["fluid_feedback_constraint_active_cell_count"],
+                "7",
+            )
             self.assertGreater(float(compare_rows[0]["rel_error"]), 0.0)
 
     def test_load_report_accepts_prefix_text_before_json(self) -> None:
@@ -259,6 +290,12 @@ def _fixture_report() -> dict:
         "surface_feedback_updated_marker_count": 12,
         "surface_feedback_invalid_marker_count": 0,
         "surface_feedback_max_marker_displacement_m": 4.0e-5,
+        "fluid_projection_consumed_feedback": True,
+        "fluid_projection_consumed_feedback_count": 1,
+        "fluid_feedback_constraint_marker_count": 12,
+        "fluid_feedback_constraint_active_cell_count": 7,
+        "no_slip_residual_before_mps": 0.015,
+        "no_slip_residual_after_mps": 0.0,
         "total_marker_force_n": [0.0, 0.0, -1.2],
         "mpm_external_force_n": [0.0, 0.0, -1.2],
         "scatter_action_reaction_residual_n": 0.0,
@@ -288,6 +325,11 @@ def _fixture_report() -> dict:
                     "post_boundary_l2": 4.0e-7,
                     "velocity_dirichlet_boundary_max_delta_mps": 5.0e-7,
                 },
+                "fluid_projection_consumed_feedback": False,
+                "fluid_feedback_constraint_marker_count": 0,
+                "fluid_feedback_constraint_active_cell_count": 0,
+                "no_slip_residual_before_mps": "",
+                "no_slip_residual_after_mps": "",
             },
             {
                 "step": 2,
@@ -308,6 +350,11 @@ def _fixture_report() -> dict:
                     "post_boundary_l2": 5.0e-7,
                     "velocity_dirichlet_boundary_max_delta_mps": 6.0e-7,
                 },
+                "fluid_projection_consumed_feedback": True,
+                "fluid_feedback_constraint_marker_count": 12,
+                "fluid_feedback_constraint_active_cell_count": 7,
+                "no_slip_residual_before_mps": 0.015,
+                "no_slip_residual_after_mps": 0.0,
             },
         ],
     }
