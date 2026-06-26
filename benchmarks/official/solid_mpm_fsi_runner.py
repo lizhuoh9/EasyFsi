@@ -1597,6 +1597,11 @@ def _run_fixed_solid_preflow(
             if history
             else {}
         ),
+        "final_flow_field_snapshot": (
+            _flow_field_snapshot(fluid)
+            if history and bool(getattr(config, "export_final_flow_snapshot", False))
+            else {}
+        ),
     }
 
 
@@ -1609,6 +1614,27 @@ def _relative_delta(current: object, previous: object) -> float:
     previous_value = float(previous)
     scale = max(abs(current_value), abs(previous_value), 1.0e-30)
     return abs(current_value - previous_value) / scale
+
+
+def _flow_field_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
+    snapshot = {
+        "pressure": fluid.pressure.to_numpy(),
+        "velocity": fluid.velocity.to_numpy(),
+        "obstacle": fluid.obstacle.to_numpy(),
+        "cell_face_x_m": fluid.cell_face_x_m.to_numpy(),
+        "cell_face_y_m": fluid.cell_face_y_m.to_numpy(),
+        "cell_face_z_m": fluid.cell_face_z_m.to_numpy(),
+        "cell_center_x_m": fluid.cell_center_x_m.to_numpy(),
+        "cell_center_y_m": fluid.cell_center_y_m.to_numpy(),
+        "cell_center_z_m": fluid.cell_center_z_m.to_numpy(),
+        "cell_width_x_m": fluid.cell_width_x_m.to_numpy(),
+        "cell_width_y_m": fluid.cell_width_y_m.to_numpy(),
+        "cell_width_z_m": fluid.cell_width_z_m.to_numpy(),
+    }
+    sampling_obstacle = getattr(fluid, "sampling_obstacle", None)
+    if sampling_obstacle is not None:
+        snapshot["sampling_obstacle"] = sampling_obstacle.to_numpy()
+    return snapshot
 
 
 def _apply_marker_feedback_to_fluid(

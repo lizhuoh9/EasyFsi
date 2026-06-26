@@ -1,0 +1,440 @@
+{
+  "array_summary": {
+    "fluid_cell_count": 8064,
+    "obstacle_cell_count": 128
+  },
+  "candidate_status": "snapshot_only_no_reference_selection",
+  "case": "ansys-vertical-flap-fsi",
+  "commit_sha": "b163e0a7d7b0ee2117580bd48f41c7f1fc1108c2",
+  "config": {
+    "air_density_kgm3": 1.225,
+    "air_viscosity_pa_s": 1.8e-05,
+    "apply_marker_feedback_to_fluid": false,
+    "displacement_tolerance": 0.05,
+    "dt_s": 0.0005,
+    "duct_height_m": 0.04,
+    "duct_length_m": 0.1,
+    "enforce_plane_strain_x": true,
+    "export_final_flow_snapshot": true,
+    "flap_height_m": 0.01,
+    "flap_streamwise_max_m": 0.053,
+    "flap_streamwise_min_m": 0.05,
+    "flap_thickness_m": 0.003,
+    "flow_cg_tolerance": 1e-06,
+    "flow_divergence_cleanup_iterations": 0,
+    "flow_driver_mode": "sustained_volume_source_inlet",
+    "flow_inlet_source_profile": "linear_ramp",
+    "flow_inlet_source_ramp_steps": 2,
+    "flow_inlet_source_schedule_scope": "global",
+    "flow_inlet_source_strength": 0.8,
+    "flow_outlet_balance_policy": "report_only",
+    "flow_pressure_outlet_enabled": true,
+    "flow_pressure_solver": "fv_jacobi",
+    "flow_projection_iterations": 1080,
+    "flow_reinitialize_inlet_each_step": false,
+    "flow_reset_pressure_each_step": false,
+    "grid_nodes": [
+      4,
+      32,
+      64
+    ],
+    "inlet_velocity_mps": 10.0,
+    "marker_count": 12,
+    "mpm_support_radius_m": 0.006,
+    "poisson_ratio": 0.47,
+    "preflow_convergence_tolerance": 0.0,
+    "preflow_steps": 20,
+    "solid_cfl_target": 0.5,
+    "solid_density_kgm3": 1600.0,
+    "solid_particle_counts": [
+      1,
+      12,
+      4
+    ],
+    "solid_substeps": 1600,
+    "span_m": 0.003,
+    "step_count": 0,
+    "traction_include_viscous": false,
+    "traction_marker_face_offset_cells": 0.51,
+    "traction_marker_layout": "dual_physical_faces",
+    "traction_pressure_sampling_mode": "two_sided_pressure_jump",
+    "traction_viscosity_pa_s": 0.0,
+    "velocity_damping": 0.995,
+    "velocity_peak_tolerance": 0.05,
+    "young_modulus_pa": 1000000.0
+  },
+  "created_at_utc": "2026-06-26T08:44:39.770182Z",
+  "field_arrays": {
+    "cell_center_x_m": {
+      "dtype": "float32",
+      "shape": [
+        4
+      ]
+    },
+    "cell_center_y_m": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "cell_center_z_m": {
+      "dtype": "float32",
+      "shape": [
+        64
+      ]
+    },
+    "cell_face_x_m": {
+      "dtype": "float32",
+      "shape": [
+        5
+      ]
+    },
+    "cell_face_y_m": {
+      "dtype": "float32",
+      "shape": [
+        33
+      ]
+    },
+    "cell_face_z_m": {
+      "dtype": "float32",
+      "shape": [
+        65
+      ]
+    },
+    "cell_width_x_m": {
+      "dtype": "float32",
+      "shape": [
+        4
+      ]
+    },
+    "cell_width_y_m": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "cell_width_z_m": {
+      "dtype": "float32",
+      "shape": [
+        64
+      ]
+    },
+    "dt_s": {
+      "dtype": "float64",
+      "shape": [
+        1
+      ]
+    },
+    "grid_nodes": {
+      "dtype": "int32",
+      "shape": [
+        3
+      ]
+    },
+    "inlet_velocity_mps": {
+      "dtype": "float64",
+      "shape": [
+        1
+      ]
+    },
+    "obstacle": {
+      "dtype": "int32",
+      "shape": [
+        4,
+        32,
+        64
+      ]
+    },
+    "preflow_step": {
+      "dtype": "int32",
+      "shape": [
+        1
+      ]
+    },
+    "pressure": {
+      "dtype": "float64",
+      "shape": [
+        4,
+        32,
+        64
+      ]
+    },
+    "pressure_outlet_flux_ratio": {
+      "dtype": "float64",
+      "shape": [
+        1
+      ]
+    },
+    "sampling_obstacle": {
+      "dtype": "int32",
+      "shape": [
+        4,
+        32,
+        64
+      ]
+    },
+    "source_ramp_steps": {
+      "dtype": "int32",
+      "shape": [
+        1
+      ]
+    },
+    "source_strength": {
+      "dtype": "float64",
+      "shape": [
+        1
+      ]
+    },
+    "velocity": {
+      "dtype": "float32",
+      "shape": [
+        4,
+        32,
+        64,
+        3
+      ]
+    },
+    "velocity_outlet_flux_ratio": {
+      "dtype": "float64",
+      "shape": [
+        1
+      ]
+    }
+  },
+  "field_path": "validation_runs/ansys_vertical_flap_fsi/traction_shared_snapshot_diagnostics/step020_fields.npz",
+  "field_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
+  "flow_driver_mode": "sustained_volume_source_inlet",
+  "flow_inlet_source_profile": "linear_ramp",
+  "flow_inlet_source_ramp_steps": 2,
+  "flow_inlet_source_schedule_scope": "global",
+  "flow_inlet_source_strength": 0.8,
+  "flow_phase": "preflow",
+  "flow_projection_report": {
+    "abs_source_volume_flux_m3s": 0.0004799999587703496,
+    "cg_breakdown": "",
+    "cg_breakdown_code": 0,
+    "cg_breakdown_count": 0,
+    "cg_breakdown_dAd": 0.0,
+    "cg_converged_all": true,
+    "cg_host_residual_checks": 0,
+    "cg_initial_relative_residual_max": 0.0,
+    "cg_iterations_max": 0,
+    "cg_iterations_total": 0,
+    "cg_mean_host_reads": 0,
+    "cg_mean_projection_count": 0,
+    "cg_project_calls": 0,
+    "cg_relative_residual_max": 0.0,
+    "cg_restart_count": 0,
+    "cg_restart_count_measured": false,
+    "cg_restart_policy": "not_applicable_non_cg",
+    "cg_unreached_component_count": 0,
+    "cg_unreached_component_largest_cell_count": 0,
+    "cg_unreached_component_overflow": false,
+    "cg_unreached_component_raw_count": 0,
+    "cg_unreached_component_singleton_count": 0,
+    "cg_unreached_component_small_cell_count": 0,
+    "cg_unreached_component_small_count": 0,
+    "cg_unreached_component_small_threshold_cells": 128,
+    "cg_unreached_set_mean_projection_count": 0,
+    "hibm_pressure_component_labels_converged": true,
+    "hibm_pressure_filled_cell_count": -1,
+    "hibm_pressure_reachability_converged": true,
+    "hibm_pressure_reachability_revision": 20,
+    "hibm_pressure_reachability_valid": true,
+    "hibm_pressure_unreached_cell_count": 0,
+    "hibm_projection_overflow_singleton_cleanup_cell_count": 0,
+    "hibm_projection_overflow_singleton_cleanup_component_count": 0,
+    "hibm_projection_tiny_unreached_cleanup_cell_count": 0,
+    "hibm_projection_tiny_unreached_cleanup_component_count": 0,
+    "hibm_projection_topology_mutated": false,
+    "hibm_solid_band_enclosed_water_cells": -1,
+    "hibm_solid_band_interior_cells": -1,
+    "hibm_solid_band_last_marked_increment": 0,
+    "hibm_solid_band_mask_protected_cells": -1,
+    "hibm_solid_band_velocity_dirichlet_protected_cells": -1,
+    "hibm_unreached_component_rhs_integral_max_abs": 0.0,
+    "hibm_unreached_component_rhs_mean_max_abs": 0.0,
+    "hibm_unreached_incompatible_component_count": 0,
+    "interior_l2": 160.30529894143103,
+    "interior_max_abs": 1252.8524169921875,
+    "interior_pressure_correctable_cell_count": 3660,
+    "interior_pressure_correctable_l2": 160.30529894143112,
+    "interior_pressure_correctable_max_abs": 1252.8524169921875,
+    "interior_pressure_correctable_raw_l2": 160.30529894143115,
+    "interior_pressure_correctable_raw_max_abs": 1252.8524169921875,
+    "interior_pressure_fixed_cell_count": 0,
+    "interior_pressure_fixed_l2": 0.0,
+    "interior_pressure_fixed_max_abs": 0.0,
+    "interior_pressure_fixed_raw_l2": 0.0,
+    "interior_pressure_fixed_raw_max_abs": 0.0,
+    "interior_raw_l2": 160.30529894143112,
+    "interior_raw_max_abs": 1252.8524169921875,
+    "l2": 225.73939135386468,
+    "max_abs": 1280.0,
+    "positive_source_volume_flux_m3s": 0.0004799999587703496,
+    "post_boundary_l2": 225.73939135386462,
+    "post_boundary_max_abs": 1280.0,
+    "post_boundary_raw_l2": 821.6511752326511,
+    "post_boundary_raw_max_abs": 6400.0,
+    "post_constraint_l2": 225.73939135386468,
+    "post_constraint_max_abs": 1280.0,
+    "post_constraint_raw_l2": 821.6511752326506,
+    "post_constraint_raw_max_abs": 6400.0,
+    "pre_projection_l2": 226.0121869947494,
+    "pre_projection_max_abs": 1280.0,
+    "pre_projection_raw_l2": 821.726164620874,
+    "pre_projection_raw_max_abs": 6400.0,
+    "pressure_correctable_cell_count": 7936,
+    "pressure_correctable_l2": 159.23056862031459,
+    "pressure_correctable_max_abs": 1259.939208984375,
+    "pressure_correctable_raw_l2": 159.23056862031473,
+    "pressure_correctable_raw_max_abs": 1259.939208984375,
+    "pressure_fixed_cell_count": 128,
+    "pressure_fixed_l2": 1280.0,
+    "pressure_fixed_max_abs": 1280.0,
+    "pressure_fixed_raw_l2": 6400.0,
+    "pressure_fixed_raw_max_abs": 6400.0,
+    "pressure_interface_matrix_active": false,
+    "pressure_interface_matrix_active_cells": 0,
+    "pressure_interface_matrix_diagonal_integral": 0.0,
+    "pressure_interface_matrix_max_abs_diagonal": 0.0,
+    "pressure_interface_matrix_rhs_integral": 0.0,
+    "pressure_interface_matrix_row_active_count": 0,
+    "pressure_interface_matrix_row_count": 0,
+    "pressure_interface_matrix_row_diagonal_integral": 0.0,
+    "pressure_interface_matrix_row_diagonal_integral_abs_mismatch": 0.0,
+    "pressure_interface_matrix_row_diagonal_max_abs_density_mismatch": 0.0,
+    "pressure_interface_matrix_row_invalid_count": 0,
+    "pressure_interface_matrix_row_max_transmissibility": 0.0,
+    "pressure_interface_matrix_row_overflow_count": 0,
+    "pressure_nullspace_compatibility_measured": true,
+    "pressure_nullspace_policy": "pressure_outlet_dirichlet",
+    "pressure_nullspace_zero_mean_projection_applied": false,
+    "pressure_projection_physical_failure": false,
+    "pressure_projection_physical_failure_action": "none",
+    "pressure_projection_physical_failure_reason": "",
+    "pressure_solve_failed": false,
+    "pressure_solve_failure_action": "none",
+    "pressure_solve_failure_policy": "report",
+    "pressure_solver": "fv_jacobi",
+    "pressure_solver_force_reason": "",
+    "pressure_solver_forced_to_fv_cg": false,
+    "pressure_solver_requested": "fv_jacobi",
+    "pressure_system_anchored_by_interface_matrix": false,
+    "projection_l2": 225.73939135386462,
+    "projection_max_abs": 1280.0,
+    "projection_raw_l2": 821.6511752326511,
+    "projection_raw_max_abs": 6400.0,
+    "raw_l2": 821.6511752326506,
+    "raw_max_abs": 6400.0,
+    "source_volume_flux_m3s": 0.0004799999587703496,
+    "unreached_cells_with_interface_coupling": 0,
+    "unreached_cells_with_interface_diagonal": 0,
+    "unreached_components_with_interface_hits": 0,
+    "velocity_dirichlet_boundary_active_cells_max": 128,
+    "velocity_dirichlet_boundary_active_cells_total": 768,
+    "velocity_dirichlet_boundary_apply_calls": 6,
+    "velocity_dirichlet_boundary_max_delta_mps": 2.0062718391418457,
+    "velocity_dirichlet_boundary_mean_delta_mps": 1.325484037399292,
+    "velocity_dirichlet_boundary_momentum_delta_n_s": [
+      2.1683696421593729e-19,
+      -1.0706861937846701e-11,
+      -9.13341054342709e-07
+    ],
+    "velocity_dirichlet_far_l2": 3.07630778524982,
+    "velocity_dirichlet_far_max_abs": 10.475032806396484,
+    "velocity_dirichlet_far_raw_l2": 3.076307785249821,
+    "velocity_dirichlet_far_raw_max_abs": 10.475032806396484,
+    "velocity_dirichlet_near_l2": 1266.8452753020485,
+    "velocity_dirichlet_near_max_abs": 1280.0,
+    "velocity_dirichlet_near_raw_l2": 4611.4744877918565,
+    "velocity_dirichlet_near_raw_max_abs": 6400.0,
+    "zmin_pressure_outlet_flux_m3s": 1.0804709745571017e-05,
+    "zmin_pressure_outlet_to_abs_source_ratio": 0.022509813903422448,
+    "zmin_pressure_outlet_to_net_source_ratio": 0.022509813903422448,
+    "zmin_pressure_outlet_to_positive_source_ratio": 0.022509813903422448,
+    "zmin_pressure_outlet_to_source_ratio": 0.02250981330871582,
+    "zmin_projection_post_boundary_velocity_outlet_flux_m3s": 0.00047263901797123253,
+    "zmin_projection_post_pressure_velocity_outlet_flux_m3s": 0.00047263901797123253,
+    "zmin_projection_pre_velocity_outlet_flux_m3s": 0.0004618343082256615,
+    "zmin_reachability_revision": 20,
+    "zmin_reachability_valid": true,
+    "zmin_reachable_source_cell_count": 128,
+    "zmin_reachable_source_volume_flux_m3s": 0.0004799999587703496,
+    "zmin_unreached_source_abs_flux_m3s": 0.0,
+    "zmin_unreached_source_cell_count": 0,
+    "zmin_unreached_source_centroid_x_m": "NaN",
+    "zmin_unreached_source_centroid_y_m": "NaN",
+    "zmin_unreached_source_centroid_z_m": "NaN",
+    "zmin_unreached_source_max_x_m": "NaN",
+    "zmin_unreached_source_max_y_m": "NaN",
+    "zmin_unreached_source_max_z_m": "NaN",
+    "zmin_unreached_source_min_x_m": "NaN",
+    "zmin_unreached_source_min_y_m": "NaN",
+    "zmin_unreached_source_min_z_m": "NaN",
+    "zmin_unreached_source_volume_flux_m3s": 0.0,
+    "zmin_velocity_outlet_flux_m3s": 0.00047263901797123253,
+    "zmin_velocity_outlet_to_abs_source_ratio": 0.9846647053512794,
+    "zmin_velocity_outlet_to_net_source_ratio": 0.9846647053512794,
+    "zmin_velocity_outlet_to_positive_source_ratio": 0.9846647053512794,
+    "zmin_velocity_outlet_to_source_ratio": 0.9846646785736084
+  },
+  "flow_step_index_global": 19,
+  "grid_nodes": [
+    4,
+    32,
+    64
+  ],
+  "marker_geometry": {
+    "flap_box_m": {
+      "max": [
+        0.003,
+        0.01,
+        0.053
+      ],
+      "min": [
+        0.0,
+        0.0,
+        0.05
+      ]
+    },
+    "grid_nodes": [
+      4,
+      32,
+      64
+    ],
+    "marker_count": 24,
+    "marker_count_per_face": 12,
+    "marker_face_count": 2,
+    "marker_face_offset_cells": 0.51,
+    "marker_layout": "dual_physical_faces",
+    "pressure_sampling_mode": "two_sided_pressure_jump",
+    "solid_particle_counts": [
+      1,
+      12,
+      4
+    ],
+    "traction_include_viscous": false,
+    "traction_viscosity_pa_s": 0.0
+  },
+  "marker_geometry_sha256": "5bc7e5ac47c8113396935c110c529551daa3ca70aab3b16b89f2e61a6d028837",
+  "non_goal_statement": "This snapshot archives one local EasyFsi fixed-solid flow state only; it does not choose a traction formulation, run one-sided traction, run coupled 50-step FSI, or claim Fluent parity.",
+  "preflow_steps": 20,
+  "preflow_steps_completed": 20,
+  "pressure_max_pa": 25.999032120465625,
+  "pressure_min_pa": -4.472715807665312,
+  "pressure_outlet_flux_ratio": 0.022509813903422448,
+  "purpose": "fixed-solid shared flow snapshot for later traction resampling",
+  "reference_formulation_candidate": "none",
+  "runner": "validation_runs/ansys_vertical_flap_fsi/scripts/run_traction_shared_snapshot.py",
+  "scope_limit": "fixed-solid shared flow snapshot only; no coupled 50-step or Fluent parity claim",
+  "source_commit": "b163e0a7d7b0ee2117580bd48f41c7f1fc1108c2",
+  "source_profile": "linear_ramp",
+  "source_ramp_steps": 2,
+  "source_schedule_scope": "global",
+  "source_strength": 0.8,
+  "step_count": 0,
+  "velocity_outlet_flux_ratio": 0.9846647053512794,
+  "velocity_p999_mps": 25.1116388870788,
+  "velocity_peak_mps": 31.640314138895192
+}

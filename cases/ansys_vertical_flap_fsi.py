@@ -153,6 +153,7 @@ class VerticalFlapFsiConfig:
     traction_include_viscous: bool = False
     traction_marker_face_offset_cells: float = 0.51
     traction_viscosity_pa_s: float = 0.0
+    export_final_flow_snapshot: bool = False
     enforce_plane_strain_x: bool = True
     mpm_support_radius_m: float = 0.006
     displacement_tolerance: float = 0.05
