@@ -182,6 +182,30 @@ advance the MPM solid, apply marker feedback, run coupled FSI, or claim Fluent
 parity. It is only evidence about the source/outlet flow before coupled
 release.
 
+The fixed-solid histories also record explicit phase-local, global, and source
+schedule indices. The source ramp schedule must be contiguous during preflow:
+a ramp5 source records schedule indices `0..4` with factors
+`0.15, 0.30, 0.45, 0.60, 0.75`; it must not skip to `0, 2, 4, ...`.
+
+For the coupled preflow-release STEP20 diagnostic, run:
+
+```powershell
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py
+```
+
+This writes coupled preflow-release artifacts under:
+
+```text
+validation_runs\ansys_vertical_flap_fsi\preflow_release_coupling_diagnostics\
+```
+
+The preflow-release matrix runs the required 0/10/20/30 fixed-solid preflow
+cases and then releases the MPM solid for 20 coupled FSI steps. It records
+whether the source schedule continues globally after preflow or restarts in the
+phase-local diagnostic case. It is a coupled STEP20 diagnostic only: no 50-step
+run, no L2/L3 matrix, no solid/damping/support/gate tuning, no full-field
+reinitialize promotion, and no Fluent parity claim.
+
 ## Known Non-Gating Historical Failures
 
 - ANSYS vertical-flap displacement tolerance smoke.

@@ -18,6 +18,13 @@ from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     VerticalFlapFsiConfig,
     run_vertical_flap_fsi_smoke,
 )
+from tools.validation.ansys_vertical_flap_temporal_gates import (  # noqa: E402
+    STEP20_COUPLED_PROFILE,
+    classify_combined_temporal,
+    classify_coupling_settling,
+    classify_flow_temporal,
+    promotion_status,
+)
 
 
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
@@ -143,8 +150,10 @@ HISTORY_COLUMNS = [
     "step",
     "source_factor",
     "source_normal_velocity_mps",
+    "flow_phase",
     "flow_step_index_local",
     "flow_step_index_global",
+    "flow_source_schedule_step_index",
     "flow_source_schedule_scope",
     "flow_source_ramp_restarted_after_preflow",
     "velocity_peak_mps",
@@ -534,8 +543,13 @@ def _history_rows(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "flow_inlet_source_normal_velocity_mps",
                     "",
                 ),
+                "flow_phase": raw.get("flow_phase", ""),
                 "flow_step_index_local": raw.get("flow_step_index_local", ""),
                 "flow_step_index_global": raw.get("flow_step_index_global", ""),
+                "flow_source_schedule_step_index": raw.get(
+                    "flow_source_schedule_step_index",
+                    "",
+                ),
                 "flow_source_schedule_scope": raw.get(
                     "flow_source_schedule_scope",
                     "",
@@ -597,6 +611,11 @@ def _temporal_report(
     row: dict[str, Any],
     history: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    return classify_combined_temporal(
+        row,
+        history,
+        profile=STEP20_COUPLED_PROFILE,
+    )
     ramp_steps = int(row.get("source_ramp_steps") or 0)
     warmup_steps = max(ramp_steps + 2, 5)
     evaluation_start_step = warmup_steps + 1
@@ -683,6 +702,11 @@ def _flow_temporal_report(
     row: dict[str, Any],
     history: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    return classify_flow_temporal(
+        row,
+        history,
+        profile=STEP20_COUPLED_PROFILE,
+    )
     ramp_steps = int(row.get("source_ramp_steps") or 0)
     warmup_steps = max(ramp_steps + 2, 5)
     evaluation_start_step = warmup_steps + 1
@@ -760,6 +784,11 @@ def _coupling_settling_report(
     row: dict[str, Any],
     history: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    return classify_coupling_settling(
+        row,
+        history,
+        profile=STEP20_COUPLED_PROFILE,
+    )
     ramp_steps = int(row.get("source_ramp_steps") or 0)
     warmup_steps = max(ramp_steps + 2, 5)
     evaluation_start_step = warmup_steps + 1
@@ -808,6 +837,7 @@ def _coupling_settling_report(
 
 
 def _row_promotion_status(row: dict[str, Any]) -> str:
+    return promotion_status(row)
     if row.get("run_status") != "completed":
         return PROMOTION_NOT_APPLICABLE
     if bool(row.get("flow_driver_uses_full_velocity_reset")):

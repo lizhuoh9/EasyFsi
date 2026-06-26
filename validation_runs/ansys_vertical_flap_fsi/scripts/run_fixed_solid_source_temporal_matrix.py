@@ -18,6 +18,10 @@ from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     VerticalFlapFsiConfig,
     run_vertical_flap_fsi_smoke,
 )
+from tools.validation.ansys_vertical_flap_temporal_gates import (  # noqa: E402
+    STEP30_FIXED_SOLID_PROFILE,
+    classify_flow_temporal,
+)
 
 
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
@@ -27,10 +31,13 @@ MATRIX_CSV = OUTPUT_DIR / "fixed_solid_source_temporal_matrix.csv"
 SUMMARY_PATH = OUTPUT_DIR / "fixed_solid_source_temporal_summary.md"
 HISTORY_JSON = OUTPUT_DIR / "fixed_solid_source_temporal_history.json"
 HISTORIES_DIR = OUTPUT_DIR / "histories"
+WORKER_LOGS_DIR = OUTPUT_DIR / "worker_logs"
+FAILURES_DIR = OUTPUT_DIR / "failures"
 VERIFICATION_PATH = OUTPUT_DIR / "verification_fixed_solid_source_temporal_2026-06-25.md"
 
 PREFLOW_STEPS = 30
 LAST_WINDOW_STEPS = 10
+WORKER_TIMEOUT_S = 900
 
 FLOW_STRICT = "flow_temporal_strict"
 FLOW_FAILED = "flow_temporal_failed"
@@ -75,6 +82,12 @@ CSV_COLUMNS = [
     "flow_last_window_failed_step_count",
     "flow_last_window_min_p999_mps",
     "flow_last_window_mean_outlet_ratio",
+    "worker_mode",
+    "worker_returncode",
+    "worker_timed_out",
+    "worker_elapsed_s",
+    "worker_stdout_log",
+    "worker_stderr_log",
     "elapsed_s",
     "error",
 ]
@@ -84,8 +97,10 @@ HISTORY_COLUMNS = [
     "step",
     "source_factor",
     "source_normal_velocity_mps",
+    "flow_phase",
     "flow_step_index_local",
     "flow_step_index_global",
+    "flow_source_schedule_step_index",
     "flow_source_schedule_scope",
     "flow_source_ramp_restarted_after_preflow",
     "flow_driver_uses_full_velocity_reset",
@@ -115,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     HISTORIES_DIR.mkdir(parents=True, exist_ok=True)
+    WORKER_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    FAILURES_DIR.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     histories: dict[str, list[dict[str, Any]]] = {}
     for scenario, _config in _matrix_specs():
@@ -241,29 +258,124 @@ def _run_scenario_subprocess(scenario: str) -> tuple[dict[str, Any], list[dict[s
         str(output_path),
     ]
     started = time.perf_counter()
-    result = subprocess.run(
-        command,
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=WORKER_TIMEOUT_S,
+        )
+        elapsed_s = time.perf_counter() - started
+        stdout_log = _write_worker_log(
+            scenario,
+            "stdout",
+            result.stdout,
+            failed=result.returncode != 0,
+        )
+        stderr_log = _write_worker_log(
+            scenario,
+            "stderr",
+            result.stderr,
+            failed=result.returncode != 0,
+        )
+    except subprocess.TimeoutExpired as exc:
+        elapsed_s = time.perf_counter() - started
+        stdout_log = _write_worker_log(
+            scenario,
+            "stdout",
+            _timeout_stream_text(exc.stdout),
+            failed=True,
+        )
+        stderr_log = _write_worker_log(
+            scenario,
+            "stderr",
+            _timeout_stream_text(exc.stderr),
+            failed=True,
+        )
+        _, config = _scenario_spec(scenario)
+        row = _failed_worker_row(
+            scenario=scenario,
+            config=config,
+            elapsed_s=elapsed_s,
+            error=f"worker timed out after {WORKER_TIMEOUT_S} s",
+            worker_returncode="timeout",
+            worker_timed_out=True,
+            worker_stdout_log=stdout_log,
+            worker_stderr_log=stderr_log,
+        )
+        return row, []
     if result.returncode == 0 and output_path.exists():
         payload = json.loads(output_path.read_text(encoding="utf-8"))
         output_path.unlink()
-        return dict(payload["row"]), [dict(row) for row in payload["history"]]
+        row = dict(payload["row"])
+        row.update(
+            _worker_fields(
+                returncode=result.returncode,
+                timed_out=False,
+                elapsed_s=elapsed_s,
+                stdout_log=stdout_log,
+                stderr_log=stderr_log,
+            )
+        )
+        return row, [dict(row) for row in payload["history"]]
     _, config = _scenario_spec(scenario)
     row = _failed_worker_row(
         scenario=scenario,
         config=config,
-        elapsed_s=time.perf_counter() - started,
+        elapsed_s=elapsed_s,
         error=(
             f"worker exit code {result.returncode}\n"
             f"stdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}"
         ),
+        worker_returncode=result.returncode,
+        worker_timed_out=False,
+        worker_stdout_log=stdout_log,
+        worker_stderr_log=stderr_log,
     )
     return row, []
+
+
+def _write_worker_log(
+    scenario: str,
+    stream_name: str,
+    text: str,
+    *,
+    failed: bool,
+) -> str:
+    directory = FAILURES_DIR if failed else WORKER_LOGS_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{scenario}_{stream_name}.log"
+    path.write_text(text or "", encoding="utf-8")
+    return path.as_posix()
+
+
+def _timeout_stream_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _worker_fields(
+    *,
+    returncode: int | str,
+    timed_out: bool,
+    elapsed_s: float,
+    stdout_log: str,
+    stderr_log: str,
+) -> dict[str, Any]:
+    return {
+        "worker_mode": "isolated_subprocess",
+        "worker_returncode": returncode,
+        "worker_timed_out": bool(timed_out),
+        "worker_elapsed_s": elapsed_s,
+        "worker_stdout_log": stdout_log,
+        "worker_stderr_log": stderr_log,
+    }
 
 
 def _source_config(strength: float, **overrides: Any) -> VerticalFlapFsiConfig:
@@ -343,8 +455,12 @@ def _failed_worker_row(
     config: VerticalFlapFsiConfig,
     elapsed_s: float,
     error: str,
+    worker_returncode: int | str = "",
+    worker_timed_out: bool = False,
+    worker_stdout_log: str = "",
+    worker_stderr_log: str = "",
 ) -> dict[str, Any]:
-    return {
+    row = {
         "scenario": scenario,
         "run_status": "failed",
         "step_count": int(config.step_count),
@@ -376,6 +492,16 @@ def _failed_worker_row(
         "elapsed_s": elapsed_s,
         "error": error,
     }
+    row.update(
+        _worker_fields(
+            returncode=worker_returncode,
+            timed_out=worker_timed_out,
+            elapsed_s=elapsed_s,
+            stdout_log=worker_stdout_log,
+            stderr_log=worker_stderr_log,
+        )
+    )
+    return row
 
 
 def _history_rows(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -390,8 +516,13 @@ def _history_rows(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "flow_inlet_source_normal_velocity_mps",
                     "",
                 ),
+                "flow_phase": raw.get("flow_phase", ""),
                 "flow_step_index_local": raw.get("flow_step_index_local", ""),
                 "flow_step_index_global": raw.get("flow_step_index_global", ""),
+                "flow_source_schedule_step_index": raw.get(
+                    "flow_source_schedule_step_index",
+                    "",
+                ),
                 "flow_source_schedule_scope": raw.get(
                     "flow_source_schedule_scope",
                     "",
@@ -436,6 +567,11 @@ def _fixed_solid_flow_report(
     row: dict[str, Any],
     history: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    return classify_flow_temporal(
+        row,
+        history,
+        profile=STEP30_FIXED_SOLID_PROFILE,
+    )
     base: dict[str, Any] = {
         "flow_temporal_status": FLOW_NOT_APPLICABLE,
         "flow_temporal_fail_reasons": [],
@@ -607,7 +743,14 @@ def _verification_markdown(payload: dict[str, Any]) -> str:
         "histories, while the same next scenario completed when run by itself; "
         "the worker isolation keeps the generated data tied to real EasyFsi "
         "solver runs without depending on Taichi/CUDA multi-run lifecycle "
-        "behavior.\n\n"
+        f"behavior. Each worker has timeout_s = {WORKER_TIMEOUT_S} and records "
+        "return code, timeout status, elapsed time, stdout log, and stderr log "
+        "in the matrix row.\n\n"
+        "## Schedule Note\n\n"
+        "The fixed-solid histories record phase-local, global, and source "
+        "schedule indices. The ramp5 scenario now advances schedule indices "
+        "0, 1, 2, 3, 4 with source factors 0.15, 0.30, 0.45, 0.60, 0.75; "
+        "it does not skip to 0, 2, 4 during preflow.\n\n"
         "## Scope Limits\n\n"
         "- No coupled FSI step was run.\n"
         "- These artifacts are not coupled FSI validation.\n"

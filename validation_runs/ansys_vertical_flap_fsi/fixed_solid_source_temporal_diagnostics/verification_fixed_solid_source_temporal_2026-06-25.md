@@ -14,11 +14,11 @@ fixed_solid_flow_candidate_count = 4
 
 ## Runtime Note
 
-The matrix runner executes each scenario in a separate Python worker process. A
-single-process trial exited after writing two scenario histories, while the same
-next scenario completed when run by itself; the worker isolation keeps the
-generated data tied to real EasyFsi solver runs without depending on
-Taichi/CUDA multi-run lifecycle behavior.
+The matrix runner executes each scenario in a separate Python worker process. A single-process trial exited after writing two scenario histories, while the same next scenario completed when run by itself; the worker isolation keeps the generated data tied to real EasyFsi solver runs without depending on Taichi/CUDA multi-run lifecycle behavior. Each worker has timeout_s = 900 and records return code, timeout status, elapsed time, stdout log, and stderr log in the matrix row.
+
+## Schedule Note
+
+The fixed-solid histories record phase-local, global, and source schedule indices. The ramp5 scenario now advances schedule indices 0, 1, 2, 3, 4 with source factors 0.15, 0.30, 0.45, 0.60, 0.75; it does not skip to 0, 2, 4 during preflow.
 
 ## Scope Limits
 

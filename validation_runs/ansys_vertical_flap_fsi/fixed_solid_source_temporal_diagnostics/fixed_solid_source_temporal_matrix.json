@@ -16,7 +16,7 @@
   ],
   "rows": [
     {
-      "elapsed_s": 101.74657059999299,
+      "elapsed_s": 102.63538970000809,
       "error": "",
       "feedback_applied": false,
       "final_velocity_p999_mps": 25.53406524658203,
@@ -45,10 +45,16 @@
       "source_strength": 0.75,
       "step_count": 0,
       "stress_invalid_marker_count": 0,
-      "velocity_outlet_flux_ratio": 1.1040489430559155
+      "velocity_outlet_flux_ratio": 1.1040489430559155,
+      "worker_elapsed_s": 105.60471479999251,
+      "worker_mode": "isolated_subprocess",
+      "worker_returncode": 0,
+      "worker_stderr_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/fixed_source_0p75_constant_step30_stderr.log",
+      "worker_stdout_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/fixed_source_0p75_constant_step30_stdout.log",
+      "worker_timed_out": false
     },
     {
-      "elapsed_s": 43.56627809998463,
+      "elapsed_s": 43.53557869998622,
       "error": "",
       "feedback_applied": false,
       "final_velocity_p999_mps": 26.374658584594727,
@@ -77,10 +83,16 @@
       "source_strength": 0.8,
       "step_count": 0,
       "stress_invalid_marker_count": 0,
-      "velocity_outlet_flux_ratio": 1.0567433186846062
+      "velocity_outlet_flux_ratio": 1.0567433186846062,
+      "worker_elapsed_s": 45.25699359999271,
+      "worker_mode": "isolated_subprocess",
+      "worker_returncode": 0,
+      "worker_stderr_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/fixed_source_0p80_constant_step30_stderr.log",
+      "worker_stdout_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/fixed_source_0p80_constant_step30_stdout.log",
+      "worker_timed_out": false
     },
     {
-      "elapsed_s": 100.99066270000185,
+      "elapsed_s": 54.01502379999147,
       "error": "",
       "feedback_applied": false,
       "final_velocity_p999_mps": 25.836065172195436,
@@ -109,10 +121,16 @@
       "source_strength": 0.75,
       "step_count": 0,
       "stress_invalid_marker_count": 0,
-      "velocity_outlet_flux_ratio": 1.1204279270699624
+      "velocity_outlet_flux_ratio": 1.1204279270699624,
+      "worker_elapsed_s": 56.199811400001636,
+      "worker_mode": "isolated_subprocess",
+      "worker_returncode": 0,
+      "worker_stderr_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/fixed_source_0p75_ramp2_step30_stderr.log",
+      "worker_stdout_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/fixed_source_0p75_ramp2_step30_stdout.log",
+      "worker_timed_out": false
     },
     {
-      "elapsed_s": 42.556726999988314,
+      "elapsed_s": 44.248019600025145,
       "error": "",
       "feedback_applied": false,
       "final_velocity_p999_mps": 26.71710956001282,
@@ -141,31 +159,38 @@
       "source_strength": 0.8,
       "step_count": 0,
       "stress_invalid_marker_count": 0,
-      "velocity_outlet_flux_ratio": 1.0742104690973986
+      "velocity_outlet_flux_ratio": 1.0742104690973986,
+      "worker_elapsed_s": 46.086443300009705,
+      "worker_mode": "isolated_subprocess",
+      "worker_returncode": 0,
+      "worker_stderr_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/fixed_source_0p80_ramp2_step30_stderr.log",
+      "worker_stdout_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/fixed_source_0p80_ramp2_step30_stdout.log",
+      "worker_timed_out": false
     },
     {
-      "elapsed_s": 63.475043300015386,
+      "elapsed_s": 41.749060500005726,
       "error": "",
       "feedback_applied": false,
-      "final_velocity_p999_mps": 26.59758186340332,
-      "final_velocity_peak_mps": 33.514102935791016,
+      "final_velocity_p999_mps": 28.01066017150879,
+      "final_velocity_peak_mps": 35.29524230957031,
       "flow_driver_mode": "sustained_volume_source_inlet",
       "flow_driver_uses_full_velocity_reset": false,
-      "flow_last_window_failed_step_count": 0,
-      "flow_last_window_mean_outlet_ratio": 1.1474005145685,
-      "flow_last_window_min_p999_mps": 24.581125259399414,
+      "flow_last_window_failed_step_count": 8,
+      "flow_last_window_mean_outlet_ratio": 1.2531808310331072,
+      "flow_last_window_min_p999_mps": 25.985532760620117,
       "flow_outlet_balance_policy": "report_only",
-      "flow_post_warmup_failed_step_count": 7,
+      "flow_post_warmup_failed_step_count": 15,
       "flow_pressure_outlet_enabled": true,
       "flow_temporal_fail_reasons": [
+        "p999_below_20",
         "velocity_outlet_ratio_outside_0.75_1.25",
-        "p999_below_20"
+        "velocity_outlet_ratio_outside_0.80_1.20"
       ],
       "flow_temporal_status": "flow_temporal_failed",
-      "max_velocity_p999_mps": 26.972150802612305,
-      "max_velocity_peak_mps": 33.98621368408203,
+      "max_velocity_p999_mps": 28.990978240966797,
+      "max_velocity_peak_mps": 36.53073501586914,
       "preflow_steps": 30,
-      "pressure_outlet_flux_ratio": -0.014453863231570635,
+      "pressure_outlet_flux_ratio": -0.03168655934427667,
       "run_status": "completed",
       "scenario": "fixed_source_0p75_ramp5_step30",
       "solid_advanced": false,
@@ -176,10 +201,16 @@
       "source_strength": 0.75,
       "step_count": 0,
       "stress_invalid_marker_count": 0,
-      "velocity_outlet_flux_ratio": 1.1634318631354634
+      "velocity_outlet_flux_ratio": 1.2456924565546237,
+      "worker_elapsed_s": 43.46342600000207,
+      "worker_mode": "isolated_subprocess",
+      "worker_returncode": 0,
+      "worker_stderr_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/fixed_source_0p75_ramp5_step30_stderr.log",
+      "worker_stdout_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/fixed_source_0p75_ramp5_step30_stdout.log",
+      "worker_timed_out": false
     },
     {
-      "elapsed_s": 49.302805000013905,
+      "elapsed_s": 41.037985800008755,
       "error": "",
       "feedback_applied": false,
       "final_velocity_p999_mps": 10.518691002845765,
@@ -212,10 +243,16 @@
       "source_strength": 1.0,
       "step_count": 0,
       "stress_invalid_marker_count": 0,
-      "velocity_outlet_flux_ratio": 0.0
+      "velocity_outlet_flux_ratio": 0.0,
+      "worker_elapsed_s": 42.74297120000119,
+      "worker_mode": "isolated_subprocess",
+      "worker_returncode": 0,
+      "worker_stderr_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/projection_only_step30_baseline_stderr.log",
+      "worker_stdout_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/projection_only_step30_baseline_stdout.log",
+      "worker_timed_out": false
     },
     {
-      "elapsed_s": 38.38793179998174,
+      "elapsed_s": 38.34134370001266,
       "error": "",
       "feedback_applied": false,
       "final_velocity_p999_mps": 22.381813049316406,
@@ -246,7 +283,13 @@
       "source_strength": 1.0,
       "step_count": 0,
       "stress_invalid_marker_count": 0,
-      "velocity_outlet_flux_ratio": 0.0
+      "velocity_outlet_flux_ratio": 0.0,
+      "worker_elapsed_s": 40.03516229998786,
+      "worker_mode": "isolated_subprocess",
+      "worker_returncode": 0,
+      "worker_stderr_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/diagnostic_reinitialize_step30_upper_bound_stderr.log",
+      "worker_stdout_log": "validation_runs/ansys_vertical_flap_fsi/fixed_solid_source_temporal_diagnostics/worker_logs/diagnostic_reinitialize_step30_upper_bound_stdout.log",
+      "worker_timed_out": false
     }
   ],
   "scope_limit": "fixed-solid preflow-only diagnostic; not coupled FSI validation",

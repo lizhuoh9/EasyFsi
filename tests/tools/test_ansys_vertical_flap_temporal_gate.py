@@ -6,6 +6,8 @@ import json
 import unittest
 from pathlib import Path
 
+from tools.validation import ansys_vertical_flap_temporal_gates as gates
+
 
 MODULE_PATH = (
     Path("validation_runs")
@@ -32,7 +34,10 @@ class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
         row = _row()
         history = _history()
 
-        matrix._apply_temporal_classification([row], {"case": history})
+        row.update(gates.classify_flow_temporal(row, history))
+        row.update(gates.classify_coupling_settling(row, history))
+        row.update(gates.classify_combined_temporal(row, history))
+        row["promotion_candidate_status"] = gates.promotion_status(row)
 
         self.assertEqual(row["flow_temporal_status"], "flow_temporal_strict")
         self.assertEqual(row["flow_post_warmup_failed_step_count"], 0)
@@ -44,7 +49,7 @@ class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
         history = _history(step_count=12, p999_overrides={6: 19.0, 7: 19.5})
         row = _row()
 
-        report = matrix._flow_temporal_report(row, history)
+        report = gates.classify_flow_temporal(row, history)
 
         self.assertEqual(report["flow_temporal_status"], "flow_temporal_soft")
         self.assertEqual(report["flow_post_warmup_failed_step_count"], 2)
@@ -56,7 +61,7 @@ class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
             p999_overrides={6: 19.0, 7: 19.5, 8: 19.8},
         )
 
-        report = matrix._flow_temporal_report(_row(), history)
+        report = gates.classify_flow_temporal(_row(), history)
 
         self.assertEqual(report["flow_temporal_status"], "flow_temporal_failed")
         self.assertEqual(report["flow_post_warmup_failed_step_count"], 3)
@@ -64,16 +69,29 @@ class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
     def test_flow_temporal_failed_when_last_window_fails(self):
         history = _history(step_count=12, p999_overrides={12: 19.0})
 
-        report = matrix._flow_temporal_report(_row(), history)
+        report = gates.classify_flow_temporal(_row(), history)
 
         self.assertEqual(report["flow_temporal_status"], "flow_temporal_failed")
         self.assertEqual(report["flow_post_warmup_failed_step_count"], 1)
         self.assertEqual(report["flow_last_window_failed_step_count"], 1)
 
+    def test_flow_temporal_failed_when_only_stricter_last_window_fails(self):
+        history = _history(step_count=12, outlet_overrides={12: 1.22})
+
+        report = gates.classify_flow_temporal(_row(), history)
+
+        self.assertEqual(report["flow_temporal_status"], "flow_temporal_failed")
+        self.assertEqual(report["flow_post_warmup_failed_step_count"], 0)
+        self.assertEqual(report["flow_last_window_failed_step_count"], 1)
+        self.assertIn(
+            "velocity_outlet_ratio_outside_0.80_1.20",
+            report["flow_temporal_fail_reasons"],
+        )
+
     def test_missing_history_is_not_applicable(self):
-        flow_report = matrix._flow_temporal_report(_row(), [])
-        coupling_report = matrix._coupling_settling_report(_row(), [])
-        combined_report = matrix._temporal_report(_row(), [])
+        flow_report = gates.classify_flow_temporal(_row(), [])
+        coupling_report = gates.classify_coupling_settling(_row(), [])
+        combined_report = gates.classify_combined_temporal(_row(), [])
 
         self.assertEqual(
             flow_report["flow_temporal_status"],
@@ -96,7 +114,7 @@ class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
         row = _row(source_ramp_steps=5)
         history = _history(step_count=12, p999_overrides={6: 18.0, 7: 19.0})
 
-        report = matrix._flow_temporal_report(row, history)
+        report = gates.classify_flow_temporal(row, history)
 
         self.assertEqual(report["flow_temporal_status"], "flow_temporal_strict")
         self.assertEqual(report["flow_post_warmup_failed_step_count"], 0)
@@ -105,7 +123,10 @@ class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
         row = _row()
         history = _history(force_overrides={10: 0.1}, tip_overrides={10: 0.1})
 
-        matrix._apply_temporal_classification([row], {"case": history})
+        row.update(gates.classify_flow_temporal(row, history))
+        row.update(gates.classify_coupling_settling(row, history))
+        row.update(gates.classify_combined_temporal(row, history))
+        row["promotion_candidate_status"] = gates.promotion_status(row)
 
         self.assertEqual(row["flow_temporal_status"], "flow_temporal_strict")
         self.assertEqual(row["coupling_settling_status"], "coupling_unsettled")
@@ -185,10 +206,12 @@ def _history(
     *,
     step_count: int = 10,
     p999_overrides: dict[int, float] | None = None,
+    outlet_overrides: dict[int, float] | None = None,
     force_overrides: dict[int, float] | None = None,
     tip_overrides: dict[int, float] | None = None,
 ) -> list[dict]:
     p999_overrides = p999_overrides or {}
+    outlet_overrides = outlet_overrides or {}
     force_overrides = force_overrides or {}
     tip_overrides = tip_overrides or {}
     rows: list[dict] = []
@@ -198,7 +221,7 @@ def _history(
                 "step": step,
                 "velocity_peak_mps": 30.0,
                 "velocity_p999_mps": p999_overrides.get(step, 24.0),
-                "velocity_outlet_flux_ratio": 1.0,
+                "velocity_outlet_flux_ratio": outlet_overrides.get(step, 1.0),
                 "marker_force_z_N": force_overrides.get(step, -0.1),
                 "tip_dz_m": tip_overrides.get(step, -0.001),
                 "stress_invalid_marker_count": 0,

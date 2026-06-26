@@ -47,6 +47,12 @@ class AnsysVerticalFlapFixedSolidSourceTemporalArtifactTests(unittest.TestCase):
             self.assertIn("flow_temporal_fail_reasons", row)
             self.assertIn("flow_last_window_min_p999_mps", row)
             self.assertIn("flow_last_window_mean_outlet_ratio", row)
+            self.assertEqual(row["worker_mode"], "isolated_subprocess")
+            self.assertEqual(int(row["worker_returncode"]), 0)
+            self.assertFalse(bool(row["worker_timed_out"]))
+            self.assertGreater(float(row["worker_elapsed_s"]), 0.0)
+            self.assertTrue(Path(row["worker_stdout_log"]).exists())
+            self.assertTrue(Path(row["worker_stderr_log"]).exists())
 
         diagnostic = _row(rows, "diagnostic_reinitialize_step30_upper_bound")
         self.assertTrue(bool(diagnostic["flow_driver_uses_full_velocity_reset"]))
@@ -71,7 +77,28 @@ class AnsysVerticalFlapFixedSolidSourceTemporalArtifactTests(unittest.TestCase):
             history_rows = _read_csv(history_path)
             self.assertEqual(len(history_rows), 30)
             self.assertIn("flow_step_index_global", history_rows[0])
+            self.assertIn("flow_source_schedule_step_index", history_rows[0])
             self.assertIn("flow_source_schedule_scope", history_rows[0])
+            self.assertEqual(
+                [int(row["flow_step_index_local"]) for row in history_rows],
+                list(range(30)),
+            )
+            self.assertEqual(
+                [int(row["flow_step_index_global"]) for row in history_rows],
+                list(range(30)),
+            )
+            self.assertEqual(
+                [int(row["flow_source_schedule_step_index"]) for row in history_rows],
+                list(range(30)),
+            )
+
+        ramp5_rows = _read_csv(
+            HISTORIES_DIR / "fixed_source_0p75_ramp5_step30_history.csv"
+        )
+        self.assertEqual(
+            [round(float(row["source_factor"]), 2) for row in ramp5_rows[:5]],
+            [0.15, 0.30, 0.45, 0.60, 0.75],
+        )
 
         summary = SUMMARY_MD.read_text(encoding="utf-8")
         verification = VERIFICATION_MD.read_text(encoding="utf-8")
@@ -79,6 +106,7 @@ class AnsysVerticalFlapFixedSolidSourceTemporalArtifactTests(unittest.TestCase):
         self.assertIn("No coupled FSI step was run", verification)
         self.assertIn("No Fluent parity claim is made", verification)
         self.assertIn("not coupled FSI validation", verification)
+        self.assertIn("does not skip to 0, 2, 4 during preflow", verification)
 
 
 def _row(rows: list[dict], scenario: str) -> dict:

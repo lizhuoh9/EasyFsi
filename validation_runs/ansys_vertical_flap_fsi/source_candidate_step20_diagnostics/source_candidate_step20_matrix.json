@@ -59,7 +59,8 @@
       "flow_reset_pressure_each_step": false,
       "flow_temporal_fail_reasons": [
         "p999_below_20",
-        "velocity_outlet_ratio_outside_0p75_1p25"
+        "velocity_outlet_ratio_outside_0.75_1.25",
+        "velocity_outlet_ratio_outside_0.80_1.20"
       ],
       "flow_temporal_status": "flow_temporal_failed",
       "marker_force_z_N": -0.0003492466824987069,
@@ -85,9 +86,10 @@
       "temporal_evaluation_start_step": 6,
       "temporal_fail_reasons": [
         "p999_below_20",
-        "velocity_outlet_ratio_outside_0p75_1p25",
+        "velocity_outlet_ratio_outside_0.75_1.25",
         "marker_force_z_nonnegative",
-        "tip_dz_nonnegative"
+        "tip_dz_nonnegative",
+        "velocity_outlet_ratio_outside_0.80_1.20"
       ],
       "temporal_last_window_failed_step_count": 5,
       "temporal_last_window_force_sign_ok": true,
@@ -200,7 +202,8 @@
       "flow_reinitialize_inlet_each_step": false,
       "flow_reset_pressure_each_step": false,
       "flow_temporal_fail_reasons": [
-        "p999_below_20"
+        "p999_below_20",
+        "velocity_outlet_ratio_outside_0.80_1.20"
       ],
       "flow_temporal_status": "flow_temporal_failed",
       "marker_force_z_N": -6.954605826858572e-05,
@@ -227,7 +230,8 @@
       "temporal_fail_reasons": [
         "marker_force_z_nonnegative",
         "tip_dz_nonnegative",
-        "p999_below_20"
+        "p999_below_20",
+        "velocity_outlet_ratio_outside_0.80_1.20"
       ],
       "temporal_last_window_failed_step_count": 5,
       "temporal_last_window_force_sign_ok": true,
@@ -612,7 +616,8 @@
       "flow_reset_pressure_each_step": false,
       "flow_temporal_fail_reasons": [
         "p999_below_20",
-        "velocity_outlet_ratio_outside_0p75_1p25"
+        "velocity_outlet_ratio_outside_0.75_1.25",
+        "velocity_outlet_ratio_outside_0.80_1.20"
       ],
       "flow_temporal_status": "flow_temporal_failed",
       "marker_force_z_N": -0.000198867892722342,
@@ -638,9 +643,10 @@
       "temporal_evaluation_start_step": 8,
       "temporal_fail_reasons": [
         "p999_below_20",
-        "velocity_outlet_ratio_outside_0p75_1p25",
+        "velocity_outlet_ratio_outside_0.75_1.25",
         "marker_force_z_nonnegative",
-        "tip_dz_nonnegative"
+        "tip_dz_nonnegative",
+        "velocity_outlet_ratio_outside_0.80_1.20"
       ],
       "temporal_last_window_failed_step_count": 1,
       "temporal_last_window_force_sign_ok": true,

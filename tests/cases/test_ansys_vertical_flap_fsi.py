@@ -339,8 +339,8 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         preflow_history = [{} for _ in range(5)]
         global_step = solid_mpm_fsi_runner._flow_source_schedule_step_index(
             ramp,
-            step_index=0,
-            preflow_history=preflow_history,
+            step_index_local=0,
+            step_index_global=5,
         )
 
         self.assertEqual(global_step, 5)
@@ -351,8 +351,10 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertFalse(
             solid_mpm_fsi_runner._flow_source_ramp_restarted_after_preflow(
                 ramp,
+                flow_phase="fsi",
                 step_index_local=0,
                 step_index_global=global_step,
+                source_schedule_step_index=global_step,
                 preflow_history=preflow_history,
             )
         )
@@ -365,8 +367,8 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
         local_step = solid_mpm_fsi_runner._flow_source_schedule_step_index(
             phase_local,
-            step_index=0,
-            preflow_history=preflow_history,
+            step_index_local=0,
+            step_index_global=5,
         )
 
         self.assertEqual(local_step, 0)
@@ -377,10 +379,38 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertTrue(
             solid_mpm_fsi_runner._flow_source_ramp_restarted_after_preflow(
                 phase_local,
+                flow_phase="fsi",
                 step_index_local=0,
                 step_index_global=len(preflow_history),
+                source_schedule_step_index=local_step,
                 preflow_history=preflow_history,
             )
+        )
+
+    def test_source_ramp_schedule_uses_contiguous_preflow_indices(self):
+        ramp = VerticalFlapFsiConfig(
+            flow_inlet_source_strength=0.75,
+            flow_inlet_source_profile="linear_ramp",
+            flow_inlet_source_ramp_steps=5,
+            flow_inlet_source_schedule_scope="global",
+        )
+        schedule_indices = [
+            solid_mpm_fsi_runner._flow_source_schedule_step_index(
+                ramp,
+                step_index_local=step_index,
+                step_index_global=step_index,
+            )
+            for step_index in range(5)
+        ]
+        factors = [
+            solid_mpm_fsi_runner._flow_inlet_source_factor(ramp, step_index)
+            for step_index in schedule_indices
+        ]
+
+        self.assertEqual(schedule_indices, [0, 1, 2, 3, 4])
+        self.assertEqual(
+            [round(factor, 2) for factor in factors],
+            [0.15, 0.30, 0.45, 0.60, 0.75],
         )
 
     def test_thin_wall_probe_reach_tracks_refined_streamwise_spacing(self):
