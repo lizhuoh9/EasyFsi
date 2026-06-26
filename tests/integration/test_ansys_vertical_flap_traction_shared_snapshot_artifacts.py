@@ -15,6 +15,7 @@ MANIFEST_JSON = DIAG_ROOT / "snapshot_manifest.json"
 SUMMARY_MD = DIAG_ROOT / "snapshot_summary.md"
 VERIFICATION_MD = DIAG_ROOT / "verification_shared_snapshot_2026-06-26.md"
 CHECKSUMS = DIAG_ROOT / "CHECKSUMS.sha256"
+STALE_PRE_RUNNER_SOURCE_COMMIT = "b163e0a7d7b0ee2117580bd48f41c7f1fc1108c2"
 
 REQUIRED_ARRAYS = {
     "pressure",
@@ -101,6 +102,27 @@ class AnsysVerticalFlapTractionSharedSnapshotArtifactTests(unittest.TestCase):
                 "cell_center_x_m",
                 "cell_width_x_m",
             }.issubset(manifest["field_arrays"])
+        )
+
+    def test_shared_snapshot_provenance_uses_committed_runner_source(self):
+        manifest = _read_json(MANIFEST_JSON)
+
+        self.assertEqual(manifest["commit_sha"], manifest["source_commit"])
+        self.assertEqual(len(manifest["commit_sha"]), 40)
+        self.assertNotEqual(
+            manifest["commit_sha"],
+            STALE_PRE_RUNNER_SOURCE_COMMIT,
+        )
+        self.assertTrue(
+            manifest["runner"].endswith("run_traction_shared_snapshot.py"),
+            manifest["runner"],
+        )
+        verification = VERIFICATION_MD.read_text(encoding="utf-8")
+        self.assertIn(f"source_commit = {manifest['source_commit']}", verification)
+        self.assertIn("contains the shared snapshot runner", verification)
+        self.assertEqual(
+            manifest["candidate_status"],
+            "snapshot_only_no_reference_selection",
         )
 
     def test_summary_and_checksums_preserve_snapshot_scope(self):

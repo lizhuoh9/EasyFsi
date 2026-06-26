@@ -12,6 +12,10 @@ field_sha256 = 3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968
 
 marker_geometry_sha256 = 5bc7e5ac47c8113396935c110c529551daa3ca70aab3b16b89f2e61a6d028837
 
+source_commit = 8488848d9302f7c05ffb8fd59342aec9d0a7e36f
+
+source_commit_note = Git HEAD used by the runner; this commit contains the shared snapshot runner and export path.
+
 reference_formulation_candidate = none
 
 candidate_status = snapshot_only_no_reference_selection
