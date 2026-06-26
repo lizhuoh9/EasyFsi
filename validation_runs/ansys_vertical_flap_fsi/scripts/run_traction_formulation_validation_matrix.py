@@ -36,7 +36,26 @@ FAILURES_DIR = OUTPUT_DIR / "failures"
 PREFLOW_STEPS = 20
 WORKER_TIMEOUT_S = 900
 ACTION_REACTION_RESIDUAL_MAX_N = 1.0e-8
-REFERENCE_SCENARIO = "dual_two_sided_offset0p51_pressure_only"
+BASELINE_SCENARIO = "dual_two_sided_offset0p51_pressure_only"
+REFERENCE_SCENARIO = BASELINE_SCENARIO
+DUAL_ONE_SIDED_SCENARIO = "dual_one_sided_offset0p51_pressure_only"
+SINGLE_MID_TWO_SIDED_SCENARIO = "single_mid_two_sided_offset0p00_pressure_only"
+OFFSET_SENSITIVITY_SCENARIOS = (
+    "dual_two_sided_offset0p25_pressure_only",
+    BASELINE_SCENARIO,
+    "dual_two_sided_offset1p00_pressure_only",
+)
+OFFSET_FORCE_RATIO_TOLERANCE_MIN = 0.90
+OFFSET_FORCE_RATIO_TOLERANCE_MAX = 1.10
+FORMULATION_AGREEMENT_RELATIVE_ERROR_MAX = 0.10
+FLOW_SNAPSHOT_FIELDS = (
+    "final_velocity_peak_mps",
+    "final_velocity_p999_mps",
+    "velocity_outlet_flux_ratio",
+    "pressure_outlet_flux_ratio",
+    "pressure_min_pa",
+    "pressure_max_pa",
+)
 SCOPE_LIMIT = (
     "fixed-solid traction formulation diagnostic only; no coupled 50-step or "
     "Fluent parity claim"
@@ -46,9 +65,9 @@ PRESSURE_MEAN_STATUS = (
 )
 
 REQUIRED_SCENARIOS = (
-    REFERENCE_SCENARIO,
-    "dual_one_sided_offset0p51_pressure_only",
-    "single_mid_two_sided_offset0p00_pressure_only",
+    BASELINE_SCENARIO,
+    DUAL_ONE_SIDED_SCENARIO,
+    SINGLE_MID_TWO_SIDED_SCENARIO,
     "dual_two_sided_offset0p25_pressure_only",
     "dual_two_sided_offset1p00_pressure_only",
     "dual_two_sided_offset0p51_viscous_air",
@@ -91,6 +110,15 @@ MATRIX_COLUMNS = [
     "max_abs_traction_pa",
     "two_sided_pressure_marker_count",
     "one_sided_pressure_marker_count",
+    "final_velocity_peak_mps",
+    "final_velocity_p999_mps",
+    "velocity_outlet_flux_ratio",
+    "pressure_outlet_flux_ratio",
+    "pressure_min_pa",
+    "pressure_max_pa",
+    "flow_snapshot_signature",
+    "force_difference_from_baseline_N",
+    "force_ratio_to_baseline",
     "force_difference_from_reference_N",
     "force_ratio_to_reference",
     "face_force_ratio",
@@ -173,7 +201,8 @@ def main(argv: list[str] | None = None) -> int:
         histories[scenario] = history
         _write_csv(HISTORIES_DIR / f"{scenario}_history.csv", history, HISTORY_COLUMNS)
 
-    rows = _apply_reference_comparisons(rows)
+    rows = _hydrate_rows_from_histories(rows, histories)
+    rows = _apply_baseline_comparisons(rows)
     payload = _payload(rows)
     _write_payload_artifacts(payload, histories, rows)
     print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
@@ -205,9 +234,11 @@ def _reclassify_existing_artifacts() -> int:
             for scenario, rows in history_payload.get("histories", {}).items()
         }
     existing = json.loads(MATRIX_JSON.read_text(encoding="utf-8"))
-    rows = _apply_reference_comparisons(
-        [dict(row) for row in existing.get("rows", [])]
+    rows = _hydrate_rows_from_histories(
+        [dict(row) for row in existing.get("rows", [])],
+        histories,
     )
+    rows = _apply_baseline_comparisons(rows)
     payload = _payload(rows)
     _write_payload_artifacts(payload, histories, rows)
     print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
@@ -216,15 +247,15 @@ def _reclassify_existing_artifacts() -> int:
 
 def _matrix_specs() -> list[tuple[str, VerticalFlapFsiConfig]]:
     return [
-        (REFERENCE_SCENARIO, _source_config()),
+        (BASELINE_SCENARIO, _source_config()),
         (
-            "dual_one_sided_offset0p51_pressure_only",
+            DUAL_ONE_SIDED_SCENARIO,
             _source_config(
                 traction_pressure_sampling_mode="one_sided_surface_pressure",
             ),
         ),
         (
-            "single_mid_two_sided_offset0p00_pressure_only",
+            SINGLE_MID_TWO_SIDED_SCENARIO,
             _source_config(
                 traction_marker_layout="single_mid_surface",
                 traction_marker_face_offset_cells=0.0,
@@ -571,6 +602,13 @@ def _summary_row(
                 "one_sided_pressure_marker_count",
                 "",
             ),
+            "final_velocity_peak_mps": final.get("velocity_peak_mps", ""),
+            "final_velocity_p999_mps": final.get("velocity_p999_mps", ""),
+            "velocity_outlet_flux_ratio": final.get("velocity_outlet_flux_ratio", ""),
+            "pressure_outlet_flux_ratio": final.get("pressure_outlet_flux_ratio", ""),
+            "pressure_min_pa": final.get("pressure_min_pa", ""),
+            "pressure_max_pa": final.get("pressure_max_pa", ""),
+            "flow_snapshot_signature": _flow_snapshot_signature(final),
             "face_force_ratio": _face_force_ratio(final),
             "flow_driver_uses_full_velocity_reset": bool(
                 report.get("flow_driver_uses_full_velocity_reset", False)
@@ -607,6 +645,15 @@ def _base_row(
         "source_strength": float(config.flow_inlet_source_strength),
         "source_profile": str(config.flow_inlet_source_profile),
         "source_ramp_steps": int(config.flow_inlet_source_ramp_steps),
+        "final_velocity_peak_mps": "",
+        "final_velocity_p999_mps": "",
+        "velocity_outlet_flux_ratio": "",
+        "pressure_outlet_flux_ratio": "",
+        "pressure_min_pa": "",
+        "pressure_max_pa": "",
+        "flow_snapshot_signature": "",
+        "force_difference_from_baseline_N": "",
+        "force_ratio_to_baseline": "",
         "force_difference_from_reference_N": "",
         "force_ratio_to_reference": "",
         "face_force_ratio": "",
@@ -694,48 +741,91 @@ def _row_quality_status(final: dict[str, Any]) -> str:
     return "completed" if not reasons else ",".join(reasons)
 
 
-def _apply_reference_comparisons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    reference = next(
+def _hydrate_rows_from_histories(
+    rows: list[dict[str, Any]],
+    histories: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    for row in rows:
+        for column in MATRIX_COLUMNS:
+            row.setdefault(column, "")
+        if row.get("run_status") != "completed":
+            row.setdefault("flow_snapshot_signature", "")
+            continue
+        history = histories.get(str(row.get("scenario")), [])
+        if not history:
+            row.setdefault("flow_snapshot_signature", "")
+            continue
+        final = history[-1]
+        row["final_velocity_peak_mps"] = final.get("velocity_peak_mps", "")
+        row["final_velocity_p999_mps"] = final.get("velocity_p999_mps", "")
+        row["velocity_outlet_flux_ratio"] = final.get("velocity_outlet_flux_ratio", "")
+        row["pressure_outlet_flux_ratio"] = final.get("pressure_outlet_flux_ratio", "")
+        row["pressure_min_pa"] = final.get("pressure_min_pa", "")
+        row["pressure_max_pa"] = final.get("pressure_max_pa", "")
+        row["flow_snapshot_signature"] = _flow_snapshot_signature(row)
+    return rows
+
+
+def _apply_baseline_comparisons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    baseline = next(
         (
             row
             for row in rows
-            if row.get("scenario") == REFERENCE_SCENARIO
+            if row.get("scenario") == BASELINE_SCENARIO
             and row.get("run_status") == "completed"
         ),
         None,
     )
-    reference_force = (
-        _float_or_none(reference.get("total_force_z_N")) if reference else None
-    )
+    baseline_force = _float_or_none(baseline.get("total_force_z_N")) if baseline else None
     for row in rows:
+        row.setdefault("force_difference_from_baseline_N", "")
+        row.setdefault("force_ratio_to_baseline", "")
         row.setdefault("force_difference_from_reference_N", "")
         row.setdefault("force_ratio_to_reference", "")
-        if row.get("run_status") != "completed" or reference_force is None:
+        if row.get("run_status") != "completed" or baseline_force is None:
             continue
         force = _float_or_none(row.get("total_force_z_N"))
         if force is None:
             continue
-        row["force_difference_from_reference_N"] = force - reference_force
-        row["force_ratio_to_reference"] = (
-            force / reference_force if abs(reference_force) > 0.0 else ""
-        )
+        difference = force - baseline_force
+        ratio = force / baseline_force if abs(baseline_force) > 0.0 else ""
+        row["force_difference_from_baseline_N"] = difference
+        row["force_ratio_to_baseline"] = ratio
+        row["force_difference_from_reference_N"] = difference
+        row["force_ratio_to_reference"] = ratio
     return rows
+
+
+def _apply_reference_comparisons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return _apply_baseline_comparisons(rows)
 
 
 def _payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
     supported_count = sum(1 for row in rows if row.get("run_status") == "completed")
     unsupported_count = sum(1 for row in rows if row.get("run_status") == "unsupported")
-    candidate = _reference_candidate(rows)
+    gate = _gate_report(rows)
+    candidate = _reference_candidate(rows, gate)
     return {
         "case": "ansys-vertical-flap-fsi",
         "purpose": "fixed-solid traction formulation diagnostics",
         "preflow_steps": PREFLOW_STEPS,
         "rows": rows,
         "required_scenarios": list(REQUIRED_SCENARIOS),
+        "baseline_scenario": BASELINE_SCENARIO,
         "reference_formulation_candidate": candidate,
         "candidate_status": (
             "candidate_found" if candidate != "none" else "no_reference_formulation_candidate"
         ),
+        "candidate_blockers": gate["candidate_blockers"],
+        "offset_sensitivity_status": gate["offset_sensitivity_status"],
+        "offset_force_ratio_min": gate["offset_force_ratio_min"],
+        "offset_force_ratio_max": gate["offset_force_ratio_max"],
+        "offset_force_relative_span": gate["offset_force_relative_span"],
+        "formulation_agreement_status": gate["formulation_agreement_status"],
+        "dual_one_sided_vs_single_mid_relative_error": gate[
+            "dual_one_sided_vs_single_mid_relative_error"
+        ],
+        "flow_snapshot_identity_status": gate["flow_snapshot_identity_status"],
         "supported_formulation_count": supported_count,
         "unsupported_formulation_count": unsupported_count,
         "pressure_mean_status": PRESSURE_MEAN_STATUS,
@@ -743,18 +833,262 @@ def _payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _reference_candidate(rows: list[dict[str, Any]]) -> str:
-    if any(row.get("run_status") == "unsupported" for row in rows):
+def _gate_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    blockers: list[str] = []
+    rows_by_scenario = {str(row.get("scenario")): row for row in rows}
+    for scenario in REQUIRED_SCENARIOS:
+        row = rows_by_scenario.get(scenario)
+        if row is None:
+            _add_blocker(blockers, "required_formulation_missing")
+            continue
+        status = row.get("run_status")
+        if status == "unsupported":
+            _add_blocker(blockers, "required_formulation_unsupported")
+            _add_unsupported_blocker(blockers, row)
+            continue
+        if status != "completed":
+            _add_blocker(blockers, "required_formulation_failed")
+            continue
+        _add_row_quality_blockers(blockers, row)
+
+    offset_report = _offset_sensitivity_report(rows_by_scenario)
+    if offset_report["offset_sensitivity_status"] == "offset_sensitivity_incomplete":
+        _add_blocker(blockers, "offset_sensitivity_incomplete")
+    if offset_report["offset_sensitivity_status"] == "offset_sensitivity_above_tolerance":
+        _add_blocker(blockers, "dual_two_sided_offset_sensitivity_above_tolerance")
+
+    agreement_report = _formulation_agreement_report(rows_by_scenario)
+    if (
+        agreement_report["formulation_agreement_status"]
+        == "formulation_agreement_incomplete"
+    ):
+        _add_blocker(blockers, "formulation_agreement_incomplete")
+    if (
+        agreement_report["formulation_agreement_status"]
+        == "formulation_disagreement_above_tolerance"
+    ):
+        _add_blocker(blockers, "formulation_disagreement_above_tolerance")
+
+    flow_report = _flow_snapshot_identity_report(rows)
+    if flow_report["flow_snapshot_identity_status"] == "flow_metrics_incomplete":
+        _add_blocker(blockers, "flow_snapshot_metrics_incomplete")
+    if (
+        flow_report["flow_snapshot_identity_status"]
+        == "flow_metrics_mismatch_completed_rows"
+    ):
+        _add_blocker(blockers, "flow_snapshot_identity_mismatch")
+
+    return {
+        "candidate_blockers": blockers,
+        **offset_report,
+        **agreement_report,
+        **flow_report,
+    }
+
+
+def _reference_candidate(
+    rows: list[dict[str, Any]],
+    gate: dict[str, Any] | None = None,
+) -> str:
+    if gate is None:
+        gate = _gate_report(rows)
+    if gate["candidate_blockers"]:
         return "none"
-    reference = next(
-        (row for row in rows if row.get("scenario") == REFERENCE_SCENARIO),
+    baseline = next(
+        (row for row in rows if row.get("scenario") == BASELINE_SCENARIO),
         None,
     )
-    if reference is None or reference.get("run_status") != "completed":
+    if baseline is None or baseline.get("run_status") != "completed":
         return "none"
-    if str(reference.get("status_reason", "")).startswith("completed"):
-        return REFERENCE_SCENARIO
+    if str(baseline.get("status_reason", "")).startswith("completed"):
+        return BASELINE_SCENARIO
     return "none"
+
+
+def _add_blocker(blockers: list[str], blocker: str) -> None:
+    if blocker not in blockers:
+        blockers.append(blocker)
+
+
+def _add_unsupported_blocker(blockers: list[str], row: dict[str, Any]) -> None:
+    marker_layout = str(row.get("marker_layout"))
+    pressure_mode = str(row.get("pressure_sampling_mode"))
+    if (
+        marker_layout == "dual_physical_faces"
+        and pressure_mode == "one_sided_surface_pressure"
+    ):
+        _add_blocker(blockers, "dual_face_one_sided_unsupported")
+    if (
+        marker_layout == "single_mid_surface"
+        and pressure_mode == "one_sided_surface_pressure"
+    ):
+        _add_blocker(blockers, "single_mid_one_sided_unsupported")
+
+
+def _add_row_quality_blockers(blockers: list[str], row: dict[str, Any]) -> None:
+    primary_invalid = _float_or_zero(row.get("primary_face_invalid_marker_count"))
+    secondary_invalid = _float_or_zero(row.get("secondary_face_invalid_marker_count"))
+    if primary_invalid != 0.0 or secondary_invalid != 0.0:
+        _add_blocker(blockers, "invalid_marker_count_nonzero")
+    if (
+        _float_or_zero(row.get("force_decomposition_residual_N"))
+        > ACTION_REACTION_RESIDUAL_MAX_N
+    ):
+        _add_blocker(blockers, "force_decomposition_residual_above_tolerance")
+    if (
+        _float_or_zero(row.get("marker_action_reaction_residual_N"))
+        > ACTION_REACTION_RESIDUAL_MAX_N
+    ):
+        _add_blocker(blockers, "marker_action_reaction_residual_above_tolerance")
+    if (
+        _float_or_zero(row.get("scatter_action_reaction_residual_N"))
+        > ACTION_REACTION_RESIDUAL_MAX_N
+    ):
+        _add_blocker(blockers, "scatter_action_reaction_residual_above_tolerance")
+    if _truthy(row.get("flow_driver_uses_full_velocity_reset")):
+        _add_blocker(blockers, "full_field_reset_used")
+    if (
+        row.get("primary_face_mean_pressure_pa", "") == ""
+        or row.get("secondary_face_mean_pressure_pa", "") == ""
+    ):
+        _add_blocker(blockers, "pressure_probe_diagnostics_incomplete")
+
+
+def _offset_sensitivity_report(
+    rows_by_scenario: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    ratios: list[float] = []
+    for scenario in OFFSET_SENSITIVITY_SCENARIOS:
+        row = rows_by_scenario.get(scenario)
+        if row is None or row.get("run_status") != "completed":
+            return {
+                "offset_sensitivity_status": "offset_sensitivity_incomplete",
+                "offset_force_ratio_min": "",
+                "offset_force_ratio_max": "",
+                "offset_force_relative_span": "",
+            }
+        ratio = _float_or_none(row.get("force_ratio_to_baseline"))
+        if ratio is None:
+            ratio = _float_or_none(row.get("force_ratio_to_reference"))
+        if ratio is None:
+            return {
+                "offset_sensitivity_status": "offset_sensitivity_incomplete",
+                "offset_force_ratio_min": "",
+                "offset_force_ratio_max": "",
+                "offset_force_relative_span": "",
+            }
+        ratios.append(ratio)
+    ratio_min = min(ratios)
+    ratio_max = max(ratios)
+    span = ratio_max - ratio_min
+    status = (
+        "offset_sensitivity_above_tolerance"
+        if ratio_min < OFFSET_FORCE_RATIO_TOLERANCE_MIN
+        or ratio_max > OFFSET_FORCE_RATIO_TOLERANCE_MAX
+        else "offset_sensitivity_passed"
+    )
+    return {
+        "offset_sensitivity_status": status,
+        "offset_force_ratio_min": ratio_min,
+        "offset_force_ratio_max": ratio_max,
+        "offset_force_relative_span": span,
+    }
+
+
+def _formulation_agreement_report(
+    rows_by_scenario: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    dual = rows_by_scenario.get(DUAL_ONE_SIDED_SCENARIO)
+    single = rows_by_scenario.get(SINGLE_MID_TWO_SIDED_SCENARIO)
+    if dual is None or single is None:
+        return {
+            "formulation_agreement_status": "formulation_agreement_incomplete",
+            "dual_one_sided_vs_single_mid_relative_error": "",
+        }
+    if dual.get("run_status") == "unsupported":
+        return {
+            "formulation_agreement_status": "blocked_dual_one_sided_unsupported",
+            "dual_one_sided_vs_single_mid_relative_error": "",
+        }
+    if dual.get("run_status") != "completed" or single.get("run_status") != "completed":
+        return {
+            "formulation_agreement_status": "formulation_agreement_incomplete",
+            "dual_one_sided_vs_single_mid_relative_error": "",
+        }
+    dual_force = _float_or_none(dual.get("total_force_z_N"))
+    single_force = _float_or_none(single.get("total_force_z_N"))
+    if dual_force is None or single_force is None:
+        return {
+            "formulation_agreement_status": "formulation_agreement_incomplete",
+            "dual_one_sided_vs_single_mid_relative_error": "",
+        }
+    relative_error = abs(dual_force - single_force) / max(abs(single_force), 1.0e-30)
+    status = (
+        "formulation_disagreement_above_tolerance"
+        if relative_error > FORMULATION_AGREEMENT_RELATIVE_ERROR_MAX
+        else "formulation_agreement_passed"
+    )
+    return {
+        "formulation_agreement_status": status,
+        "dual_one_sided_vs_single_mid_relative_error": relative_error,
+    }
+
+
+def _flow_snapshot_identity_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    signatures: list[str] = []
+    for row in rows:
+        if row.get("run_status") != "completed":
+            continue
+        signature = str(row.get("flow_snapshot_signature", ""))
+        if not signature:
+            signature = _flow_snapshot_signature(row)
+            row["flow_snapshot_signature"] = signature
+        if not signature:
+            return {"flow_snapshot_identity_status": "flow_metrics_incomplete"}
+        signatures.append(signature)
+    if not signatures:
+        return {"flow_snapshot_identity_status": "flow_metrics_incomplete"}
+    if len(set(signatures)) != 1:
+        return {"flow_snapshot_identity_status": "flow_metrics_mismatch_completed_rows"}
+    return {"flow_snapshot_identity_status": "flow_metrics_match_completed_rows"}
+
+
+def _flow_snapshot_signature(row: dict[str, Any]) -> str:
+    values: list[str] = []
+    for field in FLOW_SNAPSHOT_FIELDS:
+        value = _flow_snapshot_field(row, field)
+        if value is None:
+            return ""
+        values.append(f"{value:.12g}")
+    return "|".join(values)
+
+
+def _flow_snapshot_field(row: dict[str, Any], field: str) -> float | None:
+    aliases = {
+        "final_velocity_peak_mps": (
+            "final_velocity_peak_mps",
+            "velocity_peak_mps",
+            "local_velocity_peak_mps",
+        ),
+        "final_velocity_p999_mps": (
+            "final_velocity_p999_mps",
+            "velocity_p999_mps",
+            "fluid_speed_p999_mps",
+        ),
+    }
+    for key in aliases.get(field, (field,)):
+        value = _float_or_none(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value)
 
 
 def _write_payload_artifacts(
@@ -789,18 +1123,30 @@ def _summary_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# ANSYS Vertical-Flap Traction Formulation Diagnostics",
         "",
+        f"baseline_scenario = {payload['baseline_scenario']}",
         f"reference_formulation_candidate = {payload['reference_formulation_candidate']}",
         f"candidate_status = {payload['candidate_status']}",
+        f"candidate_blockers = {', '.join(payload['candidate_blockers']) or 'none'}",
+        f"offset_sensitivity_status = {payload['offset_sensitivity_status']}",
+        f"offset_force_ratio_min = {payload['offset_force_ratio_min']}",
+        f"offset_force_ratio_max = {payload['offset_force_ratio_max']}",
+        f"offset_force_relative_span = {payload['offset_force_relative_span']}",
+        f"formulation_agreement_status = {payload['formulation_agreement_status']}",
+        "dual_one_sided_vs_single_mid_relative_error = "
+        f"{payload['dual_one_sided_vs_single_mid_relative_error'] or 'none'}",
+        f"flow_snapshot_identity_status = {payload['flow_snapshot_identity_status']}",
         f"supported_formulation_count = {payload['supported_formulation_count']}",
         f"unsupported_formulation_count = {payload['unsupported_formulation_count']}",
         f"pressure_mean_status = {payload['pressure_mean_status']}",
         f"scope_limit = {payload['scope_limit']}",
         "",
-        "candidate_rule = all A/B/C rows supported, completed, conservative, and stable",
+        "candidate_rule = all A/B/C rows supported, completed, conservative, "
+        "pressure-probe complete, offset-stable, formulation-agreeing, and "
+        "flow-snapshot identical",
         "",
         "## Matrix",
         "",
-        "| scenario | status | layout | pressure mode | viscous | total force z N | diff from ref N | face ratio | reason |",
+        "| scenario | status | layout | pressure mode | viscous | total force z N | ratio to baseline | flow snapshot | reason |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for row in payload["rows"]:
@@ -812,8 +1158,8 @@ def _summary_markdown(payload: dict[str, Any]) -> str:
             f"{row.get('pressure_sampling_mode')} | "
             f"{row.get('include_viscous_traction')} | "
             f"{row.get('total_force_z_N')} | "
-            f"{row.get('force_difference_from_reference_N')} | "
-            f"{row.get('face_force_ratio')} | "
+            f"{row.get('force_ratio_to_baseline')} | "
+            f"{row.get('flow_snapshot_signature')} | "
             f"{row.get('status_reason')} |"
         )
     return "\n".join(lines) + "\n"
@@ -828,12 +1174,25 @@ def _verification_markdown(payload: dict[str, Any]) -> str:
         "resamples the ANSYS vertical-flap marker traction under explicit "
         "marker-layout, pressure-sampling, offset, and viscous-traction controls.\n\n"
         "## Result\n\n"
+        f"baseline_scenario = {payload['baseline_scenario']}\n\n"
         f"reference_formulation_candidate = {payload['reference_formulation_candidate']}\n\n"
         f"candidate_status = {payload['candidate_status']}\n\n"
+        f"candidate_blockers = {', '.join(payload['candidate_blockers']) or 'none'}\n\n"
+        f"offset_sensitivity_status = {payload['offset_sensitivity_status']}\n\n"
+        f"offset_force_ratio_min = {payload['offset_force_ratio_min']}\n\n"
+        f"offset_force_ratio_max = {payload['offset_force_ratio_max']}\n\n"
+        f"offset_force_relative_span = {payload['offset_force_relative_span']}\n\n"
+        f"formulation_agreement_status = {payload['formulation_agreement_status']}\n\n"
+        "dual_one_sided_vs_single_mid_relative_error = "
+        f"{payload['dual_one_sided_vs_single_mid_relative_error'] or 'none'}\n\n"
+        f"flow_snapshot_identity_status = {payload['flow_snapshot_identity_status']}\n\n"
         f"supported_formulation_count = {payload['supported_formulation_count']}\n\n"
         f"unsupported_formulation_count = {payload['unsupported_formulation_count']}\n\n"
-        "The current matrix does not promote a reference formulation when any "
-        "required A/B/C row is unsupported. The dual physical-face plus "
+        "The current matrix treats the 0.51-cell dual/two-sided row as a "
+        "baseline scenario, not as a validated reference formulation. It does "
+        "not promote a reference formulation when any required row is unsupported, "
+        "failed, pressure-probe incomplete, offset-sensitive, formulation-"
+        "disagreeing, or flow-snapshot divergent. The dual physical-face plus "
         "one-sided surface-pressure row is report-only because the current core "
         "exposes a single `one_sided_pressure_region_id`, not per-face one-sided "
         "region support.\n\n"

@@ -226,13 +226,18 @@ validation_runs\ansys_vertical_flap_fsi\traction_formulation_diagnostics\
 The traction matrix reuses the fixed-solid sustained-source load path and
 compares dual physical faces with a two-sided pressure jump, dual physical
 faces with one-sided surface pressure, a single mid-surface with a two-sided
-pressure jump, offset sensitivity, and explicit viscous traction. Unsupported
-formulations are archived as `unsupported` rows rather than faked. The current
-core exposes force, traction, marker-count, stress-counter, and residual fields;
-it does not expose per-face pressure means without adding a new solver output,
-so those pressure mean columns remain blank and documented. This is still a
-fixed-solid formulation diagnostic only: it does not run the 50-step case,
-does not import Fluent force history, and does not claim Fluent parity.
+pressure jump, offset sensitivity, and explicit viscous traction. The
+`dual_two_sided_offset0p51_pressure_only` row is a baseline for comparison, not
+a validated reference formulation. Unsupported formulations are archived as
+`unsupported` rows rather than faked. Candidate promotion is blocked by any
+required unsupported/failed row, invalid marker count, action-reaction residual,
+full-field flow reset, missing per-face pressure probe, offset sensitivity,
+formulation disagreement, or flow-snapshot mismatch. The current reclassified
+artifact records these blockers explicitly; in particular, dual-face one-sided
+pressure is unsupported, offset ratios are outside the tolerance window, and
+per-face pressure means are not exposed by the current core. This is still a
+fixed-solid formulation diagnostic only: it does not run the 50-step case, does
+not import Fluent force history, and does not claim Fluent parity.
 
 For the coupled preflow-release STEP20 diagnostic, run:
 

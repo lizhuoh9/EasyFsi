@@ -42,6 +42,7 @@ TRACTION_PRESSURE_SAMPLING_MODES = {
     TRACTION_PRESSURE_TWO_SIDED,
     TRACTION_PRESSURE_ONE_SIDED,
 }
+TRACTION_MARKER_FACE_OFFSET_CELLS_DIAGNOSTIC_MAX = 4.0
 SUPPORTED_FORMAL_FLOW_DRIVER_MODES = {
     FLOW_DRIVER_PROJECTION_ONLY,
     FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC,
@@ -842,6 +843,15 @@ def _traction_include_viscous(config: Any) -> bool:
     return bool(getattr(config, "traction_include_viscous", False))
 
 
+def _is_default_traction_formulation(config: Any) -> bool:
+    return (
+        _traction_marker_layout(config) == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES
+        and _traction_pressure_sampling_mode(config) == TRACTION_PRESSURE_TWO_SIDED
+        and math.isclose(_traction_marker_face_offset_cells(config), 0.51)
+        and not _traction_include_viscous(config)
+    )
+
+
 def _traction_viscosity_pa_s(config: Any) -> float:
     if not _traction_include_viscous(config):
         return 0.0
@@ -868,6 +878,15 @@ def traction_formulation_supported(config: Any) -> tuple[bool, str]:
             False,
             "dual-face one-sided pressure needs per-face one-sided region support; "
             "current core exposes one one_sided_pressure_region_id",
+        )
+    if (
+        marker_layout == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE
+        and pressure_sampling_mode == TRACTION_PRESSURE_ONE_SIDED
+    ):
+        return (
+            False,
+            "single-mid one-sided pressure has ambiguous fluid side without "
+            "explicit one_sided_fluid_side_normal_sign",
         )
     return True, "supported"
 
@@ -908,13 +927,24 @@ def _validate_rectangular_solid_config(config: Any) -> None:
             f"unsupported traction_pressure_sampling_mode: {pressure_sampling_mode!r}"
         )
     marker_face_offset_cells = _traction_marker_face_offset_cells(config)
-    if marker_face_offset_cells < 0.0:
-        raise ValueError("traction_marker_face_offset_cells must be non-negative")
+    if not math.isfinite(marker_face_offset_cells) or marker_face_offset_cells < 0.0:
+        raise ValueError(
+            "traction_marker_face_offset_cells must be finite and non-negative"
+        )
+    if marker_face_offset_cells > TRACTION_MARKER_FACE_OFFSET_CELLS_DIAGNOSTIC_MAX:
+        raise ValueError(
+            "traction_marker_face_offset_cells is outside the fixed-solid "
+            "diagnostic range"
+        )
     traction_viscosity = _traction_viscosity_pa_s(config)
     if not math.isfinite(traction_viscosity) or traction_viscosity < 0.0:
         raise ValueError("traction viscosity must be finite and non-negative")
     if config.step_count < 0:
         raise ValueError("step_count must be non-negative")
+    if config.step_count > 0 and not _is_default_traction_formulation(config):
+        raise ValueError(
+            "non-default traction formulations are fixed-solid diagnostics only"
+        )
     if config.step_count == 0 and int(getattr(config, "preflow_steps", 0)) <= 0:
         raise ValueError("step_count=0 is only valid for preflow-only diagnostics")
     if min(config.grid_nodes) < 4:

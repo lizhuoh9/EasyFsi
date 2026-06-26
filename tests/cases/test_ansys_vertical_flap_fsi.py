@@ -473,6 +473,17 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertTrue(single_supported)
         self.assertEqual(single_reason, "supported")
 
+        single_one_sided_supported, single_one_sided_reason = (
+            solid_mpm_fsi_runner.traction_formulation_supported(
+                VerticalFlapFsiConfig(
+                    traction_marker_layout="single_mid_surface",
+                    traction_pressure_sampling_mode="one_sided_surface_pressure",
+                )
+            )
+        )
+        self.assertFalse(single_one_sided_supported)
+        self.assertIn("ambiguous fluid side", single_one_sided_reason)
+
         with self.assertRaisesRegex(ValueError, "traction_marker_layout"):
             solid_mpm_fsi_runner._validate_rectangular_solid_config(
                 VerticalFlapFsiConfig(
@@ -491,6 +502,33 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                     traction_marker_face_offset_cells=-0.01,
                 )
             )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(
+                    traction_marker_face_offset_cells=math.nan,
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "diagnostic range"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(
+                    traction_marker_face_offset_cells=5.0,
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "fixed-solid diagnostics only"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(
+                    step_count=1,
+                    preflow_steps=0,
+                    traction_marker_face_offset_cells=1.0,
+                )
+            )
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            VerticalFlapFsiConfig(
+                step_count=0,
+                preflow_steps=1,
+                traction_marker_face_offset_cells=1.0,
+            )
+        )
 
         source = inspect.getsource(solid_mpm_fsi_runner._sample_stress_to_marker_forces)
         self.assertIn("one_sided_pressure_region_id", source)
