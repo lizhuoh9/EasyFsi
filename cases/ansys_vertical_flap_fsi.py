@@ -152,6 +152,8 @@ class VerticalFlapFsiConfig:
     traction_pressure_sampling_mode: str = "two_sided_pressure_jump"
     traction_include_viscous: bool = False
     traction_marker_face_offset_cells: float = 0.51
+    traction_pressure_probe_origin_mode: str = "marker_position"
+    traction_pressure_probe_origin_offset_cells: float | None = None
     traction_viscosity_pa_s: float = 0.0
     export_final_flow_snapshot: bool = False
     enforce_plane_strain_x: bool = True

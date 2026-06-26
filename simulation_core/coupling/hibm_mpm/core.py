@@ -252,6 +252,15 @@ class HibmMpmSurfaceMarkers:
         self.projection_triangle_count = 0
 
         self.x_gamma_m = ti.Vector.field(3, dtype=ti.f32, shape=self.marker_capacity)
+        self.pressure_probe_origin_m = ti.Vector.field(
+            3,
+            dtype=ti.f32,
+            shape=self.marker_capacity,
+        )
+        self.pressure_probe_origin_explicit = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
         self.v_gamma_mps = ti.Vector.field(3, dtype=ti.f32, shape=self.marker_capacity)
         self.n_gamma = ti.Vector.field(3, dtype=ti.f32, shape=self.marker_capacity)
         self.A_gamma_m2 = ti.field(dtype=ti.f32, shape=self.marker_capacity)
@@ -721,6 +730,7 @@ class HibmMpmSurfaceMarkers:
         normals: Sequence[Sequence[float]],
         areas_m2: Sequence[float],
         region_ids: Sequence[int],
+        pressure_probe_origins_m: Sequence[Sequence[float]] | None = None,
     ) -> None:
         count = len(positions_m)
         if count > self.marker_capacity:
@@ -733,16 +743,34 @@ class HibmMpmSurfaceMarkers:
             == count
         ):
             raise ValueError("marker inputs must have matching lengths")
+        if (
+            pressure_probe_origins_m is not None
+            and len(pressure_probe_origins_m) != count
+        ):
+            raise ValueError("pressure probe origin marker count must match markers")
         self.marker_count = int(count)
         self.projection_triangle_count = 0
         for marker in range(count):
             position = _vector3(positions_m[marker], name="positions_m")
+            if pressure_probe_origins_m is None:
+                pressure_probe_origin = position
+                pressure_probe_origin_explicit = 0
+            else:
+                pressure_probe_origin = _vector3(
+                    pressure_probe_origins_m[marker],
+                    name="pressure_probe_origins_m",
+                )
+                pressure_probe_origin_explicit = 1
             velocity = _vector3(velocities_mps[marker], name="velocities_mps")
             normal = _normalize_vector3(normals[marker], name="normals")
             area = float(areas_m2[marker])
             if not math.isfinite(area) or area < 0.0:
                 raise ValueError("areas_m2 must contain finite non-negative values")
             self.x_gamma_m[marker] = position
+            self.pressure_probe_origin_m[marker] = pressure_probe_origin
+            self.pressure_probe_origin_explicit[marker] = (
+                pressure_probe_origin_explicit
+            )
             self.v_gamma_mps[marker] = velocity
             self.n_gamma[marker] = normal
             self.A_gamma_m2[marker] = area
@@ -750,6 +778,18 @@ class HibmMpmSurfaceMarkers:
             self.t_gamma_pa[marker] = (0.0, 0.0, 0.0)
             self.F_gamma_n[marker] = (0.0, 0.0, 0.0)
         self.reset_stress_diagnostics(count)
+
+    def set_pressure_probe_origins_m(
+        self,
+        origins_m: Sequence[Sequence[float]],
+    ) -> None:
+        count = int(self.marker_count)
+        if len(origins_m) != count:
+            raise ValueError("pressure probe origin marker count must match markers")
+        for marker in range(count):
+            origin = _vector3(origins_m[marker], name="pressure_probe_origins_m")
+            self.pressure_probe_origin_m[marker] = origin
+            self.pressure_probe_origin_explicit[marker] = 1
 
     def set_projection_triangles(
         self,
@@ -852,6 +892,8 @@ class HibmMpmSurfaceMarkers:
             if normal_norm <= 1.0e-12 or area < 0.0:
                 self.report_surface_field_load_invalid_marker_count[None] += 1
             self.x_gamma_m[marker] = surface_position_m[marker]
+            self.pressure_probe_origin_m[marker] = surface_position_m[marker]
+            self.pressure_probe_origin_explicit[marker] = 0
             self.v_gamma_mps[marker] = initial_velocity
             self.n_gamma[marker] = normal / ti.max(normal_norm, 1.0e-12)
             self.A_gamma_m2[marker] = ti.max(area, 0.0)
@@ -879,6 +921,8 @@ class HibmMpmSurfaceMarkers:
                 self.report_surface_field_load_invalid_marker_count[None] += 1
             velocity = surface_velocity_mps[marker]
             self.x_gamma_m[marker] = surface_position_m[marker]
+            self.pressure_probe_origin_m[marker] = surface_position_m[marker]
+            self.pressure_probe_origin_explicit[marker] = 0
             self.v_gamma_mps[marker] = velocity
             self.n_gamma[marker] = normal / ti.max(normal_norm, 1.0e-12)
             self.A_gamma_m2[marker] = ti.max(area, 0.0)
@@ -1476,6 +1520,9 @@ class HibmMpmSurfaceMarkers:
         for marker in range(marker_count):
             position = self.x_gamma_m[marker]
             normal = self.n_gamma[marker]
+            probe_origin = position
+            if self.pressure_probe_origin_explicit[marker] != 0:
+                probe_origin = self.pressure_probe_origin_m[marker]
             grid_coordinate = self._grid_coordinate_from_fields(
                 position,
                 cell_face_x_m,
@@ -1615,7 +1662,7 @@ class HibmMpmSurfaceMarkers:
                     if outside_pressure_found == 0 or (
                         closure_region_marker == 1 and outside_gradient_found == 0
                     ):
-                        outside_position = position + normal * probe_distance
+                        outside_position = probe_origin + normal * probe_distance
                         outside_coordinate = self._grid_coordinate_from_fields(
                             outside_position,
                             cell_face_x_m,
@@ -1744,7 +1791,7 @@ class HibmMpmSurfaceMarkers:
                     if inside_pressure_found == 0 or (
                         closure_region_marker == 1 and inside_gradient_found == 0
                     ):
-                        inside_position = position - normal * probe_distance
+                        inside_position = probe_origin - normal * probe_distance
                         inside_coordinate = self._grid_coordinate_from_fields(
                             inside_position,
                             cell_face_x_m,
@@ -1896,7 +1943,7 @@ class HibmMpmSurfaceMarkers:
                         # (see the entry gate above), so the S2-A4 decoupled
                         # acceptance applies unconditionally here.
                         if inside_pressure_found == 0 or inside_gradient_found == 0:
-                            inside_position = position - normal * probe_distance
+                            inside_position = probe_origin - normal * probe_distance
                             inside_coordinate = self._grid_coordinate_from_fields(
                                 inside_position,
                                 cell_face_x_m,
@@ -2081,7 +2128,7 @@ class HibmMpmSurfaceMarkers:
                         if side_crossed == 0 and (
                             side_pressure_found == 0 or side_gradient_found == 0
                         ):
-                            extension_position = position + normal * (
+                            extension_position = probe_origin + normal * (
                                 side_sign * rung_distance
                             )
                             extension_coordinate = self._grid_coordinate_from_fields(
@@ -2861,6 +2908,9 @@ class HibmMpmSurfaceMarkers:
         for marker in range(marker_count):
             position = self.x_gamma_m[marker]
             normal = self.n_gamma[marker]
+            probe_origin = position
+            if self.pressure_probe_origin_explicit[marker] != 0:
+                probe_origin = self.pressure_probe_origin_m[marker]
             grid_coordinate = self._grid_coordinate_from_fields(
                 position,
                 cell_face_x_m,
@@ -2942,7 +2992,9 @@ class HibmMpmSurfaceMarkers:
                 inside_found = 0
                 for probe_index in ti.static(range(3)):
                     multiplier = ti.cast(probe_index + 1, ti.f32)
-                    outside_position = position + multiplier * probe_distance_m * normal
+                    outside_position = (
+                        probe_origin + multiplier * probe_distance_m * normal
+                    )
                     outside_grid = self._grid_coordinate_from_fields(
                         outside_position,
                         cell_face_x_m,
@@ -3019,7 +3071,9 @@ class HibmMpmSurfaceMarkers:
                             ti.f64,
                         )
                         diagnostic_outside_probe_ladder_mode = 4
-                    inside_position = position - multiplier * probe_distance_m * normal
+                    inside_position = (
+                        probe_origin - multiplier * probe_distance_m * normal
+                    )
                     inside_grid = self._grid_coordinate_from_fields(
                         inside_position,
                         cell_face_x_m,
@@ -5187,11 +5241,19 @@ class HibmMpmSurfaceMarkers:
         viscous_traction = self.t_viscous_gamma_pa.to_numpy()[:marker_count]
         total_traction = self.t_gamma_pa.to_numpy()[:marker_count]
         positions = self.x_gamma_m.to_numpy()[:marker_count]
+        probe_origins = self.pressure_probe_origin_m.to_numpy()[:marker_count]
+        probe_origin_explicit = self.pressure_probe_origin_explicit.to_numpy()[
+            :marker_count
+        ]
         normals = self.n_gamma.to_numpy()[:marker_count]
         regions = self.region_id.to_numpy()[:marker_count]
         diagnostics: list[dict[str, Any]] = []
         for marker in range(marker_count):
             reason_code = int(invalid_reason_code[marker])
+            explicit_probe_origin = bool(int(probe_origin_explicit[marker]))
+            probe_origin = (
+                probe_origins[marker] if explicit_probe_origin else positions[marker]
+            )
             pressure_traction_vector = [
                 float(value) for value in pressure_traction[marker]
             ]
@@ -5295,6 +5357,13 @@ class HibmMpmSurfaceMarkers:
                         traction_decomposition_residual
                     ),
                     "position_m": [float(value) for value in positions[marker]],
+                    "pressure_probe_origin_m": [
+                        float(value) for value in probe_origin
+                    ],
+                    "pressure_probe_origin_source": (
+                        "explicit" if explicit_probe_origin else "marker_position"
+                    ),
+                    "pressure_probe_origin_explicit": explicit_probe_origin,
                     "normal": [float(value) for value in normals[marker]],
                     "region_id": int(regions[marker]),
                 }

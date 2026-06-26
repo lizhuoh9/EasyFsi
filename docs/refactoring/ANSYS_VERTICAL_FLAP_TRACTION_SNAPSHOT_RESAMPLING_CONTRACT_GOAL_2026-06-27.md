@@ -3,7 +3,7 @@
 ## Source Context
 
 - Repository: `lizhuoh9/EasyFsi`
-- Working directory: `D:\working\squid robot\simulation\src\reference\papers\HIBM-MPM\refactored`
+- Working tree: refactored EasyFsi checkout root
 - Active branch at goal creation: `solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
 - Target runner: `validation_runs/ansys_vertical_flap_fsi/scripts/run_traction_snapshot_resampling_matrix.py`
 - Target artifact directory: `validation_runs/ansys_vertical_flap_fsi/traction_snapshot_resampling_diagnostics`
@@ -64,8 +64,8 @@ Required test coverage:
 ### P0-2 Repo-Relative Source Script
 
 Problem: `source_script` in the matrix JSON currently stores a machine-local
-Windows absolute path under `D:\working\squid robot\...`, which makes the
-artifact less portable and exposes private local directory structure.
+absolute path, which makes the artifact less portable and exposes private local
+directory structure.
 
 Required change:
 
@@ -87,7 +87,7 @@ Required test coverage:
   `validation_runs/ansys_vertical_flap_fsi/scripts/run_traction_snapshot_resampling_matrix.py`.
 - Assert it is not an absolute path.
 - Assert it contains no backslashes.
-- Assert it contains no `D:\` prefix or local user/workstation path fragments.
+- Assert it contains no local drive prefix or local user/workstation path fragments.
 
 ### P0-3 Summary Contract
 
@@ -219,7 +219,7 @@ After code and tests are updated, regenerate the snapshot-resampling artifacts b
 running:
 
 ```powershell
-& 'D:\working\taichi\env\python.exe' validation_runs/ansys_vertical_flap_fsi/scripts/run_traction_snapshot_resampling_matrix.py
+python validation_runs/ansys_vertical_flap_fsi/scripts/run_traction_snapshot_resampling_matrix.py
 ```
 
 Regenerated artifacts must include:
@@ -250,19 +250,19 @@ Acceptance constraints:
 Run syntax checks:
 
 ```powershell
-& 'D:\working\taichi\env\python.exe' -m py_compile validation_runs/ansys_vertical_flap_fsi/scripts/run_traction_snapshot_resampling_matrix.py tests/integration/test_ansys_vertical_flap_traction_snapshot_resampling_artifacts.py
+python -m py_compile validation_runs/ansys_vertical_flap_fsi/scripts/run_traction_snapshot_resampling_matrix.py tests/integration/test_ansys_vertical_flap_traction_snapshot_resampling_artifacts.py
 ```
 
 Run the focused artifact contract test:
 
 ```powershell
-& 'D:\working\taichi\env\python.exe' -m unittest tests.integration.test_ansys_vertical_flap_traction_snapshot_resampling_artifacts -v
+python -m unittest tests.integration.test_ansys_vertical_flap_traction_snapshot_resampling_artifacts -v
 ```
 
 Run the related ANSYS traction artifact slice:
 
 ```powershell
-& 'D:\working\taichi\env\python.exe' -m unittest tests.integration.test_ansys_vertical_flap_traction_snapshot_resampling_artifacts tests.integration.test_ansys_vertical_flap_traction_shared_snapshot_artifacts tests.integration.test_ansys_vertical_flap_traction_probe_observability_artifacts tests.integration.test_ansys_vertical_flap_traction_formulation_artifacts -v
+python -m unittest tests.integration.test_ansys_vertical_flap_traction_snapshot_resampling_artifacts tests.integration.test_ansys_vertical_flap_traction_shared_snapshot_artifacts tests.integration.test_ansys_vertical_flap_traction_probe_observability_artifacts tests.integration.test_ansys_vertical_flap_traction_formulation_artifacts -v
 ```
 
 Run whitespace verification:
