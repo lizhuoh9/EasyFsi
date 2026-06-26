@@ -55,6 +55,17 @@ from .reports import (
     HibmMpmVelocityDirichletBoundaryReport,
 )
 
+STRESS_PROBE_MODE_NAMES = {
+    0: "none",
+    1: "base_pressure",
+    2: "two_sided_pressure_jump",
+    3: "far_pressure_closure_inside_water",
+    4: "far_pressure_closure_outside_water",
+    5: "one_sided_inside_water",
+    6: "one_sided_outside_water",
+    7: "pressure_anchor_fallback",
+}
+
 
 def _debug_stage_progress(message: str) -> None:
     if os.environ.get("HIBM_DEBUG_STAGE_PROGRESS") == "1":
@@ -238,6 +249,16 @@ class HibmMpmSurfaceMarkers:
         self.A_gamma_m2 = ti.field(dtype=ti.f32, shape=self.marker_capacity)
         self.region_id = ti.field(dtype=ti.i32, shape=self.marker_capacity)
         self.t_gamma_pa = ti.Vector.field(3, dtype=ti.f64, shape=self.marker_capacity)
+        self.t_pressure_gamma_pa = ti.Vector.field(
+            3,
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
+        self.t_viscous_gamma_pa = ti.Vector.field(
+            3,
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
         self._stress_pressure_valid = ti.field(
             dtype=ti.i32,
             shape=self.marker_capacity,
@@ -263,6 +284,60 @@ class HibmMpmSurfaceMarkers:
             shape=self.marker_capacity,
         )
         self._stress_invalid_reason_code = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_base_pressure_pa = ti.field(
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
+        self._stress_inside_pressure_pa = ti.field(
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
+        self._stress_outside_pressure_pa = ti.field(
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
+        self._stress_pressure_jump_pa = ti.field(
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
+        self._stress_fluid_side_pressure_pa = ti.field(
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
+        self._stress_reference_pressure_pa = ti.field(
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
+        self._stress_inside_probe_rung = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_outside_probe_rung = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_inside_probe_distance_m = ti.field(
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
+        self._stress_outside_probe_distance_m = ti.field(
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
+        self._stress_inside_probe_cell = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_outside_probe_cell = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_probe_mode = ti.field(
             dtype=ti.i32,
             shape=self.marker_capacity,
         )
@@ -526,8 +601,35 @@ class HibmMpmSurfaceMarkers:
         )
         # Taichi zero-initializes fields, and (0, 0, 0) is a real cell
         # index: establish the unset sentinel before anyone can sample.
+        self._reset_stress_diagnostics_kernel(int(self.marker_capacity))
         self.reset_pressure_anchor_cells()
         self._reset_node_anchor_cell_unset_kernel()
+
+    @ti.kernel
+    def _reset_stress_diagnostics_kernel(self, marker_count: ti.i32):
+        for marker in range(marker_count):
+            self.t_pressure_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+            self.t_viscous_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+            self._stress_pressure_valid[marker] = 0
+            self._stress_viscous_mode[marker] = 0
+            self._stress_base_pressure_found[marker] = 0
+            self._stress_inside_pressure_found[marker] = 0
+            self._stress_outside_pressure_found[marker] = 0
+            self._stress_marker_anchor_available[marker] = 0
+            self._stress_invalid_reason_code[marker] = STRESS_INVALID_REASON_NONE
+            self._stress_base_pressure_pa[marker] = 0.0
+            self._stress_inside_pressure_pa[marker] = 0.0
+            self._stress_outside_pressure_pa[marker] = 0.0
+            self._stress_pressure_jump_pa[marker] = 0.0
+            self._stress_fluid_side_pressure_pa[marker] = 0.0
+            self._stress_reference_pressure_pa[marker] = 0.0
+            self._stress_inside_probe_rung[marker] = -1
+            self._stress_outside_probe_rung[marker] = -1
+            self._stress_inside_probe_distance_m[marker] = -1.0
+            self._stress_outside_probe_distance_m[marker] = -1.0
+            self._stress_inside_probe_cell[marker] = ti.Vector([-1, -1, -1])
+            self._stress_outside_probe_cell[marker] = ti.Vector([-1, -1, -1])
+            self._stress_probe_mode[marker] = 0
 
     @ti.kernel
     def _reset_pressure_anchor_cells_kernel(self):
@@ -550,6 +652,12 @@ class HibmMpmSurfaceMarkers:
         (-1, -1, -1) sentinel and stay on the invalid path in the sampler.
         """
         self._reset_pressure_anchor_cells_kernel()
+
+    def reset_stress_diagnostics(self, marker_count: int | None = None) -> None:
+        count = int(self.marker_count if marker_count is None else marker_count)
+        if count < 0 or count > self.marker_capacity:
+            raise ValueError("marker_count out of range")
+        self._reset_stress_diagnostics_kernel(count)
 
     def load_markers(
         self,
@@ -587,6 +695,7 @@ class HibmMpmSurfaceMarkers:
             self.region_id[marker] = int(region_ids[marker])
             self.t_gamma_pa[marker] = (0.0, 0.0, 0.0)
             self.F_gamma_n[marker] = (0.0, 0.0, 0.0)
+        self.reset_stress_diagnostics(count)
 
     def set_projection_triangles(
         self,
@@ -765,6 +874,7 @@ class HibmMpmSurfaceMarkers:
                 surface_region_id,
                 count,
             )
+        self.reset_stress_diagnostics(count)
         invalid_count = int(self.report_surface_field_load_invalid_marker_count[None])
         if invalid_count > 0:
             raise ValueError(
@@ -1338,6 +1448,22 @@ class HibmMpmSurfaceMarkers:
             diagnostic_base_pressure_found = 0
             if pressure_sample_valid:
                 diagnostic_base_pressure_found = 1
+            diagnostic_base_pressure_pa = ti.cast(pressure, ti.f64)
+            diagnostic_inside_pressure_pa = ti.cast(0.0, ti.f64)
+            diagnostic_outside_pressure_pa = ti.cast(0.0, ti.f64)
+            diagnostic_pressure_jump_pa = ti.cast(0.0, ti.f64)
+            diagnostic_fluid_side_pressure_pa = ti.cast(0.0, ti.f64)
+            diagnostic_reference_pressure_pa = ti.cast(0.0, ti.f64)
+            diagnostic_inside_probe_rung = -1
+            diagnostic_outside_probe_rung = -1
+            diagnostic_inside_probe_distance_m = ti.cast(-1.0, ti.f64)
+            diagnostic_outside_probe_distance_m = ti.cast(-1.0, ti.f64)
+            diagnostic_inside_probe_cell = ti.Vector([-1, -1, -1])
+            diagnostic_outside_probe_cell = ti.Vector([-1, -1, -1])
+            diagnostic_probe_mode = 0
+            if pressure_sample_valid:
+                diagnostic_fluid_side_pressure_pa = diagnostic_base_pressure_pa
+                diagnostic_probe_mode = 1
             diagnostic_inside_pressure_found = 0
             diagnostic_outside_pressure_found = 0
             diagnostic_marker_anchor_available = 0
@@ -1482,6 +1608,40 @@ class HibmMpmSurfaceMarkers:
                         if accept_pressure == 1:
                             outside_pressure = sample_pressure
                             outside_pressure_found = 1
+                            diagnostic_outside_pressure_pa = ti.cast(
+                                sample_pressure,
+                                ti.f64,
+                            )
+                            diagnostic_outside_probe_rung = probe_index
+                            diagnostic_outside_probe_distance_m = ti.cast(
+                                probe_distance,
+                                ti.f64,
+                            )
+                            diagnostic_outside_probe_cell = ti.Vector(
+                                [
+                                    ti.min(
+                                        ti.max(
+                                            ti.floor(outside_coordinate.x + 0.5, ti.i32),
+                                            0,
+                                        ),
+                                        nx - 1,
+                                    ),
+                                    ti.min(
+                                        ti.max(
+                                            ti.floor(outside_coordinate.y + 0.5, ti.i32),
+                                            0,
+                                        ),
+                                        ny - 1,
+                                    ),
+                                    ti.min(
+                                        ti.max(
+                                            ti.floor(outside_coordinate.z + 0.5, ti.i32),
+                                            0,
+                                        ),
+                                        nz - 1,
+                                    ),
+                                ]
+                            )
                         if accept_gradient == 1:
                             outside_gradient = sample_gradient
                             outside_gradient_found = 1
@@ -1552,6 +1712,40 @@ class HibmMpmSurfaceMarkers:
                         if accept_pressure == 1:
                             inside_pressure = sample_pressure
                             inside_pressure_found = 1
+                            diagnostic_inside_pressure_pa = ti.cast(
+                                sample_pressure,
+                                ti.f64,
+                            )
+                            diagnostic_inside_probe_rung = probe_index
+                            diagnostic_inside_probe_distance_m = ti.cast(
+                                probe_distance,
+                                ti.f64,
+                            )
+                            diagnostic_inside_probe_cell = ti.Vector(
+                                [
+                                    ti.min(
+                                        ti.max(
+                                            ti.floor(inside_coordinate.x + 0.5, ti.i32),
+                                            0,
+                                        ),
+                                        nx - 1,
+                                    ),
+                                    ti.min(
+                                        ti.max(
+                                            ti.floor(inside_coordinate.y + 0.5, ti.i32),
+                                            0,
+                                        ),
+                                        ny - 1,
+                                    ),
+                                    ti.min(
+                                        ti.max(
+                                            ti.floor(inside_coordinate.z + 0.5, ti.i32),
+                                            0,
+                                        ),
+                                        nz - 1,
+                                    ),
+                                ]
+                            )
                         if accept_gradient == 1:
                             inside_gradient = sample_gradient
                             inside_gradient_found = 1
@@ -1639,6 +1833,49 @@ class HibmMpmSurfaceMarkers:
                                 inside_pressure = sample_pressure
                                 inside_pressure_found = 1
                                 inside_found_extended = 1
+                                diagnostic_inside_pressure_pa = ti.cast(
+                                    sample_pressure,
+                                    ti.f64,
+                                )
+                                diagnostic_inside_probe_rung = 5 + probe_index
+                                diagnostic_inside_probe_distance_m = ti.cast(
+                                    probe_distance,
+                                    ti.f64,
+                                )
+                                diagnostic_inside_probe_cell = ti.Vector(
+                                    [
+                                        ti.min(
+                                            ti.max(
+                                                ti.floor(
+                                                    inside_coordinate.x + 0.5,
+                                                    ti.i32,
+                                                ),
+                                                0,
+                                            ),
+                                            nx - 1,
+                                        ),
+                                        ti.min(
+                                            ti.max(
+                                                ti.floor(
+                                                    inside_coordinate.y + 0.5,
+                                                    ti.i32,
+                                                ),
+                                                0,
+                                            ),
+                                            ny - 1,
+                                        ),
+                                        ti.min(
+                                            ti.max(
+                                                ti.floor(
+                                                    inside_coordinate.z + 0.5,
+                                                    ti.i32,
+                                                ),
+                                                0,
+                                            ),
+                                            nz - 1,
+                                        ),
+                                    ]
+                                )
                             if (
                                 sample_weight > 1.0e-12
                                 and sample_gradient_valid == 1
@@ -1799,9 +2036,45 @@ class HibmMpmSurfaceMarkers:
                                     if side_is_inside == 1:
                                         inside_pressure = sample_pressure
                                         inside_pressure_found = 1
+                                        diagnostic_inside_pressure_pa = ti.cast(
+                                            sample_pressure,
+                                            ti.f64,
+                                        )
+                                        diagnostic_inside_probe_rung = (
+                                            10 + extension_index // 2
+                                        )
+                                        diagnostic_inside_probe_distance_m = ti.cast(
+                                            rung_distance,
+                                            ti.f64,
+                                        )
+                                        diagnostic_inside_probe_cell = ti.Vector(
+                                            [
+                                                near_extension_i,
+                                                near_extension_j,
+                                                near_extension_k,
+                                            ]
+                                        )
                                     else:
                                         outside_pressure = sample_pressure
                                         outside_pressure_found = 1
+                                        diagnostic_outside_pressure_pa = ti.cast(
+                                            sample_pressure,
+                                            ti.f64,
+                                        )
+                                        diagnostic_outside_probe_rung = (
+                                            10 + extension_index // 2
+                                        )
+                                        diagnostic_outside_probe_distance_m = ti.cast(
+                                            rung_distance,
+                                            ti.f64,
+                                        )
+                                        diagnostic_outside_probe_cell = ti.Vector(
+                                            [
+                                                near_extension_i,
+                                                near_extension_j,
+                                                near_extension_k,
+                                            ]
+                                        )
                                     two_sided_found_extended = 1
                                 if (
                                     sample_weight > 1.0e-12
@@ -2218,6 +2491,31 @@ class HibmMpmSurfaceMarkers:
                         )
                 diagnostic_inside_pressure_found = inside_pressure_found
                 diagnostic_outside_pressure_found = outside_pressure_found
+                if pressure_sample_valid:
+                    diagnostic_inside_pressure_pa = ti.cast(inside_pressure, ti.f64)
+                    diagnostic_outside_pressure_pa = ti.cast(outside_pressure, ti.f64)
+                    diagnostic_pressure_jump_pa = ti.cast(
+                        inside_pressure - outside_pressure,
+                        ti.f64,
+                    )
+                    diagnostic_fluid_side_pressure_pa = ti.cast(
+                        inside_pressure,
+                        ti.f64,
+                    )
+                    diagnostic_reference_pressure_pa = ti.cast(
+                        outside_pressure,
+                        ti.f64,
+                    )
+                    if viscous_mode == 4 or viscous_mode == 6:
+                        diagnostic_fluid_side_pressure_pa = ti.cast(
+                            outside_pressure,
+                            ti.f64,
+                        )
+                        diagnostic_reference_pressure_pa = ti.cast(
+                            inside_pressure,
+                            ti.f64,
+                        )
+                    diagnostic_probe_mode = viscous_mode
             else:
                 if ti.static(viscosity_pa_s <= 0.0):
                     gradient = ti.Matrix.zero(ti.f32, 3, 3)
@@ -2261,6 +2559,7 @@ class HibmMpmSurfaceMarkers:
                     and gradient_valid == 0
                 ):
                     invalid_reason = STRESS_INVALID_REASON_VISCOUS_GRADIENT_MISSING
+                diagnostic_probe_mode = 0
             self._stress_base_pressure_found[marker] = diagnostic_base_pressure_found
             self._stress_inside_pressure_found[marker] = diagnostic_inside_pressure_found
             self._stress_outside_pressure_found[marker] = diagnostic_outside_pressure_found
@@ -2268,12 +2567,35 @@ class HibmMpmSurfaceMarkers:
                 diagnostic_marker_anchor_available
             )
             self._stress_invalid_reason_code[marker] = invalid_reason
+            self._stress_base_pressure_pa[marker] = diagnostic_base_pressure_pa
+            self._stress_inside_pressure_pa[marker] = diagnostic_inside_pressure_pa
+            self._stress_outside_pressure_pa[marker] = diagnostic_outside_pressure_pa
+            self._stress_pressure_jump_pa[marker] = diagnostic_pressure_jump_pa
+            self._stress_fluid_side_pressure_pa[marker] = (
+                diagnostic_fluid_side_pressure_pa
+            )
+            self._stress_reference_pressure_pa[marker] = diagnostic_reference_pressure_pa
+            self._stress_inside_probe_rung[marker] = diagnostic_inside_probe_rung
+            self._stress_outside_probe_rung[marker] = diagnostic_outside_probe_rung
+            self._stress_inside_probe_distance_m[marker] = (
+                diagnostic_inside_probe_distance_m
+            )
+            self._stress_outside_probe_distance_m[marker] = (
+                diagnostic_outside_probe_distance_m
+            )
+            self._stress_inside_probe_cell[marker] = diagnostic_inside_probe_cell
+            self._stress_outside_probe_cell[marker] = diagnostic_outside_probe_cell
+            self._stress_probe_mode[marker] = diagnostic_probe_mode
             if stress_sample_valid:
                 traction = pressure_traction
+                viscous_traction = ti.Vector([0.0, 0.0, 0.0])
                 if ti.static(viscosity_pa_s > 0.0):
                     viscous_stress = viscosity_pa_s * (gradient + gradient.transpose())
-                    traction = pressure_traction + viscous_stress @ normal
+                    viscous_traction = viscous_stress @ normal
+                    traction = pressure_traction + viscous_traction
                 self.t_gamma_pa[marker] = traction
+                self.t_pressure_gamma_pa[marker] = pressure_traction
+                self.t_viscous_gamma_pa[marker] = viscous_traction
                 self._stress_pressure_valid[marker] = 1
                 self._stress_viscous_mode[marker] = viscous_mode
                 self.report_stress_valid_marker_count[None] += 1
@@ -2283,6 +2605,8 @@ class HibmMpmSurfaceMarkers:
                 )
             else:
                 self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                self.t_pressure_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                self.t_viscous_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
                 self._stress_pressure_valid[marker] = 0
                 self._stress_viscous_mode[marker] = 0
                 self.report_stress_invalid_marker_count[None] += 1
@@ -2351,6 +2675,27 @@ class HibmMpmSurfaceMarkers:
             )
             traction = -pressure * normal
             pressure_sample_valid = pressure_weight > 1.0e-12
+            diagnostic_base_pressure_found = 0
+            if pressure_sample_valid:
+                diagnostic_base_pressure_found = 1
+            diagnostic_inside_pressure_found = 0
+            diagnostic_outside_pressure_found = 0
+            diagnostic_base_pressure_pa = ti.cast(pressure, ti.f64)
+            diagnostic_inside_pressure_pa = ti.cast(0.0, ti.f64)
+            diagnostic_outside_pressure_pa = ti.cast(0.0, ti.f64)
+            diagnostic_pressure_jump_pa = ti.cast(0.0, ti.f64)
+            diagnostic_fluid_side_pressure_pa = ti.cast(0.0, ti.f64)
+            diagnostic_reference_pressure_pa = ti.cast(0.0, ti.f64)
+            diagnostic_inside_probe_rung = -1
+            diagnostic_outside_probe_rung = -1
+            diagnostic_inside_probe_distance_m = ti.cast(-1.0, ti.f64)
+            diagnostic_outside_probe_distance_m = ti.cast(-1.0, ti.f64)
+            diagnostic_inside_probe_cell = ti.Vector([-1, -1, -1])
+            diagnostic_outside_probe_cell = ti.Vector([-1, -1, -1])
+            diagnostic_probe_mode = 0
+            if pressure_sample_valid:
+                diagnostic_fluid_side_pressure_pa = diagnostic_base_pressure_pa
+                diagnostic_probe_mode = 1
             if two_sided_pressure != 0:
                 i_near = ti.min(ti.max(ti.floor(grid_coordinate.x, ti.i32), 0), nx - 1)
                 j_near = ti.min(ti.max(ti.floor(grid_coordinate.y, ti.i32), 0), ny - 1)
@@ -2393,6 +2738,41 @@ class HibmMpmSurfaceMarkers:
                     if outside_found == 0 and outside_weight > 1.0e-12:
                         outside_pressure = sampled_outside
                         outside_found = 1
+                        diagnostic_outside_pressure_pa = ti.cast(
+                            sampled_outside,
+                            ti.f64,
+                        )
+                        diagnostic_outside_pressure_found = 1
+                        diagnostic_outside_probe_rung = probe_index
+                        diagnostic_outside_probe_distance_m = ti.cast(
+                            multiplier * probe_distance_m,
+                            ti.f64,
+                        )
+                        diagnostic_outside_probe_cell = ti.Vector(
+                            [
+                                ti.min(
+                                    ti.max(
+                                        ti.floor(outside_grid.x + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    nx - 1,
+                                ),
+                                ti.min(
+                                    ti.max(
+                                        ti.floor(outside_grid.y + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    ny - 1,
+                                ),
+                                ti.min(
+                                    ti.max(
+                                        ti.floor(outside_grid.z + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    nz - 1,
+                                ),
+                            ]
+                        )
                     inside_position = position - multiplier * probe_distance_m * normal
                     inside_grid = self._grid_coordinate_from_fields(
                         inside_position,
@@ -2419,6 +2799,41 @@ class HibmMpmSurfaceMarkers:
                     if inside_found == 0 and inside_weight > 1.0e-12:
                         inside_pressure = sampled_inside
                         inside_found = 1
+                        diagnostic_inside_pressure_pa = ti.cast(
+                            sampled_inside,
+                            ti.f64,
+                        )
+                        diagnostic_inside_pressure_found = 1
+                        diagnostic_inside_probe_rung = probe_index
+                        diagnostic_inside_probe_distance_m = ti.cast(
+                            multiplier * probe_distance_m,
+                            ti.f64,
+                        )
+                        diagnostic_inside_probe_cell = ti.Vector(
+                            [
+                                ti.min(
+                                    ti.max(
+                                        ti.floor(inside_grid.x + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    nx - 1,
+                                ),
+                                ti.min(
+                                    ti.max(
+                                        ti.floor(inside_grid.y + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    ny - 1,
+                                ),
+                                ti.min(
+                                    ti.max(
+                                        ti.floor(inside_grid.z + 0.5, ti.i32),
+                                        0,
+                                    ),
+                                    nz - 1,
+                                ),
+                            ]
+                        )
                 if (
                     one_sided_pressure_region_id != -1
                     and self.region_id[marker] == one_sided_pressure_region_id
@@ -2428,6 +2843,24 @@ class HibmMpmSurfaceMarkers:
                         inside_pressure - one_sided_reference_pressure_pa
                     ) * normal
                     pressure_sample_valid = True
+                    diagnostic_inside_pressure_pa = ti.cast(inside_pressure, ti.f64)
+                    diagnostic_outside_pressure_pa = ti.cast(
+                        one_sided_reference_pressure_pa,
+                        ti.f64,
+                    )
+                    diagnostic_pressure_jump_pa = ti.cast(
+                        inside_pressure - one_sided_reference_pressure_pa,
+                        ti.f64,
+                    )
+                    diagnostic_fluid_side_pressure_pa = ti.cast(
+                        inside_pressure,
+                        ti.f64,
+                    )
+                    diagnostic_reference_pressure_pa = ti.cast(
+                        one_sided_reference_pressure_pa,
+                        ti.f64,
+                    )
+                    diagnostic_probe_mode = 5
                     ti.atomic_add(
                         self.report_stress_one_sided_pressure_marker_count[None],
                         1,
@@ -2441,6 +2874,24 @@ class HibmMpmSurfaceMarkers:
                         one_sided_reference_pressure_pa - outside_pressure
                     ) * normal
                     pressure_sample_valid = True
+                    diagnostic_inside_pressure_pa = ti.cast(
+                        one_sided_reference_pressure_pa,
+                        ti.f64,
+                    )
+                    diagnostic_outside_pressure_pa = ti.cast(outside_pressure, ti.f64)
+                    diagnostic_pressure_jump_pa = ti.cast(
+                        one_sided_reference_pressure_pa - outside_pressure,
+                        ti.f64,
+                    )
+                    diagnostic_fluid_side_pressure_pa = ti.cast(
+                        outside_pressure,
+                        ti.f64,
+                    )
+                    diagnostic_reference_pressure_pa = ti.cast(
+                        one_sided_reference_pressure_pa,
+                        ti.f64,
+                    )
+                    diagnostic_probe_mode = 6
                     ti.atomic_add(
                         self.report_stress_one_sided_pressure_marker_count[None],
                         1,
@@ -2448,16 +2899,67 @@ class HibmMpmSurfaceMarkers:
                 elif outside_found != 0 and inside_found != 0:
                     traction = (inside_pressure - outside_pressure) * normal
                     pressure_sample_valid = True
+                    diagnostic_inside_pressure_pa = ti.cast(inside_pressure, ti.f64)
+                    diagnostic_outside_pressure_pa = ti.cast(outside_pressure, ti.f64)
+                    diagnostic_pressure_jump_pa = ti.cast(
+                        inside_pressure - outside_pressure,
+                        ti.f64,
+                    )
+                    diagnostic_fluid_side_pressure_pa = ti.cast(
+                        inside_pressure,
+                        ti.f64,
+                    )
+                    diagnostic_reference_pressure_pa = ti.cast(
+                        outside_pressure,
+                        ti.f64,
+                    )
+                    diagnostic_probe_mode = 2
                     ti.atomic_add(
                         self.report_stress_two_sided_pressure_marker_count[None],
                         1,
                     )
                 else:
                     pressure_sample_valid = False
+            invalid_reason = STRESS_INVALID_REASON_NONE
+            if not pressure_sample_valid:
+                if diagnostic_base_pressure_found == 0:
+                    invalid_reason = STRESS_INVALID_REASON_BASE_PRESSURE_MISSING
+                if two_sided_pressure != 0 and (
+                    diagnostic_inside_pressure_found == 0
+                    or diagnostic_outside_pressure_found == 0
+                ):
+                    invalid_reason = STRESS_INVALID_REASON_TWO_SIDED_PRESSURE_MISSING
+                diagnostic_probe_mode = 0
+            self._stress_base_pressure_found[marker] = diagnostic_base_pressure_found
+            self._stress_inside_pressure_found[marker] = diagnostic_inside_pressure_found
+            self._stress_outside_pressure_found[marker] = diagnostic_outside_pressure_found
+            self._stress_marker_anchor_available[marker] = 0
+            self._stress_invalid_reason_code[marker] = invalid_reason
+            self._stress_base_pressure_pa[marker] = diagnostic_base_pressure_pa
+            self._stress_inside_pressure_pa[marker] = diagnostic_inside_pressure_pa
+            self._stress_outside_pressure_pa[marker] = diagnostic_outside_pressure_pa
+            self._stress_pressure_jump_pa[marker] = diagnostic_pressure_jump_pa
+            self._stress_fluid_side_pressure_pa[marker] = (
+                diagnostic_fluid_side_pressure_pa
+            )
+            self._stress_reference_pressure_pa[marker] = diagnostic_reference_pressure_pa
+            self._stress_inside_probe_rung[marker] = diagnostic_inside_probe_rung
+            self._stress_outside_probe_rung[marker] = diagnostic_outside_probe_rung
+            self._stress_inside_probe_distance_m[marker] = (
+                diagnostic_inside_probe_distance_m
+            )
+            self._stress_outside_probe_distance_m[marker] = (
+                diagnostic_outside_probe_distance_m
+            )
+            self._stress_inside_probe_cell[marker] = diagnostic_inside_probe_cell
+            self._stress_outside_probe_cell[marker] = diagnostic_outside_probe_cell
+            self._stress_probe_mode[marker] = diagnostic_probe_mode
             if pressure_sample_valid:
                 self.t_gamma_pa[marker] = traction
+                self.t_pressure_gamma_pa[marker] = traction
+                self.t_viscous_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
                 self._stress_pressure_valid[marker] = 1
-                self._stress_viscous_mode[marker] = 0
+                self._stress_viscous_mode[marker] = diagnostic_probe_mode
                 self.report_stress_valid_marker_count[None] += 1
                 ti.atomic_max(
                     self.report_stress_max_abs_traction_pa[None],
@@ -2465,6 +2967,8 @@ class HibmMpmSurfaceMarkers:
                 )
             else:
                 self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                self.t_pressure_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                self.t_viscous_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
                 self._stress_pressure_valid[marker] = 0
                 self._stress_viscous_mode[marker] = 0
                 self.report_stress_invalid_marker_count[None] += 1
@@ -2955,7 +3459,17 @@ class HibmMpmSurfaceMarkers:
                     )
                     if gradient_valid == 0:
                         self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                        self.t_pressure_gamma_pa[marker] = ti.Vector(
+                            [0.0, 0.0, 0.0]
+                        )
+                        self.t_viscous_gamma_pa[marker] = ti.Vector(
+                            [0.0, 0.0, 0.0]
+                        )
                         self._stress_pressure_valid[marker] = 0
+                        self._stress_invalid_reason_code[marker] = (
+                            STRESS_INVALID_REASON_VISCOUS_GRADIENT_MISSING
+                        )
+                        self._stress_probe_mode[marker] = 0
                         ti.atomic_add(
                             self.report_stress_valid_marker_count[None],
                             -1,
@@ -2975,7 +3489,89 @@ class HibmMpmSurfaceMarkers:
                     viscous_stress = viscosity_pa_s * (
                         gradient + gradient.transpose()
                     )
-                    traction = self.t_gamma_pa[marker] + viscous_stress @ normal
+                    viscous_traction = viscous_stress @ normal
+                    self.t_viscous_gamma_pa[marker] = viscous_traction
+                    traction = self.t_pressure_gamma_pa[marker] + viscous_traction
+                    self.t_gamma_pa[marker] = traction
+                    ti.atomic_max(
+                        self.report_stress_max_abs_traction_pa[None],
+                        traction.norm(),
+                    )
+
+    @ti.kernel
+    def _add_base_viscous_marker_tractions_kernel(
+        self,
+        velocity_field: ti.template(),
+        obstacle_field: ti.template(),
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+        marker_count: ti.i32,
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+        viscosity_pa_s: ti.f32,
+    ):
+        self.report_stress_max_abs_traction_pa[None] = 0.0
+        self.report_stress_viscous_gradient_invalid_marker_count[None] = 0
+        self.report_stress_closure_gradient_missing_marker_count[None] = 0
+        self.report_stress_one_sided_gradient_missing_marker_count[None] = 0
+        for marker in range(marker_count):
+            if self._stress_pressure_valid[marker] != 0:
+                position = self.x_gamma_m[marker]
+                normal = self.n_gamma[marker]
+                grid_coordinate = self._grid_coordinate_from_fields(
+                    position,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    nx,
+                    ny,
+                    nz,
+                )
+                gradient, gradient_valid = self._sample_velocity_gradient(
+                    velocity_field,
+                    obstacle_field,
+                    grid_coordinate.x,
+                    grid_coordinate.y,
+                    grid_coordinate.z,
+                    nx,
+                    ny,
+                    nz,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                )
+                if gradient_valid == 0:
+                    self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                    self.t_pressure_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                    self.t_viscous_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                    self._stress_pressure_valid[marker] = 0
+                    self._stress_invalid_reason_code[marker] = (
+                        STRESS_INVALID_REASON_VISCOUS_GRADIENT_MISSING
+                    )
+                    self._stress_probe_mode[marker] = 0
+                    ti.atomic_add(self.report_stress_valid_marker_count[None], -1)
+                    ti.atomic_add(self.report_stress_invalid_marker_count[None], 1)
+                    ti.atomic_add(
+                        self.report_stress_viscous_gradient_invalid_marker_count[
+                            None
+                        ],
+                        1,
+                    )
+                else:
+                    viscous_stress = viscosity_pa_s * (
+                        gradient + gradient.transpose()
+                    )
+                    viscous_traction = viscous_stress @ normal
+                    self.t_viscous_gamma_pa[marker] = viscous_traction
+                    traction = self.t_pressure_gamma_pa[marker] + viscous_traction
                     self.t_gamma_pa[marker] = traction
                     ti.atomic_max(
                         self.report_stress_max_abs_traction_pa[None],
@@ -3048,7 +3644,17 @@ class HibmMpmSurfaceMarkers:
                     )
                     if gradient_valid == 0:
                         self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                        self.t_pressure_gamma_pa[marker] = ti.Vector(
+                            [0.0, 0.0, 0.0]
+                        )
+                        self.t_viscous_gamma_pa[marker] = ti.Vector(
+                            [0.0, 0.0, 0.0]
+                        )
                         self._stress_pressure_valid[marker] = 0
+                        self._stress_invalid_reason_code[marker] = (
+                            STRESS_INVALID_REASON_VISCOUS_GRADIENT_MISSING
+                        )
+                        self._stress_probe_mode[marker] = 0
                         ti.atomic_add(self.report_stress_valid_marker_count[None], -1)
                         ti.atomic_add(self.report_stress_invalid_marker_count[None], 1)
                         ti.atomic_add(
@@ -3345,7 +3951,9 @@ class HibmMpmSurfaceMarkers:
                     viscous_stress = viscosity_pa_s * (
                         gradient + gradient.transpose()
                     )
-                    traction = self.t_gamma_pa[marker] + viscous_stress @ normal
+                    viscous_traction = viscous_stress @ normal
+                    self.t_viscous_gamma_pa[marker] = viscous_traction
+                    traction = self.t_pressure_gamma_pa[marker] + viscous_traction
                     self.t_gamma_pa[marker] = traction
                     ti.atomic_max(
                         self.report_stress_max_abs_traction_pa[None],
@@ -3424,7 +4032,17 @@ class HibmMpmSurfaceMarkers:
                     )
                     if gradient_valid == 0:
                         self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
+                        self.t_pressure_gamma_pa[marker] = ti.Vector(
+                            [0.0, 0.0, 0.0]
+                        )
+                        self.t_viscous_gamma_pa[marker] = ti.Vector(
+                            [0.0, 0.0, 0.0]
+                        )
                         self._stress_pressure_valid[marker] = 0
+                        self._stress_invalid_reason_code[marker] = (
+                            STRESS_INVALID_REASON_VISCOUS_GRADIENT_MISSING
+                        )
+                        self._stress_probe_mode[marker] = 0
                         ti.atomic_add(self.report_stress_valid_marker_count[None], -1)
                         ti.atomic_add(self.report_stress_invalid_marker_count[None], 1)
                         ti.atomic_add(
@@ -3741,7 +4359,9 @@ class HibmMpmSurfaceMarkers:
                     viscous_stress = viscosity_pa_s * (
                         gradient + gradient.transpose()
                     )
-                    traction = self.t_gamma_pa[marker] + viscous_stress @ normal
+                    viscous_traction = viscous_stress @ normal
+                    self.t_viscous_gamma_pa[marker] = viscous_traction
+                    traction = self.t_pressure_gamma_pa[marker] + viscous_traction
                     self.t_gamma_pa[marker] = traction
                     ti.atomic_max(
                         self.report_stress_max_abs_traction_pa[None],
@@ -3852,6 +4472,15 @@ class HibmMpmSurfaceMarkers:
             and node_anchor_was_none
             and sampling_obstacle_was_none
         )
+        base_viscous_split_path = (
+            viscosity > 0.0
+            and not bool(two_sided_pressure)
+            and far_region_id < 0
+            and one_sided_region_id < 0
+            and not bool(use_pressure_anchor_fallback)
+            and node_anchor_was_none
+            and sampling_obstacle_was_none
+        )
         split_viscous_path = viscosity > 0.0 and bool(two_sided_pressure)
         if pressure_only_fast_path:
             _debug_stage_progress("stress_sampling:pressure_only:start")
@@ -3876,6 +4505,46 @@ class HibmMpmSurfaceMarkers:
                 one_sided_reference_pressure,
             )
             _debug_stage_progress("stress_sampling:pressure_only:done")
+        elif base_viscous_split_path:
+            _debug_stage_progress("stress_sampling:base_pressure:start")
+            self._sample_pressure_only_marker_tractions_kernel(
+                pressure_field,
+                obstacle_field,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+                cell_width_x_m,
+                cell_width_y_m,
+                cell_width_z_m,
+                int(self.marker_count),
+                int(nodes[0]),
+                int(nodes[1]),
+                int(nodes[2]),
+                0,
+                -1,
+                0.0,
+            )
+            _debug_stage_progress("stress_sampling:base_pressure:done")
+            _debug_stage_progress("stress_sampling:base_viscous:start")
+            self._add_base_viscous_marker_tractions_kernel(
+                velocity_field,
+                obstacle_field,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+                int(self.marker_count),
+                int(nodes[0]),
+                int(nodes[1]),
+                int(nodes[2]),
+                viscosity,
+            )
+            _debug_stage_progress("stress_sampling:base_viscous:done")
         elif split_viscous_path:
             _debug_stage_progress("stress_sampling:split_pressure:start")
             self._sample_fluid_stress_to_marker_tractions_kernel(
@@ -4183,12 +4852,51 @@ class HibmMpmSurfaceMarkers:
         invalid_reason_code = self._stress_invalid_reason_code.to_numpy()[
             :marker_count
         ]
+        base_pressure_pa = self._stress_base_pressure_pa.to_numpy()[:marker_count]
+        inside_pressure_pa = self._stress_inside_pressure_pa.to_numpy()[:marker_count]
+        outside_pressure_pa = self._stress_outside_pressure_pa.to_numpy()[:marker_count]
+        pressure_jump_pa = self._stress_pressure_jump_pa.to_numpy()[:marker_count]
+        fluid_side_pressure_pa = self._stress_fluid_side_pressure_pa.to_numpy()[
+            :marker_count
+        ]
+        reference_pressure_pa = self._stress_reference_pressure_pa.to_numpy()[
+            :marker_count
+        ]
+        inside_probe_rung = self._stress_inside_probe_rung.to_numpy()[:marker_count]
+        outside_probe_rung = self._stress_outside_probe_rung.to_numpy()[:marker_count]
+        inside_probe_distance_m = self._stress_inside_probe_distance_m.to_numpy()[
+            :marker_count
+        ]
+        outside_probe_distance_m = self._stress_outside_probe_distance_m.to_numpy()[
+            :marker_count
+        ]
+        inside_probe_cell = self._stress_inside_probe_cell.to_numpy()[:marker_count]
+        outside_probe_cell = self._stress_outside_probe_cell.to_numpy()[:marker_count]
+        probe_mode = self._stress_probe_mode.to_numpy()[:marker_count]
+        pressure_traction = self.t_pressure_gamma_pa.to_numpy()[:marker_count]
+        viscous_traction = self.t_viscous_gamma_pa.to_numpy()[:marker_count]
+        total_traction = self.t_gamma_pa.to_numpy()[:marker_count]
         positions = self.x_gamma_m.to_numpy()[:marker_count]
         normals = self.n_gamma.to_numpy()[:marker_count]
         regions = self.region_id.to_numpy()[:marker_count]
         diagnostics: list[dict[str, Any]] = []
         for marker in range(marker_count):
             reason_code = int(invalid_reason_code[marker])
+            pressure_traction_vector = [
+                float(value) for value in pressure_traction[marker]
+            ]
+            viscous_traction_vector = [
+                float(value) for value in viscous_traction[marker]
+            ]
+            total_traction_vector = [float(value) for value in total_traction[marker]]
+            traction_decomposition_residual = float(
+                np.linalg.norm(
+                    total_traction[marker]
+                    - pressure_traction[marker]
+                    - viscous_traction[marker]
+                )
+            )
+            mode_code = int(probe_mode[marker])
             diagnostics.append(
                 {
                     "marker_index": int(marker),
@@ -4205,12 +4913,148 @@ class HibmMpmSurfaceMarkers:
                     "pressure_anchor_available": bool(
                         int(marker_anchor_available[marker])
                     ),
+                    "probe_mode": STRESS_PROBE_MODE_NAMES.get(
+                        mode_code,
+                        f"unknown_{mode_code}",
+                    ),
+                    "probe_mode_code": mode_code,
+                    "base_pressure_pa": float(base_pressure_pa[marker]),
+                    "inside_pressure_pa": float(inside_pressure_pa[marker]),
+                    "outside_pressure_pa": float(outside_pressure_pa[marker]),
+                    "pressure_jump_pa": float(pressure_jump_pa[marker]),
+                    "fluid_side_pressure_pa": float(fluid_side_pressure_pa[marker]),
+                    "reference_pressure_pa": float(reference_pressure_pa[marker]),
+                    "inside_probe_rung": int(inside_probe_rung[marker]),
+                    "outside_probe_rung": int(outside_probe_rung[marker]),
+                    "inside_probe_distance_m": float(
+                        inside_probe_distance_m[marker]
+                    ),
+                    "outside_probe_distance_m": float(
+                        outside_probe_distance_m[marker]
+                    ),
+                    "inside_probe_cell": [
+                        int(value) for value in inside_probe_cell[marker]
+                    ],
+                    "outside_probe_cell": [
+                        int(value) for value in outside_probe_cell[marker]
+                    ],
+                    "pressure_traction_pa": pressure_traction_vector,
+                    "viscous_traction_pa": viscous_traction_vector,
+                    "total_traction_pa": total_traction_vector,
+                    "traction_decomposition_residual_pa": (
+                        traction_decomposition_residual
+                    ),
                     "position_m": [float(value) for value in positions[marker]],
                     "normal": [float(value) for value in normals[marker]],
                     "region_id": int(regions[marker]),
                 }
             )
         return tuple(diagnostics)
+
+    def stress_face_diagnostics(
+        self,
+        *,
+        primary_region_id: int,
+        secondary_region_id: int | None = None,
+        streamwise_axis_index: int = 2,
+    ) -> dict[str, object]:
+        diagnostics = self.stress_marker_diagnostics()
+
+        def _mean(valid_markers: list[dict[str, Any]], field: str) -> float | str:
+            if not valid_markers:
+                return ""
+            return float(np.mean([float(marker[field]) for marker in valid_markers]))
+
+        def _mean_vector_component(
+            valid_markers: list[dict[str, Any]],
+            field: str,
+            component: int,
+        ) -> float | str:
+            if not valid_markers:
+                return ""
+            return float(
+                np.mean(
+                    [
+                        float(marker[field][component])
+                        for marker in valid_markers
+                    ]
+                )
+            )
+
+        def _summarize(prefix: str, region_id: int) -> dict[str, object]:
+            face_markers = [
+                marker
+                for marker in diagnostics
+                if int(marker["region_id"]) == int(region_id)
+            ]
+            valid_markers = [
+                marker for marker in face_markers if bool(marker["valid"])
+            ]
+            invalid_markers = [
+                marker for marker in face_markers if not bool(marker["valid"])
+            ]
+            pressure_complete_markers = [
+                marker
+                for marker in valid_markers
+                if bool(marker["inside_pressure_found"])
+                and bool(marker["outside_pressure_found"])
+            ]
+            return {
+                f"{prefix}_face_marker_count": len(face_markers),
+                f"{prefix}_face_valid_marker_count": len(valid_markers),
+                f"{prefix}_face_invalid_marker_count": len(invalid_markers),
+                f"{prefix}_face_pressure_complete_marker_count": len(
+                    pressure_complete_markers
+                ),
+                f"{prefix}_face_mean_pressure_pa": _mean(
+                    valid_markers,
+                    "pressure_jump_pa",
+                ),
+                f"{prefix}_face_mean_pressure_jump_pa": _mean(
+                    valid_markers,
+                    "pressure_jump_pa",
+                ),
+                f"{prefix}_face_mean_inside_pressure_pa": _mean(
+                    valid_markers,
+                    "inside_pressure_pa",
+                ),
+                f"{prefix}_face_mean_outside_pressure_pa": _mean(
+                    valid_markers,
+                    "outside_pressure_pa",
+                ),
+                f"{prefix}_face_mean_fluid_side_pressure_pa": _mean(
+                    valid_markers,
+                    "fluid_side_pressure_pa",
+                ),
+                f"{prefix}_face_mean_reference_pressure_pa": _mean(
+                    valid_markers,
+                    "reference_pressure_pa",
+                ),
+                f"{prefix}_face_mean_traction_z_pa": _mean_vector_component(
+                    valid_markers,
+                    "total_traction_pa",
+                    int(streamwise_axis_index),
+                ),
+                f"{prefix}_face_mean_pressure_traction_z_pa": (
+                    _mean_vector_component(
+                        valid_markers,
+                        "pressure_traction_pa",
+                        int(streamwise_axis_index),
+                    )
+                ),
+                f"{prefix}_face_mean_viscous_traction_z_pa": (
+                    _mean_vector_component(
+                        valid_markers,
+                        "viscous_traction_pa",
+                        int(streamwise_axis_index),
+                    )
+                ),
+            }
+
+        result = _summarize("primary", int(primary_region_id))
+        if secondary_region_id is not None:
+            result.update(_summarize("secondary", int(secondary_region_id)))
+        return result
 
     @ti.kernel
     def _mark_far_pressure_air_backed_seed_components_kernel(

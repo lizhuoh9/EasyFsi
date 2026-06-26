@@ -228,6 +228,78 @@ class AnsysVerticalFlapTractionFormulationArtifactTests(unittest.TestCase):
         self.assertEqual(payload["reference_formulation_candidate"], "none")
         self.assertIn("full_field_reset_used", payload["candidate_blockers"])
 
+    def test_candidate_gate_blocks_missing_full_field_reset_status(self):
+        rows = _stable_synthetic_rows()
+        rows[0] = dict(rows[0])
+        rows[0].pop("flow_driver_uses_full_velocity_reset")
+        payload = traction_matrix._payload(traction_matrix._apply_baseline_comparisons(rows))
+
+        self.assertEqual(payload["reference_formulation_candidate"], "none")
+        self.assertIn(
+            "full_field_reset_status_missing",
+            payload["candidate_blockers"],
+        )
+
+    def test_candidate_gate_blocks_marker_count_inconsistency(self):
+        cases = [
+            ("primary_face_marker_count", 12.5, "marker_count_nonintegral"),
+            ("primary_face_marker_count", 11, "marker_count_inconsistent"),
+            (
+                "primary_face_valid_marker_count",
+                11,
+                "valid_invalid_marker_count_inconsistent",
+            ),
+        ]
+        for field, value, blocker in cases:
+            with self.subTest(field=field):
+                rows = _stable_synthetic_rows()
+                rows[0] = dict(rows[0], **{field: value})
+                payload = traction_matrix._payload(
+                    traction_matrix._apply_baseline_comparisons(rows)
+                )
+
+                self.assertEqual(payload["reference_formulation_candidate"], "none")
+                self.assertIn(blocker, payload["candidate_blockers"])
+
+    def test_candidate_gate_pressure_probe_completeness_is_layout_aware(self):
+        rows = _stable_synthetic_rows()
+        single_mid = dict(rows[2])
+        single_mid["secondary_face_mean_pressure_pa"] = ""
+        single_mid["secondary_face_mean_pressure_jump_pa"] = ""
+        single_mid["secondary_face_mean_inside_pressure_pa"] = ""
+        single_mid["secondary_face_mean_outside_pressure_pa"] = ""
+        rows[2] = single_mid
+        payload = traction_matrix._payload(traction_matrix._apply_baseline_comparisons(rows))
+
+        self.assertEqual(
+            payload["reference_formulation_candidate"],
+            "dual_two_sided_offset0p51_pressure_only",
+        )
+        self.assertNotIn(
+            "pressure_probe_diagnostics_incomplete",
+            payload["candidate_blockers"],
+        )
+
+        rows = _stable_synthetic_rows()
+        rows[0] = dict(rows[0], secondary_face_mean_outside_pressure_pa="")
+        payload = traction_matrix._payload(traction_matrix._apply_baseline_comparisons(rows))
+
+        self.assertEqual(payload["reference_formulation_candidate"], "none")
+        self.assertIn(
+            "pressure_probe_diagnostics_incomplete",
+            payload["candidate_blockers"],
+        )
+
+        rows = _stable_synthetic_rows()
+        rows[2] = dict(rows[2], primary_face_mean_inside_pressure_pa="")
+        payload = traction_matrix._payload(traction_matrix._apply_baseline_comparisons(rows))
+
+        self.assertEqual(payload["reference_formulation_candidate"], "none")
+        self.assertIn(
+            "pressure_probe_diagnostics_incomplete",
+            payload["candidate_blockers"],
+        )
+
     def test_candidate_gate_blocks_formulation_disagreement(self):
         rows = _stable_synthetic_rows()
         rows[1] = dict(rows[1], total_force_z_N=-60.0)
@@ -375,6 +447,10 @@ def _synthetic_completed_row(
 ) -> dict[str, object]:
     primary = total_force_z * 0.6
     secondary = total_force_z - primary
+    primary_marker_count = 24 if marker_layout == "single_mid_surface" else 12
+    secondary_marker_count = 0 if marker_layout == "single_mid_surface" else 12
+    total_marker_count = primary_marker_count + secondary_marker_count
+    secondary_pressure = "" if secondary_marker_count == 0 else 1.0
     return {
         "scenario": scenario,
         "run_status": "completed",
@@ -385,7 +461,11 @@ def _synthetic_completed_row(
         "marker_face_offset_cells": marker_face_offset_cells,
         "step_count": 0,
         "preflow_steps": 20,
-        "total_marker_count": 24,
+        "total_marker_count": total_marker_count,
+        "primary_face_marker_count": primary_marker_count,
+        "secondary_face_marker_count": secondary_marker_count,
+        "primary_face_valid_marker_count": primary_marker_count,
+        "secondary_face_valid_marker_count": secondary_marker_count,
         "primary_face_invalid_marker_count": 0,
         "secondary_face_invalid_marker_count": 0,
         "primary_face_force_z_N": primary,
@@ -396,7 +476,23 @@ def _synthetic_completed_row(
         "marker_action_reaction_residual_N": 0.0,
         "scatter_action_reaction_residual_N": 0.0,
         "primary_face_mean_pressure_pa": 1.0,
-        "secondary_face_mean_pressure_pa": 1.0,
+        "secondary_face_mean_pressure_pa": secondary_pressure,
+        "primary_face_mean_pressure_jump_pa": 1.0,
+        "secondary_face_mean_pressure_jump_pa": secondary_pressure,
+        "primary_face_mean_inside_pressure_pa": 2.0,
+        "secondary_face_mean_inside_pressure_pa": (
+            "" if secondary_marker_count == 0 else 2.0
+        ),
+        "primary_face_mean_outside_pressure_pa": 1.0,
+        "secondary_face_mean_outside_pressure_pa": secondary_pressure,
+        "primary_face_mean_fluid_side_pressure_pa": 2.0,
+        "secondary_face_mean_fluid_side_pressure_pa": (
+            "" if secondary_marker_count == 0 else 2.0
+        ),
+        "primary_face_mean_reference_pressure_pa": 1.0,
+        "secondary_face_mean_reference_pressure_pa": secondary_pressure,
+        "primary_face_pressure_complete_marker_count": primary_marker_count,
+        "secondary_face_pressure_complete_marker_count": secondary_marker_count,
         "flow_driver_uses_full_velocity_reset": False,
         "final_velocity_peak_mps": 22.0,
         "final_velocity_p999_mps": 20.0,

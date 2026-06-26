@@ -217,6 +217,14 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             1,
         )
 
+    def test_formal_runner_uses_public_stress_face_diagnostics(self):
+        source = inspect.getsource(solid_mpm_fsi_runner._marker_traction_report_fields)
+
+        self.assertIn("stress_face_diagnostics(", source)
+        self.assertNotIn("._stress_pressure_valid", source)
+        self.assertNotIn("._stress_inside_pressure_found", source)
+        self.assertNotIn("._stress_outside_pressure_found", source)
+
     def test_solid_substep_cfl_report_preserves_explicit_higher_count(self):
         unstable = VerticalFlapFsiConfig(
             grid_nodes=(4, 320, 640),

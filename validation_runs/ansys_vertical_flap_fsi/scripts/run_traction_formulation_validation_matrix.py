@@ -61,7 +61,7 @@ SCOPE_LIMIT = (
     "Fluent parity claim"
 )
 PRESSURE_MEAN_STATUS = (
-    "not_exposed_by_current_core; force and traction counters are archived"
+    "exposed_by_core_stress_face_diagnostics; mean field is pressure_jump_pa"
 )
 
 REQUIRED_SCENARIOS = (
@@ -105,8 +105,24 @@ MATRIX_COLUMNS = [
     "scatter_action_reaction_residual_N",
     "primary_face_mean_pressure_pa",
     "secondary_face_mean_pressure_pa",
+    "primary_face_mean_pressure_jump_pa",
+    "secondary_face_mean_pressure_jump_pa",
+    "primary_face_mean_inside_pressure_pa",
+    "secondary_face_mean_inside_pressure_pa",
+    "primary_face_mean_outside_pressure_pa",
+    "secondary_face_mean_outside_pressure_pa",
+    "primary_face_mean_fluid_side_pressure_pa",
+    "secondary_face_mean_fluid_side_pressure_pa",
+    "primary_face_mean_reference_pressure_pa",
+    "secondary_face_mean_reference_pressure_pa",
+    "primary_face_pressure_complete_marker_count",
+    "secondary_face_pressure_complete_marker_count",
     "primary_face_mean_traction_z_pa",
     "secondary_face_mean_traction_z_pa",
+    "primary_face_mean_pressure_traction_z_pa",
+    "secondary_face_mean_pressure_traction_z_pa",
+    "primary_face_mean_viscous_traction_z_pa",
+    "secondary_face_mean_viscous_traction_z_pa",
     "max_abs_traction_pa",
     "two_sided_pressure_marker_count",
     "one_sided_pressure_marker_count",
@@ -130,6 +146,7 @@ MATRIX_COLUMNS = [
     "worker_elapsed_s",
     "worker_stdout_log",
     "worker_stderr_log",
+    "flow_driver_uses_full_velocity_reset",
     "elapsed_s",
     "error",
 ]
@@ -169,6 +186,24 @@ HISTORY_COLUMNS = [
     "secondary_face_invalid_marker_count",
     "primary_face_mean_traction_z_pa",
     "secondary_face_mean_traction_z_pa",
+    "primary_face_mean_pressure_pa",
+    "secondary_face_mean_pressure_pa",
+    "primary_face_mean_pressure_jump_pa",
+    "secondary_face_mean_pressure_jump_pa",
+    "primary_face_mean_inside_pressure_pa",
+    "secondary_face_mean_inside_pressure_pa",
+    "primary_face_mean_outside_pressure_pa",
+    "secondary_face_mean_outside_pressure_pa",
+    "primary_face_mean_fluid_side_pressure_pa",
+    "secondary_face_mean_fluid_side_pressure_pa",
+    "primary_face_mean_reference_pressure_pa",
+    "secondary_face_mean_reference_pressure_pa",
+    "primary_face_pressure_complete_marker_count",
+    "secondary_face_pressure_complete_marker_count",
+    "primary_face_mean_pressure_traction_z_pa",
+    "secondary_face_mean_pressure_traction_z_pa",
+    "primary_face_mean_viscous_traction_z_pa",
+    "secondary_face_mean_viscous_traction_z_pa",
     "max_abs_traction_pa",
     "two_sided_pressure_marker_count",
     "one_sided_pressure_marker_count",
@@ -509,12 +544,84 @@ def _history_row(scenario: str, raw: dict[str, Any]) -> dict[str, Any]:
             "secondary_face_invalid_marker_count",
             "",
         ),
+        "primary_face_mean_pressure_pa": raw.get(
+            "primary_face_mean_pressure_pa",
+            "",
+        ),
+        "secondary_face_mean_pressure_pa": raw.get(
+            "secondary_face_mean_pressure_pa",
+            "",
+        ),
+        "primary_face_mean_pressure_jump_pa": raw.get(
+            "primary_face_mean_pressure_jump_pa",
+            "",
+        ),
+        "secondary_face_mean_pressure_jump_pa": raw.get(
+            "secondary_face_mean_pressure_jump_pa",
+            "",
+        ),
+        "primary_face_mean_inside_pressure_pa": raw.get(
+            "primary_face_mean_inside_pressure_pa",
+            "",
+        ),
+        "secondary_face_mean_inside_pressure_pa": raw.get(
+            "secondary_face_mean_inside_pressure_pa",
+            "",
+        ),
+        "primary_face_mean_outside_pressure_pa": raw.get(
+            "primary_face_mean_outside_pressure_pa",
+            "",
+        ),
+        "secondary_face_mean_outside_pressure_pa": raw.get(
+            "secondary_face_mean_outside_pressure_pa",
+            "",
+        ),
+        "primary_face_mean_fluid_side_pressure_pa": raw.get(
+            "primary_face_mean_fluid_side_pressure_pa",
+            "",
+        ),
+        "secondary_face_mean_fluid_side_pressure_pa": raw.get(
+            "secondary_face_mean_fluid_side_pressure_pa",
+            "",
+        ),
+        "primary_face_mean_reference_pressure_pa": raw.get(
+            "primary_face_mean_reference_pressure_pa",
+            "",
+        ),
+        "secondary_face_mean_reference_pressure_pa": raw.get(
+            "secondary_face_mean_reference_pressure_pa",
+            "",
+        ),
+        "primary_face_pressure_complete_marker_count": raw.get(
+            "primary_face_pressure_complete_marker_count",
+            "",
+        ),
+        "secondary_face_pressure_complete_marker_count": raw.get(
+            "secondary_face_pressure_complete_marker_count",
+            "",
+        ),
         "primary_face_mean_traction_z_pa": raw.get(
             "primary_face_mean_traction_z_pa",
             "",
         ),
         "secondary_face_mean_traction_z_pa": raw.get(
             "secondary_face_mean_traction_z_pa",
+            "",
+        ),
+        "primary_face_mean_pressure_traction_z_pa": raw.get(
+            "primary_face_mean_pressure_traction_z_pa",
+            "",
+        ),
+        "secondary_face_mean_pressure_traction_z_pa": raw.get(
+            "secondary_face_mean_pressure_traction_z_pa",
+            "",
+        ),
+        "primary_face_mean_viscous_traction_z_pa": raw.get(
+            "primary_face_mean_viscous_traction_z_pa",
+            "",
+        ),
+        "secondary_face_mean_viscous_traction_z_pa": raw.get(
+            "secondary_face_mean_viscous_traction_z_pa",
             "",
         ),
         "max_abs_traction_pa": raw.get("max_abs_traction_pa", ""),
@@ -583,14 +690,84 @@ def _summary_row(
                 "scatter_action_reaction_residual_N",
                 "",
             ),
-            "primary_face_mean_pressure_pa": "",
-            "secondary_face_mean_pressure_pa": "",
+            "primary_face_mean_pressure_pa": final.get(
+                "primary_face_mean_pressure_pa",
+                "",
+            ),
+            "secondary_face_mean_pressure_pa": final.get(
+                "secondary_face_mean_pressure_pa",
+                "",
+            ),
+            "primary_face_mean_pressure_jump_pa": final.get(
+                "primary_face_mean_pressure_jump_pa",
+                "",
+            ),
+            "secondary_face_mean_pressure_jump_pa": final.get(
+                "secondary_face_mean_pressure_jump_pa",
+                "",
+            ),
+            "primary_face_mean_inside_pressure_pa": final.get(
+                "primary_face_mean_inside_pressure_pa",
+                "",
+            ),
+            "secondary_face_mean_inside_pressure_pa": final.get(
+                "secondary_face_mean_inside_pressure_pa",
+                "",
+            ),
+            "primary_face_mean_outside_pressure_pa": final.get(
+                "primary_face_mean_outside_pressure_pa",
+                "",
+            ),
+            "secondary_face_mean_outside_pressure_pa": final.get(
+                "secondary_face_mean_outside_pressure_pa",
+                "",
+            ),
+            "primary_face_mean_fluid_side_pressure_pa": final.get(
+                "primary_face_mean_fluid_side_pressure_pa",
+                "",
+            ),
+            "secondary_face_mean_fluid_side_pressure_pa": final.get(
+                "secondary_face_mean_fluid_side_pressure_pa",
+                "",
+            ),
+            "primary_face_mean_reference_pressure_pa": final.get(
+                "primary_face_mean_reference_pressure_pa",
+                "",
+            ),
+            "secondary_face_mean_reference_pressure_pa": final.get(
+                "secondary_face_mean_reference_pressure_pa",
+                "",
+            ),
+            "primary_face_pressure_complete_marker_count": final.get(
+                "primary_face_pressure_complete_marker_count",
+                "",
+            ),
+            "secondary_face_pressure_complete_marker_count": final.get(
+                "secondary_face_pressure_complete_marker_count",
+                "",
+            ),
             "primary_face_mean_traction_z_pa": final.get(
                 "primary_face_mean_traction_z_pa",
                 "",
             ),
             "secondary_face_mean_traction_z_pa": final.get(
                 "secondary_face_mean_traction_z_pa",
+                "",
+            ),
+            "primary_face_mean_pressure_traction_z_pa": final.get(
+                "primary_face_mean_pressure_traction_z_pa",
+                "",
+            ),
+            "secondary_face_mean_pressure_traction_z_pa": final.get(
+                "secondary_face_mean_pressure_traction_z_pa",
+                "",
+            ),
+            "primary_face_mean_viscous_traction_z_pa": final.get(
+                "primary_face_mean_viscous_traction_z_pa",
+                "",
+            ),
+            "secondary_face_mean_viscous_traction_z_pa": final.get(
+                "secondary_face_mean_viscous_traction_z_pa",
                 "",
             ),
             "max_abs_traction_pa": final.get("max_abs_traction_pa", ""),
@@ -610,8 +787,9 @@ def _summary_row(
             "pressure_max_pa": final.get("pressure_max_pa", ""),
             "flow_snapshot_signature": _flow_snapshot_signature(final),
             "face_force_ratio": _face_force_ratio(final),
-            "flow_driver_uses_full_velocity_reset": bool(
-                report.get("flow_driver_uses_full_velocity_reset", False)
+            "flow_driver_uses_full_velocity_reset": report.get(
+                "flow_driver_uses_full_velocity_reset",
+                "",
             ),
         }
     )
@@ -762,6 +940,33 @@ def _hydrate_rows_from_histories(
         row["pressure_outlet_flux_ratio"] = final.get("pressure_outlet_flux_ratio", "")
         row["pressure_min_pa"] = final.get("pressure_min_pa", "")
         row["pressure_max_pa"] = final.get("pressure_max_pa", "")
+        for pressure_field in (
+            "primary_face_mean_pressure_pa",
+            "secondary_face_mean_pressure_pa",
+            "primary_face_mean_pressure_jump_pa",
+            "secondary_face_mean_pressure_jump_pa",
+            "primary_face_mean_inside_pressure_pa",
+            "secondary_face_mean_inside_pressure_pa",
+            "primary_face_mean_outside_pressure_pa",
+            "secondary_face_mean_outside_pressure_pa",
+            "primary_face_mean_fluid_side_pressure_pa",
+            "secondary_face_mean_fluid_side_pressure_pa",
+            "primary_face_mean_reference_pressure_pa",
+            "secondary_face_mean_reference_pressure_pa",
+            "primary_face_pressure_complete_marker_count",
+            "secondary_face_pressure_complete_marker_count",
+            "primary_face_mean_pressure_traction_z_pa",
+            "secondary_face_mean_pressure_traction_z_pa",
+            "primary_face_mean_viscous_traction_z_pa",
+            "secondary_face_mean_viscous_traction_z_pa",
+        ):
+            row[pressure_field] = final.get(pressure_field, row.get(pressure_field, ""))
+        if str(row.get("run_status", "")) == "completed":
+            status_reason = str(row.get("status_reason", "completed"))
+            pressure_prefix = status_reason.split("; pressure means ", 1)[0]
+            row["status_reason"] = (
+                f"{pressure_prefix}; pressure means {PRESSURE_MEAN_STATUS}"
+            )
         row["flow_snapshot_signature"] = _flow_snapshot_signature(row)
     return rows
 
@@ -929,9 +1134,49 @@ def _add_row_quality_blockers(blockers: list[str], row: dict[str, Any]) -> None:
     total_force = _float_or_none(row.get("total_force_z_N"))
     if total_force is None:
         _add_blocker(blockers, "total_force_missing")
-    total_marker_count = _float_or_none(row.get("total_marker_count"))
-    if total_marker_count is None or total_marker_count <= 0.0:
+    marker_counts: dict[str, int] = {}
+    marker_count_missing = False
+    marker_count_nonintegral = False
+    for field in (
+        "total_marker_count",
+        "primary_face_marker_count",
+        "secondary_face_marker_count",
+        "primary_face_valid_marker_count",
+        "secondary_face_valid_marker_count",
+        "primary_face_invalid_marker_count",
+        "secondary_face_invalid_marker_count",
+    ):
+        value = _float_or_none(row.get(field))
+        if value is None:
+            marker_count_missing = True
+            continue
+        rounded = round(value)
+        if abs(value - rounded) > 1.0e-9:
+            marker_count_nonintegral = True
+            continue
+        marker_counts[field] = int(rounded)
+    if marker_count_missing or marker_counts.get("total_marker_count", 0) <= 0:
         _add_blocker(blockers, "marker_count_missing")
+    if marker_count_nonintegral:
+        _add_blocker(blockers, "marker_count_nonintegral")
+    if {
+        "primary_face_marker_count",
+        "secondary_face_marker_count",
+        "total_marker_count",
+    }.issubset(marker_counts) and (
+        marker_counts["primary_face_marker_count"]
+        + marker_counts["secondary_face_marker_count"]
+        != marker_counts["total_marker_count"]
+    ):
+        _add_blocker(blockers, "marker_count_inconsistent")
+    for prefix in ("primary", "secondary"):
+        face = f"{prefix}_face_marker_count"
+        valid = f"{prefix}_face_valid_marker_count"
+        invalid = f"{prefix}_face_invalid_marker_count"
+        if {face, valid, invalid}.issubset(marker_counts) and (
+            marker_counts[valid] + marker_counts[invalid] != marker_counts[face]
+        ):
+            _add_blocker(blockers, "valid_invalid_marker_count_inconsistent")
 
     primary_invalid = _float_or_none(row.get("primary_face_invalid_marker_count"))
     secondary_invalid = _float_or_none(row.get("secondary_face_invalid_marker_count"))
@@ -961,13 +1206,37 @@ def _add_row_quality_blockers(blockers: list[str], row: dict[str, Any]) -> None:
         "scatter_action_reaction_residual_missing",
         "scatter_action_reaction_residual_above_tolerance",
     )
-    if _truthy(row.get("flow_driver_uses_full_velocity_reset")):
+    if _missing(row.get("flow_driver_uses_full_velocity_reset")):
+        _add_blocker(blockers, "full_field_reset_status_missing")
+    elif _truthy(row.get("flow_driver_uses_full_velocity_reset")):
         _add_blocker(blockers, "full_field_reset_used")
-    if (
-        row.get("primary_face_mean_pressure_pa", "") == ""
-        or row.get("secondary_face_mean_pressure_pa", "") == ""
-    ):
+    missing_pressure_faces = _missing_pressure_probe_faces(row)
+    if missing_pressure_faces:
         _add_blocker(blockers, "pressure_probe_diagnostics_incomplete")
+        for face in missing_pressure_faces:
+            _add_blocker(blockers, f"{face}_pressure_probe_diagnostics_incomplete")
+
+
+def _missing(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _missing_pressure_probe_faces(row: dict[str, Any]) -> list[str]:
+    missing_faces: list[str] = []
+    required_faces = ["primary"]
+    if str(row.get("marker_layout", "")) == "dual_physical_faces":
+        required_faces.append("secondary")
+    for face in required_faces:
+        for field in (
+            f"{face}_face_mean_pressure_pa",
+            f"{face}_face_mean_pressure_jump_pa",
+            f"{face}_face_mean_inside_pressure_pa",
+            f"{face}_face_mean_outside_pressure_pa",
+        ):
+            if _missing(row.get(field)):
+                missing_faces.append(face)
+                break
+    return missing_faces
 
 
 def _add_residual_blocker(
@@ -1227,10 +1496,11 @@ def _verification_markdown(payload: dict[str, Any]) -> str:
         "exposes a single `one_sided_pressure_region_id`, not per-face one-sided "
         "region support.\n\n"
         "## Runtime Finding\n\n"
-        "The existing core exposes force, traction, marker-count, stress-counter, "
-        "and action-reaction residual data for this diagnostic. It does not expose "
-        "per-face pressure means without adding new solver-output fields, so the "
-        f"matrix records blank pressure means with status `{PRESSURE_MEAN_STATUS}`.\n\n"
+        "The core exposes force, traction, marker-count, stress-counter, "
+        "action-reaction residual, per-face pressure-probe data, and per-face "
+        "pressure means for this diagnostic. Candidate promotion remains "
+        "fail-closed when the required layout-specific pressure fields are "
+        f"blank; status `{PRESSURE_MEAN_STATUS}`.\n\n"
         "## Scope Limits\n\n"
         "- No coupled FSI release was run.\n"
         "- No 50-step run was performed.\n"

@@ -61,10 +61,37 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         )
 
         self.assertEqual(markers.t_gamma_pa.dtype, ti.f64)
+        self.assertEqual(markers.t_pressure_gamma_pa.dtype, ti.f64)
+        self.assertEqual(markers.t_viscous_gamma_pa.dtype, ti.f64)
         self.assertEqual(markers.F_gamma_n.dtype, ti.f64)
         self.assertEqual(markers.report_stress_max_abs_traction_pa.dtype, ti.f64)
         self.assertEqual(markers.report_mpm_scatter_marker_force_n.dtype, ti.f64)
         self.assertEqual(markers.report_mpm_scatter_external_force_n.dtype, ti.f64)
+
+    def test_stress_marker_diagnostics_expose_pressure_probe_evidence(self) -> None:
+        source = inspect.getsource(HibmMpmSurfaceMarkers.stress_marker_diagnostics)
+        for key in (
+            '"base_pressure_pa"',
+            '"inside_pressure_pa"',
+            '"outside_pressure_pa"',
+            '"pressure_jump_pa"',
+            '"fluid_side_pressure_pa"',
+            '"reference_pressure_pa"',
+            '"inside_probe_rung"',
+            '"outside_probe_rung"',
+            '"inside_probe_cell"',
+            '"outside_probe_cell"',
+            '"pressure_traction_pa"',
+            '"viscous_traction_pa"',
+            '"total_traction_pa"',
+            '"traction_decomposition_residual_pa"',
+        ):
+            with self.subTest(key=key):
+                self.assertIn(key, source)
+
+        face_source = inspect.getsource(HibmMpmSurfaceMarkers.stress_face_diagnostics)
+        self.assertIn("_face_mean_pressure_pa", face_source)
+        self.assertIn('"pressure_jump_pa"', face_source)
 
     def test_pressure_neumann_rows_force_fv_multigrid_to_fv_cg(self) -> None:
         source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")

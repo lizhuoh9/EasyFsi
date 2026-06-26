@@ -1874,21 +1874,11 @@ def _stress_sampling_report_fields(report: Any) -> dict[str, object]:
 
 
 def _marker_traction_report_fields(markers: HibmMpmSurfaceMarkers) -> dict[str, object]:
-    marker_count = int(markers.marker_count)
-    tractions = markers.t_gamma_pa.to_numpy()[:marker_count]
-    regions = markers.region_id.to_numpy()[:marker_count]
-    valid = markers._stress_pressure_valid.to_numpy()[:marker_count] != 0
-
-    def mean_z_for(region_id: int) -> float | str:
-        mask = (regions == int(region_id)) & valid
-        if not np.any(mask):
-            return ""
-        return float(np.mean(tractions[mask, STREAMWISE_AXIS_INDEX]))
-
-    return {
-        "primary_face_mean_traction_z_pa": mean_z_for(PRIMARY_REGION_ID),
-        "secondary_face_mean_traction_z_pa": mean_z_for(SECONDARY_REGION_ID),
-    }
+    return markers.stress_face_diagnostics(
+        primary_region_id=PRIMARY_REGION_ID,
+        secondary_region_id=SECONDARY_REGION_ID,
+        streamwise_axis_index=STREAMWISE_AXIS_INDEX,
+    )
 
 
 def _scatter_report_fields(report: Any) -> dict[str, object]:

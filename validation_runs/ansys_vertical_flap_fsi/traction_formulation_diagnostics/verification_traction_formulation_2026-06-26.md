@@ -12,7 +12,7 @@ reference_formulation_candidate = none
 
 candidate_status = no_reference_formulation_candidate
 
-candidate_blockers = pressure_probe_diagnostics_incomplete, required_formulation_unsupported, dual_face_one_sided_unsupported, dual_two_sided_offset_sensitivity_above_tolerance
+candidate_blockers = pressure_probe_diagnostics_incomplete, primary_pressure_probe_diagnostics_incomplete, secondary_pressure_probe_diagnostics_incomplete, required_formulation_unsupported, dual_face_one_sided_unsupported, dual_two_sided_offset_sensitivity_above_tolerance
 
 offset_sensitivity_status = offset_sensitivity_above_tolerance
 
@@ -36,7 +36,7 @@ The current matrix treats the 0.51-cell dual/two-sided row as a baseline scenari
 
 ## Runtime Finding
 
-The existing core exposes force, traction, marker-count, stress-counter, and action-reaction residual data for this diagnostic. It does not expose per-face pressure means without adding new solver-output fields, so the matrix records blank pressure means with status `not_exposed_by_current_core; force and traction counters are archived`.
+The core exposes force, traction, marker-count, stress-counter, action-reaction residual, per-face pressure-probe data, and per-face pressure means for this diagnostic. Candidate promotion remains fail-closed when the required layout-specific pressure fields are blank; status `exposed_by_core_stress_face_diagnostics; mean field is pressure_jump_pa`.
 
 ## Scope Limits
 
