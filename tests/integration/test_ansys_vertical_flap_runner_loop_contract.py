@@ -11,7 +11,9 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
     def test_runner_projects_flow_inside_fsi_loop_before_stress_sampling(self) -> None:
         loop_body = _fsi_loop_body(_runner_source())
         project_index = loop_body.index("_flow_advance_current_step(")
-        stress_index = loop_body.index("_sample_stress_to_marker_forces(markers, fluid)")
+        stress_index = loop_body.index(
+            "_sample_stress_to_marker_forces(\n            markers,"
+        )
 
         self.assertLess(project_index, stress_index)
         self.assertIn("_project_current_flow(", _flow_advance_body(_runner_source()))
@@ -44,7 +46,9 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
 
     def test_closed_loop_solver_must_project_fluid_inside_fsi_loop(self) -> None:
         loop_body = _fsi_loop_body(_runner_source())
-        stress_index = loop_body.index("_sample_stress_to_marker_forces(markers, fluid)")
+        stress_index = loop_body.index(
+            "_sample_stress_to_marker_forces(\n            markers,"
+        )
 
         recompute_indices = [
             loop_body.find(token)

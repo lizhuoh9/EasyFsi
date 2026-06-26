@@ -148,6 +148,11 @@ class VerticalFlapFsiConfig:
     flow_inlet_source_schedule_scope: str = "global"
     flow_pressure_outlet_enabled: bool = True
     flow_outlet_balance_policy: str = "report_only"
+    traction_marker_layout: str = "dual_physical_faces"
+    traction_pressure_sampling_mode: str = "two_sided_pressure_jump"
+    traction_include_viscous: bool = False
+    traction_marker_face_offset_cells: float = 0.51
+    traction_viscosity_pa_s: float = 0.0
     enforce_plane_strain_x: bool = True
     mpm_support_radius_m: float = 0.006
     displacement_tolerance: float = 0.05

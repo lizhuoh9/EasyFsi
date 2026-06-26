@@ -30,6 +30,18 @@ FLOW_DRIVER_SHARP_REFERENCE = "sharp_hibm_mpm_reference"
 FLOW_INLET_SOURCE_PROFILES = {"constant", "linear_ramp"}
 FLOW_INLET_SOURCE_SCHEDULE_SCOPES = {"global", "phase_local"}
 FLOW_OUTLET_BALANCE_POLICIES = {"report_only"}
+TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES = "dual_physical_faces"
+TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE = "single_mid_surface"
+TRACTION_MARKER_LAYOUTS = {
+    TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES,
+    TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE,
+}
+TRACTION_PRESSURE_TWO_SIDED = "two_sided_pressure_jump"
+TRACTION_PRESSURE_ONE_SIDED = "one_sided_surface_pressure"
+TRACTION_PRESSURE_SAMPLING_MODES = {
+    TRACTION_PRESSURE_TWO_SIDED,
+    TRACTION_PRESSURE_ONE_SIDED,
+}
 SUPPORTED_FORMAL_FLOW_DRIVER_MODES = {
     FLOW_DRIVER_PROJECTION_ONLY,
     FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC,
@@ -139,7 +151,11 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             fluid_projection_after_feedback_count += 1
         if latest_feedback_constraint_report["fluid_projection_consumed_feedback"]:
             fluid_projection_consumed_feedback_count += 1
-        latest_stress_report = _sample_stress_to_marker_forces(markers, fluid)
+        latest_stress_report = _sample_stress_to_marker_forces(
+            markers,
+            fluid,
+            config,
+        )
         latest_force_report = markers.aggregate_region_forces(
             primary_region_id=PRIMARY_REGION_ID,
             secondary_region_id=SECONDARY_REGION_ID,
@@ -341,6 +357,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "total_marker_force_n": latest_force_report.total_marker_force_n,
                 **_marker_force_report_fields(latest_force_report),
                 **_stress_sampling_report_fields(latest_stress_report),
+                **_marker_traction_report_fields(markers),
                 **_scatter_report_fields(latest_scatter_report),
                 "mpm_external_force_n": latest_solid_report.external_force_n,
                 "max_displacement_m": step_displacement["max_displacement_m"],
@@ -446,7 +463,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             "min": list(_solid_box(config)[0]),
             "max": list(_solid_box(config)[1]),
         },
-        "marker_face_count": 2,
+        "marker_face_count": _traction_marker_face_count(config),
         "marker_count_per_face": int(config.marker_count),
         "marker_count_actual": int(markers.marker_count),
         "flow_projection_iterations_actual": int(config.flow_projection_iterations),
@@ -668,7 +685,7 @@ def _preflow_only_report(
             "min": list(_solid_box(config)[0]),
             "max": list(_solid_box(config)[1]),
         },
-        "marker_face_count": 2,
+        "marker_face_count": _traction_marker_face_count(config),
         "marker_count_per_face": int(config.marker_count),
         "marker_count_actual": int(markers.marker_count),
         "flow_projection_iterations_actual": int(config.flow_projection_iterations),
@@ -791,6 +808,70 @@ def _preflow_only_report(
     }
 
 
+def _traction_marker_layout(config: Any) -> str:
+    return str(
+        getattr(
+            config,
+            "traction_marker_layout",
+            TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES,
+        )
+    )
+
+
+def _traction_pressure_sampling_mode(config: Any) -> str:
+    return str(
+        getattr(
+            config,
+            "traction_pressure_sampling_mode",
+            TRACTION_PRESSURE_TWO_SIDED,
+        )
+    )
+
+
+def _traction_marker_face_offset_cells(config: Any) -> float:
+    return float(getattr(config, "traction_marker_face_offset_cells", 0.51))
+
+
+def _traction_marker_face_count(config: Any) -> int:
+    if _traction_marker_layout(config) == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE:
+        return 1
+    return 2
+
+
+def _traction_include_viscous(config: Any) -> bool:
+    return bool(getattr(config, "traction_include_viscous", False))
+
+
+def _traction_viscosity_pa_s(config: Any) -> float:
+    if not _traction_include_viscous(config):
+        return 0.0
+    configured = float(
+        getattr(
+            config,
+            "traction_viscosity_pa_s",
+            getattr(config, "air_viscosity_pa_s", 0.0),
+        )
+    )
+    if configured == 0.0:
+        return float(getattr(config, "air_viscosity_pa_s", 0.0))
+    return configured
+
+
+def traction_formulation_supported(config: Any) -> tuple[bool, str]:
+    marker_layout = _traction_marker_layout(config)
+    pressure_sampling_mode = _traction_pressure_sampling_mode(config)
+    if (
+        marker_layout == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES
+        and pressure_sampling_mode == TRACTION_PRESSURE_ONE_SIDED
+    ):
+        return (
+            False,
+            "dual-face one-sided pressure needs per-face one-sided region support; "
+            "current core exposes one one_sided_pressure_region_id",
+        )
+    return True, "supported"
+
+
 def _validate_rectangular_solid_config(config: Any) -> None:
     flow_driver_mode = str(
         getattr(config, "flow_driver_mode", FLOW_DRIVER_PROJECTION_ONLY)
@@ -818,6 +899,20 @@ def _validate_rectangular_solid_config(config: Any) -> None:
     outlet_policy = str(getattr(config, "flow_outlet_balance_policy", "report_only"))
     if outlet_policy not in FLOW_OUTLET_BALANCE_POLICIES:
         raise ValueError(f"unsupported flow_outlet_balance_policy: {outlet_policy!r}")
+    marker_layout = _traction_marker_layout(config)
+    if marker_layout not in TRACTION_MARKER_LAYOUTS:
+        raise ValueError(f"unsupported traction_marker_layout: {marker_layout!r}")
+    pressure_sampling_mode = _traction_pressure_sampling_mode(config)
+    if pressure_sampling_mode not in TRACTION_PRESSURE_SAMPLING_MODES:
+        raise ValueError(
+            f"unsupported traction_pressure_sampling_mode: {pressure_sampling_mode!r}"
+        )
+    marker_face_offset_cells = _traction_marker_face_offset_cells(config)
+    if marker_face_offset_cells < 0.0:
+        raise ValueError("traction_marker_face_offset_cells must be non-negative")
+    traction_viscosity = _traction_viscosity_pa_s(config)
+    if not math.isfinite(traction_viscosity) or traction_viscosity < 0.0:
+        raise ValueError("traction viscosity must be finite and non-negative")
     if config.step_count < 0:
         raise ValueError("step_count must be non-negative")
     if config.step_count == 0 and int(getattr(config, "preflow_steps", 0)) <= 0:
@@ -1332,7 +1427,7 @@ def _run_fixed_solid_preflow(
                 or preflow_index == 0
             ),
         )
-        stress_report = _sample_stress_to_marker_forces(markers, fluid)
+        stress_report = _sample_stress_to_marker_forces(markers, fluid, config)
         force_report = markers.aggregate_region_forces(
             primary_region_id=PRIMARY_REGION_ID,
             secondary_region_id=SECONDARY_REGION_ID,
@@ -1424,6 +1519,7 @@ def _run_fixed_solid_preflow(
             "scatter_active_particle_count": scatter_report.active_particle_count,
             **_marker_force_report_fields(force_report),
             **_stress_sampling_report_fields(stress_report),
+            **_marker_traction_report_fields(markers),
             **_scatter_report_fields(scatter_report),
         }
         if previous_row is not None:
@@ -1672,11 +1768,15 @@ def _marker_force_report_fields(report: Any) -> dict[str, object]:
     secondary_force = tuple(report.secondary_marker_force_n)
     total_force = tuple(report.total_marker_force_n)
     fluid_reaction = tuple(report.fluid_reaction_force_n)
+    primary_plus_secondary_z = float(primary_force[2]) + float(secondary_force[2])
+    total_z = float(total_force[2])
     return {
         "primary_face_force_n": primary_force,
         "secondary_face_force_n": secondary_force,
         "primary_face_force_z_N": float(primary_force[2]),
         "secondary_face_force_z_N": float(secondary_force[2]),
+        "primary_plus_secondary_force_z_N": primary_plus_secondary_z,
+        "force_decomposition_residual_N": abs(primary_plus_secondary_z - total_z),
         "marker_force_z_N": float(total_force[2]),
         "fluid_reaction_force_n": fluid_reaction,
         "fluid_reaction_force_z_N": float(fluid_reaction[2]),
@@ -1688,6 +1788,7 @@ def _marker_force_report_fields(report: Any) -> dict[str, object]:
         ),
         "primary_face_marker_count": int(report.primary_marker_count),
         "secondary_face_marker_count": int(report.secondary_marker_count),
+        "total_marker_count": int(report.total_marker_count),
         "primary_face_valid_marker_count": int(
             report.primary_stress_valid_marker_count
         ),
@@ -1739,6 +1840,24 @@ def _stress_sampling_report_fields(report: Any) -> dict[str, object]:
     }
 
 
+def _marker_traction_report_fields(markers: HibmMpmSurfaceMarkers) -> dict[str, object]:
+    marker_count = int(markers.marker_count)
+    tractions = markers.t_gamma_pa.to_numpy()[:marker_count]
+    regions = markers.region_id.to_numpy()[:marker_count]
+    valid = markers._stress_pressure_valid.to_numpy()[:marker_count] != 0
+
+    def mean_z_for(region_id: int) -> float | str:
+        mask = (regions == int(region_id)) & valid
+        if not np.any(mask):
+            return ""
+        return float(np.mean(tractions[mask, STREAMWISE_AXIS_INDEX]))
+
+    return {
+        "primary_face_mean_traction_z_pa": mean_z_for(PRIMARY_REGION_ID),
+        "secondary_face_mean_traction_z_pa": mean_z_for(SECONDARY_REGION_ID),
+    }
+
+
 def _scatter_report_fields(report: Any) -> dict[str, object]:
     return {
         "scatter_action_reaction_residual_n": float(
@@ -1755,8 +1874,14 @@ def _build_markers(
     runtime: TaichiRuntimeConfig,
 ) -> HibmMpmSurfaceMarkers:
     markers_per_face = int(config.marker_count)
+    marker_layout = _traction_marker_layout(config)
+    marker_capacity = (
+        markers_per_face
+        if marker_layout == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE
+        else 2 * markers_per_face
+    )
     markers = HibmMpmSurfaceMarkers(
-        marker_capacity=2 * markers_per_face,
+        marker_capacity=marker_capacity,
         runtime=runtime,
     )
     solid_min, solid_max = _solid_box(config)
@@ -1764,10 +1889,20 @@ def _build_markers(
     segment = config.flap_height_m / markers_per_face
     area = config.flap_height_m * (solid_max[0] - solid_min[0]) / markers_per_face
     dz = _grid_spacing_m(config)[2]
-    face_specs = (
-        (solid_max[2] + 0.51 * dz, (0.0, 0.0, 1.0), PRIMARY_REGION_ID),
-        (solid_min[2] - 0.51 * dz, (0.0, 0.0, -1.0), SECONDARY_REGION_ID),
-    )
+    offset = _traction_marker_face_offset_cells(config) * dz
+    if marker_layout == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE:
+        face_specs = (
+            (
+                0.5 * (solid_min[2] + solid_max[2]),
+                (0.0, 0.0, 1.0),
+                PRIMARY_REGION_ID,
+            ),
+        )
+    else:
+        face_specs = (
+            (solid_max[2] + offset, (0.0, 0.0, 1.0), PRIMARY_REGION_ID),
+            (solid_min[2] - offset, (0.0, 0.0, -1.0), SECONDARY_REGION_ID),
+        )
     positions = []
     velocities = []
     normals = []
@@ -1856,7 +1991,18 @@ def _configure_solid_fields(
 def _sample_stress_to_marker_forces(
     markers: HibmMpmSurfaceMarkers,
     fluid: CartesianFluidSolver,
+    config: Any | None = None,
 ) -> Any:
+    pressure_sampling_mode = (
+        TRACTION_PRESSURE_TWO_SIDED
+        if config is None
+        else _traction_pressure_sampling_mode(config)
+    )
+    one_sided_region_id = (
+        PRIMARY_REGION_ID
+        if pressure_sampling_mode == TRACTION_PRESSURE_ONE_SIDED
+        else -1
+    )
     report = markers.sample_fluid_stress_to_marker_tractions(
         fluid.velocity,
         fluid.pressure,
@@ -1871,8 +2017,10 @@ def _sample_stress_to_marker_forces(
         fluid.cell_width_y_m,
         fluid.cell_width_z_m,
         fluid.grid.grid_nodes,
-        viscosity_pa_s=0.0,
+        viscosity_pa_s=0.0 if config is None else _traction_viscosity_pa_s(config),
         two_sided_pressure=True,
+        one_sided_pressure_region_id=one_sided_region_id,
+        one_sided_reference_pressure_pa=0.0,
     )
     markers.compute_marker_forces()
     return report

@@ -211,6 +211,29 @@ fixed-solid load matrix is hydrodynamic-load evidence. Therefore a later
 preflow-release failure cannot yet be blamed entirely on MPM coupling unless
 the fixed-solid load matrix also shows a stable, physically credible load.
 
+For the fixed-solid traction formulation diagnostic, run:
+
+```powershell
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_formulation_validation_matrix.py
+```
+
+This writes formulation artifacts under:
+
+```text
+validation_runs\ansys_vertical_flap_fsi\traction_formulation_diagnostics\
+```
+
+The traction matrix reuses the fixed-solid sustained-source load path and
+compares dual physical faces with a two-sided pressure jump, dual physical
+faces with one-sided surface pressure, a single mid-surface with a two-sided
+pressure jump, offset sensitivity, and explicit viscous traction. Unsupported
+formulations are archived as `unsupported` rows rather than faked. The current
+core exposes force, traction, marker-count, stress-counter, and residual fields;
+it does not expose per-face pressure means without adding a new solver output,
+so those pressure mean columns remain blank and documented. This is still a
+fixed-solid formulation diagnostic only: it does not run the 50-step case,
+does not import Fluent force history, and does not claim Fluent parity.
+
 For the coupled preflow-release STEP20 diagnostic, run:
 
 ```powershell

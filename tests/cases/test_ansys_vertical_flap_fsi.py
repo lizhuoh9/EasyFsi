@@ -153,6 +153,70 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             )
         )
 
+        offset_config = VerticalFlapFsiConfig(
+            marker_count=2,
+            traction_marker_face_offset_cells=1.0,
+        )
+        with patch.object(solid_mpm_fsi_runner, "HibmMpmSurfaceMarkers", FakeMarkers):
+            offset_markers = solid_mpm_fsi_runner._build_markers(
+                offset_config,
+                runtime=None,
+            )
+
+        self.assertEqual(offset_markers.marker_capacity, 4)
+        self.assertTrue(
+            all(
+                math.isclose(
+                    position[2],
+                    offset_config.flap_streamwise_max_m + dz,
+                )
+                for position in offset_markers.positions_m[:2]
+            )
+        )
+        self.assertTrue(
+            all(
+                math.isclose(
+                    position[2],
+                    offset_config.flap_streamwise_min_m - dz,
+                )
+                for position in offset_markers.positions_m[2:]
+            )
+        )
+
+        single_config = VerticalFlapFsiConfig(
+            marker_count=3,
+            traction_marker_layout="single_mid_surface",
+            traction_marker_face_offset_cells=0.0,
+        )
+        with patch.object(solid_mpm_fsi_runner, "HibmMpmSurfaceMarkers", FakeMarkers):
+            single_markers = solid_mpm_fsi_runner._build_markers(
+                single_config,
+                runtime=None,
+            )
+
+        midpoint_z = 0.5 * (
+            single_config.flap_streamwise_min_m
+            + single_config.flap_streamwise_max_m
+        )
+        self.assertEqual(single_markers.marker_capacity, 3)
+        self.assertEqual(single_markers.marker_count, 3)
+        self.assertEqual(single_markers.normals, [(0.0, 0.0, 1.0)] * 3)
+        self.assertEqual(
+            single_markers.region_ids,
+            [solid_mpm_fsi_runner.PRIMARY_REGION_ID] * 3,
+        )
+        self.assertTrue(
+            all(
+                math.isclose(position[2], midpoint_z)
+                for position in single_markers.positions_m
+            )
+        )
+        self.assertEqual(solid_mpm_fsi_runner._traction_marker_face_count(config), 2)
+        self.assertEqual(
+            solid_mpm_fsi_runner._traction_marker_face_count(single_config),
+            1,
+        )
+
     def test_solid_substep_cfl_report_preserves_explicit_higher_count(self):
         unstable = VerticalFlapFsiConfig(
             grid_nodes=(4, 320, 640),
@@ -245,10 +309,11 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertIn('"solid_fixed": True', source)
         self.assertIn('"solid_advanced": False', source)
         self.assertIn("_flow_advance_current_step(", source)
-        self.assertIn("_sample_stress_to_marker_forces(markers, fluid)", source)
+        self.assertIn("_sample_stress_to_marker_forces(markers, fluid, config)", source)
         self.assertNotIn("solid.step(", source)
         self.assertIn("scatter_marker_forces_to_mpm_particles", source)
         self.assertIn("_scatter_report_fields(scatter_report)", source)
+        self.assertIn("_marker_traction_report_fields(markers)", source)
 
     def test_marker_force_report_fields_are_face_resolved(self):
         report = SimpleNamespace(
@@ -278,11 +343,64 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(fields["secondary_face_marker_count"], 3)
         self.assertEqual(fields["primary_face_force_z_N"], -3.0)
         self.assertEqual(fields["secondary_face_force_z_N"], -6.0)
+        self.assertEqual(fields["primary_plus_secondary_force_z_N"], -9.0)
+        self.assertEqual(fields["force_decomposition_residual_N"], 0.0)
         self.assertEqual(fields["marker_force_z_N"], -9.0)
         self.assertEqual(fields["fluid_reaction_force_z_N"], 9.0)
         self.assertEqual(fields["marker_action_reaction_residual_N"], 0.0)
+        self.assertEqual(fields["total_marker_count"], 6)
         self.assertEqual(fields["primary_face_valid_marker_count"], 3)
         self.assertEqual(fields["secondary_face_invalid_marker_count"], 1)
+
+    def test_region_split_preserves_loaded_total_marker_force(self):
+        primary = solid_mpm_fsi_runner.PRIMARY_REGION_ID
+        secondary = solid_mpm_fsi_runner.SECONDARY_REGION_ID
+        marker_forces = [
+            (0.0, 0.0, -1.0e-5),
+            (0.0, 0.0, -2.0e-5),
+            (0.0, 0.0, -3.0e-5),
+            (0.0, 0.0, -4.0e-5),
+        ]
+
+        def aggregate(region_ids):
+            primary_force_z = sum(
+                force[2]
+                for force, region_id in zip(marker_forces, region_ids, strict=True)
+                if region_id == primary
+            )
+            secondary_force_z = sum(
+                force[2]
+                for force, region_id in zip(marker_forces, region_ids, strict=True)
+                if region_id == secondary
+            )
+            total_force_z = sum(force[2] for force in marker_forces)
+            return {
+                "primary_count": sum(region_id == primary for region_id in region_ids),
+                "secondary_count": sum(
+                    region_id == secondary for region_id in region_ids
+                ),
+                "total_count": len(region_ids),
+                "primary_force_z": primary_force_z,
+                "secondary_force_z": secondary_force_z,
+                "total_force_z": total_force_z,
+            }
+
+        all_primary = aggregate([primary, primary, primary, primary])
+        split = aggregate([primary, primary, secondary, secondary])
+
+        self.assertEqual(all_primary["total_count"], split["total_count"])
+        self.assertAlmostEqual(
+            all_primary["total_force_z"],
+            split["total_force_z"],
+            places=12,
+        )
+        self.assertEqual(split["primary_count"], 2)
+        self.assertEqual(split["secondary_count"], 2)
+        self.assertAlmostEqual(
+            split["primary_force_z"] + split["secondary_force_z"],
+            split["total_force_z"],
+            places=12,
+        )
 
     def test_preflow_only_step_count_zero_is_diagnostic_only(self):
         solid_mpm_fsi_runner._validate_rectangular_solid_config(
@@ -309,6 +427,14 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(config.flow_inlet_source_strength, 1.0)
         self.assertEqual(config.flow_inlet_source_profile, "constant")
         self.assertEqual(config.flow_inlet_source_schedule_scope, "global")
+        self.assertEqual(config.traction_marker_layout, "dual_physical_faces")
+        self.assertEqual(
+            config.traction_pressure_sampling_mode,
+            "two_sided_pressure_jump",
+        )
+        self.assertFalse(config.traction_include_viscous)
+        self.assertAlmostEqual(config.traction_marker_face_offset_cells, 0.51)
+        self.assertAlmostEqual(config.traction_viscosity_pa_s, 0.0)
 
         run_source = inspect.getsource(
             solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
@@ -317,6 +443,58 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertIn("flow_reset_pressure_each_step", run_source)
         self.assertIn("flow_reinitialize_inlet_each_step", run_source)
         self.assertIn("_flow_advance_current_step", run_source)
+
+    def test_traction_formulation_controls_are_explicit_and_report_unsupported(self):
+        supported, reason = solid_mpm_fsi_runner.traction_formulation_supported(
+            VerticalFlapFsiConfig()
+        )
+        self.assertTrue(supported)
+        self.assertEqual(reason, "supported")
+
+        unsupported, unsupported_reason = (
+            solid_mpm_fsi_runner.traction_formulation_supported(
+                VerticalFlapFsiConfig(
+                    traction_marker_layout="dual_physical_faces",
+                    traction_pressure_sampling_mode="one_sided_surface_pressure",
+                )
+            )
+        )
+        self.assertFalse(unsupported)
+        self.assertIn("one_sided_pressure_region_id", unsupported_reason)
+
+        single_supported, single_reason = (
+            solid_mpm_fsi_runner.traction_formulation_supported(
+                VerticalFlapFsiConfig(
+                    traction_marker_layout="single_mid_surface",
+                    traction_pressure_sampling_mode="two_sided_pressure_jump",
+                )
+            )
+        )
+        self.assertTrue(single_supported)
+        self.assertEqual(single_reason, "supported")
+
+        with self.assertRaisesRegex(ValueError, "traction_marker_layout"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(
+                    traction_marker_layout="not_a_layout",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "traction_pressure_sampling_mode"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(
+                    traction_pressure_sampling_mode="not_a_sampling_mode",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(
+                    traction_marker_face_offset_cells=-0.01,
+                )
+            )
+
+        source = inspect.getsource(solid_mpm_fsi_runner._sample_stress_to_marker_forces)
+        self.assertIn("one_sided_pressure_region_id", source)
+        self.assertIn("_traction_viscosity_pa_s(config)", source)
 
     def test_sustained_flow_driver_modes_are_explicit_and_default_safe(self):
         self.assertIn(
