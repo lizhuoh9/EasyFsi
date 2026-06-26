@@ -139,6 +139,7 @@ class AnsysVerticalFlapTractionProbeOffsetDecouplingArtifactTests(
         fixed_probe = [
             row for row in payload["rows"] if row["scenario_group"] == "fixed_probe"
         ]
+        by_scenario = {row["scenario"]: row for row in payload["rows"]}
 
         self.assertEqual(len(fixed_marker), 4)
         self.assertEqual(len(fixed_probe), 4)
@@ -158,11 +159,34 @@ class AnsysVerticalFlapTractionProbeOffsetDecouplingArtifactTests(
         )
         self.assertGreater(
             float(payload["fixed_marker_probe_origin_ratio_span"]["relative_span"]),
-            0.0,
+            20.0,
         )
-        self.assertGreaterEqual(
-            float(payload["fixed_probe_marker_ratio_span"]["relative_span"]),
-            0.0,
+        self.assertLessEqual(
+            abs(float(payload["fixed_probe_marker_ratio_span"]["relative_span"])),
+            1.0e-12,
+        )
+        for row in fixed_probe:
+            self.assertAlmostEqual(
+                float(row["force_ratio_to_group_baseline"]),
+                1.0,
+                delta=1.0e-12,
+                msg=row["scenario"],
+            )
+        self.assertGreater(
+            float(
+                by_scenario["fixed_marker0p51_probe0p25"][
+                    "force_ratio_to_group_baseline"
+                ]
+            ),
+            1.5,
+        )
+        self.assertLess(
+            float(
+                by_scenario["fixed_marker0p51_probe1p00"][
+                    "force_ratio_to_group_baseline"
+                ]
+            ),
+            0.1,
         )
 
     def test_marker_diagnostics_archive_probe_origin_fields(self):

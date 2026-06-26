@@ -872,6 +872,9 @@ def _is_default_traction_formulation(config: Any) -> bool:
         and _traction_pressure_sampling_mode(config) == TRACTION_PRESSURE_TWO_SIDED
         and math.isclose(_traction_marker_face_offset_cells(config), 0.51)
         and not _traction_include_viscous(config)
+        and _traction_pressure_probe_origin_mode(config)
+        == TRACTION_PRESSURE_PROBE_ORIGIN_MARKER_POSITION
+        and _traction_pressure_probe_origin_offset_cells(config) is None
     )
 
 

@@ -116,11 +116,13 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 normals,
                 areas_m2,
                 region_ids,
+                pressure_probe_origins_m=None,
             ):
                 self.positions_m = list(positions_m)
                 self.normals = list(normals)
                 self.areas_m2 = list(areas_m2)
                 self.region_ids = list(region_ids)
+                self.pressure_probe_origins_m = pressure_probe_origins_m
                 self.marker_count = len(self.positions_m)
 
         config = VerticalFlapFsiConfig(marker_count=3)
@@ -553,6 +555,37 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 step_count=0,
                 preflow_steps=1,
                 traction_marker_face_offset_cells=1.0,
+            )
+        )
+        self.assertTrue(
+            solid_mpm_fsi_runner._is_default_traction_formulation(
+                VerticalFlapFsiConfig()
+            )
+        )
+        explicit_probe_origin = VerticalFlapFsiConfig(
+            traction_pressure_probe_origin_mode="physical_face_offset",
+            traction_pressure_probe_origin_offset_cells=0.51,
+        )
+        self.assertFalse(
+            solid_mpm_fsi_runner._is_default_traction_formulation(
+                explicit_probe_origin
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "fixed-solid diagnostics only"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(
+                    step_count=1,
+                    preflow_steps=0,
+                    traction_pressure_probe_origin_mode="physical_face_offset",
+                    traction_pressure_probe_origin_offset_cells=0.51,
+                )
+            )
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            VerticalFlapFsiConfig(
+                step_count=0,
+                preflow_steps=1,
+                traction_pressure_probe_origin_mode="physical_face_offset",
+                traction_pressure_probe_origin_offset_cells=0.51,
             )
         )
 
