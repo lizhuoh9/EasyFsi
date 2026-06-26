@@ -1,6 +1,6 @@
 {
   "case": "ansys_vertical_flap_fsi",
-  "created_at_utc": "2026-06-26T10:46:52.060408+00:00",
+  "created_at_utc": "2026-06-26T15:19:39.039335+00:00",
   "face_diagnostics": {
     "primary_face_base_pressure_found_marker_count": 0,
     "primary_face_inside_pressure_found_marker_count": 12,

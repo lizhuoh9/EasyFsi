@@ -46,6 +46,12 @@ SUMMARY_MD = OUTPUT_DIR / "traction_snapshot_resampling_summary.md"
 VERIFICATION_MD = OUTPUT_DIR / "verification_snapshot_resampling_2026-06-26.md"
 CHECKSUMS_PATH = OUTPUT_DIR / "CHECKSUMS.sha256"
 
+RESAMPLING_SCOPE_LIMIT = (
+    "shared snapshot sampling-only traction formulation comparison on archived "
+    "shared preflow velocity/pressure/obstacle fields; does not advance coupled "
+    "FSI and does not claim Fluent parity."
+)
+
 SUPPORTED_REQUIRED_SCENARIOS = {
     "dual_two_sided_offset0p51_pressure_only",
     "single_mid_two_sided_offset0p00_pressure_only",
@@ -208,8 +214,62 @@ def _load_snapshot_fields() -> Dict[str, np.ndarray]:
         if missing:
             raise SnapshotResamplingError(
                 "Shared snapshot is missing required arrays: " + ", ".join(missing)
-            )
+        )
         return {name: np.array(data[name], copy=True) for name in data.files}
+
+
+def _validate_snapshot_fields(
+    fields: Mapping[str, np.ndarray],
+    manifest: Mapping[str, Any],
+    config: Any,
+) -> None:
+    missing = [name for name in REQUIRED_SNAPSHOT_ARRAYS if name not in fields]
+    if missing:
+        raise SnapshotResamplingError(
+            "Shared snapshot is missing required arrays: " + ", ".join(missing)
+        )
+
+    try:
+        grid_nodes = tuple(int(value) for value in manifest["grid_nodes"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SnapshotResamplingError(
+            "Shared snapshot manifest grid_nodes must be a 3-entry integer sequence"
+        ) from exc
+    if len(grid_nodes) != 3:
+        raise SnapshotResamplingError(
+            "Shared snapshot manifest grid_nodes must contain exactly 3 entries: "
+            f"{grid_nodes}"
+        )
+
+    config_grid_nodes = tuple(int(value) for value in config.grid_nodes)
+    if grid_nodes != config_grid_nodes:
+        raise SnapshotResamplingError(
+            "Shared snapshot manifest grid_nodes do not match baseline config "
+            f"grid_nodes: manifest={grid_nodes} config={config_grid_nodes}"
+        )
+
+    nx, ny, nz = grid_nodes
+    expected_shapes = {
+        "velocity": (nx, ny, nz, 3),
+        "pressure": (nx, ny, nz),
+        "obstacle": (nx, ny, nz),
+        "cell_face_x_m": (nx + 1,),
+        "cell_face_y_m": (ny + 1,),
+        "cell_face_z_m": (nz + 1,),
+        "cell_center_x_m": (nx,),
+        "cell_center_y_m": (ny,),
+        "cell_center_z_m": (nz,),
+        "cell_width_x_m": (nx,),
+        "cell_width_y_m": (ny,),
+        "cell_width_z_m": (nz,),
+    }
+    for name, expected_shape in expected_shapes.items():
+        actual_shape = tuple(int(dim) for dim in fields[name].shape)
+        if actual_shape != expected_shape:
+            raise SnapshotResamplingError(
+                f"Shared snapshot array {name} shape mismatch: "
+                f"expected {expected_shape} actual {actual_shape}"
+            )
 
 
 def _restore_snapshot_to_fluid(
@@ -411,6 +471,7 @@ def _complete_row(
     row["flow_snapshot_source"] = "archived_shared_preflow_snapshot"
     row["solid_advanced"] = False
     row["feedback_applied"] = False
+    row["scope_limit"] = RESAMPLING_SCOPE_LIMIT
     marker_path, marker_geometry_sha256 = _write_marker_diagnostics(
         scenario,
         config,
@@ -442,6 +503,7 @@ def _unsupported_row(
     row["flow_snapshot_source"] = "archived_shared_preflow_snapshot"
     row["solid_advanced"] = False
     row["feedback_applied"] = False
+    row["scope_limit"] = RESAMPLING_SCOPE_LIMIT
     row.update(_snapshot_row_fields(manifest))
     return row
 
@@ -502,8 +564,11 @@ def _ensure_candidate_blocker(
     detail: str,
 ) -> None:
     blockers = payload.setdefault("candidate_blockers", [])
-    if any(item.get("blocker") == blocker for item in blockers):
-        return
+    for item in blockers:
+        if item.get("blocker") == blocker:
+            if not str(item.get("detail", "")).strip():
+                item["detail"] = detail
+            return
     blockers.append({"blocker": blocker, "detail": detail})
 
 
@@ -538,13 +603,9 @@ def _resampling_payload(
             "schema_version": 1,
             "case": CASE_NAME,
             "purpose": "shared_flow_snapshot_traction_resampling_matrix",
-            "scope_limit": (
-                "Sampling-only traction formulation comparison on the archived shared "
-                "preflow velocity/pressure/obstacle fields. This is not a coupled FSI "
-                "run and does not claim Fluent parity."
-            ),
+            "scope_limit": RESAMPLING_SCOPE_LIMIT,
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "source_script": str(Path(__file__).resolve()),
+            "source_script": _repo_relative(Path(__file__).resolve()),
             "input_shared_snapshot_manifest": _repo_relative(SHARED_MANIFEST_PATH),
             "input_shared_snapshot_npz": _repo_relative(SHARED_NPZ_PATH),
             "flow_snapshot_sha256": expected_sha256,
@@ -568,10 +629,26 @@ def _resampling_payload(
     )
     _ensure_candidate_blocker(
         payload,
+        "required_formulation_unsupported",
+        (
+            "At least one required formulation remains unsupported in the core "
+            "traction policy and is recorded as not_run rather than sampled."
+        ),
+    )
+    _ensure_candidate_blocker(
+        payload,
         "dual_face_one_sided_unsupported",
         (
             "dual_one_sided_offset0p51_pressure_only remains not_run because the core "
             "does not yet expose per-face one-sided pressure regions."
+        ),
+    )
+    _ensure_candidate_blocker(
+        payload,
+        "dual_two_sided_offset_sensitivity_above_tolerance",
+        (
+            "Two-sided dual-face pressure-only rows remain strongly sensitive to marker "
+            "face offset, so this sampling matrix cannot select a reference formulation."
         ),
     )
     _ensure_candidate_blocker(
@@ -582,13 +659,12 @@ def _resampling_payload(
             "they are evidence for traction sampling behavior only."
         ),
     )
-    if payload.get("reference_formulation_candidate"):
-        _ensure_candidate_blocker(
-            payload,
-            "reference_selection_deferred",
-            "No reference formulation should be selected from a sampling-only matrix.",
-        )
-        payload["reference_formulation_candidate"] = None
+    _ensure_candidate_blocker(
+        payload,
+        "reference_selection_deferred",
+        "No reference formulation should be selected from a sampling-only matrix.",
+    )
+    payload["reference_formulation_candidate"] = None
     payload["candidate_status"] = "snapshot_resampling_no_reference_selection"
     return payload
 
@@ -613,6 +689,15 @@ def _summary_markdown(
     offset025 = by_name.get("dual_two_sided_offset0p25_pressure_only", {})
     offset100 = by_name.get("dual_two_sided_offset1p00_pressure_only", {})
     one_sided = by_name.get("dual_one_sided_offset0p51_pressure_only", {})
+    candidate = payload.get("reference_formulation_candidate")
+    candidate_text = "none" if candidate in (None, "", "None") else str(candidate)
+    blockers = payload.get("candidate_blockers", [])
+    completed_scenarios = sorted(row["scenario"] for row in _completed_rows(rows))
+    unsupported_scenarios = sorted(
+        str(row.get("scenario", ""))
+        for row in rows
+        if row.get("run_status") == "unsupported"
+    )
     lines = [
         "# ANSYS vertical-flap shared-snapshot traction resampling",
         "",
@@ -657,6 +742,52 @@ def _summary_markdown(
             f"`{one_sided.get('status_reason', '')}`"
         ),
         "",
+        "## Candidate decision",
+        "",
+        f"- reference_formulation_candidate: {candidate_text}",
+        f"- candidate_status: `{payload.get('candidate_status', '')}`",
+        "- candidate_blockers:",
+    ]
+    for blocker in blockers:
+        if isinstance(blocker, Mapping):
+            lines.append(f"  - {blocker.get('blocker', '')}")
+        else:
+            lines.append(f"  - {blocker}")
+    lines.extend(
+        [
+            "",
+            "## Completed scenarios",
+            "",
+        ]
+    )
+    lines.extend(f"- {scenario}" for scenario in completed_scenarios)
+    lines.extend(
+        [
+            "",
+            "## Unsupported scenarios",
+            "",
+        ]
+    )
+    lines.extend(f"- {scenario}" for scenario in unsupported_scenarios)
+    lines.extend(
+        [
+            "",
+            "## Non-claims",
+            "",
+            "- Does not claim Fluent parity.",
+            "- Does not run coupled 50-step FSI.",
+            "",
+            "## Next step",
+            "",
+            (
+                "split marker offset from pressure-probe start offset before attempting "
+                "reference selection."
+            ),
+            "",
+        ]
+    )
+    lines.extend(
+        [
         "## Files",
         "",
         f"- Matrix JSON: `{_repo_relative(MATRIX_JSON)}`",
@@ -682,7 +813,8 @@ def _summary_markdown(
             "opposing flap faces."
         ),
         "",
-    ]
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -744,8 +876,9 @@ def run() -> Dict[str, Any]:
     _prepare_output_dir()
     manifest = _load_manifest()
     fields = _load_snapshot_fields()
-    runtime = TaichiRuntimeConfig(arch="cuda")
     baseline_config = _scenario_config("dual_two_sided_offset0p51_pressure_only")
+    _validate_snapshot_fields(fields, manifest, baseline_config)
+    runtime = TaichiRuntimeConfig(arch="cuda")
     fluid = solid_mpm_fsi_runner._build_fluid(baseline_config, runtime)
     _restore_snapshot_to_fluid(fluid, fields)
 

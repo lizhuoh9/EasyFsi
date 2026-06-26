@@ -5,6 +5,13 @@ import hashlib
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+
+from validation_runs.ansys_vertical_flap_fsi.scripts import (
+    run_traction_snapshot_resampling_matrix as resampling_runner,
+)
 
 
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
@@ -28,6 +35,21 @@ SUPPORTED_SCENARIOS = {
 }
 
 UNSUPPORTED_SCENARIO = "dual_one_sided_offset0p51_pressure_only"
+EXPECTED_SOURCE_SCRIPT = (
+    "validation_runs/ansys_vertical_flap_fsi/scripts/"
+    "run_traction_snapshot_resampling_matrix.py"
+)
+SCOPE_REQUIRED_FRAGMENTS = (
+    "shared snapshot",
+    "sampling-only",
+    "does not claim Fluent parity",
+)
+OLD_SCOPE_FRAGMENT = "fixed-solid traction formulation diagnostic only"
+CORE_CANDIDATE_BLOCKERS = {
+    "required_formulation_unsupported",
+    "dual_face_one_sided_unsupported",
+    "dual_two_sided_offset_sensitivity_above_tolerance",
+}
 
 MARKER_REQUIRED_FIELDS = {
     "marker_index",
@@ -93,14 +115,25 @@ class AnsysVerticalFlapTractionSnapshotResamplingArtifactTests(unittest.TestCase
         )
         self.assertEqual(payload["flow_snapshot_sha256"], manifest["field_sha256"])
         self.assertEqual(payload["flow_snapshot_source_commit"], manifest["source_commit"])
+        self.assertTrue(SHARED_FIELDS.exists())
+        self.assertEqual(_sha256_file(SHARED_FIELDS), manifest["field_sha256"])
         self.assertEqual(payload["completed_formulation_count"], len(SUPPORTED_SCENARIOS))
         self.assertEqual(payload["unsupported_formulation_count"], 1)
-        self.assertIn("not a coupled FSI run", payload["scope_limit"])
+        _assert_resampling_scope(self, payload["scope_limit"])
+        self.assertEqual(payload["source_script"], EXPECTED_SOURCE_SCRIPT)
+        self.assertFalse(Path(payload["source_script"]).is_absolute())
+        self.assertNotIn("\\", payload["source_script"])
+        self.assertNotIn("D:", payload["source_script"])
+        self.assertNotIn("Users", payload["source_script"])
+        self.assertNotIn("lizhu", payload["source_script"])
         self.assertEqual(
             payload["candidate_status"],
             "snapshot_resampling_no_reference_selection",
         )
         self.assertIsNone(payload["reference_formulation_candidate"])
+
+        for row in rows:
+            _assert_resampling_scope(self, row["scope_limit"])
 
         for scenario in SUPPORTED_SCENARIOS:
             row = by_scenario[scenario]
@@ -132,18 +165,35 @@ class AnsysVerticalFlapTractionSnapshotResamplingArtifactTests(unittest.TestCase
 
         low_offset = by_scenario["dual_two_sided_offset0p25_pressure_only"]
         high_offset = by_scenario["dual_two_sided_offset1p00_pressure_only"]
-        blockers = {item["blocker"] for item in payload["candidate_blockers"]}
+        blockers = {
+            item["blocker"]: item.get("detail", "")
+            for item in payload["candidate_blockers"]
+        }
 
         self.assertGreater(float(low_offset["force_ratio_to_baseline"]), 1.5)
         self.assertLess(float(high_offset["force_ratio_to_baseline"]), 0.2)
         self.assertIn("dual_face_one_sided_unsupported", blockers)
         self.assertIn("formulation_resampling_only", blockers)
         self.assertIn("required_formulation_unsupported", blockers)
+        self.assertIn("reference_selection_deferred", blockers)
+        for blocker, detail in blockers.items():
+            self.assertNotEqual(detail.strip(), "", blocker)
+        for blocker in CORE_CANDIDATE_BLOCKERS:
+            self.assertNotEqual(blockers[blocker].strip(), "", blocker)
 
         summary = SUMMARY_MD.read_text(encoding="utf-8")
         self.assertIn("reuses one archived shared preflow", summary)
         self.assertIn("force differences come from sampling formulation", summary)
         self.assertIn("dual-face one-sided pressure scenario remains fail-closed", summary)
+        self.assertIn("reference_formulation_candidate", summary)
+        self.assertIn("none", summary)
+        self.assertIn("candidate_blockers", summary)
+        for scenario in SUPPORTED_SCENARIOS:
+            self.assertIn(scenario, summary)
+        self.assertIn(UNSUPPORTED_SCENARIO, summary)
+        self.assertIn("Fluent parity", summary)
+        self.assertIn("coupled 50-step FSI", summary)
+        self.assertIn("split marker offset from pressure-probe", summary)
         verification = VERIFICATION_MD.read_text(encoding="utf-8")
         self.assertIn("checks the archived NPZ checksum", verification)
 
@@ -197,6 +247,35 @@ class AnsysVerticalFlapTractionSnapshotResamplingArtifactTests(unittest.TestCase
                 marker_rel = Path(row["marker_diagnostics_json"]).relative_to(DIAG_ROOT)
                 self.assertIn(marker_rel.as_posix(), checksum_rows)
 
+    def test_snapshot_field_shape_validator_rejects_mismatches_without_taichi(self):
+        manifest = {"grid_nodes": [2, 3, 4]}
+        config = SimpleNamespace(grid_nodes=(2, 3, 4))
+        fields = _synthetic_snapshot_fields(2, 3, 4)
+
+        resampling_runner._validate_snapshot_fields(fields, manifest, config)
+
+        bad_pressure = dict(fields)
+        bad_pressure["pressure"] = np.zeros((2, 3, 5), dtype=np.float64)
+        with self.assertRaisesRegex(
+            resampling_runner.SnapshotResamplingError,
+            "pressure",
+        ):
+            resampling_runner._validate_snapshot_fields(
+                bad_pressure,
+                manifest,
+                config,
+            )
+
+        with self.assertRaisesRegex(
+            resampling_runner.SnapshotResamplingError,
+            "grid_nodes",
+        ):
+            resampling_runner._validate_snapshot_fields(
+                fields,
+                {"grid_nodes": [2, 3, 5]},
+                config,
+            )
+
 
 def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
@@ -212,3 +291,29 @@ def _read_checksums(path: Path) -> dict[str, str]:
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _assert_resampling_scope(
+    testcase: unittest.TestCase,
+    scope: str,
+) -> None:
+    for fragment in SCOPE_REQUIRED_FRAGMENTS:
+        testcase.assertIn(fragment, scope)
+    testcase.assertNotIn(OLD_SCOPE_FRAGMENT, scope)
+
+
+def _synthetic_snapshot_fields(nx: int, ny: int, nz: int) -> dict[str, np.ndarray]:
+    return {
+        "velocity": np.zeros((nx, ny, nz, 3), dtype=np.float64),
+        "pressure": np.zeros((nx, ny, nz), dtype=np.float64),
+        "obstacle": np.zeros((nx, ny, nz), dtype=np.int32),
+        "cell_face_x_m": np.zeros((nx + 1,), dtype=np.float64),
+        "cell_face_y_m": np.zeros((ny + 1,), dtype=np.float64),
+        "cell_face_z_m": np.zeros((nz + 1,), dtype=np.float64),
+        "cell_center_x_m": np.zeros((nx,), dtype=np.float64),
+        "cell_center_y_m": np.zeros((ny,), dtype=np.float64),
+        "cell_center_z_m": np.zeros((nz,), dtype=np.float64),
+        "cell_width_x_m": np.ones((nx,), dtype=np.float64),
+        "cell_width_y_m": np.ones((ny,), dtype=np.float64),
+        "cell_width_z_m": np.ones((nz,), dtype=np.float64),
+    }

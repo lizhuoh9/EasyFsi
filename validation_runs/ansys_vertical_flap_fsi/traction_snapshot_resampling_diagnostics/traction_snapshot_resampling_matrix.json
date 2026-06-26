@@ -3,15 +3,15 @@
   "candidate_blockers": [
     {
       "blocker": "required_formulation_unsupported",
-      "detail": ""
+      "detail": "At least one required formulation remains unsupported in the core traction policy and is recorded as not_run rather than sampled."
     },
     {
       "blocker": "dual_face_one_sided_unsupported",
-      "detail": ""
+      "detail": "dual_one_sided_offset0p51_pressure_only remains not_run because the core does not yet expose per-face one-sided pressure regions."
     },
     {
       "blocker": "dual_two_sided_offset_sensitivity_above_tolerance",
-      "detail": ""
+      "detail": "Two-sided dual-face pressure-only rows remain strongly sensitive to marker face offset, so this sampling matrix cannot select a reference formulation."
     },
     {
       "blocker": "formulation_resampling_only",
@@ -25,7 +25,7 @@
   "candidate_status": "snapshot_resampling_no_reference_selection",
   "case": "ansys_vertical_flap_fsi",
   "completed_formulation_count": 5,
-  "created_at_utc": "2026-06-26T10:47:12.380107+00:00",
+  "created_at_utc": "2026-06-26T15:20:01.298058+00:00",
   "dual_one_sided_vs_single_mid_relative_error": "",
   "flow_metric_identity_status": "flow_metrics_match_completed_rows",
   "flow_snapshot_candidate_status": "snapshot_only_no_reference_selection",
@@ -652,7 +652,7 @@
       "run_status": "completed",
       "scatter_action_reaction_residual_N": 0.0,
       "scenario": "dual_two_sided_offset0p51_pressure_only",
-      "scope_limit": "fixed-solid traction formulation diagnostic only; no coupled 50-step or Fluent parity claim",
+      "scope_limit": "shared snapshot sampling-only traction formulation comparison on archived shared preflow velocity/pressure/obstacle fields; does not advance coupled FSI and does not claim Fluent parity.",
       "secondary_face_base_pressure_found_marker_count": 12,
       "secondary_face_force_z_N": -4.126595045167353e-06,
       "secondary_face_inside_pressure_found_marker_count": 12,
@@ -700,7 +700,7 @@
       "two_sided_pressure_marker_count": 24,
       "velocity_outlet_flux_ratio": 0.9846647053512794,
       "viscosity_pa_s": 0.0,
-      "worker_elapsed_s": 5.3311676000012085,
+      "worker_elapsed_s": 6.467076200002339,
       "worker_mode": "shared_snapshot_resampling",
       "worker_returncode": 0,
       "worker_stderr_log": "",
@@ -787,7 +787,7 @@
       "run_status": "unsupported",
       "scatter_action_reaction_residual_N": "",
       "scenario": "dual_one_sided_offset0p51_pressure_only",
-      "scope_limit": "fixed-solid traction formulation diagnostic only; no coupled 50-step or Fluent parity claim",
+      "scope_limit": "shared snapshot sampling-only traction formulation comparison on archived shared preflow velocity/pressure/obstacle fields; does not advance coupled FSI and does not claim Fluent parity.",
       "secondary_face_base_pressure_found_marker_count": "",
       "secondary_face_force_z_N": "",
       "secondary_face_inside_pressure_found_marker_count": "",
@@ -922,7 +922,7 @@
       "run_status": "completed",
       "scatter_action_reaction_residual_N": 0.0,
       "scenario": "single_mid_two_sided_offset0p00_pressure_only",
-      "scope_limit": "fixed-solid traction formulation diagnostic only; no coupled 50-step or Fluent parity claim",
+      "scope_limit": "shared snapshot sampling-only traction formulation comparison on archived shared preflow velocity/pressure/obstacle fields; does not advance coupled FSI and does not claim Fluent parity.",
       "secondary_face_base_pressure_found_marker_count": 0,
       "secondary_face_force_z_N": 0.0,
       "secondary_face_inside_pressure_found_marker_count": 0,
@@ -966,7 +966,7 @@
       "two_sided_pressure_marker_count": 12,
       "velocity_outlet_flux_ratio": 0.9846647053512794,
       "viscosity_pa_s": 0.0,
-      "worker_elapsed_s": 5.271520000009332,
+      "worker_elapsed_s": 39.60429639997892,
       "worker_mode": "shared_snapshot_resampling",
       "worker_returncode": 0,
       "worker_stderr_log": "",
@@ -1057,7 +1057,7 @@
       "run_status": "completed",
       "scatter_action_reaction_residual_N": 0.0,
       "scenario": "dual_two_sided_offset0p25_pressure_only",
-      "scope_limit": "fixed-solid traction formulation diagnostic only; no coupled 50-step or Fluent parity claim",
+      "scope_limit": "shared snapshot sampling-only traction formulation comparison on archived shared preflow velocity/pressure/obstacle fields; does not advance coupled FSI and does not claim Fluent parity.",
       "secondary_face_base_pressure_found_marker_count": 12,
       "secondary_face_force_z_N": -0.00017566435718115004,
       "secondary_face_inside_pressure_found_marker_count": 12,
@@ -1105,7 +1105,7 @@
       "two_sided_pressure_marker_count": 24,
       "velocity_outlet_flux_ratio": 0.9846647053512794,
       "viscosity_pa_s": 0.0,
-      "worker_elapsed_s": 5.288623500004178,
+      "worker_elapsed_s": 5.9225013999966905,
       "worker_mode": "shared_snapshot_resampling",
       "worker_returncode": 0,
       "worker_stderr_log": "",
@@ -1196,7 +1196,7 @@
       "run_status": "completed",
       "scatter_action_reaction_residual_N": 0.0,
       "scenario": "dual_two_sided_offset1p00_pressure_only",
-      "scope_limit": "fixed-solid traction formulation diagnostic only; no coupled 50-step or Fluent parity claim",
+      "scope_limit": "shared snapshot sampling-only traction formulation comparison on archived shared preflow velocity/pressure/obstacle fields; does not advance coupled FSI and does not claim Fluent parity.",
       "secondary_face_base_pressure_found_marker_count": 12,
       "secondary_face_force_z_N": -7.231768867939616e-06,
       "secondary_face_inside_pressure_found_marker_count": 12,
@@ -1244,7 +1244,7 @@
       "two_sided_pressure_marker_count": 24,
       "velocity_outlet_flux_ratio": 0.9846647053512794,
       "viscosity_pa_s": 0.0,
-      "worker_elapsed_s": 5.350875299976906,
+      "worker_elapsed_s": 5.715494499949273,
       "worker_mode": "shared_snapshot_resampling",
       "worker_returncode": 0,
       "worker_stderr_log": "",
@@ -1335,7 +1335,7 @@
       "run_status": "completed",
       "scatter_action_reaction_residual_N": 0.0,
       "scenario": "dual_two_sided_offset0p51_viscous_air",
-      "scope_limit": "fixed-solid traction formulation diagnostic only; no coupled 50-step or Fluent parity claim",
+      "scope_limit": "shared snapshot sampling-only traction formulation comparison on archived shared preflow velocity/pressure/obstacle fields; does not advance coupled FSI and does not claim Fluent parity.",
       "secondary_face_base_pressure_found_marker_count": 12,
       "secondary_face_force_z_N": -4.7571241545763355e-06,
       "secondary_face_inside_pressure_found_marker_count": 12,
@@ -1383,7 +1383,7 @@
       "two_sided_pressure_marker_count": 24,
       "velocity_outlet_flux_ratio": 0.9846647053512794,
       "viscosity_pa_s": 1.8e-05,
-      "worker_elapsed_s": 9.376825300016208,
+      "worker_elapsed_s": 10.197680599987507,
       "worker_mode": "shared_snapshot_resampling",
       "worker_returncode": 0,
       "worker_stderr_log": "",
@@ -1392,8 +1392,8 @@
     }
   ],
   "schema_version": 1,
-  "scope_limit": "Sampling-only traction formulation comparison on the archived shared preflow velocity/pressure/obstacle fields. This is not a coupled FSI run and does not claim Fluent parity.",
-  "source_script": "D:\\working\\squid robot\\simulation\\src\\reference\\papers\\HIBM-MPM\\refactored\\validation_runs\\ansys_vertical_flap_fsi\\scripts\\run_traction_snapshot_resampling_matrix.py",
+  "scope_limit": "shared snapshot sampling-only traction formulation comparison on archived shared preflow velocity/pressure/obstacle fields; does not advance coupled FSI and does not claim Fluent parity.",
+  "source_script": "validation_runs/ansys_vertical_flap_fsi/scripts/run_traction_snapshot_resampling_matrix.py",
   "supported_formulation_count": 5,
   "supported_required_scenarios": [
     "dual_two_sided_offset0p25_pressure_only",

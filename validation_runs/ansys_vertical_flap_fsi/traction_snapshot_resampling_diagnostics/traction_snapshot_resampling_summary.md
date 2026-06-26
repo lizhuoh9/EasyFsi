@@ -24,6 +24,38 @@ This artifact reuses one archived shared preflow velocity/pressure/obstacle snap
 - Offset 1.00 force ratio vs baseline: 0.0675151
 - One-sided dual-face row: `unsupported` / `dual-face one-sided pressure needs per-face one-sided region support; current core exposes one one_sided_pressure_region_id`
 
+## Candidate decision
+
+- reference_formulation_candidate: none
+- candidate_status: `snapshot_resampling_no_reference_selection`
+- candidate_blockers:
+  - required_formulation_unsupported
+  - dual_face_one_sided_unsupported
+  - dual_two_sided_offset_sensitivity_above_tolerance
+  - formulation_resampling_only
+  - reference_selection_deferred
+
+## Completed scenarios
+
+- dual_two_sided_offset0p25_pressure_only
+- dual_two_sided_offset0p51_pressure_only
+- dual_two_sided_offset0p51_viscous_air
+- dual_two_sided_offset1p00_pressure_only
+- single_mid_two_sided_offset0p00_pressure_only
+
+## Unsupported scenarios
+
+- dual_one_sided_offset0p51_pressure_only
+
+## Non-claims
+
+- Does not claim Fluent parity.
+- Does not run coupled 50-step FSI.
+
+## Next step
+
+split marker offset from pressure-probe start offset before attempting reference selection.
+
 ## Files
 
 - Matrix JSON: `validation_runs/ansys_vertical_flap_fsi/traction_snapshot_resampling_diagnostics/traction_snapshot_resampling_matrix.json`
