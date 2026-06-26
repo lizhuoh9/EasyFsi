@@ -1586,6 +1586,17 @@ def _run_fixed_solid_preflow(
         "preflow_status": stop_reason,
         "preflow_stop_reason": stop_reason,
         "preflow_history": history,
+        "final_stress_marker_diagnostics": (
+            markers.stress_marker_diagnostics() if history else []
+        ),
+        "final_stress_face_diagnostics": (
+            markers.stress_face_diagnostics(
+                primary_region_id=PRIMARY_REGION_ID,
+                secondary_region_id=SECONDARY_REGION_ID,
+            )
+            if history
+            else {}
+        ),
     }
 
 
