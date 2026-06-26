@@ -198,6 +198,63 @@ class AnsysVerticalFlapTractionFormulationArtifactTests(unittest.TestCase):
         self.assertEqual(payload["reference_formulation_candidate"], "none")
         self.assertIn("required_formulation_failed", payload["candidate_blockers"])
 
+    def test_candidate_gate_blocks_missing_completed_row_diagnostics(self):
+        cases = [
+            ("marker_action_reaction_residual_N", "marker_action_reaction_residual_missing"),
+            ("scatter_action_reaction_residual_N", "scatter_action_reaction_residual_missing"),
+            ("force_decomposition_residual_N", "force_decomposition_residual_missing"),
+            ("primary_face_invalid_marker_count", "invalid_marker_count_missing"),
+            ("secondary_face_invalid_marker_count", "invalid_marker_count_missing"),
+            ("total_force_z_N", "total_force_missing"),
+            ("total_marker_count", "marker_count_missing"),
+        ]
+        for field, blocker in cases:
+            with self.subTest(field=field):
+                rows = _stable_synthetic_rows()
+                rows[0] = dict(rows[0])
+                rows[0][field] = ""
+                payload = traction_matrix._payload(
+                    traction_matrix._apply_baseline_comparisons(rows)
+                )
+
+                self.assertEqual(payload["reference_formulation_candidate"], "none")
+                self.assertIn(blocker, payload["candidate_blockers"])
+
+    def test_candidate_gate_blocks_full_field_reset(self):
+        rows = _stable_synthetic_rows()
+        rows[0] = dict(rows[0], flow_driver_uses_full_velocity_reset=True)
+        payload = traction_matrix._payload(traction_matrix._apply_baseline_comparisons(rows))
+
+        self.assertEqual(payload["reference_formulation_candidate"], "none")
+        self.assertIn("full_field_reset_used", payload["candidate_blockers"])
+
+    def test_candidate_gate_blocks_formulation_disagreement(self):
+        rows = _stable_synthetic_rows()
+        rows[1] = dict(rows[1], total_force_z_N=-60.0)
+        payload = traction_matrix._payload(traction_matrix._apply_baseline_comparisons(rows))
+
+        self.assertEqual(payload["reference_formulation_candidate"], "none")
+        self.assertEqual(
+            payload["formulation_agreement_status"],
+            "formulation_disagreement_above_tolerance",
+        )
+        self.assertIn(
+            "formulation_disagreement_above_tolerance",
+            payload["candidate_blockers"],
+        )
+
+    def test_candidate_gate_blocks_flow_snapshot_mismatch(self):
+        rows = _stable_synthetic_rows()
+        rows[2] = dict(rows[2], final_velocity_peak_mps=23.0)
+        payload = traction_matrix._payload(traction_matrix._apply_baseline_comparisons(rows))
+
+        self.assertEqual(payload["reference_formulation_candidate"], "none")
+        self.assertEqual(
+            payload["flow_snapshot_identity_status"],
+            "flow_metrics_mismatch_completed_rows",
+        )
+        self.assertIn("flow_snapshot_identity_mismatch", payload["candidate_blockers"])
+
     def test_candidate_gate_blocks_offset_instability_when_rows_complete(self):
         rows = _stable_synthetic_rows(
             offset025_force_z=-195.0,
@@ -328,6 +385,7 @@ def _synthetic_completed_row(
         "marker_face_offset_cells": marker_face_offset_cells,
         "step_count": 0,
         "preflow_steps": 20,
+        "total_marker_count": 24,
         "primary_face_invalid_marker_count": 0,
         "secondary_face_invalid_marker_count": 0,
         "primary_face_force_z_N": primary,

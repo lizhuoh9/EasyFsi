@@ -232,12 +232,15 @@ a validated reference formulation. Unsupported formulations are archived as
 `unsupported` rows rather than faked. Candidate promotion is blocked by any
 required unsupported/failed row, invalid marker count, action-reaction residual,
 full-field flow reset, missing per-face pressure probe, offset sensitivity,
-formulation disagreement, or flow-snapshot mismatch. The current reclassified
-artifact records these blockers explicitly; in particular, dual-face one-sided
-pressure is unsupported, offset ratios are outside the tolerance window, and
-per-face pressure means are not exposed by the current core. This is still a
-fixed-solid formulation diagnostic only: it does not run the 50-step case, does
-not import Fluent force history, and does not claim Fluent parity.
+formulation disagreement, flow-snapshot mismatch, or missing required
+diagnostic field. Missing residuals, invalid-marker counts, marker counts, or
+total force are fail-closed blockers instead of being interpreted as zero. The
+current reclassified artifact records these blockers explicitly; in particular,
+dual-face one-sided pressure is unsupported, offset ratios are outside the
+tolerance window, and per-face pressure means are not exposed by the current
+core. This is still a fixed-solid formulation diagnostic only: it does not run
+the 50-step case, does not import Fluent force history, and does not claim
+Fluent parity.
 
 For the coupled preflow-release STEP20 diagnostic, run:
 

@@ -926,25 +926,41 @@ def _add_unsupported_blocker(blockers: list[str], row: dict[str, Any]) -> None:
 
 
 def _add_row_quality_blockers(blockers: list[str], row: dict[str, Any]) -> None:
-    primary_invalid = _float_or_zero(row.get("primary_face_invalid_marker_count"))
-    secondary_invalid = _float_or_zero(row.get("secondary_face_invalid_marker_count"))
-    if primary_invalid != 0.0 or secondary_invalid != 0.0:
+    total_force = _float_or_none(row.get("total_force_z_N"))
+    if total_force is None:
+        _add_blocker(blockers, "total_force_missing")
+    total_marker_count = _float_or_none(row.get("total_marker_count"))
+    if total_marker_count is None or total_marker_count <= 0.0:
+        _add_blocker(blockers, "marker_count_missing")
+
+    primary_invalid = _float_or_none(row.get("primary_face_invalid_marker_count"))
+    secondary_invalid = _float_or_none(row.get("secondary_face_invalid_marker_count"))
+    if primary_invalid is None or secondary_invalid is None:
+        _add_blocker(blockers, "invalid_marker_count_missing")
+    elif primary_invalid != 0.0 or secondary_invalid != 0.0:
         _add_blocker(blockers, "invalid_marker_count_nonzero")
-    if (
-        _float_or_zero(row.get("force_decomposition_residual_N"))
-        > ACTION_REACTION_RESIDUAL_MAX_N
-    ):
-        _add_blocker(blockers, "force_decomposition_residual_above_tolerance")
-    if (
-        _float_or_zero(row.get("marker_action_reaction_residual_N"))
-        > ACTION_REACTION_RESIDUAL_MAX_N
-    ):
-        _add_blocker(blockers, "marker_action_reaction_residual_above_tolerance")
-    if (
-        _float_or_zero(row.get("scatter_action_reaction_residual_N"))
-        > ACTION_REACTION_RESIDUAL_MAX_N
-    ):
-        _add_blocker(blockers, "scatter_action_reaction_residual_above_tolerance")
+
+    _add_residual_blocker(
+        blockers,
+        row,
+        "force_decomposition_residual_N",
+        "force_decomposition_residual_missing",
+        "force_decomposition_residual_above_tolerance",
+    )
+    _add_residual_blocker(
+        blockers,
+        row,
+        "marker_action_reaction_residual_N",
+        "marker_action_reaction_residual_missing",
+        "marker_action_reaction_residual_above_tolerance",
+    )
+    _add_residual_blocker(
+        blockers,
+        row,
+        "scatter_action_reaction_residual_N",
+        "scatter_action_reaction_residual_missing",
+        "scatter_action_reaction_residual_above_tolerance",
+    )
     if _truthy(row.get("flow_driver_uses_full_velocity_reset")):
         _add_blocker(blockers, "full_field_reset_used")
     if (
@@ -952,6 +968,20 @@ def _add_row_quality_blockers(blockers: list[str], row: dict[str, Any]) -> None:
         or row.get("secondary_face_mean_pressure_pa", "") == ""
     ):
         _add_blocker(blockers, "pressure_probe_diagnostics_incomplete")
+
+
+def _add_residual_blocker(
+    blockers: list[str],
+    row: dict[str, Any],
+    field: str,
+    missing_blocker: str,
+    above_tolerance_blocker: str,
+) -> None:
+    residual = _float_or_none(row.get(field))
+    if residual is None:
+        _add_blocker(blockers, missing_blocker)
+    elif abs(residual) > ACTION_REACTION_RESIDUAL_MAX_N:
+        _add_blocker(blockers, above_tolerance_blocker)
 
 
 def _offset_sensitivity_report(

@@ -926,6 +926,9 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError(
             f"unsupported traction_pressure_sampling_mode: {pressure_sampling_mode!r}"
         )
+    formulation_supported, formulation_reason = traction_formulation_supported(config)
+    if not formulation_supported:
+        raise ValueError(f"unsupported traction formulation: {formulation_reason}")
     marker_face_offset_cells = _traction_marker_face_offset_cells(config)
     if not math.isfinite(marker_face_offset_cells) or marker_face_offset_cells < 0.0:
         raise ValueError(
