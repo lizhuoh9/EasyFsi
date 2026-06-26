@@ -43,6 +43,18 @@ REQUIRED_ROW_FIELDS = {
     "scatter_action_reaction_residual_N",
     "primary_face_mean_pressure_pa",
     "secondary_face_mean_pressure_pa",
+    "primary_face_pressure_missing_marker_count",
+    "secondary_face_pressure_missing_marker_count",
+    "primary_face_inside_probe_rung_histogram",
+    "secondary_face_inside_probe_rung_histogram",
+    "primary_face_outside_probe_rung_histogram",
+    "secondary_face_outside_probe_rung_histogram",
+    "primary_face_inside_unique_nearest_cell_count",
+    "secondary_face_inside_unique_nearest_cell_count",
+    "primary_face_outside_unique_nearest_cell_count",
+    "secondary_face_outside_unique_nearest_cell_count",
+    "primary_face_traction_decomposition_max_abs_residual_pa",
+    "secondary_face_traction_decomposition_max_abs_residual_pa",
     "primary_face_mean_traction_z_pa",
     "secondary_face_mean_traction_z_pa",
     "final_velocity_peak_mps",
@@ -261,6 +273,50 @@ class AnsysVerticalFlapTractionFormulationArtifactTests(unittest.TestCase):
                 self.assertEqual(payload["reference_formulation_candidate"], "none")
                 self.assertIn(blocker, payload["candidate_blockers"])
 
+    def test_candidate_gate_blocks_incomplete_probe_detail_diagnostics(self):
+        cases = [
+            (
+                "primary_face_pressure_missing_marker_count",
+                "",
+                "pressure_complete_count_inconsistent",
+            ),
+            (
+                "primary_face_pressure_complete_marker_count",
+                11,
+                "pressure_complete_count_inconsistent",
+            ),
+            (
+                "primary_face_inside_probe_rung_histogram",
+                "",
+                "probe_rung_diagnostics_incomplete",
+            ),
+            (
+                "primary_face_inside_unique_nearest_cell_count",
+                "",
+                "probe_cell_diagnostics_incomplete",
+            ),
+            (
+                "primary_face_traction_decomposition_max_abs_residual_pa",
+                "",
+                "traction_decomposition_missing",
+            ),
+            (
+                "primary_face_traction_decomposition_max_abs_residual_pa",
+                1.0e-3,
+                "traction_decomposition_above_tolerance",
+            ),
+        ]
+        for field, value, blocker in cases:
+            with self.subTest(field=field):
+                rows = _stable_synthetic_rows()
+                rows[0] = dict(rows[0], **{field: value})
+                payload = traction_matrix._payload(
+                    traction_matrix._apply_baseline_comparisons(rows)
+                )
+
+                self.assertEqual(payload["reference_formulation_candidate"], "none")
+                self.assertIn(blocker, payload["candidate_blockers"])
+
     def test_candidate_gate_pressure_probe_completeness_is_layout_aware(self):
         rows = _stable_synthetic_rows()
         single_mid = dict(rows[2])
@@ -451,6 +507,11 @@ def _synthetic_completed_row(
     secondary_marker_count = 0 if marker_layout == "single_mid_surface" else 12
     total_marker_count = primary_marker_count + secondary_marker_count
     secondary_pressure = "" if secondary_marker_count == 0 else 1.0
+    secondary_histogram = "" if secondary_marker_count == 0 else {"0": secondary_marker_count}
+    secondary_unique_cell_count = "" if secondary_marker_count == 0 else 3
+    secondary_distance = "" if secondary_marker_count == 0 else 0.001
+    secondary_residual = "" if secondary_marker_count == 0 else 0.0
+    secondary_residual_count = "" if secondary_marker_count == 0 else 0
     return {
         "scenario": scenario,
         "run_status": "completed",
@@ -493,6 +554,50 @@ def _synthetic_completed_row(
         "secondary_face_mean_reference_pressure_pa": secondary_pressure,
         "primary_face_pressure_complete_marker_count": primary_marker_count,
         "secondary_face_pressure_complete_marker_count": secondary_marker_count,
+        "primary_face_pressure_missing_marker_count": 0,
+        "secondary_face_pressure_missing_marker_count": 0,
+        "primary_face_base_pressure_found_marker_count": primary_marker_count,
+        "secondary_face_base_pressure_found_marker_count": secondary_marker_count,
+        "primary_face_inside_pressure_found_marker_count": primary_marker_count,
+        "secondary_face_inside_pressure_found_marker_count": secondary_marker_count,
+        "primary_face_outside_pressure_found_marker_count": primary_marker_count,
+        "secondary_face_outside_pressure_found_marker_count": secondary_marker_count,
+        "primary_face_mean_base_pressure_pa": 1.5,
+        "secondary_face_mean_base_pressure_pa": secondary_pressure,
+        "primary_face_inside_probe_rung_histogram": {"0": primary_marker_count},
+        "secondary_face_inside_probe_rung_histogram": secondary_histogram,
+        "primary_face_outside_probe_rung_histogram": {"0": primary_marker_count},
+        "secondary_face_outside_probe_rung_histogram": secondary_histogram,
+        "primary_face_inside_probe_distance_min_m": 0.001,
+        "secondary_face_inside_probe_distance_min_m": secondary_distance,
+        "primary_face_inside_probe_distance_mean_m": 0.001,
+        "secondary_face_inside_probe_distance_mean_m": secondary_distance,
+        "primary_face_inside_probe_distance_max_m": 0.001,
+        "secondary_face_inside_probe_distance_max_m": secondary_distance,
+        "primary_face_outside_probe_distance_min_m": 0.001,
+        "secondary_face_outside_probe_distance_min_m": secondary_distance,
+        "primary_face_outside_probe_distance_mean_m": 0.001,
+        "secondary_face_outside_probe_distance_mean_m": secondary_distance,
+        "primary_face_outside_probe_distance_max_m": 0.001,
+        "secondary_face_outside_probe_distance_max_m": secondary_distance,
+        "primary_face_inside_unique_nearest_cell_count": 3,
+        "secondary_face_inside_unique_nearest_cell_count": secondary_unique_cell_count,
+        "primary_face_outside_unique_nearest_cell_count": 3,
+        "secondary_face_outside_unique_nearest_cell_count": secondary_unique_cell_count,
+        "primary_face_mean_traction_z_pa": primary,
+        "secondary_face_mean_traction_z_pa": secondary,
+        "primary_face_mean_total_traction_z_pa": primary,
+        "secondary_face_mean_total_traction_z_pa": secondary,
+        "primary_face_mean_pressure_traction_z_pa": primary,
+        "secondary_face_mean_pressure_traction_z_pa": secondary,
+        "primary_face_mean_viscous_traction_z_pa": 0.0,
+        "secondary_face_mean_viscous_traction_z_pa": 0.0,
+        "primary_face_traction_decomposition_max_abs_residual_pa": 0.0,
+        "secondary_face_traction_decomposition_max_abs_residual_pa": secondary_residual,
+        "primary_face_traction_decomposition_invalid_marker_count": 0,
+        "secondary_face_traction_decomposition_invalid_marker_count": (
+            secondary_residual_count
+        ),
         "flow_driver_uses_full_velocity_reset": False,
         "final_velocity_peak_mps": 22.0,
         "final_velocity_p999_mps": 20.0,

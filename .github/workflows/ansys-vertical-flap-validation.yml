@@ -88,3 +88,14 @@ jobs:
             tests.tools.test_ansys_vertical_flap_diagnostics `
             tests.tools.test_ansys_vertical_flap_temporal_gate `
             -v
+
+      - name: Run traction probe diagnostics unit tests when CUDA is enabled
+        shell: pwsh
+        run: |
+          python -m unittest -v `
+            tests.solvers.test_hibm_traction_probe_diagnostics.HibmMpmTractionProbeDiagnosticsTests.test_uniform_two_sided_pressure_reports_zero_jump_and_probe_evidence `
+            tests.solvers.test_hibm_traction_probe_diagnostics.HibmMpmTractionProbeDiagnosticsTests.test_piecewise_two_sided_pressure_reports_jump_sign_and_nearest_cells `
+            tests.solvers.test_hibm_traction_probe_diagnostics.HibmMpmTractionProbeDiagnosticsTests.test_missing_two_sided_probe_resets_sentinel_fields_and_reason_code `
+            tests.solvers.test_hibm_traction_probe_diagnostics.HibmMpmTractionProbeDiagnosticsTests.test_pressure_only_and_general_paths_report_equivalent_pressure_traction `
+            tests.solvers.test_hibm_traction_probe_diagnostics.HibmMpmTractionProbeDiagnosticsTests.test_base_viscous_split_preserves_pressure_viscous_total_decomposition `
+            tests.solvers.test_hibm_traction_probe_diagnostics.HibmMpmTractionProbeDiagnosticsTests.test_external_total_traction_keeps_public_decomposition_consistent

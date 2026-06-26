@@ -36,6 +36,7 @@ FAILURES_DIR = OUTPUT_DIR / "failures"
 PREFLOW_STEPS = 20
 WORKER_TIMEOUT_S = 900
 ACTION_REACTION_RESIDUAL_MAX_N = 1.0e-8
+TRACTION_DECOMPOSITION_RESIDUAL_MAX_PA = 1.0e-8
 BASELINE_SCENARIO = "dual_two_sided_offset0p51_pressure_only"
 REFERENCE_SCENARIO = BASELINE_SCENARIO
 DUAL_ONE_SIDED_SCENARIO = "dual_one_sided_offset0p51_pressure_only"
@@ -71,6 +72,45 @@ REQUIRED_SCENARIOS = (
     "dual_two_sided_offset0p25_pressure_only",
     "dual_two_sided_offset1p00_pressure_only",
     "dual_two_sided_offset0p51_viscous_air",
+)
+
+FACE_DIAGNOSTIC_EXTRA_FIELDS = (
+    "primary_face_pressure_missing_marker_count",
+    "secondary_face_pressure_missing_marker_count",
+    "primary_face_base_pressure_found_marker_count",
+    "secondary_face_base_pressure_found_marker_count",
+    "primary_face_inside_pressure_found_marker_count",
+    "secondary_face_inside_pressure_found_marker_count",
+    "primary_face_outside_pressure_found_marker_count",
+    "secondary_face_outside_pressure_found_marker_count",
+    "primary_face_mean_base_pressure_pa",
+    "secondary_face_mean_base_pressure_pa",
+    "primary_face_inside_probe_rung_histogram",
+    "secondary_face_inside_probe_rung_histogram",
+    "primary_face_outside_probe_rung_histogram",
+    "secondary_face_outside_probe_rung_histogram",
+    "primary_face_inside_probe_distance_min_m",
+    "secondary_face_inside_probe_distance_min_m",
+    "primary_face_inside_probe_distance_mean_m",
+    "secondary_face_inside_probe_distance_mean_m",
+    "primary_face_inside_probe_distance_max_m",
+    "secondary_face_inside_probe_distance_max_m",
+    "primary_face_outside_probe_distance_min_m",
+    "secondary_face_outside_probe_distance_min_m",
+    "primary_face_outside_probe_distance_mean_m",
+    "secondary_face_outside_probe_distance_mean_m",
+    "primary_face_outside_probe_distance_max_m",
+    "secondary_face_outside_probe_distance_max_m",
+    "primary_face_inside_unique_nearest_cell_count",
+    "secondary_face_inside_unique_nearest_cell_count",
+    "primary_face_outside_unique_nearest_cell_count",
+    "secondary_face_outside_unique_nearest_cell_count",
+    "primary_face_mean_total_traction_z_pa",
+    "secondary_face_mean_total_traction_z_pa",
+    "primary_face_traction_decomposition_max_abs_residual_pa",
+    "secondary_face_traction_decomposition_max_abs_residual_pa",
+    "primary_face_traction_decomposition_invalid_marker_count",
+    "secondary_face_traction_decomposition_invalid_marker_count",
 )
 
 MATRIX_COLUMNS = [
@@ -117,6 +157,7 @@ MATRIX_COLUMNS = [
     "secondary_face_mean_reference_pressure_pa",
     "primary_face_pressure_complete_marker_count",
     "secondary_face_pressure_complete_marker_count",
+    *FACE_DIAGNOSTIC_EXTRA_FIELDS,
     "primary_face_mean_traction_z_pa",
     "secondary_face_mean_traction_z_pa",
     "primary_face_mean_pressure_traction_z_pa",
@@ -200,6 +241,7 @@ HISTORY_COLUMNS = [
     "secondary_face_mean_reference_pressure_pa",
     "primary_face_pressure_complete_marker_count",
     "secondary_face_pressure_complete_marker_count",
+    *FACE_DIAGNOSTIC_EXTRA_FIELDS,
     "primary_face_mean_pressure_traction_z_pa",
     "secondary_face_mean_pressure_traction_z_pa",
     "primary_face_mean_viscous_traction_z_pa",
@@ -635,6 +677,9 @@ def _history_row(scenario: str, raw: dict[str, Any]) -> dict[str, Any]:
         ),
         "stress_invalid_marker_count": raw.get("stress_invalid_marker_count", ""),
     }
+    for field in FACE_DIAGNOSTIC_EXTRA_FIELDS:
+        row[field] = raw.get(field, "")
+    return row
 
 
 def _summary_row(
@@ -797,6 +842,8 @@ def _summary_row(
         row["status_reason"] = "completed; pressure means " + PRESSURE_MEAN_STATUS
     else:
         row["status_reason"] += "; pressure means " + PRESSURE_MEAN_STATUS
+    for field in FACE_DIAGNOSTIC_EXTRA_FIELDS:
+        row[field] = final.get(field, "")
     return row
 
 
@@ -959,6 +1006,7 @@ def _hydrate_rows_from_histories(
             "secondary_face_mean_pressure_traction_z_pa",
             "primary_face_mean_viscous_traction_z_pa",
             "secondary_face_mean_viscous_traction_z_pa",
+            *FACE_DIAGNOSTIC_EXTRA_FIELDS,
         ):
             row[pressure_field] = final.get(pressure_field, row.get(pressure_field, ""))
         if str(row.get("run_status", "")) == "completed":
@@ -1215,6 +1263,7 @@ def _add_row_quality_blockers(blockers: list[str], row: dict[str, Any]) -> None:
         _add_blocker(blockers, "pressure_probe_diagnostics_incomplete")
         for face in missing_pressure_faces:
             _add_blocker(blockers, f"{face}_pressure_probe_diagnostics_incomplete")
+    _add_probe_detail_blockers(blockers, row)
 
 
 def _missing(value: Any) -> bool:
@@ -1223,10 +1272,7 @@ def _missing(value: Any) -> bool:
 
 def _missing_pressure_probe_faces(row: dict[str, Any]) -> list[str]:
     missing_faces: list[str] = []
-    required_faces = ["primary"]
-    if str(row.get("marker_layout", "")) == "dual_physical_faces":
-        required_faces.append("secondary")
-    for face in required_faces:
+    for face in _required_pressure_faces(row):
         for field in (
             f"{face}_face_mean_pressure_pa",
             f"{face}_face_mean_pressure_jump_pa",
@@ -1237,6 +1283,99 @@ def _missing_pressure_probe_faces(row: dict[str, Any]) -> list[str]:
                 missing_faces.append(face)
                 break
     return missing_faces
+
+
+def _required_pressure_faces(row: dict[str, Any]) -> list[str]:
+    required_faces = ["primary"]
+    if str(row.get("marker_layout", "")) == "dual_physical_faces":
+        required_faces.append("secondary")
+    return required_faces
+
+
+def _int_count_or_none(value: Any) -> int | None:
+    parsed = _float_or_none(value)
+    if parsed is None:
+        return None
+    rounded = round(parsed)
+    if abs(parsed - rounded) > 1.0e-9:
+        return None
+    return int(rounded)
+
+
+def _empty_histogram(value: Any) -> bool:
+    if _missing(value):
+        return True
+    if isinstance(value, dict):
+        return len(value) == 0
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped in {"{}", "[]"}
+    return False
+
+
+def _add_probe_detail_blockers(
+    blockers: list[str],
+    row: dict[str, Any],
+) -> None:
+    for face in _required_pressure_faces(row):
+        valid_count = _int_count_or_none(row.get(f"{face}_face_valid_marker_count"))
+        if valid_count is None or valid_count <= 0:
+            continue
+        complete_count = _int_count_or_none(
+            row.get(f"{face}_face_pressure_complete_marker_count")
+        )
+        missing_count = _int_count_or_none(
+            row.get(f"{face}_face_pressure_missing_marker_count")
+        )
+        inside_found_count = _int_count_or_none(
+            row.get(f"{face}_face_inside_pressure_found_marker_count")
+        )
+        outside_found_count = _int_count_or_none(
+            row.get(f"{face}_face_outside_pressure_found_marker_count")
+        )
+        if (
+            complete_count is None
+            or missing_count is None
+            or inside_found_count is None
+            or outside_found_count is None
+            or complete_count + missing_count != valid_count
+            or complete_count != valid_count
+            or inside_found_count != valid_count
+            or outside_found_count != valid_count
+        ):
+            _add_blocker(blockers, "pressure_complete_count_inconsistent")
+            _add_blocker(blockers, "pressure_probe_diagnostics_incomplete")
+            _add_blocker(blockers, f"{face}_pressure_probe_diagnostics_incomplete")
+        if _empty_histogram(row.get(f"{face}_face_inside_probe_rung_histogram")) or (
+            _empty_histogram(row.get(f"{face}_face_outside_probe_rung_histogram"))
+        ):
+            _add_blocker(blockers, "probe_rung_diagnostics_incomplete")
+        inside_cell_count = _int_count_or_none(
+            row.get(f"{face}_face_inside_unique_nearest_cell_count")
+        )
+        outside_cell_count = _int_count_or_none(
+            row.get(f"{face}_face_outside_unique_nearest_cell_count")
+        )
+        if (
+            inside_cell_count is None
+            or outside_cell_count is None
+            or inside_cell_count <= 0
+            or outside_cell_count <= 0
+        ):
+            _add_blocker(blockers, "probe_cell_diagnostics_incomplete")
+        residual = _float_or_none(
+            row.get(f"{face}_face_traction_decomposition_max_abs_residual_pa")
+        )
+        invalid_residual_count = _int_count_or_none(
+            row.get(f"{face}_face_traction_decomposition_invalid_marker_count")
+        )
+        if residual is None or invalid_residual_count is None:
+            _add_blocker(blockers, "traction_decomposition_missing")
+        elif (
+            abs(residual) > TRACTION_DECOMPOSITION_RESIDUAL_MAX_PA
+            or invalid_residual_count != 0
+        ):
+            _add_blocker(blockers, "traction_decomposition_above_tolerance")
 
 
 def _add_residual_blocker(
