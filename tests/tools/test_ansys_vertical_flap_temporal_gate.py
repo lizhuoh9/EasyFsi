@@ -15,6 +15,12 @@ MODULE_PATH = (
     / "scripts"
     / "run_source_candidate_step20_matrix.py"
 )
+PREFLOW_RELEASE_MODULE_PATH = (
+    Path("validation_runs")
+    / "ansys_vertical_flap_fsi"
+    / "scripts"
+    / "run_preflow_release_step20_matrix.py"
+)
 
 
 def _load_matrix_module():
@@ -26,7 +32,20 @@ def _load_matrix_module():
     return module
 
 
+def _load_preflow_release_module():
+    spec = importlib.util.spec_from_file_location(
+        "preflow_release_step20",
+        PREFLOW_RELEASE_MODULE_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load {PREFLOW_RELEASE_MODULE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 matrix = _load_matrix_module()
+preflow_release_matrix = _load_preflow_release_module()
 
 
 class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
@@ -177,6 +196,63 @@ class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
             json.dumps(second_payload, sort_keys=True),
         )
 
+    def test_preflow_release_flow_candidate_ignores_coupling_penalty(self):
+        flow_best = _preflow_release_row(
+            scenario="flow_best",
+            release_coupling_settling_status="coupling_unsettled",
+            release_first_permanently_valid_step="",
+            release_longest_consecutive_pass_steps=0,
+        )
+        coupling_best = _preflow_release_row(
+            scenario="coupling_best",
+            final_velocity_p999_mps=27.5,
+            release_flow_last_window_min_p999_mps=21.0,
+            release_flow_last_window_mean_outlet_ratio=1.18,
+            release_coupling_settling_status="coupling_settled",
+            release_first_permanently_valid_step=1,
+            release_longest_consecutive_pass_steps=20,
+        )
+
+        payload = preflow_release_matrix._payload([flow_best, coupling_best])
+
+        self.assertEqual(payload["best_release_flow_candidate"], "flow_best")
+        self.assertEqual(payload["best_release_coupling_candidate"], "coupling_best")
+        self.assertEqual(payload["best_release_promotion_candidate"], "none")
+
+    def test_preflow_release_promotion_gate_requires_root_and_residual_bounds(self):
+        ready = _preflow_release_promotion_row()
+        missing_root = {
+            **ready,
+            "release_final_root_max_displacement_m": "",
+        }
+        high_root = {
+            **ready,
+            "release_final_root_max_displacement_m": 1.0e-6,
+        }
+        high_marker_residual = {
+            **ready,
+            "release_final_marker_action_reaction_residual_N": 1.0e-5,
+        }
+        high_scatter_residual = {
+            **ready,
+            "release_final_scatter_action_reaction_residual_N": 1.0e-5,
+        }
+
+        self.assertEqual(
+            preflow_release_matrix._promotion_candidate_status(ready),
+            "promotion_ready",
+        )
+        for row in (
+            missing_root,
+            high_root,
+            high_marker_residual,
+            high_scatter_residual,
+        ):
+            self.assertEqual(
+                preflow_release_matrix._promotion_candidate_status(row),
+                "not_promotion_candidate",
+            )
+
 
 def _row(
     *,
@@ -230,6 +306,43 @@ def _history(
             }
         )
     return rows
+
+
+def _preflow_release_row(**overrides) -> dict:
+    row = {
+        "scenario": "case",
+        "release_flow_temporal_status": "flow_temporal_strict",
+        "release_coupling_settling_status": "coupling_unsettled",
+        "promotion_candidate_status": "not_promotion_candidate",
+        "final_velocity_p999_mps": 24.5,
+        "final_velocity_peak_mps": 30.0,
+        "max_velocity_peak_mps": 32.0,
+        "velocity_outlet_flux_ratio": 1.0,
+        "release_flow_last_window_min_p999_mps": 24.0,
+        "release_flow_last_window_mean_outlet_ratio": 1.0,
+        "release_first_permanently_valid_step": "",
+        "release_longest_consecutive_pass_steps": 0,
+    }
+    row.update(overrides)
+    return row
+
+
+def _preflow_release_promotion_row(**overrides) -> dict:
+    row = {
+        "run_status": "completed",
+        "apply_marker_feedback_to_fluid": True,
+        "flow_source_schedule_scope": "global",
+        "preflow_flow_temporal_status": "flow_temporal_strict",
+        "release_flow_temporal_status": "flow_temporal_strict",
+        "release_temporal_candidate_status": "temporal_strict",
+        "candidate_status": "candidate",
+        "release_ramp_restarted_after_preflow": False,
+        "release_final_root_max_displacement_m": 0.0,
+        "release_final_marker_action_reaction_residual_N": 0.0,
+        "release_final_scatter_action_reaction_residual_N": 0.0,
+    }
+    row.update(overrides)
+    return row
 
 
 if __name__ == "__main__":

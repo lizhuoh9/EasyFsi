@@ -187,6 +187,30 @@ schedule indices. The source ramp schedule must be contiguous during preflow:
 a ramp5 source records schedule indices `0..4` with factors
 `0.15, 0.30, 0.45, 0.60, 0.75`; it must not skip to `0, 2, 4, ...`.
 
+For the fixed-solid STEP60 hydrodynamic-load diagnostic, run:
+
+```powershell
+& $python validation_runs\ansys_vertical_flap_fsi\scripts\run_fixed_solid_load_temporal_matrix.py
+```
+
+This writes fixed-solid load artifacts under:
+
+```text
+validation_runs\ansys_vertical_flap_fsi\fixed_solid_load_temporal_diagnostics\
+```
+
+The STEP60 load matrix keeps `step_count=0`, disables marker feedback, and
+records face-resolved marker force, hydrodynamic force sign statistics, and
+marker/scatter action-reaction residuals. It is the diagnostic for whether the
+current marker sampling and force integration produce a stable fixed-flap load.
+It does not release the MPM solid, does not run the 50-step case, and does not
+claim Fluent parity.
+
+The STEP30 fixed-solid source matrix is flow-only evidence. The STEP60
+fixed-solid load matrix is hydrodynamic-load evidence. Therefore a later
+preflow-release failure cannot yet be blamed entirely on MPM coupling unless
+the fixed-solid load matrix also shows a stable, physically credible load.
+
 For the coupled preflow-release STEP20 diagnostic, run:
 
 ```powershell

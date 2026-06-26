@@ -8,7 +8,11 @@ This EasyFsi diagnostic runs coupled STEP20 release scenarios after 0/10/20/30 f
 
 best_preflow_release_candidate = none
 
-best_release_flow_candidate = no_preflow_release20_source_0p80_ramp2
+best_release_flow_candidate = preflow20_release20_source_0p80_ramp2
+
+best_release_coupling_candidate = none
+
+best_release_promotion_candidate = none
 
 promotion_candidate_count = 0
 

@@ -3,6 +3,7 @@ import math
 import unittest
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from benchmarks.official import solid_mpm_fsi_runner
@@ -105,6 +106,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 self.positions_m = []
                 self.normals = []
                 self.areas_m2 = []
+                self.region_ids = []
 
             def load_markers(
                 self,
@@ -118,6 +120,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 self.positions_m = list(positions_m)
                 self.normals = list(normals)
                 self.areas_m2 = list(areas_m2)
+                self.region_ids = list(region_ids)
                 self.marker_count = len(self.positions_m)
 
         config = VerticalFlapFsiConfig(marker_count=3)
@@ -129,6 +132,14 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(markers.marker_count, 6)
         self.assertEqual(markers.normals[:3], [(0.0, 0.0, 1.0)] * 3)
         self.assertEqual(markers.normals[3:], [(0.0, 0.0, -1.0)] * 3)
+        self.assertEqual(
+            markers.region_ids[:3],
+            [solid_mpm_fsi_runner.PRIMARY_REGION_ID] * 3,
+        )
+        self.assertEqual(
+            markers.region_ids[3:],
+            [solid_mpm_fsi_runner.SECONDARY_REGION_ID] * 3,
+        )
         self.assertTrue(
             all(
                 math.isclose(position[2], config.flap_streamwise_max_m + 0.51 * dz)
@@ -236,7 +247,42 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertIn("_flow_advance_current_step(", source)
         self.assertIn("_sample_stress_to_marker_forces(markers, fluid)", source)
         self.assertNotIn("solid.step(", source)
-        self.assertNotIn("scatter_marker_forces_to_mpm_particles", source)
+        self.assertIn("scatter_marker_forces_to_mpm_particles", source)
+        self.assertIn("_scatter_report_fields(scatter_report)", source)
+
+    def test_marker_force_report_fields_are_face_resolved(self):
+        report = SimpleNamespace(
+            primary_marker_force_n=(1.0, 2.0, -3.0),
+            secondary_marker_force_n=(4.0, 5.0, -6.0),
+            total_marker_force_n=(5.0, 7.0, -9.0),
+            fluid_reaction_force_n=(-5.0, -7.0, 9.0),
+            action_reaction_residual_n=0.0,
+            primary_marker_count=3,
+            secondary_marker_count=3,
+            total_marker_count=6,
+            primary_stress_valid_marker_count=3,
+            secondary_stress_valid_marker_count=2,
+            primary_stress_invalid_marker_count=0,
+            secondary_stress_invalid_marker_count=1,
+            primary_marker_force_norm_sum_n=3.0,
+            secondary_marker_force_norm_sum_n=6.0,
+            total_marker_force_norm_sum_n=9.0,
+            primary_marker_force_norm_max_n=2.0,
+            secondary_marker_force_norm_max_n=4.0,
+            total_marker_force_norm_max_n=4.0,
+        )
+
+        fields = solid_mpm_fsi_runner._marker_force_report_fields(report)
+
+        self.assertEqual(fields["primary_face_marker_count"], 3)
+        self.assertEqual(fields["secondary_face_marker_count"], 3)
+        self.assertEqual(fields["primary_face_force_z_N"], -3.0)
+        self.assertEqual(fields["secondary_face_force_z_N"], -6.0)
+        self.assertEqual(fields["marker_force_z_N"], -9.0)
+        self.assertEqual(fields["fluid_reaction_force_z_N"], 9.0)
+        self.assertEqual(fields["marker_action_reaction_residual_N"], 0.0)
+        self.assertEqual(fields["primary_face_valid_marker_count"], 3)
+        self.assertEqual(fields["secondary_face_invalid_marker_count"], 1)
 
     def test_preflow_only_step_count_zero_is_diagnostic_only(self):
         solid_mpm_fsi_runner._validate_rectangular_solid_config(

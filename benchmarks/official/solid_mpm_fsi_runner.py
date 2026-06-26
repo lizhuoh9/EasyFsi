@@ -14,7 +14,8 @@ from simulation_core.runtime import TaichiRuntimeConfig
 
 
 PRIMARY_REGION_ID = 101
-SECONDARY_UNUSED_REGION_ID = 202
+SECONDARY_REGION_ID = 202
+SECONDARY_UNUSED_REGION_ID = SECONDARY_REGION_ID
 STREAMWISE_AXIS_INDEX = 2
 OUT_OF_PLANE_AXIS_INDEX = 0
 AXIS_NAMES = ("x", "y", "z")
@@ -75,7 +76,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     mu_pa, lambda_pa = _lame_parameters(config)
     solid_substep_cfl = solid_substep_cfl_report(config)
     solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])
-    preflow_report = _run_fixed_solid_preflow(markers, fluid, config)
+    preflow_report = _run_fixed_solid_preflow(markers, fluid, solid, config)
     preflow_history = preflow_report["preflow_history"]
 
     latest_stress_report = None
@@ -141,7 +142,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         latest_stress_report = _sample_stress_to_marker_forces(markers, fluid)
         latest_force_report = markers.aggregate_region_forces(
             primary_region_id=PRIMARY_REGION_ID,
-            secondary_region_id=SECONDARY_UNUSED_REGION_ID,
+            secondary_region_id=SECONDARY_REGION_ID,
         )
         markers.clear_mpm_external_forces(
             solid.external_force_n,
@@ -163,7 +164,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 mu_pa=mu_pa,
                 lambda_pa=lambda_pa,
                 primary_region_id=PRIMARY_REGION_ID,
-                secondary_region_id=SECONDARY_UNUSED_REGION_ID,
+                secondary_region_id=SECONDARY_REGION_ID,
                 velocity_damping=solid_substep_velocity_damping,
             )
             if config.enforce_plane_strain_x:
@@ -252,6 +253,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "flow_reset_pressure_each_step": bool(
                     getattr(config, "flow_reset_pressure_each_step", False)
                 ),
+                "flow_pressure_reset_applied": latest_flow_report[
+                    "flow_pressure_reset_applied"
+                ],
                 "flow_reinitialize_inlet_each_step": bool(
                     getattr(config, "flow_reinitialize_inlet_each_step", False)
                 ),
@@ -335,6 +339,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                     latest_feedback_report.invalid_marker_count
                 ),
                 "total_marker_force_n": latest_force_report.total_marker_force_n,
+                **_marker_force_report_fields(latest_force_report),
+                **_stress_sampling_report_fields(latest_stress_report),
+                **_scatter_report_fields(latest_scatter_report),
                 "mpm_external_force_n": latest_solid_report.external_force_n,
                 "max_displacement_m": step_displacement["max_displacement_m"],
                 "root_max_displacement_m": step_displacement[
@@ -418,6 +425,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "flow_reset_pressure_each_step": bool(
             getattr(config, "flow_reset_pressure_each_step", False)
         ),
+        "flow_pressure_reset_applied": latest_flow_report[
+            "flow_pressure_reset_applied"
+        ],
         "flow_reinitialize_inlet_each_step": bool(
             getattr(config, "flow_reinitialize_inlet_each_step", False)
         ),
@@ -554,16 +564,11 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         ),
         "max_abs_traction_pa": latest_stress_report.max_abs_traction_pa,
         "total_marker_force_n": latest_force_report.total_marker_force_n,
-        "fluid_reaction_force_n": latest_force_report.fluid_reaction_force_n,
-        "marker_action_reaction_residual_n": (
-            latest_force_report.action_reaction_residual_n
-        ),
+        **_marker_force_report_fields(latest_force_report),
         "scatter_invalid_marker_count": latest_scatter_report.invalid_marker_count,
         "scatter_active_marker_count": latest_scatter_report.active_marker_count,
         "scatter_active_particle_count": latest_scatter_report.active_particle_count,
-        "scatter_action_reaction_residual_n": (
-            latest_scatter_report.action_reaction_residual_n
-        ),
+        **_scatter_report_fields(latest_scatter_report),
         "mpm_external_force_n": latest_solid_report.external_force_n,
         "surface_feedback_updated_marker_count": (
             latest_feedback_report.updated_marker_count
@@ -644,6 +649,7 @@ def _preflow_only_report(
         "flow_reset_pressure_each_step": bool(
             getattr(config, "flow_reset_pressure_each_step", False)
         ),
+        "flow_pressure_reset_applied": latest_preflow["flow_pressure_reset_applied"],
         "flow_reinitialize_inlet_each_step": bool(
             getattr(config, "flow_reinitialize_inlet_each_step", False)
         ),
@@ -728,15 +734,51 @@ def _preflow_only_report(
         "two_sided_pressure_marker_count": latest_preflow[
             "two_sided_pressure_marker_count"
         ],
-        "max_abs_traction_pa": 0.0,
+        "max_abs_traction_pa": latest_preflow.get("max_abs_traction_pa", ""),
+        "one_sided_pressure_marker_count": latest_preflow.get(
+            "one_sided_pressure_marker_count",
+            "",
+        ),
         "total_marker_force_n": marker_force,
-        "fluid_reaction_force_n": tuple(-float(v) for v in marker_force),
-        "marker_action_reaction_residual_n": 0.0,
-        "scatter_invalid_marker_count": 0,
-        "scatter_active_marker_count": 0,
-        "scatter_active_particle_count": 0,
-        "scatter_action_reaction_residual_n": 0.0,
-        "mpm_external_force_n": (0.0, 0.0, 0.0),
+        "fluid_reaction_force_n": tuple(latest_preflow["fluid_reaction_force_n"]),
+        "fluid_reaction_force_z_N": latest_preflow["fluid_reaction_force_z_N"],
+        "marker_force_z_N": latest_preflow["marker_force_z_N"],
+        "marker_action_reaction_residual_n": latest_preflow[
+            "marker_action_reaction_residual_n"
+        ],
+        "marker_action_reaction_residual_N": latest_preflow[
+            "marker_action_reaction_residual_N"
+        ],
+        "primary_face_force_n": tuple(latest_preflow["primary_face_force_n"]),
+        "secondary_face_force_n": tuple(latest_preflow["secondary_face_force_n"]),
+        "primary_face_force_z_N": latest_preflow["primary_face_force_z_N"],
+        "secondary_face_force_z_N": latest_preflow["secondary_face_force_z_N"],
+        "primary_face_marker_count": latest_preflow["primary_face_marker_count"],
+        "secondary_face_marker_count": latest_preflow["secondary_face_marker_count"],
+        "primary_face_valid_marker_count": latest_preflow[
+            "primary_face_valid_marker_count"
+        ],
+        "secondary_face_valid_marker_count": latest_preflow[
+            "secondary_face_valid_marker_count"
+        ],
+        "primary_face_invalid_marker_count": latest_preflow[
+            "primary_face_invalid_marker_count"
+        ],
+        "secondary_face_invalid_marker_count": latest_preflow[
+            "secondary_face_invalid_marker_count"
+        ],
+        "scatter_invalid_marker_count": latest_preflow["scatter_invalid_marker_count"],
+        "scatter_active_marker_count": latest_preflow["scatter_active_marker_count"],
+        "scatter_active_particle_count": latest_preflow[
+            "scatter_active_particle_count"
+        ],
+        "scatter_action_reaction_residual_n": latest_preflow[
+            "scatter_action_reaction_residual_n"
+        ],
+        "scatter_action_reaction_residual_N": latest_preflow[
+            "scatter_action_reaction_residual_N"
+        ],
+        "mpm_external_force_n": tuple(latest_preflow["mpm_external_force_n"]),
         "surface_feedback_updated_marker_count": 0,
         "surface_feedback_invalid_marker_count": 0,
         "surface_feedback_max_marker_displacement_m": 0.0,
@@ -1109,6 +1151,7 @@ def _flow_advance_current_step(
     flow_report["flow_step_index"] = int(step_index_local)
     flow_report["flow_step_index_local"] = int(step_index_local)
     flow_report["flow_step_index_global"] = int(step_index_global)
+    flow_report["flow_pressure_reset_applied"] = bool(reset_pressure)
     flow_report["flow_source_schedule_step_index"] = int(source_schedule_step_index)
     flow_report["flow_source_schedule_scope"] = source_schedule_scope
     flow_report["flow_source_ramp_restarted_after_preflow"] = (
@@ -1262,6 +1305,7 @@ def _zmax_inlet_boundary_report(
 def _run_fixed_solid_preflow(
     markers: HibmMpmSurfaceMarkers,
     fluid: CartesianFluidSolver,
+    solid: NeoHookeanMpmState,
     config: Any,
 ) -> dict[str, object]:
     requested_steps = int(getattr(config, "preflow_steps", 0))
@@ -1291,7 +1335,17 @@ def _run_fixed_solid_preflow(
         stress_report = _sample_stress_to_marker_forces(markers, fluid)
         force_report = markers.aggregate_region_forces(
             primary_region_id=PRIMARY_REGION_ID,
-            secondary_region_id=SECONDARY_UNUSED_REGION_ID,
+            secondary_region_id=SECONDARY_REGION_ID,
+        )
+        markers.clear_mpm_external_forces(
+            solid.external_force_n,
+            particle_count=solid.particle_count,
+        )
+        scatter_report = markers.scatter_marker_forces_to_mpm_particles(
+            solid.external_force_n,
+            solid.x,
+            particle_count=solid.particle_count,
+            support_radius_m=config.mpm_support_radius_m,
         )
         row = {
             "preflow_step": preflow_index + 1,
@@ -1348,6 +1402,7 @@ def _run_fixed_solid_preflow(
             "flow_source_ramp_restarted_after_preflow": flow_report[
                 "flow_source_ramp_restarted_after_preflow"
             ],
+            "flow_pressure_reset_applied": flow_report["flow_pressure_reset_applied"],
             "solid_fixed": True,
             "solid_advanced": False,
             "local_velocity_peak_mps": flow_report["local_velocity_peak_mps"],
@@ -1363,6 +1418,13 @@ def _run_fixed_solid_preflow(
                 stress_report.two_sided_pressure_marker_count
             ),
             "total_marker_force_n": force_report.total_marker_force_n,
+            "mpm_external_force_n": scatter_report.total_mpm_external_force_n,
+            "scatter_invalid_marker_count": scatter_report.invalid_marker_count,
+            "scatter_active_marker_count": scatter_report.active_marker_count,
+            "scatter_active_particle_count": scatter_report.active_particle_count,
+            **_marker_force_report_fields(force_report),
+            **_stress_sampling_report_fields(stress_report),
+            **_scatter_report_fields(scatter_report),
         }
         if previous_row is not None:
             row["velocity_peak_relative_delta"] = _relative_delta(
@@ -1605,6 +1667,89 @@ def _flow_source_report_fields(report: Any) -> dict[str, object]:
     return fields
 
 
+def _marker_force_report_fields(report: Any) -> dict[str, object]:
+    primary_force = tuple(report.primary_marker_force_n)
+    secondary_force = tuple(report.secondary_marker_force_n)
+    total_force = tuple(report.total_marker_force_n)
+    fluid_reaction = tuple(report.fluid_reaction_force_n)
+    return {
+        "primary_face_force_n": primary_force,
+        "secondary_face_force_n": secondary_force,
+        "primary_face_force_z_N": float(primary_force[2]),
+        "secondary_face_force_z_N": float(secondary_force[2]),
+        "marker_force_z_N": float(total_force[2]),
+        "fluid_reaction_force_n": fluid_reaction,
+        "fluid_reaction_force_z_N": float(fluid_reaction[2]),
+        "marker_action_reaction_residual_n": float(
+            report.action_reaction_residual_n
+        ),
+        "marker_action_reaction_residual_N": float(
+            report.action_reaction_residual_n
+        ),
+        "primary_face_marker_count": int(report.primary_marker_count),
+        "secondary_face_marker_count": int(report.secondary_marker_count),
+        "primary_face_valid_marker_count": int(
+            report.primary_stress_valid_marker_count
+        ),
+        "secondary_face_valid_marker_count": int(
+            report.secondary_stress_valid_marker_count
+        ),
+        "primary_face_invalid_marker_count": int(
+            report.primary_stress_invalid_marker_count
+        ),
+        "secondary_face_invalid_marker_count": int(
+            report.secondary_stress_invalid_marker_count
+        ),
+        "primary_face_force_norm_sum_N": float(
+            report.primary_marker_force_norm_sum_n
+        ),
+        "secondary_face_force_norm_sum_N": float(
+            report.secondary_marker_force_norm_sum_n
+        ),
+        "total_marker_force_norm_sum_N": float(
+            report.total_marker_force_norm_sum_n
+        ),
+        "primary_face_force_norm_max_N": float(
+            report.primary_marker_force_norm_max_n
+        ),
+        "secondary_face_force_norm_max_N": float(
+            report.secondary_marker_force_norm_max_n
+        ),
+        "total_marker_force_norm_max_N": float(
+            report.total_marker_force_norm_max_n
+        ),
+    }
+
+
+def _stress_sampling_report_fields(report: Any) -> dict[str, object]:
+    return {
+        "max_abs_traction_pa": float(report.max_abs_traction_pa),
+        "two_sided_pressure_marker_count": int(
+            report.two_sided_pressure_marker_count
+        ),
+        "one_sided_pressure_marker_count": int(
+            report.one_sided_pressure_marker_count
+        ),
+        "two_sided_extended_marker_count": int(
+            getattr(report, "two_sided_extended_marker_count", 0)
+        ),
+        "one_sided_extended_marker_count": int(
+            getattr(report, "one_sided_extended_marker_count", 0)
+        ),
+    }
+
+
+def _scatter_report_fields(report: Any) -> dict[str, object]:
+    return {
+        "scatter_action_reaction_residual_n": float(
+            report.action_reaction_residual_n
+        ),
+        "scatter_action_reaction_residual_N": float(
+            report.action_reaction_residual_n
+        ),
+    }
+
+
 def _build_markers(
     config: Any,
     runtime: TaichiRuntimeConfig,
@@ -1620,22 +1765,22 @@ def _build_markers(
     area = config.flap_height_m * (solid_max[0] - solid_min[0]) / markers_per_face
     dz = _grid_spacing_m(config)[2]
     face_specs = (
-        (solid_max[2] + 0.51 * dz, (0.0, 0.0, 1.0)),
-        (solid_min[2] - 0.51 * dz, (0.0, 0.0, -1.0)),
+        (solid_max[2] + 0.51 * dz, (0.0, 0.0, 1.0), PRIMARY_REGION_ID),
+        (solid_min[2] - 0.51 * dz, (0.0, 0.0, -1.0), SECONDARY_REGION_ID),
     )
     positions = []
     velocities = []
     normals = []
     areas = []
     regions = []
-    for z, normal in face_specs:
+    for z, normal, region_id in face_specs:
         for marker in range(markers_per_face):
             y = solid_min[1] + (float(marker) + 0.5) * segment
             positions.append((x_center, y, z))
             velocities.append((0.0, 0.0, 0.0))
             normals.append(normal)
             areas.append(area)
-            regions.append(PRIMARY_REGION_ID)
+            regions.append(region_id)
     markers.load_markers(
         positions_m=positions,
         velocities_mps=velocities,

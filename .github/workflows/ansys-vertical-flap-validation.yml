@@ -42,6 +42,7 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_source_outlet_balance_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_source_candidate_step20_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_fixed_solid_source_temporal_matrix.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\run_fixed_solid_load_temporal_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py
 
       - name: Run archive and artifact consistency tests
@@ -56,6 +57,7 @@ jobs:
             tests.integration.test_ansys_vertical_flap_source_candidate_step20_artifacts `
             tests.integration.test_ansys_vertical_flap_source_candidate_temporal_gate_artifacts `
             tests.integration.test_ansys_vertical_flap_fixed_solid_source_temporal_artifacts `
+            tests.integration.test_ansys_vertical_flap_fixed_solid_load_artifacts `
             tests.integration.test_ansys_vertical_flap_preflow_release_step20_artifacts `
             -v
 

@@ -41,6 +41,8 @@ class AnsysVerticalFlapPreflowReleaseStep20ArtifactTests(unittest.TestCase):
         self.assertTrue(REQUIRED_SCENARIOS.issubset({row["scenario"] for row in rows}))
         self.assertIn("best_preflow_release_candidate", payload)
         self.assertIn("best_release_flow_candidate", payload)
+        self.assertIn("best_release_coupling_candidate", payload)
+        self.assertIn("best_release_promotion_candidate", payload)
         self.assertIn("promotion_candidate_count", payload)
         self.assertIn("candidate_status", payload)
 
@@ -53,8 +55,14 @@ class AnsysVerticalFlapPreflowReleaseStep20ArtifactTests(unittest.TestCase):
             self.assertIn("release_temporal_candidate_status", row)
             self.assertIn("release_coupling_settling_status", row)
             self.assertIn("promotion_candidate_status", row)
-            self.assertIn("preflow_release_state_continuity_ok", row)
+            self.assertIn("preflow_release_index_continuity_ok", row)
+            self.assertNotIn("preflow_release_state_continuity_ok", row)
             self.assertIn("release_ramp_restarted_after_preflow", row)
+            self.assertIn("first_release_pressure_reset", row)
+            self.assertIn("first_release_full_field_reinitialized", row)
+            self.assertIn("release_final_root_max_displacement_m", row)
+            self.assertIn("release_final_marker_action_reaction_residual_N", row)
+            self.assertIn("release_final_scatter_action_reaction_residual_N", row)
             self.assertEqual(row["worker_mode"], "isolated_subprocess")
             self.assertEqual(int(row["worker_returncode"]), 0)
             self.assertFalse(_truthy(row["worker_timed_out"]))
@@ -63,7 +71,7 @@ class AnsysVerticalFlapPreflowReleaseStep20ArtifactTests(unittest.TestCase):
             self.assertTrue(Path(row["worker_stderr_log"]).exists())
 
         preflow20 = _row(rows, "preflow20_release20_source_0p80_ramp2")
-        self.assertTrue(_truthy(preflow20["preflow_release_state_continuity_ok"]))
+        self.assertTrue(_truthy(preflow20["preflow_release_index_continuity_ok"]))
         self.assertTrue(
             _truthy(preflow20["preflow_release_source_factor_continuity_ok"])
         )
@@ -116,6 +124,10 @@ class AnsysVerticalFlapPreflowReleaseStep20ArtifactTests(unittest.TestCase):
             self.assertIn("flow_phase", rows[0])
             self.assertIn("global_step", rows[0])
             self.assertIn("source_schedule_step", rows[0])
+            self.assertIn("flow_pressure_reset_applied", rows[0])
+            self.assertIn("flow_full_field_reinitialized", rows[0])
+            self.assertIn("marker_action_reaction_residual_N", rows[0])
+            self.assertIn("scatter_action_reaction_residual_N", rows[0])
 
             preflow_rows = [row for row in rows if row["flow_phase"] == "preflow"]
             release_rows = [row for row in rows if row["flow_phase"] == "release"]

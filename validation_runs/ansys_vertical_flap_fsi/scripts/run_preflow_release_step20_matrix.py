@@ -44,6 +44,8 @@ FAILURES_DIR = OUTPUT_DIR / "failures"
 
 RELEASE_STEPS = 20
 WORKER_TIMEOUT_S = 900
+PROMOTION_ROOT_DISPLACEMENT_MAX_M = 1.0e-8
+PROMOTION_ACTION_REACTION_RESIDUAL_MAX_N = 1.0e-8
 
 REQUIRED_SCENARIOS = (
     "no_preflow_release20_source_0p80_ramp2",
@@ -73,9 +75,14 @@ MATRIX_COLUMNS = [
     "release_coupling_settling_status",
     "candidate_status",
     "promotion_candidate_status",
-    "preflow_release_state_continuity_ok",
+    "preflow_release_index_continuity_ok",
     "preflow_release_source_factor_continuity_ok",
+    "first_release_pressure_reset",
+    "first_release_full_field_reinitialized",
     "release_ramp_restarted_after_preflow",
+    "release_final_root_max_displacement_m",
+    "release_final_marker_action_reaction_residual_N",
+    "release_final_scatter_action_reaction_residual_N",
     "preflow_final_p999_mps",
     "preflow_final_outlet_ratio",
     "preflow_final_marker_force_z_N",
@@ -112,6 +119,8 @@ HISTORY_COLUMNS = [
     "source_normal_velocity_mps",
     "flow_source_schedule_scope",
     "flow_source_ramp_restarted_after_preflow",
+    "flow_pressure_reset_applied",
+    "flow_full_field_reinitialized",
     "velocity_peak_mps",
     "velocity_p999_mps",
     "velocity_outlet_flux_ratio",
@@ -121,6 +130,8 @@ HISTORY_COLUMNS = [
     "projection_l2",
     "projection_max_abs",
     "marker_force_z_N",
+    "fluid_reaction_force_z_N",
+    "marker_action_reaction_residual_N",
     "mpm_external_force_z_N",
     "tip_dz_m",
     "root_max_displacement_m",
@@ -382,6 +393,8 @@ def _preflow_history_row(scenario: str, raw: dict[str, Any]) -> dict[str, Any]:
         "source_normal_velocity_mps": raw.get("flow_inlet_source_normal_velocity_mps", ""),
         "flow_source_schedule_scope": raw.get("flow_source_schedule_scope", ""),
         "flow_source_ramp_restarted_after_preflow": raw.get("flow_source_ramp_restarted_after_preflow", ""),
+        "flow_pressure_reset_applied": raw.get("flow_pressure_reset_applied", ""),
+        "flow_full_field_reinitialized": raw.get("flow_full_field_reinitialized", ""),
         "velocity_peak_mps": _float_or_zero(raw.get("local_velocity_peak_mps")),
         "velocity_p999_mps": _float_or_zero(raw.get("fluid_speed_p999_mps")),
         "velocity_outlet_flux_ratio": _source_value(raw, projection, "velocity_outlet_flux_ratio"),
@@ -391,10 +404,18 @@ def _preflow_history_row(scenario: str, raw: dict[str, Any]) -> dict[str, Any]:
         "projection_l2": projection.get("projection_l2", ""),
         "projection_max_abs": projection.get("projection_max_abs", ""),
         "marker_force_z_N": force[2],
+        "fluid_reaction_force_z_N": raw.get("fluid_reaction_force_z_N", ""),
+        "marker_action_reaction_residual_N": raw.get(
+            "marker_action_reaction_residual_N",
+            raw.get("marker_action_reaction_residual_n", ""),
+        ),
         "mpm_external_force_z_N": "",
         "tip_dz_m": 0.0,
         "root_max_displacement_m": 0.0,
-        "scatter_action_reaction_residual_N": "",
+        "scatter_action_reaction_residual_N": raw.get(
+            "scatter_action_reaction_residual_N",
+            raw.get("scatter_action_reaction_residual_n", ""),
+        ),
         "stress_invalid_marker_count": raw.get("stress_invalid_marker_count", ""),
         "scatter_invalid_marker_count": 0,
         "feedback_invalid_marker_count": 0,
@@ -419,6 +440,8 @@ def _release_history_row(scenario: str, raw: dict[str, Any]) -> dict[str, Any]:
         "source_normal_velocity_mps": raw.get("flow_inlet_source_normal_velocity_mps", ""),
         "flow_source_schedule_scope": raw.get("flow_source_schedule_scope", ""),
         "flow_source_ramp_restarted_after_preflow": raw.get("flow_source_ramp_restarted_after_preflow", ""),
+        "flow_pressure_reset_applied": raw.get("flow_pressure_reset_applied", ""),
+        "flow_full_field_reinitialized": raw.get("flow_full_field_reinitialized", ""),
         "velocity_peak_mps": _float_or_zero(raw.get("local_velocity_peak_mps")),
         "velocity_p999_mps": _float_or_zero(raw.get("fluid_speed_p999_mps")),
         "velocity_outlet_flux_ratio": _source_value(raw, projection, "velocity_outlet_flux_ratio"),
@@ -428,10 +451,18 @@ def _release_history_row(scenario: str, raw: dict[str, Any]) -> dict[str, Any]:
         "projection_l2": projection.get("projection_l2", ""),
         "projection_max_abs": projection.get("projection_max_abs", ""),
         "marker_force_z_N": force[2],
+        "fluid_reaction_force_z_N": raw.get("fluid_reaction_force_z_N", ""),
+        "marker_action_reaction_residual_N": raw.get(
+            "marker_action_reaction_residual_N",
+            raw.get("marker_action_reaction_residual_n", ""),
+        ),
         "mpm_external_force_z_N": mpm_force[2],
         "tip_dz_m": tip[2],
         "root_max_displacement_m": raw.get("root_max_displacement_m", ""),
-        "scatter_action_reaction_residual_N": raw.get("scatter_action_reaction_residual_n", ""),
+        "scatter_action_reaction_residual_N": raw.get(
+            "scatter_action_reaction_residual_N",
+            raw.get("scatter_action_reaction_residual_n", ""),
+        ),
         "stress_invalid_marker_count": raw.get("stress_invalid_marker_count", ""),
         "scatter_invalid_marker_count": raw.get("scatter_invalid_marker_count", ""),
         "feedback_invalid_marker_count": raw.get("feedback_invalid_marker_count", ""),
@@ -470,6 +501,18 @@ def _summary_row(
         "velocity_outlet_flux_ratio": final_release.get("velocity_outlet_flux_ratio", ""),
         "marker_force_z_N": final_release.get("marker_force_z_N", ""),
         "tip_dz_final_m": final_release.get("tip_dz_m", ""),
+        "release_final_root_max_displacement_m": final_release.get(
+            "root_max_displacement_m",
+            "",
+        ),
+        "release_final_marker_action_reaction_residual_N": final_release.get(
+            "marker_action_reaction_residual_N",
+            "",
+        ),
+        "release_final_scatter_action_reaction_residual_N": final_release.get(
+            "scatter_action_reaction_residual_N",
+            "",
+        ),
     }
     row["candidate_status"] = _release_final_candidate_status(row, final_release)
     row.update(_prefix("preflow_", _preflow_flow_report(row, preflow_history)))
@@ -578,8 +621,18 @@ def _state_continuity(
 ) -> dict[str, Any]:
     if not preflow_history or not release_history:
         return {
-            "preflow_release_state_continuity_ok": "",
+            "preflow_release_index_continuity_ok": "",
             "preflow_release_source_factor_continuity_ok": "",
+            "first_release_pressure_reset": (
+                release_history[0].get("flow_pressure_reset_applied", "")
+                if release_history
+                else ""
+            ),
+            "first_release_full_field_reinitialized": (
+                release_history[0].get("flow_full_field_reinitialized", "")
+                if release_history
+                else ""
+            ),
             "release_ramp_restarted_after_preflow": (
                 release_history[0].get("flow_source_ramp_restarted_after_preflow", "")
                 if release_history
@@ -598,13 +651,21 @@ def _state_continuity(
     last_preflow = preflow_history[-1]
     first_release = release_history[0]
     return {
-        "preflow_release_state_continuity_ok": (
+        "preflow_release_index_continuity_ok": (
             int(last_preflow.get("global_step") or -1) + 1
             == int(first_release.get("global_step") or -999)
         ),
         "preflow_release_source_factor_continuity_ok": (
             _float_or_none(last_preflow.get("source_factor"))
             == _float_or_none(first_release.get("source_factor"))
+        ),
+        "first_release_pressure_reset": first_release.get(
+            "flow_pressure_reset_applied",
+            "",
+        ),
+        "first_release_full_field_reinitialized": first_release.get(
+            "flow_full_field_reinitialized",
+            "",
         ),
         "release_ramp_restarted_after_preflow": first_release.get(
             "flow_source_ramp_restarted_after_preflow",
@@ -641,6 +702,21 @@ def _promotion_candidate_status(row: dict[str, Any]) -> str:
     if row.get("candidate_status") != "candidate":
         return "not_promotion_candidate"
     if bool(row.get("release_ramp_restarted_after_preflow")):
+        return "not_promotion_candidate"
+    if not _bounded_abs(
+        row.get("release_final_root_max_displacement_m"),
+        PROMOTION_ROOT_DISPLACEMENT_MAX_M,
+    ):
+        return "not_promotion_candidate"
+    if not _bounded_abs(
+        row.get("release_final_marker_action_reaction_residual_N"),
+        PROMOTION_ACTION_REACTION_RESIDUAL_MAX_N,
+    ):
+        return "not_promotion_candidate"
+    if not _bounded_abs(
+        row.get("release_final_scatter_action_reaction_residual_N"),
+        PROMOTION_ACTION_REACTION_RESIDUAL_MAX_N,
+    ):
         return "not_promotion_candidate"
     return "promotion_ready"
 
@@ -690,8 +766,23 @@ def _payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if row.get("release_flow_temporal_status")
         in {FLOW_TEMPORAL_STRICT, FLOW_TEMPORAL_SOFT}
     ]
-    best_promotion = min(promotions, key=_candidate_penalty) if promotions else None
-    best_flow = min(flow_candidates, key=_candidate_penalty) if flow_candidates else None
+    coupling_candidates = [
+        row
+        for row in rows
+        if row.get("release_coupling_settling_status")
+        in {"coupling_settled", "coupling_settled_late"}
+    ]
+    best_promotion = (
+        min(promotions, key=_promotion_candidate_penalty) if promotions else None
+    )
+    best_flow = (
+        min(flow_candidates, key=_flow_candidate_penalty) if flow_candidates else None
+    )
+    best_coupling = (
+        min(coupling_candidates, key=_coupling_candidate_penalty)
+        if coupling_candidates
+        else None
+    )
     return {
         "case": "ansys-vertical-flap-fsi",
         "purpose": "coupled preflow-release STEP20 diagnostics",
@@ -702,8 +793,15 @@ def _payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
             best_promotion.get("scenario") if best_promotion else "none"
         ),
         "best_release_flow_candidate": best_flow.get("scenario") if best_flow else "none",
+        "best_release_coupling_candidate": (
+            best_coupling.get("scenario") if best_coupling else "none"
+        ),
+        "best_release_promotion_candidate": (
+            best_promotion.get("scenario") if best_promotion else "none"
+        ),
         "promotion_candidate_count": len(promotions),
         "release_flow_candidate_count": len(flow_candidates),
+        "release_coupling_candidate_count": len(coupling_candidates),
         "candidate_status": "promotion_candidate_found" if best_promotion else "no_promotion_candidate",
         "scope_limit": "coupled STEP20 diagnostic only; no 50-step or Fluent parity claim",
     }
@@ -714,7 +812,7 @@ def _reclassify_existing_artifacts() -> int:
     history_payload = json.loads(HISTORY_JSON.read_text(encoding="utf-8"))
     previous_rows = {row["scenario"]: row for row in matrix_payload["rows"]}
     histories = {
-        scenario: [dict(item) for item in rows]
+        scenario: [_normalize_history_row(dict(item)) for item in rows]
         for scenario, rows in history_payload["histories"].items()
     }
     rows: list[dict[str, Any]] = []
@@ -756,7 +854,23 @@ def _reclassify_existing_artifacts() -> int:
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    HISTORY_JSON.write_text(
+        json.dumps(
+            {
+                "case": "ansys-vertical-flap-fsi",
+                "purpose": "preflow-release coupled STEP20 histories",
+                "release_steps": RELEASE_STEPS,
+                "histories": histories,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     _write_csv(MATRIX_CSV, rows, MATRIX_COLUMNS)
+    for scenario, history in histories.items():
+        _write_csv(HISTORIES_DIR / f"{scenario}_history.csv", history, HISTORY_COLUMNS)
     SUMMARY_PATH.write_text(_summary_markdown(payload), encoding="utf-8")
     VERIFICATION_PATH.write_text(_verification_markdown(payload), encoding="utf-8")
     print(
@@ -766,6 +880,12 @@ def _reclassify_existing_artifacts() -> int:
                     "best_preflow_release_candidate"
                 ],
                 "best_release_flow_candidate": payload["best_release_flow_candidate"],
+                "best_release_coupling_candidate": payload[
+                    "best_release_coupling_candidate"
+                ],
+                "best_release_promotion_candidate": payload[
+                    "best_release_promotion_candidate"
+                ],
                 "promotion_candidate_count": payload["promotion_candidate_count"],
                 "candidate_status": payload["candidate_status"],
             },
@@ -777,19 +897,51 @@ def _reclassify_existing_artifacts() -> int:
     return 0
 
 
+def _normalize_history_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = {column: row.get(column, "") for column in HISTORY_COLUMNS}
+    normalized["scenario"] = row.get("scenario", normalized["scenario"])
+    normalized["flow_phase"] = row.get("flow_phase", normalized["flow_phase"])
+    normalized["phase_step"] = row.get("phase_step", normalized["phase_step"])
+    normalized["step"] = row.get("step", normalized["step"])
+    normalized["global_step"] = row.get("global_step", normalized["global_step"])
+    normalized["source_schedule_step"] = row.get(
+        "source_schedule_step",
+        normalized["source_schedule_step"],
+    )
+    normalized["flow_pressure_reset_applied"] = row.get(
+        "flow_pressure_reset_applied",
+        "",
+    )
+    normalized["flow_full_field_reinitialized"] = row.get(
+        "flow_full_field_reinitialized",
+        "",
+    )
+    normalized["marker_action_reaction_residual_N"] = row.get(
+        "marker_action_reaction_residual_N",
+        row.get("marker_action_reaction_residual_n", ""),
+    )
+    normalized["scatter_action_reaction_residual_N"] = row.get(
+        "scatter_action_reaction_residual_N",
+        row.get("scatter_action_reaction_residual_n", ""),
+    )
+    return normalized
+
+
 def _summary_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# ANSYS Vertical-Flap Preflow-Release STEP20 Diagnostics",
         "",
         f"best_preflow_release_candidate = {payload['best_preflow_release_candidate']}",
         f"best_release_flow_candidate = {payload['best_release_flow_candidate']}",
+        f"best_release_coupling_candidate = {payload['best_release_coupling_candidate']}",
+        f"best_release_promotion_candidate = {payload['best_release_promotion_candidate']}",
         f"promotion_candidate_count = {payload['promotion_candidate_count']}",
         f"candidate_status = {payload['candidate_status']}",
         f"scope_limit = {payload['scope_limit']}",
         "",
         "## Matrix",
         "",
-        "| scenario | preflow | release flow | release combined | coupling | promotion | continuity | restart |",
+        "| scenario | preflow | release flow | release combined | coupling | promotion | index continuity | restart |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for row in payload["rows"]:
@@ -801,7 +953,7 @@ def _summary_markdown(payload: dict[str, Any]) -> str:
             f"{row.get('release_temporal_candidate_status')} | "
             f"{row.get('release_coupling_settling_status')} | "
             f"{row.get('promotion_candidate_status')} | "
-            f"{row.get('preflow_release_state_continuity_ok')} | "
+            f"{row.get('preflow_release_index_continuity_ok')} | "
             f"{row.get('release_ramp_restarted_after_preflow')} |"
         )
     return "\n".join(lines) + "\n"
@@ -819,6 +971,8 @@ def _verification_markdown(payload: dict[str, Any]) -> str:
         "## Result\n\n"
         f"best_preflow_release_candidate = {payload['best_preflow_release_candidate']}\n\n"
         f"best_release_flow_candidate = {payload['best_release_flow_candidate']}\n\n"
+        f"best_release_coupling_candidate = {payload['best_release_coupling_candidate']}\n\n"
+        f"best_release_promotion_candidate = {payload['best_release_promotion_candidate']}\n\n"
         f"promotion_candidate_count = {payload['promotion_candidate_count']}\n\n"
         f"candidate_status = {payload['candidate_status']}\n\n"
         "## Findings\n\n"
@@ -918,13 +1072,39 @@ def _prefix(prefix: str, report: dict[str, Any]) -> dict[str, Any]:
     return {f"{prefix}{key}": value for key, value in report.items()}
 
 
-def _candidate_penalty(row: dict[str, Any]) -> float:
+def _flow_candidate_penalty(row: dict[str, Any]) -> float:
+    strict_penalty = (
+        0.0 if row.get("release_flow_temporal_status") == FLOW_TEMPORAL_STRICT else 1.0
+    )
     p999 = _float_or_zero(row.get("final_velocity_p999_mps"))
+    peak = _float_or_zero(row.get("final_velocity_peak_mps"))
+    max_peak = _float_or_zero(row.get("max_velocity_peak_mps"))
     outlet = _float_or_none(row.get("velocity_outlet_flux_ratio"))
+    last_p999 = _float_or_zero(row.get("release_flow_last_window_min_p999_mps"))
+    last_outlet = _float_or_none(row.get("release_flow_last_window_mean_outlet_ratio"))
+    outlet_value = last_outlet if last_outlet is not None else outlet
+    outlet_penalty = 5.0 if outlet_value is None else abs(outlet_value - 1.0) * 2.0
+    return (
+        strict_penalty
+        + abs(p999 - 24.5)
+        + max(0.0, 20.0 - last_p999) * 2.0
+        + max(0.0, peak - 40.0) * 2.0
+        + max(0.0, max_peak - 40.0) * 2.0
+        + outlet_penalty
+    )
+
+
+def _coupling_candidate_penalty(row: dict[str, Any]) -> float:
     first_valid = _float_or_none(row.get("release_first_permanently_valid_step"))
+    longest = _float_or_zero(row.get("release_longest_consecutive_pass_steps"))
+    first_valid_penalty = 20.0 if first_valid is None else first_valid * 0.1
+    return first_valid_penalty + max(0.0, 20.0 - longest)
+
+
+def _promotion_candidate_penalty(row: dict[str, Any]) -> float:
+    outlet = _float_or_none(row.get("velocity_outlet_flux_ratio"))
     outlet_penalty = 5.0 if outlet is None else abs(outlet - 1.0) * 2.0
-    settling_penalty = 20.0 if first_valid is None else first_valid * 0.1
-    return abs(p999 - 24.5) + outlet_penalty + settling_penalty
+    return _flow_candidate_penalty(row) + _coupling_candidate_penalty(row) + outlet_penalty
 
 
 def _first_permanently_negative_step(rows: list[dict[str, Any]], key: str) -> int | str:
@@ -1019,6 +1199,11 @@ def _timeout_stream_text(value: Any) -> str:
 def _negative(value: Any) -> bool:
     parsed = _float_or_none(value)
     return parsed is not None and parsed < 0.0
+
+
+def _bounded_abs(value: Any, limit: float) -> bool:
+    parsed = _float_or_none(value)
+    return parsed is not None and abs(parsed) <= float(limit)
 
 
 def _float_or_zero(value: Any) -> float:
