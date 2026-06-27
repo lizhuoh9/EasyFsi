@@ -115,3 +115,4 @@ _smoke_equivalence/
 *.vti
 *.vtp
 *.npz
+!validation_runs/ansys_vertical_flap_fsi/traction_shared_snapshot_diagnostics/step020_fields.npz
