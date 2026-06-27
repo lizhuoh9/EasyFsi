@@ -158,6 +158,9 @@ class VerticalFlapFsiConfig:
     traction_pressure_probe_ladder_spacing_cells: float = 0.5
     traction_pressure_probe_ladder_rung_count: int = 5
     traction_pressure_probe_ladder_mode: str = "current_normal_cell_ladder"
+    traction_pressure_pair_policy: str = "independent_ladder"
+    traction_pressure_pair_max_cell_delta: int = 1
+    traction_pressure_pair_require_opposite_sides: bool = True
     traction_viscosity_pa_s: float = 0.0
     export_final_flow_snapshot: bool = False
     enforce_plane_strain_x: bool = True

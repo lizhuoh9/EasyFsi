@@ -77,6 +77,16 @@ STRESS_PROBE_LADDER_MODE_NAMES = {
 STRESS_PRESSURE_PROBE_LADDER_MODE_CURRENT_NORMAL_CELL = (
     "current_normal_cell_ladder"
 )
+STRESS_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER = "independent_ladder"
+STRESS_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR = "symmetric_cell_pair"
+STRESS_PRESSURE_PAIR_POLICY_CODES = {
+    STRESS_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER: 0,
+    STRESS_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR: 1,
+}
+STRESS_PRESSURE_PAIR_POLICY_NAMES = {
+    0: STRESS_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER,
+    1: STRESS_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR,
+}
 
 
 def _debug_stage_progress(message: str) -> None:
@@ -396,6 +406,36 @@ class HibmMpmSurfaceMarkers:
             dtype=ti.i32,
             shape=self.marker_capacity,
         )
+        self._stress_pressure_pair_policy_code = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_pressure_pair_selected = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_pressure_pair_fallback_used = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_pressure_pair_inside_cell = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_pressure_pair_outside_cell = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_pressure_pair_cell_delta = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_pressure_pair_symmetry_residual_cells = ti.field(
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
         self.F_gamma_n = ti.Vector.field(3, dtype=ti.f64, shape=self.marker_capacity)
         self.projection_triangle_indices = ti.Vector.field(
             3,
@@ -697,6 +737,13 @@ class HibmMpmSurfaceMarkers:
             self._stress_inside_probe_ladder_mode[marker] = 0
             self._stress_outside_probe_ladder_mode[marker] = 0
             self._stress_probe_mode[marker] = 0
+            self._stress_pressure_pair_policy_code[marker] = 0
+            self._stress_pressure_pair_selected[marker] = 0
+            self._stress_pressure_pair_fallback_used[marker] = 0
+            self._stress_pressure_pair_inside_cell[marker] = ti.Vector([-1, -1, -1])
+            self._stress_pressure_pair_outside_cell[marker] = ti.Vector([-1, -1, -1])
+            self._stress_pressure_pair_cell_delta[marker] = -1
+            self._stress_pressure_pair_symmetry_residual_cells[marker] = -1.0
 
     @ti.kernel
     def _reset_pressure_anchor_cells_kernel(self):
@@ -2897,6 +2944,9 @@ class HibmMpmSurfaceMarkers:
         pressure_probe_ladder_spacing_multiplier: ti.f32,
         pressure_probe_ladder_rung_count: ti.i32,
         pressure_probe_ladder_configured: ti.i32,
+        pressure_pair_policy_code: ti.i32,
+        pressure_pair_max_cell_delta: ti.i32,
+        pressure_pair_require_opposite_sides: ti.i32,
     ):
         self.report_stress_valid_marker_count[None] = 0
         self.report_stress_invalid_marker_count[None] = 0
@@ -2981,6 +3031,12 @@ class HibmMpmSurfaceMarkers:
             diagnostic_inside_probe_ladder_mode = 0
             diagnostic_outside_probe_ladder_mode = 0
             diagnostic_probe_mode = 0
+            diagnostic_pressure_pair_selected = 0
+            diagnostic_pressure_pair_fallback_used = 0
+            diagnostic_pressure_pair_inside_cell = ti.Vector([-1, -1, -1])
+            diagnostic_pressure_pair_outside_cell = ti.Vector([-1, -1, -1])
+            diagnostic_pressure_pair_cell_delta = -1
+            diagnostic_pressure_pair_symmetry_residual_cells = ti.cast(-1.0, ti.f64)
             if pressure_sample_valid:
                 diagnostic_fluid_side_pressure_pa = diagnostic_base_pressure_pa
                 diagnostic_probe_mode = 1
@@ -3007,6 +3063,18 @@ class HibmMpmSurfaceMarkers:
                     probe_spacing = pressure_probe_ladder_spacing_multiplier
                     probe_count = pressure_probe_ladder_rung_count
                     probe_ladder_mode = 5
+                probe_origin_grid = self._grid_coordinate_from_fields(
+                    probe_origin,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    nx,
+                    ny,
+                    nz,
+                )
                 for probe_index in range(probe_count):
                     multiplier = (
                         probe_start + probe_spacing * ti.cast(probe_index, ti.f32)
@@ -3016,6 +3084,21 @@ class HibmMpmSurfaceMarkers:
                     )
                     outside_grid = self._grid_coordinate_from_fields(
                         outside_position,
+                        cell_face_x_m,
+                        cell_face_y_m,
+                        cell_face_z_m,
+                        cell_center_x_m,
+                        cell_center_y_m,
+                        cell_center_z_m,
+                        nx,
+                        ny,
+                        nz,
+                    )
+                    inside_position = (
+                        probe_origin - multiplier * probe_distance_m * normal
+                    )
+                    inside_grid = self._grid_coordinate_from_fields(
+                        inside_position,
                         cell_face_x_m,
                         cell_face_y_m,
                         cell_face_z_m,
@@ -3036,75 +3119,6 @@ class HibmMpmSurfaceMarkers:
                         ny,
                         nz,
                     )
-                    if outside_found == 0 and outside_weight > 1.0e-12:
-                        outside_pressure = sampled_outside
-                        outside_found = 1
-                        diagnostic_outside_pressure_pa = ti.cast(
-                            sampled_outside,
-                            ti.f64,
-                        )
-                        diagnostic_outside_pressure_found = 1
-                        diagnostic_outside_probe_rung = probe_index
-                        diagnostic_outside_probe_distance_m = ti.cast(
-                            multiplier * probe_distance_m,
-                            ti.f64,
-                        )
-                        diagnostic_outside_probe_cell = ti.Vector(
-                            [
-                                ti.min(
-                                    ti.max(
-                                        ti.floor(outside_grid.x + 0.5, ti.i32),
-                                        0,
-                                    ),
-                                    nx - 1,
-                                ),
-                                ti.min(
-                                    ti.max(
-                                        ti.floor(outside_grid.y + 0.5, ti.i32),
-                                        0,
-                                    ),
-                                    ny - 1,
-                                ),
-                                ti.min(
-                                    ti.max(
-                                        ti.floor(outside_grid.z + 0.5, ti.i32),
-                                        0,
-                                    ),
-                                    nz - 1,
-                                ),
-                            ]
-                        )
-                        diagnostic_outside_probe_grid_coordinate = ti.Vector(
-                            [
-                                ti.cast(outside_grid.x, ti.f64),
-                                ti.cast(outside_grid.y, ti.f64),
-                                ti.cast(outside_grid.z, ti.f64),
-                            ]
-                        )
-                        diagnostic_outside_probe_fluid_weight = ti.cast(
-                            outside_weight,
-                            ti.f64,
-                        )
-                        diagnostic_outside_probe_multiplier = ti.cast(
-                            multiplier,
-                            ti.f64,
-                        )
-                        diagnostic_outside_probe_ladder_mode = probe_ladder_mode
-                    inside_position = (
-                        probe_origin - multiplier * probe_distance_m * normal
-                    )
-                    inside_grid = self._grid_coordinate_from_fields(
-                        inside_position,
-                        cell_face_x_m,
-                        cell_face_y_m,
-                        cell_face_z_m,
-                        cell_center_x_m,
-                        cell_center_y_m,
-                        cell_center_z_m,
-                        nx,
-                        ny,
-                        nz,
-                    )
                     sampled_inside, inside_weight = self._sample_pressure_trilinear(
                         pressure_field,
                         obstacle_field,
@@ -3115,60 +3129,208 @@ class HibmMpmSurfaceMarkers:
                         ny,
                         nz,
                     )
-                    if inside_found == 0 and inside_weight > 1.0e-12:
-                        inside_pressure = sampled_inside
-                        inside_found = 1
-                        diagnostic_inside_pressure_pa = ti.cast(
-                            sampled_inside,
-                            ti.f64,
-                        )
-                        diagnostic_inside_pressure_found = 1
-                        diagnostic_inside_probe_rung = probe_index
-                        diagnostic_inside_probe_distance_m = ti.cast(
-                            multiplier * probe_distance_m,
-                            ti.f64,
-                        )
-                        diagnostic_inside_probe_cell = ti.Vector(
-                            [
-                                ti.min(
-                                    ti.max(
-                                        ti.floor(inside_grid.x + 0.5, ti.i32),
-                                        0,
-                                    ),
-                                    nx - 1,
+                    outside_cell = ti.Vector(
+                        [
+                            ti.min(
+                                ti.max(ti.floor(outside_grid.x + 0.5, ti.i32), 0),
+                                nx - 1,
+                            ),
+                            ti.min(
+                                ti.max(ti.floor(outside_grid.y + 0.5, ti.i32), 0),
+                                ny - 1,
+                            ),
+                            ti.min(
+                                ti.max(ti.floor(outside_grid.z + 0.5, ti.i32), 0),
+                                nz - 1,
+                            ),
+                        ]
+                    )
+                    inside_cell = ti.Vector(
+                        [
+                            ti.min(
+                                ti.max(ti.floor(inside_grid.x + 0.5, ti.i32), 0),
+                                nx - 1,
+                            ),
+                            ti.min(
+                                ti.max(ti.floor(inside_grid.y + 0.5, ti.i32), 0),
+                                ny - 1,
+                            ),
+                            ti.min(
+                                ti.max(ti.floor(inside_grid.z + 0.5, ti.i32), 0),
+                                nz - 1,
+                            ),
+                        ]
+                    )
+                    if pressure_pair_policy_code == 1:
+                        pair_residual_cells = ti.max(
+                            ti.max(
+                                ti.abs(
+                                    outside_grid.x
+                                    - probe_origin_grid.x
+                                    + inside_grid.x
+                                    - probe_origin_grid.x
                                 ),
-                                ti.min(
-                                    ti.max(
-                                        ti.floor(inside_grid.y + 0.5, ti.i32),
-                                        0,
-                                    ),
-                                    ny - 1,
+                                ti.abs(
+                                    outside_grid.y
+                                    - probe_origin_grid.y
+                                    + inside_grid.y
+                                    - probe_origin_grid.y
                                 ),
-                                ti.min(
-                                    ti.max(
-                                        ti.floor(inside_grid.z + 0.5, ti.i32),
-                                        0,
-                                    ),
-                                    nz - 1,
-                                ),
-                            ]
+                            ),
+                            ti.abs(
+                                outside_grid.z
+                                - probe_origin_grid.z
+                                + inside_grid.z
+                                - probe_origin_grid.z
+                            ),
                         )
-                        diagnostic_inside_probe_grid_coordinate = ti.Vector(
-                            [
-                                ti.cast(inside_grid.x, ti.f64),
-                                ti.cast(inside_grid.y, ti.f64),
-                                ti.cast(inside_grid.z, ti.f64),
-                            ]
-                        )
-                        diagnostic_inside_probe_fluid_weight = ti.cast(
-                            inside_weight,
-                            ti.f64,
-                        )
-                        diagnostic_inside_probe_multiplier = ti.cast(
-                            multiplier,
-                            ti.f64,
-                        )
-                        diagnostic_inside_probe_ladder_mode = probe_ladder_mode
+                        opposite_sides_ok = 1
+                        if pressure_pair_require_opposite_sides != 0:
+                            outside_side = (outside_position - probe_origin).dot(normal)
+                            inside_side = (inside_position - probe_origin).dot(normal)
+                            if outside_side <= 0.0 or inside_side >= 0.0:
+                                opposite_sides_ok = 0
+                        if (
+                            diagnostic_pressure_pair_selected == 0
+                            and outside_weight > 1.0e-12
+                            and inside_weight > 1.0e-12
+                            and pair_residual_cells
+                            <= ti.cast(pressure_pair_max_cell_delta, ti.f32) + 1.0e-8
+                            and opposite_sides_ok != 0
+                        ):
+                            outside_pressure = sampled_outside
+                            inside_pressure = sampled_inside
+                            outside_found = 1
+                            inside_found = 1
+                            diagnostic_outside_pressure_pa = ti.cast(
+                                sampled_outside,
+                                ti.f64,
+                            )
+                            diagnostic_inside_pressure_pa = ti.cast(
+                                sampled_inside,
+                                ti.f64,
+                            )
+                            diagnostic_outside_pressure_found = 1
+                            diagnostic_inside_pressure_found = 1
+                            diagnostic_outside_probe_rung = probe_index
+                            diagnostic_inside_probe_rung = probe_index
+                            diagnostic_outside_probe_distance_m = ti.cast(
+                                multiplier * probe_distance_m,
+                                ti.f64,
+                            )
+                            diagnostic_inside_probe_distance_m = ti.cast(
+                                multiplier * probe_distance_m,
+                                ti.f64,
+                            )
+                            diagnostic_outside_probe_cell = outside_cell
+                            diagnostic_inside_probe_cell = inside_cell
+                            diagnostic_outside_probe_grid_coordinate = ti.Vector(
+                                [
+                                    ti.cast(outside_grid.x, ti.f64),
+                                    ti.cast(outside_grid.y, ti.f64),
+                                    ti.cast(outside_grid.z, ti.f64),
+                                ]
+                            )
+                            diagnostic_inside_probe_grid_coordinate = ti.Vector(
+                                [
+                                    ti.cast(inside_grid.x, ti.f64),
+                                    ti.cast(inside_grid.y, ti.f64),
+                                    ti.cast(inside_grid.z, ti.f64),
+                                ]
+                            )
+                            diagnostic_outside_probe_fluid_weight = ti.cast(
+                                outside_weight,
+                                ti.f64,
+                            )
+                            diagnostic_inside_probe_fluid_weight = ti.cast(
+                                inside_weight,
+                                ti.f64,
+                            )
+                            diagnostic_outside_probe_multiplier = ti.cast(
+                                multiplier,
+                                ti.f64,
+                            )
+                            diagnostic_inside_probe_multiplier = ti.cast(
+                                multiplier,
+                                ti.f64,
+                            )
+                            diagnostic_outside_probe_ladder_mode = probe_ladder_mode
+                            diagnostic_inside_probe_ladder_mode = probe_ladder_mode
+                            diagnostic_pressure_pair_selected = 1
+                            diagnostic_pressure_pair_inside_cell = inside_cell
+                            diagnostic_pressure_pair_outside_cell = outside_cell
+                            cell_delta_x = ti.abs(inside_cell.x - outside_cell.x)
+                            cell_delta_y = ti.abs(inside_cell.y - outside_cell.y)
+                            cell_delta_z = ti.abs(inside_cell.z - outside_cell.z)
+                            diagnostic_pressure_pair_cell_delta = ti.max(
+                                ti.max(cell_delta_x, cell_delta_y),
+                                cell_delta_z,
+                            )
+                            diagnostic_pressure_pair_symmetry_residual_cells = ti.cast(
+                                pair_residual_cells,
+                                ti.f64,
+                            )
+                    else:
+                        if outside_found == 0 and outside_weight > 1.0e-12:
+                            outside_pressure = sampled_outside
+                            outside_found = 1
+                            diagnostic_outside_pressure_pa = ti.cast(
+                                sampled_outside,
+                                ti.f64,
+                            )
+                            diagnostic_outside_pressure_found = 1
+                            diagnostic_outside_probe_rung = probe_index
+                            diagnostic_outside_probe_distance_m = ti.cast(
+                                multiplier * probe_distance_m,
+                                ti.f64,
+                            )
+                            diagnostic_outside_probe_cell = outside_cell
+                            diagnostic_outside_probe_grid_coordinate = ti.Vector(
+                                [
+                                    ti.cast(outside_grid.x, ti.f64),
+                                    ti.cast(outside_grid.y, ti.f64),
+                                    ti.cast(outside_grid.z, ti.f64),
+                                ]
+                            )
+                            diagnostic_outside_probe_fluid_weight = ti.cast(
+                                outside_weight,
+                                ti.f64,
+                            )
+                            diagnostic_outside_probe_multiplier = ti.cast(
+                                multiplier,
+                                ti.f64,
+                            )
+                            diagnostic_outside_probe_ladder_mode = probe_ladder_mode
+                        if inside_found == 0 and inside_weight > 1.0e-12:
+                            inside_pressure = sampled_inside
+                            inside_found = 1
+                            diagnostic_inside_pressure_pa = ti.cast(
+                                sampled_inside,
+                                ti.f64,
+                            )
+                            diagnostic_inside_pressure_found = 1
+                            diagnostic_inside_probe_rung = probe_index
+                            diagnostic_inside_probe_distance_m = ti.cast(
+                                multiplier * probe_distance_m,
+                                ti.f64,
+                            )
+                            diagnostic_inside_probe_cell = inside_cell
+                            diagnostic_inside_probe_grid_coordinate = ti.Vector(
+                                [
+                                    ti.cast(inside_grid.x, ti.f64),
+                                    ti.cast(inside_grid.y, ti.f64),
+                                    ti.cast(inside_grid.z, ti.f64),
+                                ]
+                            )
+                            diagnostic_inside_probe_fluid_weight = ti.cast(
+                                inside_weight,
+                                ti.f64,
+                            )
+                            diagnostic_inside_probe_multiplier = ti.cast(
+                                multiplier,
+                                ti.f64,
+                            )
+                            diagnostic_inside_probe_ladder_mode = probe_ladder_mode
                 if (
                     one_sided_pressure_region_id != -1
                     and self.region_id[marker] == one_sided_pressure_region_id
@@ -3313,6 +3475,23 @@ class HibmMpmSurfaceMarkers:
                 diagnostic_outside_probe_ladder_mode
             )
             self._stress_probe_mode[marker] = diagnostic_probe_mode
+            self._stress_pressure_pair_policy_code[marker] = pressure_pair_policy_code
+            self._stress_pressure_pair_selected[marker] = diagnostic_pressure_pair_selected
+            self._stress_pressure_pair_fallback_used[marker] = (
+                diagnostic_pressure_pair_fallback_used
+            )
+            self._stress_pressure_pair_inside_cell[marker] = (
+                diagnostic_pressure_pair_inside_cell
+            )
+            self._stress_pressure_pair_outside_cell[marker] = (
+                diagnostic_pressure_pair_outside_cell
+            )
+            self._stress_pressure_pair_cell_delta[marker] = (
+                diagnostic_pressure_pair_cell_delta
+            )
+            self._stress_pressure_pair_symmetry_residual_cells[marker] = (
+                diagnostic_pressure_pair_symmetry_residual_cells
+            )
             if pressure_sample_valid:
                 self.t_gamma_pa[marker] = traction
                 self.t_pressure_gamma_pa[marker] = traction
@@ -4760,6 +4939,9 @@ class HibmMpmSurfaceMarkers:
         pressure_probe_ladder_spacing_cells: float = 0.5,
         pressure_probe_ladder_rung_count: int = 5,
         pressure_probe_ladder_mode: str = STRESS_PRESSURE_PROBE_LADDER_MODE_CURRENT_NORMAL_CELL,
+        pressure_pair_policy: str = STRESS_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER,
+        pressure_pair_max_cell_delta: int = 1,
+        pressure_pair_require_opposite_sides: bool = True,
     ) -> HibmMpmFluidStressSampleReport:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
@@ -4866,6 +5048,20 @@ class HibmMpmSurfaceMarkers:
         if not pressure_probe_ladder_configured:
             pressure_probe_ladder_spacing = 1.0
             pressure_probe_ladder_count = 3
+        pressure_pair_policy_name = str(pressure_pair_policy)
+        if pressure_pair_policy_name not in STRESS_PRESSURE_PAIR_POLICY_CODES:
+            raise ValueError(
+                f"unsupported pressure_pair_policy: {pressure_pair_policy_name!r}"
+            )
+        pressure_pair_policy_code = STRESS_PRESSURE_PAIR_POLICY_CODES[
+            pressure_pair_policy_name
+        ]
+        pressure_pair_max_delta = int(pressure_pair_max_cell_delta)
+        if pressure_pair_max_delta < 0:
+            raise ValueError("pressure_pair_max_cell_delta must be non-negative")
+        pressure_pair_require_opposite_sides_flag = (
+            1 if bool(pressure_pair_require_opposite_sides) else 0
+        )
         pressure_only_fast_path = (
             viscosity == 0.0
             and
@@ -4889,6 +5085,14 @@ class HibmMpmSurfaceMarkers:
         ):
             raise ValueError(
                 "pressure_probe_ladder controls are pressure-only diagnostics"
+            )
+        if pressure_pair_policy_code != 0 and not (
+            pressure_only_fast_path
+            and bool(two_sided_pressure)
+            and one_sided_region_id < 0
+        ):
+            raise ValueError(
+                "pressure_pair_policy controls are pressure-only two-sided diagnostics"
             )
         if pressure_only_fast_path:
             _debug_stage_progress("stress_sampling:pressure_only:start")
@@ -4915,6 +5119,9 @@ class HibmMpmSurfaceMarkers:
                 pressure_probe_ladder_spacing,
                 pressure_probe_ladder_count,
                 1 if pressure_probe_ladder_configured else 0,
+                pressure_pair_policy_code,
+                pressure_pair_max_delta,
+                pressure_pair_require_opposite_sides_flag,
             )
             _debug_stage_progress("stress_sampling:pressure_only:done")
         elif base_viscous_split_path:
@@ -4942,6 +5149,9 @@ class HibmMpmSurfaceMarkers:
                 pressure_probe_ladder_spacing,
                 pressure_probe_ladder_count,
                 1 if pressure_probe_ladder_configured else 0,
+                0,
+                1,
+                1,
             )
             _debug_stage_progress("stress_sampling:base_pressure:done")
             _debug_stage_progress("stress_sampling:base_viscous:start")
@@ -5313,6 +5523,27 @@ class HibmMpmSurfaceMarkers:
             self._stress_outside_probe_ladder_mode.to_numpy()[:marker_count]
         )
         probe_mode = self._stress_probe_mode.to_numpy()[:marker_count]
+        pressure_pair_policy_code = (
+            self._stress_pressure_pair_policy_code.to_numpy()[:marker_count]
+        )
+        pressure_pair_selected = (
+            self._stress_pressure_pair_selected.to_numpy()[:marker_count]
+        )
+        pressure_pair_fallback_used = (
+            self._stress_pressure_pair_fallback_used.to_numpy()[:marker_count]
+        )
+        pressure_pair_inside_cell = (
+            self._stress_pressure_pair_inside_cell.to_numpy()[:marker_count]
+        )
+        pressure_pair_outside_cell = (
+            self._stress_pressure_pair_outside_cell.to_numpy()[:marker_count]
+        )
+        pressure_pair_cell_delta = (
+            self._stress_pressure_pair_cell_delta.to_numpy()[:marker_count]
+        )
+        pressure_pair_symmetry_residual_cells = (
+            self._stress_pressure_pair_symmetry_residual_cells.to_numpy()[:marker_count]
+        )
         pressure_traction = self.t_pressure_gamma_pa.to_numpy()[:marker_count]
         viscous_traction = self.t_viscous_gamma_pa.to_numpy()[:marker_count]
         total_traction = self.t_gamma_pa.to_numpy()[:marker_count]
@@ -5348,6 +5579,7 @@ class HibmMpmSurfaceMarkers:
             fluid_side_pressure_defined = mode_code not in (0, 2)
             inside_ladder_code = int(inside_probe_ladder_mode[marker])
             outside_ladder_code = int(outside_probe_ladder_mode[marker])
+            pair_policy_code = int(pressure_pair_policy_code[marker])
             diagnostics.append(
                 {
                     "marker_index": int(marker),
@@ -5390,6 +5622,28 @@ class HibmMpmSurfaceMarkers:
                         f"unknown_{outside_ladder_code}",
                     ),
                     "outside_probe_ladder_mode_code": outside_ladder_code,
+                    "pressure_pair_policy": STRESS_PRESSURE_PAIR_POLICY_NAMES.get(
+                        pair_policy_code,
+                        f"unknown_{pair_policy_code}",
+                    ),
+                    "pressure_pair_selected": bool(
+                        int(pressure_pair_selected[marker])
+                    ),
+                    "pressure_pair_fallback_used": bool(
+                        int(pressure_pair_fallback_used[marker])
+                    ),
+                    "pressure_pair_inside_cell": [
+                        int(value) for value in pressure_pair_inside_cell[marker]
+                    ],
+                    "pressure_pair_outside_cell": [
+                        int(value) for value in pressure_pair_outside_cell[marker]
+                    ],
+                    "pressure_pair_cell_delta": int(
+                        pressure_pair_cell_delta[marker]
+                    ),
+                    "pressure_pair_symmetry_residual_cells": float(
+                        pressure_pair_symmetry_residual_cells[marker]
+                    ),
                     "inside_probe_multiplier": float(
                         inside_probe_multiplier[marker]
                     ),

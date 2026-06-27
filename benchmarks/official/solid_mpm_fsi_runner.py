@@ -52,6 +52,12 @@ TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL = "current_normal_cell_ladder
 TRACTION_PRESSURE_PROBE_LADDER_MODES = {
     TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL,
 }
+TRACTION_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER = "independent_ladder"
+TRACTION_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR = "symmetric_cell_pair"
+TRACTION_PRESSURE_PAIR_POLICIES = {
+    TRACTION_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER,
+    TRACTION_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR,
+}
 TRACTION_MARKER_FACE_OFFSET_CELLS_DIAGNOSTIC_MAX = 4.0
 SUPPORTED_FORMAL_FLOW_DRIVER_MODES = {
     FLOW_DRIVER_PROJECTION_ONLY,
@@ -885,6 +891,24 @@ def _traction_pressure_probe_ladder_mode(config: Any) -> str:
     )
 
 
+def _traction_pressure_pair_policy(config: Any) -> str:
+    return str(
+        getattr(
+            config,
+            "traction_pressure_pair_policy",
+            TRACTION_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER,
+        )
+    )
+
+
+def _traction_pressure_pair_max_cell_delta(config: Any) -> int:
+    return int(getattr(config, "traction_pressure_pair_max_cell_delta", 1))
+
+
+def _traction_pressure_pair_require_opposite_sides(config: Any) -> bool:
+    return bool(getattr(config, "traction_pressure_pair_require_opposite_sides", True))
+
+
 def _traction_marker_face_count(config: Any) -> int:
     if _traction_marker_layout(config) == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE:
         return 1
@@ -907,6 +931,10 @@ def _is_default_traction_formulation(config: Any) -> bool:
         and _traction_pressure_probe_start_offset_cells(config) is None
         and _traction_pressure_probe_ladder_mode(config)
         == TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL
+        and _traction_pressure_pair_policy(config)
+        == TRACTION_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER
+        and _traction_pressure_pair_max_cell_delta(config) == 1
+        and _traction_pressure_pair_require_opposite_sides(config)
     )
 
 
@@ -1062,6 +1090,14 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError(
             f"unsupported traction_pressure_probe_ladder_mode: {probe_ladder_mode!r}"
         )
+    pressure_pair_policy = _traction_pressure_pair_policy(config)
+    if pressure_pair_policy not in TRACTION_PRESSURE_PAIR_POLICIES:
+        raise ValueError(
+            f"unsupported traction_pressure_pair_policy: {pressure_pair_policy!r}"
+        )
+    pressure_pair_max_cell_delta = _traction_pressure_pair_max_cell_delta(config)
+    if pressure_pair_max_cell_delta < 0:
+        raise ValueError("traction_pressure_pair_max_cell_delta must be non-negative")
     traction_viscosity = _traction_viscosity_pa_s(config)
     if not math.isfinite(traction_viscosity) or traction_viscosity < 0.0:
         raise ValueError("traction viscosity must be finite and non-negative")
@@ -2249,6 +2285,19 @@ def _sample_stress_to_marker_forces(
             TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL
             if config is None
             else _traction_pressure_probe_ladder_mode(config)
+        ),
+        pressure_pair_policy=(
+            TRACTION_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER
+            if config is None
+            else _traction_pressure_pair_policy(config)
+        ),
+        pressure_pair_max_cell_delta=(
+            1 if config is None else _traction_pressure_pair_max_cell_delta(config)
+        ),
+        pressure_pair_require_opposite_sides=(
+            True
+            if config is None
+            else _traction_pressure_pair_require_opposite_sides(config)
         ),
     )
     markers.compute_marker_forces()
