@@ -57,31 +57,157 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_reference_formulation_selection_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py
 
-      - name: Run archive and artifact consistency tests
+      - name: Run archive artifact test - official half-domain
         shell: pwsh
         run: |
           python -m unittest `
             tests.integration.test_ansys_official_half_domain_archive_consistency `
+            -v
+
+      - name: Run archive artifact test - postrepair
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_postrepair_artifacts `
+            -v
+
+      - name: Run archive artifact test - flow collapse
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_flow_collapse_artifacts `
+            -v
+
+      - name: Run archive artifact test - sustained flow driver
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_sustained_flow_driver_artifacts `
+            -v
+
+      - name: Run archive artifact test - source outlet balance
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_source_outlet_balance_artifacts `
+            -v
+
+      - name: Run archive artifact test - source candidate step20
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_source_candidate_step20_artifacts `
+            -v
+
+      - name: Run archive artifact test - source temporal gate
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_source_candidate_temporal_gate_artifacts `
+            -v
+
+      - name: Run archive artifact test - fixed solid source temporal
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_fixed_solid_source_temporal_artifacts `
+            -v
+
+      - name: Run archive artifact test - fixed solid load
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_fixed_solid_load_artifacts `
+            -v
+
+      - name: Run traction artifact test - formulation
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_formulation_artifacts `
+            -v
+
+      - name: Run traction artifact test - probe observability
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_probe_observability_artifacts `
+            -v
+
+      - name: Run traction artifact test - shared snapshot
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_shared_snapshot_artifacts `
+            -v
+
+      - name: Run traction artifact test - snapshot resampling
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_snapshot_resampling_artifacts `
+            -v
+
+      - name: Run traction artifact test - probe offset decoupling
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_probe_offset_decoupling_artifacts `
+            -v
+
+      - name: Run traction artifact test - probe ladder stability
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_probe_ladder_stability_artifacts `
+            -v
+
+      - name: Run traction artifact test - probe ladder control
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_probe_ladder_control_artifacts `
+            -v
+
+      - name: Run traction artifact test - symmetric pressure pair
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_symmetric_pressure_pair_artifacts `
+            -v
+
+      - name: Run traction artifact test - pressure pair anchor map
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_pressure_pair_anchor_map_artifacts `
+            -v
+
+      - name: Run traction artifact test - pressure pair reference preselection
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_pressure_pair_reference_preselection_artifacts `
+            -v
+
+      - name: Run traction artifact test - per-face one-sided
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_per_face_one_sided_artifacts `
+            -v
+
+      - name: Run traction artifact test - reference formulation selection
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_reference_formulation_selection_artifacts `
+            -v
+
+      - name: Run archive artifact test - preflow release step20
+        shell: pwsh
+        run: |
+          python -m unittest `
             tests.integration.test_ansys_vertical_flap_preflow_release_step20_artifacts `
             -v
 
