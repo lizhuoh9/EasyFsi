@@ -92,6 +92,11 @@ STRESS_PRESSURE_PAIR_POLICY_NAMES = {
     1: STRESS_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR,
     2: STRESS_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR,
 }
+STRESS_ONE_SIDED_POLICY_NAMES = {
+    0: "disabled",
+    1: "legacy_single_region",
+    2: "per_face_region",
+}
 
 
 def _debug_stage_progress(message: str) -> None:
@@ -471,6 +476,26 @@ class HibmMpmSurfaceMarkers:
             dtype=ti.i32,
             shape=self.marker_capacity,
         )
+        self._stress_one_sided_policy_code = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_one_sided_region_id = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_one_sided_side_normal_sign = ti.field(
+            dtype=ti.f64,
+            shape=self.marker_capacity,
+        )
+        self._stress_one_sided_anchor_selected = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_one_sided_anchor_fallback_used = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
         self.F_gamma_n = ti.Vector.field(3, dtype=ti.f64, shape=self.marker_capacity)
         self.projection_triangle_indices = ti.Vector.field(
             3,
@@ -781,6 +806,11 @@ class HibmMpmSurfaceMarkers:
             self._stress_pressure_pair_cell_delta[marker] = -1
             self._stress_pressure_pair_symmetry_residual_cells[marker] = -1.0
             self._stress_pressure_pair_anchor_fallback_used[marker] = 0
+            self._stress_one_sided_policy_code[marker] = 0
+            self._stress_one_sided_region_id[marker] = -1
+            self._stress_one_sided_side_normal_sign[marker] = 0.0
+            self._stress_one_sided_anchor_selected[marker] = 0
+            self._stress_one_sided_anchor_fallback_used[marker] = 0
 
     @ti.kernel
     def _reset_pressure_anchor_cells_kernel(self):
@@ -3015,6 +3045,12 @@ class HibmMpmSurfaceMarkers:
         two_sided_pressure: ti.i32,
         one_sided_pressure_region_id: ti.i32,
         one_sided_reference_pressure_pa: ti.f32,
+        one_sided_pressure_primary_region_id: ti.i32,
+        one_sided_pressure_secondary_region_id: ti.i32,
+        one_sided_primary_reference_pressure_pa: ti.f32,
+        one_sided_secondary_reference_pressure_pa: ti.f32,
+        one_sided_primary_fluid_side_normal_sign: ti.f32,
+        one_sided_secondary_fluid_side_normal_sign: ti.f32,
         pressure_probe_ladder_start_multiplier: ti.f32,
         pressure_probe_ladder_spacing_multiplier: ti.f32,
         pressure_probe_ladder_rung_count: ti.i32,
@@ -3113,6 +3149,11 @@ class HibmMpmSurfaceMarkers:
             diagnostic_pressure_pair_cell_delta = -1
             diagnostic_pressure_pair_symmetry_residual_cells = ti.cast(-1.0, ti.f64)
             diagnostic_pressure_pair_anchor_fallback_used = 0
+            diagnostic_one_sided_policy_code = 0
+            diagnostic_one_sided_region_id = -1
+            diagnostic_one_sided_side_normal_sign = ti.cast(0.0, ti.f64)
+            diagnostic_one_sided_anchor_selected = 0
+            diagnostic_one_sided_anchor_fallback_used = 0
             if pressure_sample_valid:
                 diagnostic_fluid_side_pressure_pa = diagnostic_base_pressure_pa
                 diagnostic_probe_mode = 1
@@ -3506,7 +3547,98 @@ class HibmMpmSurfaceMarkers:
                                 ti.f64,
                             )
                             diagnostic_inside_probe_ladder_mode = probe_ladder_mode
+                per_face_region_marker = 0
+                per_face_reference_pressure = ti.cast(0.0, ti.f64)
+                per_face_side_normal_sign = ti.cast(0.0, ti.f64)
                 if (
+                    one_sided_pressure_primary_region_id >= 0
+                    and self.region_id[marker] == one_sided_pressure_primary_region_id
+                ):
+                    per_face_region_marker = 1
+                    per_face_reference_pressure = ti.cast(
+                        one_sided_primary_reference_pressure_pa,
+                        ti.f64,
+                    )
+                    per_face_side_normal_sign = ti.cast(
+                        one_sided_primary_fluid_side_normal_sign,
+                        ti.f64,
+                    )
+                elif (
+                    one_sided_pressure_secondary_region_id >= 0
+                    and self.region_id[marker] == one_sided_pressure_secondary_region_id
+                ):
+                    per_face_region_marker = 1
+                    per_face_reference_pressure = ti.cast(
+                        one_sided_secondary_reference_pressure_pa,
+                        ti.f64,
+                    )
+                    per_face_side_normal_sign = ti.cast(
+                        one_sided_secondary_fluid_side_normal_sign,
+                        ti.f64,
+                    )
+                if per_face_region_marker != 0 and per_face_side_normal_sign < 0.0:
+                    if inside_found != 0:
+                        traction = (inside_pressure - per_face_reference_pressure) * normal
+                        pressure_sample_valid = True
+                        diagnostic_inside_pressure_pa = ti.cast(inside_pressure, ti.f64)
+                        diagnostic_outside_pressure_pa = per_face_reference_pressure
+                        diagnostic_pressure_jump_pa = ti.cast(
+                            inside_pressure - per_face_reference_pressure,
+                            ti.f64,
+                        )
+                        diagnostic_fluid_side_pressure_pa = ti.cast(
+                            inside_pressure,
+                            ti.f64,
+                        )
+                        diagnostic_reference_pressure_pa = per_face_reference_pressure
+                        diagnostic_probe_mode = 5
+                        diagnostic_one_sided_policy_code = 2
+                        diagnostic_one_sided_region_id = self.region_id[marker]
+                        diagnostic_one_sided_side_normal_sign = per_face_side_normal_sign
+                        diagnostic_one_sided_anchor_selected = (
+                            diagnostic_pressure_pair_selected
+                        )
+                        diagnostic_one_sided_anchor_fallback_used = (
+                            diagnostic_pressure_pair_anchor_fallback_used
+                        )
+                        ti.atomic_add(
+                            self.report_stress_one_sided_pressure_marker_count[None],
+                            1,
+                        )
+                    else:
+                        pressure_sample_valid = False
+                elif per_face_region_marker != 0 and per_face_side_normal_sign > 0.0:
+                    if outside_found != 0:
+                        traction = (per_face_reference_pressure - outside_pressure) * normal
+                        pressure_sample_valid = True
+                        diagnostic_inside_pressure_pa = per_face_reference_pressure
+                        diagnostic_outside_pressure_pa = ti.cast(outside_pressure, ti.f64)
+                        diagnostic_pressure_jump_pa = ti.cast(
+                            per_face_reference_pressure - outside_pressure,
+                            ti.f64,
+                        )
+                        diagnostic_fluid_side_pressure_pa = ti.cast(
+                            outside_pressure,
+                            ti.f64,
+                        )
+                        diagnostic_reference_pressure_pa = per_face_reference_pressure
+                        diagnostic_probe_mode = 6
+                        diagnostic_one_sided_policy_code = 2
+                        diagnostic_one_sided_region_id = self.region_id[marker]
+                        diagnostic_one_sided_side_normal_sign = per_face_side_normal_sign
+                        diagnostic_one_sided_anchor_selected = (
+                            diagnostic_pressure_pair_selected
+                        )
+                        diagnostic_one_sided_anchor_fallback_used = (
+                            diagnostic_pressure_pair_anchor_fallback_used
+                        )
+                        ti.atomic_add(
+                            self.report_stress_one_sided_pressure_marker_count[None],
+                            1,
+                        )
+                    else:
+                        pressure_sample_valid = False
+                elif (
                     one_sided_pressure_region_id != -1
                     and self.region_id[marker] == one_sided_pressure_region_id
                     and inside_found != 0
@@ -3533,6 +3665,15 @@ class HibmMpmSurfaceMarkers:
                         ti.f64,
                     )
                     diagnostic_probe_mode = 5
+                    diagnostic_one_sided_policy_code = 1
+                    diagnostic_one_sided_region_id = self.region_id[marker]
+                    diagnostic_one_sided_side_normal_sign = ti.cast(-1.0, ti.f64)
+                    diagnostic_one_sided_anchor_selected = (
+                        diagnostic_pressure_pair_selected
+                    )
+                    diagnostic_one_sided_anchor_fallback_used = (
+                        diagnostic_pressure_pair_anchor_fallback_used
+                    )
                     ti.atomic_add(
                         self.report_stress_one_sided_pressure_marker_count[None],
                         1,
@@ -3564,6 +3705,15 @@ class HibmMpmSurfaceMarkers:
                         ti.f64,
                     )
                     diagnostic_probe_mode = 6
+                    diagnostic_one_sided_policy_code = 1
+                    diagnostic_one_sided_region_id = self.region_id[marker]
+                    diagnostic_one_sided_side_normal_sign = ti.cast(1.0, ti.f64)
+                    diagnostic_one_sided_anchor_selected = (
+                        diagnostic_pressure_pair_selected
+                    )
+                    diagnostic_one_sided_anchor_fallback_used = (
+                        diagnostic_pressure_pair_anchor_fallback_used
+                    )
                     ti.atomic_add(
                         self.report_stress_one_sided_pressure_marker_count[None],
                         1,
@@ -3669,6 +3819,17 @@ class HibmMpmSurfaceMarkers:
             )
             self._stress_pressure_pair_anchor_fallback_used[marker] = (
                 diagnostic_pressure_pair_anchor_fallback_used
+            )
+            self._stress_one_sided_policy_code[marker] = diagnostic_one_sided_policy_code
+            self._stress_one_sided_region_id[marker] = diagnostic_one_sided_region_id
+            self._stress_one_sided_side_normal_sign[marker] = (
+                diagnostic_one_sided_side_normal_sign
+            )
+            self._stress_one_sided_anchor_selected[marker] = (
+                diagnostic_one_sided_anchor_selected
+            )
+            self._stress_one_sided_anchor_fallback_used[marker] = (
+                diagnostic_one_sided_anchor_fallback_used
             )
             if pressure_sample_valid:
                 self.t_gamma_pa[marker] = traction
@@ -5109,6 +5270,12 @@ class HibmMpmSurfaceMarkers:
         two_sided_probe_max_multiplier: float = 3.0,
         one_sided_pressure_region_id: int = -1,
         one_sided_reference_pressure_pa: float = 0.0,
+        one_sided_pressure_primary_region_id: int = -1,
+        one_sided_pressure_secondary_region_id: int = -1,
+        one_sided_primary_reference_pressure_pa: float = 0.0,
+        one_sided_secondary_reference_pressure_pa: float = 0.0,
+        one_sided_primary_fluid_side_normal_sign: float = 0.0,
+        one_sided_secondary_fluid_side_normal_sign: float = 0.0,
         one_sided_probe_max_multiplier: float = 3.0,
         use_pressure_anchor_fallback: bool = False,
         node_anchor_cell=None,
@@ -5182,6 +5349,51 @@ class HibmMpmSurfaceMarkers:
         one_sided_reference_pressure = float(one_sided_reference_pressure_pa)
         if not math.isfinite(one_sided_reference_pressure):
             raise ValueError("one_sided_reference_pressure_pa must be a finite number")
+        one_sided_primary_region_id = int(one_sided_pressure_primary_region_id)
+        one_sided_secondary_region_id = int(one_sided_pressure_secondary_region_id)
+        one_sided_primary_reference_pressure = float(
+            one_sided_primary_reference_pressure_pa
+        )
+        one_sided_secondary_reference_pressure = float(
+            one_sided_secondary_reference_pressure_pa
+        )
+        if not math.isfinite(one_sided_primary_reference_pressure):
+            raise ValueError(
+                "one_sided_primary_reference_pressure_pa must be a finite number"
+            )
+        if not math.isfinite(one_sided_secondary_reference_pressure):
+            raise ValueError(
+                "one_sided_secondary_reference_pressure_pa must be a finite number"
+            )
+        one_sided_primary_side = float(one_sided_primary_fluid_side_normal_sign)
+        one_sided_secondary_side = float(one_sided_secondary_fluid_side_normal_sign)
+        if one_sided_primary_side not in (-1.0, 0.0, 1.0):
+            raise ValueError(
+                "one_sided_primary_fluid_side_normal_sign must be -1.0, 0.0, or 1.0"
+            )
+        if one_sided_secondary_side not in (-1.0, 0.0, 1.0):
+            raise ValueError(
+                "one_sided_secondary_fluid_side_normal_sign must be -1.0, 0.0, or 1.0"
+            )
+        per_face_one_sided_configured = (
+            one_sided_primary_region_id >= 0 or one_sided_secondary_region_id >= 0
+        )
+        if per_face_one_sided_configured:
+            if one_sided_region_id >= 0:
+                raise ValueError(
+                    "legacy one_sided_pressure_region_id cannot be combined with "
+                    "per-face one-sided pressure regions"
+                )
+            if one_sided_primary_region_id >= 0 and one_sided_primary_side == 0.0:
+                raise ValueError(
+                    "one_sided_primary_fluid_side_normal_sign must be -1.0 or 1.0 "
+                    "when one_sided_pressure_primary_region_id is set"
+                )
+            if one_sided_secondary_region_id >= 0 and one_sided_secondary_side == 0.0:
+                raise ValueError(
+                    "one_sided_secondary_fluid_side_normal_sign must be -1.0 or 1.0 "
+                    "when one_sided_pressure_secondary_region_id is set"
+                )
         one_sided_probe_max = float(one_sided_probe_max_multiplier)
         if not math.isfinite(one_sided_probe_max) or one_sided_probe_max < 3.0:
             raise ValueError(
@@ -5264,6 +5476,10 @@ class HibmMpmSurfaceMarkers:
             raise ValueError(
                 "pressure_probe_ladder controls are pressure-only diagnostics"
             )
+        if per_face_one_sided_configured and not pressure_only_fast_path:
+            raise ValueError(
+                "per-face one-sided pressure controls are pressure-only diagnostics"
+            )
         if pressure_pair_policy_code != 0 and not (
             pressure_only_fast_path
             and bool(two_sided_pressure)
@@ -5293,6 +5509,12 @@ class HibmMpmSurfaceMarkers:
                 1 if bool(two_sided_pressure) else 0,
                 one_sided_region_id,
                 one_sided_reference_pressure,
+                one_sided_primary_region_id,
+                one_sided_secondary_region_id,
+                one_sided_primary_reference_pressure,
+                one_sided_secondary_reference_pressure,
+                one_sided_primary_side,
+                one_sided_secondary_side,
                 pressure_probe_ladder_start,
                 pressure_probe_ladder_spacing,
                 pressure_probe_ladder_count,
@@ -5322,6 +5544,12 @@ class HibmMpmSurfaceMarkers:
                 int(nodes[2]),
                 0,
                 -1,
+                0.0,
+                -1,
+                -1,
+                0.0,
+                0.0,
+                0.0,
                 0.0,
                 pressure_probe_ladder_start,
                 pressure_probe_ladder_spacing,
@@ -5734,6 +5962,21 @@ class HibmMpmSurfaceMarkers:
         pressure_pair_anchor_fallback_used = (
             self._stress_pressure_pair_anchor_fallback_used.to_numpy()[:marker_count]
         )
+        one_sided_policy_code = self._stress_one_sided_policy_code.to_numpy()[
+            :marker_count
+        ]
+        one_sided_region_id = self._stress_one_sided_region_id.to_numpy()[
+            :marker_count
+        ]
+        one_sided_side_normal_sign = (
+            self._stress_one_sided_side_normal_sign.to_numpy()[:marker_count]
+        )
+        one_sided_anchor_selected = (
+            self._stress_one_sided_anchor_selected.to_numpy()[:marker_count]
+        )
+        one_sided_anchor_fallback_used = (
+            self._stress_one_sided_anchor_fallback_used.to_numpy()[:marker_count]
+        )
         pressure_traction = self.t_pressure_gamma_pa.to_numpy()[:marker_count]
         viscous_traction = self.t_viscous_gamma_pa.to_numpy()[:marker_count]
         total_traction = self.t_gamma_pa.to_numpy()[:marker_count]
@@ -5770,6 +6013,13 @@ class HibmMpmSurfaceMarkers:
             inside_ladder_code = int(inside_probe_ladder_mode[marker])
             outside_ladder_code = int(outside_probe_ladder_mode[marker])
             pair_policy_code = int(pressure_pair_policy_code[marker])
+            one_sided_code = int(one_sided_policy_code[marker])
+            one_sided_sign = float(one_sided_side_normal_sign[marker])
+            one_sided_side_selected = ""
+            if one_sided_sign < 0.0:
+                one_sided_side_selected = "inside"
+            elif one_sided_sign > 0.0:
+                one_sided_side_selected = "outside"
             diagnostics.append(
                 {
                     "marker_index": int(marker),
@@ -5850,6 +6100,32 @@ class HibmMpmSurfaceMarkers:
                     ),
                     "pressure_pair_anchor_fallback_used": bool(
                         int(pressure_pair_anchor_fallback_used[marker])
+                    ),
+                    "one_sided_policy": STRESS_ONE_SIDED_POLICY_NAMES.get(
+                        one_sided_code,
+                        f"unknown_{one_sided_code}",
+                    ),
+                    "one_sided_policy_code": one_sided_code,
+                    "one_sided_region_id": int(one_sided_region_id[marker]),
+                    "one_sided_side_normal_sign": one_sided_sign,
+                    "one_sided_side_selected": one_sided_side_selected,
+                    "one_sided_fluid_side_pressure_pa": float(
+                        fluid_side_pressure_pa[marker]
+                    ),
+                    "one_sided_reference_pressure_pa": float(
+                        reference_pressure_pa[marker]
+                    ),
+                    "one_sided_pressure_pair_policy": (
+                        STRESS_PRESSURE_PAIR_POLICY_NAMES.get(
+                            pair_policy_code,
+                            f"unknown_{pair_policy_code}",
+                        )
+                    ),
+                    "one_sided_anchor_selected": bool(
+                        int(one_sided_anchor_selected[marker])
+                    ),
+                    "one_sided_anchor_fallback_used": bool(
+                        int(one_sided_anchor_fallback_used[marker])
                     ),
                     "inside_probe_multiplier": float(
                         inside_probe_multiplier[marker]

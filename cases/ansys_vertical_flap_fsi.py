@@ -161,6 +161,12 @@ class VerticalFlapFsiConfig:
     traction_pressure_pair_policy: str = "independent_ladder"
     traction_pressure_pair_max_cell_delta: int = 1
     traction_pressure_pair_require_opposite_sides: bool = True
+    traction_one_sided_pressure_policy: str = "disabled"
+    traction_one_sided_primary_fluid_side_normal_sign: float | None = None
+    traction_one_sided_secondary_fluid_side_normal_sign: float | None = None
+    traction_one_sided_primary_reference_pressure_pa: float = 0.0
+    traction_one_sided_secondary_reference_pressure_pa: float = 0.0
+    traction_one_sided_pressure_pair_policy: str = "baseline_anchored_cell_pair"
     traction_viscosity_pa_s: float = 0.0
     export_final_flow_snapshot: bool = False
     enforce_plane_strain_x: bool = True

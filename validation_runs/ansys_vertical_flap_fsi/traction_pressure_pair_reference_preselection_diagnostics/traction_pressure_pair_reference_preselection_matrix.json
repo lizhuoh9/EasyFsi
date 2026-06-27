@@ -300,7 +300,7 @@
   "candidate_status": "pressure_pair_policy_preselection_candidate_found",
   "case": "ansys_vertical_flap_fsi",
   "completed_formulation_count": 9,
-  "created_at_utc": "2026-06-27T04:41:17.321285+00:00",
+  "created_at_utc": "2026-06-27T05:30:58.152907+00:00",
   "flow_snapshot_identity_status": "shared_snapshot_sha256_identical_completed_rows",
   "flow_snapshot_preflow_steps": 20,
   "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
@@ -309,7 +309,7 @@
     "anchored_pair_dual_faces_probe0p00": {
       "anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
       "anchor_source_scenario": "baseline_independent_ladder_probe0p51",
-      "flow_phase": "shared_snapshot_pressure_pair_anchor_map",
+      "flow_phase": "shared_snapshot_pressure_pair_reference_preselection",
       "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
       "fluid_reaction_force_n": [
         -0.0,
@@ -419,7 +419,7 @@
     "anchored_pair_dual_faces_probe0p25": {
       "anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
       "anchor_source_scenario": "baseline_independent_ladder_probe0p51",
-      "flow_phase": "shared_snapshot_pressure_pair_anchor_map",
+      "flow_phase": "shared_snapshot_pressure_pair_reference_preselection",
       "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
       "fluid_reaction_force_n": [
         -0.0,
@@ -529,7 +529,7 @@
     "anchored_pair_dual_faces_probe0p375": {
       "anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
       "anchor_source_scenario": "baseline_independent_ladder_probe0p51",
-      "flow_phase": "shared_snapshot_pressure_pair_anchor_map",
+      "flow_phase": "shared_snapshot_pressure_pair_reference_preselection",
       "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
       "fluid_reaction_force_n": [
         -0.0,
@@ -639,7 +639,7 @@
     "anchored_pair_dual_faces_probe0p51": {
       "anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
       "anchor_source_scenario": "baseline_independent_ladder_probe0p51",
-      "flow_phase": "shared_snapshot_pressure_pair_anchor_map",
+      "flow_phase": "shared_snapshot_pressure_pair_reference_preselection",
       "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
       "fluid_reaction_force_n": [
         -0.0,
@@ -749,7 +749,7 @@
     "anchored_pair_dual_faces_probe0p625": {
       "anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
       "anchor_source_scenario": "baseline_independent_ladder_probe0p51",
-      "flow_phase": "shared_snapshot_pressure_pair_anchor_map",
+      "flow_phase": "shared_snapshot_pressure_pair_reference_preselection",
       "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
       "fluid_reaction_force_n": [
         -0.0,
@@ -859,7 +859,7 @@
     "anchored_pair_dual_faces_probe0p75": {
       "anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
       "anchor_source_scenario": "baseline_independent_ladder_probe0p51",
-      "flow_phase": "shared_snapshot_pressure_pair_anchor_map",
+      "flow_phase": "shared_snapshot_pressure_pair_reference_preselection",
       "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
       "fluid_reaction_force_n": [
         -0.0,
@@ -969,7 +969,7 @@
     "anchored_pair_dual_faces_probe1p00": {
       "anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
       "anchor_source_scenario": "baseline_independent_ladder_probe0p51",
-      "flow_phase": "shared_snapshot_pressure_pair_anchor_map",
+      "flow_phase": "shared_snapshot_pressure_pair_reference_preselection",
       "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
       "fluid_reaction_force_n": [
         -0.0,
@@ -1079,7 +1079,7 @@
     "anchored_pair_dual_faces_probe1p50": {
       "anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
       "anchor_source_scenario": "baseline_independent_ladder_probe0p51",
-      "flow_phase": "shared_snapshot_pressure_pair_anchor_map",
+      "flow_phase": "shared_snapshot_pressure_pair_reference_preselection",
       "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
       "fluid_reaction_force_n": [
         -0.0,
@@ -1189,7 +1189,7 @@
     "baseline_independent_ladder_probe0p51": {
       "anchor_map_sha256": "",
       "anchor_source_scenario": "",
-      "flow_phase": "shared_snapshot_pressure_pair_anchor_map",
+      "flow_phase": "shared_snapshot_pressure_pair_reference_preselection",
       "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
       "fluid_reaction_force_n": [
         -0.0,
@@ -1482,7 +1482,7 @@
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
       "unsupported_reason": "",
-      "worker_elapsed_s": 38.04747180000413,
+      "worker_elapsed_s": 10.047336499963421,
       "worker_mode": "shared_snapshot_pressure_pair_reference_preselection"
     },
     {
@@ -1622,7 +1622,7 @@
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
       "unsupported_reason": "",
-      "worker_elapsed_s": 38.86878880002769,
+      "worker_elapsed_s": 10.400494100002106,
       "worker_mode": "shared_snapshot_pressure_pair_reference_preselection"
     },
     {
@@ -1762,7 +1762,7 @@
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
       "unsupported_reason": "",
-      "worker_elapsed_s": 37.83079749997705,
+      "worker_elapsed_s": 41.72751590004191,
       "worker_mode": "shared_snapshot_pressure_pair_reference_preselection"
     },
     {
@@ -1902,7 +1902,7 @@
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
       "unsupported_reason": "",
-      "worker_elapsed_s": 38.18352759996196,
+      "worker_elapsed_s": 40.53193250001641,
       "worker_mode": "shared_snapshot_pressure_pair_reference_preselection"
     },
     {
@@ -2042,7 +2042,7 @@
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
       "unsupported_reason": "",
-      "worker_elapsed_s": 37.9541986999684,
+      "worker_elapsed_s": 40.17642740003066,
       "worker_mode": "shared_snapshot_pressure_pair_reference_preselection"
     },
     {
@@ -2182,7 +2182,7 @@
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
       "unsupported_reason": "",
-      "worker_elapsed_s": 39.374115200014785,
+      "worker_elapsed_s": 40.7894431000459,
       "worker_mode": "shared_snapshot_pressure_pair_reference_preselection"
     },
     {
@@ -2322,7 +2322,7 @@
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
       "unsupported_reason": "",
-      "worker_elapsed_s": 37.51633640000364,
+      "worker_elapsed_s": 41.14625640003942,
       "worker_mode": "shared_snapshot_pressure_pair_reference_preselection"
     },
     {
@@ -2462,7 +2462,7 @@
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
       "unsupported_reason": "",
-      "worker_elapsed_s": 38.379128900007345,
+      "worker_elapsed_s": 40.04752209997969,
       "worker_mode": "shared_snapshot_pressure_pair_reference_preselection"
     },
     {
@@ -2602,7 +2602,7 @@
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
       "unsupported_reason": "",
-      "worker_elapsed_s": 37.74296359997243,
+      "worker_elapsed_s": 41.110374200041406,
       "worker_mode": "shared_snapshot_pressure_pair_reference_preselection"
     },
     {

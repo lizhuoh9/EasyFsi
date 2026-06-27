@@ -6,7 +6,7 @@
     "pressure_pair_anchor_selected_marker_count": 24
   },
   "case": "ansys_vertical_flap_fsi",
-  "created_at_utc": "2026-06-27T04:36:47.942521+00:00",
+  "created_at_utc": "2026-06-27T05:26:10.084953+00:00",
   "face_diagnostics": {
     "primary_face_base_pressure_found_marker_count": 12,
     "primary_face_inside_pressure_found_marker_count": 12,

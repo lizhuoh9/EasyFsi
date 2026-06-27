@@ -53,6 +53,7 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_symmetric_pressure_pair_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_pressure_pair_anchor_map_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_pressure_pair_reference_preselection_matrix.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_per_face_one_sided_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py
 
       - name: Run archive and artifact consistency tests
@@ -78,6 +79,7 @@ jobs:
             tests.integration.test_ansys_vertical_flap_traction_symmetric_pressure_pair_artifacts `
             tests.integration.test_ansys_vertical_flap_traction_pressure_pair_anchor_map_artifacts `
             tests.integration.test_ansys_vertical_flap_traction_pressure_pair_reference_preselection_artifacts `
+            tests.integration.test_ansys_vertical_flap_traction_per_face_one_sided_artifacts `
             tests.integration.test_ansys_vertical_flap_preflow_release_step20_artifacts `
             -v
 
@@ -119,4 +121,5 @@ jobs:
             tests.solvers.test_hibm_traction_probe_diagnostics.HibmMpmTractionProbeDiagnosticsTests.test_external_total_traction_keeps_public_decomposition_consistent `
             tests.solvers.test_hibm_traction_probe_ladder_controls `
             tests.solvers.test_hibm_traction_symmetric_pressure_pair `
-            tests.solvers.test_hibm_traction_pressure_pair_anchor_map
+            tests.solvers.test_hibm_traction_pressure_pair_anchor_map `
+            tests.solvers.test_hibm_traction_per_face_one_sided_pressure

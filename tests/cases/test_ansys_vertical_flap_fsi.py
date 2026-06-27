@@ -470,7 +470,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             )
         )
         self.assertFalse(unsupported)
-        self.assertIn("one_sided_pressure_region_id", unsupported_reason)
+        self.assertIn("per_face_mirrored", unsupported_reason)
         with self.assertRaisesRegex(ValueError, "unsupported traction formulation"):
             solid_mpm_fsi_runner._validate_rectangular_solid_config(
                 VerticalFlapFsiConfig(
@@ -478,6 +478,45 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                     preflow_steps=20,
                     traction_marker_layout="dual_physical_faces",
                     traction_pressure_sampling_mode="one_sided_surface_pressure",
+                )
+            )
+        per_face_one_sided = VerticalFlapFsiConfig(
+            step_count=0,
+            preflow_steps=20,
+            traction_marker_layout="dual_physical_faces",
+            traction_pressure_sampling_mode="one_sided_surface_pressure",
+            traction_pressure_pair_policy="baseline_anchored_cell_pair",
+            traction_one_sided_pressure_policy="per_face_mirrored",
+            traction_one_sided_primary_fluid_side_normal_sign=1.0,
+            traction_one_sided_secondary_fluid_side_normal_sign=1.0,
+        )
+        supported, reason = solid_mpm_fsi_runner.traction_formulation_supported(
+            per_face_one_sided
+        )
+        self.assertTrue(supported)
+        self.assertEqual(reason, "supported")
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(per_face_one_sided)
+        with self.assertRaisesRegex(ValueError, "fixed-solid diagnostics only"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(
+                    traction_marker_layout="dual_physical_faces",
+                    traction_pressure_sampling_mode="one_sided_surface_pressure",
+                    traction_pressure_pair_policy="baseline_anchored_cell_pair",
+                    traction_one_sided_pressure_policy="per_face_mirrored",
+                    traction_one_sided_primary_fluid_side_normal_sign=1.0,
+                    traction_one_sided_secondary_fluid_side_normal_sign=1.0,
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "primary_fluid_side"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(
+                    step_count=0,
+                    preflow_steps=20,
+                    traction_marker_layout="dual_physical_faces",
+                    traction_pressure_sampling_mode="one_sided_surface_pressure",
+                    traction_pressure_pair_policy="baseline_anchored_cell_pair",
+                    traction_one_sided_pressure_policy="per_face_mirrored",
+                    traction_one_sided_secondary_fluid_side_normal_sign=1.0,
                 )
             )
 
@@ -591,6 +630,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
         source = inspect.getsource(solid_mpm_fsi_runner._sample_stress_to_marker_forces)
         self.assertIn("one_sided_pressure_region_id", source)
+        self.assertIn("one_sided_pressure_primary_region_id", source)
         self.assertIn("_traction_viscosity_pa_s(config)", source)
 
     def test_sustained_flow_driver_modes_are_explicit_and_default_safe(self):

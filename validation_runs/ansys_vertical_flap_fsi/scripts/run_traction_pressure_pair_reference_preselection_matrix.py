@@ -173,6 +173,17 @@ def _normalize_completed_row(row: dict[str, Any], *, role: str) -> dict[str, Any
     return row
 
 
+def _normalize_completed_history(
+    history: Mapping[str, Any],
+    *,
+    scenario: str,
+) -> dict[str, Any]:
+    normalized = dict(history)
+    normalized["flow_phase"] = "shared_snapshot_pressure_pair_reference_preselection"
+    normalized["scenario"] = scenario
+    return normalized
+
+
 def _enrich_anchor_map(
     *,
     base_anchor_map: Mapping[str, Any],
@@ -620,7 +631,10 @@ def run() -> dict[str, Any]:
     )
     baseline_row = _normalize_completed_row(baseline_row, role="baseline")
     rows.append(baseline_row)
-    histories[BASELINE_SCENARIO] = baseline_history
+    histories[BASELINE_SCENARIO] = _normalize_completed_history(
+        baseline_history,
+        scenario=BASELINE_SCENARIO,
+    )
 
     base_anchor = anchor_map_matrix._anchor_map_from_baseline(baseline_markers)
     anchor_map = _enrich_anchor_map(
@@ -646,7 +660,10 @@ def run() -> dict[str, Any]:
             role=_completed_row_role(scenario),
         )
         rows.append(row)
-        histories[scenario] = history
+        histories[scenario] = _normalize_completed_history(
+            history,
+            scenario=scenario,
+        )
 
     unsupported = _unsupported_row(manifest)
     rows.append(unsupported)
@@ -688,4 +705,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if __package__ in (None, ""):
+        from validation_runs.ansys_vertical_flap_fsi.scripts import (
+            run_traction_pressure_pair_reference_preselection_matrix as module_entry,
+        )
+
+        raise SystemExit(module_entry.main())
     raise SystemExit(main())

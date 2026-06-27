@@ -62,6 +62,12 @@ TRACTION_PRESSURE_PAIR_POLICIES = {
     TRACTION_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR,
     TRACTION_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR,
 }
+TRACTION_ONE_SIDED_PRESSURE_POLICY_DISABLED = "disabled"
+TRACTION_ONE_SIDED_PRESSURE_POLICY_PER_FACE_MIRRORED = "per_face_mirrored"
+TRACTION_ONE_SIDED_PRESSURE_POLICIES = {
+    TRACTION_ONE_SIDED_PRESSURE_POLICY_DISABLED,
+    TRACTION_ONE_SIDED_PRESSURE_POLICY_PER_FACE_MIRRORED,
+}
 TRACTION_MARKER_FACE_OFFSET_CELLS_DIAGNOSTIC_MAX = 4.0
 SUPPORTED_FORMAL_FLOW_DRIVER_MODES = {
     FLOW_DRIVER_PROJECTION_ONLY,
@@ -913,6 +919,50 @@ def _traction_pressure_pair_require_opposite_sides(config: Any) -> bool:
     return bool(getattr(config, "traction_pressure_pair_require_opposite_sides", True))
 
 
+def _traction_one_sided_pressure_policy(config: Any) -> str:
+    return str(
+        getattr(
+            config,
+            "traction_one_sided_pressure_policy",
+            TRACTION_ONE_SIDED_PRESSURE_POLICY_DISABLED,
+        )
+    )
+
+
+def _traction_one_sided_primary_fluid_side_normal_sign(config: Any) -> float | None:
+    value = getattr(config, "traction_one_sided_primary_fluid_side_normal_sign", None)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _traction_one_sided_secondary_fluid_side_normal_sign(config: Any) -> float | None:
+    value = getattr(config, "traction_one_sided_secondary_fluid_side_normal_sign", None)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _traction_one_sided_primary_reference_pressure_pa(config: Any) -> float:
+    return float(getattr(config, "traction_one_sided_primary_reference_pressure_pa", 0.0))
+
+
+def _traction_one_sided_secondary_reference_pressure_pa(config: Any) -> float:
+    return float(
+        getattr(config, "traction_one_sided_secondary_reference_pressure_pa", 0.0)
+    )
+
+
+def _traction_one_sided_pressure_pair_policy(config: Any) -> str:
+    return str(
+        getattr(
+            config,
+            "traction_one_sided_pressure_pair_policy",
+            TRACTION_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR,
+        )
+    )
+
+
 def _traction_marker_face_count(config: Any) -> int:
     if _traction_marker_layout(config) == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE:
         return 1
@@ -939,6 +989,12 @@ def _is_default_traction_formulation(config: Any) -> bool:
         == TRACTION_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER
         and _traction_pressure_pair_max_cell_delta(config) == 1
         and _traction_pressure_pair_require_opposite_sides(config)
+        and _traction_one_sided_pressure_policy(config)
+        == TRACTION_ONE_SIDED_PRESSURE_POLICY_DISABLED
+        and _traction_one_sided_primary_fluid_side_normal_sign(config) is None
+        and _traction_one_sided_secondary_fluid_side_normal_sign(config) is None
+        and _traction_one_sided_pressure_pair_policy(config)
+        == TRACTION_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR
     )
 
 
@@ -964,10 +1020,15 @@ def traction_formulation_supported(config: Any) -> tuple[bool, str]:
         marker_layout == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES
         and pressure_sampling_mode == TRACTION_PRESSURE_ONE_SIDED
     ):
+        if (
+            _traction_one_sided_pressure_policy(config)
+            == TRACTION_ONE_SIDED_PRESSURE_POLICY_PER_FACE_MIRRORED
+        ):
+            return True, "supported"
         return (
             False,
-            "dual-face one-sided pressure needs per-face one-sided region support; "
-            "current core exposes one one_sided_pressure_region_id",
+            "dual-face one-sided pressure requires "
+            "traction_one_sided_pressure_policy='per_face_mirrored'",
         )
     if (
         marker_layout == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE
@@ -1102,6 +1163,60 @@ def _validate_rectangular_solid_config(config: Any) -> None:
     pressure_pair_max_cell_delta = _traction_pressure_pair_max_cell_delta(config)
     if pressure_pair_max_cell_delta < 0:
         raise ValueError("traction_pressure_pair_max_cell_delta must be non-negative")
+    one_sided_policy = _traction_one_sided_pressure_policy(config)
+    if one_sided_policy not in TRACTION_ONE_SIDED_PRESSURE_POLICIES:
+        raise ValueError(
+            f"unsupported traction_one_sided_pressure_policy: {one_sided_policy!r}"
+        )
+    one_sided_pair_policy = _traction_one_sided_pressure_pair_policy(config)
+    if one_sided_pair_policy not in TRACTION_PRESSURE_PAIR_POLICIES:
+        raise ValueError(
+            "unsupported traction_one_sided_pressure_pair_policy: "
+            f"{one_sided_pair_policy!r}"
+        )
+    primary_side_sign = _traction_one_sided_primary_fluid_side_normal_sign(config)
+    secondary_side_sign = _traction_one_sided_secondary_fluid_side_normal_sign(config)
+    primary_reference_pressure = _traction_one_sided_primary_reference_pressure_pa(config)
+    secondary_reference_pressure = (
+        _traction_one_sided_secondary_reference_pressure_pa(config)
+    )
+    if not math.isfinite(primary_reference_pressure):
+        raise ValueError(
+            "traction_one_sided_primary_reference_pressure_pa must be finite"
+        )
+    if not math.isfinite(secondary_reference_pressure):
+        raise ValueError(
+            "traction_one_sided_secondary_reference_pressure_pa must be finite"
+        )
+    if one_sided_policy == TRACTION_ONE_SIDED_PRESSURE_POLICY_PER_FACE_MIRRORED:
+        if marker_layout != TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES:
+            raise ValueError(
+                "per_face_mirrored one-sided pressure requires dual_physical_faces"
+            )
+        if pressure_sampling_mode != TRACTION_PRESSURE_ONE_SIDED:
+            raise ValueError(
+                "per_face_mirrored one-sided pressure requires "
+                "traction_pressure_sampling_mode='one_sided_surface_pressure'"
+            )
+        if primary_side_sign not in (-1.0, 1.0):
+            raise ValueError(
+                "traction_one_sided_primary_fluid_side_normal_sign must be -1.0 or 1.0"
+            )
+        if secondary_side_sign not in (-1.0, 1.0):
+            raise ValueError(
+                "traction_one_sided_secondary_fluid_side_normal_sign must be -1.0 or 1.0"
+            )
+        if one_sided_pair_policy != pressure_pair_policy:
+            raise ValueError(
+                "traction_one_sided_pressure_pair_policy must match "
+                "traction_pressure_pair_policy for per-face diagnostics"
+            )
+    elif pressure_sampling_mode == TRACTION_PRESSURE_ONE_SIDED:
+        if marker_layout == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES:
+            raise ValueError(
+                "dual-face one-sided pressure requires "
+                "traction_one_sided_pressure_policy='per_face_mirrored'"
+            )
     traction_viscosity = _traction_viscosity_pa_s(config)
     if not math.isfinite(traction_viscosity) or traction_viscosity < 0.0:
         raise ValueError("traction viscosity must be finite and non-negative")
@@ -2249,10 +2364,30 @@ def _sample_stress_to_marker_forces(
         if config is None
         else _traction_pressure_sampling_mode(config)
     )
+    one_sided_policy = (
+        TRACTION_ONE_SIDED_PRESSURE_POLICY_DISABLED
+        if config is None
+        else _traction_one_sided_pressure_policy(config)
+    )
     one_sided_region_id = (
         PRIMARY_REGION_ID
         if pressure_sampling_mode == TRACTION_PRESSURE_ONE_SIDED
+        and one_sided_policy == TRACTION_ONE_SIDED_PRESSURE_POLICY_DISABLED
         else -1
+    )
+    per_face_one_sided = (
+        pressure_sampling_mode == TRACTION_PRESSURE_ONE_SIDED
+        and one_sided_policy == TRACTION_ONE_SIDED_PRESSURE_POLICY_PER_FACE_MIRRORED
+    )
+    primary_side_sign = (
+        0.0
+        if config is None
+        else _traction_one_sided_primary_fluid_side_normal_sign(config) or 0.0
+    )
+    secondary_side_sign = (
+        0.0
+        if config is None
+        else _traction_one_sided_secondary_fluid_side_normal_sign(config) or 0.0
     )
     report = markers.sample_fluid_stress_to_marker_tractions(
         fluid.velocity,
@@ -2272,6 +2407,24 @@ def _sample_stress_to_marker_forces(
         two_sided_pressure=True,
         one_sided_pressure_region_id=one_sided_region_id,
         one_sided_reference_pressure_pa=0.0,
+        one_sided_pressure_primary_region_id=(
+            PRIMARY_REGION_ID if per_face_one_sided else -1
+        ),
+        one_sided_pressure_secondary_region_id=(
+            SECONDARY_REGION_ID if per_face_one_sided else -1
+        ),
+        one_sided_primary_reference_pressure_pa=(
+            0.0
+            if config is None
+            else _traction_one_sided_primary_reference_pressure_pa(config)
+        ),
+        one_sided_secondary_reference_pressure_pa=(
+            0.0
+            if config is None
+            else _traction_one_sided_secondary_reference_pressure_pa(config)
+        ),
+        one_sided_primary_fluid_side_normal_sign=primary_side_sign,
+        one_sided_secondary_fluid_side_normal_sign=secondary_side_sign,
         pressure_probe_ladder_start_offset_cells=(
             None
             if config is None

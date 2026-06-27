@@ -6,7 +6,7 @@
     "pressure_pair_anchor_selected_marker_count": 24
   },
   "case": "ansys_vertical_flap_fsi",
-  "created_at_utc": "2026-06-27T05:28:13.503508+00:00",
+  "created_at_utc": "2026-06-27T05:57:52.879664+00:00",
   "face_diagnostics": {
     "primary_face_base_pressure_found_marker_count": 12,
     "primary_face_inside_pressure_found_marker_count": 12,
@@ -18,13 +18,13 @@
     "primary_face_invalid_marker_count": 0,
     "primary_face_marker_count": 12,
     "primary_face_mean_base_pressure_pa": 22.578028809008813,
-    "primary_face_mean_fluid_side_pressure_pa": "",
+    "primary_face_mean_fluid_side_pressure_pa": 22.666768639324413,
     "primary_face_mean_inside_pressure_pa": 0.0,
     "primary_face_mean_outside_pressure_pa": 22.666768639324413,
     "primary_face_mean_pressure_jump_pa": -22.666768639324413,
     "primary_face_mean_pressure_pa": -22.666768639324413,
     "primary_face_mean_pressure_traction_z_pa": -22.666768639324413,
-    "primary_face_mean_reference_pressure_pa": 22.666768639324413,
+    "primary_face_mean_reference_pressure_pa": 0.0,
     "primary_face_mean_total_traction_z_pa": -22.666768639324413,
     "primary_face_mean_traction_z_pa": -22.666768639324413,
     "primary_face_mean_viscous_traction_z_pa": 0.0,
@@ -49,13 +49,13 @@
     "secondary_face_invalid_marker_count": 0,
     "secondary_face_marker_count": 12,
     "secondary_face_mean_base_pressure_pa": 16.822775960950448,
-    "secondary_face_mean_fluid_side_pressure_pa": "",
+    "secondary_face_mean_fluid_side_pressure_pa": 16.702727693725258,
     "secondary_face_mean_inside_pressure_pa": 0.0,
     "secondary_face_mean_outside_pressure_pa": 16.702727693725258,
     "secondary_face_mean_pressure_jump_pa": -16.702727693725258,
     "secondary_face_mean_pressure_pa": -16.702727693725258,
     "secondary_face_mean_pressure_traction_z_pa": 16.702727693725258,
-    "secondary_face_mean_reference_pressure_pa": 16.702727693725258,
+    "secondary_face_mean_reference_pressure_pa": 0.0,
     "secondary_face_mean_total_traction_z_pa": 16.702727693725258,
     "secondary_face_mean_traction_z_pa": 16.702727693725258,
     "secondary_face_mean_viscous_traction_z_pa": 0.0,
@@ -464,14 +464,24 @@
     "pressure_pair_anchor_inside_cell",
     "pressure_pair_anchor_outside_cell",
     "pressure_pair_anchor_source",
-    "pressure_pair_anchor_fallback_used"
+    "pressure_pair_anchor_fallback_used",
+    "one_sided_policy",
+    "one_sided_policy_code",
+    "one_sided_region_id",
+    "one_sided_side_normal_sign",
+    "one_sided_side_selected",
+    "one_sided_fluid_side_pressure_pa",
+    "one_sided_reference_pressure_pa",
+    "one_sided_pressure_pair_policy",
+    "one_sided_anchor_selected",
+    "one_sided_anchor_fallback_used"
   ],
   "markers": [
     {
       "base_pressure_found": true,
       "base_pressure_pa": 23.009124933715164,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 23.05111919057099,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -497,6 +507,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 23.05111919057099,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 23.05111919057099,
       "outside_probe_distance_m": 0.0,
@@ -552,7 +572,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.00041666667675599456,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -560,7 +580,7 @@
         -0.0,
         -23.05111919057099
       ],
-      "reference_pressure_pa": 23.05111919057099,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -578,8 +598,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 22.99418523275518,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 23.02823817755177,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -605,6 +625,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 23.02823817755177,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 23.02823817755177,
       "outside_probe_distance_m": 0.0,
@@ -660,7 +690,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0012499999720603228,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -668,7 +698,7 @@
         -0.0,
         -23.02823817755177
       ],
-      "reference_pressure_pa": 23.02823817755177,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -686,8 +716,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 22.964609145640303,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 23.004517924453054,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -713,6 +743,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 23.004517924453054,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 23.004517924453054,
       "outside_probe_distance_m": 0.0,
@@ -768,7 +808,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0020833334419876337,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -776,7 +816,7 @@
         -0.0,
         -23.004517924453054
       ],
-      "reference_pressure_pa": 23.004517924453054,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -794,8 +834,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 22.918310808409693,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 22.972377567212106,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -821,6 +861,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 22.972377567212106,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 22.972377567212106,
       "outside_probe_distance_m": 0.0,
@@ -876,7 +926,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.002916666679084301,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -884,7 +934,7 @@
         -0.0,
         -22.972377567212106
       ],
-      "reference_pressure_pa": 22.972377567212106,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -902,8 +952,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 22.854258819804596,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 22.881718181684224,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -929,6 +979,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 22.881718181684224,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 22.881718181684224,
       "outside_probe_distance_m": 0.0,
@@ -984,7 +1044,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0037499999161809683,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -992,7 +1052,7 @@
         -0.0,
         -22.881718181684224
       ],
-      "reference_pressure_pa": 22.881718181684224,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -1010,8 +1070,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 22.772729650087488,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 22.822453000197278,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -1037,6 +1097,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 22.822453000197278,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 22.822453000197278,
       "outside_probe_distance_m": 0.0,
@@ -1092,7 +1162,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.004583333153277636,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -1100,7 +1170,7 @@
         -0.0,
         -22.822453000197278
       ],
-      "reference_pressure_pa": 22.822453000197278,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -1118,8 +1188,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 22.669820738528816,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 22.75327321323015,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -1145,6 +1215,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 22.75327321323015,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 22.75327321323015,
       "outside_probe_distance_m": 0.0,
@@ -1200,7 +1280,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0054166666232049465,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -1208,7 +1288,7 @@
         -0.0,
         -22.75327321323015
       ],
-      "reference_pressure_pa": 22.75327321323015,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -1226,8 +1306,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 22.54232334956469,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 22.582898335725318,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -1253,6 +1333,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 22.582898335725318,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 22.582898335725318,
       "outside_probe_distance_m": 0.0,
@@ -1308,7 +1398,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0062500000931322575,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -1316,7 +1406,7 @@
         -0.0,
         -22.582898335725318
       ],
-      "reference_pressure_pa": 22.582898335725318,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -1334,8 +1424,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 22.388358905146944,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 22.48052418035333,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -1361,6 +1451,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 22.48052418035333,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 22.48052418035333,
       "outside_probe_distance_m": 0.0,
@@ -1416,7 +1516,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.007083333563059568,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -1424,7 +1524,7 @@
         -0.0,
         -22.48052418035333
       ],
-      "reference_pressure_pa": 22.48052418035333,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -1442,8 +1542,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 22.198298438878375,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 22.366069565273097,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -1469,6 +1569,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 22.366069565273097,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 22.366069565273097,
       "outside_probe_distance_m": 0.0,
@@ -1524,7 +1634,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.007916666567325592,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -1532,7 +1642,7 @@
         -0.0,
         -22.366069565273097
       ],
-      "reference_pressure_pa": 22.366069565273097,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -1550,8 +1660,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 21.960746175413924,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 22.101881967095057,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -1577,6 +1687,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 22.101881967095057,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 22.101881967095057,
       "outside_probe_distance_m": 0.0,
@@ -1632,7 +1752,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.008750000037252903,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -1640,7 +1760,7 @@
         -0.0,
         -22.101881967095057
       ],
-      "reference_pressure_pa": 22.101881967095057,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -1658,8 +1778,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 21.66357951016059,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 21.956152368546583,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -1685,6 +1805,16 @@
         0.0,
         1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 21.956152368546583,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 101,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 21.956152368546583,
       "outside_probe_distance_m": 0.0,
@@ -1740,7 +1870,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.009583333507180214,
-        0.05379687622189522
+        0.05397656187415123
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -1748,7 +1878,7 @@
         -0.0,
         -21.956152368546583
       ],
-      "reference_pressure_pa": 21.956152368546583,
+      "reference_pressure_pa": 0.0,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
@@ -1766,8 +1896,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 16.36550002904718,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 16.293115655511752,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -1793,6 +1923,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 16.293115655511752,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 16.293115655511752,
       "outside_probe_distance_m": 0.0,
@@ -1848,7 +1988,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.00041666667675599456,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -1856,7 +1996,7 @@
         -0.0,
         16.293115655511752
       ],
-      "reference_pressure_pa": 16.293115655511752,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -1874,8 +2014,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 16.38292740696221,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 16.319743889055065,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -1901,6 +2041,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 16.319743889055065,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 16.319743889055065,
       "outside_probe_distance_m": 0.0,
@@ -1956,7 +2106,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0012499999720603228,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -1964,7 +2114,7 @@
         -0.0,
         16.319743889055065
       ],
-      "reference_pressure_pa": 16.319743889055065,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -1982,8 +2132,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 16.4155149497122,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 16.34578015166796,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -2009,6 +2159,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 16.34578015166796,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 16.34578015166796,
       "outside_probe_distance_m": 0.0,
@@ -2064,7 +2224,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0020833334419876337,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -2072,7 +2232,7 @@
         -0.0,
         16.34578015166796
       ],
-      "reference_pressure_pa": 16.34578015166796,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -2090,8 +2250,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 16.46542468983242,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 16.38054113563553,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -2117,6 +2277,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 16.38054113563553,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 16.38054113563553,
       "outside_probe_distance_m": 0.0,
@@ -2172,7 +2342,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.002916666679084301,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -2180,7 +2350,7 @@
         -0.0,
         16.38054113563553
       ],
-      "reference_pressure_pa": 16.38054113563553,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -2198,8 +2368,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 16.53372778676464,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 16.477403653637456,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -2225,6 +2395,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 16.477403653637456,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 16.477403653637456,
       "outside_probe_distance_m": 0.0,
@@ -2280,7 +2460,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0037499999161809683,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -2288,7 +2468,7 @@
         -0.0,
         16.477403653637456
       ],
-      "reference_pressure_pa": 16.477403653637456,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -2306,8 +2486,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 16.620139721181125,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 16.54028285421664,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -2333,6 +2513,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 16.54028285421664,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 16.54028285421664,
       "outside_probe_distance_m": 0.0,
@@ -2388,7 +2578,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.004583333153277636,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -2396,7 +2586,7 @@
         -0.0,
         16.54028285421664
       ],
-      "reference_pressure_pa": 16.54028285421664,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -2414,8 +2604,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 16.728704495982665,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 16.61344552416041,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -2441,6 +2631,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 16.61344552416041,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 16.61344552416041,
       "outside_probe_distance_m": 0.0,
@@ -2496,7 +2696,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0054166666232049465,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -2504,7 +2704,7 @@
         -0.0,
         16.61344552416041
       ],
-      "reference_pressure_pa": 16.61344552416041,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -2522,8 +2722,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 16.862747052322273,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 16.792987209811482,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -2549,6 +2749,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 16.792987209811482,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 16.792987209811482,
       "outside_probe_distance_m": 0.0,
@@ -2604,7 +2814,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0062500000931322575,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -2612,7 +2822,7 @@
         -0.0,
         16.792987209811482
       ],
-      "reference_pressure_pa": 16.792987209811482,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -2630,8 +2840,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 17.024205901361977,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 16.900598176355217,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -2657,6 +2867,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 16.900598176355217,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 16.900598176355217,
       "outside_probe_distance_m": 0.0,
@@ -2712,7 +2932,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.007083333563059568,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -2720,7 +2940,7 @@
         -0.0,
         16.900598176355217
       ],
-      "reference_pressure_pa": 16.900598176355217,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -2738,8 +2958,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 17.223029741158935,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 17.020753640423102,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -2765,6 +2985,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 17.020753640423102,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 17.020753640423102,
       "outside_probe_distance_m": 0.0,
@@ -2820,7 +3050,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.007916666567325592,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -2828,7 +3058,7 @@
         -0.0,
         17.020753640423102
       ],
-      "reference_pressure_pa": 17.020753640423102,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -2846,8 +3076,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 17.470959326514276,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 17.297713699514237,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -2873,6 +3103,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 17.297713699514237,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 17.297713699514237,
       "outside_probe_distance_m": 0.0,
@@ -2928,7 +3168,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.008750000037252903,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -2936,7 +3176,7 @@
         -0.0,
         17.297713699514237
       ],
-      "reference_pressure_pa": 17.297713699514237,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -2954,8 +3194,8 @@
     {
       "base_pressure_found": true,
       "base_pressure_pa": 17.78043043056549,
-      "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 0.0,
+      "fluid_side_pressure_defined": true,
+      "fluid_side_pressure_pa": 17.450366734714212,
       "inside_pressure_found": true,
       "inside_pressure_pa": 0.0,
       "inside_probe_distance_m": 0.0,
@@ -2981,6 +3221,16 @@
         0.0,
         -1.0
       ],
+      "one_sided_anchor_fallback_used": false,
+      "one_sided_anchor_selected": true,
+      "one_sided_fluid_side_pressure_pa": 17.450366734714212,
+      "one_sided_policy": "per_face_region",
+      "one_sided_policy_code": 2,
+      "one_sided_pressure_pair_policy": "baseline_anchored_cell_pair",
+      "one_sided_reference_pressure_pa": 0.0,
+      "one_sided_region_id": 202,
+      "one_sided_side_normal_sign": 1.0,
+      "one_sided_side_selected": "outside",
       "outside_pressure_found": true,
       "outside_pressure_pa": 17.450366734714212,
       "outside_probe_distance_m": 0.0,
@@ -3036,7 +3286,7 @@
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.009583333507180214,
-        0.04920312389731407
+        0.04902343824505806
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
@@ -3044,7 +3294,7 @@
         -0.0,
         17.450366734714212
       ],
-      "reference_pressure_pa": 17.450366734714212,
+      "reference_pressure_pa": 0.0,
       "region_id": 202,
       "total_traction_pa": [
         -0.0,
@@ -3060,145 +3310,159 @@
       ]
     }
   ],
-  "pressure_pair_max_cell_delta": 1,
+  "one_sided_pressure_policy": "per_face_mirrored",
+  "one_sided_stats": {
+    "one_sided_anchor_fallback_marker_count": 0,
+    "one_sided_anchor_selected_marker_count": 24,
+    "one_sided_marker_count": 24,
+    "one_sided_primary_marker_count": 12,
+    "one_sided_secondary_marker_count": 12,
+    "one_sided_side_selection_counts": {
+      "inside": 0,
+      "outside": 24
+    }
+  },
   "pressure_pair_policy": "baseline_anchored_cell_pair",
-  "pressure_pair_require_opposite_sides": true,
   "pressure_probe_ladder_mode": "current_normal_cell_ladder",
   "pressure_probe_origin": {
     "pressure_probe_origins_m": [
       [
         0.001500000013038516,
         0.00041666667675599456,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.0012499999720603228,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.0020833334419876337,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.002916666679084301,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.0037499999161809683,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.004583333153277636,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.0054166666232049465,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.0062500000931322575,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.007083333563059568,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.007916666567325592,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.008750000037252903,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.009583333507180214,
-        0.05379687622189522
+        0.05397656187415123
       ],
       [
         0.001500000013038516,
         0.00041666667675599456,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.0012499999720603228,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.0020833334419876337,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.002916666679084301,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.0037499999161809683,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.004583333153277636,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.0054166666232049465,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.0062500000931322575,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.007083333563059568,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.007916666567325592,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.008750000037252903,
-        0.04920312389731407
+        0.04902343824505806
       ],
       [
         0.001500000013038516,
         0.009583333507180214,
-        0.04920312389731407
+        0.04902343824505806
       ]
     ]
   },
-  "pressure_probe_origin_offset_cells": 0.51,
-  "pressure_probe_origin_sha256": "6e8cd62ee7e0dcd338426b95a63f165236c835dd4abd2a8c74393f9421182404",
-  "purpose": "shared_flow_snapshot_pressure_pair_anchor_map_marker_diagnostics",
-  "scenario": "anchored_pair_dual_faces_probe0p51",
+  "pressure_probe_origin_offset_cells": 0.625,
+  "pressure_probe_origin_sha256": "fc64f8d3d90df332522d27ea00935297772891db29fad0bffdb7958a33e736e7",
+  "primary_fluid_side_normal_sign": 1.0,
+  "primary_reference_pressure_pa": 0.0,
+  "purpose": "shared_flow_snapshot_per_face_one_sided_marker_diagnostics",
+  "scenario": "dual_one_sided_per_face_probe0p625",
   "schema_version": 1,
+  "secondary_fluid_side_normal_sign": 1.0,
+  "secondary_reference_pressure_pa": 0.0,
   "stress_report": {
     "max_abs_traction_pa": 23.05111919057099,
     "one_sided_extended_marker_count": 0,
-    "one_sided_pressure_marker_count": 0,
+    "one_sided_pressure_marker_count": 24,
     "two_sided_extended_marker_count": 0,
-    "two_sided_pressure_marker_count": 24
+    "two_sided_pressure_marker_count": 0
   },
   "transition_fields": {
     "primary_inside_nearest_cell_histogram": {

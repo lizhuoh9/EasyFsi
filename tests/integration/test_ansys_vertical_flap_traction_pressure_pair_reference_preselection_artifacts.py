@@ -255,6 +255,16 @@ class AnsysVerticalFlapPressurePairReferencePreselectionArtifactTests(
         payload = _read_json(MATRIX_JSON)
         history = _read_json(HISTORY_JSON)
         self.assertEqual(set(history["histories"]), EXPECTED_SCENARIOS)
+        matrix_histories = payload["histories"]
+        self.assertEqual(set(matrix_histories), EXPECTED_SCENARIOS)
+        for scenario in EXPECTED_SCENARIOS:
+            for source in (history["histories"][scenario], matrix_histories[scenario]):
+                self.assertEqual(source["scenario"], scenario)
+                self.assertEqual(
+                    source["flow_phase"],
+                    "shared_snapshot_pressure_pair_reference_preselection",
+                )
+                self.assertEqual(source["flow_snapshot_sha256"], EXPECTED_SHARED_SHA)
 
         for row in payload["rows"]:
             if row["run_status"] != "completed":
