@@ -32,6 +32,9 @@ EXPECTED_PER_FACE_SCENARIOS = {
     "dual_one_sided_per_face_probe1p00",
 }
 EXPECTED_SCENARIOS = {EXPECTED_BASELINE_SCENARIO} | EXPECTED_PER_FACE_SCENARIOS
+EXPECTED_ONE_SIDED_MARKERS = 24
+EXPECTED_ONE_SIDED_REGION_COUNTS = {101: 12, 202: 12}
+EXPECTED_ONE_SIDED_SIDE_COUNTS = {"inside": 0, "outside": 24}
 ONE_SIDED_REQUIRED_FIELDS = {
     "one_sided_policy",
     "one_sided_policy_code",
@@ -121,7 +124,16 @@ class AnsysVerticalFlapPerFaceOneSidedArtifactTests(unittest.TestCase):
             self.assertEqual(row["pressure_pair_policy"], "baseline_anchored_cell_pair")
             self.assertEqual(row["one_sided_pressure_policy"], "per_face_mirrored")
             self.assertEqual(row["pressure_sampling_mode"], "one_sided_surface_pressure")
+            self.assertEqual(int(row["one_sided_marker_count"]), EXPECTED_ONE_SIDED_MARKERS)
             self.assertEqual(int(row["one_sided_marker_count"]), int(row["total_marker_count"]))
+            self.assertEqual(int(row["one_sided_primary_marker_count"]), 12)
+            self.assertEqual(int(row["one_sided_secondary_marker_count"]), 12)
+            self.assertEqual(
+                row["one_sided_side_selection_counts"],
+                EXPECTED_ONE_SIDED_SIDE_COUNTS,
+            )
+            self.assertEqual(float(row["primary_fluid_side_normal_sign"]), 1.0)
+            self.assertEqual(float(row["secondary_fluid_side_normal_sign"]), 1.0)
             self.assertEqual(
                 int(row["one_sided_anchor_selected_marker_count"]),
                 int(row["total_marker_count"]),
@@ -209,11 +221,44 @@ class AnsysVerticalFlapPerFaceOneSidedArtifactTests(unittest.TestCase):
                 ],
                 row["one_sided_anchor_fallback_marker_count"],
             )
+            if row["one_sided_pressure_policy"] == "per_face_mirrored":
+                self.assertEqual(
+                    marker_payload["one_sided_stats"]["one_sided_marker_count"],
+                    EXPECTED_ONE_SIDED_MARKERS,
+                )
+                self.assertEqual(
+                    marker_payload["one_sided_stats"][
+                        "one_sided_primary_marker_count"
+                    ],
+                    12,
+                )
+                self.assertEqual(
+                    marker_payload["one_sided_stats"][
+                        "one_sided_secondary_marker_count"
+                    ],
+                    12,
+                )
+                self.assertEqual(
+                    marker_payload["one_sided_stats"][
+                        "one_sided_side_selection_counts"
+                    ],
+                    EXPECTED_ONE_SIDED_SIDE_COUNTS,
+                )
+                region_counts: dict[int, int] = {}
+                for marker in marker_payload["markers"]:
+                    region_id = int(marker["one_sided_region_id"])
+                    region_counts[region_id] = region_counts.get(region_id, 0) + 1
+                self.assertEqual(region_counts, EXPECTED_ONE_SIDED_REGION_COUNTS)
             for marker in marker_payload["markers"]:
                 self.assertTrue(ONE_SIDED_REQUIRED_FIELDS.issubset(marker))
                 if row["one_sided_pressure_policy"] == "per_face_mirrored":
                     self.assertEqual(marker["one_sided_policy"], "per_face_region")
                     self.assertEqual(marker["one_sided_side_selected"], "outside")
+                    self.assertIn(
+                        int(marker["one_sided_region_id"]),
+                        EXPECTED_ONE_SIDED_REGION_COUNTS,
+                    )
+                    self.assertEqual(float(marker["one_sided_side_normal_sign"]), 1.0)
                     self.assertEqual(
                         marker["one_sided_pressure_pair_policy"],
                         "baseline_anchored_cell_pair",
