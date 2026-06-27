@@ -1,6 +1,6 @@
 {
   "case": "ansys_vertical_flap_fsi",
-  "created_at_utc": "2026-06-27T01:14:52.215603+00:00",
+  "created_at_utc": "2026-06-27T01:16:51.057396+00:00",
   "face_diagnostics": {
     "primary_face_base_pressure_found_marker_count": 12,
     "primary_face_inside_pressure_found_marker_count": 12,
@@ -471,7 +471,7 @@
         0.1666666865348816,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -496,7 +496,7 @@
         0.1666666865348816,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -551,7 +551,7 @@
         1.5,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -576,7 +576,7 @@
         1.5,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -631,7 +631,7 @@
         2.8333334922790527,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -656,7 +656,7 @@
         2.8333334922790527,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -711,7 +711,7 @@
         4.166666507720947,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -736,7 +736,7 @@
         4.166666507720947,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -791,7 +791,7 @@
         5.5,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -816,7 +816,7 @@
         5.5,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -871,7 +871,7 @@
         6.8333330154418945,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -896,7 +896,7 @@
         6.8333330154418945,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -951,7 +951,7 @@
         8.166666984558105,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -976,7 +976,7 @@
         8.166666984558105,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1031,7 +1031,7 @@
         9.5,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1056,7 +1056,7 @@
         9.5,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1111,7 +1111,7 @@
         10.833333969116211,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1136,7 +1136,7 @@
         10.833333969116211,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1191,7 +1191,7 @@
         12.166666030883789,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1216,7 +1216,7 @@
         12.166666030883789,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1271,7 +1271,7 @@
         13.5,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1296,7 +1296,7 @@
         13.5,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1351,7 +1351,7 @@
         14.833333969116211,
         33.04500198364258
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1376,7 +1376,7 @@
         14.833333969116211,
         35.04499816894531
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1431,7 +1431,7 @@
         0.1666666865348816,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1456,7 +1456,7 @@
         0.1666666865348816,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1511,7 +1511,7 @@
         1.5,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1536,7 +1536,7 @@
         1.5,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1591,7 +1591,7 @@
         2.8333334922790527,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1616,7 +1616,7 @@
         2.8333334922790527,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1671,7 +1671,7 @@
         4.166666507720947,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1696,7 +1696,7 @@
         4.166666507720947,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1751,7 +1751,7 @@
         5.5,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1776,7 +1776,7 @@
         5.5,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1831,7 +1831,7 @@
         6.8333330154418945,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1856,7 +1856,7 @@
         6.8333330154418945,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1911,7 +1911,7 @@
         8.166666984558105,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -1936,7 +1936,7 @@
         8.166666984558105,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -1991,7 +1991,7 @@
         9.5,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -2016,7 +2016,7 @@
         9.5,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -2071,7 +2071,7 @@
         10.833333969116211,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -2096,7 +2096,7 @@
         10.833333969116211,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -2151,7 +2151,7 @@
         12.166666030883789,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -2176,7 +2176,7 @@
         12.166666030883789,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -2231,7 +2231,7 @@
         13.5,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -2256,7 +2256,7 @@
         13.5,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -2311,7 +2311,7 @@
         14.833333969116211,
         31.875
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
       "inside_probe_multiplier": 1.0,
       "inside_probe_nearest_cell": [
         2,
@@ -2336,7 +2336,7 @@
         14.833333969116211,
         29.875001907348633
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
       "outside_probe_multiplier": 1.0,
       "outside_probe_nearest_cell": [
         2,
@@ -2378,6 +2378,9 @@
       ]
     }
   ],
+  "pressure_probe_ladder_mode": "current_normal_cell_ladder",
+  "pressure_probe_ladder_rung_count": 5,
+  "pressure_probe_ladder_spacing_cells": 0.5,
   "pressure_probe_origin": {
     "pressure_probe_origins_m": [
       [
@@ -2504,9 +2507,11 @@
   },
   "pressure_probe_origin_offset_cells": 0.625,
   "pressure_probe_origin_sha256": "fc64f8d3d90df332522d27ea00935297772891db29fad0bffdb7958a33e736e7",
-  "purpose": "shared_flow_snapshot_traction_probe_ladder_stability_marker_diagnostics",
-  "scenario": "probe_offset0p625",
+  "pressure_probe_start_offset_cells": 1.0,
+  "purpose": "shared_flow_snapshot_traction_probe_ladder_control_marker_diagnostics",
+  "scenario": "origin0p51_start1p00_spacing0p50_probe0p625",
   "schema_version": 1,
+  "strategy": "origin0p51_start1p00_spacing0p50",
   "stress_report": {
     "max_abs_traction_pa": 0.4076753469695795,
     "one_sided_extended_marker_count": 0,

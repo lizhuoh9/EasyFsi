@@ -154,6 +154,10 @@ class VerticalFlapFsiConfig:
     traction_marker_face_offset_cells: float = 0.51
     traction_pressure_probe_origin_mode: str = "marker_position"
     traction_pressure_probe_origin_offset_cells: float | None = None
+    traction_pressure_probe_start_offset_cells: float | None = None
+    traction_pressure_probe_ladder_spacing_cells: float = 0.5
+    traction_pressure_probe_ladder_rung_count: int = 5
+    traction_pressure_probe_ladder_mode: str = "current_normal_cell_ladder"
     traction_viscosity_pa_s: float = 0.0
     export_final_flow_snapshot: bool = False
     enforce_plane_strain_x: bool = True

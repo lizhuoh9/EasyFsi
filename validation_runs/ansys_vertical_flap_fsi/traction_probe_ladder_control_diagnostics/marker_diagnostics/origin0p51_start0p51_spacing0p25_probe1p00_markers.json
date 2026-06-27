@@ -1,12 +1,12 @@
 {
   "case": "ansys_vertical_flap_fsi",
-  "created_at_utc": "2026-06-27T01:14:52.215603+00:00",
+  "created_at_utc": "2026-06-27T01:18:42.251210+00:00",
   "face_diagnostics": {
     "primary_face_base_pressure_found_marker_count": 12,
     "primary_face_inside_pressure_found_marker_count": 12,
-    "primary_face_inside_probe_distance_max_m": 0.0015625000232830644,
-    "primary_face_inside_probe_distance_mean_m": 0.0015625000232830644,
-    "primary_face_inside_probe_distance_min_m": 0.0015625000232830644,
+    "primary_face_inside_probe_distance_max_m": 0.0007968749850988388,
+    "primary_face_inside_probe_distance_mean_m": 0.0007968749850988388,
+    "primary_face_inside_probe_distance_min_m": 0.0007968749850988388,
     "primary_face_inside_probe_rung_histogram": {
       "0": 12
     },
@@ -15,19 +15,19 @@
     "primary_face_marker_count": 12,
     "primary_face_mean_base_pressure_pa": 22.578028809008813,
     "primary_face_mean_fluid_side_pressure_pa": "",
-    "primary_face_mean_inside_pressure_pa": 22.57802880904058,
-    "primary_face_mean_outside_pressure_pa": 22.68661407770141,
-    "primary_face_mean_pressure_jump_pa": -0.10858526866082811,
-    "primary_face_mean_pressure_pa": -0.10858526866082811,
-    "primary_face_mean_pressure_traction_z_pa": -0.10858526866082811,
-    "primary_face_mean_reference_pressure_pa": 22.68661407770141,
-    "primary_face_mean_total_traction_z_pa": -0.10858526866082811,
-    "primary_face_mean_traction_z_pa": -0.10858526866082811,
+    "primary_face_mean_inside_pressure_pa": 22.578028809019074,
+    "primary_face_mean_outside_pressure_pa": 22.672928784348617,
+    "primary_face_mean_pressure_jump_pa": -0.09489997532954468,
+    "primary_face_mean_pressure_pa": -0.09489997532954468,
+    "primary_face_mean_pressure_traction_z_pa": -0.09489997532954468,
+    "primary_face_mean_reference_pressure_pa": 22.672928784348617,
+    "primary_face_mean_total_traction_z_pa": -0.09489997532954468,
+    "primary_face_mean_traction_z_pa": -0.09489997532954468,
     "primary_face_mean_viscous_traction_z_pa": 0.0,
     "primary_face_outside_pressure_found_marker_count": 12,
-    "primary_face_outside_probe_distance_max_m": 0.0015625000232830644,
-    "primary_face_outside_probe_distance_mean_m": 0.0015625000232830644,
-    "primary_face_outside_probe_distance_min_m": 0.0015625000232830644,
+    "primary_face_outside_probe_distance_max_m": 0.0007968749850988388,
+    "primary_face_outside_probe_distance_mean_m": 0.0007968749850988388,
+    "primary_face_outside_probe_distance_min_m": 0.0007968749850988388,
     "primary_face_outside_probe_rung_histogram": {
       "0": 12
     },
@@ -39,9 +39,9 @@
     "primary_face_valid_marker_count": 12,
     "secondary_face_base_pressure_found_marker_count": 12,
     "secondary_face_inside_pressure_found_marker_count": 12,
-    "secondary_face_inside_probe_distance_max_m": 0.0015625000232830644,
-    "secondary_face_inside_probe_distance_mean_m": 0.0015625000232830644,
-    "secondary_face_inside_probe_distance_min_m": 0.0015625000232830644,
+    "secondary_face_inside_probe_distance_max_m": 0.0007968749850988388,
+    "secondary_face_inside_probe_distance_mean_m": 0.0007968749850988388,
+    "secondary_face_inside_probe_distance_min_m": 0.0007968749850988388,
     "secondary_face_inside_probe_rung_histogram": {
       "0": 12
     },
@@ -50,19 +50,19 @@
     "secondary_face_marker_count": 12,
     "secondary_face_mean_base_pressure_pa": 16.822775960950448,
     "secondary_face_mean_fluid_side_pressure_pa": "",
-    "secondary_face_mean_inside_pressure_pa": 16.82413065778346,
-    "secondary_face_mean_outside_pressure_pa": 16.662285748827884,
-    "secondary_face_mean_pressure_jump_pa": 0.1618449089555781,
-    "secondary_face_mean_pressure_pa": 0.1618449089555781,
-    "secondary_face_mean_pressure_traction_z_pa": -0.1618449089555781,
-    "secondary_face_mean_reference_pressure_pa": 16.662285748827884,
-    "secondary_face_mean_total_traction_z_pa": -0.1618449089555781,
-    "secondary_face_mean_traction_z_pa": -0.1618449089555781,
+    "secondary_face_mean_inside_pressure_pa": 16.824130657777157,
+    "secondary_face_mean_outside_pressure_pa": 16.68657708324294,
+    "secondary_face_mean_pressure_jump_pa": 0.13755357453422068,
+    "secondary_face_mean_pressure_pa": 0.13755357453422068,
+    "secondary_face_mean_pressure_traction_z_pa": -0.13755357453422068,
+    "secondary_face_mean_reference_pressure_pa": 16.68657708324294,
+    "secondary_face_mean_total_traction_z_pa": -0.13755357453422068,
+    "secondary_face_mean_traction_z_pa": -0.13755357453422068,
     "secondary_face_mean_viscous_traction_z_pa": 0.0,
     "secondary_face_outside_pressure_found_marker_count": 12,
-    "secondary_face_outside_probe_distance_max_m": 0.0015625000232830644,
-    "secondary_face_outside_probe_distance_mean_m": 0.0015625000232830644,
-    "secondary_face_outside_probe_distance_min_m": 0.0015625000232830644,
+    "secondary_face_outside_probe_distance_max_m": 0.0007968749850988388,
+    "secondary_face_outside_probe_distance_mean_m": 0.0007968749850988388,
+    "secondary_face_outside_probe_distance_min_m": 0.0007968749850988388,
     "secondary_face_outside_probe_rung_histogram": {
       "0": 12
     },
@@ -81,39 +81,39 @@
     "fluid_reaction_force_n": [
       -0.0,
       -0.0,
-      8.112905123542959e-06
+      6.973606319744842e-06
     ],
-    "fluid_reaction_force_z_N": 8.112905123542959e-06,
-    "force_decomposition_residual_N": 0.0,
+    "fluid_reaction_force_z_N": 6.973606319744842e-06,
+    "force_decomposition_residual_N": 8.470329472543003e-22,
     "marker_action_reaction_residual_N": 0.0,
     "marker_action_reaction_residual_n": 0.0,
-    "marker_force_z_N": -8.112905123542959e-06,
+    "marker_force_z_N": -6.973606319744842e-06,
     "primary_face_force_n": [
       0.0,
       0.0,
-      -3.257557977532005e-06
+      -2.8469991879650896e-06
     ],
-    "primary_face_force_norm_max_N": 8.276415694236685e-07,
-    "primary_face_force_norm_sum_N": 3.257557977532005e-06,
-    "primary_face_force_z_N": -3.257557977532005e-06,
+    "primary_face_force_norm_max_N": 7.367051443951064e-07,
+    "primary_face_force_norm_sum_N": 2.8469991879650896e-06,
+    "primary_face_force_z_N": -2.8469991879650896e-06,
     "primary_face_invalid_marker_count": 0,
     "primary_face_marker_count": 12,
     "primary_face_valid_marker_count": 12,
-    "primary_plus_secondary_force_z_N": -8.112905123542959e-06,
+    "primary_plus_secondary_force_z_N": -6.973606319744843e-06,
     "secondary_face_force_n": [
       0.0,
       0.0,
-      -4.855347146010954e-06
+      -4.126607131779753e-06
     ],
-    "secondary_face_force_norm_max_N": 1.019188341677085e-06,
-    "secondary_face_force_norm_sum_N": 4.855347146010954e-06,
-    "secondary_face_force_z_N": -4.855347146010954e-06,
+    "secondary_face_force_norm_max_N": 9.074615462373197e-07,
+    "secondary_face_force_norm_sum_N": 4.126607131779753e-06,
+    "secondary_face_force_z_N": -4.126607131779753e-06,
     "secondary_face_invalid_marker_count": 0,
     "secondary_face_marker_count": 12,
     "secondary_face_valid_marker_count": 12,
     "total_marker_count": 24,
-    "total_marker_force_norm_max_N": 1.019188341677085e-06,
-    "total_marker_force_norm_sum_N": 8.112905123542959e-06
+    "total_marker_force_norm_max_N": 9.074615462373197e-07,
+    "total_marker_force_norm_sum_N": 6.973606319744842e-06
   },
   "marker_count": 24,
   "marker_face_offset_cells": 0.51,
@@ -461,22 +461,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 23.009124933715164,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 23.00912493366809,
+      "fluid_side_pressure_pa": 23.009124933701287,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 23.00912493366809,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.04500198340974748,
+      "inside_pressure_pa": 23.009124933701287,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9099998325109482,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         0.1666666865348816,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         0,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -488,16 +488,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 23.053370104653794,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 1.0000000009313226,
+      "outside_pressure_pa": 23.047034454940775,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 0.9999999855645001,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         0.1666666865348816,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         0,
@@ -509,25 +509,25 @@
         0.00041666667675599456,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.04424517098570391,
+      "pressure_jump_pa": -0.03790952123948799,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.00041666667675599456,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.04424517098570391
+        -0.03790952123948799
       ],
-      "reference_pressure_pa": 23.053370104653794,
+      "reference_pressure_pa": 23.047034454940775,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.04424517098570391
+        -0.03790952123948799
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -544,19 +544,19 @@
       "fluid_side_pressure_pa": 22.99418523275518,
       "inside_pressure_found": true,
       "inside_pressure_pa": 22.99418523275518,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.045001983642578125,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9099998474121094,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         1.5,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         2,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -568,16 +568,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 23.039545001792753,
-      "outside_probe_distance_m": 0.0015625000232830644,
+      "outside_pressure_pa": 23.03305839848902,
+      "outside_probe_distance_m": 0.0007968749850988388,
       "outside_probe_fluid_weight": 1.0,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         1.5,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         2,
@@ -589,25 +589,25 @@
         0.0012499999720603228,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.04535976903757444,
+      "pressure_jump_pa": -0.0388731657338397,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0012499999720603228,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.04535976903757444
+        -0.0388731657338397
       ],
-      "reference_pressure_pa": 23.039545001792753,
+      "reference_pressure_pa": 23.03305839848902,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.04535976903757444
+        -0.0388731657338397
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -621,22 +621,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 22.964609145640303,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 22.96460914566602,
+      "fluid_side_pressure_pa": 22.96460914562233,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 22.96460914566602,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.04500198271125555,
+      "inside_pressure_pa": 22.96460914562233,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.90999985486269,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         2.8333334922790527,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         3,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -648,16 +648,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 23.012186844563566,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 1.0000000076834112,
+      "outside_pressure_pa": 23.005401126307294,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.0000000004656613,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         2.8333334922790527,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         3,
@@ -669,25 +669,25 @@
         0.0020833334419876337,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.04757769889754471,
+      "pressure_jump_pa": -0.04079198068496481,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0020833334419876337,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.04757769889754471
+        -0.04079198068496481
       ],
-      "reference_pressure_pa": 23.012186844563566,
+      "reference_pressure_pa": 23.005401126307294,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.04757769889754471
+        -0.04079198068496481
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -701,22 +701,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 22.918310808409693,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 22.918310808365085,
+      "fluid_side_pressure_pa": 22.918310808440857,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 22.918310808365085,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.04500198271125555,
+      "inside_pressure_pa": 22.918310808440857,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.90999985486269,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         4.166666507720947,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         4,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -728,16 +728,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 22.969539611346168,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 1.0000000076834112,
+      "outside_pressure_pa": 22.96226573997347,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.0000000004656613,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         4.166666507720947,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         4,
@@ -749,25 +749,25 @@
         0.002916666679084301,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.051228802981082566,
+      "pressure_jump_pa": -0.04395493153261398,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.002916666679084301,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.051228802981082566
+        -0.04395493153261398
       ],
-      "reference_pressure_pa": 22.969539611346168,
+      "reference_pressure_pa": 22.96226573997347,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.051228802981082566
+        -0.04395493153261398
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -781,22 +781,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 22.854258819804596,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 22.854258819804596,
+      "fluid_side_pressure_pa": 22.854258819804592,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 22.854258819804596,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.045001983642578125,
+      "inside_pressure_pa": 22.854258819804592,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9099998474121094,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         5.5,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         6,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -808,16 +808,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 22.910967736225615,
-      "outside_probe_distance_m": 0.0015625000232830644,
+      "outside_pressure_pa": 22.902970791642666,
+      "outside_probe_distance_m": 0.0007968749850988388,
       "outside_probe_fluid_weight": 1.0,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         5.5,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         6,
@@ -829,25 +829,25 @@
         0.0037499999161809683,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.056708916421019495,
+      "pressure_jump_pa": -0.048711971838073964,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0037499999161809683,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.056708916421019495
+        -0.048711971838073964
       ],
-      "reference_pressure_pa": 22.910967736225615,
+      "reference_pressure_pa": 22.902970791642666,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.056708916421019495
+        -0.048711971838073964
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -861,22 +861,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 22.772729650087488,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 22.772729650057556,
+      "fluid_side_pressure_pa": 22.77272965027601,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 22.772729650057556,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.045001983642578125,
+      "inside_pressure_pa": 22.77272965027601,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9099998399615288,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         6.8333330154418945,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         7,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -888,16 +888,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 22.83715667057456,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 0.9999999844003469,
+      "outside_pressure_pa": 22.828158731996588,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.0000000004656613,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         6.8333330154418945,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         7,
@@ -909,25 +909,25 @@
         0.004583333153277636,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.06442702051700522,
+      "pressure_jump_pa": -0.05542908172057892,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.004583333153277636,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.06442702051700522
+        -0.05542908172057892
       ],
-      "reference_pressure_pa": 22.83715667057456,
+      "reference_pressure_pa": 22.828158731996588,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.06442702051700522
+        -0.05542908172057892
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -941,22 +941,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 22.669820738528816,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 22.66982073857017,
+      "fluid_side_pressure_pa": 22.66982073826838,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 22.66982073857017,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.045001983642578125,
+      "inside_pressure_pa": 22.66982073826838,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9099998399615288,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         8.166666984558105,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         8,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -968,16 +968,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 22.745505112545814,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 0.9999999844003469,
+      "outside_pressure_pa": 22.735085767060056,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.0000000004656613,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         8.166666984558105,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         8,
@@ -989,25 +989,25 @@
         0.0054166666232049465,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.07568437397564409,
+      "pressure_jump_pa": -0.06526502879167495,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0054166666232049465,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.07568437397564409
+        -0.06526502879167495
       ],
-      "reference_pressure_pa": 22.745505112545814,
+      "reference_pressure_pa": 22.735085767060056,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.07568437397564409
+        -0.06526502879167495
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1024,19 +1024,19 @@
       "fluid_side_pressure_pa": 22.542323349564686,
       "inside_pressure_found": true,
       "inside_pressure_pa": 22.542323349564686,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.045001983642578125,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9099998474121094,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         9.5,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         10,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1048,16 +1048,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 22.634695715992883,
-      "outside_probe_distance_m": 0.0015625000232830644,
+      "outside_pressure_pa": 22.622244643867035,
+      "outside_probe_distance_m": 0.0007968749850988388,
       "outside_probe_fluid_weight": 1.0,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         9.5,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         10,
@@ -1069,25 +1069,25 @@
         0.0062500000931322575,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.09237236642819724,
+      "pressure_jump_pa": -0.0799212943023484,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0062500000931322575,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.09237236642819724
+        -0.0799212943023484
       ],
-      "reference_pressure_pa": 22.634695715992883,
+      "reference_pressure_pa": 22.622244643867035,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.09237236642819724
+        -0.0799212943023484
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1101,22 +1101,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 22.388358905146944,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 22.388358905421498,
+      "fluid_side_pressure_pa": 22.388358905270273,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 22.388358905421498,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.045001983642578125,
+      "inside_pressure_pa": 22.388358905270273,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9099998325109482,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         10.833333969116211,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         11,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1128,16 +1128,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 22.505249557213475,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 1.0000000011641532,
+      "outside_pressure_pa": 22.489940994757706,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.0000000083819032,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         10.833333969116211,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         11,
@@ -1149,25 +1149,25 @@
         0.007083333563059568,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.11689065179197655,
+      "pressure_jump_pa": -0.10158208948743308,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.007083333563059568,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.11689065179197655
+        -0.10158208948743308
       ],
-      "reference_pressure_pa": 22.505249557213475,
+      "reference_pressure_pa": 22.489940994757706,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.11689065179197655
+        -0.10158208948743308
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1181,22 +1181,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 22.198298438878375,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 22.198298438503112,
+      "fluid_side_pressure_pa": 22.198298438709806,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 22.198298438503112,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.045001983642578125,
+      "inside_pressure_pa": 22.198298438709806,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9099998325109482,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         12.166666030883789,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         12,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1208,16 +1208,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 22.354300272580726,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 1.0000000011641532,
+      "outside_pressure_pa": 22.334712855912535,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.0000000083819032,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         12.166666030883789,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         12,
@@ -1229,25 +1229,25 @@
         0.007916666567325592,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.15600183407761392,
+      "pressure_jump_pa": -0.1364144172027295,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.007916666567325592,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.15600183407761392
+        -0.1364144172027295
       ],
-      "reference_pressure_pa": 22.354300272580726,
+      "reference_pressure_pa": 22.334712855912535,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.15600183407761392
+        -0.1364144172027295
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1264,19 +1264,19 @@
       "fluid_side_pressure_pa": 21.960746175413927,
       "inside_pressure_found": true,
       "inside_pressure_pa": 21.960746175413927,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.045001983642578125,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9099998474121094,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         13.5,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         14,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1288,16 +1288,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 22.18221615809784,
-      "outside_probe_distance_m": 0.0015625000232830644,
+      "outside_pressure_pa": 22.15601033163238,
+      "outside_probe_distance_m": 0.0007968749850988388,
       "outside_probe_fluid_weight": 1.0,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         13.5,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         14,
@@ -1309,25 +1309,25 @@
         0.008750000037252903,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.2214699826839137,
+      "pressure_jump_pa": -0.19526415621845317,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.008750000037252903,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.2214699826839137
+        -0.19526415621845317
       ],
-      "reference_pressure_pa": 22.18221615809784,
+      "reference_pressure_pa": 22.15601033163238,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.2214699826839137
+        -0.19526415621845317
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1341,22 +1341,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 21.66357951016059,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 21.66357951069704,
+      "fluid_side_pressure_pa": 21.663579510401565,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 21.66357951069704,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.045001983642578125,
+      "inside_pressure_pa": 21.663579510401565,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9099998325109482,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         14.833333969116211,
-        33.04500198364258
+        33.90999984741211
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         15,
-        33
+        34
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1368,16 +1368,16 @@
         1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 21.994636146829702,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 1.0000000011641532,
+      "outside_pressure_pa": 21.958261575603903,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.0000000083819032,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         14.833333969116211,
-        35.04499816894531
+        34.93000411987305
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         15,
@@ -1389,25 +1389,25 @@
         0.009583333507180214,
         0.05379687622189522
       ],
-      "pressure_jump_pa": -0.33105663613266145,
+      "pressure_jump_pa": -0.29468206520233764,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.009583333507180214,
-        0.05397656187415123
+        0.05456250160932541
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         -0.0,
         -0.0,
-        -0.33105663613266145
+        -0.29468206520233764
       ],
-      "reference_pressure_pa": 21.994636146829702,
+      "reference_pressure_pa": 21.958261575603903,
       "region_id": 101,
       "total_traction_pa": [
         -0.0,
         -0.0,
-        -0.33105663613266145
+        -0.29468206520233764
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1421,22 +1421,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 16.36550002904718,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 16.366215990304113,
+      "fluid_side_pressure_pa": 16.36621599023305,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 16.366215990304113,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_pressure_pa": 16.36621599023305,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899997860193253,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         0.1666666865348816,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         0,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1448,16 +1448,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 16.277103490906324,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 0.9999999944120646,
+      "outside_pressure_pa": 16.293232303051347,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.0000000002328306,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         0.1666666865348816,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         0,
@@ -1469,25 +1469,25 @@
         0.00041666667675599456,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.08911249939778898,
+      "pressure_jump_pa": 0.07298368718170423,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.00041666667675599456,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.08911249939778898
+        -0.07298368718170423
       ],
-      "reference_pressure_pa": 16.277103490906324,
+      "reference_pressure_pa": 16.293232303051347,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.08911249939778898
+        -0.07298368718170423
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1501,22 +1501,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 16.38292740696221,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 16.38365422163611,
+      "fluid_side_pressure_pa": 16.383654221636114,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 16.38365422163611,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_pressure_pa": 16.383654221636114,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899997711181641,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         1.5,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         2,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1528,16 +1528,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 16.293228222554244,
-      "outside_probe_distance_m": 0.0015625000232830644,
+      "outside_pressure_pa": 16.30956714778009,
+      "outside_probe_distance_m": 0.0007968749850988388,
       "outside_probe_fluid_weight": 1.0,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         1.5,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         2,
@@ -1549,25 +1549,25 @@
         0.0012499999720603228,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.09042599908186588,
+      "pressure_jump_pa": 0.07408707385602398,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0012499999720603228,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.09042599908186588
+        -0.07408707385602398
       ],
-      "reference_pressure_pa": 16.293228222554244,
+      "reference_pressure_pa": 16.30956714778009,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.09042599908186588
+        -0.07408707385602398
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1581,22 +1581,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 16.4155149497122,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 16.416263335090672,
+      "fluid_side_pressure_pa": 16.416263335345498,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 16.416263335090672,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_pressure_pa": 16.416263335345498,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899997860193253,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         2.8333334922790527,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         3,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1608,16 +1608,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 16.323231158343827,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 0.9999999944120646,
+      "outside_pressure_pa": 16.339983675679846,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.0000000002910383,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         2.8333334922790527,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         3,
@@ -1629,25 +1629,25 @@
         0.0020833334419876337,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.09303217674684561,
+      "pressure_jump_pa": 0.07627965966565142,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0020833334419876337,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.09303217674684561
+        -0.07627965966565142
       ],
-      "reference_pressure_pa": 16.323231158343827,
+      "reference_pressure_pa": 16.339983675679846,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.09303217674684561
+        -0.07627965966565142
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1661,22 +1661,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 16.46542468983242,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 16.466208601551532,
+      "fluid_side_pressure_pa": 16.46620860111934,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 16.466208601551532,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_pressure_pa": 16.46620860111934,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899997860193253,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         4.166666507720947,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         4,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1688,16 +1688,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 16.368898522423322,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 0.9999999944120646,
+      "outside_pressure_pa": 16.386318982539855,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.0000000002910383,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         4.166666507720947,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         4,
@@ -1709,25 +1709,25 @@
         0.002916666679084301,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.09731007912820999,
+      "pressure_jump_pa": 0.07988961857948595,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.002916666679084301,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.09731007912820999
+        -0.07988961857948595
       ],
-      "reference_pressure_pa": 16.368898522423322,
+      "reference_pressure_pa": 16.386318982539855,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.09731007912820999
+        -0.07988961857948595
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1744,19 +1744,19 @@
       "fluid_side_pressure_pa": 16.534565101056582,
       "inside_pressure_found": true,
       "inside_pressure_pa": 16.534565101056582,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899997711181641,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         5.5,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         6,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1768,16 +1768,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 16.430856768238616,
-      "outside_probe_distance_m": 0.0015625000232830644,
+      "outside_pressure_pa": 16.44925160594293,
+      "outside_probe_distance_m": 0.0007968749850988388,
       "outside_probe_fluid_weight": 1.0,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         5.5,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         6,
@@ -1789,25 +1789,25 @@
         0.0037499999161809683,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.10370833281796621,
+      "pressure_jump_pa": 0.0853134951136525,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0037499999161809683,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.10370833281796621
+        -0.0853134951136525
       ],
-      "reference_pressure_pa": 16.430856768238616,
+      "reference_pressure_pa": 16.44925160594293,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.10370833281796621
+        -0.0853134951136525
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1821,22 +1821,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 16.620139721181125,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 16.621052410789446,
+      "fluid_side_pressure_pa": 16.62105241108754,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 16.621052410789446,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_pressure_pa": 16.62105241108754,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899997860193253,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         6.8333330154418945,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         7,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1848,16 +1848,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 16.508371312984593,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 0.9999999944120646,
+      "outside_pressure_pa": 16.528088042474156,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.000000000349246,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         6.8333330154418945,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         7,
@@ -1869,25 +1869,25 @@
         0.004583333153277636,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.11268109780485247,
+      "pressure_jump_pa": 0.09296436861338364,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.004583333153277636,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.11268109780485247
+        -0.09296436861338364
       ],
-      "reference_pressure_pa": 16.508371312984593,
+      "reference_pressure_pa": 16.528088042474156,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.11268109780485247
+        -0.09296436861338364
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1901,22 +1901,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 16.728704495982665,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 16.72972748985726,
+      "fluid_side_pressure_pa": 16.729727489447743,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 16.72972748985726,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_pressure_pa": 16.729727489447743,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899997860193253,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         8.166666984558105,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         8,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -1928,16 +1928,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 16.604043508197986,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 0.9999999944120646,
+      "outside_pressure_pa": 16.62557698364374,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.000000000349246,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         8.166666984558105,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         8,
@@ -1949,25 +1949,25 @@
         0.0054166666232049465,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.1256839816592752,
+      "pressure_jump_pa": 0.10415050580400376,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0054166666232049465,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.1256839816592752
+        -0.10415050580400376
       ],
-      "reference_pressure_pa": 16.604043508197986,
+      "reference_pressure_pa": 16.62557698364374,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.1256839816592752
+        -0.10415050580400376
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -1984,19 +1984,19 @@
       "fluid_side_pressure_pa": 16.863934354543137,
       "inside_pressure_found": true,
       "inside_pressure_pa": 16.863934354543137,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899997711181641,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         9.5,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         10,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -2008,16 +2008,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 16.719131662803044,
-      "outside_probe_distance_m": 0.0015625000232830644,
+      "outside_pressure_pa": 16.743141186458864,
+      "outside_probe_distance_m": 0.0007968749850988388,
       "outside_probe_fluid_weight": 1.0,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         9.5,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         10,
@@ -2029,25 +2029,25 @@
         0.0062500000931322575,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.14480269174009308,
+      "pressure_jump_pa": 0.12079316808427265,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.0062500000931322575,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.14480269174009308
+        -0.12079316808427265
       ],
-      "reference_pressure_pa": 16.719131662803044,
+      "reference_pressure_pa": 16.743141186458864,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.14480269174009308
+        -0.12079316808427265
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -2061,22 +2061,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 17.024205901361977,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 17.02563593450291,
+      "fluid_side_pressure_pa": 17.025635934682608,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 17.02563593450291,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_pressure_pa": 17.025635934682608,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899998009204865,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         10.833333969116211,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         11,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -2088,16 +2088,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 16.85300937264422,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 0.9999999944120646,
+      "outside_pressure_pa": 16.88029024453584,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.000000000174623,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         10.833333969116211,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         11,
@@ -2109,25 +2109,25 @@
         0.007083333563059568,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.17262656185868863,
+      "pressure_jump_pa": 0.1453456901467689,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.007083333563059568,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.17262656185868863
+        -0.1453456901467689
       ],
-      "reference_pressure_pa": 16.85300937264422,
+      "reference_pressure_pa": 16.88029024453584,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.17262656185868863
+        -0.1453456901467689
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -2141,22 +2141,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 17.223029741158935,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 17.224849915946255,
+      "fluid_side_pressure_pa": 17.22484991570128,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 17.224849915946255,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_pressure_pa": 17.22484991570128,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899998009204865,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         12.166666030883789,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         12,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -2168,16 +2168,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 17.00841679917471,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 0.9999999944120646,
+      "outside_pressure_pa": 17.040114424307948,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.000000000174623,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         12.166666030883789,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         12,
@@ -2189,25 +2189,25 @@
         0.007916666567325592,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.21643311677154387,
+      "pressure_jump_pa": 0.184735491393333,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.007916666567325592,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.21643311677154387
+        -0.184735491393333
       ],
-      "reference_pressure_pa": 17.00841679917471,
+      "reference_pressure_pa": 17.040114424307948,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.21643311677154387
+        -0.184735491393333
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -2224,19 +2224,19 @@
       "fluid_side_pressure_pa": 17.473438366844594,
       "inside_pressure_found": true,
       "inside_pressure_pa": 17.473438366844594,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899997711181641,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         13.5,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         14,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -2248,16 +2248,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 17.184791343354366,
-      "outside_probe_distance_m": 0.0015625000232830644,
+      "outside_pressure_pa": 17.222322858536916,
+      "outside_probe_distance_m": 0.0007968749850988388,
       "outside_probe_fluid_weight": 1.0,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         13.5,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         14,
@@ -2269,25 +2269,25 @@
         0.008750000037252903,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.28864702349022764,
+      "pressure_jump_pa": 0.25111550830767726,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.008750000037252903,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.28864702349022764
+        -0.25111550830767726
       ],
-      "reference_pressure_pa": 17.184791343354366,
+      "reference_pressure_pa": 17.222322858536916,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.28864702349022764
+        -0.25111550830767726
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -2301,22 +2301,22 @@
       "base_pressure_found": true,
       "base_pressure_pa": 17.78043043056549,
       "fluid_side_pressure_defined": false,
-      "fluid_side_pressure_pa": 17.78402217127893,
+      "fluid_side_pressure_pa": 17.784022171628425,
       "inside_pressure_found": true,
-      "inside_pressure_pa": 17.78402217127893,
-      "inside_probe_distance_m": 0.0015625000232830644,
-      "inside_probe_fluid_weight": 0.125,
+      "inside_pressure_pa": 17.784022171628425,
+      "inside_probe_distance_m": 0.0007968749850988388,
+      "inside_probe_fluid_weight": 0.9899998009204865,
       "inside_probe_grid_coordinate": [
         1.5000001192092896,
         14.833333969116211,
-        31.875
+        31.010000228881836
       ],
-      "inside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "inside_probe_multiplier": 1.0,
+      "inside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "inside_probe_multiplier": 0.5099999904632568,
       "inside_probe_nearest_cell": [
         2,
         15,
-        32
+        31
       ],
       "inside_probe_rung": 0,
       "invalid_reason": "none",
@@ -2328,16 +2328,16 @@
         -1.0
       ],
       "outside_pressure_found": true,
-      "outside_pressure_pa": 17.37634682430935,
-      "outside_probe_distance_m": 0.0015625000232830644,
-      "outside_probe_fluid_weight": 0.9999999944120646,
+      "outside_pressure_pa": 17.421037543963735,
+      "outside_probe_distance_m": 0.0007968749850988388,
+      "outside_probe_fluid_weight": 1.000000000174623,
       "outside_probe_grid_coordinate": [
         1.5000001192092896,
         14.833333969116211,
-        29.875001907348633
+        29.98999786376953
       ],
-      "outside_probe_ladder_mode": "pressure_only_integer_ladder",
-      "outside_probe_multiplier": 1.0,
+      "outside_probe_ladder_mode": "pressure_only_configured_ladder",
+      "outside_probe_multiplier": 0.5099999904632568,
       "outside_probe_nearest_cell": [
         2,
         15,
@@ -2349,25 +2349,25 @@
         0.009583333507180214,
         0.04920312389731407
       ],
-      "pressure_jump_pa": 0.4076753469695795,
+      "pressure_jump_pa": 0.36298462766469086,
       "pressure_probe_origin_explicit": true,
       "pressure_probe_origin_m": [
         0.001500000013038516,
         0.009583333507180214,
-        0.04902343824505806
+        0.04843749850988388
       ],
       "pressure_probe_origin_source": "explicit",
       "pressure_traction_pa": [
         0.0,
         0.0,
-        -0.4076753469695795
+        -0.36298462766469086
       ],
-      "reference_pressure_pa": 17.37634682430935,
+      "reference_pressure_pa": 17.421037543963735,
       "region_id": 202,
       "total_traction_pa": [
         0.0,
         0.0,
-        -0.4076753469695795
+        -0.36298462766469086
       ],
       "traction_decomposition_residual_pa": 0.0,
       "valid": true,
@@ -2378,137 +2378,142 @@
       ]
     }
   ],
+  "pressure_probe_ladder_mode": "current_normal_cell_ladder",
+  "pressure_probe_ladder_rung_count": 5,
+  "pressure_probe_ladder_spacing_cells": 0.25,
   "pressure_probe_origin": {
     "pressure_probe_origins_m": [
       [
         0.001500000013038516,
         0.00041666667675599456,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.0012499999720603228,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.0020833334419876337,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.002916666679084301,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.0037499999161809683,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.004583333153277636,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.0054166666232049465,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.0062500000931322575,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.007083333563059568,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.007916666567325592,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.008750000037252903,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.009583333507180214,
-        0.05397656187415123
+        0.05456250160932541
       ],
       [
         0.001500000013038516,
         0.00041666667675599456,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.0012499999720603228,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.0020833334419876337,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.002916666679084301,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.0037499999161809683,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.004583333153277636,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.0054166666232049465,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.0062500000931322575,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.007083333563059568,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.007916666567325592,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.008750000037252903,
-        0.04902343824505806
+        0.04843749850988388
       ],
       [
         0.001500000013038516,
         0.009583333507180214,
-        0.04902343824505806
+        0.04843749850988388
       ]
     ]
   },
-  "pressure_probe_origin_offset_cells": 0.625,
-  "pressure_probe_origin_sha256": "fc64f8d3d90df332522d27ea00935297772891db29fad0bffdb7958a33e736e7",
-  "purpose": "shared_flow_snapshot_traction_probe_ladder_stability_marker_diagnostics",
-  "scenario": "probe_offset0p625",
+  "pressure_probe_origin_offset_cells": 1.0,
+  "pressure_probe_origin_sha256": "1129368ae14a684893cf9ead31cc694118da07645f2095174e96e5e2be19473b",
+  "pressure_probe_start_offset_cells": 0.51,
+  "purpose": "shared_flow_snapshot_traction_probe_ladder_control_marker_diagnostics",
+  "scenario": "origin0p51_start0p51_spacing0p25_probe1p00",
   "schema_version": 1,
+  "strategy": "origin0p51_start0p51_spacing0p25",
   "stress_report": {
-    "max_abs_traction_pa": 0.4076753469695795,
+    "max_abs_traction_pa": 0.36298462766469086,
     "one_sided_extended_marker_count": 0,
     "one_sided_pressure_marker_count": 0,
     "two_sided_extended_marker_count": 0,
@@ -2516,24 +2521,24 @@
   },
   "transition_fields": {
     "primary_inside_nearest_cell_histogram": {
-      "2,0,33": 1,
-      "2,10,33": 1,
-      "2,11,33": 1,
-      "2,12,33": 1,
-      "2,14,33": 1,
-      "2,15,33": 1,
-      "2,2,33": 1,
-      "2,3,33": 1,
-      "2,4,33": 1,
-      "2,6,33": 1,
-      "2,7,33": 1,
-      "2,8,33": 1
+      "2,0,34": 1,
+      "2,10,34": 1,
+      "2,11,34": 1,
+      "2,12,34": 1,
+      "2,14,34": 1,
+      "2,15,34": 1,
+      "2,2,34": 1,
+      "2,3,34": 1,
+      "2,4,34": 1,
+      "2,6,34": 1,
+      "2,7,34": 1,
+      "2,8,34": 1
     },
     "primary_inside_rung_histogram": {
       "0": 12
     },
     "primary_inside_unique_nearest_cell_count": 12,
-    "primary_mean_pressure_jump_pa": -0.10858526866082811,
+    "primary_mean_pressure_jump_pa": -0.09489997532954468,
     "primary_outside_nearest_cell_histogram": {
       "2,0,35": 1,
       "2,10,35": 1,
@@ -2554,24 +2559,24 @@
     "primary_outside_unique_nearest_cell_count": 12,
     "primary_pressure_complete_marker_count": 12,
     "secondary_inside_nearest_cell_histogram": {
-      "2,0,32": 1,
-      "2,10,32": 1,
-      "2,11,32": 1,
-      "2,12,32": 1,
-      "2,14,32": 1,
-      "2,15,32": 1,
-      "2,2,32": 1,
-      "2,3,32": 1,
-      "2,4,32": 1,
-      "2,6,32": 1,
-      "2,7,32": 1,
-      "2,8,32": 1
+      "2,0,31": 1,
+      "2,10,31": 1,
+      "2,11,31": 1,
+      "2,12,31": 1,
+      "2,14,31": 1,
+      "2,15,31": 1,
+      "2,2,31": 1,
+      "2,3,31": 1,
+      "2,4,31": 1,
+      "2,6,31": 1,
+      "2,7,31": 1,
+      "2,8,31": 1
     },
     "secondary_inside_rung_histogram": {
       "0": 12
     },
     "secondary_inside_unique_nearest_cell_count": 12,
-    "secondary_mean_pressure_jump_pa": 0.1618449089555781,
+    "secondary_mean_pressure_jump_pa": 0.13755357453422068,
     "secondary_outside_nearest_cell_histogram": {
       "2,0,30": 1,
       "2,10,30": 1,

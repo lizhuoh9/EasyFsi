@@ -503,6 +503,61 @@ def _first_offset(
     return ""
 
 
+def _first_offset_above(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    baseline_offset: float,
+    predicate: Any,
+) -> float | str:
+    for entry in sorted(entries, key=lambda item: float(item["offset_cells"])):
+        if float(entry["offset_cells"]) <= baseline_offset:
+            continue
+        if predicate(entry):
+            return float(entry["offset_cells"])
+    return ""
+
+
+def _nearest_offset_below(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    baseline_offset: float,
+    predicate: Any,
+) -> float | str:
+    for entry in sorted(
+        entries,
+        key=lambda item: float(item["offset_cells"]),
+        reverse=True,
+    ):
+        if float(entry["offset_cells"]) >= baseline_offset:
+            continue
+        if predicate(entry):
+            return float(entry["offset_cells"])
+    return ""
+
+
+def _nearest_offset_above(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    baseline_offset: float,
+) -> float | str:
+    for entry in sorted(entries, key=lambda item: float(item["offset_cells"])):
+        if float(entry["offset_cells"]) > baseline_offset:
+            return float(entry["offset_cells"])
+    return ""
+
+
+def _ratio_for_offset(
+    entries: Sequence[Mapping[str, Any]],
+    offset: float | str,
+) -> float | str:
+    if offset == "":
+        return ""
+    for entry in entries:
+        if math.isclose(float(entry["offset_cells"]), float(offset)):
+            return entry.get("force_ratio_to_baseline", "")
+    return ""
+
+
 def _build_transition_map(
     *,
     rows: Sequence[Mapping[str, Any]],
@@ -520,6 +575,27 @@ def _build_transition_map(
 
     baseline = by_transition[BASELINE_SCENARIO]
     offset100 = by_transition["probe_offset1p00"]
+    baseline_offset = float(by_scenario[BASELINE_SCENARIO]["probe_origin_offset_cells"])
+    first_high_side_force_collapse = _first_offset_above(
+        entries,
+        baseline_offset=baseline_offset,
+        predicate=lambda entry: (
+            _float_or_none(entry.get("force_ratio_to_baseline")) is not None
+            and float(entry["force_ratio_to_baseline"]) < 0.1
+        ),
+    )
+    nearest_below_amplification = _nearest_offset_below(
+        entries,
+        baseline_offset=baseline_offset,
+        predicate=lambda entry: (
+            _float_or_none(entry.get("force_ratio_to_baseline")) is not None
+            and float(entry["force_ratio_to_baseline"]) > 1.5
+        ),
+    )
+    nearest_above = _nearest_offset_above(
+        entries,
+        baseline_offset=baseline_offset,
+    )
     transition_summary = {
         "force_amplification_threshold": 1.5,
         "force_collapse_threshold": 0.1,
@@ -558,6 +634,42 @@ def _build_transition_map(
         "collapse_0p51_to_1p00_has_probe_classification_change": _histograms_changed(
             offset100,
             baseline,
+        ),
+        "first_high_side_force_collapse_offset_cells": first_high_side_force_collapse,
+        "first_high_side_primary_nearest_cell_transition_offset_cells": (
+            _first_offset_above(
+                entries,
+                baseline_offset=baseline_offset,
+                predicate=lambda entry: (
+                    entry["primary_inside_nearest_cell_histogram"]
+                    != baseline["primary_inside_nearest_cell_histogram"]
+                    or entry["primary_outside_nearest_cell_histogram"]
+                    != baseline["primary_outside_nearest_cell_histogram"]
+                ),
+            )
+        ),
+        "first_high_side_secondary_nearest_cell_transition_offset_cells": (
+            _first_offset_above(
+                entries,
+                baseline_offset=baseline_offset,
+                predicate=lambda entry: (
+                    entry["secondary_inside_nearest_cell_histogram"]
+                    != baseline["secondary_inside_nearest_cell_histogram"]
+                    or entry["secondary_outside_nearest_cell_histogram"]
+                    != baseline["secondary_outside_nearest_cell_histogram"]
+                ),
+            )
+        ),
+        "nearest_below_baseline_force_amplification_offset_cells": (
+            nearest_below_amplification
+        ),
+        "nearest_below_baseline_force_ratio_to_baseline": _ratio_for_offset(
+            entries,
+            nearest_below_amplification,
+        ),
+        "nearest_above_baseline_force_ratio_to_baseline": _ratio_for_offset(
+            entries,
+            nearest_above,
         ),
         "baseline_force_ratio_to_baseline": by_scenario[BASELINE_SCENARIO].get(
             "force_ratio_to_baseline",
@@ -707,6 +819,18 @@ def _summary_markdown(
             f"{transition_summary['first_primary_nearest_cell_transition_offset_cells']}",
             "- First secondary nearest-cell transition offset: "
             f"{transition_summary['first_secondary_nearest_cell_transition_offset_cells']}",
+            "- First high-side force collapse offset: "
+            f"{transition_summary['first_high_side_force_collapse_offset_cells']}",
+            "- First high-side primary nearest-cell transition offset: "
+            f"{transition_summary['first_high_side_primary_nearest_cell_transition_offset_cells']}",
+            "- First high-side secondary nearest-cell transition offset: "
+            f"{transition_summary['first_high_side_secondary_nearest_cell_transition_offset_cells']}",
+            "- Nearest below-baseline amplification offset: "
+            f"{transition_summary['nearest_below_baseline_force_amplification_offset_cells']}",
+            "- Nearest below-baseline amplification ratio: "
+            f"{_fmt(transition_summary['nearest_below_baseline_force_ratio_to_baseline'])}",
+            "- Nearest above-baseline force ratio: "
+            f"{_fmt(transition_summary['nearest_above_baseline_force_ratio_to_baseline'])}",
             "- 0.51 to 1.00 collapse has nearest-cell/rung transition: "
             f"{transition_summary['collapse_0p51_to_1p00_has_probe_classification_change']}",
             "",

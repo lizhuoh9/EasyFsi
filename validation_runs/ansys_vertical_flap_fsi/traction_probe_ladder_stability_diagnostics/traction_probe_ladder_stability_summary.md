@@ -29,6 +29,12 @@ This artifact reuses one archived shared preflow snapshot and re-runs only marke
 - First offset with force collapse < 0.1: 0.625
 - First primary nearest-cell transition offset: 0.0
 - First secondary nearest-cell transition offset: 0.0
+- First high-side force collapse offset: 0.625
+- First high-side primary nearest-cell transition offset: 0.625
+- First high-side secondary nearest-cell transition offset: 1.0
+- Nearest below-baseline amplification offset: 0.375
+- Nearest below-baseline amplification ratio: 1.95569
+- Nearest above-baseline force ratio: 0.0451745
 - 0.51 to 1.00 collapse has nearest-cell/rung transition: True
 
 ## Scenarios

@@ -48,6 +48,10 @@ TRACTION_PRESSURE_PROBE_ORIGIN_MODES = {
     TRACTION_PRESSURE_PROBE_ORIGIN_MARKER_POSITION,
     TRACTION_PRESSURE_PROBE_ORIGIN_PHYSICAL_FACE_OFFSET,
 }
+TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL = "current_normal_cell_ladder"
+TRACTION_PRESSURE_PROBE_LADDER_MODES = {
+    TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL,
+}
 TRACTION_MARKER_FACE_OFFSET_CELLS_DIAGNOSTIC_MAX = 4.0
 SUPPORTED_FORMAL_FLOW_DRIVER_MODES = {
     FLOW_DRIVER_PROJECTION_ONLY,
@@ -856,6 +860,31 @@ def _traction_pressure_probe_origin_offset_cells(config: Any) -> float | None:
     return float(value)
 
 
+def _traction_pressure_probe_start_offset_cells(config: Any) -> float | None:
+    value = getattr(config, "traction_pressure_probe_start_offset_cells", None)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _traction_pressure_probe_ladder_spacing_cells(config: Any) -> float:
+    return float(getattr(config, "traction_pressure_probe_ladder_spacing_cells", 0.5))
+
+
+def _traction_pressure_probe_ladder_rung_count(config: Any) -> int:
+    return int(getattr(config, "traction_pressure_probe_ladder_rung_count", 5))
+
+
+def _traction_pressure_probe_ladder_mode(config: Any) -> str:
+    return str(
+        getattr(
+            config,
+            "traction_pressure_probe_ladder_mode",
+            TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL,
+        )
+    )
+
+
 def _traction_marker_face_count(config: Any) -> int:
     if _traction_marker_layout(config) == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE:
         return 1
@@ -875,6 +904,9 @@ def _is_default_traction_formulation(config: Any) -> bool:
         and _traction_pressure_probe_origin_mode(config)
         == TRACTION_PRESSURE_PROBE_ORIGIN_MARKER_POSITION
         and _traction_pressure_probe_origin_offset_cells(config) is None
+        and _traction_pressure_probe_start_offset_cells(config) is None
+        and _traction_pressure_probe_ladder_mode(config)
+        == TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL
     )
 
 
@@ -995,6 +1027,40 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError(
             "traction_pressure_probe_origin_offset_cells is required for "
             "physical_face_offset probe origins"
+        )
+    probe_start_offset_cells = _traction_pressure_probe_start_offset_cells(config)
+    if probe_start_offset_cells is not None:
+        if (
+            not math.isfinite(probe_start_offset_cells)
+            or probe_start_offset_cells < 0.0
+        ):
+            raise ValueError(
+                "traction_pressure_probe_start_offset_cells must be finite "
+                "and non-negative"
+            )
+        if (
+            probe_start_offset_cells
+            > TRACTION_MARKER_FACE_OFFSET_CELLS_DIAGNOSTIC_MAX
+        ):
+            raise ValueError(
+                "traction_pressure_probe_start_offset_cells is outside the "
+                "diagnostic range"
+            )
+    probe_ladder_spacing_cells = _traction_pressure_probe_ladder_spacing_cells(config)
+    if (
+        not math.isfinite(probe_ladder_spacing_cells)
+        or probe_ladder_spacing_cells <= 0.0
+    ):
+        raise ValueError(
+            "traction_pressure_probe_ladder_spacing_cells must be finite and positive"
+        )
+    probe_ladder_rung_count = _traction_pressure_probe_ladder_rung_count(config)
+    if probe_ladder_rung_count <= 0:
+        raise ValueError("traction_pressure_probe_ladder_rung_count must be positive")
+    probe_ladder_mode = _traction_pressure_probe_ladder_mode(config)
+    if probe_ladder_mode not in TRACTION_PRESSURE_PROBE_LADDER_MODES:
+        raise ValueError(
+            f"unsupported traction_pressure_probe_ladder_mode: {probe_ladder_mode!r}"
         )
     traction_viscosity = _traction_viscosity_pa_s(config)
     if not math.isfinite(traction_viscosity) or traction_viscosity < 0.0:
@@ -2166,6 +2232,24 @@ def _sample_stress_to_marker_forces(
         two_sided_pressure=True,
         one_sided_pressure_region_id=one_sided_region_id,
         one_sided_reference_pressure_pa=0.0,
+        pressure_probe_ladder_start_offset_cells=(
+            None
+            if config is None
+            else _traction_pressure_probe_start_offset_cells(config)
+        ),
+        pressure_probe_ladder_spacing_cells=(
+            0.5
+            if config is None
+            else _traction_pressure_probe_ladder_spacing_cells(config)
+        ),
+        pressure_probe_ladder_rung_count=(
+            5 if config is None else _traction_pressure_probe_ladder_rung_count(config)
+        ),
+        pressure_probe_ladder_mode=(
+            TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL
+            if config is None
+            else _traction_pressure_probe_ladder_mode(config)
+        ),
     )
     markers.compute_marker_forces()
     return report

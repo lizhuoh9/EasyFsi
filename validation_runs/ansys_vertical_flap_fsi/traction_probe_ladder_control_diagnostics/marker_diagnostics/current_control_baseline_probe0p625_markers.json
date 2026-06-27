@@ -1,6 +1,6 @@
 {
   "case": "ansys_vertical_flap_fsi",
-  "created_at_utc": "2026-06-27T01:14:52.215603+00:00",
+  "created_at_utc": "2026-06-27T01:16:18.875626+00:00",
   "face_diagnostics": {
     "primary_face_base_pressure_found_marker_count": 12,
     "primary_face_inside_pressure_found_marker_count": 12,
@@ -2378,6 +2378,9 @@
       ]
     }
   ],
+  "pressure_probe_ladder_mode": "current_normal_cell_ladder",
+  "pressure_probe_ladder_rung_count": 5,
+  "pressure_probe_ladder_spacing_cells": 0.5,
   "pressure_probe_origin": {
     "pressure_probe_origins_m": [
       [
@@ -2504,9 +2507,11 @@
   },
   "pressure_probe_origin_offset_cells": 0.625,
   "pressure_probe_origin_sha256": "fc64f8d3d90df332522d27ea00935297772891db29fad0bffdb7958a33e736e7",
-  "purpose": "shared_flow_snapshot_traction_probe_ladder_stability_marker_diagnostics",
-  "scenario": "probe_offset0p625",
+  "pressure_probe_start_offset_cells": null,
+  "purpose": "shared_flow_snapshot_traction_probe_ladder_control_marker_diagnostics",
+  "scenario": "current_control_baseline_probe0p625",
   "schema_version": 1,
+  "strategy": "current_control_baseline",
   "stress_report": {
     "max_abs_traction_pa": 0.4076753469695795,
     "one_sided_extended_marker_count": 0,

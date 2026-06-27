@@ -25,7 +25,7 @@
   "candidate_status": "probe_ladder_stability_diagnostic_only",
   "case": "ansys_vertical_flap_fsi",
   "completed_formulation_count": 11,
-  "created_at_utc": "2026-06-27T00:35:38.294904+00:00",
+  "created_at_utc": "2026-06-27T01:15:49.380010+00:00",
   "flow_snapshot_identity_status": "shared_snapshot_sha256_identical_completed_rows",
   "flow_snapshot_preflow_steps": 20,
   "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
@@ -1443,7 +1443,7 @@
       "total_marker_force_norm_sum_N": 0.00034855121420842704,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 41.61428929999238,
+      "worker_elapsed_s": 16.920259199978318,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     },
     {
@@ -1580,7 +1580,7 @@
       "total_marker_force_norm_sum_N": 0.00034944178427725043,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 42.09051039995393,
+      "worker_elapsed_s": 17.086554800043814,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     },
     {
@@ -1717,7 +1717,7 @@
       "total_marker_force_norm_sum_N": 0.00035033234658293674,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 41.4742499999702,
+      "worker_elapsed_s": 16.651581300015096,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     },
     {
@@ -1854,7 +1854,7 @@
       "total_marker_force_norm_sum_N": 0.0003512229205930718,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 42.82329720002599,
+      "worker_elapsed_s": 11.238309699983802,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     },
     {
@@ -1991,7 +1991,7 @@
       "total_marker_force_norm_sum_N": 0.00017959052273141572,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 42.264716999954544,
+      "worker_elapsed_s": 11.151804400025867,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     },
     {
@@ -2128,7 +2128,7 @@
       "total_marker_force_norm_sum_N": 8.112905123542959e-06,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 42.17650479997974,
+      "worker_elapsed_s": 11.157977399998344,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     },
     {
@@ -2265,7 +2265,7 @@
       "total_marker_force_norm_sum_N": 9.450291865369906e-06,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 42.41767759999493,
+      "worker_elapsed_s": 11.161101900041103,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     },
     {
@@ -2402,7 +2402,7 @@
       "total_marker_force_norm_sum_N": 1.0787690711554348e-05,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 42.211032299965154,
+      "worker_elapsed_s": 11.066729000012856,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     },
     {
@@ -2539,7 +2539,7 @@
       "total_marker_force_norm_sum_N": 1.2125077444893233e-05,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 41.82271999999648,
+      "worker_elapsed_s": 11.20574070001021,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     },
     {
@@ -2676,7 +2676,7 @@
       "total_marker_force_norm_sum_N": 1.4799838879469385e-05,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 42.1436102000298,
+      "worker_elapsed_s": 11.403925999999046,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     },
     {
@@ -2813,7 +2813,7 @@
       "total_marker_force_norm_sum_N": 1.747461673957907e-05,
       "two_sided_extended_marker_count": 0,
       "two_sided_pressure_marker_count": 24,
-      "worker_elapsed_s": 41.677431699994486,
+      "worker_elapsed_s": 11.449961999955121,
       "worker_mode": "shared_snapshot_probe_ladder_stability"
     }
   ],

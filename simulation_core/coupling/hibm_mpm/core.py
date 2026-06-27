@@ -72,7 +72,11 @@ STRESS_PROBE_LADDER_MODE_NAMES = {
     2: "closure_extension_ladder",
     3: "two_sided_extension_ladder",
     4: "pressure_only_integer_ladder",
+    5: "pressure_only_configured_ladder",
 }
+STRESS_PRESSURE_PROBE_LADDER_MODE_CURRENT_NORMAL_CELL = (
+    "current_normal_cell_ladder"
+)
 
 
 def _debug_stage_progress(message: str) -> None:
@@ -2889,6 +2893,10 @@ class HibmMpmSurfaceMarkers:
         two_sided_pressure: ti.i32,
         one_sided_pressure_region_id: ti.i32,
         one_sided_reference_pressure_pa: ti.f32,
+        pressure_probe_ladder_start_multiplier: ti.f32,
+        pressure_probe_ladder_spacing_multiplier: ti.f32,
+        pressure_probe_ladder_rung_count: ti.i32,
+        pressure_probe_ladder_configured: ti.i32,
     ):
         self.report_stress_valid_marker_count[None] = 0
         self.report_stress_invalid_marker_count[None] = 0
@@ -2990,8 +2998,19 @@ class HibmMpmSurfaceMarkers:
                 inside_pressure = ti.cast(0.0, ti.f64)
                 outside_found = 0
                 inside_found = 0
-                for probe_index in ti.static(range(3)):
-                    multiplier = ti.cast(probe_index + 1, ti.f32)
+                probe_start = ti.cast(1.0, ti.f32)
+                probe_spacing = ti.cast(1.0, ti.f32)
+                probe_count = 3
+                probe_ladder_mode = 4
+                if pressure_probe_ladder_configured != 0:
+                    probe_start = pressure_probe_ladder_start_multiplier
+                    probe_spacing = pressure_probe_ladder_spacing_multiplier
+                    probe_count = pressure_probe_ladder_rung_count
+                    probe_ladder_mode = 5
+                for probe_index in range(probe_count):
+                    multiplier = (
+                        probe_start + probe_spacing * ti.cast(probe_index, ti.f32)
+                    )
                     outside_position = (
                         probe_origin + multiplier * probe_distance_m * normal
                     )
@@ -3070,7 +3089,7 @@ class HibmMpmSurfaceMarkers:
                             multiplier,
                             ti.f64,
                         )
-                        diagnostic_outside_probe_ladder_mode = 4
+                        diagnostic_outside_probe_ladder_mode = probe_ladder_mode
                     inside_position = (
                         probe_origin - multiplier * probe_distance_m * normal
                     )
@@ -3149,7 +3168,7 @@ class HibmMpmSurfaceMarkers:
                             multiplier,
                             ti.f64,
                         )
-                        diagnostic_inside_probe_ladder_mode = 4
+                        diagnostic_inside_probe_ladder_mode = probe_ladder_mode
                 if (
                     one_sided_pressure_region_id != -1
                     and self.region_id[marker] == one_sided_pressure_region_id
@@ -4737,6 +4756,10 @@ class HibmMpmSurfaceMarkers:
         use_pressure_anchor_fallback: bool = False,
         node_anchor_cell=None,
         sampling_obstacle_field=None,
+        pressure_probe_ladder_start_offset_cells: float | None = None,
+        pressure_probe_ladder_spacing_cells: float = 0.5,
+        pressure_probe_ladder_rung_count: int = 5,
+        pressure_probe_ladder_mode: str = STRESS_PRESSURE_PROBE_LADDER_MODE_CURRENT_NORMAL_CELL,
     ) -> HibmMpmFluidStressSampleReport:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
@@ -4804,6 +4827,45 @@ class HibmMpmSurfaceMarkers:
             raise ValueError(
                 "one_sided_probe_max_multiplier must be finite and >= 3.0"
             )
+        if (
+            str(pressure_probe_ladder_mode)
+            != STRESS_PRESSURE_PROBE_LADDER_MODE_CURRENT_NORMAL_CELL
+        ):
+            raise ValueError(
+                "pressure_probe_ladder_mode must be "
+                f"{STRESS_PRESSURE_PROBE_LADDER_MODE_CURRENT_NORMAL_CELL!r}"
+            )
+        pressure_probe_ladder_configured = (
+            pressure_probe_ladder_start_offset_cells is not None
+        )
+        if pressure_probe_ladder_configured:
+            pressure_probe_ladder_start = float(
+                pressure_probe_ladder_start_offset_cells
+            )
+            if (
+                not math.isfinite(pressure_probe_ladder_start)
+                or pressure_probe_ladder_start < 0.0
+            ):
+                raise ValueError(
+                    "pressure_probe_ladder_start_offset_cells must be finite "
+                    "and non-negative"
+                )
+        else:
+            pressure_probe_ladder_start = 1.0
+        pressure_probe_ladder_spacing = float(pressure_probe_ladder_spacing_cells)
+        if (
+            not math.isfinite(pressure_probe_ladder_spacing)
+            or pressure_probe_ladder_spacing <= 0.0
+        ):
+            raise ValueError(
+                "pressure_probe_ladder_spacing_cells must be finite and positive"
+            )
+        pressure_probe_ladder_count = int(pressure_probe_ladder_rung_count)
+        if pressure_probe_ladder_count <= 0:
+            raise ValueError("pressure_probe_ladder_rung_count must be positive")
+        if not pressure_probe_ladder_configured:
+            pressure_probe_ladder_spacing = 1.0
+            pressure_probe_ladder_count = 3
         pressure_only_fast_path = (
             viscosity == 0.0
             and
@@ -4822,6 +4884,12 @@ class HibmMpmSurfaceMarkers:
             and sampling_obstacle_was_none
         )
         split_viscous_path = viscosity > 0.0 and bool(two_sided_pressure)
+        if pressure_probe_ladder_configured and not (
+            pressure_only_fast_path or base_viscous_split_path
+        ):
+            raise ValueError(
+                "pressure_probe_ladder controls are pressure-only diagnostics"
+            )
         if pressure_only_fast_path:
             _debug_stage_progress("stress_sampling:pressure_only:start")
             self._sample_pressure_only_marker_tractions_kernel(
@@ -4843,6 +4911,10 @@ class HibmMpmSurfaceMarkers:
                 1 if bool(two_sided_pressure) else 0,
                 one_sided_region_id,
                 one_sided_reference_pressure,
+                pressure_probe_ladder_start,
+                pressure_probe_ladder_spacing,
+                pressure_probe_ladder_count,
+                1 if pressure_probe_ladder_configured else 0,
             )
             _debug_stage_progress("stress_sampling:pressure_only:done")
         elif base_viscous_split_path:
@@ -4866,6 +4938,10 @@ class HibmMpmSurfaceMarkers:
                 0,
                 -1,
                 0.0,
+                pressure_probe_ladder_start,
+                pressure_probe_ladder_spacing,
+                pressure_probe_ladder_count,
+                1 if pressure_probe_ladder_configured else 0,
             )
             _debug_stage_progress("stress_sampling:base_pressure:done")
             _debug_stage_progress("stress_sampling:base_viscous:start")
