@@ -2,6 +2,7 @@ import inspect
 import math
 import unittest
 import importlib.util
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -505,6 +506,35 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                     traction_one_sided_pressure_policy="per_face_mirrored",
                     traction_one_sided_primary_fluid_side_normal_sign=1.0,
                     traction_one_sided_secondary_fluid_side_normal_sign=1.0,
+                )
+            )
+        selected_coupled_smoke = VerticalFlapFsiConfig(
+            step_count=5,
+            traction_marker_layout="dual_physical_faces",
+            traction_pressure_sampling_mode="one_sided_surface_pressure",
+            traction_pressure_probe_origin_mode="physical_face_offset",
+            traction_pressure_probe_origin_offset_cells=0.51,
+            traction_pressure_pair_policy="baseline_anchored_cell_pair",
+            traction_one_sided_pressure_policy="per_face_mirrored",
+            traction_one_sided_primary_fluid_side_normal_sign=1.0,
+            traction_one_sided_secondary_fluid_side_normal_sign=1.0,
+            allow_selected_traction_formulation_coupled_smoke=True,
+        )
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            selected_coupled_smoke
+        )
+        with self.assertRaisesRegex(ValueError, "fixed-solid diagnostics only"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                replace(selected_coupled_smoke, step_count=50)
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "fixed-solid diagnostics only|traction_one_sided_pressure_pair_policy",
+        ):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                replace(
+                    selected_coupled_smoke,
+                    traction_pressure_pair_policy="independent_ladder",
                 )
             )
         with self.assertRaisesRegex(ValueError, "primary_fluid_side"):

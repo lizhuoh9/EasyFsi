@@ -77,6 +77,8 @@ class AnsysVerticalFlapFixedSolidSelectedFormulationArtifactTests(
             payload["fixed_solid_snapshot_policy"],
             EXPECTED_FIXED_SOLID_POLICY,
         )
+        self.assertNotIn("coupled_fsi_validated", payload["candidate_status"])
+        self.assertNotIn("fluent_parity", payload["candidate_status"])
         self.assertEqual(
             payload["new_or_confirmed_flow_snapshot_sha256"],
             EXPECTED_SHARED_SHA,
@@ -258,7 +260,10 @@ class AnsysVerticalFlapFixedSolidSelectedFormulationArtifactTests(
         self.assertIn("fixed-solid selected formulation", summary)
         self.assertIn("does not claim coupled FSI", summary)
         self.assertIn("does not claim Fluent parity", summary)
+        self.assertIn(EXPECTED_FIXED_SOLID_POLICY, summary)
         self.assertIn(EXPECTED_CANDIDATE, summary)
+        self.assertNotIn("fresh regenerated coupled run", summary)
+        self.assertNotIn("coupled FSI validated", summary)
         self.assertNotIn("Fluent parity validated", summary)
         for scenario in EXPECTED_SCENARIOS:
             self.assertIn(scenario, summary)

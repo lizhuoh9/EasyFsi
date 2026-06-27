@@ -998,6 +998,38 @@ def _is_default_traction_formulation(config: Any) -> bool:
     )
 
 
+def _is_selected_traction_formulation_coupled_smoke(config: Any) -> bool:
+    if not bool(getattr(config, "allow_selected_traction_formulation_coupled_smoke", False)):
+        return False
+    return (
+        0 < int(getattr(config, "step_count", 0)) <= 10
+        and _traction_marker_layout(config)
+        == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES
+        and _traction_pressure_sampling_mode(config) == TRACTION_PRESSURE_ONE_SIDED
+        and math.isclose(_traction_marker_face_offset_cells(config), 0.51)
+        and not _traction_include_viscous(config)
+        and _traction_pressure_probe_origin_mode(config)
+        == TRACTION_PRESSURE_PROBE_ORIGIN_PHYSICAL_FACE_OFFSET
+        and math.isclose(
+            float(_traction_pressure_probe_origin_offset_cells(config) or -1.0),
+            0.51,
+        )
+        and _traction_pressure_probe_start_offset_cells(config) is None
+        and _traction_pressure_probe_ladder_mode(config)
+        == TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL
+        and _traction_pressure_pair_policy(config)
+        == TRACTION_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR
+        and _traction_pressure_pair_max_cell_delta(config) == 1
+        and _traction_pressure_pair_require_opposite_sides(config)
+        and _traction_one_sided_pressure_policy(config)
+        == TRACTION_ONE_SIDED_PRESSURE_POLICY_PER_FACE_MIRRORED
+        and _traction_one_sided_primary_fluid_side_normal_sign(config) == 1.0
+        and _traction_one_sided_secondary_fluid_side_normal_sign(config) == 1.0
+        and _traction_one_sided_pressure_pair_policy(config)
+        == TRACTION_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR
+    )
+
+
 def _traction_viscosity_pa_s(config: Any) -> float:
     if not _traction_include_viscous(config):
         return 0.0
@@ -1222,7 +1254,11 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError("traction viscosity must be finite and non-negative")
     if config.step_count < 0:
         raise ValueError("step_count must be non-negative")
-    if config.step_count > 0 and not _is_default_traction_formulation(config):
+    if (
+        config.step_count > 0
+        and not _is_default_traction_formulation(config)
+        and not _is_selected_traction_formulation_coupled_smoke(config)
+    ):
         raise ValueError(
             "non-default traction formulations are fixed-solid diagnostics only"
         )
