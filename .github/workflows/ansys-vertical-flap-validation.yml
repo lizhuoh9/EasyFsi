@@ -48,6 +48,7 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_shared_snapshot.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_snapshot_resampling_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_probe_offset_decoupling_matrix.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_probe_ladder_stability_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py
 
       - name: Run archive and artifact consistency tests
@@ -68,6 +69,7 @@ jobs:
             tests.integration.test_ansys_vertical_flap_traction_shared_snapshot_artifacts `
             tests.integration.test_ansys_vertical_flap_traction_snapshot_resampling_artifacts `
             tests.integration.test_ansys_vertical_flap_traction_probe_offset_decoupling_artifacts `
+            tests.integration.test_ansys_vertical_flap_traction_probe_ladder_stability_artifacts `
             tests.integration.test_ansys_vertical_flap_preflow_release_step20_artifacts `
             -v
 

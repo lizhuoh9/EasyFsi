@@ -1,0 +1,938 @@
+{
+  "baseline_scenario": "probe_offset0p51",
+  "case": "ansys_vertical_flap_fsi",
+  "created_at_utc": "2026-06-27T00:35:38.294904+00:00",
+  "entries": [
+    {
+      "force_ratio_to_baseline": 1.9408107338141574,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset0p00_markers.json",
+      "offset_cells": 0.0,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,31": 1,
+        "2,10,31": 1,
+        "2,11,31": 1,
+        "2,12,31": 1,
+        "2,14,31": 1,
+        "2,15,31": 1,
+        "2,2,31": 1,
+        "2,3,31": 1,
+        "2,4,31": 1,
+        "2,6,31": 1,
+        "2,7,31": 1,
+        "2,8,31": 1
+      },
+      "primary_inside_rung_histogram": {
+        "1": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -5.796755827262571,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,34": 1,
+        "2,10,34": 1,
+        "2,11,34": 1,
+        "2,12,34": 1,
+        "2,14,34": 1,
+        "2,15,34": 1,
+        "2,2,34": 1,
+        "2,3,34": 1,
+        "2,4,34": 1,
+        "2,6,34": 1,
+        "2,7,34": 1,
+        "2,8,34": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset0p00",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,34": 1,
+        "2,10,34": 1,
+        "2,11,34": 1,
+        "2,12,34": 1,
+        "2,14,34": 1,
+        "2,15,34": 1,
+        "2,2,34": 1,
+        "2,3,34": 1,
+        "2,4,34": 1,
+        "2,6,34": 1,
+        "2,7,34": 1,
+        "2,8,34": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "1": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 5.821618273189816,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,31": 1,
+        "2,10,31": 1,
+        "2,11,31": 1,
+        "2,12,31": 1,
+        "2,14,31": 1,
+        "2,15,31": 1,
+        "2,2,31": 1,
+        "2,3,31": 1,
+        "2,4,31": 1,
+        "2,6,31": 1,
+        "2,7,31": 1,
+        "2,8,31": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -0.00034855121420842704
+    },
+    {
+      "force_ratio_to_baseline": 1.9457696261614739,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset0p125_markers.json",
+      "offset_cells": 0.125,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,32": 1,
+        "2,10,32": 1,
+        "2,11,32": 1,
+        "2,12,32": 1,
+        "2,14,32": 1,
+        "2,15,32": 1,
+        "2,2,32": 1,
+        "2,3,32": 1,
+        "2,4,32": 1,
+        "2,6,32": 1,
+        "2,7,32": 1,
+        "2,8,32": 1
+      },
+      "primary_inside_rung_histogram": {
+        "1": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -5.809511144495372,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,35": 1,
+        "2,10,35": 1,
+        "2,11,35": 1,
+        "2,12,35": 1,
+        "2,14,35": 1,
+        "2,15,35": 1,
+        "2,2,35": 1,
+        "2,3,35": 1,
+        "2,4,35": 1,
+        "2,6,35": 1,
+        "2,7,35": 1,
+        "2,8,35": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset0p125",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,33": 1,
+        "2,10,33": 1,
+        "2,11,33": 1,
+        "2,12,33": 1,
+        "2,14,33": 1,
+        "2,15,33": 1,
+        "2,2,33": 1,
+        "2,3,33": 1,
+        "2,4,33": 1,
+        "2,6,33": 1,
+        "2,7,33": 1,
+        "2,8,33": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "1": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 5.838548625667715,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,30": 1,
+        "2,10,30": 1,
+        "2,11,30": 1,
+        "2,12,30": 1,
+        "2,14,30": 1,
+        "2,15,30": 1,
+        "2,2,30": 1,
+        "2,3,30": 1,
+        "2,4,30": 1,
+        "2,6,30": 1,
+        "2,7,30": 1,
+        "2,8,30": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -0.00034944178427725043
+    },
+    {
+      "force_ratio_to_baseline": 1.9507284752819152,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset0p25_markers.json",
+      "offset_cells": 0.25,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,32": 1,
+        "2,10,32": 1,
+        "2,11,32": 1,
+        "2,12,32": 1,
+        "2,14,32": 1,
+        "2,15,32": 1,
+        "2,2,32": 1,
+        "2,3,32": 1,
+        "2,4,32": 1,
+        "2,6,32": 1,
+        "2,7,32": 1,
+        "2,8,32": 1
+      },
+      "primary_inside_rung_histogram": {
+        "1": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -5.822266460475711,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,35": 1,
+        "2,10,35": 1,
+        "2,11,35": 1,
+        "2,12,35": 1,
+        "2,14,35": 1,
+        "2,15,35": 1,
+        "2,2,35": 1,
+        "2,3,35": 1,
+        "2,4,35": 1,
+        "2,6,35": 1,
+        "2,7,35": 1,
+        "2,8,35": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset0p25",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,33": 1,
+        "2,10,33": 1,
+        "2,11,33": 1,
+        "2,12,33": 1,
+        "2,14,33": 1,
+        "2,15,33": 1,
+        "2,2,33": 1,
+        "2,3,33": 1,
+        "2,4,33": 1,
+        "2,6,33": 1,
+        "2,7,33": 1,
+        "2,8,33": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "1": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 5.855478720626835,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,30": 1,
+        "2,10,30": 1,
+        "2,11,30": 1,
+        "2,12,30": 1,
+        "2,14,30": 1,
+        "2,15,30": 1,
+        "2,2,30": 1,
+        "2,3,30": 1,
+        "2,4,30": 1,
+        "2,6,30": 1,
+        "2,7,30": 1,
+        "2,8,30": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -0.00035033234658293674
+    },
+    {
+      "force_ratio_to_baseline": 1.9556873895753324,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset0p375_markers.json",
+      "offset_cells": 0.375,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,32": 1,
+        "2,10,32": 1,
+        "2,11,32": 1,
+        "2,12,32": 1,
+        "2,14,32": 1,
+        "2,15,32": 1,
+        "2,2,32": 1,
+        "2,3,32": 1,
+        "2,4,32": 1,
+        "2,6,32": 1,
+        "2,7,32": 1,
+        "2,8,32": 1
+      },
+      "primary_inside_rung_histogram": {
+        "1": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -5.835022166688262,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,35": 1,
+        "2,10,35": 1,
+        "2,11,35": 1,
+        "2,12,35": 1,
+        "2,14,35": 1,
+        "2,15,35": 1,
+        "2,2,35": 1,
+        "2,3,35": 1,
+        "2,4,35": 1,
+        "2,6,35": 1,
+        "2,7,35": 1,
+        "2,8,35": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset0p375",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,33": 1,
+        "2,10,33": 1,
+        "2,11,33": 1,
+        "2,12,33": 1,
+        "2,14,33": 1,
+        "2,15,33": 1,
+        "2,2,33": 1,
+        "2,3,33": 1,
+        "2,4,33": 1,
+        "2,6,33": 1,
+        "2,7,33": 1,
+        "2,8,33": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "1": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 5.872408815502048,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,30": 1,
+        "2,10,30": 1,
+        "2,11,30": 1,
+        "2,12,30": 1,
+        "2,14,30": 1,
+        "2,15,30": 1,
+        "2,2,30": 1,
+        "2,3,30": 1,
+        "2,4,30": 1,
+        "2,6,30": 1,
+        "2,7,30": 1,
+        "2,8,30": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -0.0003512229205930718
+    },
+    {
+      "force_ratio_to_baseline": 1.0,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset0p51_markers.json",
+      "offset_cells": 0.51,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,32": 1,
+        "2,10,32": 1,
+        "2,11,32": 1,
+        "2,12,32": 1,
+        "2,14,32": 1,
+        "2,15,32": 1,
+        "2,2,32": 1,
+        "2,3,32": 1,
+        "2,4,32": 1,
+        "2,6,32": 1,
+        "2,7,32": 1,
+        "2,8,32": 1
+      },
+      "primary_inside_rung_histogram": {
+        "1": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -5.848797737294671,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,35": 1,
+        "2,10,35": 1,
+        "2,11,35": 1,
+        "2,12,35": 1,
+        "2,14,35": 1,
+        "2,15,35": 1,
+        "2,2,35": 1,
+        "2,3,35": 1,
+        "2,4,35": 1,
+        "2,6,35": 1,
+        "2,7,35": 1,
+        "2,8,35": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset0p51",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,32": 1,
+        "2,10,32": 1,
+        "2,11,32": 1,
+        "2,12,32": 1,
+        "2,14,32": 1,
+        "2,15,32": 1,
+        "2,2,32": 1,
+        "2,3,32": 1,
+        "2,4,32": 1,
+        "2,6,32": 1,
+        "2,7,32": 1,
+        "2,8,32": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 0.13755317164713046,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,30": 1,
+        "2,10,30": 1,
+        "2,11,30": 1,
+        "2,12,30": 1,
+        "2,14,30": 1,
+        "2,15,30": 1,
+        "2,2,30": 1,
+        "2,3,30": 1,
+        "2,4,30": 1,
+        "2,6,30": 1,
+        "2,7,30": 1,
+        "2,8,30": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -0.00017959052273141572
+    },
+    {
+      "force_ratio_to_baseline": 0.045174461325423666,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset0p625_markers.json",
+      "offset_cells": 0.625,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,33": 1,
+        "2,10,33": 1,
+        "2,11,33": 1,
+        "2,12,33": 1,
+        "2,14,33": 1,
+        "2,15,33": 1,
+        "2,2,33": 1,
+        "2,3,33": 1,
+        "2,4,33": 1,
+        "2,6,33": 1,
+        "2,7,33": 1,
+        "2,8,33": 1
+      },
+      "primary_inside_rung_histogram": {
+        "0": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -0.10858526866082811,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,35": 1,
+        "2,10,35": 1,
+        "2,11,35": 1,
+        "2,12,35": 1,
+        "2,14,35": 1,
+        "2,15,35": 1,
+        "2,2,35": 1,
+        "2,3,35": 1,
+        "2,4,35": 1,
+        "2,6,35": 1,
+        "2,7,35": 1,
+        "2,8,35": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset0p625",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,32": 1,
+        "2,10,32": 1,
+        "2,11,32": 1,
+        "2,12,32": 1,
+        "2,14,32": 1,
+        "2,15,32": 1,
+        "2,2,32": 1,
+        "2,3,32": 1,
+        "2,4,32": 1,
+        "2,6,32": 1,
+        "2,7,32": 1,
+        "2,8,32": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 0.1618449089555781,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,30": 1,
+        "2,10,30": 1,
+        "2,11,30": 1,
+        "2,12,30": 1,
+        "2,14,30": 1,
+        "2,15,30": 1,
+        "2,2,30": 1,
+        "2,3,30": 1,
+        "2,4,30": 1,
+        "2,6,30": 1,
+        "2,7,30": 1,
+        "2,8,30": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -8.112905123542959e-06
+    },
+    {
+      "force_ratio_to_baseline": 0.052621328350957404,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset0p75_markers.json",
+      "offset_cells": 0.75,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,33": 1,
+        "2,10,33": 1,
+        "2,11,33": 1,
+        "2,12,33": 1,
+        "2,14,33": 1,
+        "2,15,33": 1,
+        "2,2,33": 1,
+        "2,3,33": 1,
+        "2,4,33": 1,
+        "2,6,33": 1,
+        "2,7,33": 1,
+        "2,8,33": 1
+      },
+      "primary_inside_rung_histogram": {
+        "0": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -0.1267602759230737,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,35": 1,
+        "2,10,35": 1,
+        "2,11,35": 1,
+        "2,12,35": 1,
+        "2,14,35": 1,
+        "2,15,35": 1,
+        "2,2,35": 1,
+        "2,3,35": 1,
+        "2,4,35": 1,
+        "2,6,35": 1,
+        "2,7,35": 1,
+        "2,8,35": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset0p75",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,32": 1,
+        "2,10,32": 1,
+        "2,11,32": 1,
+        "2,12,32": 1,
+        "2,14,32": 1,
+        "2,15,32": 1,
+        "2,2,32": 1,
+        "2,3,32": 1,
+        "2,4,32": 1,
+        "2,6,32": 1,
+        "2,7,32": 1,
+        "2,8,32": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 0.18824946088040515,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,30": 1,
+        "2,10,30": 1,
+        "2,11,30": 1,
+        "2,12,30": 1,
+        "2,14,30": 1,
+        "2,15,30": 1,
+        "2,2,30": 1,
+        "2,3,30": 1,
+        "2,4,30": 1,
+        "2,6,30": 1,
+        "2,7,30": 1,
+        "2,8,30": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -9.450291865369906e-06
+    },
+    {
+      "force_ratio_to_baseline": 0.060068262776247605,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset0p875_markers.json",
+      "offset_cells": 0.875,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,33": 1,
+        "2,10,33": 1,
+        "2,11,33": 1,
+        "2,12,33": 1,
+        "2,14,33": 1,
+        "2,15,33": 1,
+        "2,2,33": 1,
+        "2,3,33": 1,
+        "2,4,33": 1,
+        "2,6,33": 1,
+        "2,7,33": 1,
+        "2,8,33": 1
+      },
+      "primary_inside_rung_histogram": {
+        "0": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -0.14493528319852444,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,35": 1,
+        "2,10,35": 1,
+        "2,11,35": 1,
+        "2,12,35": 1,
+        "2,14,35": 1,
+        "2,15,35": 1,
+        "2,2,35": 1,
+        "2,3,35": 1,
+        "2,4,35": 1,
+        "2,6,35": 1,
+        "2,7,35": 1,
+        "2,8,35": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset0p875",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,32": 1,
+        "2,10,32": 1,
+        "2,11,32": 1,
+        "2,12,32": 1,
+        "2,14,32": 1,
+        "2,15,32": 1,
+        "2,2,32": 1,
+        "2,3,32": 1,
+        "2,4,32": 1,
+        "2,6,32": 1,
+        "2,7,32": 1,
+        "2,8,32": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 0.2146544162706204,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,30": 1,
+        "2,10,30": 1,
+        "2,11,30": 1,
+        "2,12,30": 1,
+        "2,14,30": 1,
+        "2,15,30": 1,
+        "2,2,30": 1,
+        "2,3,30": 1,
+        "2,4,30": 1,
+        "2,6,30": 1,
+        "2,7,30": 1,
+        "2,8,30": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -1.0787690711554348e-05
+    },
+    {
+      "force_ratio_to_baseline": 0.06751512975451793,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset1p00_markers.json",
+      "offset_cells": 1.0,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,33": 1,
+        "2,10,33": 1,
+        "2,11,33": 1,
+        "2,12,33": 1,
+        "2,14,33": 1,
+        "2,15,33": 1,
+        "2,2,33": 1,
+        "2,3,33": 1,
+        "2,4,33": 1,
+        "2,6,33": 1,
+        "2,7,33": 1,
+        "2,8,33": 1
+      },
+      "primary_inside_rung_histogram": {
+        "0": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -0.1631102900189664,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,35": 1,
+        "2,10,35": 1,
+        "2,11,35": 1,
+        "2,12,35": 1,
+        "2,14,35": 1,
+        "2,15,35": 1,
+        "2,2,35": 1,
+        "2,3,35": 1,
+        "2,4,35": 1,
+        "2,6,35": 1,
+        "2,7,35": 1,
+        "2,8,35": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset1p00",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,31": 1,
+        "2,10,31": 1,
+        "2,11,31": 1,
+        "2,12,31": 1,
+        "2,14,31": 1,
+        "2,15,31": 1,
+        "2,2,31": 1,
+        "2,3,31": 1,
+        "2,4,31": 1,
+        "2,6,31": 1,
+        "2,7,31": 1,
+        "2,8,31": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 0.24105896835431562,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,30": 1,
+        "2,10,30": 1,
+        "2,11,30": 1,
+        "2,12,30": 1,
+        "2,14,30": 1,
+        "2,15,30": 1,
+        "2,2,30": 1,
+        "2,3,30": 1,
+        "2,4,30": 1,
+        "2,6,30": 1,
+        "2,7,30": 1,
+        "2,8,30": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -1.2125077444893233e-05
+    },
+    {
+      "force_ratio_to_baseline": 0.0824087967136389,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset1p25_markers.json",
+      "offset_cells": 1.25,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,34": 1,
+        "2,10,34": 1,
+        "2,11,34": 1,
+        "2,12,34": 1,
+        "2,14,34": 1,
+        "2,15,34": 1,
+        "2,2,34": 1,
+        "2,3,34": 1,
+        "2,4,34": 1,
+        "2,6,34": 1,
+        "2,7,34": 1,
+        "2,8,34": 1
+      },
+      "primary_inside_rung_histogram": {
+        "0": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -0.1994603049696654,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,36": 1,
+        "2,10,36": 1,
+        "2,11,36": 1,
+        "2,12,36": 1,
+        "2,14,36": 1,
+        "2,15,36": 1,
+        "2,2,36": 1,
+        "2,3,36": 1,
+        "2,4,36": 1,
+        "2,6,36": 1,
+        "2,7,36": 1,
+        "2,8,36": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset1p25",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,31": 1,
+        "2,10,31": 1,
+        "2,11,31": 1,
+        "2,12,31": 1,
+        "2,14,31": 1,
+        "2,15,31": 1,
+        "2,2,31": 1,
+        "2,3,31": 1,
+        "2,4,31": 1,
+        "2,6,31": 1,
+        "2,7,31": 1,
+        "2,8,31": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 0.293867670141827,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,29": 1,
+        "2,10,29": 1,
+        "2,11,29": 1,
+        "2,12,29": 1,
+        "2,14,29": 1,
+        "2,15,29": 1,
+        "2,2,29": 1,
+        "2,3,29": 1,
+        "2,4,29": 1,
+        "2,6,29": 1,
+        "2,7,29": 1,
+        "2,8,29": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -1.4799838879469385e-05
+    },
+    {
+      "force_ratio_to_baseline": 0.09730255513378624,
+      "marker_diagnostics_json": "validation_runs/ansys_vertical_flap_fsi/traction_probe_ladder_stability_diagnostics/marker_diagnostics/probe_offset1p50_markers.json",
+      "offset_cells": 1.5,
+      "primary_inside_nearest_cell_histogram": {
+        "2,0,34": 1,
+        "2,10,34": 1,
+        "2,11,34": 1,
+        "2,12,34": 1,
+        "2,14,34": 1,
+        "2,15,34": 1,
+        "2,2,34": 1,
+        "2,3,34": 1,
+        "2,4,34": 1,
+        "2,6,34": 1,
+        "2,7,34": 1,
+        "2,8,34": 1
+      },
+      "primary_inside_rung_histogram": {
+        "0": 12
+      },
+      "primary_inside_unique_nearest_cell_count": 12,
+      "primary_mean_pressure_jump_pa": -0.23581032004260472,
+      "primary_outside_nearest_cell_histogram": {
+        "2,0,36": 1,
+        "2,10,36": 1,
+        "2,11,36": 1,
+        "2,12,36": 1,
+        "2,14,36": 1,
+        "2,15,36": 1,
+        "2,2,36": 1,
+        "2,3,36": 1,
+        "2,4,36": 1,
+        "2,6,36": 1,
+        "2,7,36": 1,
+        "2,8,36": 1
+      },
+      "primary_outside_rung_histogram": {
+        "0": 12
+      },
+      "primary_outside_unique_nearest_cell_count": 12,
+      "primary_pressure_complete_marker_count": 12,
+      "scenario": "probe_offset1p50",
+      "secondary_inside_nearest_cell_histogram": {
+        "2,0,31": 1,
+        "2,10,31": 1,
+        "2,11,31": 1,
+        "2,12,31": 1,
+        "2,14,31": 1,
+        "2,15,31": 1,
+        "2,2,31": 1,
+        "2,3,31": 1,
+        "2,4,31": 1,
+        "2,6,31": 1,
+        "2,7,31": 1,
+        "2,8,31": 1
+      },
+      "secondary_inside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_inside_unique_nearest_cell_count": 12,
+      "secondary_mean_pressure_jump_pa": 0.34667691932489636,
+      "secondary_outside_nearest_cell_histogram": {
+        "2,0,29": 1,
+        "2,10,29": 1,
+        "2,11,29": 1,
+        "2,12,29": 1,
+        "2,14,29": 1,
+        "2,15,29": 1,
+        "2,2,29": 1,
+        "2,3,29": 1,
+        "2,4,29": 1,
+        "2,6,29": 1,
+        "2,7,29": 1,
+        "2,8,29": 1
+      },
+      "secondary_outside_rung_histogram": {
+        "0": 12
+      },
+      "secondary_outside_unique_nearest_cell_count": 12,
+      "secondary_pressure_complete_marker_count": 12,
+      "total_force_z_N": -1.747461673957907e-05
+    }
+  ],
+  "flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
+  "flow_snapshot_source_commit": "8488848d9302f7c05ffb8fd59342aec9d0a7e36f",
+  "purpose": "shared_flow_snapshot_traction_probe_ladder_transition_map",
+  "schema_version": 1,
+  "scope_limit": "shared snapshot sampling-only pressure probe ladder stability diagnostic on archived shared preflow velocity/pressure/obstacle fields; does not advance coupled FSI and does not claim Fluent parity.",
+  "source_script": "validation_runs/ansys_vertical_flap_fsi/scripts/run_traction_probe_ladder_stability_matrix.py",
+  "transition_summary": {
+    "baseline_force_ratio_to_baseline": 1.0,
+    "collapse_0p51_to_1p00_has_probe_classification_change": true,
+    "first_force_amplification_offset_cells": 0.0,
+    "first_force_collapse_offset_cells": 0.625,
+    "first_primary_nearest_cell_transition_offset_cells": 0.0,
+    "first_secondary_nearest_cell_transition_offset_cells": 0.0,
+    "force_amplification_threshold": 1.5,
+    "force_collapse_threshold": 0.1,
+    "offset0p25_force_ratio_to_baseline": 1.9507284752819152,
+    "offset1p00_force_ratio_to_baseline": 0.06751512975451793
+  }
+}
