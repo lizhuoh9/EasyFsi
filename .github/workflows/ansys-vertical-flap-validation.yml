@@ -52,6 +52,7 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_probe_ladder_control_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_symmetric_pressure_pair_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_pressure_pair_anchor_map_matrix.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_pressure_pair_reference_preselection_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py
 
       - name: Run archive and artifact consistency tests
@@ -76,6 +77,7 @@ jobs:
             tests.integration.test_ansys_vertical_flap_traction_probe_ladder_control_artifacts `
             tests.integration.test_ansys_vertical_flap_traction_symmetric_pressure_pair_artifacts `
             tests.integration.test_ansys_vertical_flap_traction_pressure_pair_anchor_map_artifacts `
+            tests.integration.test_ansys_vertical_flap_traction_pressure_pair_reference_preselection_artifacts `
             tests.integration.test_ansys_vertical_flap_preflow_release_step20_artifacts `
             -v
 
