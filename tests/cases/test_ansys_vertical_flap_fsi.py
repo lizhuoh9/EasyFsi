@@ -22,6 +22,15 @@ from cases.ansys_vertical_flap_fsi import (
 )
 
 
+SELECTED_ANCHOR_MARKERS_JSON = (
+    Path("validation_runs")
+    / "ansys_vertical_flap_fsi"
+    / "traction_fixed_solid_selected_formulation_diagnostics"
+    / "marker_diagnostics"
+    / "fixed_solid_selected_per_face_one_sided_probe0p51_markers.json"
+).as_posix()
+
+
 class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
     def test_benchmark_results_must_be_computed_not_assigned_from_reference(self):
         config_fields = VerticalFlapFsiConfig.__dataclass_fields__
@@ -518,11 +527,22 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             traction_one_sided_pressure_policy="per_face_mirrored",
             traction_one_sided_primary_fluid_side_normal_sign=1.0,
             traction_one_sided_secondary_fluid_side_normal_sign=1.0,
+            traction_pressure_pair_anchor_markers_json=SELECTED_ANCHOR_MARKERS_JSON,
             allow_selected_traction_formulation_coupled_smoke=True,
         )
         solid_mpm_fsi_runner._validate_rectangular_solid_config(
             selected_coupled_smoke
         )
+        with self.assertRaisesRegex(
+            ValueError,
+            "traction_pressure_pair_anchor_markers_json",
+        ):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                replace(
+                    selected_coupled_smoke,
+                    traction_pressure_pair_anchor_markers_json=None,
+                )
+            )
         with self.assertRaisesRegex(ValueError, "fixed-solid diagnostics only"):
             solid_mpm_fsi_runner._validate_rectangular_solid_config(
                 replace(selected_coupled_smoke, step_count=50)
@@ -662,6 +682,62 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertIn("one_sided_pressure_region_id", source)
         self.assertIn("one_sided_pressure_primary_region_id", source)
         self.assertIn("_traction_viscosity_pa_s(config)", source)
+
+    def test_pressure_pair_anchor_payload_cells_are_fail_closed(self):
+        payload = {
+            "marker_count": 1,
+            "markers": [
+                {
+                    "marker_index": 0,
+                    "pressure_pair_anchor_active": True,
+                    "pressure_pair_anchor_inside_cell": [1, 2, 3],
+                    "pressure_pair_anchor_outside_cell": [1, 2, 4],
+                }
+            ],
+        }
+
+        inside, outside = (
+            solid_mpm_fsi_runner._pressure_pair_anchor_cells_from_marker_payload(
+                payload
+            )
+        )
+
+        self.assertEqual(inside, [(1, 2, 3)])
+        self.assertEqual(outside, [(1, 2, 4)])
+
+        inactive = {
+            "markers": [
+                {
+                    "pressure_pair_anchor_active": False,
+                    "pressure_pair_anchor_inside_cell": [1, 2, 3],
+                    "pressure_pair_anchor_outside_cell": [1, 2, 4],
+                }
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "inactive marker"):
+            solid_mpm_fsi_runner._pressure_pair_anchor_cells_from_marker_payload(
+                inactive
+            )
+
+        missing_cell = {
+            "markers": [
+                {
+                    "pressure_pair_anchor_active": True,
+                    "pressure_pair_anchor_inside_cell": [1, 2],
+                    "pressure_pair_anchor_outside_cell": [1, 2, 4],
+                }
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "must have 3 cells"):
+            solid_mpm_fsi_runner._pressure_pair_anchor_cells_from_marker_payload(
+                missing_cell
+            )
+
+        mismatched_count = {"marker_count": 2, "markers": payload["markers"]}
+        with self.assertRaisesRegex(ValueError, "marker_count"):
+            solid_mpm_fsi_runner._pressure_pair_anchor_cells_from_marker_payload(
+                mismatched_count
+            )
 
     def test_sustained_flow_driver_modes_are_explicit_and_default_safe(self):
         self.assertIn(

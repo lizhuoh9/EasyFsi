@@ -167,6 +167,7 @@ class VerticalFlapFsiConfig:
     traction_one_sided_primary_reference_pressure_pa: float = 0.0
     traction_one_sided_secondary_reference_pressure_pa: float = 0.0
     traction_one_sided_pressure_pair_policy: str = "baseline_anchored_cell_pair"
+    traction_pressure_pair_anchor_markers_json: str | None = None
     traction_viscosity_pa_s: float = 0.0
     allow_selected_traction_formulation_coupled_smoke: bool = False
     export_final_flow_snapshot: bool = False

@@ -6438,6 +6438,41 @@ class HibmMpmSurfaceMarkers:
         result = _summarize("primary", int(primary_region_id))
         if secondary_region_id is not None:
             result.update(_summarize("secondary", int(secondary_region_id)))
+        result.update(
+            {
+                "pressure_pair_anchor_active_marker_count": sum(
+                    1
+                    for marker in diagnostics
+                    if bool(marker["pressure_pair_anchor_active"])
+                ),
+                "pressure_pair_anchor_selected_marker_count": sum(
+                    1
+                    for marker in diagnostics
+                    if bool(marker["pressure_pair_anchor_active"])
+                    and bool(marker["pressure_pair_selected"])
+                ),
+                "pressure_pair_anchor_fallback_marker_count": sum(
+                    1
+                    for marker in diagnostics
+                    if bool(marker["pressure_pair_anchor_fallback_used"])
+                ),
+                "one_sided_marker_count": sum(
+                    1
+                    for marker in diagnostics
+                    if bool(marker["one_sided_anchor_selected"])
+                ),
+                "one_sided_anchor_selected_marker_count": sum(
+                    1
+                    for marker in diagnostics
+                    if bool(marker["one_sided_anchor_selected"])
+                ),
+                "one_sided_anchor_fallback_marker_count": sum(
+                    1
+                    for marker in diagnostics
+                    if bool(marker["one_sided_anchor_fallback_used"])
+                ),
+            }
+        )
         return result
 
     @ti.kernel

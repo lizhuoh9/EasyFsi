@@ -18,6 +18,12 @@ FIXED_SOLID_SELECTION = (
     / "traction_fixed_solid_selected_formulation_diagnostics"
     / "traction_fixed_solid_selected_formulation_matrix.json"
 )
+SELECTED_ANCHOR_MARKERS_JSON = (
+    ROOT
+    / "traction_fixed_solid_selected_formulation_diagnostics"
+    / "marker_diagnostics"
+    / "fixed_solid_selected_per_face_one_sided_probe0p51_markers.json"
+)
 DIAG_ROOT = ROOT / "traction_selected_formulation_coupled_smoke_diagnostics"
 SCENARIO_DIAGNOSTICS_ROOT = DIAG_ROOT / "scenario_diagnostics"
 MATRIX_JSON = DIAG_ROOT / "traction_selected_formulation_coupled_smoke_matrix.json"
@@ -32,10 +38,14 @@ EXPECTED_SOURCE_SCRIPT = (
 )
 EXPECTED_CANDIDATE = "anchored_dual_face_pressure_pair_with_per_face_one_sided"
 EXPECTED_SCENARIO = "selected_formulation_coupled_smoke_5step"
-EXPECTED_PENDING_BLOCKERS = {
+EXPECTED_PENDING_BASE_BLOCKERS = {
     "coupled_fsi_validation_pending",
     "no_fluent_parity_claim",
+}
+EXPECTED_PENDING_SMOKE_BLOCKERS = {
     "blocked_invalid_marker_sampling",
+    "blocked_requested_5step_not_completed",
+    "not_run",
 }
 EXPECTED_PASS_BLOCKERS = {
     "long_coupled_validation_pending",
@@ -84,6 +94,14 @@ class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
             payload["fixed_solid_selected_formulation_source_sha256"],
             _sha256_file(FIXED_SOLID_SELECTION),
         )
+        self.assertEqual(
+            payload["selected_anchor_markers_source"],
+            SELECTED_ANCHOR_MARKERS_JSON.as_posix(),
+        )
+        self.assertEqual(
+            payload["selected_anchor_markers_source_sha256"],
+            _sha256_file(SELECTED_ANCHOR_MARKERS_JSON),
+        )
 
         row = rows[0]
         self.assertEqual(row["reference_formulation_candidate"], EXPECTED_CANDIDATE)
@@ -94,6 +112,14 @@ class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
         self.assertEqual(
             row["fixed_solid_selected_formulation_source_sha256"],
             _sha256_file(FIXED_SOLID_SELECTION),
+        )
+        self.assertEqual(
+            row["selected_anchor_markers_source"],
+            SELECTED_ANCHOR_MARKERS_JSON.as_posix(),
+        )
+        self.assertEqual(
+            row["selected_anchor_markers_source_sha256"],
+            _sha256_file(SELECTED_ANCHOR_MARKERS_JSON),
         )
         self.assertEqual(int(row["requested_step_count"]), 5)
         self.assertGreaterEqual(int(row["completed_step_count"]), 0)
@@ -116,6 +142,11 @@ class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
             self.assertTrue(bool(row["pressure_finite"]))
             self.assertTrue(bool(row["solid_position_finite"]))
             self.assertEqual(int(row["invalid_marker_count_max"]), 0)
+            self.assertGreaterEqual(
+                int(row["pressure_pair_anchor_active_marker_count_min"]),
+                24,
+            )
+            self.assertGreaterEqual(int(row["anchor_selected_marker_count_min"]), 24)
             self.assertEqual(int(row["anchor_fallback_marker_count_max"]), 0)
             self.assertGreaterEqual(int(row["one_sided_marker_count_min"]), 24)
             self.assertLessEqual(
@@ -128,10 +159,27 @@ class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
                 "selected_formulation_coupled_smoke_pending",
             )
             self.assertFalse(acceptance["accepted"])
-            self.assertEqual(blockers, EXPECTED_PENDING_BLOCKERS)
+            self.assertTrue(EXPECTED_PENDING_BASE_BLOCKERS.issubset(blockers))
+            self.assertIn(row["smoke_status"], EXPECTED_PENDING_SMOKE_BLOCKERS)
+            self.assertIn(row["smoke_status"], blockers)
             self.assertEqual(row["run_status"], "blocked")
             self.assertNotEqual(row["smoke_status"], "passed")
             self.assertIn("coupled_fsi_validation_pending", blockers)
+            if row["smoke_status"] == "blocked_requested_5step_not_completed":
+                self.assertEqual(int(row["completed_step_count"]), 1)
+                self.assertEqual(int(row["invalid_marker_count_max"]), 0)
+                self.assertGreaterEqual(
+                    int(row["pressure_pair_anchor_active_marker_count_min"]),
+                    24,
+                )
+                self.assertGreaterEqual(
+                    int(row["anchor_selected_marker_count_min"]),
+                    24,
+                )
+                self.assertEqual(int(row["anchor_fallback_marker_count_max"]), 0)
+                self.assertGreaterEqual(int(row["one_sided_marker_count_min"]), 24)
+            elif row["smoke_status"] == "blocked_invalid_marker_sampling":
+                self.assertGreater(int(row["invalid_marker_count_max"]), 0)
 
         self.assertIn("no_fluent_parity_claim", blockers)
 

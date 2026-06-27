@@ -40,6 +40,11 @@ FIXED_SOLID_ROOT = ROOT / "traction_fixed_solid_selected_formulation_diagnostics
 FIXED_SOLID_MATRIX_JSON = (
     FIXED_SOLID_ROOT / "traction_fixed_solid_selected_formulation_matrix.json"
 )
+SELECTED_ANCHOR_MARKERS_JSON = (
+    FIXED_SOLID_ROOT
+    / "marker_diagnostics"
+    / "fixed_solid_selected_per_face_one_sided_probe0p51_markers.json"
+)
 
 SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
@@ -72,7 +77,15 @@ CSV_COLUMNS = [
     "pressure_finite",
     "solid_position_finite",
     "invalid_marker_count_max",
+    "pressure_pair_anchor_active_marker_count_min",
+    "anchor_selected_marker_count_min",
     "anchor_fallback_marker_count_max",
+    "selected_anchor_markers_source",
+    "selected_anchor_markers_source_sha256",
+    "pressure_pair_anchor_map_sha256",
+    "pressure_pair_anchor_source_flow_snapshot_sha256",
+    "pressure_pair_anchor_source_marker_geometry_sha256",
+    "pressure_pair_anchor_current_marker_geometry_sha256",
     "one_sided_anchor_fallback_marker_count_max",
     "force_action_reaction_residual_max_n",
     "scenario_diagnostics_json",
@@ -180,6 +193,9 @@ def _selected_smoke_config() -> VerticalFlapFsiConfig:
         traction_one_sided_pressure_policy=ONE_SIDED_PRESSURE_POLICY_CANDIDATE,
         traction_one_sided_primary_fluid_side_normal_sign=1.0,
         traction_one_sided_secondary_fluid_side_normal_sign=1.0,
+        traction_pressure_pair_anchor_markers_json=(
+            SELECTED_ANCHOR_MARKERS_JSON.as_posix()
+        ),
         allow_selected_traction_formulation_coupled_smoke=True,
     )
 
@@ -205,6 +221,9 @@ def _row_from_report(
     )
     anchor_selected_marker_count_min = _min_numeric(
         _history_values(history, "pressure_pair_anchor_selected_marker_count")
+    )
+    anchor_active_marker_count_min = _min_numeric(
+        _history_values(history, "pressure_pair_anchor_active_marker_count")
     )
     anchor_fallback_marker_count_max = _max_numeric(
         _history_values(history, "pressure_pair_anchor_fallback_marker_count")
@@ -280,8 +299,35 @@ def _row_from_report(
         "solid_position_finite": solid_position_finite,
         "invalid_marker_count_max": invalid_marker_count_max,
         "pressure_complete_marker_count_min": pressure_complete_marker_count_min,
+        "pressure_pair_anchor_active_marker_count_min": (
+            anchor_active_marker_count_min
+        ),
         "anchor_selected_marker_count_min": anchor_selected_marker_count_min,
         "anchor_fallback_marker_count_max": anchor_fallback_marker_count_max,
+        "selected_anchor_markers_source": _repo_relative(
+            SELECTED_ANCHOR_MARKERS_JSON
+        ),
+        "selected_anchor_markers_source_sha256": _sha256_file(
+            SELECTED_ANCHOR_MARKERS_JSON
+        ),
+        "pressure_pair_anchor_install_status": str(
+            report.get("pressure_pair_anchor_install_status", "")
+        ),
+        "pressure_pair_anchor_resolved_markers_json": str(
+            report.get("pressure_pair_anchor_resolved_markers_json", "")
+        ),
+        "pressure_pair_anchor_map_sha256": str(
+            report.get("pressure_pair_anchor_map_sha256", "")
+        ),
+        "pressure_pair_anchor_source_flow_snapshot_sha256": str(
+            report.get("pressure_pair_anchor_source_flow_snapshot_sha256", "")
+        ),
+        "pressure_pair_anchor_source_marker_geometry_sha256": str(
+            report.get("pressure_pair_anchor_source_marker_geometry_sha256", "")
+        ),
+        "pressure_pair_anchor_current_marker_geometry_sha256": str(
+            report.get("pressure_pair_anchor_current_marker_geometry_sha256", "")
+        ),
         "one_sided_marker_count_min": one_sided_marker_count_min,
         "one_sided_anchor_fallback_marker_count_max": (
             one_sided_anchor_fallback_marker_count_max
@@ -339,8 +385,21 @@ def _blocked_row_from_exception(
         "solid_position_finite": False,
         "invalid_marker_count_max": 0,
         "pressure_complete_marker_count_min": 0,
+        "pressure_pair_anchor_active_marker_count_min": 0,
         "anchor_selected_marker_count_min": 0,
         "anchor_fallback_marker_count_max": 0,
+        "selected_anchor_markers_source": _repo_relative(
+            SELECTED_ANCHOR_MARKERS_JSON
+        ),
+        "selected_anchor_markers_source_sha256": _sha256_file(
+            SELECTED_ANCHOR_MARKERS_JSON
+        ),
+        "pressure_pair_anchor_install_status": "",
+        "pressure_pair_anchor_resolved_markers_json": "",
+        "pressure_pair_anchor_map_sha256": "",
+        "pressure_pair_anchor_source_flow_snapshot_sha256": "",
+        "pressure_pair_anchor_source_marker_geometry_sha256": "",
+        "pressure_pair_anchor_current_marker_geometry_sha256": "",
         "one_sided_marker_count_min": 0,
         "one_sided_anchor_fallback_marker_count_max": 0,
         "force_action_reaction_residual_max_n": 0.0,
@@ -410,6 +469,12 @@ def _payload(
         "fixed_solid_selected_formulation_source_sha256": _sha256_file(
             FIXED_SOLID_MATRIX_JSON
         ),
+        "selected_anchor_markers_source": _repo_relative(
+            SELECTED_ANCHOR_MARKERS_JSON
+        ),
+        "selected_anchor_markers_source_sha256": _sha256_file(
+            SELECTED_ANCHOR_MARKERS_JSON
+        ),
         "shared_snapshot_manifest": _repo_relative(SHARED_MANIFEST_PATH),
         "shared_snapshot_sha256": shared_manifest["field_sha256"],
         "source_reference_selection_candidate_status": reference_selection[
@@ -444,6 +509,10 @@ def _smoke_acceptance(row: Mapping[str, Any]) -> dict[str, Any]:
     )
     no_marker_invalid = int(row["invalid_marker_count_max"]) == 0
     anchor_fallback_zero = int(row["anchor_fallback_marker_count_max"]) == 0
+    anchor_selected_all = (
+        int(row["pressure_pair_anchor_active_marker_count_min"]) >= 24
+        and int(row["anchor_selected_marker_count_min"]) >= 24
+    )
     one_sided_complete = int(row["one_sided_marker_count_min"]) >= 24
     one_sided_fallback_zero = (
         int(row["one_sided_anchor_fallback_marker_count_max"]) == 0
@@ -458,6 +527,7 @@ def _smoke_acceptance(row: Mapping[str, Any]) -> dict[str, Any]:
             completed_requested_steps,
             finite_fields,
             no_marker_invalid,
+            anchor_selected_all,
             anchor_fallback_zero,
             one_sided_complete,
             one_sided_fallback_zero,
@@ -471,6 +541,7 @@ def _smoke_acceptance(row: Mapping[str, Any]) -> dict[str, Any]:
         "completed_requested_steps": completed_requested_steps,
         "finite_fields": finite_fields,
         "no_marker_invalid": no_marker_invalid,
+        "anchor_selected_all": anchor_selected_all,
         "anchor_fallback_zero": anchor_fallback_zero,
         "one_sided_complete": one_sided_complete,
         "one_sided_fallback_zero": one_sided_fallback_zero,
@@ -480,6 +551,12 @@ def _smoke_acceptance(row: Mapping[str, Any]) -> dict[str, Any]:
         "requested_step_count": int(row["requested_step_count"]),
         "completed_step_count": int(row["completed_step_count"]),
         "invalid_marker_count_max": int(row["invalid_marker_count_max"]),
+        "pressure_pair_anchor_active_marker_count_min": int(
+            row["pressure_pair_anchor_active_marker_count_min"]
+        ),
+        "anchor_selected_marker_count_min": int(
+            row["anchor_selected_marker_count_min"]
+        ),
         "one_sided_marker_count_min": int(row["one_sided_marker_count_min"]),
         "force_action_reaction_residual_max_n": float(
             row["force_action_reaction_residual_max_n"]
@@ -503,6 +580,20 @@ def _history_from_report(
         "reference_formulation_candidate": REFERENCE_FORMULATION_CANDIDATE,
         "pressure_pair_policy_candidate": PRESSURE_PAIR_POLICY_CANDIDATE,
         "one_sided_pressure_policy_candidate": ONE_SIDED_PRESSURE_POLICY_CANDIDATE,
+        "selected_anchor_markers_source": row["selected_anchor_markers_source"],
+        "selected_anchor_markers_source_sha256": row[
+            "selected_anchor_markers_source_sha256"
+        ],
+        "pressure_pair_anchor_map_sha256": row["pressure_pair_anchor_map_sha256"],
+        "pressure_pair_anchor_source_flow_snapshot_sha256": row[
+            "pressure_pair_anchor_source_flow_snapshot_sha256"
+        ],
+        "pressure_pair_anchor_source_marker_geometry_sha256": row[
+            "pressure_pair_anchor_source_marker_geometry_sha256"
+        ],
+        "pressure_pair_anchor_current_marker_geometry_sha256": row[
+            "pressure_pair_anchor_current_marker_geometry_sha256"
+        ],
         "history": list(report.get("history", [])),
         "scope_limit": SCOPE_LIMIT,
     }

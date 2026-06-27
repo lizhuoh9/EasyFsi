@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -110,6 +112,10 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     fluid = _build_fluid(config, runtime)
     _initialize_computed_flow(fluid, config)
     markers = _build_markers(config, runtime)
+    anchor_install_report = _install_selected_pressure_pair_anchor_markers(
+        markers,
+        config,
+    )
     solid = _build_solid(config, runtime)
     fixed_mask, tip_mask = _solid_masks(solid, config)
     mu_pa, lambda_pa = _lame_parameters(config)
@@ -385,6 +391,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 **_marker_force_report_fields(latest_force_report),
                 **_stress_sampling_report_fields(latest_stress_report),
                 **_marker_traction_report_fields(markers),
+                **anchor_install_report,
                 **_scatter_report_fields(latest_scatter_report),
                 "mpm_external_force_n": latest_solid_report.external_force_n,
                 "max_displacement_m": step_displacement["max_displacement_m"],
@@ -609,6 +616,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "max_abs_traction_pa": latest_stress_report.max_abs_traction_pa,
         "total_marker_force_n": latest_force_report.total_marker_force_n,
         **_marker_force_report_fields(latest_force_report),
+        **_stress_sampling_report_fields(latest_stress_report),
+        **_marker_traction_report_fields(markers),
+        **anchor_install_report,
         "scatter_invalid_marker_count": latest_scatter_report.invalid_marker_count,
         "scatter_active_marker_count": latest_scatter_report.active_marker_count,
         "scatter_active_particle_count": latest_scatter_report.active_particle_count,
@@ -622,6 +632,12 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         ),
         "surface_feedback_max_marker_displacement_m": (
             latest_feedback_report.max_marker_displacement_m
+        ),
+        "final_stress_marker_diagnostics": markers.stress_marker_diagnostics(),
+        "final_stress_face_diagnostics": markers.stress_face_diagnostics(
+            primary_region_id=PRIMARY_REGION_ID,
+            secondary_region_id=SECONDARY_REGION_ID,
+            streamwise_axis_index=STREAMWISE_AXIS_INDEX,
         ),
         "history": history,
         "max_displacement_m": max_displacement,
@@ -963,6 +979,14 @@ def _traction_one_sided_pressure_pair_policy(config: Any) -> str:
     )
 
 
+def _traction_pressure_pair_anchor_markers_json(config: Any) -> str | None:
+    value = getattr(config, "traction_pressure_pair_anchor_markers_json", None)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _traction_marker_face_count(config: Any) -> int:
     if _traction_marker_layout(config) == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE:
         return 1
@@ -995,6 +1019,7 @@ def _is_default_traction_formulation(config: Any) -> bool:
         and _traction_one_sided_secondary_fluid_side_normal_sign(config) is None
         and _traction_one_sided_pressure_pair_policy(config)
         == TRACTION_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR
+        and _traction_pressure_pair_anchor_markers_json(config) is None
     )
 
 
@@ -1261,6 +1286,23 @@ def _validate_rectangular_solid_config(config: Any) -> None:
     ):
         raise ValueError(
             "non-default traction formulations are fixed-solid diagnostics only"
+        )
+    anchor_markers_json = _traction_pressure_pair_anchor_markers_json(config)
+    if (
+        _is_selected_traction_formulation_coupled_smoke(config)
+        and pressure_pair_policy == TRACTION_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR
+        and anchor_markers_json is None
+    ):
+        raise ValueError(
+            "selected coupled smoke requires "
+            "traction_pressure_pair_anchor_markers_json"
+        )
+    if (
+        anchor_markers_json is not None
+        and not _is_selected_traction_formulation_coupled_smoke(config)
+    ):
+        raise ValueError(
+            "traction_pressure_pair_anchor_markers_json is selected coupled smoke only"
         )
     if config.step_count == 0 and int(getattr(config, "preflow_steps", 0)) <= 0:
         raise ValueError("step_count=0 is only valid for preflow-only diagnostics")
@@ -2326,6 +2368,278 @@ def _build_markers(
         ),
     )
     return markers
+
+
+def _install_selected_pressure_pair_anchor_markers(
+    markers: HibmMpmSurfaceMarkers,
+    config: Any,
+) -> dict[str, object]:
+    anchor_markers_json = _traction_pressure_pair_anchor_markers_json(config)
+    if anchor_markers_json is None:
+        if _is_selected_traction_formulation_coupled_smoke(config):
+            raise ValueError(
+                "selected coupled smoke requires "
+                "traction_pressure_pair_anchor_markers_json"
+            )
+        return _pressure_pair_anchor_install_report(
+            status="not_requested",
+            source="unset",
+            marker_count=int(markers.marker_count),
+        )
+    if not _is_selected_traction_formulation_coupled_smoke(config):
+        raise ValueError(
+            "traction_pressure_pair_anchor_markers_json is selected coupled smoke only"
+        )
+
+    (
+        marker_payload,
+        resolved_markers_json,
+        wrapper_payloads,
+        wrapper_paths,
+    ) = _load_pressure_pair_anchor_marker_payload(Path(anchor_markers_json))
+    _assert_pressure_pair_anchor_marker_geometry_matches(markers, marker_payload)
+    inside_cells, outside_cells = _pressure_pair_anchor_cells_from_marker_payload(
+        marker_payload,
+    )
+    markers.set_pressure_pair_anchor_cells(
+        inside_cells=inside_cells,
+        outside_cells=outside_cells,
+    )
+
+    metadata_sources = list(wrapper_payloads) + [marker_payload]
+    return _pressure_pair_anchor_install_report(
+        status="installed",
+        source="marker_diagnostics_json",
+        marker_count=int(markers.marker_count),
+        active_marker_count=len(inside_cells),
+        source_json=anchor_markers_json,
+        resolved_json=resolved_markers_json.as_posix(),
+        wrapper_jsons=[path.as_posix() for path in wrapper_paths],
+        wrapper_depth=len(wrapper_paths),
+        anchor_map_sha256=_first_metadata_value(
+            metadata_sources,
+            "anchor_map_sha256",
+        ),
+        source_flow_snapshot_sha256=_first_metadata_value(
+            metadata_sources,
+            "anchor_source_flow_snapshot_sha256",
+            "flow_snapshot_sha256",
+            "new_or_confirmed_flow_snapshot_sha256",
+        ),
+        source_marker_geometry_sha256=_first_metadata_value(
+            metadata_sources,
+            "anchor_source_marker_geometry_sha256",
+            "marker_geometry_sha256",
+        ),
+        fixed_solid_snapshot_policy=_first_metadata_value(
+            metadata_sources,
+            "fixed_solid_snapshot_policy",
+        ),
+    )
+
+
+def _load_pressure_pair_anchor_marker_payload(
+    path: Path,
+) -> tuple[dict[str, Any], Path, tuple[dict[str, Any], ...], tuple[Path, ...]]:
+    current = path
+    wrappers: list[dict[str, Any]] = []
+    wrapper_paths: list[Path] = []
+    seen: set[str] = set()
+    for _depth in range(8):
+        current_key = current.resolve().as_posix()
+        if current_key in seen:
+            raise ValueError("pressure pair anchor marker diagnostics source cycle")
+        seen.add(current_key)
+        payload = json.loads(current.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("pressure pair anchor marker diagnostics must be an object")
+        if isinstance(payload.get("markers"), list):
+            return payload, current, tuple(wrappers), tuple(wrapper_paths)
+        source = payload.get("source_marker_diagnostics_json")
+        if not source:
+            raise ValueError(
+                "pressure pair anchor marker diagnostics must contain markers "
+                "or source_marker_diagnostics_json"
+            )
+        wrappers.append(payload)
+        wrapper_paths.append(current)
+        current = Path(str(source))
+    raise ValueError("pressure pair anchor marker diagnostics source chain too deep")
+
+
+def _pressure_pair_anchor_cells_from_marker_payload(
+    payload: Mapping[str, Any],
+) -> tuple[list[tuple[int, int, int]], list[tuple[int, int, int]]]:
+    marker_payloads = _pressure_pair_anchor_marker_entries(payload)
+    inside_cells: list[tuple[int, int, int]] = []
+    outside_cells: list[tuple[int, int, int]] = []
+    for index, marker in enumerate(marker_payloads):
+        if not bool(marker.get("pressure_pair_anchor_active", False)):
+            raise ValueError(
+                "pressure pair anchor marker payload contains inactive marker "
+                f"{index}"
+            )
+        inside_cells.append(
+            _pressure_pair_anchor_cell(
+                marker.get("pressure_pair_anchor_inside_cell"),
+                marker_index=index,
+                field_name="pressure_pair_anchor_inside_cell",
+            )
+        )
+        outside_cells.append(
+            _pressure_pair_anchor_cell(
+                marker.get("pressure_pair_anchor_outside_cell"),
+                marker_index=index,
+                field_name="pressure_pair_anchor_outside_cell",
+            )
+        )
+    return inside_cells, outside_cells
+
+
+def _pressure_pair_anchor_marker_entries(
+    payload: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    markers_payload = payload.get("markers")
+    if not isinstance(markers_payload, list) or not markers_payload:
+        raise ValueError("pressure pair anchor marker payload must contain markers")
+    entries: list[Mapping[str, Any]] = []
+    for index, marker in enumerate(markers_payload):
+        if not isinstance(marker, Mapping):
+            raise ValueError(f"pressure pair anchor marker {index} must be an object")
+        entries.append(marker)
+    declared_count = payload.get("marker_count")
+    if declared_count is not None and int(declared_count) != len(entries):
+        raise ValueError("pressure pair anchor marker_count does not match markers")
+    return entries
+
+
+def _pressure_pair_anchor_cell(
+    value: object,
+    *,
+    marker_index: int,
+    field_name: str,
+) -> tuple[int, int, int]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(f"{field_name} for marker {marker_index} must have 3 cells")
+    cell = tuple(int(component) for component in value)
+    if any(component < 0 for component in cell):
+        raise ValueError(f"{field_name} for marker {marker_index} must be in-bounds")
+    return cell
+
+
+def _assert_pressure_pair_anchor_marker_geometry_matches(
+    markers: HibmMpmSurfaceMarkers,
+    payload: Mapping[str, Any],
+) -> None:
+    marker_payloads = _pressure_pair_anchor_marker_entries(payload)
+    marker_count = int(markers.marker_count)
+    if len(marker_payloads) != marker_count:
+        raise ValueError("pressure pair anchor marker count must match live markers")
+    positions = markers.x_gamma_m.to_numpy()[:marker_count]
+    normals = markers.n_gamma.to_numpy()[:marker_count]
+    regions = markers.region_id.to_numpy()[:marker_count]
+    for index, marker in enumerate(marker_payloads):
+        marker_index = int(marker.get("marker_index", index))
+        if marker_index != index:
+            raise ValueError("pressure pair anchor marker indices must be ordered")
+        if int(marker.get("region_id", -1)) != int(regions[index]):
+            raise ValueError(
+                "pressure pair anchor marker region mismatch at marker "
+                f"{index}"
+            )
+        expected_position = _pressure_pair_anchor_vector3(
+            marker.get("position_m"),
+            marker_index=index,
+            field_name="position_m",
+        )
+        expected_normal = _pressure_pair_anchor_vector3(
+            marker.get("normal"),
+            marker_index=index,
+            field_name="normal",
+        )
+        if not np.allclose(
+            positions[index],
+            np.asarray(expected_position, dtype=np.float64),
+            rtol=0.0,
+            atol=1.0e-7,
+        ):
+            raise ValueError(
+                "pressure pair anchor marker position mismatch at marker "
+                f"{index}"
+            )
+        if not np.allclose(
+            normals[index],
+            np.asarray(expected_normal, dtype=np.float64),
+            rtol=0.0,
+            atol=1.0e-7,
+        ):
+            raise ValueError(
+                "pressure pair anchor marker normal mismatch at marker "
+                f"{index}"
+            )
+
+
+def _pressure_pair_anchor_vector3(
+    value: object,
+    *,
+    marker_index: int,
+    field_name: str,
+) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(f"{field_name} for marker {marker_index} must be length 3")
+    return tuple(float(component) for component in value)
+
+
+def _first_metadata_value(
+    payloads: list[Mapping[str, Any]],
+    *keys: str,
+) -> str:
+    for payload in payloads:
+        for key in keys:
+            value = payload.get(key)
+            if value is not None and str(value) != "":
+                return str(value)
+    return ""
+
+
+def _pressure_pair_anchor_install_report(
+    *,
+    status: str,
+    source: str,
+    marker_count: int,
+    active_marker_count: int = 0,
+    source_json: str = "",
+    resolved_json: str = "",
+    wrapper_jsons: list[str] | None = None,
+    wrapper_depth: int = 0,
+    anchor_map_sha256: str = "",
+    source_flow_snapshot_sha256: str = "",
+    source_marker_geometry_sha256: str = "",
+    fixed_solid_snapshot_policy: str = "",
+) -> dict[str, object]:
+    return {
+        "pressure_pair_anchor_install_status": status,
+        "pressure_pair_anchor_source": source,
+        "pressure_pair_anchor_markers_json": source_json,
+        "pressure_pair_anchor_resolved_markers_json": resolved_json,
+        "pressure_pair_anchor_wrapper_jsons": list(wrapper_jsons or []),
+        "pressure_pair_anchor_wrapper_depth": int(wrapper_depth),
+        "pressure_pair_anchor_active_marker_count": int(active_marker_count),
+        "pressure_pair_anchor_expected_marker_count": int(marker_count),
+        "pressure_pair_anchor_map_sha256": anchor_map_sha256,
+        "pressure_pair_anchor_source_flow_snapshot_sha256": (
+            source_flow_snapshot_sha256
+        ),
+        "pressure_pair_anchor_source_marker_geometry_sha256": (
+            source_marker_geometry_sha256
+        ),
+        "pressure_pair_anchor_current_marker_geometry_sha256": (
+            source_marker_geometry_sha256 if active_marker_count == marker_count else ""
+        ),
+        "pressure_pair_anchor_fixed_solid_snapshot_policy": (
+            fixed_solid_snapshot_policy
+        ),
+    }
 
 
 def _build_solid(
