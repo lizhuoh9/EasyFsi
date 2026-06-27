@@ -92,12 +92,13 @@ class AnsysVerticalFlapPressurePairAnchorMapArtifactTests(unittest.TestCase):
         self.assertEqual(_sha256_file(SHARED_FIELDS), EXPECTED_SHARED_SHA)
         self.assertEqual(payload["completed_formulation_count"], len(EXPECTED_SCENARIOS))
         self.assertEqual(payload["scenario_count"], len(EXPECTED_SCENARIOS))
-        self.assertIn(
+        self.assertEqual(
             payload["candidate_status"],
-            {
-                "pressure_pair_anchor_map_no_stable_candidate",
-                "pressure_pair_anchor_map_stable_candidate_found",
-            },
+            "pressure_pair_anchor_map_stable_candidate_found",
+        )
+        self.assertEqual(
+            payload["stable_pressure_pair_policy"],
+            "baseline_anchored_cell_pair",
         )
         self.assertIsNone(payload["reference_formulation_candidate"])
         _assert_scope(self, payload["scope_limit"])
@@ -138,8 +139,32 @@ class AnsysVerticalFlapPressurePairAnchorMapArtifactTests(unittest.TestCase):
                 by_scenario[scenario]["pressure_pair_policy"],
                 "baseline_anchored_cell_pair",
             )
-            self.assertEqual(by_scenario[scenario]["anchor_source_scenario"], EXPECTED_BASELINE_SCENARIO)
+            self.assertEqual(
+                by_scenario[scenario]["anchor_source_scenario"],
+                EXPECTED_BASELINE_SCENARIO,
+            )
             self.assertNotEqual(by_scenario[scenario]["anchor_map_sha256"], "")
+            self.assertEqual(
+                int(
+                    by_scenario[scenario][
+                        "pressure_pair_anchor_selected_marker_count"
+                    ]
+                ),
+                24,
+            )
+            self.assertEqual(
+                int(
+                    by_scenario[scenario][
+                        "pressure_pair_anchor_fallback_marker_count"
+                    ]
+                ),
+                0,
+            )
+        anchored_ratios = {
+            round(float(by_scenario[scenario]["force_ratio_to_anchor_baseline"]), 12)
+            for scenario in EXPECTED_ANCHORED_SCENARIOS
+        }
+        self.assertEqual(len(anchored_ratios), 1)
 
     def test_anchor_map_candidate_gate_is_artifact_backed(self):
         payload = _read_json(MATRIX_JSON)
@@ -155,25 +180,27 @@ class AnsysVerticalFlapPressurePairAnchorMapArtifactTests(unittest.TestCase):
         self.assertIsInstance(acceptance["anchor_fallback_zero"], bool)
         self.assertIsInstance(acceptance["scope_sampling_only"], bool)
 
-        if payload["candidate_status"] == "pressure_pair_anchor_map_stable_candidate_found":
-            self.assertEqual(
-                payload["stable_pressure_pair_policy"],
-                "baseline_anchored_cell_pair",
-            )
-            self.assertTrue(acceptance["accepted"])
-            self.assertLessEqual(
-                float(acceptance["force_ratio_relative_span"]),
-                float(gate["force_ratio_relative_span_max"]),
-            )
-            self.assertLessEqual(
-                float(acceptance["max_face_traction_decomposition_residual_pa"]),
-                float(gate["traction_decomposition_residual_max"]),
-            )
-            self.assertTrue(acceptance["anchor_selected_all_markers"])
-            self.assertTrue(acceptance["anchor_fallback_zero"])
-        else:
-            self.assertFalse(acceptance["accepted"])
-            self.assertIsNone(payload["stable_pressure_pair_policy"])
+        self.assertEqual(
+            payload["candidate_status"],
+            "pressure_pair_anchor_map_stable_candidate_found",
+        )
+        self.assertEqual(
+            payload["stable_pressure_pair_policy"],
+            "baseline_anchored_cell_pair",
+        )
+        self.assertTrue(acceptance["accepted"])
+        self.assertEqual(float(acceptance["force_ratio_relative_span"]), 0.0)
+        self.assertLessEqual(
+            float(acceptance["force_ratio_relative_span"]),
+            float(gate["force_ratio_relative_span_max"]),
+        )
+        self.assertLessEqual(
+            float(acceptance["max_face_traction_decomposition_residual_pa"]),
+            float(gate["traction_decomposition_residual_max"]),
+        )
+        self.assertTrue(acceptance["anchor_selected_all_markers"])
+        self.assertTrue(acceptance["anchor_fallback_zero"])
+        self.assertTrue(acceptance["scope_sampling_only"])
 
     def test_marker_diagnostics_include_anchor_fields(self):
         payload = _read_json(MATRIX_JSON)
