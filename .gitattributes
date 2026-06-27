@@ -1,0 +1,6 @@
+# ANSYS validation artifact checksums are generated from Windows text-mode
+# outputs in this checkout. Keep those artifact bytes stable on CI checkouts.
+validation_runs/ansys_vertical_flap_fsi/**/*.json text eol=crlf
+validation_runs/ansys_vertical_flap_fsi/**/*.csv text eol=crlf
+validation_runs/ansys_vertical_flap_fsi/**/*.md text eol=crlf
+validation_runs/ansys_vertical_flap_fsi/**/*.sha256 text eol=crlf
