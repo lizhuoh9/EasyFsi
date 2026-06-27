@@ -170,6 +170,7 @@ class VerticalFlapFsiConfig:
     traction_pressure_pair_anchor_markers_json: str | None = None
     traction_viscosity_pa_s: float = 0.0
     allow_selected_traction_formulation_coupled_smoke: bool = False
+    allow_selected_traction_formulation_coupled_long_validation: bool = False
     export_final_flow_snapshot: bool = False
     enforce_plane_strain_x: bool = True
     mpm_support_radius_m: float = 0.006

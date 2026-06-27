@@ -1026,8 +1026,19 @@ def _is_default_traction_formulation(config: Any) -> bool:
 def _is_selected_traction_formulation_coupled_smoke(config: Any) -> bool:
     if not bool(getattr(config, "allow_selected_traction_formulation_coupled_smoke", False)):
         return False
+    max_selected_step_count = (
+        50
+        if bool(
+            getattr(
+                config,
+                "allow_selected_traction_formulation_coupled_long_validation",
+                False,
+            )
+        )
+        else 10
+    )
     return (
-        0 < int(getattr(config, "step_count", 0)) <= 10
+        0 < int(getattr(config, "step_count", 0)) <= max_selected_step_count
         and _traction_marker_layout(config)
         == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES
         and _traction_pressure_sampling_mode(config) == TRACTION_PRESSURE_ONE_SIDED

@@ -39,26 +39,11 @@ EXPECTED_SOURCE_SCRIPT = (
 EXPECTED_CANDIDATE = "anchored_dual_face_pressure_pair_with_per_face_one_sided"
 EXPECTED_PREFLIGHT_SCENARIO = "selected_formulation_coupled_preflight_1step"
 EXPECTED_SMOKE_SCENARIO = "selected_formulation_coupled_smoke_5step"
-EXPECTED_PENDING_BASE_BLOCKERS = {
-    "coupled_fsi_validation_pending",
-    "no_fluent_parity_claim",
-}
-EXPECTED_PENDING_SMOKE_BLOCKERS = {
-    "blocked_nan_or_inf",
-    "blocked_invalid_marker_sampling",
-    "blocked_anchor_fallback",
-    "blocked_one_sided_incomplete",
-    "blocked_force_residual",
-    "blocked_velocity_threshold",
-    "blocked_pressure_threshold",
-    "blocked_solid_displacement_threshold",
-    "blocked_requested_5step_not_completed",
-    "not_run",
-}
 EXPECTED_PASS_BLOCKERS = {
     "long_coupled_validation_pending",
     "no_fluent_parity_claim",
 }
+EXPECTED_RETIRED_BLOCKERS = ["coupled_fsi_validation_pending"]
 
 
 class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
@@ -155,12 +140,9 @@ class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
         first_step = history[0]
         report = diagnostics["report"]
 
-        self.assertIn(
+        self.assertEqual(
             payload["candidate_status"],
-            {
-                "selected_formulation_coupled_smoke_pending",
-                "selected_formulation_coupled_smoke_passed",
-            },
+            "selected_formulation_coupled_smoke_passed",
         )
         self.assertEqual(row["smoke_status"], "blocked_requested_5step_not_completed")
         self.assertEqual(row["run_status"], "blocked")
@@ -195,56 +177,52 @@ class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
         self.assertEqual(int(first_step["one_sided_pressure_marker_count"]), 24)
         self.assertEqual(int(report["surface_feedback_updated_marker_count"]), 24)
 
-    def test_five_step_status_is_pass_or_exact_fail_closed(self):
+    def test_five_step_status_is_exact_pass(self):
         payload = _read_json(MATRIX_JSON)
         row = _row_by_scenario(payload)[EXPECTED_SMOKE_SCENARIO]
         acceptance = payload["smoke_acceptance"]
         blockers = {item["blocker"] for item in payload["candidate_blockers"]}
 
-        if payload["candidate_status"] == "selected_formulation_coupled_smoke_passed":
-            self.assertTrue(acceptance["accepted"])
-            self.assertEqual(row["run_status"], "completed")
-            self.assertEqual(row["smoke_status"], "passed")
-            self.assertEqual(blockers, EXPECTED_PASS_BLOCKERS)
-            self.assertEqual(
-                int(row["completed_step_count"]),
-                int(row["requested_step_count"]),
-            )
-            self.assertEqual(int(row["completed_step_count"]), 5)
-            self.assertTrue(bool(row["fluid_finite"]))
-            self.assertTrue(bool(row["pressure_finite"]))
-            self.assertTrue(bool(row["solid_position_finite"]))
-            self.assertEqual(int(row["invalid_marker_count_max"]), 0)
-            self.assertGreaterEqual(
-                int(row["pressure_pair_anchor_active_marker_count_min"]),
-                24,
-            )
-            self.assertGreaterEqual(int(row["anchor_selected_marker_count_min"]), 24)
-            self.assertEqual(int(row["anchor_fallback_marker_count_max"]), 0)
-            self.assertGreaterEqual(int(row["one_sided_marker_count_min"]), 24)
-            self.assertEqual(int(row["one_sided_anchor_fallback_marker_count_max"]), 0)
-            self.assertLessEqual(
-                float(row["force_action_reaction_residual_max_n"]),
-                float(payload["stable_candidate_gate"]["force_action_reaction_residual_max_n"]),
-            )
-            self.assertIn(
-                "coupled_fsi_validation_pending",
-                payload["historical_blockers_retired"],
-            )
-        else:
-            self.assertEqual(
-                payload["candidate_status"],
-                "selected_formulation_coupled_smoke_pending",
-            )
-            self.assertFalse(acceptance["accepted"])
-            self.assertTrue(EXPECTED_PENDING_BASE_BLOCKERS.issubset(blockers))
-            self.assertIn(row["smoke_status"], EXPECTED_PENDING_SMOKE_BLOCKERS)
-            self.assertIn(row["smoke_status"], blockers)
-            self.assertEqual(row["run_status"], "blocked")
-            self.assertNotEqual(row["smoke_status"], "passed")
-            self.assertIn("coupled_fsi_validation_pending", blockers)
-            self.assertNotEqual(row["first_failed_step"], "")
-            self.assertNotEqual(row["first_failed_gate"], "")
+        self.assertEqual(
+            payload["candidate_status"],
+            "selected_formulation_coupled_smoke_passed",
+        )
+        self.assertTrue(acceptance["accepted"])
+        self.assertEqual(row["run_status"], "completed")
+        self.assertEqual(row["smoke_status"], "passed")
+        self.assertEqual(blockers, EXPECTED_PASS_BLOCKERS)
+        self.assertEqual(
+            payload["historical_blockers_retired"],
+            EXPECTED_RETIRED_BLOCKERS,
+        )
+        self.assertEqual(
+            int(row["completed_step_count"]),
+            int(row["requested_step_count"]),
+        )
+        self.assertEqual(int(row["completed_step_count"]), 5)
+        self.assertEqual(row["first_failed_step"], "")
+        self.assertEqual(row["first_failed_gate"], "")
+        self.assertEqual(row["first_failed_gate_value"], "")
+        self.assertTrue(bool(row["fluid_finite"]))
+        self.assertTrue(bool(row["pressure_finite"]))
+        self.assertTrue(bool(row["solid_position_finite"]))
+        self.assertEqual(int(row["invalid_marker_count_max"]), 0)
+        self.assertGreaterEqual(
+            int(row["pressure_pair_anchor_active_marker_count_min"]),
+            24,
+        )
+        self.assertGreaterEqual(int(row["anchor_selected_marker_count_min"]), 24)
+        self.assertEqual(int(row["anchor_fallback_marker_count_max"]), 0)
+        self.assertGreaterEqual(int(row["one_sided_marker_count_min"]), 24)
+        self.assertEqual(int(row["one_sided_anchor_fallback_marker_count_max"]), 0)
+        self.assertLessEqual(
+            float(row["force_action_reaction_residual_max_n"]),
+            float(
+                payload["stable_candidate_gate"][
+                    "force_action_reaction_residual_max_n"
+                ]
+            ),
+        )
 
         self.assertIn("no_fluent_parity_claim", blockers)
         completed_steps = int(row["completed_step_count"])

@@ -547,6 +547,13 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             solid_mpm_fsi_runner._validate_rectangular_solid_config(
                 replace(selected_coupled_smoke, step_count=50)
             )
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            replace(
+                selected_coupled_smoke,
+                step_count=50,
+                allow_selected_traction_formulation_coupled_long_validation=True,
+            )
+        )
         with self.assertRaisesRegex(
             ValueError,
             "fixed-solid diagnostics only|traction_one_sided_pressure_pair_policy",
