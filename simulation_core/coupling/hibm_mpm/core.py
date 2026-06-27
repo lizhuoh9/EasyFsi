@@ -79,13 +79,18 @@ STRESS_PRESSURE_PROBE_LADDER_MODE_CURRENT_NORMAL_CELL = (
 )
 STRESS_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER = "independent_ladder"
 STRESS_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR = "symmetric_cell_pair"
+STRESS_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR = (
+    "baseline_anchored_cell_pair"
+)
 STRESS_PRESSURE_PAIR_POLICY_CODES = {
     STRESS_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER: 0,
     STRESS_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR: 1,
+    STRESS_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR: 2,
 }
 STRESS_PRESSURE_PAIR_POLICY_NAMES = {
     0: STRESS_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER,
     1: STRESS_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR,
+    2: STRESS_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR,
 }
 
 
@@ -112,6 +117,18 @@ def _normalize_vector3(value: Sequence[float], *, name: str) -> tuple[float, flo
     if norm <= 0.0:
         raise ValueError(f"{name} must contain non-zero vectors")
     return tuple(component / norm for component in vector)
+
+
+def _cell_vector3(value: Sequence[int], *, name: str) -> tuple[int, int, int]:
+    try:
+        vector = tuple(int(component) for component in value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must contain exactly 3 components") from exc
+    if len(vector) != 3:
+        raise ValueError(f"{name} must contain exactly 3 components")
+    if any(component < 0 for component in vector):
+        raise ValueError(f"{name} must contain non-negative cell indices")
+    return (vector[0], vector[1], vector[2])
 
 
 def _positive_divergence_stencil_touch_mask(row_mask: np.ndarray) -> np.ndarray:
@@ -436,6 +453,24 @@ class HibmMpmSurfaceMarkers:
             dtype=ti.f64,
             shape=self.marker_capacity,
         )
+        self.pressure_pair_anchor_active = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self.pressure_pair_anchor_inside_cell = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self.pressure_pair_anchor_outside_cell = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._stress_pressure_pair_anchor_fallback_used = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
         self.F_gamma_n = ti.Vector.field(3, dtype=ti.f64, shape=self.marker_capacity)
         self.projection_triangle_indices = ti.Vector.field(
             3,
@@ -698,6 +733,7 @@ class HibmMpmSurfaceMarkers:
         # index: establish the unset sentinel before anyone can sample.
         self._reset_stress_diagnostics_kernel(int(self.marker_capacity))
         self.reset_pressure_anchor_cells()
+        self.reset_pressure_pair_anchor_cells()
         self._reset_node_anchor_cell_unset_kernel()
 
     @ti.kernel
@@ -744,11 +780,19 @@ class HibmMpmSurfaceMarkers:
             self._stress_pressure_pair_outside_cell[marker] = ti.Vector([-1, -1, -1])
             self._stress_pressure_pair_cell_delta[marker] = -1
             self._stress_pressure_pair_symmetry_residual_cells[marker] = -1.0
+            self._stress_pressure_pair_anchor_fallback_used[marker] = 0
 
     @ti.kernel
     def _reset_pressure_anchor_cells_kernel(self):
         for marker in self.marker_pressure_anchor_cell:
             self.marker_pressure_anchor_cell[marker] = ti.Vector([-1, -1, -1])
+
+    @ti.kernel
+    def _reset_pressure_pair_anchor_cells_kernel(self):
+        for marker in self.pressure_pair_anchor_active:
+            self.pressure_pair_anchor_active[marker] = 0
+            self.pressure_pair_anchor_inside_cell[marker] = ti.Vector([-1, -1, -1])
+            self.pressure_pair_anchor_outside_cell[marker] = ti.Vector([-1, -1, -1])
 
     @ti.kernel
     def _reset_node_anchor_cell_unset_kernel(self):
@@ -766,6 +810,10 @@ class HibmMpmSurfaceMarkers:
         (-1, -1, -1) sentinel and stay on the invalid path in the sampler.
         """
         self._reset_pressure_anchor_cells_kernel()
+
+    def reset_pressure_pair_anchor_cells(self) -> None:
+        """Reset every marker's pressure-pair anchor cells to unset."""
+        self._reset_pressure_pair_anchor_cells_kernel()
 
     def reset_stress_diagnostics(self, marker_count: int | None = None) -> None:
         count = int(self.marker_count if marker_count is None else marker_count)
@@ -828,6 +876,7 @@ class HibmMpmSurfaceMarkers:
             self.region_id[marker] = int(region_ids[marker])
             self.t_gamma_pa[marker] = (0.0, 0.0, 0.0)
             self.F_gamma_n[marker] = (0.0, 0.0, 0.0)
+        self.reset_pressure_pair_anchor_cells()
         self.reset_stress_diagnostics(count)
 
     def set_pressure_probe_origins_m(
@@ -841,6 +890,32 @@ class HibmMpmSurfaceMarkers:
             origin = _vector3(origins_m[marker], name="pressure_probe_origins_m")
             self.pressure_probe_origin_m[marker] = origin
             self.pressure_probe_origin_explicit[marker] = 1
+
+    def set_pressure_pair_anchor_cells(
+        self,
+        *,
+        inside_cells: Sequence[Sequence[int]],
+        outside_cells: Sequence[Sequence[int]],
+    ) -> None:
+        count = int(self.marker_count)
+        if len(inside_cells) != count or len(outside_cells) != count:
+            raise ValueError("pressure pair anchor marker count must match markers")
+        active = np.zeros((self.marker_capacity,), dtype=np.int32)
+        inside = np.full((self.marker_capacity, 3), -1, dtype=np.int32)
+        outside = np.full((self.marker_capacity, 3), -1, dtype=np.int32)
+        for marker in range(count):
+            inside[marker, :] = _cell_vector3(
+                inside_cells[marker],
+                name="inside_cells",
+            )
+            outside[marker, :] = _cell_vector3(
+                outside_cells[marker],
+                name="outside_cells",
+            )
+            active[marker] = 1
+        self.pressure_pair_anchor_active.from_numpy(active)
+        self.pressure_pair_anchor_inside_cell.from_numpy(inside)
+        self.pressure_pair_anchor_outside_cell.from_numpy(outside)
 
     def set_projection_triangles(
         self,
@@ -3037,6 +3112,7 @@ class HibmMpmSurfaceMarkers:
             diagnostic_pressure_pair_outside_cell = ti.Vector([-1, -1, -1])
             diagnostic_pressure_pair_cell_delta = -1
             diagnostic_pressure_pair_symmetry_residual_cells = ti.cast(-1.0, ti.f64)
+            diagnostic_pressure_pair_anchor_fallback_used = 0
             if pressure_sample_valid:
                 diagnostic_fluid_side_pressure_pa = diagnostic_base_pressure_pa
                 diagnostic_probe_mode = 1
@@ -3075,6 +3151,105 @@ class HibmMpmSurfaceMarkers:
                     ny,
                     nz,
                 )
+                if pressure_pair_policy_code == 2:
+                    anchor_inside_cell = self.pressure_pair_anchor_inside_cell[marker]
+                    anchor_outside_cell = self.pressure_pair_anchor_outside_cell[marker]
+                    anchor_active = self.pressure_pair_anchor_active[marker]
+                    anchor_inside_in_bounds = 0
+                    anchor_outside_in_bounds = 0
+                    if (
+                        anchor_inside_cell.x >= 0
+                        and anchor_inside_cell.x < nx
+                        and anchor_inside_cell.y >= 0
+                        and anchor_inside_cell.y < ny
+                        and anchor_inside_cell.z >= 0
+                        and anchor_inside_cell.z < nz
+                    ):
+                        anchor_inside_in_bounds = 1
+                    if (
+                        anchor_outside_cell.x >= 0
+                        and anchor_outside_cell.x < nx
+                        and anchor_outside_cell.y >= 0
+                        and anchor_outside_cell.y < ny
+                        and anchor_outside_cell.z >= 0
+                        and anchor_outside_cell.z < nz
+                    ):
+                        anchor_outside_in_bounds = 1
+                    if (
+                        anchor_active != 0
+                        and anchor_inside_in_bounds != 0
+                        and anchor_outside_in_bounds != 0
+                    ):
+                        sampled_inside = ti.cast(
+                            pressure_field[
+                                anchor_inside_cell.x,
+                                anchor_inside_cell.y,
+                                anchor_inside_cell.z,
+                            ],
+                            ti.f64,
+                        )
+                        sampled_outside = ti.cast(
+                            pressure_field[
+                                anchor_outside_cell.x,
+                                anchor_outside_cell.y,
+                                anchor_outside_cell.z,
+                            ],
+                            ti.f64,
+                        )
+                        inside_pressure = sampled_inside
+                        outside_pressure = sampled_outside
+                        inside_found = 1
+                        outside_found = 1
+                        diagnostic_inside_pressure_pa = sampled_inside
+                        diagnostic_outside_pressure_pa = sampled_outside
+                        diagnostic_inside_pressure_found = 1
+                        diagnostic_outside_pressure_found = 1
+                        diagnostic_inside_probe_rung = -1
+                        diagnostic_outside_probe_rung = -1
+                        diagnostic_inside_probe_distance_m = ti.cast(0.0, ti.f64)
+                        diagnostic_outside_probe_distance_m = ti.cast(0.0, ti.f64)
+                        diagnostic_inside_probe_cell = anchor_inside_cell
+                        diagnostic_outside_probe_cell = anchor_outside_cell
+                        diagnostic_inside_probe_grid_coordinate = ti.Vector(
+                            [
+                                ti.cast(anchor_inside_cell.x, ti.f64),
+                                ti.cast(anchor_inside_cell.y, ti.f64),
+                                ti.cast(anchor_inside_cell.z, ti.f64),
+                            ]
+                        )
+                        diagnostic_outside_probe_grid_coordinate = ti.Vector(
+                            [
+                                ti.cast(anchor_outside_cell.x, ti.f64),
+                                ti.cast(anchor_outside_cell.y, ti.f64),
+                                ti.cast(anchor_outside_cell.z, ti.f64),
+                            ]
+                        )
+                        diagnostic_inside_probe_fluid_weight = ti.cast(1.0, ti.f64)
+                        diagnostic_outside_probe_fluid_weight = ti.cast(1.0, ti.f64)
+                        diagnostic_inside_probe_multiplier = ti.cast(0.0, ti.f64)
+                        diagnostic_outside_probe_multiplier = ti.cast(0.0, ti.f64)
+                        diagnostic_inside_probe_ladder_mode = 0
+                        diagnostic_outside_probe_ladder_mode = 0
+                        diagnostic_pressure_pair_selected = 1
+                        diagnostic_pressure_pair_inside_cell = anchor_inside_cell
+                        diagnostic_pressure_pair_outside_cell = anchor_outside_cell
+                        anchor_cell_delta_x = ti.abs(
+                            anchor_inside_cell.x - anchor_outside_cell.x
+                        )
+                        anchor_cell_delta_y = ti.abs(
+                            anchor_inside_cell.y - anchor_outside_cell.y
+                        )
+                        anchor_cell_delta_z = ti.abs(
+                            anchor_inside_cell.z - anchor_outside_cell.z
+                        )
+                        diagnostic_pressure_pair_cell_delta = ti.max(
+                            ti.max(anchor_cell_delta_x, anchor_cell_delta_y),
+                            anchor_cell_delta_z,
+                        )
+                        diagnostic_pressure_pair_symmetry_residual_cells = ti.cast(
+                            0.0,
+                            ti.f64,
+                        )
                 for probe_index in range(probe_count):
                     multiplier = (
                         probe_start + probe_spacing * ti.cast(probe_index, ti.f32)
@@ -3270,7 +3445,7 @@ class HibmMpmSurfaceMarkers:
                                 pair_residual_cells,
                                 ti.f64,
                             )
-                    else:
+                    elif pressure_pair_policy_code == 0:
                         if outside_found == 0 and outside_weight > 1.0e-12:
                             outside_pressure = sampled_outside
                             outside_found = 1
@@ -3491,6 +3666,9 @@ class HibmMpmSurfaceMarkers:
             )
             self._stress_pressure_pair_symmetry_residual_cells[marker] = (
                 diagnostic_pressure_pair_symmetry_residual_cells
+            )
+            self._stress_pressure_pair_anchor_fallback_used[marker] = (
+                diagnostic_pressure_pair_anchor_fallback_used
             )
             if pressure_sample_valid:
                 self.t_gamma_pa[marker] = traction
@@ -5544,6 +5722,18 @@ class HibmMpmSurfaceMarkers:
         pressure_pair_symmetry_residual_cells = (
             self._stress_pressure_pair_symmetry_residual_cells.to_numpy()[:marker_count]
         )
+        pressure_pair_anchor_active = self.pressure_pair_anchor_active.to_numpy()[
+            :marker_count
+        ]
+        pressure_pair_anchor_inside_cell = (
+            self.pressure_pair_anchor_inside_cell.to_numpy()[:marker_count]
+        )
+        pressure_pair_anchor_outside_cell = (
+            self.pressure_pair_anchor_outside_cell.to_numpy()[:marker_count]
+        )
+        pressure_pair_anchor_fallback_used = (
+            self._stress_pressure_pair_anchor_fallback_used.to_numpy()[:marker_count]
+        )
         pressure_traction = self.t_pressure_gamma_pa.to_numpy()[:marker_count]
         viscous_traction = self.t_viscous_gamma_pa.to_numpy()[:marker_count]
         total_traction = self.t_gamma_pa.to_numpy()[:marker_count]
@@ -5643,6 +5833,23 @@ class HibmMpmSurfaceMarkers:
                     ),
                     "pressure_pair_symmetry_residual_cells": float(
                         pressure_pair_symmetry_residual_cells[marker]
+                    ),
+                    "pressure_pair_anchor_active": bool(
+                        int(pressure_pair_anchor_active[marker])
+                    ),
+                    "pressure_pair_anchor_inside_cell": [
+                        int(value) for value in pressure_pair_anchor_inside_cell[marker]
+                    ],
+                    "pressure_pair_anchor_outside_cell": [
+                        int(value) for value in pressure_pair_anchor_outside_cell[marker]
+                    ],
+                    "pressure_pair_anchor_source": (
+                        "api"
+                        if bool(int(pressure_pair_anchor_active[marker]))
+                        else "unset"
+                    ),
+                    "pressure_pair_anchor_fallback_used": bool(
+                        int(pressure_pair_anchor_fallback_used[marker])
                     ),
                     "inside_probe_multiplier": float(
                         inside_probe_multiplier[marker]

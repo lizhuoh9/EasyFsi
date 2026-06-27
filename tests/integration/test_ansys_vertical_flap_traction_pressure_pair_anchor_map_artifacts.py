@@ -9,38 +9,41 @@ from pathlib import Path
 
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
 SHARED_ROOT = ROOT / "traction_shared_snapshot_diagnostics"
-DIAG_ROOT = ROOT / "traction_symmetric_pressure_pair_diagnostics"
-MATRIX_JSON = DIAG_ROOT / "traction_symmetric_pressure_pair_matrix.json"
-MATRIX_CSV = DIAG_ROOT / "traction_symmetric_pressure_pair_matrix.csv"
-HISTORY_JSON = DIAG_ROOT / "traction_symmetric_pressure_pair_history.json"
-SUMMARY_MD = DIAG_ROOT / "traction_symmetric_pressure_pair_summary.md"
+DIAG_ROOT = ROOT / "traction_pressure_pair_anchor_map_diagnostics"
+MATRIX_JSON = DIAG_ROOT / "traction_pressure_pair_anchor_map_matrix.json"
+MATRIX_CSV = DIAG_ROOT / "traction_pressure_pair_anchor_map_matrix.csv"
+HISTORY_JSON = DIAG_ROOT / "traction_pressure_pair_anchor_map_history.json"
+SUMMARY_MD = DIAG_ROOT / "traction_pressure_pair_anchor_map_summary.md"
 CHECKSUMS = DIAG_ROOT / "CHECKSUMS.sha256"
 SHARED_MANIFEST = SHARED_ROOT / "snapshot_manifest.json"
 SHARED_FIELDS = SHARED_ROOT / "step020_fields.npz"
 
 EXPECTED_SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
-    "run_traction_symmetric_pressure_pair_matrix.py"
+    "run_traction_pressure_pair_anchor_map_matrix.py"
 )
 EXPECTED_SHARED_SHA = (
     "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968"
 )
-EXPECTED_INDEPENDENT_SCENARIOS = {
-    "independent_ladder_baseline_probe0p51",
-    "independent_ladder_baseline_probe0p625",
-    "independent_ladder_baseline_probe1p00",
+EXPECTED_BASELINE_SCENARIO = "baseline_independent_probe0p51"
+EXPECTED_ANCHORED_SCENARIOS = {
+    "anchored_from_baseline_probe0p00",
+    "anchored_from_baseline_probe0p25",
+    "anchored_from_baseline_probe0p375",
+    "anchored_from_baseline_probe0p51",
+    "anchored_from_baseline_probe0p625",
+    "anchored_from_baseline_probe0p75",
+    "anchored_from_baseline_probe1p00",
+    "anchored_from_baseline_probe1p50",
 }
-EXPECTED_SYMMETRIC_SCENARIOS = {
-    "symmetric_pair_probe0p51",
-    "symmetric_pair_probe0p625",
-    "symmetric_pair_probe1p00",
-    "symmetric_pair_probe0p00",
-    "symmetric_pair_probe0p25",
-    "symmetric_pair_probe0p375",
-    "symmetric_pair_probe0p75",
-    "symmetric_pair_probe1p50",
+EXPECTED_SCENARIOS = {EXPECTED_BASELINE_SCENARIO} | EXPECTED_ANCHORED_SCENARIOS
+ANCHOR_REQUIRED_FIELDS = {
+    "pressure_pair_anchor_active",
+    "pressure_pair_anchor_inside_cell",
+    "pressure_pair_anchor_outside_cell",
+    "pressure_pair_anchor_source",
+    "pressure_pair_anchor_fallback_used",
 }
-EXPECTED_SCENARIOS = EXPECTED_INDEPENDENT_SCENARIOS | EXPECTED_SYMMETRIC_SCENARIOS
 PAIR_REQUIRED_FIELDS = {
     "pressure_pair_policy",
     "pressure_pair_selected",
@@ -57,8 +60,8 @@ SCOPE_REQUIRED_FRAGMENTS = (
 )
 
 
-class AnsysVerticalFlapSymmetricPressurePairArtifactTests(unittest.TestCase):
-    def test_matrix_is_shared_snapshot_sampling_only(self):
+class AnsysVerticalFlapPressurePairAnchorMapArtifactTests(unittest.TestCase):
+    def test_anchor_map_matrix_is_shared_snapshot_sampling_only(self):
         for path in (MATRIX_JSON, MATRIX_CSV, HISTORY_JSON, SUMMARY_MD, CHECKSUMS):
             self.assertTrue(path.exists(), path)
 
@@ -68,12 +71,11 @@ class AnsysVerticalFlapSymmetricPressurePairArtifactTests(unittest.TestCase):
         by_scenario = {row["scenario"]: row for row in rows}
 
         self.assertEqual(set(by_scenario), EXPECTED_SCENARIOS)
-        self.assertEqual(payload["independent_scenarios"], sorted(payload["independent_scenarios"]))
-        self.assertEqual(set(payload["independent_scenarios"]), EXPECTED_INDEPENDENT_SCENARIOS)
-        self.assertEqual(set(payload["symmetric_scenarios"]), EXPECTED_SYMMETRIC_SCENARIOS)
+        self.assertEqual(payload["baseline_scenario"], EXPECTED_BASELINE_SCENARIO)
+        self.assertEqual(set(payload["anchored_scenarios"]), EXPECTED_ANCHORED_SCENARIOS)
         self.assertEqual(
             payload["purpose"],
-            "shared_flow_snapshot_symmetric_pressure_pair_matrix",
+            "shared_flow_snapshot_pressure_pair_anchor_map_matrix",
         )
         self.assertEqual(payload["source_script"], EXPECTED_SOURCE_SCRIPT)
         self.assertFalse(Path(payload["source_script"]).is_absolute())
@@ -93,8 +95,8 @@ class AnsysVerticalFlapSymmetricPressurePairArtifactTests(unittest.TestCase):
         self.assertIn(
             payload["candidate_status"],
             {
-                "symmetric_pressure_pair_no_stable_candidate",
-                "symmetric_pressure_pair_stable_candidate_found",
+                "pressure_pair_anchor_map_no_stable_candidate",
+                "pressure_pair_anchor_map_stable_candidate_found",
             },
         )
         self.assertIsNone(payload["reference_formulation_candidate"])
@@ -116,7 +118,7 @@ class AnsysVerticalFlapSymmetricPressurePairArtifactTests(unittest.TestCase):
         for row in rows:
             self.assertEqual(row["run_status"], "completed")
             self.assertEqual(row["formulation_status"], "completed")
-            self.assertEqual(row["worker_mode"], "shared_snapshot_symmetric_pressure_pair")
+            self.assertEqual(row["worker_mode"], "shared_snapshot_pressure_pair_anchor_map")
             self.assertFalse(bool(row["solid_advanced"]))
             self.assertFalse(bool(row["feedback_applied"]))
             self.assertEqual(row["flow_snapshot_sha256"], EXPECTED_SHARED_SHA)
@@ -124,40 +126,39 @@ class AnsysVerticalFlapSymmetricPressurePairArtifactTests(unittest.TestCase):
             self.assertEqual(int(row["flow_snapshot_preflow_steps"]), 20)
             self.assertAlmostEqual(float(row["marker_face_offset_cells"]), 0.51)
             self.assertEqual(row["pressure_probe_origin_mode"], "physical_face_offset")
-            self.assertEqual(row["pressure_probe_ladder_mode"], "current_normal_cell_ladder")
-            self.assertIn(row["pressure_pair_policy"], {"independent_ladder", "symmetric_cell_pair"})
-            self.assertNotEqual(row["marker_geometry_sha256"], "")
-            self.assertNotEqual(row["pressure_probe_origin_sha256"], "")
             self.assertTrue(Path(row["marker_diagnostics_json"]).exists())
             _assert_scope(self, row["scope_limit"])
 
-    def test_candidate_gate_is_artifact_backed(self):
+        self.assertEqual(
+            by_scenario[EXPECTED_BASELINE_SCENARIO]["pressure_pair_policy"],
+            "independent_ladder",
+        )
+        for scenario in EXPECTED_ANCHORED_SCENARIOS:
+            self.assertEqual(
+                by_scenario[scenario]["pressure_pair_policy"],
+                "baseline_anchored_cell_pair",
+            )
+            self.assertEqual(by_scenario[scenario]["anchor_source_scenario"], EXPECTED_BASELINE_SCENARIO)
+            self.assertNotEqual(by_scenario[scenario]["anchor_map_sha256"], "")
+
+    def test_anchor_map_candidate_gate_is_artifact_backed(self):
         payload = _read_json(MATRIX_JSON)
-        acceptance = payload["symmetric_pair_acceptance"]
+        acceptance = payload["anchor_map_acceptance"]
         gate = payload["stable_candidate_gate"]
 
-        self.assertEqual(
-            payload["candidate_status"],
-            "symmetric_pressure_pair_no_stable_candidate",
-        )
-        self.assertIsNone(payload["stable_symmetric_pressure_pair_candidate"])
-        self.assertFalse(acceptance["accepted"])
-        self.assertGreater(float(acceptance["force_ratio_relative_span"]), 40.0)
-        self.assertTrue(acceptance["pair_selected_all_markers"])
-        self.assertTrue(acceptance["pair_fallback_zero"])
-        self.assertEqual(acceptance["row_count"], len(EXPECTED_SYMMETRIC_SCENARIOS))
-        self.assertEqual(acceptance["expected_row_count"], len(EXPECTED_SYMMETRIC_SCENARIOS))
+        self.assertEqual(acceptance["row_count"], len(EXPECTED_ANCHORED_SCENARIOS))
+        self.assertEqual(acceptance["expected_row_count"], len(EXPECTED_ANCHORED_SCENARIOS))
         self.assertIsInstance(acceptance["accepted"], bool)
         self.assertIsInstance(acceptance["pressure_complete"], bool)
         self.assertIsInstance(acceptance["invalid_marker_counts_zero"], bool)
-        self.assertIsInstance(acceptance["pair_selected_all_markers"], bool)
-        self.assertIsInstance(acceptance["pair_fallback_zero"], bool)
+        self.assertIsInstance(acceptance["anchor_selected_all_markers"], bool)
+        self.assertIsInstance(acceptance["anchor_fallback_zero"], bool)
         self.assertIsInstance(acceptance["scope_sampling_only"], bool)
 
-        if payload["candidate_status"] == "symmetric_pressure_pair_stable_candidate_found":
+        if payload["candidate_status"] == "pressure_pair_anchor_map_stable_candidate_found":
             self.assertEqual(
-                payload["stable_symmetric_pressure_pair_candidate"],
-                "symmetric_cell_pair",
+                payload["stable_pressure_pair_policy"],
+                "baseline_anchored_cell_pair",
             )
             self.assertTrue(acceptance["accepted"])
             self.assertLessEqual(
@@ -168,47 +169,13 @@ class AnsysVerticalFlapSymmetricPressurePairArtifactTests(unittest.TestCase):
                 float(acceptance["max_face_traction_decomposition_residual_pa"]),
                 float(gate["traction_decomposition_residual_max"]),
             )
-            self.assertLessEqual(
-                float(acceptance["max_pressure_pair_symmetry_residual_cells"]),
-                float(gate["pressure_pair_symmetry_residual_max_cells"]),
-            )
-            self.assertTrue(acceptance["pair_selected_all_markers"])
-            self.assertTrue(acceptance["pair_fallback_zero"])
+            self.assertTrue(acceptance["anchor_selected_all_markers"])
+            self.assertTrue(acceptance["anchor_fallback_zero"])
         else:
             self.assertFalse(acceptance["accepted"])
-            self.assertIsNone(payload["stable_symmetric_pressure_pair_candidate"])
+            self.assertIsNone(payload["stable_pressure_pair_policy"])
 
-    def test_negative_rows_lock_current_probe_origin_pathology(self):
-        payload = _read_json(MATRIX_JSON)
-        by_scenario = {row["scenario"]: row for row in payload["rows"]}
-
-        self.assertAlmostEqual(
-            float(
-                by_scenario["symmetric_pair_probe0p51"][
-                    "force_ratio_to_policy_baseline"
-                ]
-            ),
-            1.0,
-            delta=1.0e-12,
-        )
-        self.assertLess(
-            float(
-                by_scenario["symmetric_pair_probe0p625"][
-                    "force_ratio_to_policy_baseline"
-                ]
-            ),
-            0.1,
-        )
-        self.assertGreater(
-            float(
-                by_scenario["symmetric_pair_probe0p375"][
-                    "force_ratio_to_policy_baseline"
-                ]
-            ),
-            1.9,
-        )
-
-    def test_marker_diagnostics_include_pair_fields(self):
+    def test_marker_diagnostics_include_anchor_fields(self):
         payload = _read_json(MATRIX_JSON)
         history = _read_json(HISTORY_JSON)
         self.assertEqual(set(history["histories"]), EXPECTED_SCENARIOS)
@@ -225,9 +192,8 @@ class AnsysVerticalFlapSymmetricPressurePairArtifactTests(unittest.TestCase):
                 marker_payload["marker_geometry_sha256"],
                 row["marker_geometry_sha256"],
             )
-            self.assertEqual(
-                marker_payload["pressure_probe_origin_sha256"],
-                row["pressure_probe_origin_sha256"],
+            self.assertTrue(
+                ANCHOR_REQUIRED_FIELDS.issubset(marker_payload["marker_required_fields"])
             )
             self.assertTrue(
                 PAIR_REQUIRED_FIELDS.issubset(marker_payload["marker_required_fields"])
@@ -235,25 +201,33 @@ class AnsysVerticalFlapSymmetricPressurePairArtifactTests(unittest.TestCase):
             self.assertGreater(marker_payload["marker_count"], 0)
             self.assertEqual(marker_payload["marker_count"], len(marker_payload["markers"]))
             self.assertEqual(
-                marker_payload["pair_stats"]["pressure_pair_selected_marker_count"],
-                row["pressure_pair_selected_marker_count"],
+                marker_payload["anchor_stats"]["pressure_pair_anchor_selected_marker_count"],
+                row["pressure_pair_anchor_selected_marker_count"],
             )
             self.assertEqual(
-                marker_payload["pair_stats"]["pressure_pair_fallback_marker_count"],
-                row["pressure_pair_fallback_marker_count"],
+                marker_payload["anchor_stats"]["pressure_pair_anchor_fallback_marker_count"],
+                row["pressure_pair_anchor_fallback_marker_count"],
             )
             for marker in marker_payload["markers"]:
+                self.assertTrue(ANCHOR_REQUIRED_FIELDS.issubset(marker))
                 self.assertTrue(PAIR_REQUIRED_FIELDS.issubset(marker))
                 self.assertEqual(marker["pressure_pair_policy"], row["pressure_pair_policy"])
-                self.assertEqual(len(marker["pressure_pair_inside_cell"]), 3)
-                self.assertEqual(len(marker["pressure_pair_outside_cell"]), 3)
-                if row["pressure_pair_policy"] == "independent_ladder":
-                    self.assertFalse(marker["pressure_pair_selected"])
-                    self.assertFalse(marker["pressure_pair_fallback_used"])
-                else:
-                    self.assertFalse(marker["pressure_pair_fallback_used"])
+                self.assertEqual(len(marker["pressure_pair_anchor_inside_cell"]), 3)
+                self.assertEqual(len(marker["pressure_pair_anchor_outside_cell"]), 3)
+                if row["pressure_pair_policy"] == "baseline_anchored_cell_pair":
+                    self.assertTrue(marker["pressure_pair_anchor_active"])
+                    self.assertEqual(marker["pressure_pair_anchor_source"], "api")
+                    self.assertFalse(marker["pressure_pair_anchor_fallback_used"])
+                    self.assertEqual(
+                        marker["pressure_pair_inside_cell"],
+                        marker["pressure_pair_anchor_inside_cell"],
+                    )
+                    self.assertEqual(
+                        marker["pressure_pair_outside_cell"],
+                        marker["pressure_pair_anchor_outside_cell"],
+                    )
 
-    def test_summary_and_checksums_match_artifacts(self):
+    def test_summary_and_checksums_match_anchor_map_artifacts(self):
         payload = _read_json(MATRIX_JSON)
         summary = SUMMARY_MD.read_text(encoding="utf-8")
         self.assertIn("reuses one archived shared preflow snapshot", summary)
@@ -261,7 +235,7 @@ class AnsysVerticalFlapSymmetricPressurePairArtifactTests(unittest.TestCase):
         self.assertIn("does not advance", summary)
         self.assertIn("does not claim Fluent parity", summary)
         self.assertIn("reference_formulation_candidate", summary)
-        self.assertIn("stable_symmetric_pressure_pair_candidate", summary)
+        self.assertIn("stable_pressure_pair_policy", summary)
         for scenario in EXPECTED_SCENARIOS:
             self.assertIn(scenario, summary)
 
