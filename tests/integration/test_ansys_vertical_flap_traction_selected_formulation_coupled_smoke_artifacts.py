@@ -37,13 +37,21 @@ EXPECTED_SOURCE_SCRIPT = (
     "run_traction_selected_formulation_coupled_smoke.py"
 )
 EXPECTED_CANDIDATE = "anchored_dual_face_pressure_pair_with_per_face_one_sided"
-EXPECTED_SCENARIO = "selected_formulation_coupled_smoke_5step"
+EXPECTED_PREFLIGHT_SCENARIO = "selected_formulation_coupled_preflight_1step"
+EXPECTED_SMOKE_SCENARIO = "selected_formulation_coupled_smoke_5step"
 EXPECTED_PENDING_BASE_BLOCKERS = {
     "coupled_fsi_validation_pending",
     "no_fluent_parity_claim",
 }
 EXPECTED_PENDING_SMOKE_BLOCKERS = {
+    "blocked_nan_or_inf",
     "blocked_invalid_marker_sampling",
+    "blocked_anchor_fallback",
+    "blocked_one_sided_incomplete",
+    "blocked_force_residual",
+    "blocked_velocity_threshold",
+    "blocked_pressure_threshold",
+    "blocked_solid_displacement_threshold",
     "blocked_requested_5step_not_completed",
     "not_run",
 }
@@ -56,19 +64,23 @@ EXPECTED_PASS_BLOCKERS = {
 class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
     unittest.TestCase
 ):
-    def test_smoke_matrix_records_selected_formulation_sources(self):
+    def test_smoke_matrix_records_two_selected_formulation_rows(self):
         for path in (MATRIX_JSON, MATRIX_CSV, HISTORY_JSON, SUMMARY_MD, CHECKSUMS):
             self.assertTrue(path.exists(), path)
 
         payload = _read_json(MATRIX_JSON)
         rows = payload["rows"]
+        by_scenario = {row["scenario"]: row for row in rows}
         self.assertEqual(payload["purpose"], "selected_formulation_coupled_smoke_matrix")
         self.assertEqual(payload["source_script"], EXPECTED_SOURCE_SCRIPT)
         self.assertFalse(Path(payload["source_script"]).is_absolute())
         self.assertNotIn("\\", payload["source_script"])
-        self.assertEqual(payload["scenario_count"], 1)
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["scenario"], EXPECTED_SCENARIO)
+        self.assertEqual(payload["scenario_count"], 2)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            set(by_scenario),
+            {EXPECTED_PREFLIGHT_SCENARIO, EXPECTED_SMOKE_SCENARIO},
+        )
         self.assertEqual(payload["reference_formulation_candidate"], EXPECTED_CANDIDATE)
         self.assertEqual(
             payload["pressure_pair_policy_candidate"],
@@ -103,41 +115,102 @@ class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
             _sha256_file(SELECTED_ANCHOR_MARKERS_JSON),
         )
 
-        row = rows[0]
-        self.assertEqual(row["reference_formulation_candidate"], EXPECTED_CANDIDATE)
-        self.assertEqual(
-            row["reference_selection_source_sha256"],
-            _sha256_file(REFERENCE_SELECTION),
-        )
-        self.assertEqual(
-            row["fixed_solid_selected_formulation_source_sha256"],
-            _sha256_file(FIXED_SOLID_SELECTION),
-        )
-        self.assertEqual(
-            row["selected_anchor_markers_source"],
-            SELECTED_ANCHOR_MARKERS_JSON.as_posix(),
-        )
-        self.assertEqual(
-            row["selected_anchor_markers_source_sha256"],
-            _sha256_file(SELECTED_ANCHOR_MARKERS_JSON),
-        )
-        self.assertEqual(int(row["requested_step_count"]), 5)
-        self.assertGreaterEqual(int(row["completed_step_count"]), 0)
-        self.assertTrue(Path(row["scenario_diagnostics_json"]).exists())
+        for row in rows:
+            self.assertEqual(row["reference_formulation_candidate"], EXPECTED_CANDIDATE)
+            self.assertEqual(
+                row["reference_selection_source_sha256"],
+                _sha256_file(REFERENCE_SELECTION),
+            )
+            self.assertEqual(
+                row["fixed_solid_selected_formulation_source_sha256"],
+                _sha256_file(FIXED_SOLID_SELECTION),
+            )
+            self.assertEqual(
+                row["selected_anchor_markers_source"],
+                SELECTED_ANCHOR_MARKERS_JSON.as_posix(),
+            )
+            self.assertEqual(
+                row["selected_anchor_markers_source_sha256"],
+                _sha256_file(SELECTED_ANCHOR_MARKERS_JSON),
+            )
+            self.assertEqual(int(row["requested_step_count"]), 5)
+            self.assertGreaterEqual(int(row["completed_step_count"]), 0)
+            self.assertTrue(Path(row["scenario_diagnostics_json"]).exists())
 
-    def test_smoke_status_is_fail_closed_until_gates_pass(self):
+        self.assertEqual(
+            int(by_scenario[EXPECTED_PREFLIGHT_SCENARIO]["diagnostic_step_count"]),
+            1,
+        )
+        self.assertEqual(
+            int(by_scenario[EXPECTED_SMOKE_SCENARIO]["diagnostic_step_count"]),
+            5,
+        )
+
+    def test_preflight_row_hardens_anchor_injected_one_step_checkpoint(self):
         payload = _read_json(MATRIX_JSON)
-        row = payload["rows"][0]
+        row = _row_by_scenario(payload)[EXPECTED_PREFLIGHT_SCENARIO]
+        acceptance = payload["row_acceptance"][EXPECTED_PREFLIGHT_SCENARIO]
+        diagnostics = _read_json(Path(row["scenario_diagnostics_json"]))
+        history = diagnostics["report"]["history"]
+        first_step = history[0]
+        report = diagnostics["report"]
+
+        self.assertIn(
+            payload["candidate_status"],
+            {
+                "selected_formulation_coupled_smoke_pending",
+                "selected_formulation_coupled_smoke_passed",
+            },
+        )
+        self.assertEqual(row["smoke_status"], "blocked_requested_5step_not_completed")
+        self.assertEqual(row["run_status"], "blocked")
+        self.assertEqual(int(row["completed_step_count"]), 1)
+        self.assertEqual(int(row["requested_step_count"]), 5)
+        self.assertEqual(row["first_failed_step"], 2)
+        self.assertEqual(row["first_failed_gate"], "completed_requested_steps")
+        self.assertEqual(int(row["invalid_marker_count_max"]), 0)
+        self.assertGreaterEqual(
+            int(row["pressure_pair_anchor_active_marker_count_min"]),
+            24,
+        )
+        self.assertGreaterEqual(int(row["anchor_selected_marker_count_min"]), 24)
+        self.assertEqual(int(row["anchor_fallback_marker_count_max"]), 0)
+        self.assertGreaterEqual(int(row["one_sided_marker_count_min"]), 24)
+        self.assertEqual(int(row["one_sided_anchor_fallback_marker_count_max"]), 0)
+
+        self.assertTrue(acceptance["finite_fields"])
+        self.assertTrue(acceptance["no_marker_invalid"])
+        self.assertTrue(acceptance["anchor_selected_all"])
+        self.assertTrue(acceptance["anchor_fallback_zero"])
+        self.assertTrue(acceptance["one_sided_complete"])
+        self.assertTrue(acceptance["one_sided_fallback_zero"])
+        self.assertTrue(acceptance["residual_within_tolerance"])
+        self.assertFalse(acceptance["completed_requested_steps"])
+        self.assertFalse(acceptance["accepted"])
+
+        self.assertEqual(int(first_step["stress_invalid_marker_count"]), 0)
+        self.assertEqual(int(first_step["stress_valid_marker_count"]), 24)
+        self.assertEqual(int(first_step["primary_face_invalid_marker_count"]), 0)
+        self.assertEqual(int(first_step["secondary_face_invalid_marker_count"]), 0)
+        self.assertEqual(int(first_step["one_sided_pressure_marker_count"]), 24)
+        self.assertEqual(int(report["surface_feedback_updated_marker_count"]), 24)
+
+    def test_five_step_status_is_pass_or_exact_fail_closed(self):
+        payload = _read_json(MATRIX_JSON)
+        row = _row_by_scenario(payload)[EXPECTED_SMOKE_SCENARIO]
         acceptance = payload["smoke_acceptance"]
         blockers = {item["blocker"] for item in payload["candidate_blockers"]}
 
         if payload["candidate_status"] == "selected_formulation_coupled_smoke_passed":
             self.assertTrue(acceptance["accepted"])
+            self.assertEqual(row["run_status"], "completed")
+            self.assertEqual(row["smoke_status"], "passed")
             self.assertEqual(blockers, EXPECTED_PASS_BLOCKERS)
             self.assertEqual(
                 int(row["completed_step_count"]),
                 int(row["requested_step_count"]),
             )
+            self.assertEqual(int(row["completed_step_count"]), 5)
             self.assertTrue(bool(row["fluid_finite"]))
             self.assertTrue(bool(row["pressure_finite"]))
             self.assertTrue(bool(row["solid_position_finite"]))
@@ -149,9 +222,14 @@ class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
             self.assertGreaterEqual(int(row["anchor_selected_marker_count_min"]), 24)
             self.assertEqual(int(row["anchor_fallback_marker_count_max"]), 0)
             self.assertGreaterEqual(int(row["one_sided_marker_count_min"]), 24)
+            self.assertEqual(int(row["one_sided_anchor_fallback_marker_count_max"]), 0)
             self.assertLessEqual(
                 float(row["force_action_reaction_residual_max_n"]),
                 float(payload["stable_candidate_gate"]["force_action_reaction_residual_max_n"]),
+            )
+            self.assertIn(
+                "coupled_fsi_validation_pending",
+                payload["historical_blockers_retired"],
             )
         else:
             self.assertEqual(
@@ -165,53 +243,58 @@ class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
             self.assertEqual(row["run_status"], "blocked")
             self.assertNotEqual(row["smoke_status"], "passed")
             self.assertIn("coupled_fsi_validation_pending", blockers)
-            if row["smoke_status"] == "blocked_requested_5step_not_completed":
-                self.assertEqual(int(row["completed_step_count"]), 1)
-                self.assertEqual(int(row["invalid_marker_count_max"]), 0)
-                self.assertGreaterEqual(
-                    int(row["pressure_pair_anchor_active_marker_count_min"]),
-                    24,
-                )
-                self.assertGreaterEqual(
-                    int(row["anchor_selected_marker_count_min"]),
-                    24,
-                )
-                self.assertEqual(int(row["anchor_fallback_marker_count_max"]), 0)
-                self.assertGreaterEqual(int(row["one_sided_marker_count_min"]), 24)
-            elif row["smoke_status"] == "blocked_invalid_marker_sampling":
-                self.assertGreater(int(row["invalid_marker_count_max"]), 0)
+            self.assertNotEqual(row["first_failed_step"], "")
+            self.assertNotEqual(row["first_failed_gate"], "")
 
         self.assertIn("no_fluent_parity_claim", blockers)
+        completed_steps = int(row["completed_step_count"])
+        for key in (
+            "invalid_marker_count_by_step",
+            "one_sided_marker_count_by_step",
+            "anchor_selected_marker_count_by_step",
+            "anchor_fallback_marker_count_by_step",
+            "one_sided_anchor_fallback_marker_count_by_step",
+            "force_action_reaction_residual_by_step",
+            "max_velocity_by_step",
+            "max_pressure_abs_by_step",
+            "max_displacement_by_step",
+        ):
+            self.assertEqual(len(row[key]), completed_steps, key)
 
     def test_history_summary_csv_and_checksums_are_consistent(self):
         payload = _read_json(MATRIX_JSON)
         history = _read_json(HISTORY_JSON)
         summary = SUMMARY_MD.read_text(encoding="utf-8")
-        row = payload["rows"][0]
+        by_scenario = _row_by_scenario(payload)
 
-        self.assertEqual(set(history["histories"]), {EXPECTED_SCENARIO})
         self.assertEqual(
-            history["histories"][EXPECTED_SCENARIO]["scenario"],
-            EXPECTED_SCENARIO,
+            set(history["histories"]),
+            {EXPECTED_PREFLIGHT_SCENARIO, EXPECTED_SMOKE_SCENARIO},
         )
-        self.assertEqual(
-            history["histories"][EXPECTED_SCENARIO][
-                "reference_formulation_candidate"
-            ],
-            EXPECTED_CANDIDATE,
-        )
+        for scenario in (EXPECTED_PREFLIGHT_SCENARIO, EXPECTED_SMOKE_SCENARIO):
+            self.assertEqual(history["histories"][scenario]["scenario"], scenario)
+            self.assertEqual(
+                history["histories"][scenario]["reference_formulation_candidate"],
+                EXPECTED_CANDIDATE,
+            )
+
         self.assertIn("selected-formulation coupled smoke", summary)
         self.assertIn("does not claim 50-step validation", summary)
         self.assertIn("does not claim Fluent parity", summary)
         self.assertNotIn("Fluent parity validated", summary)
         self.assertNotIn("50-step validation passed", summary)
         self.assertIn(payload["candidate_status"], summary)
-        self.assertIn(row["smoke_status"], summary)
+        self.assertIn(by_scenario[EXPECTED_PREFLIGHT_SCENARIO]["smoke_status"], summary)
+        self.assertIn(by_scenario[EXPECTED_SMOKE_SCENARIO]["smoke_status"], summary)
+        self.assertIn("step | invalid | one-sided | anchor selected", summary)
 
         with MATRIX_CSV.open(newline="", encoding="utf-8") as handle:
             csv_rows = list(csv.DictReader(handle))
-        self.assertEqual(len(csv_rows), 1)
-        self.assertEqual(csv_rows[0]["scenario"], EXPECTED_SCENARIO)
+        self.assertEqual(len(csv_rows), 2)
+        self.assertEqual(
+            {row["scenario"] for row in csv_rows},
+            {EXPECTED_PREFLIGHT_SCENARIO, EXPECTED_SMOKE_SCENARIO},
+        )
 
         checksum_rows = _read_checksums(CHECKSUMS)
         for artifact in (
@@ -222,12 +305,19 @@ class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
         ):
             self.assertIn(artifact, checksum_rows)
             self.assertEqual(checksum_rows[artifact], _sha256_file(DIAG_ROOT / artifact))
-        diagnostics_rel = Path(row["scenario_diagnostics_json"]).relative_to(DIAG_ROOT)
-        self.assertIn(diagnostics_rel.as_posix(), checksum_rows)
-        self.assertEqual(
-            checksum_rows[diagnostics_rel.as_posix()],
-            _sha256_file(DIAG_ROOT / diagnostics_rel),
-        )
+        for row in payload["rows"]:
+            diagnostics_rel = Path(row["scenario_diagnostics_json"]).relative_to(
+                DIAG_ROOT
+            )
+            self.assertIn(diagnostics_rel.as_posix(), checksum_rows)
+            self.assertEqual(
+                checksum_rows[diagnostics_rel.as_posix()],
+                _sha256_file(DIAG_ROOT / diagnostics_rel),
+            )
+
+
+def _row_by_scenario(payload: dict[str, object]) -> dict[str, dict[str, object]]:
+    return {row["scenario"]: row for row in payload["rows"]}
 
 
 def _read_json(path: Path):
