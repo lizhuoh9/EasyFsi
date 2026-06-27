@@ -8,100 +8,94 @@ from pathlib import Path
 
 
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
-SHARED_ROOT = ROOT / "traction_shared_snapshot_diagnostics"
-DIAG_ROOT = ROOT / "traction_reference_formulation_selection_diagnostics"
+SELECTION_ROOT = ROOT / "traction_reference_formulation_selection_diagnostics"
+DIAG_ROOT = ROOT / "traction_fixed_solid_selected_formulation_diagnostics"
 MARKER_DIAGNOSTICS_ROOT = DIAG_ROOT / "marker_diagnostics"
-MATRIX_JSON = DIAG_ROOT / "traction_reference_formulation_selection_matrix.json"
-MATRIX_CSV = DIAG_ROOT / "traction_reference_formulation_selection_matrix.csv"
-HISTORY_JSON = DIAG_ROOT / "traction_reference_formulation_selection_history.json"
-SUMMARY_MD = DIAG_ROOT / "traction_reference_formulation_selection_summary.md"
+MATRIX_JSON = DIAG_ROOT / "traction_fixed_solid_selected_formulation_matrix.json"
+MATRIX_CSV = DIAG_ROOT / "traction_fixed_solid_selected_formulation_matrix.csv"
+HISTORY_JSON = DIAG_ROOT / "traction_fixed_solid_selected_formulation_history.json"
+SUMMARY_MD = DIAG_ROOT / "traction_fixed_solid_selected_formulation_summary.md"
 CHECKSUMS = DIAG_ROOT / "CHECKSUMS.sha256"
-SHARED_MANIFEST = SHARED_ROOT / "snapshot_manifest.json"
-SHARED_FIELDS = SHARED_ROOT / "step020_fields.npz"
+SELECTION_MATRIX = SELECTION_ROOT / "traction_reference_formulation_selection_matrix.json"
 
 EXPECTED_SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
-    "run_traction_reference_formulation_selection_matrix.py"
+    "run_traction_fixed_solid_selected_formulation_matrix.py"
 )
+EXPECTED_SELECTION_SOURCE = SELECTION_MATRIX.as_posix()
 EXPECTED_SHARED_SHA = (
     "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968"
 )
 EXPECTED_CANDIDATE = "anchored_dual_face_pressure_pair_with_per_face_one_sided"
-EXPECTED_BASELINE_SCENARIO = "reference_baseline_anchored_two_sided_probe0p51"
+EXPECTED_FIXED_SOLID_POLICY = "confirmed_shared_fixed_solid_snapshot_reused"
+EXPECTED_ACTIVE_BLOCKERS = {
+    "coupled_fsi_validation_pending",
+    "no_fluent_parity_claim",
+}
+EXPECTED_RETIRED_BLOCKERS = {
+    "fixed_solid_regenerated_validation_pending",
+}
+EXPECTED_BASELINE_SCENARIO = "fixed_solid_selected_baseline_probe0p51"
 EXPECTED_ANCHORED_SCENARIOS = {
-    "reference_anchored_two_sided_probe0p00",
-    "reference_anchored_two_sided_probe0p25",
-    "reference_anchored_two_sided_probe0p375",
-    "reference_anchored_two_sided_probe0p625",
-    "reference_anchored_two_sided_probe1p00",
+    "fixed_solid_selected_anchored_probe0p00",
+    "fixed_solid_selected_anchored_probe0p25",
+    "fixed_solid_selected_anchored_probe0p51",
+    "fixed_solid_selected_anchored_probe0p625",
+    "fixed_solid_selected_anchored_probe1p00",
 }
 EXPECTED_PER_FACE_SCENARIOS = {
-    "reference_per_face_one_sided_probe0p51",
-    "reference_per_face_one_sided_probe0p625",
-    "reference_per_face_one_sided_probe1p00",
+    "fixed_solid_selected_per_face_one_sided_probe0p51",
+    "fixed_solid_selected_per_face_one_sided_probe0p625",
+    "fixed_solid_selected_per_face_one_sided_probe1p00",
 }
 EXPECTED_SCENARIOS = (
     {EXPECTED_BASELINE_SCENARIO}
     | EXPECTED_ANCHORED_SCENARIOS
     | EXPECTED_PER_FACE_SCENARIOS
 )
-EXPECTED_ALLOWED_BLOCKERS = {
-    "sampling_only_no_coupled_fsi",
-    "no_fluent_parity_claim",
-    "fixed_solid_regenerated_validation_pending",
-    "coupled_fsi_validation_pending",
-}
-EXPECTED_RETIRED_BLOCKERS = {
-    "dual_face_one_sided_unsupported",
-    "reference_selection_deferred",
-}
-FORBIDDEN_ACTIVE_BLOCKERS = {
-    "dual_face_one_sided_unsupported",
-    "reference_selection_deferred",
-}
-SCOPE_REQUIRED_FRAGMENTS = (
-    "shared snapshot",
-    "sampling-only",
-    "does not claim Fluent parity",
-)
 
 
-class AnsysVerticalFlapReferenceFormulationSelectionArtifactTests(
+class AnsysVerticalFlapFixedSolidSelectedFormulationArtifactTests(
     unittest.TestCase
 ):
-    def test_selection_matrix_is_shared_snapshot_sampling_only(self):
+    def test_fixed_solid_selected_formulation_matrix_is_reviewable(self):
         for path in (MATRIX_JSON, MATRIX_CSV, HISTORY_JSON, SUMMARY_MD, CHECKSUMS):
             self.assertTrue(path.exists(), path)
 
-        manifest = _read_json(SHARED_MANIFEST)
         payload = _read_json(MATRIX_JSON)
         rows = payload["rows"]
         by_scenario = {row["scenario"]: row for row in rows}
 
         self.assertEqual(set(by_scenario), EXPECTED_SCENARIOS)
-        self.assertEqual(payload["baseline_scenario"], EXPECTED_BASELINE_SCENARIO)
-        self.assertEqual(set(payload["anchored_scenarios"]), EXPECTED_ANCHORED_SCENARIOS)
-        self.assertEqual(set(payload["per_face_scenarios"]), EXPECTED_PER_FACE_SCENARIOS)
-        self.assertEqual(
-            payload["purpose"],
-            "shared_flow_snapshot_reference_formulation_selection_matrix",
-        )
+        self.assertEqual(payload["purpose"], "fixed_solid_selected_formulation_matrix")
         self.assertEqual(payload["source_script"], EXPECTED_SOURCE_SCRIPT)
         self.assertFalse(Path(payload["source_script"]).is_absolute())
         self.assertNotIn("\\", payload["source_script"])
-        self.assertNotIn("D:", payload["source_script"])
+        self.assertEqual(payload["selection_source"], EXPECTED_SELECTION_SOURCE)
+        self.assertEqual(payload["selection_source_sha256"], _sha256_file(SELECTION_MATRIX))
         self.assertEqual(
-            payload["flow_snapshot_identity_status"],
-            "shared_snapshot_sha256_identical_completed_rows",
+            payload["fixed_solid_snapshot_policy"],
+            EXPECTED_FIXED_SOLID_POLICY,
         )
-        self.assertEqual(payload["flow_snapshot_sha256"], EXPECTED_SHARED_SHA)
-        self.assertEqual(payload["flow_snapshot_sha256"], manifest["field_sha256"])
-        self.assertTrue(SHARED_FIELDS.exists())
-        self.assertEqual(_sha256_file(SHARED_FIELDS), EXPECTED_SHARED_SHA)
+        self.assertEqual(
+            payload["new_or_confirmed_flow_snapshot_sha256"],
+            EXPECTED_SHARED_SHA,
+        )
+        self.assertEqual(
+            payload["anchor_source_flow_snapshot_sha256"],
+            EXPECTED_SHARED_SHA,
+        )
+        self.assertNotEqual(payload["marker_geometry_sha256"], "")
+        self.assertNotEqual(payload["anchor_source_marker_geometry_sha256"], "")
+        self.assertEqual(
+            payload["marker_geometry_sha256"],
+            payload["anchor_source_marker_geometry_sha256"],
+        )
+        self.assertNotEqual(payload["anchor_map_sha256"], "")
 
         self.assertEqual(
             payload["candidate_status"],
-            "reference_formulation_candidate_selected",
+            "fixed_solid_selected_formulation_validated",
         )
         self.assertEqual(payload["reference_formulation_candidate"], EXPECTED_CANDIDATE)
         self.assertEqual(
@@ -115,47 +109,47 @@ class AnsysVerticalFlapReferenceFormulationSelectionArtifactTests(
         self.assertEqual(payload["completed_formulation_count"], len(EXPECTED_SCENARIOS))
         self.assertEqual(payload["unsupported_formulation_count"], 0)
         self.assertEqual(
+            {item["blocker"] for item in payload["candidate_blockers"]},
+            EXPECTED_ACTIVE_BLOCKERS,
+        )
+        self.assertEqual(
             set(payload["historical_blockers_retired"]),
             EXPECTED_RETIRED_BLOCKERS,
         )
-        _assert_scope(self, payload["scope_limit"])
-
-        blockers = {item["blocker"] for item in payload["candidate_blockers"]}
-        self.assertEqual(blockers, EXPECTED_ALLOWED_BLOCKERS)
-        self.assertTrue(FORBIDDEN_ACTIVE_BLOCKERS.isdisjoint(blockers))
-
-        source_paths = {
-            payload["pressure_pair_preselection_source"],
-            payload["per_face_one_sided_source"],
-        }
-        for source_path in source_paths:
-            self.assertTrue(Path(source_path).exists(), source_path)
 
         for row in rows:
             self.assertEqual(row["run_status"], "completed")
-            self.assertEqual(row["formulation_status"], "completed")
+            self.assertEqual(row["fixed_solid_validation_status"], "completed")
             self.assertEqual(
                 row["worker_mode"],
-                "shared_snapshot_reference_formulation_selection",
+                "fixed_solid_selected_formulation_validation",
             )
-            self.assertEqual(row["flow_snapshot_sha256"], EXPECTED_SHARED_SHA)
-            self.assertFalse(bool(row["solid_advanced"]))
-            self.assertFalse(bool(row["feedback_applied"]))
             self.assertEqual(row["reference_formulation_candidate"], EXPECTED_CANDIDATE)
             self.assertEqual(row["pressure_pair_policy"], "baseline_anchored_cell_pair")
-            self.assertTrue(Path(row["source_artifact_json"]).exists())
-            self.assertIn(row["source_artifact_json"], source_paths)
+            self.assertEqual(row["flow_snapshot_sha256"], EXPECTED_SHARED_SHA)
             self.assertEqual(
-                row["source_artifact_sha256"],
-                _sha256_file(Path(row["source_artifact_json"])),
+                row["new_or_confirmed_flow_snapshot_sha256"],
+                EXPECTED_SHARED_SHA,
             )
+            self.assertEqual(
+                row["anchor_source_flow_snapshot_sha256"],
+                EXPECTED_SHARED_SHA,
+            )
+            self.assertEqual(
+                row["anchor_source_marker_geometry_sha256"],
+                row["marker_geometry_sha256"],
+            )
+            self.assertEqual(row["anchor_map_sha256"], payload["anchor_map_sha256"])
+            self.assertEqual(row["source_artifact_json"], EXPECTED_SELECTION_SOURCE)
+            self.assertEqual(row["source_artifact_sha256"], _sha256_file(SELECTION_MATRIX))
             self.assertTrue(Path(row["source_marker_diagnostics_json"]).exists())
             self.assertEqual(
                 row["source_marker_diagnostics_sha256"],
                 _sha256_file(Path(row["source_marker_diagnostics_json"])),
             )
             self.assertTrue(Path(row["marker_diagnostics_json"]).exists())
-            _assert_scope(self, row["scope_limit"])
+            self.assertFalse(bool(row["solid_advanced"]))
+            self.assertFalse(bool(row["feedback_applied"]))
 
         baseline = by_scenario[EXPECTED_BASELINE_SCENARIO]
         self.assertEqual(baseline["one_sided_pressure_policy"], "disabled")
@@ -174,20 +168,15 @@ class AnsysVerticalFlapReferenceFormulationSelectionArtifactTests(
             row = by_scenario[scenario]
             self.assertEqual(row["selection_component"], "per_face_one_sided_pressure")
             self.assertEqual(row["one_sided_pressure_policy"], "per_face_mirrored")
-            self.assertEqual(row["pressure_sampling_mode"], "one_sided_surface_pressure")
-            self.assertEqual(int(row["one_sided_marker_count"]), int(row["total_marker_count"]))
+            self.assertEqual(int(row["one_sided_marker_count"]), 24)
             self.assertEqual(int(row["one_sided_primary_marker_count"]), 12)
             self.assertEqual(int(row["one_sided_secondary_marker_count"]), 12)
             self.assertEqual(int(row["one_sided_anchor_selected_marker_count"]), 24)
             self.assertEqual(int(row["one_sided_anchor_fallback_marker_count"]), 0)
-            self.assertEqual(
-                row["one_sided_side_selection_counts"],
-                {"inside": 0, "outside": 24},
-            )
 
-    def test_selection_candidate_gate_is_artifact_backed(self):
+    def test_fixed_solid_candidate_gate_is_artifact_backed(self):
         payload = _read_json(MATRIX_JSON)
-        acceptance = payload["reference_selection_acceptance"]
+        acceptance = payload["fixed_solid_validation_acceptance"]
         gate = payload["stable_candidate_gate"]
 
         self.assertTrue(acceptance["accepted"])
@@ -195,14 +184,15 @@ class AnsysVerticalFlapReferenceFormulationSelectionArtifactTests(
             acceptance["completed_row_count"],
             acceptance["expected_completed_row_count"],
         )
-        self.assertTrue(acceptance["pressure_pair_preselection_candidate_found"])
-        self.assertTrue(acceptance["per_face_one_sided_pressure_completed"])
-        self.assertTrue(acceptance["same_shared_snapshot_sha"])
+        self.assertTrue(acceptance["selected_reference_formulation_found"])
+        self.assertTrue(acceptance["same_fixed_solid_snapshot_sha"])
+        self.assertTrue(acceptance["anchor_source_matches_fixed_solid_snapshot"])
+        self.assertTrue(acceptance["anchor_source_matches_marker_geometry"])
         self.assertTrue(acceptance["pressure_complete"])
         self.assertTrue(acceptance["invalid_marker_counts_zero"])
         self.assertTrue(acceptance["anchor_selected_all_markers"])
         self.assertTrue(acceptance["anchor_fallback_zero"])
-        self.assertTrue(acceptance["scope_sampling_only"])
+        self.assertTrue(acceptance["one_sided_rows_complete"])
         self.assertLessEqual(
             float(acceptance["absolute_baseline_bias"]),
             float(gate["absolute_baseline_bias_max"]),
@@ -216,7 +206,7 @@ class AnsysVerticalFlapReferenceFormulationSelectionArtifactTests(
             float(gate["traction_decomposition_residual_max"]),
         )
 
-    def test_history_and_marker_wrappers_preserve_source_evidence(self):
+    def test_history_and_marker_wrappers_preserve_fixed_solid_provenance(self):
         payload = _read_json(MATRIX_JSON)
         history = _read_json(HISTORY_JSON)
 
@@ -229,9 +219,13 @@ class AnsysVerticalFlapReferenceFormulationSelectionArtifactTests(
                 self.assertNotEqual(source["source_flow_phase"], "")
                 self.assertEqual(
                     source["flow_phase"],
-                    "shared_snapshot_reference_formulation_selection",
+                    "fixed_solid_selected_formulation_validation",
                 )
                 self.assertEqual(source["flow_snapshot_sha256"], EXPECTED_SHARED_SHA)
+                self.assertEqual(
+                    source["fixed_solid_snapshot_policy"],
+                    EXPECTED_FIXED_SOLID_POLICY,
+                )
                 self.assertEqual(
                     source["reference_formulation_candidate"],
                     EXPECTED_CANDIDATE,
@@ -243,28 +237,29 @@ class AnsysVerticalFlapReferenceFormulationSelectionArtifactTests(
             self.assertEqual(wrapper["scenario"], row["scenario"])
             self.assertEqual(wrapper["source_scenario"], row["source_scenario"])
             self.assertEqual(wrapper["flow_snapshot_sha256"], EXPECTED_SHARED_SHA)
-            self.assertEqual(wrapper["reference_formulation_candidate"], EXPECTED_CANDIDATE)
+            self.assertEqual(
+                wrapper["fixed_solid_snapshot_policy"],
+                EXPECTED_FIXED_SOLID_POLICY,
+            )
+            self.assertEqual(
+                wrapper["reference_formulation_candidate"],
+                EXPECTED_CANDIDATE,
+            )
             self.assertEqual(wrapper["source_marker_diagnostics_json"], source_path.as_posix())
             self.assertEqual(
                 wrapper["source_marker_diagnostics_sha256"],
                 _sha256_file(source_path),
             )
             self.assertEqual(wrapper["marker_count"], int(row["total_marker_count"]))
-            if row["selection_component"] == "per_face_one_sided_pressure":
-                self.assertEqual(
-                    wrapper["one_sided_stats"]["one_sided_side_selection_counts"],
-                    {"inside": 0, "outside": 24},
-                )
-                self.assertEqual(wrapper["one_sided_stats"]["one_sided_marker_count"], 24)
 
-    def test_summary_csv_and_checksums_match_selection_artifacts(self):
+    def test_summary_csv_and_checksums_match_fixed_solid_artifacts(self):
         payload = _read_json(MATRIX_JSON)
         summary = SUMMARY_MD.read_text(encoding="utf-8")
-        self.assertIn("shared snapshot", summary)
-        self.assertIn("marker-traction sampling", summary)
+        self.assertIn("fixed-solid selected formulation", summary)
+        self.assertIn("does not claim coupled FSI", summary)
         self.assertIn("does not claim Fluent parity", summary)
         self.assertIn(EXPECTED_CANDIDATE, summary)
-        self.assertIn("fixed-solid and coupled validations remain pending", summary)
+        self.assertNotIn("Fluent parity validated", summary)
         for scenario in EXPECTED_SCENARIOS:
             self.assertIn(scenario, summary)
 
@@ -304,11 +299,6 @@ def _read_checksums(path: Path) -> dict[str, str]:
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _assert_scope(testcase: unittest.TestCase, scope: str) -> None:
-    for fragment in SCOPE_REQUIRED_FRAGMENTS:
-        testcase.assertIn(fragment, scope)
 
 
 if __name__ == "__main__":
