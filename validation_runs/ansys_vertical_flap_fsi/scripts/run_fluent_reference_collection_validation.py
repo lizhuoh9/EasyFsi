@@ -133,6 +133,10 @@ REQUIRED_METADATA_FIELDS = [
     "coupling settings if applicable",
     "export procedure",
     "who/when/how generated",
+    "force_z_positive",
+    "flow_rate_positive",
+    "pressure_reference",
+    "displacement_definition",
 ]
 
 CSV_COLUMNS = [
@@ -278,7 +282,8 @@ def _metadata_check() -> dict[str, Any]:
         for field in REQUIRED_METADATA_FIELDS
         if _is_missing(observed.get(_normalize_field(field), ""))
     ]
-    complete = not missing
+    semantic_mismatches = _metadata_semantic_mismatches(observed, missing)
+    complete = not missing and not semantic_mismatches
     return {
         "artifact": path.name,
         "source_path": _repo_relative(path),
@@ -288,6 +293,7 @@ def _metadata_check() -> dict[str, Any]:
         "required_fields": REQUIRED_METADATA_FIELDS,
         "observed_fields": observed,
         "missing_fields": missing,
+        "semantic_mismatches": semantic_mismatches,
         "source_provenance": (
             {
                 "document": observed[_normalize_field("Source document")],
@@ -336,10 +342,14 @@ def _candidate_contract(
         for metric, payload in reference_metrics.items()
         if payload["status"] != "available"
     ]
+    comparison_metadata = _comparison_metadata(metadata_check)
     tolerances_complete = _tolerances_complete(contract.get("tolerances", {}))
     provenance_complete = metadata_check["provenance_status"] == "complete"
     contract_complete = (
-        not missing_metrics and provenance_complete and tolerances_complete
+        not missing_metrics
+        and provenance_complete
+        and tolerances_complete
+        and comparison_metadata["status"] == "complete"
     )
 
     contract["source"] = {
@@ -353,9 +363,20 @@ def _candidate_contract(
     contract["source_provenance"] = metadata_check["source_provenance"]
     contract["provenance_status"] = metadata_check["provenance_status"]
     contract["reference_metrics"] = reference_metrics
+    contract["displacement_definition"] = comparison_metadata[
+        "displacement_definition"
+    ]
+    contract["sign_conventions"] = comparison_metadata["sign_conventions"]
     contract["missing_reference_metrics"] = missing_metrics
     contract["contract_status"] = (
         CONTRACT_COMPLETE if contract_complete else CONTRACT_INCOMPLETE
+    )
+    contract["active_contract_recommendation"] = _active_contract_recommendation(
+        contract_complete=contract_complete,
+        missing_metrics=missing_metrics,
+        metadata_check=metadata_check,
+        comparison_metadata=comparison_metadata,
+        tolerances_complete=tolerances_complete,
     )
     contract["collection_validator"] = {
         "source_script": SOURCE_SCRIPT,
@@ -363,6 +384,7 @@ def _candidate_contract(
         "current_contract": _repo_relative(CURRENT_CONTRACT_JSON),
         "current_contract_sha256": _sha256_file(CURRENT_CONTRACT_JSON),
         "tolerances_complete": tolerances_complete,
+        "comparison_metadata_complete": comparison_metadata["status"] == "complete",
     }
     return contract
 
@@ -544,12 +566,116 @@ def _metadata_fields(text: str) -> dict[str, str]:
     return fields
 
 
+def _metadata_semantic_mismatches(
+    observed: Mapping[str, str],
+    missing: Iterable[str],
+) -> list[dict[str, Any]]:
+    missing_keys = {_normalize_field(field) for field in missing}
+    checks = [
+        {
+            "field": "time step",
+            "expected": EXPECTED_TIME_STEP_S,
+            "actual": _float_value(observed.get(_normalize_field("time step"))),
+        },
+        {
+            "field": "number of steps",
+            "expected": EXPECTED_STEP_COUNT,
+            "actual": _float_value(observed.get(_normalize_field("number of steps"))),
+        },
+    ]
+    mismatches: list[dict[str, Any]] = []
+    for check in checks:
+        field = str(check["field"])
+        if _normalize_field(field) in missing_keys:
+            continue
+        actual = check["actual"]
+        expected = float(check["expected"])
+        if not _float_equals(actual, expected):
+            mismatches.append(
+                {
+                    "field": field,
+                    "expected": check["expected"],
+                    "actual": actual,
+                }
+            )
+    return mismatches
+
+
 def _normalize_field(value: str) -> str:
     return " ".join(value.lower().split())
 
 
 def _is_missing(value: Any) -> bool:
     return str(value).strip().lower() in MISSING_VALUES
+
+
+def _comparison_metadata(metadata_check: Mapping[str, Any]) -> dict[str, Any]:
+    observed = metadata_check.get("observed_fields", {})
+    if not isinstance(observed, Mapping):
+        observed = {}
+    status = (
+        "complete"
+        if metadata_check.get("provenance_status") == "complete"
+        else "missing"
+    )
+    return {
+        "status": status,
+        "displacement_definition": {
+            "metric": "tip_displacement_norm_m",
+            "source_step50_metric": "tip_mean_displacement_m",
+            "point": str(
+                observed.get(_normalize_field("displacement_definition"), "")
+            ),
+            "status": status,
+        },
+        "sign_conventions": {
+            "force_z_positive": str(
+                observed.get(_normalize_field("force_z_positive"), "")
+            ),
+            "flow_rate_positive": str(
+                observed.get(_normalize_field("flow_rate_positive"), "")
+            ),
+            "pressure_reference": str(
+                observed.get(_normalize_field("pressure_reference"), "")
+            ),
+            "status": status,
+        },
+    }
+
+
+def _active_contract_recommendation(
+    *,
+    contract_complete: bool,
+    missing_metrics: Iterable[str],
+    metadata_check: Mapping[str, Any],
+    comparison_metadata: Mapping[str, Any],
+    tolerances_complete: bool,
+) -> dict[str, Any]:
+    if contract_complete:
+        reason = (
+            "Candidate contract has complete source metrics, provenance, "
+            "comparison metadata, and tolerances."
+        )
+        action = "promote_versioned_contract"
+    else:
+        reason_parts = []
+        missing = list(missing_metrics)
+        if missing:
+            reason_parts.append("missing_metrics=" + ",".join(missing))
+        if metadata_check.get("provenance_status") != "complete":
+            reason_parts.append("provenance_incomplete")
+        if comparison_metadata.get("status") != "complete":
+            reason_parts.append("comparison_metadata_incomplete")
+        if not tolerances_complete:
+            reason_parts.append("tolerances_incomplete")
+        reason = "; ".join(reason_parts)
+        action = "keep_current_incomplete_contract"
+    return {
+        "recommended_action": action,
+        "current_contract": _repo_relative(CURRENT_CONTRACT_JSON),
+        "candidate_contract": _repo_relative(CANDIDATE_CONTRACT_JSON),
+        "reason": reason,
+    }
 
 
 def _missing_source_provenance() -> dict[str, str]:

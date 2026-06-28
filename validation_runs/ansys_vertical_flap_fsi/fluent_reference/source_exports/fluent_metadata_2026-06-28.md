@@ -19,3 +19,7 @@ contract incomplete.
 - coupling settings if applicable: MISSING
 - export procedure: MISSING
 - who/when/how generated: MISSING
+- force_z_positive: MISSING
+- flow_rate_positive: MISSING
+- pressure_reference: MISSING
+- displacement_definition: MISSING

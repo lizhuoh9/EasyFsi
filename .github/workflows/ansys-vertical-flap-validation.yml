@@ -62,6 +62,9 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_fluent_parity.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py
 
+          python -m py_compile `
+            tests\integration\test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic.py
+
       - name: Run archive artifact test - official half-domain
         shell: pwsh
         run: |
@@ -242,6 +245,13 @@ jobs:
         run: |
           python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_artifacts `
+            -v
+
+      - name: Run Fluent parity comparison logic test
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.integration.test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic `
             -v
 
       - name: Run archive artifact test - preflow release step20

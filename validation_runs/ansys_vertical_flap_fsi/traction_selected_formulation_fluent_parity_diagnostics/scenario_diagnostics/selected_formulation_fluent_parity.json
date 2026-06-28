@@ -116,9 +116,33 @@
   },
   "parity_metrics": {
     "displacement": {
+      "comparison_definition": {},
+      "comparison_status": "blocked_reference_missing",
+      "comparisons": {
+        "max_displacement": {
+          "absolute_error": null,
+          "comparison_status": "blocked_reference_missing",
+          "fluent_reference_value": null,
+          "gate_status": "blocked_reference_missing",
+          "relative_error": null,
+          "source_value": 1.121674995374633e-05,
+          "tolerance": null
+        },
+        "tip_displacement": {
+          "absolute_error": null,
+          "comparison_status": "blocked_reference_missing",
+          "fluent_reference_value": null,
+          "gate_status": "blocked_reference_missing",
+          "relative_error": null,
+          "source_value": 1.09567060803595e-05,
+          "tolerance": null
+        }
+      },
       "fluent_max_displacement_m": null,
       "fluent_tip_displacement_m": null,
       "gate_status": "blocked_reference_missing",
+      "max_displacement_relative_error": null,
+      "max_displacement_tolerance": null,
       "relative_error": null,
       "source_max_displacement_m": 2.320219027751591e-05,
       "source_step50_max_displacement_m": 1.121674995374633e-05,
@@ -126,19 +150,49 @@
         0.0,
         1.0929536074399948e-05,
         -7.711350917816162e-07
-      ]
+      ],
+      "tip_displacement_relative_error": null,
+      "tip_displacement_tolerance": null
     },
     "flow_outlet": {
+      "absolute_error": null,
+      "comparison": {
+        "absolute_error": null,
+        "comparison_status": "blocked_reference_missing",
+        "fluent_reference_value": null,
+        "gate_status": "blocked_reference_missing",
+        "relative_error": null,
+        "source_value": 0.0,
+        "tolerance": null
+      },
+      "comparison_status": "blocked_reference_missing",
+      "flow_sign_matches": null,
       "fluent_flow_rate_m3s": null,
       "gate_status": "blocked_reference_missing",
       "relative_error": null,
+      "sign_convention": "",
       "source_fluid_finite": true,
-      "source_max_velocity_mps": 31.764066696166992
+      "source_max_velocity_mps": 31.764066696166992,
+      "source_step50_outlet_flow_rate_m3s": 0.0,
+      "tolerance": null
     },
     "force": {
+      "absolute_error": null,
+      "comparison": {
+        "absolute_error": null,
+        "comparison_status": "blocked_reference_missing",
+        "fluent_reference_value": null,
+        "gate_status": "blocked_reference_missing",
+        "relative_error": null,
+        "source_value": -7.811257008965991e-05,
+        "tolerance": null
+      },
+      "comparison_status": "blocked_reference_missing",
       "fluent_force_z_N": null,
+      "force_sign_matches": null,
       "gate_status": "blocked_reference_missing",
       "relative_error": null,
+      "sign_convention": "",
       "source_force_sign_flip_count": 4,
       "source_marker_force_z_history": [
         -0.008534472953970964,
@@ -194,9 +248,11 @@
       ],
       "source_step50_marker_force_z_N": -7.811257008965991e-05,
       "source_step50_primary_face_force_z_N": -7.7841176119615e-05,
-      "source_step50_secondary_face_force_z_N": -2.7139397004490174e-07
+      "source_step50_secondary_face_force_z_N": -2.7139397004490174e-07,
+      "tolerance": null
     },
     "metadata": {
+      "contract_displacement_definition": {},
       "contract_geometry": {
         "duct_height_m": 0.04,
         "duct_length_m": 0.1,
@@ -215,6 +271,7 @@
         "solid_density_kgm3": 1600.0,
         "youngs_modulus_pa": 1000000.0
       },
+      "contract_sign_conventions": {},
       "contract_simulation": {
         "step_count": 50,
         "time_step_s": 0.0005,
@@ -240,13 +297,28 @@
       "source_step50_matrix_sha256": "459d42adacbf8fe634ab0d3808f9b2e62f573603ded35a708b4d6895111b2285"
     },
     "pressure": {
+      "absolute_error": null,
+      "comparison": {
+        "absolute_error": null,
+        "comparison_status": "blocked_reference_missing",
+        "fluent_reference_value": null,
+        "gate_status": "blocked_reference_missing",
+        "relative_error": null,
+        "source_value": 152.94211646082894,
+        "tolerance": null
+      },
+      "comparison_status": "blocked_reference_missing",
       "fluent_pressure_range_pa": null,
       "gate_status": "blocked_reference_missing",
+      "pressure_reference_convention": "",
+      "relative_error": null,
       "source_max_pressure_growth_ratio": 1.5073727283627545,
       "source_max_pressure_pa": 488.50445158757975,
       "source_pressure_finite": true,
       "source_step50_pressure_max_pa": 17.67200379506938,
-      "source_step50_pressure_min_pa": -135.27011266575957
+      "source_step50_pressure_min_pa": -135.27011266575957,
+      "source_step50_pressure_range_pa": 152.94211646082894,
+      "tolerance": null
     }
   },
   "purpose": "selected_formulation_fluent_parity_diagnostics",

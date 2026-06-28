@@ -92,6 +92,10 @@ EXPECTED_METADATA_FIELDS = {
     "coupling settings if applicable",
     "export procedure",
     "who/when/how generated",
+    "force_z_positive",
+    "flow_rate_positive",
+    "pressure_reference",
+    "displacement_definition",
 }
 
 
@@ -157,6 +161,7 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
         self.assertEqual(metadata["provenance_status"], "incomplete")
         self.assertEqual(metadata["blocker"], "fluent_reference_provenance_incomplete")
         self.assertEqual(set(metadata["missing_fields"]), EXPECTED_METADATA_FIELDS)
+        self.assertEqual(metadata["semantic_mismatches"], [])
         self.assertEqual(metadata["source_provenance"]["status"], "missing")
 
     def test_candidate_contract_remains_incomplete_and_missing_reference_backed(self):
@@ -167,12 +172,25 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
         self.assertEqual(candidate["contract_status"], EXPECTED_CONTRACT_STATUS)
         self.assertEqual(candidate["provenance_status"], "incomplete")
         self.assertEqual(candidate["source_provenance"]["status"], "missing")
+        self.assertEqual(candidate["displacement_definition"]["status"], "missing")
+        self.assertEqual(candidate["sign_conventions"]["status"], "missing")
+        self.assertEqual(
+            candidate["active_contract_recommendation"]["recommended_action"],
+            "keep_current_incomplete_contract",
+        )
+        self.assertIn(
+            "comparison_metadata_incomplete",
+            candidate["active_contract_recommendation"]["reason"],
+        )
         self.assertEqual(candidate["collection_validator"]["source_script"], EXPECTED_SOURCE_SCRIPT)
         self.assertEqual(
             candidate["collection_validator"]["current_contract_sha256"],
             _sha256_file(CURRENT_CONTRACT),
         )
         self.assertFalse(candidate["collection_validator"]["tolerances_complete"])
+        self.assertFalse(
+            candidate["collection_validator"]["comparison_metadata_complete"]
+        )
         self.assertEqual(set(candidate["missing_reference_metrics"]), EXPECTED_MISSING_METRICS)
         for metric in EXPECTED_MISSING_METRICS:
             self.assertEqual(candidate["reference_metrics"][metric]["status"], "missing")

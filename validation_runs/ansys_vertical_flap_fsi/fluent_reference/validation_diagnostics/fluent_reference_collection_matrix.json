@@ -22,7 +22,7 @@
     }
   ],
   "candidate_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_candidate_contract.json",
-  "candidate_contract_sha256": "674318ebf1f605e959dc5a614c7d22489221f60076439d9859edd489cd92e1d0",
+  "candidate_contract_sha256": "2ba58e604ee65cebf0bc42fa390cc6589fe365a02459495452cae3526ad5a908",
   "candidate_contract_status": "fluent_reference_incomplete",
   "candidate_status": "fluent_reference_collection_pending",
   "case": "ansys_vertical_flap_fsi",
@@ -49,20 +49,28 @@
       "number of steps",
       "coupling settings if applicable",
       "export procedure",
-      "who/when/how generated"
+      "who/when/how generated",
+      "force_z_positive",
+      "flow_rate_positive",
+      "pressure_reference",
+      "displacement_definition"
     ],
     "observed_fields": {
       "boundary conditions": "MISSING",
       "coupling settings if applicable": "MISSING",
+      "displacement_definition": "MISSING",
       "export author": "MISSING",
       "export date": "MISSING",
       "export procedure": "MISSING",
+      "flow_rate_positive": "MISSING",
       "fluent run id": "MISSING",
       "fluent version": "MISSING",
+      "force_z_positive": "MISSING",
       "geometry units": "MISSING",
       "material model": "MISSING",
       "mesh/domain source": "MISSING",
       "number of steps": "MISSING",
+      "pressure_reference": "MISSING",
       "source document": "MISSING",
       "time step": "MISSING",
       "who/when/how generated": "MISSING"
@@ -82,8 +90,13 @@
       "number of steps",
       "coupling settings if applicable",
       "export procedure",
-      "who/when/how generated"
+      "who/when/how generated",
+      "force_z_positive",
+      "flow_rate_positive",
+      "pressure_reference",
+      "displacement_definition"
     ],
+    "semantic_mismatches": [],
     "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_metadata_2026-06-28.md",
     "source_provenance": {
       "author": "",

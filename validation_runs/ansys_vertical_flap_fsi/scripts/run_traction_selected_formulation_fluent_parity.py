@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import shutil
 import sys
 from pathlib import Path
@@ -43,6 +44,7 @@ REFERENCE_FORMULATION_CANDIDATE = (
 )
 BLOCKER_REFERENCE_INCOMPLETE = "fluent_reference_incomplete"
 BLOCKER_NO_FLUENT_PARITY = "no_fluent_parity_claim"
+RELATIVE_ERROR_DENOMINATOR_FLOOR = 1.0e-12
 
 CSV_COLUMNS = [
     "scenario",
@@ -255,9 +257,39 @@ def _parity_metrics(
 ) -> dict[str, Any]:
     final_step = source_history_rows[-1] if source_history_rows else {}
     reference_metrics = dict(reference_contract["reference_metrics"])
+    tolerances = dict(reference_contract.get("tolerances", {}))
+    tip_displacement = _relative_comparison(
+        source_value=_vector_norm_or_numeric(final_step.get("tip_mean_displacement_m")),
+        reference_value=_reference_value(reference_metrics, "tip_displacement_m"),
+        tolerance=_tolerance_value(tolerances, "tip_displacement_relative"),
+    )
+    max_displacement = _relative_comparison(
+        source_value=_numeric_value(final_step.get("max_displacement_m")),
+        reference_value=_reference_value(reference_metrics, "max_displacement_m"),
+        tolerance=_tolerance_value(tolerances, "max_displacement_relative"),
+    )
+    force_z = _relative_comparison(
+        source_value=_numeric_value(final_step.get("marker_force_z_N")),
+        reference_value=_reference_value(reference_metrics, "force_z_N"),
+        tolerance=_tolerance_value(tolerances, "force_z_relative"),
+    )
+    flow_rate = _relative_comparison(
+        source_value=_numeric_value(final_step.get("zmin_velocity_outlet_flux_m3s")),
+        reference_value=_reference_value(reference_metrics, "flow_rate_m3s"),
+        tolerance=_tolerance_value(tolerances, "flow_rate_relative"),
+    )
+    pressure_range = _absolute_comparison(
+        source_value=_pressure_range(final_step),
+        reference_value=_reference_value(reference_metrics, "pressure_range_pa"),
+        tolerance=_tolerance_value(tolerances, "pressure_sanity_absolute"),
+    )
     return {
         "displacement": {
-            "gate_status": _gate_status(reference_metrics, "tip_displacement_m"),
+            "gate_status": _combined_gate_status(tip_displacement, max_displacement),
+            "comparison_status": _combined_comparison_status(
+                tip_displacement,
+                max_displacement,
+            ),
             "source_max_displacement_m": source_row["max_displacement_m"],
             "source_step50_max_displacement_m": final_step.get(
                 "max_displacement_m"
@@ -273,10 +305,26 @@ def _parity_metrics(
                 reference_metrics,
                 "max_displacement_m",
             ),
-            "relative_error": None,
+            "tip_displacement_relative_error": tip_displacement["relative_error"],
+            "max_displacement_relative_error": max_displacement["relative_error"],
+            "tip_displacement_tolerance": tip_displacement["tolerance"],
+            "max_displacement_tolerance": max_displacement["tolerance"],
+            "relative_error": _max_present(
+                tip_displacement["relative_error"],
+                max_displacement["relative_error"],
+            ),
+            "comparisons": {
+                "tip_displacement": tip_displacement,
+                "max_displacement": max_displacement,
+            },
+            "comparison_definition": reference_contract.get(
+                "displacement_definition",
+                {},
+            ),
         },
         "force": {
-            "gate_status": _gate_status(reference_metrics, "force_z_N"),
+            "gate_status": force_z["gate_status"],
+            "comparison_status": force_z["comparison_status"],
             "source_marker_force_z_history": source_row["marker_force_z_by_step"],
             "source_step50_marker_force_z_N": final_step.get("marker_force_z_N"),
             "source_step50_primary_face_force_z_N": final_step.get(
@@ -287,20 +335,47 @@ def _parity_metrics(
             ),
             "source_force_sign_flip_count": source_row["force_sign_flip_count"],
             "fluent_force_z_N": _reference_value(reference_metrics, "force_z_N"),
-            "relative_error": None,
+            "relative_error": force_z["relative_error"],
+            "absolute_error": force_z["absolute_error"],
+            "tolerance": force_z["tolerance"],
+            "force_sign_matches": _same_sign(
+                _numeric_value(final_step.get("marker_force_z_N")),
+                _reference_value(reference_metrics, "force_z_N"),
+            ),
+            "sign_convention": reference_contract.get("sign_conventions", {}).get(
+                "force_z_positive",
+                "",
+            ),
+            "comparison": force_z,
         },
         "flow_outlet": {
-            "gate_status": _gate_status(reference_metrics, "flow_rate_m3s"),
+            "gate_status": flow_rate["gate_status"],
+            "comparison_status": flow_rate["comparison_status"],
             "source_fluid_finite": bool(source_row["fluid_finite"]),
             "source_max_velocity_mps": source_row["max_velocity_mps"],
+            "source_step50_outlet_flow_rate_m3s": final_step.get(
+                "zmin_velocity_outlet_flux_m3s"
+            ),
             "fluent_flow_rate_m3s": _reference_value(
                 reference_metrics,
                 "flow_rate_m3s",
             ),
-            "relative_error": None,
+            "relative_error": flow_rate["relative_error"],
+            "absolute_error": flow_rate["absolute_error"],
+            "tolerance": flow_rate["tolerance"],
+            "flow_sign_matches": _same_sign(
+                _numeric_value(final_step.get("zmin_velocity_outlet_flux_m3s")),
+                _reference_value(reference_metrics, "flow_rate_m3s"),
+            ),
+            "sign_convention": reference_contract.get("sign_conventions", {}).get(
+                "flow_rate_positive",
+                "",
+            ),
+            "comparison": flow_rate,
         },
         "pressure": {
-            "gate_status": _gate_status(reference_metrics, "pressure_range_pa"),
+            "gate_status": pressure_range["gate_status"],
+            "comparison_status": pressure_range["comparison_status"],
             "source_pressure_finite": bool(source_row["pressure_finite"]),
             "source_max_pressure_pa": source_row["max_pressure_pa"],
             "source_max_pressure_growth_ratio": source_row[
@@ -308,13 +383,22 @@ def _parity_metrics(
             ],
             "source_step50_pressure_min_pa": final_step.get("pressure_min_pa"),
             "source_step50_pressure_max_pa": final_step.get("pressure_max_pa"),
+            "source_step50_pressure_range_pa": _pressure_range(final_step),
             "fluent_pressure_range_pa": _reference_value(
                 reference_metrics,
                 "pressure_range_pa",
             ),
+            "absolute_error": pressure_range["absolute_error"],
+            "relative_error": pressure_range["relative_error"],
+            "tolerance": pressure_range["tolerance"],
+            "pressure_reference_convention": reference_contract.get(
+                "sign_conventions",
+                {},
+            ).get("pressure_reference", ""),
+            "comparison": pressure_range,
         },
         "metadata": {
-            "gate_status": "passed",
+            "gate_status": _metadata_gate_status(reference_contract),
             "source_step50_candidate_status": source_matrix["candidate_status"],
             "source_step50_completed_step_count": source_row["completed_step_count"],
             "reference_formulation_candidate": source_matrix[
@@ -339,6 +423,14 @@ def _parity_metrics(
             "contract_source_provenance": reference_contract["source_provenance"],
             "contract_geometry": reference_contract["geometry"],
             "contract_material": reference_contract["material"],
+            "contract_displacement_definition": reference_contract.get(
+                "displacement_definition",
+                {},
+            ),
+            "contract_sign_conventions": reference_contract.get(
+                "sign_conventions",
+                {},
+            ),
         },
     }
 
@@ -416,7 +508,190 @@ def _reference_value(reference_metrics: Mapping[str, Any], metric_name: str) -> 
     metric = reference_metrics.get(metric_name, {})
     if not isinstance(metric, Mapping) or metric.get("status") == "missing":
         return None
-    return metric.get("value")
+    return _numeric_value(metric.get("value"))
+
+
+def _tolerance_value(tolerances: Mapping[str, Any], tolerance_name: str) -> float | None:
+    tolerance = tolerances.get(tolerance_name, {})
+    if not isinstance(tolerance, Mapping) or tolerance.get("status") != "available":
+        return None
+    return _numeric_value(tolerance.get("value"))
+
+
+def _relative_comparison(
+    *,
+    source_value: float | None,
+    reference_value: float | None,
+    tolerance: float | None,
+) -> dict[str, Any]:
+    comparison = _comparison_values(
+        source_value=source_value,
+        reference_value=reference_value,
+        tolerance=tolerance,
+    )
+    if comparison["gate_status"] != "pending":
+        return comparison
+    comparison["gate_status"] = (
+        "passed"
+        if comparison["relative_error"] <= comparison["tolerance"]
+        else "failed"
+    )
+    comparison["comparison_status"] = "compared"
+    return comparison
+
+
+def _absolute_comparison(
+    *,
+    source_value: float | None,
+    reference_value: float | None,
+    tolerance: float | None,
+) -> dict[str, Any]:
+    comparison = _comparison_values(
+        source_value=source_value,
+        reference_value=reference_value,
+        tolerance=tolerance,
+    )
+    if comparison["gate_status"] != "pending":
+        return comparison
+    comparison["gate_status"] = (
+        "passed"
+        if comparison["absolute_error"] <= comparison["tolerance"]
+        else "failed"
+    )
+    comparison["comparison_status"] = "compared"
+    return comparison
+
+
+def _comparison_values(
+    *,
+    source_value: float | None,
+    reference_value: float | None,
+    tolerance: float | None,
+) -> dict[str, Any]:
+    result = {
+        "source_value": source_value,
+        "fluent_reference_value": reference_value,
+        "tolerance": tolerance,
+        "absolute_error": None,
+        "relative_error": None,
+        "gate_status": "pending",
+        "comparison_status": "pending",
+    }
+    if reference_value is None:
+        result["gate_status"] = "blocked_reference_missing"
+        result["comparison_status"] = "blocked_reference_missing"
+        return result
+    if source_value is None:
+        result["gate_status"] = "blocked_source_missing"
+        result["comparison_status"] = "blocked_source_missing"
+        return result
+    if tolerance is None:
+        result["gate_status"] = "blocked_tolerance_missing"
+        result["comparison_status"] = "blocked_tolerance_missing"
+        return result
+    absolute_error = abs(source_value - reference_value)
+    denominator = max(abs(reference_value), RELATIVE_ERROR_DENOMINATOR_FLOOR)
+    result["absolute_error"] = absolute_error
+    result["relative_error"] = absolute_error / denominator
+    return result
+
+
+def _combined_gate_status(*comparisons: Mapping[str, Any]) -> str:
+    statuses = [str(comparison["gate_status"]) for comparison in comparisons]
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    for blocked in (
+        "blocked_reference_missing",
+        "blocked_source_missing",
+        "blocked_tolerance_missing",
+    ):
+        if any(status == blocked for status in statuses):
+            return blocked
+    if all(status == "passed" for status in statuses):
+        return "passed"
+    return "pending_comparison"
+
+
+def _combined_comparison_status(*comparisons: Mapping[str, Any]) -> str:
+    statuses = [str(comparison["comparison_status"]) for comparison in comparisons]
+    if all(status == "compared" for status in statuses):
+        return "compared"
+    for blocked in (
+        "blocked_reference_missing",
+        "blocked_source_missing",
+        "blocked_tolerance_missing",
+    ):
+        if any(status == blocked for status in statuses):
+            return blocked
+    return "pending"
+
+
+def _pressure_range(final_step: Mapping[str, Any]) -> float | None:
+    pressure_min = _numeric_value(final_step.get("pressure_min_pa"))
+    pressure_max = _numeric_value(final_step.get("pressure_max_pa"))
+    if pressure_min is None or pressure_max is None:
+        return None
+    return pressure_max - pressure_min
+
+
+def _same_sign(lhs: float | None, rhs: float | None) -> bool | None:
+    if lhs is None or rhs is None:
+        return None
+    if abs(lhs) <= RELATIVE_ERROR_DENOMINATOR_FLOOR:
+        return abs(rhs) <= RELATIVE_ERROR_DENOMINATOR_FLOOR
+    if abs(rhs) <= RELATIVE_ERROR_DENOMINATOR_FLOOR:
+        return abs(lhs) <= RELATIVE_ERROR_DENOMINATOR_FLOOR
+    return lhs * rhs > 0.0
+
+
+def _metadata_gate_status(reference_contract: Mapping[str, Any]) -> str:
+    if reference_contract.get("contract_status") != "fluent_reference_complete":
+        return "passed"
+    simulation = reference_contract.get("simulation", {})
+    provenance = reference_contract.get("source_provenance", {})
+    displacement_definition = reference_contract.get("displacement_definition", {})
+    sign_conventions = reference_contract.get("sign_conventions", {})
+    step_count = _numeric_value(simulation.get("step_count"))
+    time_step_s = _numeric_value(simulation.get("time_step_s"))
+    total_time_s = _numeric_value(simulation.get("total_time_s"))
+    checks = [
+        step_count == 50,
+        time_step_s is not None and abs(time_step_s - 0.0005) <= 1.0e-12,
+        total_time_s is not None and abs(total_time_s - 0.025) <= 1.0e-12,
+        provenance.get("status") == "complete",
+        displacement_definition.get("status") == "complete",
+        sign_conventions.get("status") == "complete",
+    ]
+    return "passed" if all(checks) else "failed"
+
+
+def _max_present(*values: Any) -> float | None:
+    numeric_values = [
+        numeric
+        for numeric in (_numeric_value(value) for value in values)
+        if numeric is not None
+    ]
+    return max(numeric_values) if numeric_values else None
+
+
+def _numeric_value(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _vector_norm_or_numeric(value: Any) -> float | None:
+    numeric = _numeric_value(value)
+    if numeric is not None:
+        return numeric
+    if not isinstance(value, (list, tuple)):
+        return None
+    components = [_numeric_value(component) for component in value]
+    if any(component is None for component in components):
+        return None
+    return math.sqrt(sum(float(component) ** 2 for component in components))
 
 
 def _source_step50_row(source_matrix: Mapping[str, Any]) -> Mapping[str, Any]:
