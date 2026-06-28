@@ -16,7 +16,9 @@ from cases.ansys_vertical_flap_fsi import (
     ANSYS_VERTICAL_FLAP_REFERENCE_RESULTS,
     ANSYS_VERTICAL_FLAP_THIN_WALL_PRESSURE_SAMPLING,
     VerticalFlapFsiConfig,
+    build_ansys_vertical_flap_generic_problem,
     run_vertical_flap_fsi_smoke,
+    selected_formulation_solver_config,
     surface_force_support_radius_m,
     thin_wall_pressure_probe_max_multiplier,
 )
@@ -227,6 +229,75 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(
             solid_mpm_fsi_runner._traction_marker_face_count(single_config),
             1,
+        )
+
+    def test_generic_problem_defaults_to_runtime_pressure_pairs_without_json(self):
+        problem = build_ansys_vertical_flap_generic_problem(step_count=50)
+        provider = problem.traction_config.pressure_sampling.pair_provider
+
+        self.assertEqual(provider.mode, "runtime_anchored_cell_pair")
+        self.assertEqual(provider.pair_source_status, "runtime_generated")
+        self.assertEqual(provider.source, "")
+        self.assertFalse(provider.transition_backed)
+        self.assertNotIn("selected_anchor_markers_json", provider.as_diagnostics()["source"])
+
+        config = selected_formulation_solver_config(step_count=50)
+        self.assertIsNone(config.traction_pressure_pair_anchor_markers_json)
+        self.assertEqual(
+            config.traction_pressure_pair_runtime_provider_mode,
+            "runtime_anchored_cell_pair",
+        )
+
+    def test_generic_replay_pressure_pairs_require_anchor_json(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "replay_from_diagnostics requires selected_anchor_markers_json",
+        ):
+            build_ansys_vertical_flap_generic_problem(
+                pressure_pair_provider_mode="replay_from_diagnostics",
+                step_count=50,
+            )
+
+        problem = build_ansys_vertical_flap_generic_problem(
+            pressure_pair_provider_mode="replay_from_diagnostics",
+            selected_anchor_markers_json=SELECTED_ANCHOR_MARKERS_JSON,
+            step_count=50,
+        )
+        provider = problem.traction_config.pressure_sampling.pair_provider
+        self.assertEqual(provider.mode, "replay_from_diagnostics")
+        self.assertEqual(provider.source, SELECTED_ANCHOR_MARKERS_JSON)
+        self.assertTrue(provider.transition_backed)
+
+    def test_generic_pressure_pair_provider_mode_is_fail_closed(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "unsupported pressure_pair_provider_mode",
+        ):
+            build_ansys_vertical_flap_generic_problem(
+                pressure_pair_provider_mode="transition_seeded_from_anchor_artifact",
+                step_count=50,
+            )
+
+    def test_runtime_pressure_pair_mode_ignores_supplied_anchor_json_source(self):
+        problem = build_ansys_vertical_flap_generic_problem(
+            selected_anchor_markers_json=SELECTED_ANCHOR_MARKERS_JSON,
+            step_count=50,
+        )
+        provider = problem.traction_config.pressure_sampling.pair_provider
+
+        self.assertEqual(provider.mode, "runtime_anchored_cell_pair")
+        self.assertEqual(provider.pair_source_status, "runtime_generated")
+        self.assertEqual(provider.source, "")
+        self.assertFalse(provider.transition_backed)
+
+        config = selected_formulation_solver_config(
+            step_count=50,
+            selected_anchor_markers_json=SELECTED_ANCHOR_MARKERS_JSON,
+        )
+        self.assertIsNone(config.traction_pressure_pair_anchor_markers_json)
+        self.assertEqual(
+            config.traction_pressure_pair_runtime_provider_mode,
+            "runtime_anchored_cell_pair",
         )
 
     def test_formal_runner_uses_public_stress_face_diagnostics(self):

@@ -6,11 +6,11 @@ This artifact invokes the generic FSI solver boundary for the ANSYS vertical-fla
 
 ## Candidate decision
 
-- candidate_status: `generic_solver_selected_formulation_step50_transition_passed`
+- candidate_status: `generic_solver_selected_formulation_step50_passed`
 - completed_step_count: `50`
 - pressure_pair_mode: `runtime_anchored_cell_pair`
-- pressure_pair_runtime_generation_status: `transition_seeded_from_anchor_artifact`
-- pressure_pair_runtime_generation_complete: `False`
+- pressure_pair_runtime_generation_status: `runtime_generated`
+- pressure_pair_runtime_generation_complete: `True`
 
 ## Gates
 
@@ -23,7 +23,7 @@ This artifact invokes the generic FSI solver boundary for the ANSYS vertical-fla
 
 - Does not claim Fluent parity.
 - Does not complete Fluent reference exports.
-- Pressure-pair runtime derivation remains transition-seeded from the selected anchor artifact.
+- Pressure-pair cells are generated from runtime marker geometry through the generic pressure sample pair contract.
 
 ## Files
 

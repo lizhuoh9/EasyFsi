@@ -36,13 +36,6 @@ FLOW_CSV = OUTPUT_DIR / "easyfsi_flow_balance_history.csv"
 PRESSURE_CSV = OUTPUT_DIR / "easyfsi_pressure_summary_history.csv"
 CHECKSUMS_PATH = OUTPUT_DIR / "CHECKSUMS.sha256"
 
-FIXED_SOLID_ROOT = ROOT / "traction_fixed_solid_selected_formulation_diagnostics"
-SELECTED_ANCHOR_MARKERS_JSON = (
-    FIXED_SOLID_ROOT
-    / "marker_diagnostics"
-    / "fixed_solid_selected_per_face_one_sided_probe0p51_markers.json"
-)
-
 SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
     "run_ansys_vertical_flap_generic_solver.py"
@@ -94,7 +87,6 @@ PRESSURE_HEADERS = [
 def run() -> dict[str, Any]:
     _prepare_output_dir()
     problem = build_ansys_vertical_flap_generic_problem(
-        selected_anchor_markers_json=SELECTED_ANCHOR_MARKERS_JSON.as_posix(),
         step_count=REQUESTED_STEP_COUNT,
     )
     solver_config = FsiSolverConfig(
@@ -178,9 +170,9 @@ def _row_from_result(result: FsiRunResult) -> dict[str, Any]:
         "pressure_pair_runtime_generation_complete": bool(
             result.diagnostics["pressure_pair_runtime_generation_complete"]
         ),
-        "selected_anchor_markers_source": SELECTED_ANCHOR_MARKERS_JSON.as_posix(),
-        "selected_anchor_markers_source_sha256": _sha256_file(
-            SELECTED_ANCHOR_MARKERS_JSON
+        "pressure_pair_anchor_source": _last_text(
+            history,
+            "pressure_pair_anchor_source",
         ),
         "pressure_pair_anchor_map_sha256": _last_text(
             history,
@@ -228,18 +220,9 @@ def _matrix_payload(*, result: FsiRunResult, row: Mapping[str, Any]) -> dict[str
     candidate_status = (
         "generic_solver_selected_formulation_step50_passed"
         if row["run_status"] == "completed" and pressure_pair_generation_complete
-        else "generic_solver_selected_formulation_step50_transition_passed"
-        if row["run_status"] == "completed"
         else "generic_solver_selected_formulation_step50_blocked"
     )
     blockers = [
-        {
-            "blocker": "runtime_pressure_pair_generation_pending",
-            "detail": (
-                "pressure-pair cells are still seeded from the selected anchor "
-                "artifact; full runtime derivation remains the next solver step"
-            ),
-        },
         {
             "blocker": "fluent_reference_incomplete",
             "detail": "Fluent source exports remain incomplete and separate from this runner",
@@ -274,6 +257,9 @@ def _matrix_payload(*, result: FsiRunResult, row: Mapping[str, Any]) -> dict[str
         "pressure_pair_runtime_generation_complete": (
             pressure_pair_generation_complete
         ),
+        "transition_artifact_dependency": bool(
+            result.diagnostics.get("transition_artifact_dependency", False)
+        ),
         "pressure_pair_sample_contract": {
             "required_fields": [
                 "region_id",
@@ -287,7 +273,7 @@ def _matrix_payload(*, result: FsiRunResult, row: Mapping[str, Any]) -> dict[str
             "sample_status": (
                 "runtime_generated"
                 if pressure_pair_generation_complete
-                else "transition_seeded_from_anchor_artifact"
+                else "missing_runtime_generation"
             ),
             "fallback_status": (
                 "no_fallbacks"
@@ -295,8 +281,8 @@ def _matrix_payload(*, result: FsiRunResult, row: Mapping[str, Any]) -> dict[str
                 else "fallbacks_observed"
             ),
             "diagnostic_reason": (
-                "first generic boundary keeps selected anchor seed visible until "
-                "full pressure-pair generation is implemented"
+                "official generic boundary installs pressure-pair cells from "
+                "runtime marker geometry"
             ),
             "pair_map_sha256": row["pressure_pair_anchor_map_sha256"],
         },
@@ -465,8 +451,8 @@ def _summary_markdown(payload: Mapping[str, Any]) -> str:
         "- Does not claim Fluent parity.",
         "- Does not complete Fluent reference exports.",
         (
-            "- Pressure-pair runtime derivation remains transition-seeded from "
-            "the selected anchor artifact."
+            "- Pressure-pair cells are generated from runtime marker geometry "
+            "through the generic pressure sample pair contract."
         ),
         "",
         "## Files",

@@ -12,6 +12,10 @@ import numpy as np
 from simulation_core.fluid import CartesianFluidSolver, FluidDomainSpec
 from simulation_core.hibm_mpm import HibmMpmSurfaceMarkers
 from simulation_core.neo_hookean_mpm import NeoHookeanMpmState
+from simulation_core.pressure_sample_pairs import (
+    PressureSamplePairMap,
+    compute_runtime_anchored_cell_pair_map,
+)
 from simulation_core.runtime import TaichiRuntimeConfig
 
 
@@ -63,6 +67,14 @@ TRACTION_PRESSURE_PAIR_POLICIES = {
     TRACTION_PRESSURE_PAIR_POLICY_INDEPENDENT_LADDER,
     TRACTION_PRESSURE_PAIR_POLICY_SYMMETRIC_CELL_PAIR,
     TRACTION_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR,
+}
+TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDER_DISABLED = "disabled"
+TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDER_ANCHORED_CELL_PAIR = (
+    "runtime_anchored_cell_pair"
+)
+TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDERS = {
+    TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDER_DISABLED,
+    TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDER_ANCHORED_CELL_PAIR,
 }
 TRACTION_ONE_SIDED_PRESSURE_POLICY_DISABLED = "disabled"
 TRACTION_ONE_SIDED_PRESSURE_POLICY_PER_FACE_MIRRORED = "per_face_mirrored"
@@ -987,6 +999,16 @@ def _traction_pressure_pair_anchor_markers_json(config: Any) -> str | None:
     return text or None
 
 
+def _traction_pressure_pair_runtime_provider_mode(config: Any) -> str:
+    return str(
+        getattr(
+            config,
+            "traction_pressure_pair_runtime_provider_mode",
+            TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDER_DISABLED,
+        )
+    )
+
+
 def _traction_marker_face_count(config: Any) -> int:
     if _traction_marker_layout(config) == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE:
         return 1
@@ -1228,6 +1250,12 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError(
             f"unsupported traction_pressure_pair_policy: {pressure_pair_policy!r}"
         )
+    runtime_pair_provider = _traction_pressure_pair_runtime_provider_mode(config)
+    if runtime_pair_provider not in TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDERS:
+        raise ValueError(
+            "unsupported traction_pressure_pair_runtime_provider_mode: "
+            f"{runtime_pair_provider!r}"
+        )
     pressure_pair_max_cell_delta = _traction_pressure_pair_max_cell_delta(config)
     if pressure_pair_max_cell_delta < 0:
         raise ValueError("traction_pressure_pair_max_cell_delta must be non-negative")
@@ -1303,6 +1331,8 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         _is_selected_traction_formulation_coupled_smoke(config)
         and pressure_pair_policy == TRACTION_PRESSURE_PAIR_POLICY_BASELINE_ANCHORED_CELL_PAIR
         and anchor_markers_json is None
+        and runtime_pair_provider
+        != TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDER_ANCHORED_CELL_PAIR
     ):
         raise ValueError(
             "selected coupled smoke requires "
@@ -2387,6 +2417,24 @@ def _install_selected_pressure_pair_anchor_markers(
 ) -> dict[str, object]:
     anchor_markers_json = _traction_pressure_pair_anchor_markers_json(config)
     if anchor_markers_json is None:
+        if (
+            _is_selected_traction_formulation_coupled_smoke(config)
+            and _traction_pressure_pair_runtime_provider_mode(config)
+            == TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDER_ANCHORED_CELL_PAIR
+        ):
+            runtime_pair_map = _runtime_pressure_pair_anchor_map(markers, config)
+            markers.set_pressure_pair_anchor_cells(
+                inside_cells=runtime_pair_map.inside_cells,
+                outside_cells=runtime_pair_map.outside_cells,
+            )
+            return _pressure_pair_anchor_install_report(
+                status="installed",
+                source="runtime_generated",
+                marker_count=int(markers.marker_count),
+                active_marker_count=runtime_pair_map.selected_count,
+                anchor_map_sha256=runtime_pair_map.pair_map_sha256,
+                fixed_solid_snapshot_policy="runtime_marker_geometry",
+            )
         if _is_selected_traction_formulation_coupled_smoke(config):
             raise ValueError(
                 "selected coupled smoke requires "
@@ -2446,6 +2494,31 @@ def _install_selected_pressure_pair_anchor_markers(
             metadata_sources,
             "fixed_solid_snapshot_policy",
         ),
+    )
+
+
+def _runtime_pressure_pair_anchor_map(
+    markers: HibmMpmSurfaceMarkers,
+    config: Any,
+) -> PressureSamplePairMap:
+    count = int(markers.marker_count)
+    positions = markers.x_gamma_m.to_numpy()[:count]
+    normals = markers.n_gamma.to_numpy()[:count]
+    region_ids = markers.region_id.to_numpy()[:count]
+    solid_min, solid_max = _solid_box(config)
+    inside_axis_position_m = 0.5 * (
+        float(solid_min[STREAMWISE_AXIS_INDEX])
+        + float(solid_max[STREAMWISE_AXIS_INDEX])
+    )
+    return compute_runtime_anchored_cell_pair_map(
+        marker_positions_m=tuple(tuple(float(value) for value in row) for row in positions),
+        marker_normals=tuple(tuple(float(value) for value in row) for row in normals),
+        marker_region_ids=tuple(int(value) for value in region_ids),
+        domain_bounds_m=_domain_bounds(config),
+        grid_nodes=tuple(int(value) for value in config.grid_nodes),
+        anchor_axis=STREAMWISE_AXIS_INDEX,
+        inside_axis_position_m=inside_axis_position_m,
+        outside_axis_offset_cells=1,
     )
 
 

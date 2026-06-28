@@ -17,12 +17,6 @@ FORCE_CSV = DIAG_ROOT / "easyfsi_force_history.csv"
 FLOW_CSV = DIAG_ROOT / "easyfsi_flow_balance_history.csv"
 PRESSURE_CSV = DIAG_ROOT / "easyfsi_pressure_summary_history.csv"
 CHECKSUMS = DIAG_ROOT / "CHECKSUMS.sha256"
-SELECTED_ANCHOR_MARKERS_JSON = (
-    ROOT
-    / "traction_fixed_solid_selected_formulation_diagnostics"
-    / "marker_diagnostics"
-    / "fixed_solid_selected_per_face_one_sided_probe0p51_markers.json"
-)
 
 EXPECTED_SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
@@ -100,7 +94,7 @@ class AnsysVerticalFlapGenericSolverArtifactTests(unittest.TestCase):
         self.assertEqual(row["completed_step_count"], 50)
         self.assertEqual(row["run_status"], "completed")
 
-    def test_pressure_pair_transition_state_is_explicit(self) -> None:
+    def test_pressure_pair_runtime_generation_is_official_path(self) -> None:
         payload = _read_json(MATRIX_JSON)
         row = payload["rows"][0]
         blockers = {item["blocker"] for item in payload["candidate_blockers"]}
@@ -112,24 +106,22 @@ class AnsysVerticalFlapGenericSolverArtifactTests(unittest.TestCase):
         )
         self.assertEqual(
             pressure_policy["pair_source_status"],
-            "transition_seeded_from_anchor_artifact",
+            "runtime_generated",
         )
-        self.assertTrue(pressure_policy["transition_backed"])
-        self.assertFalse(payload["pressure_pair_runtime_generation_complete"])
+        self.assertFalse(pressure_policy["transition_backed"])
+        self.assertTrue(payload["pressure_pair_runtime_generation_complete"])
         self.assertEqual(
             payload["pressure_pair_runtime_generation_status"],
-            "transition_seeded_from_anchor_artifact",
+            "runtime_generated",
         )
-        self.assertIn("runtime_pressure_pair_generation_pending", blockers)
+        self.assertFalse(payload["transition_artifact_dependency"])
+        self.assertEqual(
+            payload["candidate_status"],
+            "generic_solver_selected_formulation_step50_passed",
+        )
+        self.assertNotIn("runtime_pressure_pair_generation_pending", blockers)
         self.assertIn("no_fluent_parity_claim", blockers)
-        self.assertEqual(
-            row["selected_anchor_markers_source"],
-            SELECTED_ANCHOR_MARKERS_JSON.as_posix(),
-        )
-        self.assertEqual(
-            row["selected_anchor_markers_source_sha256"],
-            _sha256_file(SELECTED_ANCHOR_MARKERS_JSON),
-        )
+        self.assertEqual(row["pressure_pair_anchor_source"], "runtime_generated")
         self.assertEqual(int(row["invalid_marker_count_max"]), 0)
         self.assertEqual(int(row["sample_pair_fallback_count_max"]), 0)
         self.assertGreaterEqual(int(row["one_sided_marker_count_min"]), 24)
@@ -147,7 +139,8 @@ class AnsysVerticalFlapGenericSolverArtifactTests(unittest.TestCase):
         summary = SUMMARY_MD.read_text(encoding="utf-8")
         self.assertIn("EasyFsi generic solver", summary)
         self.assertIn("does not claim Fluent parity", summary)
-        self.assertIn("transition_seeded_from_anchor_artifact", summary)
+        self.assertIn("runtime marker geometry", summary)
+        self.assertNotIn("transition_seeded_from_anchor_artifact", summary)
         self.assertNotIn("Fluent parity validated", summary)
 
     def test_history_and_checksums_are_consistent(self) -> None:
@@ -160,8 +153,9 @@ class AnsysVerticalFlapGenericSolverArtifactTests(unittest.TestCase):
         self.assertEqual(len(history["history"]), 50)
         self.assertEqual(
             history["pressure_pair_policy"]["pair_source_status"],
-            "transition_seeded_from_anchor_artifact",
+            "runtime_generated",
         )
+        self.assertFalse(history["pressure_pair_policy"]["transition_backed"])
         self.assertEqual(
             set(payload["export_artifacts"]),
             {

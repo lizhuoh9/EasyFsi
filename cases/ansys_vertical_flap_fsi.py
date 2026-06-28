@@ -182,6 +182,7 @@ class VerticalFlapFsiConfig:
     traction_one_sided_secondary_reference_pressure_pa: float = 0.0
     traction_one_sided_pressure_pair_policy: str = "baseline_anchored_cell_pair"
     traction_pressure_pair_anchor_markers_json: str | None = None
+    traction_pressure_pair_runtime_provider_mode: str = "disabled"
     traction_viscosity_pa_s: float = 0.0
     allow_selected_traction_formulation_coupled_smoke: bool = False
     allow_selected_traction_formulation_coupled_long_validation: bool = False
@@ -238,7 +239,7 @@ ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET: dict[str, Any] = {
     ),
     "pressure_pair_policy": "baseline_anchored_cell_pair",
     "generic_pressure_pair_mode": "runtime_anchored_cell_pair",
-    "pressure_pair_source_status": "transition_seeded_from_anchor_artifact",
+    "pressure_pair_source_status": "runtime_generated",
     "one_sided_pressure_policy": "per_face_mirrored",
     "primary_fluid_side_normal_sign": 1.0,
     "secondary_fluid_side_normal_sign": 1.0,
@@ -247,10 +248,25 @@ ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET: dict[str, Any] = {
 
 @dataclass(frozen=True)
 class AnsysVerticalFlapProblem:
-    selected_anchor_markers_json: str
+    pressure_pair_provider_mode: str = "runtime_anchored_cell_pair"
+    selected_anchor_markers_json: str | None = None
     step_count: int = 50
 
     def to_fsi_problem(self) -> FsiProblem:
+        if self.pressure_pair_provider_mode not in {
+            "runtime_anchored_cell_pair",
+            "replay_from_diagnostics",
+        }:
+            raise ValueError(
+                f"unsupported pressure_pair_provider_mode: {self.pressure_pair_provider_mode!r}"
+            )
+        if (
+            self.pressure_pair_provider_mode == "replay_from_diagnostics"
+            and not self.selected_anchor_markers_json
+        ):
+            raise ValueError(
+                "replay_from_diagnostics requires selected_anchor_markers_json"
+            )
         config = VerticalFlapFsiConfig(step_count=self.step_count)
         primary_region = SurfaceRegion(
             region_id="primary_flap_face",
@@ -272,18 +288,20 @@ class AnsysVerticalFlapProblem:
             ),
             reference_pressure_pa=0.0,
         )
+        pair_source_status = (
+            "runtime_generated"
+            if self.pressure_pair_provider_mode == "runtime_anchored_cell_pair"
+            else "replay_from_diagnostics"
+        )
+        pair_source = (
+            ""
+            if self.pressure_pair_provider_mode == "runtime_anchored_cell_pair"
+            else str(self.selected_anchor_markers_json or "")
+        )
         pair_provider = PressureSamplePairProvider(
-            mode=str(
-                ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
-                    "generic_pressure_pair_mode"
-                ]
-            ),
-            pair_source_status=str(
-                ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
-                    "pressure_pair_source_status"
-                ]
-            ),
-            source=self.selected_anchor_markers_json,
+            mode=self.pressure_pair_provider_mode,
+            pair_source_status=pair_source_status,
+            source=pair_source,
         )
         traction_config = TractionConfig(
             pressure_sampling=PressureSamplingConfig(pair_provider=pair_provider),
@@ -340,6 +358,7 @@ class AnsysVerticalFlapProblem:
                 "adapter": "AnsysVerticalFlapProblem",
                 "case_name": "ansys_vertical_flap_fsi",
                 "selected_traction_preset": ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET,
+                "pressure_pair_provider_mode": self.pressure_pair_provider_mode,
                 "selected_anchor_markers_json": self.selected_anchor_markers_json,
             },
         )
@@ -347,10 +366,12 @@ class AnsysVerticalFlapProblem:
 
 def build_ansys_vertical_flap_generic_problem(
     *,
-    selected_anchor_markers_json: str,
+    pressure_pair_provider_mode: str = "runtime_anchored_cell_pair",
+    selected_anchor_markers_json: str | None = None,
     step_count: int = 50,
 ) -> FsiProblem:
     return AnsysVerticalFlapProblem(
+        pressure_pair_provider_mode=pressure_pair_provider_mode,
         selected_anchor_markers_json=selected_anchor_markers_json,
         step_count=step_count,
     ).to_fsi_problem()
@@ -359,8 +380,23 @@ def build_ansys_vertical_flap_generic_problem(
 def selected_formulation_solver_config(
     *,
     step_count: int,
-    selected_anchor_markers_json: str,
+    pressure_pair_provider_mode: str = "runtime_anchored_cell_pair",
+    selected_anchor_markers_json: str | None = None,
 ) -> VerticalFlapFsiConfig:
+    if pressure_pair_provider_mode == "replay_from_diagnostics":
+        if not selected_anchor_markers_json:
+            raise ValueError(
+                "replay_from_diagnostics requires selected_anchor_markers_json"
+            )
+        runtime_provider_mode = "disabled"
+        anchor_markers_json = selected_anchor_markers_json
+    elif pressure_pair_provider_mode == "runtime_anchored_cell_pair":
+        runtime_provider_mode = "runtime_anchored_cell_pair"
+        anchor_markers_json = None
+    else:
+        raise ValueError(
+            f"unsupported pressure_pair_provider_mode: {pressure_pair_provider_mode!r}"
+        )
     return VerticalFlapFsiConfig(
         step_count=step_count,
         traction_pressure_sampling_mode="one_sided_surface_pressure",
@@ -384,7 +420,8 @@ def selected_formulation_solver_config(
                 "secondary_fluid_side_normal_sign"
             ]
         ),
-        traction_pressure_pair_anchor_markers_json=selected_anchor_markers_json,
+        traction_pressure_pair_anchor_markers_json=anchor_markers_json,
+        traction_pressure_pair_runtime_provider_mode=runtime_provider_mode,
         allow_selected_traction_formulation_coupled_smoke=True,
         allow_selected_traction_formulation_coupled_long_validation=True,
     )
@@ -395,12 +432,16 @@ def _run_ansys_vertical_flap_generic_runtime(
     solver_config: FsiSolverConfig,
     diagnostics_config: DiagnosticsConfig,
 ) -> dict[str, Any]:
-    selected_anchor_markers_json = str(
-        problem.metadata["selected_anchor_markers_json"]
+    pressure_pair_provider_mode = str(
+        problem.metadata["pressure_pair_provider_mode"]
     )
+    selected_anchor_markers_json = problem.metadata.get("selected_anchor_markers_json")
     config = selected_formulation_solver_config(
         step_count=int(solver_config.step_count),
-        selected_anchor_markers_json=selected_anchor_markers_json,
+        pressure_pair_provider_mode=pressure_pair_provider_mode,
+        selected_anchor_markers_json=(
+            None if selected_anchor_markers_json is None else str(selected_anchor_markers_json)
+        ),
     )
     report = run_vertical_flap_fsi_smoke(config)
     history = list(report.get("history", []))
@@ -417,7 +458,7 @@ def _run_ansys_vertical_flap_generic_runtime(
             "adapter": "AnsysVerticalFlapProblem",
             "diagnostics_output_root": diagnostics_config.output_root,
             "selected_formulation_preset": ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET,
-            "selected_anchor_markers_json": selected_anchor_markers_json,
+            "selected_anchor_markers_json": selected_anchor_markers_json or "",
             "pressure_pair_runtime_generation_status": (
                 pressure_policy.pair_source_status
             ),

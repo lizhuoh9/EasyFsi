@@ -35,6 +35,8 @@ jobs:
         shell: pwsh
         run: |
           python -m py_compile `
+            simulation_core\generic_fsi_solver.py `
+            simulation_core\pressure_sample_pairs.py `
             cases\ansys_vertical_flap_fsi.py `
             benchmarks\official\solid_mpm_fsi_runner.py `
             tools\validation\print_ansys_vertical_flap_diagnostics.py `
@@ -64,7 +66,10 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py
 
           python -m py_compile `
-            tests\integration\test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic.py
+            tests\contracts\test_generic_fsi_solver_architecture.py `
+            tests\integration\test_ansys_vertical_flap_generic_solver_artifacts.py `
+            tests\integration\test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic.py `
+            tests\solvers\test_pressure_sample_pair_provider_contract.py
 
       - name: Run archive artifact test - official half-domain
         shell: pwsh
