@@ -13,13 +13,20 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from fluent_reference_contract_schema import validate_fluent_reference_contract
+from fluent_reference_contract_schema import (
+    EXPECTED_METRIC_UNITS,
+    validate_fluent_reference_contract,
+)
+from fluent_source_export_schema import validate_source_export_csv
 
 
 CASE_NAME = "ansys_vertical_flap_fsi"
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
 REFERENCE_ROOT = ROOT / "fluent_reference"
 SOURCE_EXPORTS_ROOT = REFERENCE_ROOT / "source_exports"
+PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON = (
+    SOURCE_EXPORTS_ROOT / "public_tutorial_evidence_map.json"
+)
 OUTPUT_DIR = REFERENCE_ROOT / "validation_diagnostics"
 MATRIX_JSON = OUTPUT_DIR / "fluent_reference_collection_matrix.json"
 MATRIX_CSV = OUTPUT_DIR / "fluent_reference_collection_matrix.csv"
@@ -30,6 +37,7 @@ CURRENT_CONTRACT_JSON = REFERENCE_ROOT / "fluent_reference_contract_2026-06-27.j
 ACTIVE_CONTRACT_MANIFEST_JSON = (
     REFERENCE_ROOT / "active_fluent_reference_contract.json"
 )
+ACTIVE_MANIFEST_SCHEMA_VERSION = "active_fluent_reference_contract_manifest_v1"
 
 SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
@@ -208,73 +216,32 @@ def run() -> dict[str, Any]:
 
 def _source_check(spec: Mapping[str, Any]) -> dict[str, Any]:
     path = SOURCE_EXPORTS_ROOT / str(spec["artifact"])
-    if not path.exists():
-        return {
-            "artifact": spec["artifact"],
-            "metric_group": spec["metric_group"],
-            "source_path": _repo_relative(path),
-            "exists": False,
-            "file_status": "missing_file",
-            "header_status": "missing_file",
-            "final_step_status": "missing_file",
-            "metric_status": "missing",
-            "blocker": spec["blocker"],
-            "required_columns": list(spec["required_columns"]),
-            "observed_columns": [],
-            "reference_values": {},
-            "row_count": 0,
-        }
-
-    with path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        observed_columns = list(reader.fieldnames or [])
-        rows = list(reader)
-
     required_columns = list(spec["required_columns"])
-    header_status = "passed" if observed_columns == required_columns else "failed"
-    final_row = _final_step_row(rows)
-    reference_values = _reference_values(spec, final_row)
-    source_present = bool(final_row and str(final_row.get("source", "")).strip())
-    final_time_ok = _float_equals(
-        _float_value(final_row.get("time_s")) if final_row else None,
-        EXPECTED_TOTAL_TIME_S,
+    validation = validate_source_export_csv(
+        path,
+        required_columns,
+        required_final_step=EXPECTED_STEP_COUNT,
+        expected_final_time=EXPECTED_TOTAL_TIME_S,
+        reference_value_columns=spec["reference_values"],
     )
-    values_complete = (
-        header_status == "passed"
-        and final_row is not None
-        and final_time_ok
-        and source_present
-        and set(reference_values) == set(spec["reference_values"])
-    )
-    if not rows:
-        file_status = "schema_only"
-    elif header_status != "passed":
-        file_status = "present_header_mismatch"
-    elif final_row is None:
-        file_status = "present_missing_final_step"
-    elif not final_time_ok:
-        file_status = "present_final_time_mismatch"
-    elif not source_present:
-        file_status = "present_missing_source"
-    elif not values_complete:
-        file_status = "present_missing_metric_value"
-    else:
-        file_status = "present_complete"
+    values_complete = validation["metric_status"] == "available"
 
     return {
         "artifact": spec["artifact"],
         "metric_group": spec["metric_group"],
         "source_path": _repo_relative(path),
-        "exists": True,
-        "file_status": file_status,
-        "header_status": header_status,
-        "final_step_status": "passed" if final_row is not None else "missing_final_step",
-        "metric_status": "available" if values_complete else "missing",
+        "exists": bool(validation["exists"]),
+        "file_status": validation["file_status"],
+        "header_status": validation["header_status"],
+        "final_step_status": validation["final_step_status"],
+        "metric_status": validation["metric_status"],
         "blocker": None if values_complete else spec["blocker"],
         "required_columns": required_columns,
-        "observed_columns": observed_columns,
-        "reference_values": reference_values if values_complete else {},
-        "row_count": len(rows),
+        "observed_columns": validation["observed_columns"],
+        "reference_values": validation["reference_values"] if values_complete else {},
+        "row_count": validation["row_count"],
+        "final_time_s": validation["final_time_s"],
+        "schema_blockers": validation["blockers"],
     }
 
 
@@ -337,6 +304,9 @@ def _candidate_contract(
             "status": "missing",
             "value": None,
             "source": "not_collected",
+            "unit": EXPECTED_METRIC_UNITS[metric],
+            "extraction_method": "not_collected",
+            "time_s": EXPECTED_TOTAL_TIME_S,
         }
         for metric in (
             "tip_displacement_m",
@@ -351,7 +321,10 @@ def _candidate_contract(
             reference_metrics[metric] = {
                 "status": "available",
                 "value": value,
+                "unit": EXPECTED_METRIC_UNITS[metric],
                 "source": check["source_path"],
+                "extraction_method": "fluent_source_export_csv",
+                "time_s": check.get("final_time_s", EXPECTED_TOTAL_TIME_S),
             }
 
     missing_metrics = [
@@ -456,13 +429,20 @@ def _active_contract_manifest(
     return {
         "case": CASE_NAME,
         "purpose": "active_fluent_reference_contract_manifest",
+        "manifest_schema_version": ACTIVE_MANIFEST_SCHEMA_VERSION,
         "source_script": SOURCE_SCRIPT,
         "active_contract": _repo_relative(CURRENT_CONTRACT_JSON),
         "active_contract_sha256": _sha256_file(CURRENT_CONTRACT_JSON),
         "active_contract_status": str(current_contract["contract_status"]),
+        "active_contract_schema_validation": validate_fluent_reference_contract(
+            current_contract
+        ),
         "candidate_contract": _repo_relative(CANDIDATE_CONTRACT_JSON),
         "candidate_contract_sha256": _sha256_file(CANDIDATE_CONTRACT_JSON),
         "candidate_contract_status": str(candidate_contract["contract_status"]),
+        "candidate_contract_schema_validation": candidate_contract[
+            "schema_validation"
+        ],
         "promotion_status": (
             "ready_for_versioned_contract_promotion"
             if ready
@@ -518,6 +498,13 @@ def _payload(
         "purpose": "fluent_reference_collection_matrix",
         "source_script": SOURCE_SCRIPT,
         "source_exports_root": _repo_relative(SOURCE_EXPORTS_ROOT),
+        "public_reference_evidence": _repo_relative(
+            PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON
+        ),
+        "public_reference_evidence_sha256": _sha256_file(
+            PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON
+        ),
+        "public_reference_use_policy": _public_reference_use_policy(),
         "current_reference_contract": _repo_relative(CURRENT_CONTRACT_JSON),
         "current_reference_contract_sha256": _sha256_file(CURRENT_CONTRACT_JSON),
         "candidate_contract": _repo_relative(CANDIDATE_CONTRACT_JSON),
@@ -628,6 +615,10 @@ def _summary_markdown(payload: Mapping[str, Any]) -> str:
             (
                 "- Active contract manifest: "
                 f"`{_repo_relative(ACTIVE_CONTRACT_MANIFEST_JSON)}`"
+            ),
+            (
+                "- Public tutorial evidence map: "
+                f"`{_repo_relative(PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON)}`"
             ),
             f"- Checksums: `{_repo_relative(CHECKSUMS_PATH)}`",
             "",
@@ -799,9 +790,20 @@ def _tolerances_complete(tolerances: Mapping[str, Any]) -> bool:
             return False
         if _float_value(payload.get("value")) is None:
             return False
+        if _is_missing(payload.get("comparator", "")):
+            return False
         if _is_missing(payload.get("source", "")):
             return False
+        if _is_missing(payload.get("rationale", "")):
+            return False
     return bool(tolerances)
+
+
+def _public_reference_use_policy() -> str:
+    if not PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON.exists():
+        return "missing_public_reference_evidence"
+    evidence = _read_json(PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON)
+    return str(evidence.get("use_policy", "missing_public_reference_evidence"))
 
 
 def _blocker_detail(blocker: str) -> str:

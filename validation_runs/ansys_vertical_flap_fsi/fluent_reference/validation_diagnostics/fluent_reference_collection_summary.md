@@ -26,4 +26,5 @@ fluent_metadata_2026-06-28.md | present_incomplete | not_applicable | not_applic
 - Matrix CSV: `validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_matrix.csv`
 - Candidate contract: `validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_candidate_contract.json`
 - Active contract manifest: `validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json`
+- Public tutorial evidence map: `validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/public_tutorial_evidence_map.json`
 - Checksums: `validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/CHECKSUMS.sha256`

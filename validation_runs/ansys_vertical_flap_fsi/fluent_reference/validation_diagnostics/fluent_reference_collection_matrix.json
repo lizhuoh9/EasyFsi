@@ -1,8 +1,8 @@
 {
   "active_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
-  "active_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
+  "active_contract_sha256": "75cafa66851eea7e478ddc2dcfdb13d6c499e77995ac78458e1ff4ee958ae05b",
   "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
-  "active_fluent_reference_contract_manifest_sha256": "6de78e71a3e4000d6b5cf06bcf1798404025f9ed099a151113d6cc48a16bbfd7",
+  "active_fluent_reference_contract_manifest_sha256": "bc26b64bcce6743d899b188118b52f6ff765bd90a608193459c8eed486f5d30c",
   "candidate_blockers": [
     {
       "blocker": "fluent_displacement_reference_missing",
@@ -26,12 +26,12 @@
     }
   ],
   "candidate_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_candidate_contract.json",
-  "candidate_contract_sha256": "ef94d15c58121cda84219de27e9392fc70eecdd05c70dc76a092316a62fdbff6",
+  "candidate_contract_sha256": "dc6aefe0b37721b94ca122a94c90696f145974a5a4888905ba7b745fb4610737",
   "candidate_contract_status": "fluent_reference_incomplete",
   "candidate_status": "fluent_reference_collection_pending",
   "case": "ansys_vertical_flap_fsi",
   "current_reference_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
-  "current_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
+  "current_reference_contract_sha256": "75cafa66851eea7e478ddc2dcfdb13d6c499e77995ac78458e1ff4ee958ae05b",
   "expected_step_count": 50,
   "expected_time_step_s": 0.0005,
   "expected_total_time_s": 0.025,
@@ -148,32 +148,50 @@
     }
   ],
   "promotion_status": "blocked_reference_incomplete",
+  "public_reference_evidence": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/public_tutorial_evidence_map.json",
+  "public_reference_evidence_sha256": "19d96fafe19b99e7354da4e8f4ea46262762f5ed2195cdf226120728aea7872e",
+  "public_reference_use_policy": "metadata_only_not_parity_truth",
   "purpose": "fluent_reference_collection_matrix",
   "recommended_action": "keep_current_incomplete_contract",
   "reference_metrics": {
     "flow_rate_m3s": {
+      "extraction_method": "not_collected",
       "source": "not_collected",
       "status": "missing",
+      "time_s": 0.025,
+      "unit": "m3/s",
       "value": null
     },
     "force_z_N": {
+      "extraction_method": "not_collected",
       "source": "not_collected",
       "status": "missing",
+      "time_s": 0.025,
+      "unit": "N",
       "value": null
     },
     "max_displacement_m": {
+      "extraction_method": "not_collected",
       "source": "not_collected",
       "status": "missing",
+      "time_s": 0.025,
+      "unit": "m",
       "value": null
     },
     "pressure_range_pa": {
+      "extraction_method": "not_collected",
       "source": "not_collected",
       "status": "missing",
+      "time_s": 0.025,
+      "unit": "Pa",
       "value": null
     },
     "tip_displacement_m": {
+      "extraction_method": "not_collected",
       "source": "not_collected",
       "status": "missing",
+      "time_s": 0.025,
+      "unit": "m",
       "value": null
     }
   },
@@ -265,7 +283,7 @@
       },
       {
         "blocker": "fluent_reference_tolerances_incomplete",
-        "detail": "tip_displacement_relative must be available, numeric, finite, and sourced"
+        "detail": "tip_displacement_relative must be available, numeric, finite, sourced, rationalized, and use a supported comparator"
       }
     ],
     "contract_status": "fluent_reference_incomplete",
@@ -286,6 +304,7 @@
       "exists": true,
       "file_status": "schema_only",
       "final_step_status": "missing_final_step",
+      "final_time_s": null,
       "header_status": "passed",
       "metric_group": "displacement",
       "metric_status": "missing",
@@ -311,6 +330,9 @@
         "source"
       ],
       "row_count": 0,
+      "schema_blockers": [
+        "missing_final_step"
+      ],
       "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_tip_displacement_history.csv"
     },
     {
@@ -319,6 +341,7 @@
       "exists": true,
       "file_status": "schema_only",
       "final_step_status": "missing_final_step",
+      "final_time_s": null,
       "header_status": "passed",
       "metric_group": "force",
       "metric_status": "missing",
@@ -344,6 +367,9 @@
         "source"
       ],
       "row_count": 0,
+      "schema_blockers": [
+        "missing_final_step"
+      ],
       "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_force_history.csv"
     },
     {
@@ -352,6 +378,7 @@
       "exists": true,
       "file_status": "schema_only",
       "final_step_status": "missing_final_step",
+      "final_time_s": null,
       "header_status": "passed",
       "metric_group": "flow",
       "metric_status": "missing",
@@ -375,6 +402,9 @@
         "source"
       ],
       "row_count": 0,
+      "schema_blockers": [
+        "missing_final_step"
+      ],
       "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_flow_balance_history.csv"
     },
     {
@@ -383,6 +413,7 @@
       "exists": true,
       "file_status": "schema_only",
       "final_step_status": "missing_final_step",
+      "final_time_s": null,
       "header_status": "passed",
       "metric_group": "pressure",
       "metric_status": "missing",
@@ -404,6 +435,9 @@
         "source"
       ],
       "row_count": 0,
+      "schema_blockers": [
+        "missing_final_step"
+      ],
       "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_pressure_summary_history.csv"
     }
   ],

@@ -61,6 +61,8 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_coupled_smoke.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_coupled_step50.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_ansys_vertical_flap_generic_solver.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\fluent_reference_contract_schema.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\fluent_source_export_schema.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_fluent_reference_collection_validation.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_fluent_parity.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py
@@ -68,6 +70,8 @@ jobs:
           python -m py_compile `
             tests\contracts\test_generic_fsi_solver_architecture.py `
             tests\integration\test_ansys_vertical_flap_generic_solver_artifacts.py `
+            tests\integration\test_ansys_vertical_flap_fluent_reference_export_protocol.py `
+            tests\integration\test_ansys_vertical_flap_fluent_source_export_schema.py `
             tests\integration\test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic.py `
             tests\solvers\test_pressure_sample_pair_provider_contract.py
 
@@ -290,6 +294,20 @@ jobs:
             tests.integration.test_ansys_vertical_flap_fluent_reference_contract_schema `
             -v
 
+      - name: Run Fluent source export schema test
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.integration.test_ansys_vertical_flap_fluent_source_export_schema `
+            -v
+
+      - name: Run Fluent reference export protocol test
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.integration.test_ansys_vertical_flap_fluent_reference_export_protocol `
+            -v
+
       - name: Run traction artifact test - selected formulation Fluent parity
         shell: pwsh
         run: |
@@ -303,6 +321,25 @@ jobs:
           python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic `
             -v
+
+      - name: Scan Fluent artifacts for forbidden parity overclaims
+        shell: pwsh
+        run: |
+          $roots = @(
+            "validation_runs\ansys_vertical_flap_fsi\fluent_reference\validation_diagnostics",
+            "validation_runs\ansys_vertical_flap_fsi\traction_selected_formulation_fluent_parity_diagnostics"
+          )
+          $patterns = @(
+            "fluent_parity_validated",
+            "Fluent parity validated"
+          )
+          $hits = Get-ChildItem -Path $roots -File -Recurse | Select-String -Pattern $patterns -SimpleMatch
+          if ($hits) {
+            $hits | ForEach-Object {
+              Write-Error "$($_.Path):$($_.LineNumber): $($_.Line)"
+            }
+            exit 1
+          }
 
       - name: Run archive artifact test - preflow release step20
         shell: pwsh

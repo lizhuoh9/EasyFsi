@@ -1,12 +1,113 @@
 {
   "active_fluent_reference_contract_manifest": {
     "active_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
-    "active_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
+    "active_contract_schema_validation": {
+      "blockers": [
+        {
+          "blocker": "fluent_reference_provenance_incomplete",
+          "detail": "missing fields: document,run_id,author,date,status"
+        },
+        {
+          "blocker": "fluent_reference_sign_conventions_incomplete",
+          "detail": "missing fields: force_z_positive,flow_rate_positive,pressure_reference,status"
+        },
+        {
+          "blocker": "fluent_reference_displacement_definition_incomplete",
+          "detail": "missing fields: point,status"
+        },
+        {
+          "blocker": "tip_displacement_m_missing",
+          "detail": "tip_displacement_m must be available, numeric, and finite"
+        },
+        {
+          "blocker": "max_displacement_m_missing",
+          "detail": "max_displacement_m must be available, numeric, and finite"
+        },
+        {
+          "blocker": "force_z_N_missing",
+          "detail": "force_z_N must be available, numeric, and finite"
+        },
+        {
+          "blocker": "flow_rate_m3s_missing",
+          "detail": "flow_rate_m3s must be available, numeric, and finite"
+        },
+        {
+          "blocker": "pressure_range_pa_missing",
+          "detail": "pressure_range_pa must be available, numeric, and finite"
+        },
+        {
+          "blocker": "fluent_reference_tolerances_incomplete",
+          "detail": "tip_displacement_relative must be available, numeric, finite, sourced, rationalized, and use a supported comparator"
+        }
+      ],
+      "contract_status": "fluent_reference_incomplete",
+      "missing_required_metrics": [
+        "tip_displacement_m",
+        "max_displacement_m",
+        "force_z_N",
+        "flow_rate_m3s",
+        "pressure_range_pa"
+      ],
+      "required_metric_count": 5,
+      "validated_metric_count": 0
+    },
+    "active_contract_sha256": "75cafa66851eea7e478ddc2dcfdb13d6c499e77995ac78458e1ff4ee958ae05b",
     "active_contract_status": "fluent_reference_incomplete",
     "candidate_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_candidate_contract.json",
-    "candidate_contract_sha256": "ef94d15c58121cda84219de27e9392fc70eecdd05c70dc76a092316a62fdbff6",
+    "candidate_contract_schema_validation": {
+      "blockers": [
+        {
+          "blocker": "fluent_reference_provenance_incomplete",
+          "detail": "missing fields: document,run_id,author,date,status"
+        },
+        {
+          "blocker": "fluent_reference_sign_conventions_incomplete",
+          "detail": "missing fields: force_z_positive,flow_rate_positive,pressure_reference,status"
+        },
+        {
+          "blocker": "fluent_reference_displacement_definition_incomplete",
+          "detail": "missing fields: point,status"
+        },
+        {
+          "blocker": "tip_displacement_m_missing",
+          "detail": "tip_displacement_m must be available, numeric, and finite"
+        },
+        {
+          "blocker": "max_displacement_m_missing",
+          "detail": "max_displacement_m must be available, numeric, and finite"
+        },
+        {
+          "blocker": "force_z_N_missing",
+          "detail": "force_z_N must be available, numeric, and finite"
+        },
+        {
+          "blocker": "flow_rate_m3s_missing",
+          "detail": "flow_rate_m3s must be available, numeric, and finite"
+        },
+        {
+          "blocker": "pressure_range_pa_missing",
+          "detail": "pressure_range_pa must be available, numeric, and finite"
+        },
+        {
+          "blocker": "fluent_reference_tolerances_incomplete",
+          "detail": "tip_displacement_relative must be available, numeric, finite, sourced, rationalized, and use a supported comparator"
+        }
+      ],
+      "contract_status": "fluent_reference_incomplete",
+      "missing_required_metrics": [
+        "tip_displacement_m",
+        "max_displacement_m",
+        "force_z_N",
+        "flow_rate_m3s",
+        "pressure_range_pa"
+      ],
+      "required_metric_count": 5,
+      "validated_metric_count": 0
+    },
+    "candidate_contract_sha256": "dc6aefe0b37721b94ca122a94c90696f145974a5a4888905ba7b745fb4610737",
     "candidate_contract_status": "fluent_reference_incomplete",
     "case": "ansys_vertical_flap_fsi",
+    "manifest_schema_version": "active_fluent_reference_contract_manifest_v1",
     "no_fluent_parity_claim_retired": false,
     "promotion_blockers": [
       {
@@ -57,7 +158,19 @@
   "case": "ansys_vertical_flap_fsi",
   "fluent_reference_contract": {
     "case": "ansys_vertical_flap_fsi",
+    "comparison_policy": {
+      "parity_claim_requires_all_gates": true,
+      "reference_complete_required": true,
+      "status": "complete"
+    },
+    "contract_id": "ansys_vertical_flap_fluent_reference_contract_2026-06-27",
     "contract_status": "fluent_reference_incomplete",
+    "displacement_definition": {
+      "metric": "tip_displacement_norm_m",
+      "point": "",
+      "source_step50_metric": "tip_mean_displacement_m",
+      "status": "missing"
+    },
     "flow": {
       "boundary_condition_source": "ANSYS vertical-flap case metadata",
       "inlet_velocity_mps": 10.0,
@@ -116,6 +229,40 @@
         "value": null
       }
     },
+    "sampling_definitions": {
+      "flow_rate": {
+        "definition": "outlet flow-rate report at zmin pressure outlet",
+        "status": "complete",
+        "unit": "m3/s"
+      },
+      "force_z": {
+        "definition": "total z-force report over the flap wall/solid interface",
+        "status": "complete",
+        "unit": "N"
+      },
+      "max_displacement": {
+        "definition": "maximum total displacement over the deforming solid zone",
+        "status": "complete",
+        "unit": "m"
+      },
+      "pressure_range": {
+        "definition": "pressure_max_pa - pressure_min_pa on the documented Fluent sample domain",
+        "status": "complete",
+        "unit": "Pa"
+      },
+      "tip_displacement": {
+        "definition": "total displacement at the documented flap-tip report point",
+        "status": "complete",
+        "unit": "m"
+      }
+    },
+    "schema_version": "ansys_vertical_flap_fluent_reference_contract_v1",
+    "sign_conventions": {
+      "flow_rate_positive": "",
+      "force_z_positive": "",
+      "pressure_reference": "",
+      "status": "missing"
+    },
     "simulation": {
       "step_count": 50,
       "time_step_s": 0.0005,
@@ -137,22 +284,37 @@
     "time_step_s": 0.0005,
     "tolerances": {
       "flow_rate_relative": {
+        "comparator": "relative_error",
+        "rationale": "tolerance cannot be finalized until provenance-backed Fluent flow exports exist",
+        "source": "pending_fluent_reference",
         "status": "pending_reference",
         "value": null
       },
       "force_z_relative": {
+        "comparator": "relative_error",
+        "rationale": "tolerance cannot be finalized until provenance-backed Fluent force exports exist",
+        "source": "pending_fluent_reference",
         "status": "pending_reference",
         "value": null
       },
       "max_displacement_relative": {
+        "comparator": "relative_error",
+        "rationale": "tolerance cannot be finalized until provenance-backed Fluent displacement exports exist",
+        "source": "pending_fluent_reference",
         "status": "pending_reference",
         "value": null
       },
       "pressure_sanity_absolute": {
+        "comparator": "absolute_error",
+        "rationale": "tolerance cannot be finalized until provenance-backed Fluent pressure exports exist",
+        "source": "pending_fluent_reference",
         "status": "pending_reference",
         "value": null
       },
       "tip_displacement_relative": {
+        "comparator": "relative_error",
+        "rationale": "tolerance cannot be finalized until provenance-backed Fluent displacement exports exist",
+        "source": "pending_fluent_reference",
         "status": "pending_reference",
         "value": null
       }
@@ -166,11 +328,11 @@
       },
       {
         "blocker": "fluent_reference_sign_conventions_incomplete",
-        "detail": "required mapping is missing"
+        "detail": "missing fields: force_z_positive,flow_rate_positive,pressure_reference,status"
       },
       {
         "blocker": "fluent_reference_displacement_definition_incomplete",
-        "detail": "required mapping is missing"
+        "detail": "missing fields: point,status"
       },
       {
         "blocker": "tip_displacement_m_missing",
@@ -194,7 +356,7 @@
       },
       {
         "blocker": "fluent_reference_tolerances_incomplete",
-        "detail": "tip_displacement_relative must be available, numeric, finite, and sourced"
+        "detail": "tip_displacement_relative must be available, numeric, finite, sourced, rationalized, and use a supported comparator"
       }
     ],
     "contract_status": "fluent_reference_incomplete",
@@ -210,7 +372,12 @@
   },
   "parity_metrics": {
     "displacement": {
-      "comparison_definition": {},
+      "comparison_definition": {
+        "metric": "tip_displacement_norm_m",
+        "point": "",
+        "source_step50_metric": "tip_mean_displacement_m",
+        "status": "missing"
+      },
       "comparison_status": "blocked_reference_missing",
       "comparisons": {
         "max_displacement": {
@@ -347,8 +514,13 @@
     },
     "metadata": {
       "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
-      "active_fluent_reference_contract_manifest_sha256": "6de78e71a3e4000d6b5cf06bcf1798404025f9ed099a151113d6cc48a16bbfd7",
-      "contract_displacement_definition": {},
+      "active_fluent_reference_contract_manifest_sha256": "bc26b64bcce6743d899b188118b52f6ff765bd90a608193459c8eed486f5d30c",
+      "contract_displacement_definition": {
+        "metric": "tip_displacement_norm_m",
+        "point": "",
+        "source_step50_metric": "tip_mean_displacement_m",
+        "status": "missing"
+      },
       "contract_geometry": {
         "duct_height_m": 0.04,
         "duct_length_m": 0.1,
@@ -375,11 +547,11 @@
           },
           {
             "blocker": "fluent_reference_sign_conventions_incomplete",
-            "detail": "required mapping is missing"
+            "detail": "missing fields: force_z_positive,flow_rate_positive,pressure_reference,status"
           },
           {
             "blocker": "fluent_reference_displacement_definition_incomplete",
-            "detail": "required mapping is missing"
+            "detail": "missing fields: point,status"
           },
           {
             "blocker": "tip_displacement_m_missing",
@@ -403,7 +575,7 @@
           },
           {
             "blocker": "fluent_reference_tolerances_incomplete",
-            "detail": "tip_displacement_relative must be available, numeric, finite, and sourced"
+            "detail": "tip_displacement_relative must be available, numeric, finite, sourced, rationalized, and use a supported comparator"
           }
         ],
         "contract_status": "fluent_reference_incomplete",
@@ -417,7 +589,12 @@
         "required_metric_count": 5,
         "validated_metric_count": 0
       },
-      "contract_sign_conventions": {},
+      "contract_sign_conventions": {
+        "flow_rate_positive": "",
+        "force_z_positive": "",
+        "pressure_reference": "",
+        "status": "missing"
+      },
       "contract_simulation": {
         "step_count": 50,
         "time_step_s": 0.0005,
@@ -432,7 +609,7 @@
       },
       "contract_step_count": 50,
       "contract_time_step_s": 0.0005,
-      "fluent_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
+      "fluent_reference_contract_sha256": "75cafa66851eea7e478ddc2dcfdb13d6c499e77995ac78458e1ff4ee958ae05b",
       "gate_status": "passed",
       "pressure_pair_anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
       "reference_formulation_candidate": "anchored_dual_face_pressure_pair_with_per_face_one_sided",

@@ -9,11 +9,17 @@
   "collection_validator": {
     "comparison_metadata_complete": false,
     "current_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
-    "current_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
+    "current_contract_sha256": "75cafa66851eea7e478ddc2dcfdb13d6c499e77995ac78458e1ff4ee958ae05b",
     "source_exports_root": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports",
     "source_script": "validation_runs/ansys_vertical_flap_fsi/scripts/run_fluent_reference_collection_validation.py",
     "tolerances_complete": false
   },
+  "comparison_policy": {
+    "parity_claim_requires_all_gates": true,
+    "reference_complete_required": true,
+    "status": "complete"
+  },
+  "contract_id": "ansys_vertical_flap_fluent_reference_contract_2026-06-27",
   "contract_status": "fluent_reference_incomplete",
   "displacement_definition": {
     "metric": "tip_displacement_norm_m",
@@ -54,29 +60,71 @@
   "provenance_status": "incomplete",
   "reference_metrics": {
     "flow_rate_m3s": {
+      "extraction_method": "not_collected",
       "source": "not_collected",
       "status": "missing",
+      "time_s": 0.025,
+      "unit": "m3/s",
       "value": null
     },
     "force_z_N": {
+      "extraction_method": "not_collected",
       "source": "not_collected",
       "status": "missing",
+      "time_s": 0.025,
+      "unit": "N",
       "value": null
     },
     "max_displacement_m": {
+      "extraction_method": "not_collected",
       "source": "not_collected",
       "status": "missing",
+      "time_s": 0.025,
+      "unit": "m",
       "value": null
     },
     "pressure_range_pa": {
+      "extraction_method": "not_collected",
       "source": "not_collected",
       "status": "missing",
+      "time_s": 0.025,
+      "unit": "Pa",
       "value": null
     },
     "tip_displacement_m": {
+      "extraction_method": "not_collected",
       "source": "not_collected",
       "status": "missing",
+      "time_s": 0.025,
+      "unit": "m",
       "value": null
+    }
+  },
+  "sampling_definitions": {
+    "flow_rate": {
+      "definition": "outlet flow-rate report at zmin pressure outlet",
+      "status": "complete",
+      "unit": "m3/s"
+    },
+    "force_z": {
+      "definition": "total z-force report over the flap wall/solid interface",
+      "status": "complete",
+      "unit": "N"
+    },
+    "max_displacement": {
+      "definition": "maximum total displacement over the deforming solid zone",
+      "status": "complete",
+      "unit": "m"
+    },
+    "pressure_range": {
+      "definition": "pressure_max_pa - pressure_min_pa on the documented Fluent sample domain",
+      "status": "complete",
+      "unit": "Pa"
+    },
+    "tip_displacement": {
+      "definition": "total displacement at the documented flap-tip report point",
+      "status": "complete",
+      "unit": "m"
     }
   },
   "schema_validation": {
@@ -115,7 +163,7 @@
       },
       {
         "blocker": "fluent_reference_tolerances_incomplete",
-        "detail": "tip_displacement_relative must be available, numeric, finite, and sourced"
+        "detail": "tip_displacement_relative must be available, numeric, finite, sourced, rationalized, and use a supported comparator"
       }
     ],
     "contract_status": "fluent_reference_incomplete",
@@ -129,6 +177,7 @@
     "required_metric_count": 5,
     "validated_metric_count": 0
   },
+  "schema_version": "ansys_vertical_flap_fluent_reference_contract_v1",
   "sign_conventions": {
     "flow_rate_positive": "MISSING",
     "force_z_positive": "MISSING",
@@ -156,22 +205,37 @@
   "time_step_s": 0.0005,
   "tolerances": {
     "flow_rate_relative": {
+      "comparator": "relative_error",
+      "rationale": "tolerance cannot be finalized until provenance-backed Fluent flow exports exist",
+      "source": "pending_fluent_reference",
       "status": "pending_reference",
       "value": null
     },
     "force_z_relative": {
+      "comparator": "relative_error",
+      "rationale": "tolerance cannot be finalized until provenance-backed Fluent force exports exist",
+      "source": "pending_fluent_reference",
       "status": "pending_reference",
       "value": null
     },
     "max_displacement_relative": {
+      "comparator": "relative_error",
+      "rationale": "tolerance cannot be finalized until provenance-backed Fluent displacement exports exist",
+      "source": "pending_fluent_reference",
       "status": "pending_reference",
       "value": null
     },
     "pressure_sanity_absolute": {
+      "comparator": "absolute_error",
+      "rationale": "tolerance cannot be finalized until provenance-backed Fluent pressure exports exist",
+      "source": "pending_fluent_reference",
       "status": "pending_reference",
       "value": null
     },
     "tip_displacement_relative": {
+      "comparator": "relative_error",
+      "rationale": "tolerance cannot be finalized until provenance-backed Fluent displacement exports exist",
+      "source": "pending_fluent_reference",
       "status": "pending_reference",
       "value": null
     }

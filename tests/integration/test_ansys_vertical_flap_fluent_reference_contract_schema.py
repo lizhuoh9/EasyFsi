@@ -91,6 +91,18 @@ class AnsysVerticalFlapFluentReferenceContractSchemaTests(unittest.TestCase):
             {item["blocker"] for item in result["blockers"]},
         )
 
+    def test_missing_schema_version_fails_closed(self):
+        contract = _complete_contract()
+        del contract["schema_version"]
+
+        result = SCHEMA.validate_fluent_reference_contract(contract)
+
+        self.assertEqual(result["contract_status"], "fluent_reference_incomplete")
+        self.assertIn(
+            "fluent_reference_schema_version_missing",
+            {item["blocker"] for item in result["blockers"]},
+        )
+
     def test_metric_name_or_unit_mismatch_fails_closed(self):
         contract = _complete_contract()
         contract["reference_metrics"]["force_z_kN"] = contract["reference_metrics"].pop(
@@ -101,6 +113,71 @@ class AnsysVerticalFlapFluentReferenceContractSchemaTests(unittest.TestCase):
 
         self.assertEqual(result["contract_status"], "fluent_reference_incomplete")
         self.assertIn("force_z_N", result["missing_required_metrics"])
+
+    def test_wrong_metric_unit_fails_closed(self):
+        contract = _complete_contract()
+        contract["reference_metrics"]["force_z_N"]["unit"] = "kN"
+
+        result = SCHEMA.validate_fluent_reference_contract(contract)
+
+        self.assertEqual(result["contract_status"], "fluent_reference_incomplete")
+        self.assertIn("force_z_N", result["missing_required_metrics"])
+
+    def test_missing_metric_source_or_extraction_method_fails_closed(self):
+        contract = _complete_contract()
+        del contract["reference_metrics"]["flow_rate_m3s"]["extraction_method"]
+
+        result = SCHEMA.validate_fluent_reference_contract(contract)
+
+        self.assertEqual(result["contract_status"], "fluent_reference_incomplete")
+        self.assertIn("flow_rate_m3s", result["missing_required_metrics"])
+
+    def test_metric_final_time_mismatch_fails_closed(self):
+        contract = _complete_contract()
+        contract["reference_metrics"]["pressure_range_pa"]["time_s"] = 0.02
+
+        result = SCHEMA.validate_fluent_reference_contract(contract)
+
+        self.assertEqual(result["contract_status"], "fluent_reference_incomplete")
+        self.assertIn("pressure_range_pa", result["missing_required_metrics"])
+
+    def test_missing_sampling_definition_fails_closed(self):
+        contract = _complete_contract()
+        del contract["sampling_definitions"]["force_z"]
+
+        result = SCHEMA.validate_fluent_reference_contract(contract)
+
+        self.assertEqual(result["contract_status"], "fluent_reference_incomplete")
+        self.assertIn(
+            "fluent_reference_sampling_definitions_incomplete",
+            {item["blocker"] for item in result["blockers"]},
+        )
+
+    def test_missing_comparison_policy_fails_closed(self):
+        contract = _complete_contract()
+        contract["comparison_policy"]["reference_complete_required"] = False
+
+        result = SCHEMA.validate_fluent_reference_contract(contract)
+
+        self.assertEqual(result["contract_status"], "fluent_reference_incomplete")
+        self.assertIn(
+            "fluent_reference_comparison_policy_incomplete",
+            {item["blocker"] for item in result["blockers"]},
+        )
+
+    def test_unsupported_tolerance_comparator_fails_closed(self):
+        contract = _complete_contract()
+        contract["tolerances"]["pressure_sanity_absolute"]["comparator"] = (
+            "relative_error"
+        )
+
+        result = SCHEMA.validate_fluent_reference_contract(contract)
+
+        self.assertEqual(result["contract_status"], "fluent_reference_incomplete")
+        self.assertIn(
+            "fluent_reference_tolerances_incomplete",
+            {item["blocker"] for item in result["blockers"]},
+        )
 
     def test_step_count_mismatch_fails_closed(self):
         contract = _complete_contract()
@@ -140,7 +217,9 @@ def _complete_contract():
     return deepcopy(
         {
             "case": "ansys_vertical_flap_fsi",
+            "contract_id": "synthetic-complete-contract",
             "contract_status": "fluent_reference_complete",
+            "schema_version": "ansys_vertical_flap_fluent_reference_contract_v1",
             "source_provenance": {
                 "document": "synthetic schema test",
                 "run_id": "synthetic-complete-contract",
@@ -183,38 +262,115 @@ def _complete_contract():
                 "pressure_reference": "gauge pressure relative to pressure outlet",
                 "status": "complete",
             },
+            "sampling_definitions": {
+                "tip_displacement": {
+                    "definition": "synthetic tip total displacement",
+                    "unit": "m",
+                    "status": "complete",
+                },
+                "max_displacement": {
+                    "definition": "synthetic max solid total displacement",
+                    "unit": "m",
+                    "status": "complete",
+                },
+                "force_z": {
+                    "definition": "synthetic total z force",
+                    "unit": "N",
+                    "status": "complete",
+                },
+                "flow_rate": {
+                    "definition": "synthetic outlet flow rate",
+                    "unit": "m3/s",
+                    "status": "complete",
+                },
+                "pressure_range": {
+                    "definition": "synthetic pressure range",
+                    "unit": "Pa",
+                    "status": "complete",
+                },
+            },
+            "comparison_policy": {
+                "status": "complete",
+                "reference_complete_required": True,
+                "parity_claim_requires_all_gates": True,
+            },
             "reference_metrics": {
-                "tip_displacement_m": {"status": "available", "value": 0.0105},
-                "max_displacement_m": {"status": "available", "value": 0.0195},
-                "force_z_N": {"status": "available", "value": 2.1},
-                "flow_rate_m3s": {"status": "available", "value": 0.00105},
-                "pressure_range_pa": {"status": "available", "value": 58.0},
+                "tip_displacement_m": {
+                    "status": "available",
+                    "value": 0.0105,
+                    "unit": "m",
+                    "source": "synthetic source",
+                    "extraction_method": "synthetic_report_csv",
+                    "time_s": 0.025,
+                },
+                "max_displacement_m": {
+                    "status": "available",
+                    "value": 0.0195,
+                    "unit": "m",
+                    "source": "synthetic source",
+                    "extraction_method": "synthetic_report_csv",
+                    "time_s": 0.025,
+                },
+                "force_z_N": {
+                    "status": "available",
+                    "value": 2.1,
+                    "unit": "N",
+                    "source": "synthetic source",
+                    "extraction_method": "synthetic_report_csv",
+                    "time_s": 0.025,
+                },
+                "flow_rate_m3s": {
+                    "status": "available",
+                    "value": 0.00105,
+                    "unit": "m3/s",
+                    "source": "synthetic source",
+                    "extraction_method": "synthetic_report_csv",
+                    "time_s": 0.025,
+                },
+                "pressure_range_pa": {
+                    "status": "available",
+                    "value": 58.0,
+                    "unit": "Pa",
+                    "source": "synthetic source",
+                    "extraction_method": "synthetic_report_csv",
+                    "time_s": 0.025,
+                },
             },
             "tolerances": {
                 "tip_displacement_relative": {
                     "status": "available",
                     "value": 0.1,
+                    "comparator": "relative_error",
                     "source": "synthetic tolerance",
+                    "rationale": "synthetic tolerance",
                 },
                 "max_displacement_relative": {
                     "status": "available",
                     "value": 0.1,
+                    "comparator": "relative_error",
                     "source": "synthetic tolerance",
+                    "rationale": "synthetic tolerance",
                 },
                 "force_z_relative": {
                     "status": "available",
                     "value": 0.2,
+                    "comparator": "relative_error",
                     "source": "synthetic tolerance",
+                    "rationale": "synthetic tolerance",
                 },
                 "flow_rate_relative": {
                     "status": "available",
                     "value": 0.1,
+                    "comparator": "relative_error",
                     "source": "synthetic tolerance",
+                    "rationale": "synthetic tolerance",
                 },
                 "pressure_sanity_absolute": {
                     "status": "available",
                     "value": 5.0,
+                    "comparator": "absolute_error",
                     "source": "synthetic tolerance",
+                    "rationale": "synthetic tolerance",
                 },
             },
         }

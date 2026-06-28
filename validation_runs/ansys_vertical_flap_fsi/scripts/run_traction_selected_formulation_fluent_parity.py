@@ -18,6 +18,7 @@ from fluent_reference_contract_schema import validate_fluent_reference_contract
 
 CASE_NAME = "ansys_vertical_flap_fsi"
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
+REFERENCE_ROOT = ROOT / "fluent_reference"
 OUTPUT_DIR = ROOT / "traction_selected_formulation_fluent_parity_diagnostics"
 SCENARIO_DIAGNOSTICS_DIR = OUTPUT_DIR / "scenario_diagnostics"
 MATRIX_JSON = OUTPUT_DIR / "traction_selected_formulation_fluent_parity_matrix.json"
@@ -36,10 +37,10 @@ SOURCE_STEP50_HISTORY_JSON = (
     / "traction_selected_formulation_coupled_step50_history.json"
 )
 FLUENT_REFERENCE_CONTRACT_JSON = (
-    ROOT / "fluent_reference" / "fluent_reference_contract_2026-06-27.json"
+    REFERENCE_ROOT / "fluent_reference_contract_2026-06-27.json"
 )
 ACTIVE_CONTRACT_MANIFEST_JSON = (
-    ROOT / "fluent_reference" / "active_fluent_reference_contract.json"
+    REFERENCE_ROOT / "active_fluent_reference_contract.json"
 )
 
 SOURCE_SCRIPT = (
@@ -53,6 +54,7 @@ REFERENCE_FORMULATION_CANDIDATE = (
 )
 BLOCKER_REFERENCE_INCOMPLETE = "fluent_reference_incomplete"
 BLOCKER_NO_FLUENT_PARITY = "no_fluent_parity_claim"
+ACTIVE_MANIFEST_SCHEMA_VERSION = "active_fluent_reference_contract_manifest_v1"
 RELATIVE_ERROR_DENOMINATOR_FLOOR = 1.0e-12
 
 CSV_COLUMNS = [
@@ -866,6 +868,7 @@ def _active_contract_manifest() -> dict[str, Any]:
         return {
             "case": CASE_NAME,
             "purpose": "active_fluent_reference_contract_manifest",
+            "manifest_schema_version": "manifest_missing_fallback",
             "active_contract": _repo_relative(FLUENT_REFERENCE_CONTRACT_JSON),
             "active_contract_sha256": _sha256_file(FLUENT_REFERENCE_CONTRACT_JSON),
             "active_contract_status": "unknown_manifest_missing",
@@ -880,14 +883,13 @@ def _active_contract_manifest() -> dict[str, Any]:
             "no_fluent_parity_claim_retired": False,
         }
     manifest = _read_json(ACTIVE_CONTRACT_MANIFEST_JSON)
-    _validate_repo_relative_path(str(manifest["active_contract"]))
+    _validate_active_contract_manifest(manifest)
     return manifest
 
 
 def _active_reference_contract_path(manifest: Mapping[str, Any]) -> Path:
     path_text = str(manifest.get("active_contract", ""))
-    _validate_repo_relative_path(path_text)
-    return Path(path_text)
+    return _validate_repo_relative_path(path_text)
 
 
 def _active_contract_manifest_sha256() -> str:
@@ -896,10 +898,81 @@ def _active_contract_manifest_sha256() -> str:
     return _sha256_file(ACTIVE_CONTRACT_MANIFEST_JSON)
 
 
-def _validate_repo_relative_path(path_text: str) -> None:
+def _validate_active_contract_manifest(manifest: Mapping[str, Any]) -> None:
+    if manifest.get("manifest_schema_version") != ACTIVE_MANIFEST_SCHEMA_VERSION:
+        raise ValueError(
+            "active Fluent reference manifest schema version mismatch: "
+            f"{manifest.get('manifest_schema_version')}"
+        )
+
+    active_contract = _validate_repo_relative_path(
+        str(manifest.get("active_contract", ""))
+    )
+    if not active_contract.exists():
+        raise ValueError(
+            "active Fluent reference contract path is missing: "
+            f"{active_contract.as_posix()}"
+        )
+    expected_sha = str(manifest.get("active_contract_sha256", ""))
+    actual_sha = _sha256_file(active_contract)
+    if expected_sha != actual_sha:
+        raise ValueError(
+            "active Fluent reference contract sha256 mismatch: "
+            f"expected {expected_sha}, got {actual_sha}"
+        )
+
+    active_validation = manifest.get("active_contract_schema_validation")
+    if not isinstance(active_validation, Mapping):
+        raise ValueError("active Fluent reference contract schema validation missing")
+    active_status = str(manifest.get("active_contract_status", ""))
+    schema_status = str(active_validation.get("contract_status", ""))
+    if active_status != schema_status:
+        raise ValueError(
+            "active Fluent reference contract status/schema mismatch: "
+            f"{active_status} != {schema_status}"
+        )
+    if active_status == "fluent_reference_complete" and schema_status != active_status:
+        raise ValueError("active Fluent reference cannot be complete with failed schema")
+
+    candidate_validation = manifest.get("candidate_contract_schema_validation")
+    if not isinstance(candidate_validation, Mapping):
+        raise ValueError("candidate Fluent reference contract schema validation missing")
+    candidate_status = str(manifest.get("candidate_contract_status", ""))
+    candidate_schema_status = str(candidate_validation.get("contract_status", ""))
+    if candidate_status != candidate_schema_status:
+        raise ValueError(
+            "candidate Fluent reference contract status/schema mismatch: "
+            f"{candidate_status} != {candidate_schema_status}"
+        )
+    if (
+        candidate_status == "fluent_reference_complete"
+        and candidate_schema_status != candidate_status
+    ):
+        raise ValueError(
+            "candidate Fluent reference cannot be complete with failed schema"
+        )
+
+
+def _validate_repo_relative_path(path_text: str) -> Path:
     path = Path(path_text)
-    if path.is_absolute() or "\\" in path_text or path_text.startswith(".."):
-        raise ValueError(f"active Fluent reference contract path is not repo-relative: {path_text}")
+    if (
+        path.is_absolute()
+        or "\\" in path_text
+        or path_text.startswith("..")
+        or ".." in path.parts
+    ):
+        raise ValueError(
+            "active Fluent reference contract path is not repo-relative: "
+            f"{path_text}"
+        )
+    try:
+        path.relative_to(REFERENCE_ROOT)
+    except ValueError as exc:
+        raise ValueError(
+            "active Fluent reference contract path escapes fluent_reference root: "
+            f"{path_text}"
+        ) from exc
+    return path
 
 
 def _write_json(path: Path, payload: Any) -> None:

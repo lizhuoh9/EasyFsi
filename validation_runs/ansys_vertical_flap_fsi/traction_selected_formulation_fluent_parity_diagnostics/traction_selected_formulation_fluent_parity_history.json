@@ -1,9 +1,9 @@
 {
   "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
-  "active_fluent_reference_contract_manifest_sha256": "6de78e71a3e4000d6b5cf06bcf1798404025f9ed099a151113d6cc48a16bbfd7",
+  "active_fluent_reference_contract_manifest_sha256": "bc26b64bcce6743d899b188118b52f6ff765bd90a608193459c8eed486f5d30c",
   "case": "ansys_vertical_flap_fsi",
   "fluent_reference_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
-  "fluent_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
+  "fluent_reference_contract_sha256": "75cafa66851eea7e478ddc2dcfdb13d6c499e77995ac78458e1ff4ee958ae05b",
   "histories": {
     "selected_formulation_fluent_parity": {
       "candidate_blockers": [
@@ -20,7 +20,12 @@
       "fluent_parity_claimed": false,
       "parity_metrics": {
         "displacement": {
-          "comparison_definition": {},
+          "comparison_definition": {
+            "metric": "tip_displacement_norm_m",
+            "point": "",
+            "source_step50_metric": "tip_mean_displacement_m",
+            "status": "missing"
+          },
           "comparison_status": "blocked_reference_missing",
           "comparisons": {
             "max_displacement": {
@@ -157,8 +162,13 @@
         },
         "metadata": {
           "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
-          "active_fluent_reference_contract_manifest_sha256": "6de78e71a3e4000d6b5cf06bcf1798404025f9ed099a151113d6cc48a16bbfd7",
-          "contract_displacement_definition": {},
+          "active_fluent_reference_contract_manifest_sha256": "bc26b64bcce6743d899b188118b52f6ff765bd90a608193459c8eed486f5d30c",
+          "contract_displacement_definition": {
+            "metric": "tip_displacement_norm_m",
+            "point": "",
+            "source_step50_metric": "tip_mean_displacement_m",
+            "status": "missing"
+          },
           "contract_geometry": {
             "duct_height_m": 0.04,
             "duct_length_m": 0.1,
@@ -185,11 +195,11 @@
               },
               {
                 "blocker": "fluent_reference_sign_conventions_incomplete",
-                "detail": "required mapping is missing"
+                "detail": "missing fields: force_z_positive,flow_rate_positive,pressure_reference,status"
               },
               {
                 "blocker": "fluent_reference_displacement_definition_incomplete",
-                "detail": "required mapping is missing"
+                "detail": "missing fields: point,status"
               },
               {
                 "blocker": "tip_displacement_m_missing",
@@ -213,7 +223,7 @@
               },
               {
                 "blocker": "fluent_reference_tolerances_incomplete",
-                "detail": "tip_displacement_relative must be available, numeric, finite, and sourced"
+                "detail": "tip_displacement_relative must be available, numeric, finite, sourced, rationalized, and use a supported comparator"
               }
             ],
             "contract_status": "fluent_reference_incomplete",
@@ -227,7 +237,12 @@
             "required_metric_count": 5,
             "validated_metric_count": 0
           },
-          "contract_sign_conventions": {},
+          "contract_sign_conventions": {
+            "flow_rate_positive": "",
+            "force_z_positive": "",
+            "pressure_reference": "",
+            "status": "missing"
+          },
           "contract_simulation": {
             "step_count": 50,
             "time_step_s": 0.0005,
@@ -242,7 +257,7 @@
           },
           "contract_step_count": 50,
           "contract_time_step_s": 0.0005,
-          "fluent_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
+          "fluent_reference_contract_sha256": "75cafa66851eea7e478ddc2dcfdb13d6c499e77995ac78458e1ff4ee958ae05b",
           "gate_status": "passed",
           "pressure_pair_anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
           "reference_formulation_candidate": "anchored_dual_face_pressure_pair_with_per_face_one_sided",

@@ -5,6 +5,7 @@ from typing import Any, Mapping
 
 
 CASE_NAME = "ansys_vertical_flap_fsi"
+SCHEMA_VERSION = "ansys_vertical_flap_fluent_reference_contract_v1"
 CONTRACT_COMPLETE = "fluent_reference_complete"
 CONTRACT_INCOMPLETE = "fluent_reference_incomplete"
 EXPECTED_STEP_COUNT = 50
@@ -19,12 +20,48 @@ REQUIRED_REFERENCE_METRICS = (
     "pressure_range_pa",
 )
 
+EXPECTED_METRIC_UNITS = {
+    "tip_displacement_m": "m",
+    "max_displacement_m": "m",
+    "force_z_N": "N",
+    "flow_rate_m3s": "m3/s",
+    "pressure_range_pa": "Pa",
+}
+
 REQUIRED_TOLERANCES = (
     "tip_displacement_relative",
     "max_displacement_relative",
     "force_z_relative",
     "flow_rate_relative",
     "pressure_sanity_absolute",
+)
+
+ALLOWED_TOLERANCE_COMPARATORS = {
+    "relative_error",
+    "absolute_error",
+    "range_contains",
+    "sign_matches",
+    "report_only",
+}
+
+REQUIRED_SAMPLING_DEFINITIONS = (
+    "tip_displacement",
+    "max_displacement",
+    "force_z",
+    "flow_rate",
+    "pressure_range",
+)
+
+REQUIRED_SAMPLING_FIELDS = (
+    "definition",
+    "unit",
+    "status",
+)
+
+REQUIRED_COMPARISON_POLICY_FIELDS = (
+    "status",
+    "reference_complete_required",
+    "parity_claim_requires_all_gates",
 )
 
 REQUIRED_GEOMETRY_FIELDS = (
@@ -72,6 +109,18 @@ def validate_fluent_reference_contract(contract: Mapping[str, Any]) -> dict[str,
     missing_metrics: list[str] = []
     validated_metric_count = 0
 
+    if contract.get("schema_version") != SCHEMA_VERSION:
+        _append_blocker(
+            blockers,
+            "fluent_reference_schema_version_missing",
+            f"expected schema_version={SCHEMA_VERSION}",
+        )
+    if _is_missing(contract.get("contract_id")):
+        _append_blocker(
+            blockers,
+            "fluent_reference_contract_id_missing",
+            "contract_id must be present",
+        )
     if contract.get("case") != CASE_NAME:
         _append_blocker(
             blockers,
@@ -114,6 +163,14 @@ def validate_fluent_reference_contract(contract: Mapping[str, Any]) -> dict[str,
         blockers,
         "fluent_reference_displacement_definition_incomplete",
     )
+    _validate_nested_status_mapping(
+        contract.get("sampling_definitions"),
+        REQUIRED_SAMPLING_DEFINITIONS,
+        REQUIRED_SAMPLING_FIELDS,
+        blockers,
+        "fluent_reference_sampling_definitions_incomplete",
+    )
+    _validate_comparison_policy(contract.get("comparison_policy"), blockers)
 
     reference_metrics = contract.get("reference_metrics")
     if not isinstance(reference_metrics, Mapping):
@@ -125,7 +182,7 @@ def validate_fluent_reference_contract(contract: Mapping[str, Any]) -> dict[str,
         )
     for metric in REQUIRED_REFERENCE_METRICS:
         payload = reference_metrics.get(metric)
-        if _metric_payload_available(payload):
+        if _metric_payload_available(metric, payload):
             validated_metric_count += 1
         else:
             missing_metrics.append(metric)
@@ -145,11 +202,14 @@ def validate_fluent_reference_contract(contract: Mapping[str, Any]) -> dict[str,
         )
     for tolerance in REQUIRED_TOLERANCES:
         payload = tolerances.get(tolerance)
-        if not _tolerance_payload_available(payload):
+        if not _tolerance_payload_available(tolerance, payload):
             _append_blocker(
                 blockers,
                 "fluent_reference_tolerances_incomplete",
-                f"{tolerance} must be available, numeric, finite, and sourced",
+                (
+                    f"{tolerance} must be available, numeric, finite, "
+                    "sourced, rationalized, and use a supported comparator"
+                ),
             )
 
     deduped = _dedupe_blockers(blockers)
@@ -266,19 +326,94 @@ def _validate_status_mapping(
         _append_blocker(blockers, blocker, "missing fields: " + ",".join(dict.fromkeys(missing)))
 
 
-def _metric_payload_available(payload: Any) -> bool:
+def _validate_nested_status_mapping(
+    payload: Any,
+    required_keys: tuple[str, ...],
+    required_fields: tuple[str, ...],
+    blockers: list[dict[str, str]],
+    blocker: str,
+) -> None:
     if not isinstance(payload, Mapping):
-        return False
-    return payload.get("status") == "available" and _float_value(payload.get("value")) is not None
+        _append_blocker(blockers, blocker, "required mapping is missing")
+        return
+    missing = []
+    for key in required_keys:
+        item = payload.get(key)
+        if not isinstance(item, Mapping):
+            missing.append(key)
+            continue
+        for field in required_fields:
+            if _is_missing(item.get(field)):
+                missing.append(f"{key}.{field}")
+        if item.get("status") != "complete":
+            missing.append(f"{key}.status")
+    if missing:
+        _append_blocker(
+            blockers,
+            blocker,
+            "missing fields: " + ",".join(dict.fromkeys(missing)),
+        )
 
 
-def _tolerance_payload_available(payload: Any) -> bool:
+def _validate_comparison_policy(
+    payload: Any,
+    blockers: list[dict[str, str]],
+) -> None:
+    if not isinstance(payload, Mapping):
+        _append_blocker(
+            blockers,
+            "fluent_reference_comparison_policy_incomplete",
+            "comparison_policy must be a mapping",
+        )
+        return
+    missing = [
+        field
+        for field in REQUIRED_COMPARISON_POLICY_FIELDS
+        if _is_missing(payload.get(field))
+    ]
+    if payload.get("status") != "complete":
+        missing.append("status")
+    if payload.get("reference_complete_required") is not True:
+        missing.append("reference_complete_required")
+    if payload.get("parity_claim_requires_all_gates") is not True:
+        missing.append("parity_claim_requires_all_gates")
+    if missing:
+        _append_blocker(
+            blockers,
+            "fluent_reference_comparison_policy_incomplete",
+            "missing fields: " + ",".join(dict.fromkeys(missing)),
+        )
+
+
+def _metric_payload_available(metric_name: str, payload: Any) -> bool:
     if not isinstance(payload, Mapping):
         return False
     return (
         payload.get("status") == "available"
         and _float_value(payload.get("value")) is not None
+        and payload.get("unit") == EXPECTED_METRIC_UNITS[metric_name]
         and not _is_missing(payload.get("source"))
+        and not _is_missing(payload.get("extraction_method"))
+        and _float_equals(_float_value(payload.get("time_s")), EXPECTED_TOTAL_TIME_S)
+    )
+
+
+def _tolerance_payload_available(tolerance_name: str, payload: Any) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    comparator = str(payload.get("comparator", ""))
+    if comparator not in ALLOWED_TOLERANCE_COMPARATORS:
+        return False
+    if tolerance_name == "pressure_sanity_absolute" and comparator not in {
+        "absolute_error",
+        "range_contains",
+    }:
+        return False
+    return (
+        payload.get("status") == "available"
+        and _float_value(payload.get("value")) is not None
+        and not _is_missing(payload.get("source"))
+        and not _is_missing(payload.get("rationale"))
     )
 
 
@@ -314,3 +449,7 @@ def _float_value(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def _float_equals(lhs: float | None, rhs: float) -> bool:
+    return lhs is not None and abs(lhs - rhs) <= 1.0e-12

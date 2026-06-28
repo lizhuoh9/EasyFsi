@@ -1,0 +1,30 @@
+{
+  "case": "ansys_vertical_flap_fsi",
+  "evidence_id": "ansys_fluent_tutorial_fsi_2way_vertical_flap_public_v251",
+  "source_url": "https://ansyshelp.ansys.com/public/views/secured/corp/v251/en/flu_tg/flu_tg_fsi_2way.html",
+  "source_title": "ANSYS Fluent two-way FSI vertical flap tutorial",
+  "source_type": "public_tutorial_metadata",
+  "use_policy": "metadata_only_not_parity_truth",
+  "allowed_uses": [
+    "case identity",
+    "geometry and boundary-condition cross-checks",
+    "export protocol setup checklist"
+  ],
+  "disallowed_uses": [
+    "Fluent parity claim",
+    "reference metric truth",
+    "tolerance calibration",
+    "candidate promotion without provenance-backed source exports"
+  ],
+  "required_private_exports": [
+    "fluent_tip_displacement_history.csv",
+    "fluent_force_history.csv",
+    "fluent_flow_balance_history.csv",
+    "fluent_pressure_summary_history.csv",
+    "fluent_metadata_2026-06-28.md"
+  ],
+  "parity_claim_policy": {
+    "fluent_parity_claimed": false,
+    "reason": "Public tutorial metadata is not a committed Fluent run export and cannot retire no_fluent_parity_claim."
+  }
+}

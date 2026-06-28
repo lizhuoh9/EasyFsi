@@ -18,6 +18,9 @@ SUMMARY_MD = DIAG_ROOT / "fluent_reference_collection_summary.md"
 CANDIDATE_CONTRACT = DIAG_ROOT / "fluent_reference_collection_candidate_contract.json"
 CHECKSUMS = DIAG_ROOT / "CHECKSUMS.sha256"
 ACTIVE_CONTRACT_MANIFEST = REFERENCE_ROOT / "active_fluent_reference_contract.json"
+PUBLIC_TUTORIAL_EVIDENCE_MAP = (
+    SOURCE_EXPORTS_ROOT / "public_tutorial_evidence_map.json"
+)
 
 EXPECTED_SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
@@ -120,6 +123,10 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
         for field in EXPECTED_METADATA_FIELDS:
             self.assertIn(f"- {field}: MISSING", text)
 
+        evidence = _read_json(PUBLIC_TUTORIAL_EVIDENCE_MAP)
+        self.assertEqual(evidence["use_policy"], "metadata_only_not_parity_truth")
+        self.assertFalse(evidence["parity_claim_policy"]["fluent_parity_claimed"])
+
     def test_collection_matrix_records_pending_reference_state(self):
         for path in (
             MATRIX_JSON,
@@ -127,6 +134,7 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
             SUMMARY_MD,
             CANDIDATE_CONTRACT,
             ACTIVE_CONTRACT_MANIFEST,
+            PUBLIC_TUTORIAL_EVIDENCE_MAP,
             CHECKSUMS,
         ):
             self.assertTrue(path.exists(), path)
@@ -140,6 +148,18 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
         self.assertEqual(payload["source_script"], EXPECTED_SOURCE_SCRIPT)
         self.assertFalse(Path(payload["source_script"]).is_absolute())
         self.assertNotIn("\\", payload["source_script"])
+        self.assertEqual(
+            payload["public_reference_evidence"],
+            PUBLIC_TUTORIAL_EVIDENCE_MAP.as_posix(),
+        )
+        self.assertEqual(
+            payload["public_reference_evidence_sha256"],
+            _sha256_file(PUBLIC_TUTORIAL_EVIDENCE_MAP),
+        )
+        self.assertEqual(
+            payload["public_reference_use_policy"],
+            "metadata_only_not_parity_truth",
+        )
         self.assertEqual(payload["candidate_status"], EXPECTED_CANDIDATE_STATUS)
         self.assertEqual(payload["candidate_contract_status"], EXPECTED_CONTRACT_STATUS)
         self.assertEqual(blockers, EXPECTED_BLOCKERS)
@@ -235,15 +255,27 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
             candidate["collection_validator"]["comparison_metadata_complete"]
         )
         self.assertEqual(manifest["purpose"], "active_fluent_reference_contract_manifest")
+        self.assertEqual(
+            manifest["manifest_schema_version"],
+            "active_fluent_reference_contract_manifest_v1",
+        )
         self.assertEqual(manifest["active_contract"], CURRENT_CONTRACT.as_posix())
         self.assertEqual(manifest["active_contract_sha256"], _sha256_file(CURRENT_CONTRACT))
         self.assertEqual(manifest["active_contract_status"], EXPECTED_CONTRACT_STATUS)
+        self.assertEqual(
+            manifest["active_contract_schema_validation"]["contract_status"],
+            EXPECTED_CONTRACT_STATUS,
+        )
         self.assertEqual(manifest["candidate_contract"], CANDIDATE_CONTRACT.as_posix())
         self.assertEqual(
             manifest["candidate_contract_sha256"],
             _sha256_file(CANDIDATE_CONTRACT),
         )
         self.assertEqual(manifest["candidate_contract_status"], EXPECTED_CONTRACT_STATUS)
+        self.assertEqual(
+            manifest["candidate_contract_schema_validation"]["contract_status"],
+            EXPECTED_CONTRACT_STATUS,
+        )
         self.assertEqual(manifest["promotion_status"], "blocked_reference_incomplete")
         self.assertEqual(manifest["recommended_action"], "keep_current_incomplete_contract")
         self.assertEqual(
@@ -256,6 +288,11 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
             self.assertEqual(candidate["reference_metrics"][metric]["status"], "missing")
             self.assertIsNone(candidate["reference_metrics"][metric]["value"])
             self.assertEqual(candidate["reference_metrics"][metric]["source"], "not_collected")
+            self.assertEqual(candidate["reference_metrics"][metric]["time_s"], 0.025)
+            self.assertEqual(
+                candidate["reference_metrics"][metric]["extraction_method"],
+                "not_collected",
+            )
 
     def test_summary_csv_and_checksums_are_consistent(self):
         payload = _read_json(MATRIX_JSON)
@@ -263,6 +300,7 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
 
         self.assertIn("Fluent reference collection", summary)
         self.assertIn("does not claim Fluent parity", summary)
+        self.assertIn("Public tutorial evidence map", summary)
         self.assertNotIn("fluent_parity_validated", summary)
         self.assertNotIn("Fluent parity validated", summary)
         self.assertIn(EXPECTED_CANDIDATE_STATUS, summary)
