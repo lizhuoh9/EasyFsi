@@ -1,0 +1,109 @@
+{
+  "adapter": "AnsysVerticalFlapProblem",
+  "candidate_blockers": [
+    {
+      "blocker": "runtime_pressure_pair_generation_pending",
+      "detail": "pressure-pair cells are still seeded from the selected anchor artifact; full runtime derivation remains the next solver step"
+    },
+    {
+      "blocker": "fluent_reference_incomplete",
+      "detail": "Fluent source exports remain incomplete and separate from this runner"
+    },
+    {
+      "blocker": "no_fluent_parity_claim",
+      "detail": "this EasyFsi-only runner does not claim Fluent parity"
+    }
+  ],
+  "candidate_status": "generic_solver_selected_formulation_step50_transition_passed",
+  "case": "ansys_vertical_flap_fsi",
+  "completed_step_count": 50,
+  "export_artifacts": {
+    "flow_balance": "validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/easyfsi_flow_balance_history.csv",
+    "force": "validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/easyfsi_force_history.csv",
+    "pressure_summary": "validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/easyfsi_pressure_summary_history.csv",
+    "tip_displacement": "validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/easyfsi_tip_displacement_history.csv"
+  },
+  "fluent_parity_claimed": false,
+  "fluent_parity_status": "blocked_reference_incomplete",
+  "generic_api_invoked": true,
+  "generic_solver_entrypoint": "solve_fsi",
+  "one_sided_pressure_policy": {
+    "enabled": true,
+    "region_policies": [
+      {
+        "fluid_side_normal_sign": 1.0,
+        "reference_pressure_pa": 0.0,
+        "region_id": "primary_flap_face"
+      },
+      {
+        "fluid_side_normal_sign": 1.0,
+        "reference_pressure_pa": 0.0,
+        "region_id": "secondary_flap_face"
+      }
+    ]
+  },
+  "pressure_pair_policy": {
+    "mode": "runtime_anchored_cell_pair",
+    "pair_source_status": "transition_seeded_from_anchor_artifact",
+    "source": "validation_runs/ansys_vertical_flap_fsi/traction_fixed_solid_selected_formulation_diagnostics/marker_diagnostics/fixed_solid_selected_per_face_one_sided_probe0p51_markers.json",
+    "transition_backed": true
+  },
+  "pressure_pair_runtime_generation_complete": false,
+  "pressure_pair_runtime_generation_status": "transition_seeded_from_anchor_artifact",
+  "pressure_pair_sample_contract": {
+    "diagnostic_reason": "first generic boundary keeps selected anchor seed visible until full pressure-pair generation is implemented",
+    "fallback_status": "no_fallbacks",
+    "pair_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
+    "required_fields": [
+      "region_id",
+      "inside_cell",
+      "outside_cell",
+      "sample_status",
+      "fallback_status",
+      "diagnostic_reason",
+      "pair_map_sha256"
+    ],
+    "sample_status": "transition_seeded_from_anchor_artifact"
+  },
+  "purpose": "generic_solver_selected_formulation_matrix",
+  "requested_step_count": 50,
+  "rows": [
+    {
+      "anchor_fallback_marker_count_max": 0.0,
+      "anchor_selected_marker_count_min": 24.0,
+      "case": "ansys_vertical_flap_fsi",
+      "completed_step_count": 50,
+      "force_action_reaction_residual_max_n": 0.0,
+      "generic_api_invoked": true,
+      "invalid_marker_count_max": 0.0,
+      "max_displacement_m": 2.320058956684079e-05,
+      "max_pressure_abs_pa": 488.5044483902084,
+      "max_velocity_mps": 31.76406478881836,
+      "one_sided_anchor_fallback_marker_count_max": 0.0,
+      "one_sided_marker_count_min": 24.0,
+      "pressure_pair_anchor_current_marker_geometry_sha256": "4dd578d7eb768250b6efe1ce66ae640cdab42d07fc2f280be7c2d76e3ade3c62",
+      "pressure_pair_anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
+      "pressure_pair_anchor_source_flow_snapshot_sha256": "3ea3f6e95ec1a43ddf9556785a87d423d25f68d59ce61696a00627786a8ea968",
+      "pressure_pair_anchor_source_marker_geometry_sha256": "4dd578d7eb768250b6efe1ce66ae640cdab42d07fc2f280be7c2d76e3ade3c62",
+      "pressure_pair_policy_mode": "runtime_anchored_cell_pair",
+      "pressure_pair_runtime_generation_complete": false,
+      "pressure_pair_runtime_generation_status": "transition_seeded_from_anchor_artifact",
+      "requested_step_count": 50,
+      "run_status": "completed",
+      "sample_pair_fallback_count_max": 0.0,
+      "scenario": "generic_solver_selected_formulation_step50",
+      "selected_anchor_markers_source": "validation_runs/ansys_vertical_flap_fsi/traction_fixed_solid_selected_formulation_diagnostics/marker_diagnostics/fixed_solid_selected_per_face_one_sided_probe0p51_markers.json",
+      "selected_anchor_markers_source_sha256": "2278684fbb168f1557fc2496a81a2d94635a1ce5a6ec974b13ccb341d173f41e"
+    }
+  ],
+  "scenario_count": 1,
+  "source_script": "validation_runs/ansys_vertical_flap_fsi/scripts/run_ansys_vertical_flap_generic_solver.py",
+  "stable_candidate_gate": {
+    "completed_step_count": 50,
+    "force_action_reaction_residual_max_n": 1e-08,
+    "invalid_marker_count_max": 0,
+    "one_sided_marker_count_min": 24,
+    "sample_pair_fallback_count_max": 0
+  },
+  "validation_scope": "easyfsi_generic_solver_only"
+}

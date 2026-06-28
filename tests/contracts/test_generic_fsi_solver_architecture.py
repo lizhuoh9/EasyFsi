@@ -69,6 +69,111 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
             1.0e-12,
         )
 
+    def test_generic_solver_boundary_is_case_agnostic_and_injected(self) -> None:
+        from simulation_core.generic_fsi_solver import (
+            DiagnosticsConfig,
+            FluidDomain,
+            FsiProblem,
+            FsiSolverConfig,
+            InterfaceSurface,
+            OneSidedPressurePolicy,
+            PressureSamplePairProvider,
+            PressureSamplingConfig,
+            SolidBody,
+            SurfaceRegion,
+            TractionConfig,
+            solve_fsi,
+        )
+
+        provider = PressureSamplePairProvider(
+            mode="runtime_anchored_cell_pair",
+            pair_source_status="runtime_generated",
+        )
+        sampling = PressureSamplingConfig(pair_provider=provider)
+        traction = TractionConfig(
+            pressure_sampling=sampling,
+            one_sided_pressure=OneSidedPressurePolicy(),
+        )
+        problem = FsiProblem(
+            problem_id="toy-fsi",
+            fluid_domain=FluidDomain(
+                domain_id="toy-fluid",
+                coordinate_model="cartesian-3d",
+                grid_nodes=(2, 3, 4),
+                bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+                boundary_conditions={"interface": {"type": "two-way"}},
+            ),
+            solid_bodies=(
+                SolidBody(
+                    body_id="toy-solid",
+                    material={"density": 1.0},
+                    initial_state={"displacement_m": 0.0},
+                ),
+            ),
+            interface_surfaces=(
+                InterfaceSurface(
+                    surface_id="toy-interface",
+                    regions=(SurfaceRegion(region_id="face-a"),),
+                ),
+            ),
+            traction_config=traction,
+            runtime_executor=lambda problem, solver_config, diagnostics_config: {
+                "run_status": "completed",
+                "history": [
+                    {"step": 1, "max_displacement_m": 0.1},
+                    {"step": 2, "max_displacement_m": 0.2},
+                ],
+                "diagnostics": {"executor_problem": problem.problem_id},
+                "artifacts": {"matrix": "toy-matrix.json"},
+            },
+        )
+
+        result = solve_fsi(
+            problem,
+            FsiSolverConfig(step_count=2, time_step_s=0.5),
+            DiagnosticsConfig(output_root="outputs/toy"),
+        )
+
+        self.assertEqual(result.problem_id, "toy-fsi")
+        self.assertEqual(result.run_status, "completed")
+        self.assertEqual(result.completed_step_count, 2)
+        self.assertTrue(result.diagnostics["generic_api_invoked"])
+        self.assertEqual(
+            result.diagnostics["pressure_pair_policy"]["mode"],
+            "runtime_anchored_cell_pair",
+        )
+        self.assertFalse(
+            result.diagnostics["pressure_pair_policy"]["transition_backed"]
+        )
+        self.assertEqual(result.artifacts["matrix"], "toy-matrix.json")
+
+        source = (Path("simulation_core") / "generic_fsi_solver.py").read_text(
+            encoding="utf-8"
+        )
+        forbidden_terms = ("ansys", "fluent", "vertical_flap", "vertical flap")
+        for term in forbidden_terms:
+            self.assertNotIn(term, source.lower())
+
+    def test_pressure_pair_provider_reports_transition_replay_explicitly(self) -> None:
+        from simulation_core.generic_fsi_solver import PressureSamplePairProvider
+
+        provider = PressureSamplePairProvider(
+            mode="runtime_anchored_cell_pair",
+            pair_source_status="transition_seeded_from_anchor_artifact",
+            source="validation/input.json",
+        )
+
+        self.assertTrue(provider.transition_backed)
+        self.assertEqual(
+            provider.as_diagnostics(),
+            {
+                "mode": "runtime_anchored_cell_pair",
+                "pair_source_status": "transition_seeded_from_anchor_artifact",
+                "source": "validation/input.json",
+                "transition_backed": True,
+            },
+        )
+
     def test_core_fluid_domain_is_not_axisymmetric_by_default(self) -> None:
         from simulation_core.coordinate_models import (
             Axisymmetric2DCoordinateModel,

@@ -5,6 +5,20 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any
 
+from simulation_core.generic_fsi_solver import (
+    DiagnosticsConfig,
+    FluidDomain,
+    FsiProblem,
+    FsiSolverConfig,
+    InterfaceSurface,
+    OneSidedPressurePolicy,
+    PressureSamplePairProvider,
+    PressureSamplingConfig,
+    SolidBody,
+    SurfaceRegion,
+    SurfaceRegionPolicy,
+    TractionConfig,
+)
 from simulation_core.fsi_driver import FsiCaseSpec
 from benchmarks.official.official_benchmark_solver import (
     OfficialBenchmarkRunSpec,
@@ -216,6 +230,205 @@ def with_local_surface_force_support(
         config,
         mpm_support_radius_m=surface_force_support_radius_m(config),
     )
+
+
+ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET: dict[str, Any] = {
+    "reference_formulation_candidate": (
+        "anchored_dual_face_pressure_pair_with_per_face_one_sided"
+    ),
+    "pressure_pair_policy": "baseline_anchored_cell_pair",
+    "generic_pressure_pair_mode": "runtime_anchored_cell_pair",
+    "pressure_pair_source_status": "transition_seeded_from_anchor_artifact",
+    "one_sided_pressure_policy": "per_face_mirrored",
+    "primary_fluid_side_normal_sign": 1.0,
+    "secondary_fluid_side_normal_sign": 1.0,
+}
+
+
+@dataclass(frozen=True)
+class AnsysVerticalFlapProblem:
+    selected_anchor_markers_json: str
+    step_count: int = 50
+
+    def to_fsi_problem(self) -> FsiProblem:
+        config = VerticalFlapFsiConfig(step_count=self.step_count)
+        primary_region = SurfaceRegion(
+            region_id="primary_flap_face",
+            marker_count=config.marker_count,
+            fluid_side_normal_sign=float(
+                ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
+                    "primary_fluid_side_normal_sign"
+                ]
+            ),
+            reference_pressure_pa=0.0,
+        )
+        secondary_region = SurfaceRegion(
+            region_id="secondary_flap_face",
+            marker_count=config.marker_count,
+            fluid_side_normal_sign=float(
+                ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
+                    "secondary_fluid_side_normal_sign"
+                ]
+            ),
+            reference_pressure_pa=0.0,
+        )
+        pair_provider = PressureSamplePairProvider(
+            mode=str(
+                ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
+                    "generic_pressure_pair_mode"
+                ]
+            ),
+            pair_source_status=str(
+                ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
+                    "pressure_pair_source_status"
+                ]
+            ),
+            source=self.selected_anchor_markers_json,
+        )
+        traction_config = TractionConfig(
+            pressure_sampling=PressureSamplingConfig(pair_provider=pair_provider),
+            one_sided_pressure=OneSidedPressurePolicy(
+                region_policies=(
+                    SurfaceRegionPolicy(
+                        region_id=primary_region.region_id,
+                        fluid_side_normal_sign=float(
+                            primary_region.fluid_side_normal_sign
+                        ),
+                    ),
+                    SurfaceRegionPolicy(
+                        region_id=secondary_region.region_id,
+                        fluid_side_normal_sign=float(
+                            secondary_region.fluid_side_normal_sign
+                        ),
+                    ),
+                )
+            ),
+            include_viscous=False,
+        )
+        return FsiProblem(
+            problem_id=CASE_SPEC.case_id,
+            fluid_domain=FluidDomain(
+                domain_id="flap_air_domain",
+                coordinate_model=CASE_SPEC.coordinate_model,
+                grid_nodes=tuple(int(value) for value in config.grid_nodes),
+                bounds_m=(
+                    (0.0, 0.0, 0.0),
+                    (
+                        float(config.span_m),
+                        float(config.duct_height_m),
+                        float(config.duct_length_m),
+                    ),
+                ),
+                boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
+            ),
+            solid_bodies=(
+                SolidBody(
+                    body_id="elastic_flap",
+                    material=ANSYS_VERTICAL_FLAP_CASE_METADATA["solid"],
+                    initial_state={"fixed_root": True},
+                ),
+            ),
+            interface_surfaces=(
+                InterfaceSurface(
+                    surface_id="flap_wall",
+                    regions=(primary_region, secondary_region),
+                ),
+            ),
+            traction_config=traction_config,
+            runtime_executor=_run_ansys_vertical_flap_generic_runtime,
+            metadata={
+                "adapter": "AnsysVerticalFlapProblem",
+                "case_name": "ansys_vertical_flap_fsi",
+                "selected_traction_preset": ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET,
+                "selected_anchor_markers_json": self.selected_anchor_markers_json,
+            },
+        )
+
+
+def build_ansys_vertical_flap_generic_problem(
+    *,
+    selected_anchor_markers_json: str,
+    step_count: int = 50,
+) -> FsiProblem:
+    return AnsysVerticalFlapProblem(
+        selected_anchor_markers_json=selected_anchor_markers_json,
+        step_count=step_count,
+    ).to_fsi_problem()
+
+
+def selected_formulation_solver_config(
+    *,
+    step_count: int,
+    selected_anchor_markers_json: str,
+) -> VerticalFlapFsiConfig:
+    return VerticalFlapFsiConfig(
+        step_count=step_count,
+        traction_pressure_sampling_mode="one_sided_surface_pressure",
+        traction_pressure_probe_origin_mode="physical_face_offset",
+        traction_pressure_probe_origin_offset_cells=0.51,
+        traction_pressure_pair_policy=str(
+            ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET["pressure_pair_policy"]
+        ),
+        traction_one_sided_pressure_policy=str(
+            ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
+                "one_sided_pressure_policy"
+            ]
+        ),
+        traction_one_sided_primary_fluid_side_normal_sign=float(
+            ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
+                "primary_fluid_side_normal_sign"
+            ]
+        ),
+        traction_one_sided_secondary_fluid_side_normal_sign=float(
+            ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
+                "secondary_fluid_side_normal_sign"
+            ]
+        ),
+        traction_pressure_pair_anchor_markers_json=selected_anchor_markers_json,
+        allow_selected_traction_formulation_coupled_smoke=True,
+        allow_selected_traction_formulation_coupled_long_validation=True,
+    )
+
+
+def _run_ansys_vertical_flap_generic_runtime(
+    problem: FsiProblem,
+    solver_config: FsiSolverConfig,
+    diagnostics_config: DiagnosticsConfig,
+) -> dict[str, Any]:
+    selected_anchor_markers_json = str(
+        problem.metadata["selected_anchor_markers_json"]
+    )
+    config = selected_formulation_solver_config(
+        step_count=int(solver_config.step_count),
+        selected_anchor_markers_json=selected_anchor_markers_json,
+    )
+    report = run_vertical_flap_fsi_smoke(config)
+    history = list(report.get("history", []))
+    pressure_policy = problem.traction_config.pressure_sampling.pair_provider
+    return {
+        "run_status": (
+            "completed"
+            if len(history) == int(solver_config.step_count)
+            else "blocked"
+        ),
+        "history": history,
+        "report": report,
+        "diagnostics": {
+            "adapter": "AnsysVerticalFlapProblem",
+            "diagnostics_output_root": diagnostics_config.output_root,
+            "selected_formulation_preset": ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET,
+            "selected_anchor_markers_json": selected_anchor_markers_json,
+            "pressure_pair_runtime_generation_status": (
+                pressure_policy.pair_source_status
+            ),
+            "pressure_pair_runtime_generation_complete": (
+                not pressure_policy.transition_backed
+            ),
+            "transition_artifact_dependency": pressure_policy.transition_backed,
+            "fluent_parity_claimed": False,
+        },
+        "artifacts": {},
+    }
 
 
 def run_vertical_flap_fsi_smoke(config: VerticalFlapFsiConfig | None = None) -> dict[str, object]:
