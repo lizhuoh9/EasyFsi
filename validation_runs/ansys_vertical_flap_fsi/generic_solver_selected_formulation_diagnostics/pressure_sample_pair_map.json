@@ -1,0 +1,417 @@
+{
+  "fallback_count": 0,
+  "marker_geometry_sha256": "409a1d30f1add80f883c1dee652a6b9f131a67d5131e3477677a21efe71c76a0",
+  "pair_map_sha256": "4a733b4a03a7e68ae258d961b937b1c937c15757fc6397d9e31b182bbe4a01e9",
+  "pairs": [
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        0,
+        32
+      ],
+      "marker_index": 0,
+      "outside_cell": [
+        2,
+        0,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        1,
+        32
+      ],
+      "marker_index": 1,
+      "outside_cell": [
+        2,
+        1,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        3,
+        32
+      ],
+      "marker_index": 2,
+      "outside_cell": [
+        2,
+        3,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        4,
+        32
+      ],
+      "marker_index": 3,
+      "outside_cell": [
+        2,
+        4,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        5,
+        32
+      ],
+      "marker_index": 4,
+      "outside_cell": [
+        2,
+        5,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        7,
+        32
+      ],
+      "marker_index": 5,
+      "outside_cell": [
+        2,
+        7,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        8,
+        32
+      ],
+      "marker_index": 6,
+      "outside_cell": [
+        2,
+        8,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        10,
+        32
+      ],
+      "marker_index": 7,
+      "outside_cell": [
+        2,
+        10,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        11,
+        32
+      ],
+      "marker_index": 8,
+      "outside_cell": [
+        2,
+        11,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        12,
+        32
+      ],
+      "marker_index": 9,
+      "outside_cell": [
+        2,
+        12,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        14,
+        32
+      ],
+      "marker_index": 10,
+      "outside_cell": [
+        2,
+        14,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        15,
+        32
+      ],
+      "marker_index": 11,
+      "outside_cell": [
+        2,
+        15,
+        35
+      ],
+      "region_id": "101",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        0,
+        32
+      ],
+      "marker_index": 12,
+      "outside_cell": [
+        2,
+        0,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        1,
+        32
+      ],
+      "marker_index": 13,
+      "outside_cell": [
+        2,
+        1,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        3,
+        32
+      ],
+      "marker_index": 14,
+      "outside_cell": [
+        2,
+        3,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        4,
+        32
+      ],
+      "marker_index": 15,
+      "outside_cell": [
+        2,
+        4,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        5,
+        32
+      ],
+      "marker_index": 16,
+      "outside_cell": [
+        2,
+        5,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        7,
+        32
+      ],
+      "marker_index": 17,
+      "outside_cell": [
+        2,
+        7,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        8,
+        32
+      ],
+      "marker_index": 18,
+      "outside_cell": [
+        2,
+        8,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        10,
+        32
+      ],
+      "marker_index": 19,
+      "outside_cell": [
+        2,
+        10,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        11,
+        32
+      ],
+      "marker_index": 20,
+      "outside_cell": [
+        2,
+        11,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        12,
+        32
+      ],
+      "marker_index": 21,
+      "outside_cell": [
+        2,
+        12,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        14,
+        32
+      ],
+      "marker_index": 22,
+      "outside_cell": [
+        2,
+        14,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    },
+    {
+      "diagnostic_reason": "runtime_anchored_cell_pair",
+      "fallback_status": "no_fallback",
+      "inside_cell": [
+        2,
+        15,
+        32
+      ],
+      "marker_index": 23,
+      "outside_cell": [
+        2,
+        15,
+        30
+      ],
+      "region_id": "202",
+      "sample_status": "runtime_generated"
+    }
+  ],
+  "provider_mode": "runtime_anchored_cell_pair",
+  "selected_count": 24
+}

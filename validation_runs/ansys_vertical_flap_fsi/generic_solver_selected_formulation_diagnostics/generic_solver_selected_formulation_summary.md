@@ -31,3 +31,4 @@ This artifact invokes the generic FSI solver boundary for the ANSYS vertical-fla
 - force: `validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/easyfsi_force_history.csv`
 - flow_balance: `validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/easyfsi_flow_balance_history.csv`
 - pressure_summary: `validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/easyfsi_pressure_summary_history.csv`
+- pressure_sample_pair_map: `validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/pressure_sample_pair_map.json`

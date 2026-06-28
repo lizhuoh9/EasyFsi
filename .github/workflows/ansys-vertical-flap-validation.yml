@@ -71,6 +71,20 @@ jobs:
             tests\integration\test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic.py `
             tests\solvers\test_pressure_sample_pair_provider_contract.py
 
+      - name: Run runtime pressure-pair and generic architecture contracts
+        shell: pwsh
+        run: |
+          python -m unittest -v `
+            tests.solvers.test_pressure_sample_pair_provider_contract `
+            tests.contracts.test_generic_fsi_solver_architecture `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_generic_problem_defaults_to_runtime_pressure_pairs_without_json `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_generic_replay_pressure_pairs_require_anchor_json `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_generic_pressure_pair_provider_mode_is_fail_closed `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_runtime_pressure_pair_mode_ignores_supplied_anchor_json_source `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_generic_problem_reports_runtime_half_domain_metadata `
+            tests.integration.test_ansys_vertical_flap_generic_solver_artifacts `
+            tests.integration.test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic
+
       - name: Run archive artifact test - official half-domain
         shell: pwsh
         run: |
@@ -245,6 +259,22 @@ jobs:
           python -m unittest `
             tests.integration.test_ansys_vertical_flap_generic_solver_artifacts `
             -v
+
+      - name: Scan generic solver artifacts for forbidden transition states
+        shell: pwsh
+        run: |
+          $root = "validation_runs\ansys_vertical_flap_fsi\generic_solver_selected_formulation_diagnostics"
+          $patterns = @(
+            "transition_seeded_from_anchor_artifact",
+            "runtime_pressure_pair_generation_pending"
+          )
+          $hits = Get-ChildItem -Path $root -File -Recurse | Select-String -Pattern $patterns -SimpleMatch
+          if ($hits) {
+            $hits | ForEach-Object {
+              Write-Error "$($_.Path):$($_.LineNumber): $($_.Line)"
+            }
+            exit 1
+          }
 
       - name: Run Fluent reference collection artifact test
         shell: pwsh

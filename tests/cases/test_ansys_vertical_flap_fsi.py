@@ -300,6 +300,38 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             "runtime_anchored_cell_pair",
         )
 
+    def test_generic_problem_reports_runtime_half_domain_metadata(self):
+        problem = build_ansys_vertical_flap_generic_problem(step_count=50)
+        config = VerticalFlapFsiConfig(step_count=50)
+
+        self.assertEqual(
+            problem.fluid_domain.coordinate_model,
+            "cartesian-3d-half-domain",
+        )
+        self.assertEqual(problem.fluid_domain.grid_nodes, (4, 32, 64))
+        self.assertEqual(problem.fluid_domain.bounds_m[0], (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(problem.fluid_domain.bounds_m[1][0], config.span_m)
+        self.assertAlmostEqual(
+            problem.fluid_domain.bounds_m[1][1],
+            0.5 * config.duct_height_m,
+        )
+        self.assertAlmostEqual(
+            problem.fluid_domain.bounds_m[1][1],
+            ANSYS_VERTICAL_FLAP_CASE_METADATA["geometry"]["modeled_height_m"],
+        )
+        self.assertAlmostEqual(
+            problem.fluid_domain.bounds_m[1][2],
+            config.duct_length_m,
+        )
+        self.assertEqual(
+            problem.metadata["conceptual_coordinate_model"],
+            "cartesian-2d",
+        )
+        self.assertEqual(
+            problem.metadata["runtime_discretization_model"],
+            "cartesian-3d-half-domain",
+        )
+
     def test_formal_runner_uses_public_stress_face_diagnostics(self):
         source = inspect.getsource(solid_mpm_fsi_runner._marker_traction_report_fields)
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -51,6 +51,7 @@ class PressureSamplePairMap:
     provider_mode: str
     fallback_count: int
     selected_count: int
+    marker_geometry_sha256: str = ""
 
     def __post_init__(self) -> None:
         _require_non_empty(self.provider_mode, name="provider_mode")
@@ -74,6 +75,7 @@ class PressureSamplePairMap:
         return {
             "provider_mode": self.provider_mode,
             "pair_map_sha256": self.pair_map_sha256,
+            "marker_geometry_sha256": self.marker_geometry_sha256,
             "fallback_count": int(self.fallback_count),
             "selected_count": int(self.selected_count),
             "pairs": [pair.as_dict() for pair in self.pairs],
@@ -90,6 +92,34 @@ class PressureSamplePairProviderProtocol(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class RuntimeAnchoredCellPairProvider:
+    domain_bounds_m: tuple[Sequence[float], Sequence[float]]
+    grid_nodes: Sequence[int]
+    anchor_axis: int
+    inside_axis_position_m: float
+    outside_axis_offset_cells: int = 1
+
+    def compute_pairs(
+        self,
+        markers: Any,
+        fluid_state: Any = None,
+        interface_surface: Any = None,
+    ) -> PressureSamplePairMap:
+        del fluid_state, interface_surface
+        positions, normals, region_ids = marker_geometry_rows(markers)
+        return compute_runtime_anchored_cell_pair_map(
+            marker_positions_m=positions,
+            marker_normals=normals,
+            marker_region_ids=region_ids,
+            domain_bounds_m=self.domain_bounds_m,
+            grid_nodes=self.grid_nodes,
+            anchor_axis=self.anchor_axis,
+            inside_axis_position_m=self.inside_axis_position_m,
+            outside_axis_offset_cells=self.outside_axis_offset_cells,
+        )
+
+
 def pressure_sample_pair_map_sha256(
     pairs: Sequence[PressureSamplePair],
 ) -> str:
@@ -104,6 +134,7 @@ def pressure_sample_pair_map_from_pairs(
     pairs: Sequence[PressureSamplePair],
     *,
     provider_mode: str,
+    marker_geometry_sha256: str = "",
 ) -> PressureSamplePairMap:
     pair_tuple = tuple(pairs)
     fallback_count = sum(
@@ -118,7 +149,66 @@ def pressure_sample_pair_map_from_pairs(
         provider_mode=provider_mode,
         fallback_count=fallback_count,
         selected_count=selected_count,
+        marker_geometry_sha256=marker_geometry_sha256,
     )
+
+
+def pressure_sample_marker_geometry_sha256(
+    *,
+    marker_positions_m: Sequence[Sequence[float]],
+    marker_normals: Sequence[Sequence[float]],
+    marker_region_ids: Sequence[int | str],
+) -> str:
+    payload = {
+        "marker_positions_m": [
+            [float(component) for component in point]
+            for point in marker_positions_m
+        ],
+        "marker_normals": [
+            [float(component) for component in normal]
+            for normal in marker_normals
+        ],
+        "marker_region_ids": [str(region_id) for region_id in marker_region_ids],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def marker_geometry_rows(
+    markers: Any,
+) -> tuple[tuple[Point3, ...], tuple[Point3, ...], tuple[str, ...]]:
+    if isinstance(markers, Mapping):
+        positions = _rows_from_value(
+            _first_present(markers, "marker_positions_m", "positions_m"),
+            row_name="marker_positions_m",
+        )
+        normals = _rows_from_value(
+            _first_present(markers, "marker_normals", "normals"),
+            row_name="marker_normals",
+        )
+        region_ids = _region_ids_from_value(
+            _first_present(markers, "marker_region_ids", "region_ids"),
+        )
+        return positions, normals, region_ids
+
+    marker_count = int(getattr(markers, "marker_count"))
+    positions = _rows_from_value(
+        getattr(markers, "x_gamma_m"),
+        row_name="marker_positions_m",
+        count=marker_count,
+    )
+    normals = _rows_from_value(
+        getattr(markers, "n_gamma"),
+        row_name="marker_normals",
+        count=marker_count,
+    )
+    region_ids = _region_ids_from_value(
+        getattr(markers, "region_id"),
+        count=marker_count,
+    )
+    return positions, normals, region_ids
 
 
 def compute_runtime_anchored_cell_pair_map(
@@ -185,6 +275,8 @@ def compute_runtime_anchored_cell_pair_map(
             base_cell[axis] + direction * offset,
             grid[axis],
         )
+        if tuple(inside_cell) == tuple(outside_cell):
+            raise ValueError("inside_cell and outside_cell must differ")
         pairs.append(
             PressureSamplePair(
                 marker_index=marker_index,
@@ -199,6 +291,11 @@ def compute_runtime_anchored_cell_pair_map(
     return pressure_sample_pair_map_from_pairs(
         pairs,
         provider_mode="runtime_anchored_cell_pair",
+        marker_geometry_sha256=pressure_sample_marker_geometry_sha256(
+            marker_positions_m=marker_positions_m,
+            marker_normals=marker_normals,
+            marker_region_ids=marker_region_ids,
+        ),
     )
 
 
@@ -248,3 +345,32 @@ def _grid_nodes(value: Sequence[int]) -> tuple[int, int, int]:
 def _require_non_empty(value: str, *, name: str) -> None:
     if not str(value):
         raise ValueError(f"{name} must be non-empty")
+
+
+def _first_present(mapping: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in mapping:
+            return mapping[name]
+    joined = ", ".join(names)
+    raise ValueError(f"marker geometry must contain one of: {joined}")
+
+
+def _rows_from_value(
+    value: Any,
+    *,
+    row_name: str,
+    count: int | None = None,
+) -> tuple[Point3, ...]:
+    rows = value.to_numpy() if hasattr(value, "to_numpy") else value
+    limited_rows = rows if count is None else rows[:count]
+    return tuple(_point3(row, name=row_name) for row in limited_rows)
+
+
+def _region_ids_from_value(
+    value: Any,
+    *,
+    count: int | None = None,
+) -> tuple[str, ...]:
+    region_ids = value.to_numpy() if hasattr(value, "to_numpy") else value
+    limited_region_ids = region_ids if count is None else region_ids[:count]
+    return tuple(str(region_id) for region_id in limited_region_ids)

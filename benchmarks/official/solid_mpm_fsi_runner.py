@@ -14,7 +14,7 @@ from simulation_core.hibm_mpm import HibmMpmSurfaceMarkers
 from simulation_core.neo_hookean_mpm import NeoHookeanMpmState
 from simulation_core.pressure_sample_pairs import (
     PressureSamplePairMap,
-    compute_runtime_anchored_cell_pair_map,
+    RuntimeAnchoredCellPairProvider,
 )
 from simulation_core.runtime import TaichiRuntimeConfig
 
@@ -127,6 +127,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     anchor_install_report = _install_selected_pressure_pair_anchor_markers(
         markers,
         config,
+    )
+    pressure_pair_anchor_pair_map = dict(
+        anchor_install_report.pop("pressure_pair_anchor_pair_map", {})
     )
     solid = _build_solid(config, runtime)
     fixed_mask, tip_mask = _solid_masks(solid, config)
@@ -651,6 +654,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             secondary_region_id=SECONDARY_REGION_ID,
             streamwise_axis_index=STREAMWISE_AXIS_INDEX,
         ),
+        "pressure_pair_anchor_pair_map": pressure_pair_anchor_pair_map,
         "history": history,
         "max_displacement_m": max_displacement,
         "reference_max_displacement_m": reference_displacement,
@@ -2433,6 +2437,10 @@ def _install_selected_pressure_pair_anchor_markers(
                 marker_count=int(markers.marker_count),
                 active_marker_count=runtime_pair_map.selected_count,
                 anchor_map_sha256=runtime_pair_map.pair_map_sha256,
+                source_marker_geometry_sha256=(
+                    runtime_pair_map.marker_geometry_sha256
+                ),
+                pair_map_diagnostics=runtime_pair_map.as_diagnostics(),
                 fixed_solid_snapshot_policy="runtime_marker_geometry",
             )
         if _is_selected_traction_formulation_coupled_smoke(config):
@@ -2501,25 +2509,19 @@ def _runtime_pressure_pair_anchor_map(
     markers: HibmMpmSurfaceMarkers,
     config: Any,
 ) -> PressureSamplePairMap:
-    count = int(markers.marker_count)
-    positions = markers.x_gamma_m.to_numpy()[:count]
-    normals = markers.n_gamma.to_numpy()[:count]
-    region_ids = markers.region_id.to_numpy()[:count]
     solid_min, solid_max = _solid_box(config)
     inside_axis_position_m = 0.5 * (
         float(solid_min[STREAMWISE_AXIS_INDEX])
         + float(solid_max[STREAMWISE_AXIS_INDEX])
     )
-    return compute_runtime_anchored_cell_pair_map(
-        marker_positions_m=tuple(tuple(float(value) for value in row) for row in positions),
-        marker_normals=tuple(tuple(float(value) for value in row) for row in normals),
-        marker_region_ids=tuple(int(value) for value in region_ids),
+    provider = RuntimeAnchoredCellPairProvider(
         domain_bounds_m=_domain_bounds(config),
         grid_nodes=tuple(int(value) for value in config.grid_nodes),
         anchor_axis=STREAMWISE_AXIS_INDEX,
         inside_axis_position_m=inside_axis_position_m,
         outside_axis_offset_cells=1,
     )
+    return provider.compute_pairs(markers)
 
 
 def _load_pressure_pair_anchor_marker_payload(
@@ -2699,6 +2701,7 @@ def _pressure_pair_anchor_install_report(
     anchor_map_sha256: str = "",
     source_flow_snapshot_sha256: str = "",
     source_marker_geometry_sha256: str = "",
+    pair_map_diagnostics: Mapping[str, Any] | None = None,
     fixed_solid_snapshot_policy: str = "",
 ) -> dict[str, object]:
     return {
@@ -2720,6 +2723,7 @@ def _pressure_pair_anchor_install_report(
         "pressure_pair_anchor_current_marker_geometry_sha256": (
             source_marker_geometry_sha256 if active_marker_count == marker_count else ""
         ),
+        "pressure_pair_anchor_pair_map": dict(pair_map_diagnostics or {}),
         "pressure_pair_anchor_fixed_solid_snapshot_policy": (
             fixed_solid_snapshot_policy
         ),

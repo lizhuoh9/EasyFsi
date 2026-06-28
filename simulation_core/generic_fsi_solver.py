@@ -216,10 +216,17 @@ class FsiProblem:
                 "domain_id": self.fluid_domain.domain_id,
                 "coordinate_model": self.fluid_domain.coordinate_model,
                 "grid_nodes": list(self.fluid_domain.grid_nodes),
+                "bounds_m": [
+                    list(point) for point in self.fluid_domain.bounds_m
+                ],
+                "boundary_conditions": dict(
+                    self.fluid_domain.boundary_conditions
+                ),
             },
             "solid_body_count": len(self.solid_bodies),
             "interface_surface_count": len(self.interface_surfaces),
             "traction_config": self.traction_config.as_diagnostics(),
+            "metadata": dict(self.metadata),
         }
 
 

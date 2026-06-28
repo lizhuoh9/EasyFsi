@@ -323,20 +323,26 @@ class AnsysVerticalFlapProblem:
             ),
             include_viscous=False,
         )
+        runtime_discretization_model = "cartesian-3d-half-domain"
+        runtime_bounds_m = (
+            (0.0, 0.0, 0.0),
+            (
+                float(config.span_m),
+                float(
+                    ANSYS_VERTICAL_FLAP_CASE_METADATA["geometry"][
+                        "modeled_height_m"
+                    ]
+                ),
+                float(config.duct_length_m),
+            ),
+        )
         return FsiProblem(
             problem_id=CASE_SPEC.case_id,
             fluid_domain=FluidDomain(
                 domain_id="flap_air_domain",
-                coordinate_model=CASE_SPEC.coordinate_model,
+                coordinate_model=runtime_discretization_model,
                 grid_nodes=tuple(int(value) for value in config.grid_nodes),
-                bounds_m=(
-                    (0.0, 0.0, 0.0),
-                    (
-                        float(config.span_m),
-                        float(config.duct_height_m),
-                        float(config.duct_length_m),
-                    ),
-                ),
+                bounds_m=runtime_bounds_m,
                 boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
             ),
             solid_bodies=(
@@ -358,6 +364,11 @@ class AnsysVerticalFlapProblem:
                 "adapter": "AnsysVerticalFlapProblem",
                 "case_name": "ansys_vertical_flap_fsi",
                 "selected_traction_preset": ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET,
+                "conceptual_coordinate_model": CASE_SPEC.coordinate_model,
+                "runtime_discretization_model": runtime_discretization_model,
+                "runtime_domain_mode": ANSYS_VERTICAL_FLAP_CASE_METADATA[
+                    "geometry"
+                ]["modeled_domain"],
                 "pressure_pair_provider_mode": self.pressure_pair_provider_mode,
                 "selected_anchor_markers_json": self.selected_anchor_markers_json,
             },

@@ -6,12 +6,18 @@ import json
 import unittest
 from pathlib import Path
 
+from simulation_core.pressure_sample_pairs import (
+    PressureSamplePair,
+    pressure_sample_pair_map_sha256,
+)
+
 
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
 DIAG_ROOT = ROOT / "generic_solver_selected_formulation_diagnostics"
 MATRIX_JSON = DIAG_ROOT / "generic_solver_selected_formulation_matrix.json"
 HISTORY_JSON = DIAG_ROOT / "generic_solver_selected_formulation_history.json"
 SUMMARY_MD = DIAG_ROOT / "generic_solver_selected_formulation_summary.md"
+PRESSURE_PAIR_MAP_JSON = DIAG_ROOT / "pressure_sample_pair_map.json"
 TIP_CSV = DIAG_ROOT / "easyfsi_tip_displacement_history.csv"
 FORCE_CSV = DIAG_ROOT / "easyfsi_force_history.csv"
 FLOW_CSV = DIAG_ROOT / "easyfsi_flow_balance_history.csv"
@@ -69,6 +75,7 @@ class AnsysVerticalFlapGenericSolverArtifactTests(unittest.TestCase):
             MATRIX_JSON,
             HISTORY_JSON,
             SUMMARY_MD,
+            PRESSURE_PAIR_MAP_JSON,
             TIP_CSV,
             FORCE_CSV,
             FLOW_CSV,
@@ -122,6 +129,8 @@ class AnsysVerticalFlapGenericSolverArtifactTests(unittest.TestCase):
         self.assertNotIn("runtime_pressure_pair_generation_pending", blockers)
         self.assertIn("no_fluent_parity_claim", blockers)
         self.assertEqual(row["pressure_pair_anchor_source"], "runtime_generated")
+        self.assertTrue(row["pressure_pair_anchor_map_sha256"])
+        self.assertTrue(row["pressure_pair_anchor_current_marker_geometry_sha256"])
         self.assertEqual(int(row["invalid_marker_count_max"]), 0)
         self.assertEqual(int(row["sample_pair_fallback_count_max"]), 0)
         self.assertGreaterEqual(int(row["one_sided_marker_count_min"]), 24)
@@ -163,6 +172,7 @@ class AnsysVerticalFlapGenericSolverArtifactTests(unittest.TestCase):
                 "force",
                 "flow_balance",
                 "pressure_summary",
+                "pressure_sample_pair_map",
             },
         )
 
@@ -171,6 +181,7 @@ class AnsysVerticalFlapGenericSolverArtifactTests(unittest.TestCase):
             MATRIX_JSON,
             HISTORY_JSON,
             SUMMARY_MD,
+            PRESSURE_PAIR_MAP_JSON,
             TIP_CSV,
             FORCE_CSV,
             FLOW_CSV,
@@ -179,6 +190,71 @@ class AnsysVerticalFlapGenericSolverArtifactTests(unittest.TestCase):
             rel_name = path.name
             self.assertIn(rel_name, checksum_rows)
             self.assertEqual(checksum_rows[rel_name], _sha256_file(path))
+
+    def test_pressure_pair_sidecar_is_auditable(self) -> None:
+        payload = _read_json(MATRIX_JSON)
+        row = payload["rows"][0]
+        pair_map = _read_json(PRESSURE_PAIR_MAP_JSON)
+        pairs = pair_map["pairs"]
+
+        self.assertEqual(pair_map["provider_mode"], "runtime_anchored_cell_pair")
+        self.assertEqual(pair_map["fallback_count"], 0)
+        self.assertEqual(pair_map["selected_count"], 24)
+        self.assertEqual(len(pairs), 24)
+        self.assertEqual(
+            [pair["marker_index"] for pair in pairs],
+            list(range(24)),
+        )
+        region_counts = {
+            region_id: sum(1 for pair in pairs if pair["region_id"] == region_id)
+            for region_id in {pair["region_id"] for pair in pairs}
+        }
+        self.assertEqual(region_counts, {"101": 12, "202": 12})
+        for pair in pairs:
+            self.assertEqual(pair["sample_status"], "runtime_generated")
+            self.assertEqual(pair["fallback_status"], "no_fallback")
+            self.assertEqual(pair["diagnostic_reason"], "runtime_anchored_cell_pair")
+            inside_cell = tuple(pair["inside_cell"])
+            outside_cell = tuple(pair["outside_cell"])
+            self.assertNotEqual(inside_cell, outside_cell)
+            for cell in (inside_cell, outside_cell):
+                self.assertTrue(0 <= cell[0] < 4)
+                self.assertTrue(0 <= cell[1] < 32)
+                self.assertTrue(0 <= cell[2] < 64)
+
+        recomputed_sha = pressure_sample_pair_map_sha256(
+            tuple(
+                PressureSamplePair(
+                    marker_index=int(pair["marker_index"]),
+                    region_id=str(pair["region_id"]),
+                    inside_cell=tuple(pair["inside_cell"]),
+                    outside_cell=tuple(pair["outside_cell"]),
+                    sample_status=str(pair["sample_status"]),
+                    fallback_status=str(pair["fallback_status"]),
+                    diagnostic_reason=str(pair["diagnostic_reason"]),
+                )
+                for pair in pairs
+            )
+        )
+        self.assertEqual(pair_map["pair_map_sha256"], recomputed_sha)
+        self.assertEqual(row["pressure_pair_anchor_map_sha256"], recomputed_sha)
+        self.assertEqual(
+            row["pressure_pair_anchor_current_marker_geometry_sha256"],
+            pair_map["marker_geometry_sha256"],
+        )
+        self.assertTrue(pair_map["marker_geometry_sha256"])
+
+    def test_generated_artifacts_do_not_contain_transition_state_strings(self) -> None:
+        forbidden = (
+            "transition_seeded_from_anchor_artifact",
+            "runtime_pressure_pair_generation_pending",
+        )
+        for path in DIAG_ROOT.glob("*"):
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for marker in forbidden:
+                self.assertNotIn(marker, text, path)
 
 
 def _read_json(path: Path):

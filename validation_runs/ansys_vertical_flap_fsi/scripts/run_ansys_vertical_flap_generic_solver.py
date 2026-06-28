@@ -30,6 +30,7 @@ OUTPUT_DIR = ROOT / "generic_solver_selected_formulation_diagnostics"
 MATRIX_JSON = OUTPUT_DIR / "generic_solver_selected_formulation_matrix.json"
 HISTORY_JSON = OUTPUT_DIR / "generic_solver_selected_formulation_history.json"
 SUMMARY_MD = OUTPUT_DIR / "generic_solver_selected_formulation_summary.md"
+PRESSURE_PAIR_MAP_JSON = OUTPUT_DIR / "pressure_sample_pair_map.json"
 TIP_CSV = OUTPUT_DIR / "easyfsi_tip_displacement_history.csv"
 FORCE_CSV = OUTPUT_DIR / "easyfsi_force_history.csv"
 FLOW_CSV = OUTPUT_DIR / "easyfsi_flow_balance_history.csv"
@@ -100,6 +101,9 @@ def run() -> dict[str, Any]:
     row = _row_from_result(result)
     payload = _matrix_payload(result=result, row=row)
     export_artifacts = _write_exports(result.history, solver_config)
+    export_artifacts["pressure_sample_pair_map"] = _write_pressure_pair_map(
+        result.raw_report
+    )
     payload["export_artifacts"] = export_artifacts
 
     _write_json(MATRIX_JSON, payload)
@@ -331,6 +335,21 @@ def _write_exports(
     }
 
 
+def _write_pressure_pair_map(report: Mapping[str, Any]) -> str:
+    pair_map = report.get("pressure_pair_anchor_pair_map")
+    if not isinstance(pair_map, Mapping) or not pair_map:
+        pair_map = {}
+    if not pair_map:
+        pair_map = _last_mapping(
+            report.get("history", ()),
+            "pressure_pair_anchor_pair_map",
+        )
+    if not pair_map:
+        raise ValueError("runtime pressure pair map diagnostics are missing")
+    _write_json(PRESSURE_PAIR_MAP_JSON, pair_map)
+    return PRESSURE_PAIR_MAP_JSON.as_posix()
+
+
 def _tip_export_row(
     row: Mapping[str, Any],
     solver_config: FsiSolverConfig,
@@ -523,6 +542,14 @@ def _last_text(history: Sequence[Mapping[str, Any]], key: str) -> str:
         if value not in (None, ""):
             return str(value)
     return ""
+
+
+def _last_mapping(history: Sequence[Mapping[str, Any]], key: str) -> dict[str, Any]:
+    for row in reversed(history):
+        value = row.get(key)
+        if isinstance(value, Mapping) and value:
+            return dict(value)
+    return {}
 
 
 def _float_or_zero(value: Any) -> float:
