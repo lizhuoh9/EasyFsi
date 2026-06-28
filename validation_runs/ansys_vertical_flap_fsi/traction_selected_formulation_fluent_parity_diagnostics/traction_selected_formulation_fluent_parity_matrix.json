@@ -2,7 +2,7 @@
   "active_contract_promotion_status": "blocked_reference_incomplete",
   "active_contract_status": "fluent_reference_incomplete",
   "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
-  "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
+  "active_fluent_reference_contract_manifest_sha256": "6de78e71a3e4000d6b5cf06bcf1798404025f9ed099a151113d6cc48a16bbfd7",
   "candidate_blockers": [
     {
       "blocker": "fluent_reference_incomplete",
@@ -15,6 +15,7 @@
   ],
   "candidate_status": "fluent_parity_blocked_reference_incomplete",
   "case": "ansys_vertical_flap_fsi",
+  "fluent_parity_claimed": false,
   "fluent_reference_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
   "fluent_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
   "historical_blockers_retired": [],
@@ -158,7 +159,7 @@
     },
     "metadata": {
       "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
-      "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
+      "active_fluent_reference_contract_manifest_sha256": "6de78e71a3e4000d6b5cf06bcf1798404025f9ed099a151113d6cc48a16bbfd7",
       "contract_displacement_definition": {},
       "contract_geometry": {
         "duct_height_m": 0.04,
@@ -177,6 +178,56 @@
         "poisson_ratio": 0.47,
         "solid_density_kgm3": 1600.0,
         "youngs_modulus_pa": 1000000.0
+      },
+      "contract_schema_validation": {
+        "blockers": [
+          {
+            "blocker": "fluent_reference_provenance_incomplete",
+            "detail": "missing fields: document,run_id,author,date,status"
+          },
+          {
+            "blocker": "fluent_reference_sign_conventions_incomplete",
+            "detail": "required mapping is missing"
+          },
+          {
+            "blocker": "fluent_reference_displacement_definition_incomplete",
+            "detail": "required mapping is missing"
+          },
+          {
+            "blocker": "tip_displacement_m_missing",
+            "detail": "tip_displacement_m must be available, numeric, and finite"
+          },
+          {
+            "blocker": "max_displacement_m_missing",
+            "detail": "max_displacement_m must be available, numeric, and finite"
+          },
+          {
+            "blocker": "force_z_N_missing",
+            "detail": "force_z_N must be available, numeric, and finite"
+          },
+          {
+            "blocker": "flow_rate_m3s_missing",
+            "detail": "flow_rate_m3s must be available, numeric, and finite"
+          },
+          {
+            "blocker": "pressure_range_pa_missing",
+            "detail": "pressure_range_pa must be available, numeric, and finite"
+          },
+          {
+            "blocker": "fluent_reference_tolerances_incomplete",
+            "detail": "tip_displacement_relative must be available, numeric, finite, and sourced"
+          }
+        ],
+        "contract_status": "fluent_reference_incomplete",
+        "missing_required_metrics": [
+          "tip_displacement_m",
+          "max_displacement_m",
+          "force_z_N",
+          "flow_rate_m3s",
+          "pressure_range_pa"
+        ],
+        "required_metric_count": 5,
+        "validated_metric_count": 0
       },
       "contract_sign_conventions": {},
       "contract_simulation": {
@@ -241,11 +292,12 @@
       "active_contract_promotion_status": "blocked_reference_incomplete",
       "active_contract_status": "fluent_reference_incomplete",
       "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
-      "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
+      "active_fluent_reference_contract_manifest_sha256": "6de78e71a3e4000d6b5cf06bcf1798404025f9ed099a151113d6cc48a16bbfd7",
       "candidate_status": "fluent_parity_blocked_reference_incomplete",
       "case": "ansys_vertical_flap_fsi",
       "displacement_gate_status": "blocked_reference_missing",
       "flow_outlet_gate_status": "blocked_reference_missing",
+      "fluent_parity_claimed": false,
       "fluent_reference_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
       "fluent_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
       "force_gate_status": "blocked_reference_missing",
@@ -390,7 +442,7 @@
         },
         "metadata": {
           "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
-          "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
+          "active_fluent_reference_contract_manifest_sha256": "6de78e71a3e4000d6b5cf06bcf1798404025f9ed099a151113d6cc48a16bbfd7",
           "contract_displacement_definition": {},
           "contract_geometry": {
             "duct_height_m": 0.04,
@@ -409,6 +461,56 @@
             "poisson_ratio": 0.47,
             "solid_density_kgm3": 1600.0,
             "youngs_modulus_pa": 1000000.0
+          },
+          "contract_schema_validation": {
+            "blockers": [
+              {
+                "blocker": "fluent_reference_provenance_incomplete",
+                "detail": "missing fields: document,run_id,author,date,status"
+              },
+              {
+                "blocker": "fluent_reference_sign_conventions_incomplete",
+                "detail": "required mapping is missing"
+              },
+              {
+                "blocker": "fluent_reference_displacement_definition_incomplete",
+                "detail": "required mapping is missing"
+              },
+              {
+                "blocker": "tip_displacement_m_missing",
+                "detail": "tip_displacement_m must be available, numeric, and finite"
+              },
+              {
+                "blocker": "max_displacement_m_missing",
+                "detail": "max_displacement_m must be available, numeric, and finite"
+              },
+              {
+                "blocker": "force_z_N_missing",
+                "detail": "force_z_N must be available, numeric, and finite"
+              },
+              {
+                "blocker": "flow_rate_m3s_missing",
+                "detail": "flow_rate_m3s must be available, numeric, and finite"
+              },
+              {
+                "blocker": "pressure_range_pa_missing",
+                "detail": "pressure_range_pa must be available, numeric, and finite"
+              },
+              {
+                "blocker": "fluent_reference_tolerances_incomplete",
+                "detail": "tip_displacement_relative must be available, numeric, finite, and sourced"
+              }
+            ],
+            "contract_status": "fluent_reference_incomplete",
+            "missing_required_metrics": [
+              "tip_displacement_m",
+              "max_displacement_m",
+              "force_z_N",
+              "flow_rate_m3s",
+              "pressure_range_pa"
+            ],
+            "required_metric_count": 5,
+            "validated_metric_count": 0
           },
           "contract_sign_conventions": {},
           "contract_simulation": {

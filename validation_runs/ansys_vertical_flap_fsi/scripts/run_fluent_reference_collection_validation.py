@@ -9,6 +9,12 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from fluent_reference_contract_schema import validate_fluent_reference_contract
+
 
 CASE_NAME = "ansys_vertical_flap_fsi"
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
@@ -397,6 +403,12 @@ def _candidate_contract(
         "tolerances_complete": tolerances_complete,
         "comparison_metadata_complete": comparison_metadata["status"] == "complete",
     }
+    schema_validation = validate_fluent_reference_contract(contract)
+    contract["schema_validation"] = schema_validation
+    contract["missing_reference_metrics"] = schema_validation[
+        "missing_required_metrics"
+    ]
+    contract["contract_status"] = schema_validation["contract_status"]
     return contract
 
 
@@ -531,6 +543,7 @@ def _payload(
         "metadata_check": metadata_check,
         "missing_reference_metrics": candidate_contract["missing_reference_metrics"],
         "reference_metrics": candidate_contract["reference_metrics"],
+        "schema_validation": candidate_contract["schema_validation"],
         "rows": rows,
     }
 

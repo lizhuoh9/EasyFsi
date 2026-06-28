@@ -9,6 +9,12 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from fluent_reference_contract_schema import validate_fluent_reference_contract
+
 
 CASE_NAME = "ansys_vertical_flap_fsi"
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
@@ -79,6 +85,9 @@ def run() -> dict[str, Any]:
         active_contract_manifest
     )
     reference_contract = _read_json(fluent_reference_contract_json)
+    contract_schema_validation = validate_fluent_reference_contract(
+        reference_contract
+    )
     source_row = _source_step50_row(source_matrix)
     source_history_rows = _source_step50_history_rows(source_history)
     metrics = _parity_metrics(
@@ -87,6 +96,7 @@ def run() -> dict[str, Any]:
         source_history_rows=source_history_rows,
         reference_contract=reference_contract,
         reference_contract_path=fluent_reference_contract_json,
+        contract_schema_validation=contract_schema_validation,
     )
     candidate_status = _candidate_status(reference_contract, metrics)
     blockers = _candidate_blockers(candidate_status, metrics)
@@ -109,6 +119,7 @@ def run() -> dict[str, Any]:
         "candidate_status": candidate_status,
         "candidate_blockers": blockers,
         "parity_metrics": metrics,
+        "fluent_reference_contract_schema_validation": contract_schema_validation,
         "source_step50_row": source_row,
         "active_fluent_reference_contract_manifest": active_contract_manifest,
         "fluent_reference_contract": reference_contract,
@@ -152,6 +163,9 @@ def run() -> dict[str, Any]:
                 SCENARIO: {
                     "scenario": SCENARIO,
                     "candidate_status": candidate_status,
+                    "fluent_parity_claimed": (
+                        candidate_status == "fluent_parity_validated"
+                    ),
                     "candidate_blockers": blockers,
                     "parity_metrics": metrics,
                     "source_step50_completed_step_count": int(
@@ -185,7 +199,11 @@ def _row(
         else "completed",
         "parity_status": candidate_status,
         "candidate_status": candidate_status,
-        "reference_contract_status": str(reference_contract["contract_status"]),
+        "fluent_parity_claimed": candidate_status == "fluent_parity_validated",
+        "reference_contract_status": _schema_contract_status(
+            reference_contract,
+            metrics,
+        ),
         "source_script": SOURCE_SCRIPT,
         "source_step50_matrix": _repo_relative(SOURCE_STEP50_MATRIX_JSON),
         "source_step50_matrix_sha256": _sha256_file(SOURCE_STEP50_MATRIX_JSON),
@@ -251,13 +269,17 @@ def _payload(
         "source_script": SOURCE_SCRIPT,
         "scenario_count": 1,
         "candidate_status": candidate_status,
+        "fluent_parity_claimed": candidate_status == "fluent_parity_validated",
         "candidate_blockers": blockers,
         "historical_blockers_retired": (
             [BLOCKER_NO_FLUENT_PARITY]
             if candidate_status == "fluent_parity_validated"
             else []
         ),
-        "reference_contract_status": str(reference_contract["contract_status"]),
+        "reference_contract_status": _schema_contract_status(
+            reference_contract,
+            metrics,
+        ),
         "source_step50_matrix": _repo_relative(SOURCE_STEP50_MATRIX_JSON),
         "source_step50_matrix_sha256": _sha256_file(SOURCE_STEP50_MATRIX_JSON),
         "source_step50_history": _repo_relative(SOURCE_STEP50_HISTORY_JSON),
@@ -298,10 +320,21 @@ def _parity_metrics(
     source_history_rows: list[Mapping[str, Any]],
     reference_contract: Mapping[str, Any],
     reference_contract_path: Path = FLUENT_REFERENCE_CONTRACT_JSON,
+    contract_schema_validation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     final_step = source_history_rows[-1] if source_history_rows else {}
-    reference_metrics = dict(reference_contract["reference_metrics"])
+    reference_metrics = dict(reference_contract.get("reference_metrics", {}))
     tolerances = dict(reference_contract.get("tolerances", {}))
+    if contract_schema_validation is None:
+        contract_schema_validation = {
+            "contract_status": str(
+                reference_contract.get("contract_status", "unknown")
+            ),
+            "blockers": [],
+            "validated_metric_count": None,
+            "required_metric_count": None,
+            "missing_required_metrics": [],
+        }
     tip_displacement = _relative_comparison(
         source_value=_vector_norm_or_numeric(final_step.get("tip_mean_displacement_m")),
         reference_value=_reference_value(reference_metrics, "tip_displacement_m"),
@@ -469,10 +502,13 @@ def _parity_metrics(
             ],
             "contract_step_count": reference_contract["step_count"],
             "contract_time_step_s": reference_contract["time_step_s"],
-            "contract_simulation": reference_contract["simulation"],
-            "contract_source_provenance": reference_contract["source_provenance"],
-            "contract_geometry": reference_contract["geometry"],
-            "contract_material": reference_contract["material"],
+            "contract_simulation": reference_contract.get("simulation", {}),
+            "contract_source_provenance": reference_contract.get(
+                "source_provenance",
+                {},
+            ),
+            "contract_geometry": reference_contract.get("geometry", {}),
+            "contract_material": reference_contract.get("material", {}),
             "contract_displacement_definition": reference_contract.get(
                 "displacement_definition",
                 {},
@@ -481,6 +517,7 @@ def _parity_metrics(
                 "sign_conventions",
                 {},
             ),
+            "contract_schema_validation": dict(contract_schema_validation),
         },
     }
 
@@ -489,7 +526,7 @@ def _candidate_status(
     reference_contract: Mapping[str, Any],
     metrics: Mapping[str, Any],
 ) -> str:
-    if reference_contract["contract_status"] != "fluent_reference_complete":
+    if _schema_contract_status(reference_contract, metrics) != "fluent_reference_complete":
         return "fluent_parity_blocked_reference_incomplete"
     failed = [
         key
@@ -499,6 +536,21 @@ def _candidate_status(
     if failed:
         return "fluent_parity_failed"
     return "fluent_parity_validated"
+
+
+def _schema_contract_status(
+    reference_contract: Mapping[str, Any],
+    metrics: Mapping[str, Any] | None = None,
+) -> str:
+    if metrics is not None:
+        metadata = metrics.get("metadata", {})
+        if isinstance(metadata, Mapping):
+            validation = metadata.get("contract_schema_validation", {})
+            if isinstance(validation, Mapping):
+                status = validation.get("contract_status")
+                if status:
+                    return str(status)
+    return str(reference_contract.get("contract_status", "unknown"))
 
 
 def _candidate_blockers(

@@ -3,7 +3,7 @@
   "active_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
   "active_contract_status": "fluent_reference_incomplete",
   "candidate_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_candidate_contract.json",
-  "candidate_contract_sha256": "2ba58e604ee65cebf0bc42fa390cc6589fe365a02459495452cae3526ad5a908",
+  "candidate_contract_sha256": "ef94d15c58121cda84219de27e9392fc70eecdd05c70dc76a092316a62fdbff6",
   "candidate_contract_status": "fluent_reference_incomplete",
   "case": "ansys_vertical_flap_fsi",
   "no_fluent_parity_claim_retired": false,

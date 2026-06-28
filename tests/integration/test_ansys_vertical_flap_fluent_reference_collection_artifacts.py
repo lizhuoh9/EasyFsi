@@ -143,6 +143,16 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
         self.assertEqual(payload["candidate_status"], EXPECTED_CANDIDATE_STATUS)
         self.assertEqual(payload["candidate_contract_status"], EXPECTED_CONTRACT_STATUS)
         self.assertEqual(blockers, EXPECTED_BLOCKERS)
+        self.assertEqual(
+            payload["schema_validation"]["contract_status"],
+            EXPECTED_CONTRACT_STATUS,
+        )
+        self.assertEqual(payload["schema_validation"]["validated_metric_count"], 0)
+        self.assertEqual(payload["schema_validation"]["required_metric_count"], 5)
+        self.assertEqual(
+            set(payload["schema_validation"]["missing_required_metrics"]),
+            EXPECTED_MISSING_METRICS,
+        )
         self.assertEqual(int(payload["expected_step_count"]), 50)
         self.assertEqual(float(payload["expected_time_step_s"]), 0.0005)
         self.assertEqual(float(payload["expected_total_time_s"]), 0.025)
@@ -197,6 +207,12 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
 
         self.assertEqual(current["contract_status"], EXPECTED_CONTRACT_STATUS)
         self.assertEqual(candidate["contract_status"], EXPECTED_CONTRACT_STATUS)
+        self.assertEqual(
+            candidate["schema_validation"]["contract_status"],
+            EXPECTED_CONTRACT_STATUS,
+        )
+        self.assertEqual(candidate["schema_validation"]["validated_metric_count"], 0)
+        self.assertEqual(candidate["schema_validation"]["required_metric_count"], 5)
         self.assertEqual(candidate["provenance_status"], "incomplete")
         self.assertEqual(candidate["source_provenance"]["status"], "missing")
         self.assertEqual(candidate["displacement_definition"]["status"], "missing")

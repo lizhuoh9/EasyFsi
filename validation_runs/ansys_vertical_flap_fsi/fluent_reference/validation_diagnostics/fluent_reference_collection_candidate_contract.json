@@ -79,6 +79,56 @@
       "value": null
     }
   },
+  "schema_validation": {
+    "blockers": [
+      {
+        "blocker": "fluent_reference_provenance_incomplete",
+        "detail": "missing fields: document,run_id,author,date,status"
+      },
+      {
+        "blocker": "fluent_reference_sign_conventions_incomplete",
+        "detail": "missing fields: force_z_positive,flow_rate_positive,pressure_reference,status"
+      },
+      {
+        "blocker": "fluent_reference_displacement_definition_incomplete",
+        "detail": "missing fields: point,status"
+      },
+      {
+        "blocker": "tip_displacement_m_missing",
+        "detail": "tip_displacement_m must be available, numeric, and finite"
+      },
+      {
+        "blocker": "max_displacement_m_missing",
+        "detail": "max_displacement_m must be available, numeric, and finite"
+      },
+      {
+        "blocker": "force_z_N_missing",
+        "detail": "force_z_N must be available, numeric, and finite"
+      },
+      {
+        "blocker": "flow_rate_m3s_missing",
+        "detail": "flow_rate_m3s must be available, numeric, and finite"
+      },
+      {
+        "blocker": "pressure_range_pa_missing",
+        "detail": "pressure_range_pa must be available, numeric, and finite"
+      },
+      {
+        "blocker": "fluent_reference_tolerances_incomplete",
+        "detail": "tip_displacement_relative must be available, numeric, finite, and sourced"
+      }
+    ],
+    "contract_status": "fluent_reference_incomplete",
+    "missing_required_metrics": [
+      "tip_displacement_m",
+      "max_displacement_m",
+      "force_z_N",
+      "flow_rate_m3s",
+      "pressure_range_pa"
+    ],
+    "required_metric_count": 5,
+    "validated_metric_count": 0
+  },
   "sign_conventions": {
     "flow_rate_positive": "MISSING",
     "force_z_positive": "MISSING",

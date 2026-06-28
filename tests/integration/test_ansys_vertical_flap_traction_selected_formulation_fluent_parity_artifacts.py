@@ -67,6 +67,8 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
         self.assertEqual(rows[0]["parity_status"], EXPECTED_CANDIDATE_STATUS)
         self.assertEqual(set(rows[0]["active_blockers"]), EXPECTED_ACTIVE_BLOCKERS)
         self.assertEqual(payload["candidate_status"], EXPECTED_CANDIDATE_STATUS)
+        self.assertFalse(payload["fluent_parity_claimed"])
+        self.assertFalse(rows[0]["fluent_parity_claimed"])
         self.assertEqual(blockers, EXPECTED_ACTIVE_BLOCKERS)
         self.assertEqual(payload["historical_blockers_retired"], [])
         self.assertEqual(
@@ -173,6 +175,7 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
 
         self.assertEqual(row["run_status"], "blocked")
         self.assertEqual(row["parity_status"], EXPECTED_CANDIDATE_STATUS)
+        self.assertFalse(row["fluent_parity_claimed"])
         self.assertEqual(
             set(row["active_blockers"]),
             EXPECTED_ACTIVE_BLOCKERS,
@@ -212,6 +215,16 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
             metrics["metadata"]["contract_source_provenance"]["status"],
             "missing",
         )
+        self.assertEqual(
+            metrics["metadata"]["contract_schema_validation"]["contract_status"],
+            "fluent_reference_incomplete",
+        )
+        self.assertEqual(
+            metrics["metadata"]["contract_schema_validation"][
+                "validated_metric_count"
+            ],
+            0,
+        )
 
     def test_history_summary_csv_and_checksums_are_consistent(self):
         payload = _read_json(MATRIX_JSON)
@@ -222,6 +235,9 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
         self.assertEqual(
             history["histories"][EXPECTED_SCENARIO]["candidate_status"],
             EXPECTED_CANDIDATE_STATUS,
+        )
+        self.assertFalse(
+            history["histories"][EXPECTED_SCENARIO]["fluent_parity_claimed"]
         )
         self.assertEqual(
             history["active_fluent_reference_contract_manifest"],

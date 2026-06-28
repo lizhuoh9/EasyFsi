@@ -283,6 +283,13 @@ jobs:
             tests.integration.test_ansys_vertical_flap_fluent_reference_collection_artifacts `
             -v
 
+      - name: Run Fluent reference contract schema test
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.integration.test_ansys_vertical_flap_fluent_reference_contract_schema `
+            -v
+
       - name: Run traction artifact test - selected formulation Fluent parity
         shell: pwsh
         run: |
