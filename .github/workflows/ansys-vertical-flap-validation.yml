@@ -58,6 +58,7 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_fixed_solid_selected_formulation_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_coupled_smoke.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_coupled_step50.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_fluent_parity.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py
 
       - name: Run archive artifact test - official half-domain
@@ -226,6 +227,13 @@ jobs:
         run: |
           python -m unittest `
             tests.integration.test_ansys_vertical_flap_traction_selected_formulation_coupled_step50_artifacts `
+            -v
+
+      - name: Run traction artifact test - selected formulation Fluent parity
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.integration.test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_artifacts `
             -v
 
       - name: Run archive artifact test - preflow release step20

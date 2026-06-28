@@ -147,6 +147,7 @@ class AnsysVerticalFlapSelectedFormulationCoupledStep50ArtifactTests(
         blockers = {item["blocker"] for item in payload["candidate_blockers"]}
 
         self.assertEqual(payload["candidate_status"], EXPECTED_CANDIDATE_STATUS)
+        self.assertNotIn("fluent_parity_claim", payload)
         self.assertEqual(blockers, EXPECTED_ACTIVE_BLOCKERS)
         self.assertEqual(payload["historical_blockers_retired"], EXPECTED_RETIRED_BLOCKERS)
         self.assertIn("no_fluent_parity_claim", blockers)
@@ -154,6 +155,30 @@ class AnsysVerticalFlapSelectedFormulationCoupledStep50ArtifactTests(
         self.assertEqual(payload["first_failed_scenario"], "")
         self.assertEqual(payload["first_failed_step"], "")
         self.assertEqual(payload["first_failed_gate"], "")
+
+    def test_step50_pass_does_not_claim_fluent_parity(self):
+        payload = _read_json(MATRIX_JSON)
+        by_scenario = _row_by_scenario(payload)
+        summary = SUMMARY_MD.read_text(encoding="utf-8")
+        step50 = by_scenario["selected_formulation_coupled_step50"]
+
+        self.assertIn("does not claim Fluent parity", summary)
+        self.assertNotIn("Fluent parity validated", summary)
+        self.assertNotIn("fluent_parity_claim", payload)
+        self.assertEqual(
+            {item["blocker"] for item in payload["candidate_blockers"]},
+            {"no_fluent_parity_claim"},
+        )
+        self.assertEqual(
+            payload["historical_blockers_retired"],
+            ["long_coupled_validation_pending"],
+        )
+        self.assertEqual(step50["smoke_status"], "passed")
+        self.assertEqual(int(step50["completed_step_count"]), 50)
+        self.assertEqual(int(step50["invalid_marker_count_max"]), 0)
+        self.assertGreaterEqual(int(step50["one_sided_marker_count_min"]), 24)
+        self.assertGreaterEqual(int(step50["anchor_selected_marker_count_min"]), 24)
+        self.assertEqual(int(step50["anchor_fallback_marker_count_max"]), 0)
 
     def test_step50_row_acceptance_matches_gate_fields(self):
         payload = _read_json(MATRIX_JSON)

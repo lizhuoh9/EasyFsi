@@ -1,0 +1,91 @@
+{
+  "case": "ansys_vertical_flap_fsi",
+  "source": {
+    "description": "ANSYS Fluent parity reference values have not yet been collected with repository-verifiable provenance.",
+    "source_type": "missing_reference_contract",
+    "provenance": "missing"
+  },
+  "provenance_status": "incomplete",
+  "step_count": 50,
+  "time_step_s": 0.0005,
+  "geometry": {
+    "duct_length_m": 0.1,
+    "duct_height_m": 0.04,
+    "modeled_domain": "lower-symmetry-half",
+    "span_m": 0.003,
+    "flap_height_m": 0.01,
+    "flap_thickness_m": 0.003,
+    "flap_streamwise_min_m": 0.05,
+    "flap_streamwise_max_m": 0.053
+  },
+  "material": {
+    "fluid": "air",
+    "air_density_kgm3": 1.225,
+    "air_viscosity_pa_s": 1.8e-05,
+    "solid_density_kgm3": 1600.0,
+    "youngs_modulus_pa": 1000000.0,
+    "poisson_ratio": 0.47
+  },
+  "flow": {
+    "inlet_velocity_mps": 10.0,
+    "outlet_pressure_pa": 0.0,
+    "boundary_condition_source": "ANSYS vertical-flap case metadata"
+  },
+  "reference_metrics": {
+    "tip_displacement_m": {
+      "status": "missing",
+      "value": null,
+      "source": "not_collected"
+    },
+    "max_displacement_m": {
+      "status": "missing",
+      "value": null,
+      "source": "not_collected"
+    },
+    "force_z_N": {
+      "status": "missing",
+      "value": null,
+      "source": "not_collected"
+    },
+    "flow_rate_m3s": {
+      "status": "missing",
+      "value": null,
+      "source": "not_collected"
+    },
+    "pressure_range_pa": {
+      "status": "missing",
+      "value": null,
+      "source": "not_collected"
+    }
+  },
+  "tolerances": {
+    "tip_displacement_relative": {
+      "status": "pending_reference",
+      "value": null
+    },
+    "max_displacement_relative": {
+      "status": "pending_reference",
+      "value": null
+    },
+    "force_z_relative": {
+      "status": "pending_reference",
+      "value": null
+    },
+    "flow_rate_relative": {
+      "status": "pending_reference",
+      "value": null
+    },
+    "pressure_sanity_absolute": {
+      "status": "pending_reference",
+      "value": null
+    }
+  },
+  "missing_reference_metrics": [
+    "tip_displacement_m",
+    "max_displacement_m",
+    "force_z_N",
+    "flow_rate_m3s",
+    "pressure_range_pa"
+  ],
+  "contract_status": "fluent_reference_incomplete"
+}
