@@ -1,4 +1,48 @@
 {
+  "active_fluent_reference_contract_manifest": {
+    "active_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
+    "active_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
+    "active_contract_status": "fluent_reference_incomplete",
+    "candidate_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_candidate_contract.json",
+    "candidate_contract_sha256": "2ba58e604ee65cebf0bc42fa390cc6589fe365a02459495452cae3526ad5a908",
+    "candidate_contract_status": "fluent_reference_incomplete",
+    "case": "ansys_vertical_flap_fsi",
+    "no_fluent_parity_claim_retired": false,
+    "promotion_blockers": [
+      {
+        "blocker": "fluent_displacement_reference_missing",
+        "detail": "Fluent displacement source export is missing final-step values"
+      },
+      {
+        "blocker": "fluent_force_reference_missing",
+        "detail": "Fluent force source export is missing final-step values"
+      },
+      {
+        "blocker": "fluent_flow_reference_missing",
+        "detail": "Fluent flow/outlet source export is missing final-step values"
+      },
+      {
+        "blocker": "fluent_pressure_reference_missing",
+        "detail": "Fluent pressure source export is missing final-step values"
+      },
+      {
+        "blocker": "fluent_reference_provenance_incomplete",
+        "detail": "Fluent source provenance metadata is incomplete"
+      },
+      {
+        "blocker": "fluent_reference_comparison_metadata_incomplete",
+        "detail": "Fluent displacement/sign/pressure convention metadata is incomplete"
+      },
+      {
+        "blocker": "fluent_reference_tolerances_incomplete",
+        "detail": "Reference metrics exist but comparison tolerances are incomplete"
+      }
+    ],
+    "promotion_status": "blocked_reference_incomplete",
+    "purpose": "active_fluent_reference_contract_manifest",
+    "recommended_action": "keep_current_incomplete_contract",
+    "source_script": "validation_runs/ansys_vertical_flap_fsi/scripts/run_fluent_reference_collection_validation.py"
+  },
   "candidate_blockers": [
     {
       "blocker": "fluent_reference_incomplete",
@@ -252,6 +296,8 @@
       "tolerance": null
     },
     "metadata": {
+      "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
+      "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
       "contract_displacement_definition": {},
       "contract_geometry": {
         "duct_height_m": 0.04,

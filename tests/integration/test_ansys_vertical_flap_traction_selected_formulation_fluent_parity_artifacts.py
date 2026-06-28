@@ -21,6 +21,9 @@ SOURCE_STEP50_HISTORY = (
 FLUENT_REFERENCE_CONTRACT = (
     ROOT / "fluent_reference" / "fluent_reference_contract_2026-06-27.json"
 )
+ACTIVE_CONTRACT_MANIFEST = (
+    ROOT / "fluent_reference" / "active_fluent_reference_contract.json"
+)
 DIAG_ROOT = ROOT / "traction_selected_formulation_fluent_parity_diagnostics"
 SCENARIO_DIAGNOSTICS_ROOT = DIAG_ROOT / "scenario_diagnostics"
 MATRIX_JSON = DIAG_ROOT / "traction_selected_formulation_fluent_parity_matrix.json"
@@ -99,8 +102,28 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
             _sha256_file(FLUENT_REFERENCE_CONTRACT),
         )
         self.assertEqual(
+            payload["active_fluent_reference_contract_manifest"],
+            ACTIVE_CONTRACT_MANIFEST.as_posix(),
+        )
+        self.assertEqual(
+            payload["active_fluent_reference_contract_manifest_sha256"],
+            _sha256_file(ACTIVE_CONTRACT_MANIFEST),
+        )
+        self.assertEqual(
+            payload["active_contract_status"],
+            "fluent_reference_incomplete",
+        )
+        self.assertEqual(
+            payload["active_contract_promotion_status"],
+            "blocked_reference_incomplete",
+        )
+        self.assertEqual(
             row["fluent_reference_contract_sha256"],
             _sha256_file(FLUENT_REFERENCE_CONTRACT),
+        )
+        self.assertEqual(
+            row["active_fluent_reference_contract_manifest_sha256"],
+            _sha256_file(ACTIVE_CONTRACT_MANIFEST),
         )
         self.assertTrue(Path(row["scenario_diagnostics_json"]).exists())
         self.assertEqual(
@@ -199,6 +222,14 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
         self.assertEqual(
             history["histories"][EXPECTED_SCENARIO]["candidate_status"],
             EXPECTED_CANDIDATE_STATUS,
+        )
+        self.assertEqual(
+            history["active_fluent_reference_contract_manifest"],
+            ACTIVE_CONTRACT_MANIFEST.as_posix(),
+        )
+        self.assertEqual(
+            history["active_fluent_reference_contract_manifest_sha256"],
+            _sha256_file(ACTIVE_CONTRACT_MANIFEST),
         )
         self.assertIn("selected-formulation Fluent parity", summary)
         self.assertIn("does not claim Fluent parity", summary)

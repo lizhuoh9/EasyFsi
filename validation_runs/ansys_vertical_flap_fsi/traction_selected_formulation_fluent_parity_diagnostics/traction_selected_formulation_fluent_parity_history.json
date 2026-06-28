@@ -1,4 +1,6 @@
 {
+  "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
+  "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
   "case": "ansys_vertical_flap_fsi",
   "fluent_reference_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
   "fluent_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
@@ -153,6 +155,8 @@
           "tolerance": null
         },
         "metadata": {
+          "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
+          "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
           "contract_displacement_definition": {},
           "contract_geometry": {
             "duct_height_m": 0.04,

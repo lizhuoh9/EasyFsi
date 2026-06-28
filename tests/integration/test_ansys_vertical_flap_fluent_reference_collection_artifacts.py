@@ -17,6 +17,7 @@ MATRIX_CSV = DIAG_ROOT / "fluent_reference_collection_matrix.csv"
 SUMMARY_MD = DIAG_ROOT / "fluent_reference_collection_summary.md"
 CANDIDATE_CONTRACT = DIAG_ROOT / "fluent_reference_collection_candidate_contract.json"
 CHECKSUMS = DIAG_ROOT / "CHECKSUMS.sha256"
+ACTIVE_CONTRACT_MANIFEST = REFERENCE_ROOT / "active_fluent_reference_contract.json"
 
 EXPECTED_SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
@@ -30,6 +31,10 @@ EXPECTED_BLOCKERS = {
     "fluent_flow_reference_missing",
     "fluent_pressure_reference_missing",
     "fluent_reference_provenance_incomplete",
+}
+EXPECTED_PROMOTION_BLOCKERS = EXPECTED_BLOCKERS | {
+    "fluent_reference_comparison_metadata_incomplete",
+    "fluent_reference_tolerances_incomplete",
 }
 EXPECTED_MISSING_METRICS = {
     "tip_displacement_m",
@@ -116,11 +121,19 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
             self.assertIn(f"- {field}: MISSING", text)
 
     def test_collection_matrix_records_pending_reference_state(self):
-        for path in (MATRIX_JSON, MATRIX_CSV, SUMMARY_MD, CANDIDATE_CONTRACT, CHECKSUMS):
+        for path in (
+            MATRIX_JSON,
+            MATRIX_CSV,
+            SUMMARY_MD,
+            CANDIDATE_CONTRACT,
+            ACTIVE_CONTRACT_MANIFEST,
+            CHECKSUMS,
+        ):
             self.assertTrue(path.exists(), path)
 
         payload = _read_json(MATRIX_JSON)
         blockers = {item["blocker"] for item in payload["candidate_blockers"]}
+        promotion_blockers = {item["blocker"] for item in payload["promotion_blockers"]}
         rows_by_artifact = {row["artifact"]: row for row in payload["rows"]}
 
         self.assertEqual(payload["purpose"], "fluent_reference_collection_matrix")
@@ -143,6 +156,19 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
             payload["candidate_contract_sha256"],
             _sha256_file(CANDIDATE_CONTRACT),
         )
+        self.assertEqual(
+            payload["active_fluent_reference_contract_manifest"],
+            ACTIVE_CONTRACT_MANIFEST.as_posix(),
+        )
+        self.assertEqual(
+            payload["active_fluent_reference_contract_manifest_sha256"],
+            _sha256_file(ACTIVE_CONTRACT_MANIFEST),
+        )
+        self.assertEqual(payload["active_contract"], CURRENT_CONTRACT.as_posix())
+        self.assertEqual(payload["active_contract_sha256"], _sha256_file(CURRENT_CONTRACT))
+        self.assertEqual(payload["promotion_status"], "blocked_reference_incomplete")
+        self.assertEqual(payload["recommended_action"], "keep_current_incomplete_contract")
+        self.assertEqual(promotion_blockers, EXPECTED_PROMOTION_BLOCKERS)
         self.assertEqual(set(payload["missing_reference_metrics"]), EXPECTED_MISSING_METRICS)
         self.assertEqual(set(rows_by_artifact), set(EXPECTED_HEADERS) | {"fluent_metadata_2026-06-28.md"})
 
@@ -167,6 +193,7 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
     def test_candidate_contract_remains_incomplete_and_missing_reference_backed(self):
         current = _read_json(CURRENT_CONTRACT)
         candidate = _read_json(CANDIDATE_CONTRACT)
+        manifest = _read_json(ACTIVE_CONTRACT_MANIFEST)
 
         self.assertEqual(current["contract_status"], EXPECTED_CONTRACT_STATUS)
         self.assertEqual(candidate["contract_status"], EXPECTED_CONTRACT_STATUS)
@@ -191,6 +218,23 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
         self.assertFalse(
             candidate["collection_validator"]["comparison_metadata_complete"]
         )
+        self.assertEqual(manifest["purpose"], "active_fluent_reference_contract_manifest")
+        self.assertEqual(manifest["active_contract"], CURRENT_CONTRACT.as_posix())
+        self.assertEqual(manifest["active_contract_sha256"], _sha256_file(CURRENT_CONTRACT))
+        self.assertEqual(manifest["active_contract_status"], EXPECTED_CONTRACT_STATUS)
+        self.assertEqual(manifest["candidate_contract"], CANDIDATE_CONTRACT.as_posix())
+        self.assertEqual(
+            manifest["candidate_contract_sha256"],
+            _sha256_file(CANDIDATE_CONTRACT),
+        )
+        self.assertEqual(manifest["candidate_contract_status"], EXPECTED_CONTRACT_STATUS)
+        self.assertEqual(manifest["promotion_status"], "blocked_reference_incomplete")
+        self.assertEqual(manifest["recommended_action"], "keep_current_incomplete_contract")
+        self.assertEqual(
+            {item["blocker"] for item in manifest["promotion_blockers"]},
+            EXPECTED_PROMOTION_BLOCKERS,
+        )
+        self.assertFalse(manifest["no_fluent_parity_claim_retired"])
         self.assertEqual(set(candidate["missing_reference_metrics"]), EXPECTED_MISSING_METRICS)
         for metric in EXPECTED_MISSING_METRICS:
             self.assertEqual(candidate["reference_metrics"][metric]["status"], "missing")

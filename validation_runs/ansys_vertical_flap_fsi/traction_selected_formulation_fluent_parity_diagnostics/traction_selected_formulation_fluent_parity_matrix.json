@@ -1,4 +1,8 @@
 {
+  "active_contract_promotion_status": "blocked_reference_incomplete",
+  "active_contract_status": "fluent_reference_incomplete",
+  "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
+  "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
   "candidate_blockers": [
     {
       "blocker": "fluent_reference_incomplete",
@@ -153,6 +157,8 @@
       "tolerance": null
     },
     "metadata": {
+      "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
+      "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
       "contract_displacement_definition": {},
       "contract_geometry": {
         "duct_height_m": 0.04,
@@ -232,6 +238,10 @@
         "fluent_reference_incomplete",
         "no_fluent_parity_claim"
       ],
+      "active_contract_promotion_status": "blocked_reference_incomplete",
+      "active_contract_status": "fluent_reference_incomplete",
+      "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
+      "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
       "candidate_status": "fluent_parity_blocked_reference_incomplete",
       "case": "ansys_vertical_flap_fsi",
       "displacement_gate_status": "blocked_reference_missing",
@@ -379,6 +389,8 @@
           "tolerance": null
         },
         "metadata": {
+          "active_fluent_reference_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
+          "active_fluent_reference_contract_manifest_sha256": "04766f8721a5e140aaad6b900fb98c2a5fd759d70d4d65a1cada8211f7260fb8",
           "contract_displacement_definition": {},
           "contract_geometry": {
             "duct_height_m": 0.04,

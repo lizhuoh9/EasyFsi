@@ -21,6 +21,9 @@ SUMMARY_MD = OUTPUT_DIR / "fluent_reference_collection_summary.md"
 CANDIDATE_CONTRACT_JSON = OUTPUT_DIR / "fluent_reference_collection_candidate_contract.json"
 CHECKSUMS_PATH = OUTPUT_DIR / "CHECKSUMS.sha256"
 CURRENT_CONTRACT_JSON = REFERENCE_ROOT / "fluent_reference_contract_2026-06-27.json"
+ACTIVE_CONTRACT_MANIFEST_JSON = (
+    REFERENCE_ROOT / "active_fluent_reference_contract.json"
+)
 
 SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
@@ -162,6 +165,13 @@ def run() -> dict[str, Any]:
         metadata_check=metadata_check,
     )
     _write_json(CANDIDATE_CONTRACT_JSON, candidate_contract)
+    active_manifest = _active_contract_manifest(
+        current_contract=current_contract,
+        candidate_contract=candidate_contract,
+        source_checks=source_checks,
+        metadata_check=metadata_check,
+    )
+    _write_json(ACTIVE_CONTRACT_MANIFEST_JSON, active_manifest)
 
     blockers = _candidate_blockers(
         candidate_contract=candidate_contract,
@@ -180,6 +190,7 @@ def run() -> dict[str, Any]:
         source_checks=source_checks,
         metadata_check=metadata_check,
         candidate_contract=candidate_contract,
+        active_manifest=active_manifest,
         rows=rows,
     )
     _write_json(MATRIX_JSON, payload)
@@ -417,6 +428,69 @@ def _candidate_blockers(
     ]
 
 
+def _active_contract_manifest(
+    *,
+    current_contract: Mapping[str, Any],
+    candidate_contract: Mapping[str, Any],
+    source_checks: Iterable[Mapping[str, Any]],
+    metadata_check: Mapping[str, Any],
+) -> dict[str, Any]:
+    promotion_blockers = _promotion_blockers(
+        candidate_contract=candidate_contract,
+        source_checks=source_checks,
+        metadata_check=metadata_check,
+    )
+    ready = candidate_contract["contract_status"] == CONTRACT_COMPLETE
+    return {
+        "case": CASE_NAME,
+        "purpose": "active_fluent_reference_contract_manifest",
+        "source_script": SOURCE_SCRIPT,
+        "active_contract": _repo_relative(CURRENT_CONTRACT_JSON),
+        "active_contract_sha256": _sha256_file(CURRENT_CONTRACT_JSON),
+        "active_contract_status": str(current_contract["contract_status"]),
+        "candidate_contract": _repo_relative(CANDIDATE_CONTRACT_JSON),
+        "candidate_contract_sha256": _sha256_file(CANDIDATE_CONTRACT_JSON),
+        "candidate_contract_status": str(candidate_contract["contract_status"]),
+        "promotion_status": (
+            "ready_for_versioned_contract_promotion"
+            if ready
+            else "blocked_reference_incomplete"
+        ),
+        "recommended_action": (
+            "promote_versioned_contract"
+            if ready
+            else "keep_current_incomplete_contract"
+        ),
+        "promotion_blockers": promotion_blockers,
+        "no_fluent_parity_claim_retired": False,
+    }
+
+
+def _promotion_blockers(
+    *,
+    candidate_contract: Mapping[str, Any],
+    source_checks: Iterable[Mapping[str, Any]],
+    metadata_check: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    if candidate_contract["contract_status"] == CONTRACT_COMPLETE:
+        return []
+    blockers = [
+        str(check["blocker"])
+        for check in source_checks
+        if check.get("blocker")
+    ]
+    if metadata_check.get("blocker"):
+        blockers.append(str(metadata_check["blocker"]))
+    if not candidate_contract["collection_validator"]["comparison_metadata_complete"]:
+        blockers.append("fluent_reference_comparison_metadata_incomplete")
+    if not candidate_contract["collection_validator"]["tolerances_complete"]:
+        blockers.append(BLOCKER_TOLERANCES)
+    return [
+        {"blocker": blocker, "detail": _blocker_detail(blocker)}
+        for blocker in dict.fromkeys(blockers)
+    ]
+
+
 def _payload(
     *,
     candidate_status: str,
@@ -424,6 +498,7 @@ def _payload(
     source_checks: list[Mapping[str, Any]],
     metadata_check: Mapping[str, Any],
     candidate_contract: Mapping[str, Any],
+    active_manifest: Mapping[str, Any],
     rows: list[Mapping[str, Any]],
 ) -> dict[str, Any]:
     return {
@@ -435,6 +510,17 @@ def _payload(
         "current_reference_contract_sha256": _sha256_file(CURRENT_CONTRACT_JSON),
         "candidate_contract": _repo_relative(CANDIDATE_CONTRACT_JSON),
         "candidate_contract_sha256": _sha256_file(CANDIDATE_CONTRACT_JSON),
+        "active_fluent_reference_contract_manifest": _repo_relative(
+            ACTIVE_CONTRACT_MANIFEST_JSON
+        ),
+        "active_fluent_reference_contract_manifest_sha256": _sha256_file(
+            ACTIVE_CONTRACT_MANIFEST_JSON
+        ),
+        "active_contract": active_manifest["active_contract"],
+        "active_contract_sha256": active_manifest["active_contract_sha256"],
+        "promotion_status": active_manifest["promotion_status"],
+        "recommended_action": active_manifest["recommended_action"],
+        "promotion_blockers": active_manifest["promotion_blockers"],
         "candidate_status": candidate_status,
         "candidate_contract_status": candidate_contract["contract_status"],
         "candidate_blockers": blockers,
@@ -526,6 +612,10 @@ def _summary_markdown(payload: Mapping[str, Any]) -> str:
             f"- Matrix JSON: `{_repo_relative(MATRIX_JSON)}`",
             f"- Matrix CSV: `{_repo_relative(MATRIX_CSV)}`",
             f"- Candidate contract: `{_repo_relative(CANDIDATE_CONTRACT_JSON)}`",
+            (
+                "- Active contract manifest: "
+                f"`{_repo_relative(ACTIVE_CONTRACT_MANIFEST_JSON)}`"
+            ),
             f"- Checksums: `{_repo_relative(CHECKSUMS_PATH)}`",
             "",
         ]
@@ -696,6 +786,8 @@ def _tolerances_complete(tolerances: Mapping[str, Any]) -> bool:
             return False
         if _float_value(payload.get("value")) is None:
             return False
+        if _is_missing(payload.get("source", "")):
+            return False
     return bool(tolerances)
 
 
@@ -706,6 +798,9 @@ def _blocker_detail(blocker: str) -> str:
         BLOCKER_FLOW: "Fluent flow/outlet source export is missing final-step values",
         BLOCKER_PRESSURE: "Fluent pressure source export is missing final-step values",
         BLOCKER_PROVENANCE: "Fluent source provenance metadata is incomplete",
+        "fluent_reference_comparison_metadata_incomplete": (
+            "Fluent displacement/sign/pressure convention metadata is incomplete"
+        ),
         BLOCKER_TOLERANCES: "Reference metrics exist but comparison tolerances are incomplete",
     }
     return details[blocker]

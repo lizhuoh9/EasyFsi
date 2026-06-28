@@ -32,6 +32,9 @@ SOURCE_STEP50_HISTORY_JSON = (
 FLUENT_REFERENCE_CONTRACT_JSON = (
     ROOT / "fluent_reference" / "fluent_reference_contract_2026-06-27.json"
 )
+ACTIVE_CONTRACT_MANIFEST_JSON = (
+    ROOT / "fluent_reference" / "active_fluent_reference_contract.json"
+)
 
 SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
@@ -71,7 +74,11 @@ def run() -> dict[str, Any]:
     _prepare_output_dir()
     source_matrix = _read_json(SOURCE_STEP50_MATRIX_JSON)
     source_history = _read_json(SOURCE_STEP50_HISTORY_JSON)
-    reference_contract = _read_json(FLUENT_REFERENCE_CONTRACT_JSON)
+    active_contract_manifest = _active_contract_manifest()
+    fluent_reference_contract_json = _active_reference_contract_path(
+        active_contract_manifest
+    )
+    reference_contract = _read_json(fluent_reference_contract_json)
     source_row = _source_step50_row(source_matrix)
     source_history_rows = _source_step50_history_rows(source_history)
     metrics = _parity_metrics(
@@ -79,6 +86,7 @@ def run() -> dict[str, Any]:
         source_row=source_row,
         source_history_rows=source_history_rows,
         reference_contract=reference_contract,
+        reference_contract_path=fluent_reference_contract_json,
     )
     candidate_status = _candidate_status(reference_contract, metrics)
     blockers = _candidate_blockers(candidate_status, metrics)
@@ -88,6 +96,8 @@ def run() -> dict[str, Any]:
         source_matrix=source_matrix,
         source_row=source_row,
         reference_contract=reference_contract,
+        reference_contract_path=fluent_reference_contract_json,
+        active_contract_manifest=active_contract_manifest,
         metrics=metrics,
     )
     diagnostics_path = SCENARIO_DIAGNOSTICS_DIR / f"{SCENARIO}.json"
@@ -100,6 +110,7 @@ def run() -> dict[str, Any]:
         "candidate_blockers": blockers,
         "parity_metrics": metrics,
         "source_step50_row": source_row,
+        "active_fluent_reference_contract_manifest": active_contract_manifest,
         "fluent_reference_contract": reference_contract,
     }
     _write_json(diagnostics_path, diagnostics)
@@ -109,6 +120,8 @@ def run() -> dict[str, Any]:
         row=row,
         source_matrix=source_matrix,
         reference_contract=reference_contract,
+        reference_contract_path=fluent_reference_contract_json,
+        active_contract_manifest=active_contract_manifest,
         metrics=metrics,
     )
     _write_json(MATRIX_JSON, payload)
@@ -124,10 +137,16 @@ def run() -> dict[str, Any]:
             "source_step50_history": _repo_relative(SOURCE_STEP50_HISTORY_JSON),
             "source_step50_history_sha256": _sha256_file(SOURCE_STEP50_HISTORY_JSON),
             "fluent_reference_contract": _repo_relative(
-                FLUENT_REFERENCE_CONTRACT_JSON
+                fluent_reference_contract_json
             ),
             "fluent_reference_contract_sha256": _sha256_file(
-                FLUENT_REFERENCE_CONTRACT_JSON
+                fluent_reference_contract_json
+            ),
+            "active_fluent_reference_contract_manifest": _repo_relative(
+                ACTIVE_CONTRACT_MANIFEST_JSON
+            ),
+            "active_fluent_reference_contract_manifest_sha256": (
+                _active_contract_manifest_sha256()
             ),
             "histories": {
                 SCENARIO: {
@@ -154,6 +173,8 @@ def _row(
     source_matrix: Mapping[str, Any],
     source_row: Mapping[str, Any],
     reference_contract: Mapping[str, Any],
+    reference_contract_path: Path,
+    active_contract_manifest: Mapping[str, Any],
     metrics: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -170,10 +191,20 @@ def _row(
         "source_step50_matrix_sha256": _sha256_file(SOURCE_STEP50_MATRIX_JSON),
         "source_step50_history": _repo_relative(SOURCE_STEP50_HISTORY_JSON),
         "source_step50_history_sha256": _sha256_file(SOURCE_STEP50_HISTORY_JSON),
-        "fluent_reference_contract": _repo_relative(FLUENT_REFERENCE_CONTRACT_JSON),
+        "fluent_reference_contract": _repo_relative(reference_contract_path),
         "fluent_reference_contract_sha256": _sha256_file(
-            FLUENT_REFERENCE_CONTRACT_JSON
+            reference_contract_path
         ),
+        "active_fluent_reference_contract_manifest": _repo_relative(
+            ACTIVE_CONTRACT_MANIFEST_JSON
+        ),
+        "active_fluent_reference_contract_manifest_sha256": (
+            _active_contract_manifest_sha256()
+        ),
+        "active_contract_status": active_contract_manifest["active_contract_status"],
+        "active_contract_promotion_status": active_contract_manifest[
+            "promotion_status"
+        ],
         "source_step50_candidate_status": source_matrix["candidate_status"],
         "reference_formulation_candidate": source_matrix[
             "reference_formulation_candidate"
@@ -210,6 +241,8 @@ def _payload(
     row: Mapping[str, Any],
     source_matrix: Mapping[str, Any],
     reference_contract: Mapping[str, Any],
+    reference_contract_path: Path,
+    active_contract_manifest: Mapping[str, Any],
     metrics: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -230,10 +263,20 @@ def _payload(
         "source_step50_history": _repo_relative(SOURCE_STEP50_HISTORY_JSON),
         "source_step50_history_sha256": _sha256_file(SOURCE_STEP50_HISTORY_JSON),
         "source_step50_candidate_status": source_matrix["candidate_status"],
-        "fluent_reference_contract": _repo_relative(FLUENT_REFERENCE_CONTRACT_JSON),
+        "fluent_reference_contract": _repo_relative(reference_contract_path),
         "fluent_reference_contract_sha256": _sha256_file(
-            FLUENT_REFERENCE_CONTRACT_JSON
+            reference_contract_path
         ),
+        "active_fluent_reference_contract_manifest": _repo_relative(
+            ACTIVE_CONTRACT_MANIFEST_JSON
+        ),
+        "active_fluent_reference_contract_manifest_sha256": (
+            _active_contract_manifest_sha256()
+        ),
+        "active_contract_status": active_contract_manifest["active_contract_status"],
+        "active_contract_promotion_status": active_contract_manifest[
+            "promotion_status"
+        ],
         "reference_formulation_candidate": source_matrix[
             "reference_formulation_candidate"
         ],
@@ -254,6 +297,7 @@ def _parity_metrics(
     source_row: Mapping[str, Any],
     source_history_rows: list[Mapping[str, Any]],
     reference_contract: Mapping[str, Any],
+    reference_contract_path: Path = FLUENT_REFERENCE_CONTRACT_JSON,
 ) -> dict[str, Any]:
     final_step = source_history_rows[-1] if source_history_rows else {}
     reference_metrics = dict(reference_contract["reference_metrics"])
@@ -406,7 +450,13 @@ def _parity_metrics(
             ],
             "source_step50_matrix_sha256": _sha256_file(SOURCE_STEP50_MATRIX_JSON),
             "fluent_reference_contract_sha256": _sha256_file(
-                FLUENT_REFERENCE_CONTRACT_JSON
+                reference_contract_path
+            ),
+            "active_fluent_reference_contract_manifest": _repo_relative(
+                ACTIVE_CONTRACT_MANIFEST_JSON
+            ),
+            "active_fluent_reference_contract_manifest_sha256": (
+                _active_contract_manifest_sha256()
             ),
             "selected_anchor_markers_source": source_row[
                 "selected_anchor_markers_source"
@@ -757,6 +807,47 @@ def _summary_markdown(payload: Mapping[str, Any]) -> str:
 
 def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _active_contract_manifest() -> dict[str, Any]:
+    if not ACTIVE_CONTRACT_MANIFEST_JSON.exists():
+        return {
+            "case": CASE_NAME,
+            "purpose": "active_fluent_reference_contract_manifest",
+            "active_contract": _repo_relative(FLUENT_REFERENCE_CONTRACT_JSON),
+            "active_contract_sha256": _sha256_file(FLUENT_REFERENCE_CONTRACT_JSON),
+            "active_contract_status": "unknown_manifest_missing",
+            "promotion_status": "manifest_missing_fallback",
+            "recommended_action": "use_default_incomplete_contract",
+            "promotion_blockers": [
+                {
+                    "blocker": "active_contract_manifest_missing",
+                    "detail": "Falling back to the default incomplete contract",
+                }
+            ],
+            "no_fluent_parity_claim_retired": False,
+        }
+    manifest = _read_json(ACTIVE_CONTRACT_MANIFEST_JSON)
+    _validate_repo_relative_path(str(manifest["active_contract"]))
+    return manifest
+
+
+def _active_reference_contract_path(manifest: Mapping[str, Any]) -> Path:
+    path_text = str(manifest.get("active_contract", ""))
+    _validate_repo_relative_path(path_text)
+    return Path(path_text)
+
+
+def _active_contract_manifest_sha256() -> str:
+    if not ACTIVE_CONTRACT_MANIFEST_JSON.exists():
+        return ""
+    return _sha256_file(ACTIVE_CONTRACT_MANIFEST_JSON)
+
+
+def _validate_repo_relative_path(path_text: str) -> None:
+    path = Path(path_text)
+    if path.is_absolute() or "\\" in path_text or path_text.startswith(".."):
+        raise ValueError(f"active Fluent reference contract path is not repo-relative: {path_text}")
 
 
 def _write_json(path: Path, payload: Any) -> None:
