@@ -75,7 +75,9 @@ The contract must be explicit and machine-readable. Required top-level fields:
 
 - `case`
 - `source`
+- `source_provenance`
 - `provenance_status`
+- `simulation`
 - `step_count`
 - `time_step_s`
 - `geometry`
@@ -90,6 +92,11 @@ If Fluent reference metrics are not available with reliable provenance, represen
 
 - `contract_status == "fluent_reference_incomplete"`
 - missing metrics include displacement, force, flow, and pressure reference data unless real sourced values are present.
+
+The `source_provenance` object must make missing provenance explicit with
+fields for `document`, `run_id`, `author`, `date`, and `status`. The
+`simulation` object must mirror the ANSYS vertical-flap comparison horizon:
+`step_count == 50`, `time_step_s == 0.0005`, and `total_time_s == 0.025`.
 
 ## Phase 2: Fluent parity runner
 

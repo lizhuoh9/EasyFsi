@@ -12,7 +12,7 @@
   "candidate_status": "fluent_parity_blocked_reference_incomplete",
   "case": "ansys_vertical_flap_fsi",
   "fluent_reference_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
-  "fluent_reference_contract_sha256": "5f0b6d9480af5ad7092200bed8e9d2be4d93c3822c4137efb2e1a01411dc8dc1",
+  "fluent_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
   "historical_blockers_retired": [],
   "one_sided_pressure_policy_candidate": "per_face_mirrored",
   "parity_metrics": {
@@ -116,9 +116,21 @@
         "solid_density_kgm3": 1600.0,
         "youngs_modulus_pa": 1000000.0
       },
+      "contract_simulation": {
+        "step_count": 50,
+        "time_step_s": 0.0005,
+        "total_time_s": 0.025
+      },
+      "contract_source_provenance": {
+        "author": "",
+        "date": "",
+        "document": "",
+        "run_id": "",
+        "status": "missing"
+      },
       "contract_step_count": 50,
       "contract_time_step_s": 0.0005,
-      "fluent_reference_contract_sha256": "5f0b6d9480af5ad7092200bed8e9d2be4d93c3822c4137efb2e1a01411dc8dc1",
+      "fluent_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
       "gate_status": "passed",
       "pressure_pair_anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
       "reference_formulation_candidate": "anchored_dual_face_pressure_pair_with_per_face_one_sided",
@@ -153,7 +165,7 @@
       "displacement_gate_status": "blocked_reference_missing",
       "flow_outlet_gate_status": "blocked_reference_missing",
       "fluent_reference_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
-      "fluent_reference_contract_sha256": "5f0b6d9480af5ad7092200bed8e9d2be4d93c3822c4137efb2e1a01411dc8dc1",
+      "fluent_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
       "force_gate_status": "blocked_reference_missing",
       "metadata_gate_status": "passed",
       "one_sided_pressure_policy_candidate": "per_face_mirrored",
@@ -258,9 +270,21 @@
             "solid_density_kgm3": 1600.0,
             "youngs_modulus_pa": 1000000.0
           },
+          "contract_simulation": {
+            "step_count": 50,
+            "time_step_s": 0.0005,
+            "total_time_s": 0.025
+          },
+          "contract_source_provenance": {
+            "author": "",
+            "date": "",
+            "document": "",
+            "run_id": "",
+            "status": "missing"
+          },
           "contract_step_count": 50,
           "contract_time_step_s": 0.0005,
-          "fluent_reference_contract_sha256": "5f0b6d9480af5ad7092200bed8e9d2be4d93c3822c4137efb2e1a01411dc8dc1",
+          "fluent_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
           "gate_status": "passed",
           "pressure_pair_anchor_map_sha256": "9e7af66b2d5eac9ef8f4a609a347178413ef5a48a91877fcca84b2c08f9d7b88",
           "reference_formulation_candidate": "anchored_dual_face_pressure_pair_with_per_face_one_sided",

@@ -111,6 +111,19 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
         self.assertEqual(contract["case"], "ansys_vertical_flap_fsi")
         self.assertEqual(contract["provenance_status"], "incomplete")
         self.assertEqual(contract["contract_status"], "fluent_reference_incomplete")
+        self.assertIn("source_provenance", contract)
+        self.assertIn("simulation", contract)
+        self.assertEqual(
+            set(contract["source_provenance"]),
+            {"document", "run_id", "author", "date", "status"},
+        )
+        self.assertNotIn(
+            contract["source_provenance"]["status"],
+            {"complete", "validated"},
+        )
+        self.assertEqual(int(contract["simulation"]["step_count"]), 50)
+        self.assertEqual(float(contract["simulation"]["time_step_s"]), 0.0005)
+        self.assertEqual(float(contract["simulation"]["total_time_s"]), 0.025)
         self.assertEqual(int(contract["step_count"]), 50)
         self.assertEqual(float(contract["time_step_s"]), 0.0005)
         self.assertEqual(
@@ -159,6 +172,19 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
         self.assertEqual(
             metrics["metadata"]["reference_formulation_candidate"],
             EXPECTED_CANDIDATE,
+        )
+        self.assertEqual(int(metrics["metadata"]["contract_simulation"]["step_count"]), 50)
+        self.assertEqual(
+            float(metrics["metadata"]["contract_simulation"]["time_step_s"]),
+            0.0005,
+        )
+        self.assertEqual(
+            float(metrics["metadata"]["contract_simulation"]["total_time_s"]),
+            0.025,
+        )
+        self.assertEqual(
+            metrics["metadata"]["contract_source_provenance"]["status"],
+            "missing",
         )
 
     def test_history_summary_csv_and_checksums_are_consistent(self):

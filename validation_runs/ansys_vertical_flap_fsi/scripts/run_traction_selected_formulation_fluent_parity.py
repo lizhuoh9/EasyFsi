@@ -335,6 +335,8 @@ def _parity_metrics(
             ],
             "contract_step_count": reference_contract["step_count"],
             "contract_time_step_s": reference_contract["time_step_s"],
+            "contract_simulation": reference_contract["simulation"],
+            "contract_source_provenance": reference_contract["source_provenance"],
             "contract_geometry": reference_contract["geometry"],
             "contract_material": reference_contract["material"],
         },

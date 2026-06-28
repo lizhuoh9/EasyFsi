@@ -174,7 +174,9 @@ class AnsysVerticalFlapSelectedFormulationCoupledStep50ArtifactTests(
             ["long_coupled_validation_pending"],
         )
         self.assertEqual(step50["smoke_status"], "passed")
+        self.assertEqual(step50["run_status"], "completed")
         self.assertEqual(int(step50["completed_step_count"]), 50)
+        self.assertEqual(int(step50["requested_step_count"]), 50)
         self.assertEqual(int(step50["invalid_marker_count_max"]), 0)
         self.assertGreaterEqual(int(step50["one_sided_marker_count_min"]), 24)
         self.assertGreaterEqual(int(step50["anchor_selected_marker_count_min"]), 24)

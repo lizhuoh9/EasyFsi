@@ -5,7 +5,19 @@
     "source_type": "missing_reference_contract",
     "provenance": "missing"
   },
+  "source_provenance": {
+    "document": "",
+    "run_id": "",
+    "author": "",
+    "date": "",
+    "status": "missing"
+  },
   "provenance_status": "incomplete",
+  "simulation": {
+    "step_count": 50,
+    "time_step_s": 0.0005,
+    "total_time_s": 0.025
+  },
   "step_count": 50,
   "time_step_s": 0.0005,
   "geometry": {
