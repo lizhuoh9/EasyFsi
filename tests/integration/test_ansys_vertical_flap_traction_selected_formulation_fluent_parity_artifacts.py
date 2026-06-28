@@ -60,6 +60,9 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
         self.assertEqual(payload["scenario_count"], 1)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["scenario"], EXPECTED_SCENARIO)
+        self.assertEqual(rows[0]["run_status"], "blocked")
+        self.assertEqual(rows[0]["parity_status"], EXPECTED_CANDIDATE_STATUS)
+        self.assertEqual(set(rows[0]["active_blockers"]), EXPECTED_ACTIVE_BLOCKERS)
         self.assertEqual(payload["candidate_status"], EXPECTED_CANDIDATE_STATUS)
         self.assertEqual(blockers, EXPECTED_ACTIVE_BLOCKERS)
         self.assertEqual(payload["historical_blockers_retired"], [])
@@ -199,6 +202,7 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
         )
         self.assertIn("selected-formulation Fluent parity", summary)
         self.assertIn("does not claim Fluent parity", summary)
+        self.assertNotIn("fluent_parity_validated", summary)
         self.assertNotIn("Fluent parity validated", summary)
         self.assertIn(EXPECTED_CANDIDATE_STATUS, summary)
 

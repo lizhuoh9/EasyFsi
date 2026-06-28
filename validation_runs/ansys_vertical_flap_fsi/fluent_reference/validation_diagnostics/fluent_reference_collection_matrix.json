@@ -1,0 +1,313 @@
+{
+  "candidate_blockers": [
+    {
+      "blocker": "fluent_displacement_reference_missing",
+      "detail": "Fluent displacement source export is missing final-step values"
+    },
+    {
+      "blocker": "fluent_force_reference_missing",
+      "detail": "Fluent force source export is missing final-step values"
+    },
+    {
+      "blocker": "fluent_flow_reference_missing",
+      "detail": "Fluent flow/outlet source export is missing final-step values"
+    },
+    {
+      "blocker": "fluent_pressure_reference_missing",
+      "detail": "Fluent pressure source export is missing final-step values"
+    },
+    {
+      "blocker": "fluent_reference_provenance_incomplete",
+      "detail": "Fluent source provenance metadata is incomplete"
+    }
+  ],
+  "candidate_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_candidate_contract.json",
+  "candidate_contract_sha256": "674318ebf1f605e959dc5a614c7d22489221f60076439d9859edd489cd92e1d0",
+  "candidate_contract_status": "fluent_reference_incomplete",
+  "candidate_status": "fluent_reference_collection_pending",
+  "case": "ansys_vertical_flap_fsi",
+  "current_reference_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
+  "current_reference_contract_sha256": "2de72904dad8198f025d3478d4d7438baf89adc74018df4a3f597da336d8b518",
+  "expected_step_count": 50,
+  "expected_time_step_s": 0.0005,
+  "expected_total_time_s": 0.025,
+  "metadata_check": {
+    "artifact": "fluent_metadata_2026-06-28.md",
+    "blocker": "fluent_reference_provenance_incomplete",
+    "file_status": "present_incomplete",
+    "missing_fields": [
+      "Source document",
+      "Fluent run id",
+      "Export author",
+      "Export date",
+      "Fluent version",
+      "mesh/domain source",
+      "geometry units",
+      "material model",
+      "boundary conditions",
+      "time step",
+      "number of steps",
+      "coupling settings if applicable",
+      "export procedure",
+      "who/when/how generated"
+    ],
+    "observed_fields": {
+      "boundary conditions": "MISSING",
+      "coupling settings if applicable": "MISSING",
+      "export author": "MISSING",
+      "export date": "MISSING",
+      "export procedure": "MISSING",
+      "fluent run id": "MISSING",
+      "fluent version": "MISSING",
+      "geometry units": "MISSING",
+      "material model": "MISSING",
+      "mesh/domain source": "MISSING",
+      "number of steps": "MISSING",
+      "source document": "MISSING",
+      "time step": "MISSING",
+      "who/when/how generated": "MISSING"
+    },
+    "provenance_status": "incomplete",
+    "required_fields": [
+      "Source document",
+      "Fluent run id",
+      "Export author",
+      "Export date",
+      "Fluent version",
+      "mesh/domain source",
+      "geometry units",
+      "material model",
+      "boundary conditions",
+      "time step",
+      "number of steps",
+      "coupling settings if applicable",
+      "export procedure",
+      "who/when/how generated"
+    ],
+    "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_metadata_2026-06-28.md",
+    "source_provenance": {
+      "author": "",
+      "date": "",
+      "document": "",
+      "run_id": "",
+      "status": "missing"
+    }
+  },
+  "missing_reference_metrics": [
+    "tip_displacement_m",
+    "max_displacement_m",
+    "force_z_N",
+    "flow_rate_m3s",
+    "pressure_range_pa"
+  ],
+  "purpose": "fluent_reference_collection_matrix",
+  "reference_metrics": {
+    "flow_rate_m3s": {
+      "source": "not_collected",
+      "status": "missing",
+      "value": null
+    },
+    "force_z_N": {
+      "source": "not_collected",
+      "status": "missing",
+      "value": null
+    },
+    "max_displacement_m": {
+      "source": "not_collected",
+      "status": "missing",
+      "value": null
+    },
+    "pressure_range_pa": {
+      "source": "not_collected",
+      "status": "missing",
+      "value": null
+    },
+    "tip_displacement_m": {
+      "source": "not_collected",
+      "status": "missing",
+      "value": null
+    }
+  },
+  "rows": [
+    {
+      "artifact": "fluent_tip_displacement_history.csv",
+      "blocker": "fluent_displacement_reference_missing",
+      "file_status": "schema_only",
+      "final_step_status": "missing_final_step",
+      "header_status": "passed",
+      "metric_group": "displacement",
+      "metric_status": "missing",
+      "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_tip_displacement_history.csv"
+    },
+    {
+      "artifact": "fluent_force_history.csv",
+      "blocker": "fluent_force_reference_missing",
+      "file_status": "schema_only",
+      "final_step_status": "missing_final_step",
+      "header_status": "passed",
+      "metric_group": "force",
+      "metric_status": "missing",
+      "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_force_history.csv"
+    },
+    {
+      "artifact": "fluent_flow_balance_history.csv",
+      "blocker": "fluent_flow_reference_missing",
+      "file_status": "schema_only",
+      "final_step_status": "missing_final_step",
+      "header_status": "passed",
+      "metric_group": "flow",
+      "metric_status": "missing",
+      "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_flow_balance_history.csv"
+    },
+    {
+      "artifact": "fluent_pressure_summary_history.csv",
+      "blocker": "fluent_pressure_reference_missing",
+      "file_status": "schema_only",
+      "final_step_status": "missing_final_step",
+      "header_status": "passed",
+      "metric_group": "pressure",
+      "metric_status": "missing",
+      "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_pressure_summary_history.csv"
+    },
+    {
+      "artifact": "fluent_metadata_2026-06-28.md",
+      "blocker": "fluent_reference_provenance_incomplete",
+      "file_status": "present_incomplete",
+      "final_step_status": "not_applicable",
+      "header_status": "not_applicable",
+      "metric_group": "provenance",
+      "metric_status": "incomplete",
+      "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_metadata_2026-06-28.md"
+    }
+  ],
+  "source_checks": [
+    {
+      "artifact": "fluent_tip_displacement_history.csv",
+      "blocker": "fluent_displacement_reference_missing",
+      "exists": true,
+      "file_status": "schema_only",
+      "final_step_status": "missing_final_step",
+      "header_status": "passed",
+      "metric_group": "displacement",
+      "metric_status": "missing",
+      "observed_columns": [
+        "step",
+        "time_s",
+        "tip_displacement_x_m",
+        "tip_displacement_y_m",
+        "tip_displacement_z_m",
+        "tip_displacement_norm_m",
+        "max_displacement_m",
+        "source"
+      ],
+      "reference_values": {},
+      "required_columns": [
+        "step",
+        "time_s",
+        "tip_displacement_x_m",
+        "tip_displacement_y_m",
+        "tip_displacement_z_m",
+        "tip_displacement_norm_m",
+        "max_displacement_m",
+        "source"
+      ],
+      "row_count": 0,
+      "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_tip_displacement_history.csv"
+    },
+    {
+      "artifact": "fluent_force_history.csv",
+      "blocker": "fluent_force_reference_missing",
+      "exists": true,
+      "file_status": "schema_only",
+      "final_step_status": "missing_final_step",
+      "header_status": "passed",
+      "metric_group": "force",
+      "metric_status": "missing",
+      "observed_columns": [
+        "step",
+        "time_s",
+        "force_x_N",
+        "force_y_N",
+        "force_z_N",
+        "primary_force_z_N",
+        "secondary_force_z_N",
+        "source"
+      ],
+      "reference_values": {},
+      "required_columns": [
+        "step",
+        "time_s",
+        "force_x_N",
+        "force_y_N",
+        "force_z_N",
+        "primary_force_z_N",
+        "secondary_force_z_N",
+        "source"
+      ],
+      "row_count": 0,
+      "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_force_history.csv"
+    },
+    {
+      "artifact": "fluent_flow_balance_history.csv",
+      "blocker": "fluent_flow_reference_missing",
+      "exists": true,
+      "file_status": "schema_only",
+      "final_step_status": "missing_final_step",
+      "header_status": "passed",
+      "metric_group": "flow",
+      "metric_status": "missing",
+      "observed_columns": [
+        "step",
+        "time_s",
+        "inlet_flow_rate_m3s",
+        "outlet_flow_rate_m3s",
+        "pressure_outlet_flux_m3s",
+        "velocity_outlet_flux_m3s",
+        "source"
+      ],
+      "reference_values": {},
+      "required_columns": [
+        "step",
+        "time_s",
+        "inlet_flow_rate_m3s",
+        "outlet_flow_rate_m3s",
+        "pressure_outlet_flux_m3s",
+        "velocity_outlet_flux_m3s",
+        "source"
+      ],
+      "row_count": 0,
+      "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_flow_balance_history.csv"
+    },
+    {
+      "artifact": "fluent_pressure_summary_history.csv",
+      "blocker": "fluent_pressure_reference_missing",
+      "exists": true,
+      "file_status": "schema_only",
+      "final_step_status": "missing_final_step",
+      "header_status": "passed",
+      "metric_group": "pressure",
+      "metric_status": "missing",
+      "observed_columns": [
+        "step",
+        "time_s",
+        "pressure_min_pa",
+        "pressure_max_pa",
+        "pressure_range_pa",
+        "source"
+      ],
+      "reference_values": {},
+      "required_columns": [
+        "step",
+        "time_s",
+        "pressure_min_pa",
+        "pressure_max_pa",
+        "pressure_range_pa",
+        "source"
+      ],
+      "row_count": 0,
+      "source_path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/fluent_pressure_summary_history.csv"
+    }
+  ],
+  "source_exports_root": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports",
+  "source_script": "validation_runs/ansys_vertical_flap_fsi/scripts/run_fluent_reference_collection_validation.py"
+}
