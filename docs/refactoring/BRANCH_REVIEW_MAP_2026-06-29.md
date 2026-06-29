@@ -5,6 +5,7 @@ Branch: `solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
 ## Review Navigation
 
 - Merge checklist: `docs/refactoring/ANSYS_VERTICAL_FLAP_BRANCH_MERGE_CHECKLIST_2026-06-29.md`
+- PR handoff: `docs/refactoring/ANSYS_VERTICAL_FLAP_PR_HANDOFF_2026-06-29.md`
 - PR split strategy: `docs/refactoring/ANSYS_VERTICAL_FLAP_PR_SPLIT_STRATEGY_2026-06-29.md`
 - Real Fluent import gate: `docs/validation/ANSYS_VERTICAL_FLAP_REAL_FLUENT_IMPORT_GATE_2026-06-29.md`
 - Collection artifact manifest: `validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/ARTIFACT_MANIFEST.json`
