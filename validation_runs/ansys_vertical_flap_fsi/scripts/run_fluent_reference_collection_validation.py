@@ -89,6 +89,11 @@ DISALLOWED_METADATA_PROVENANCE_TERMS = (
     "not fluent truth",
     "validation_runs",
     "not_collected",
+    "public tutorial",
+    "web tutorial",
+    "tutorial page",
+    "web contour",
+    "official web baseline",
 )
 
 METRIC_SPECS = [
