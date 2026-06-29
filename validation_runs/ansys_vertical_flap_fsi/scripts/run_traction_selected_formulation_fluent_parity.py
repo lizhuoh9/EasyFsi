@@ -25,6 +25,7 @@ MATRIX_JSON = OUTPUT_DIR / "traction_selected_formulation_fluent_parity_matrix.j
 MATRIX_CSV = OUTPUT_DIR / "traction_selected_formulation_fluent_parity_matrix.csv"
 HISTORY_JSON = OUTPUT_DIR / "traction_selected_formulation_fluent_parity_history.json"
 SUMMARY_MD = OUTPUT_DIR / "traction_selected_formulation_fluent_parity_summary.md"
+ARTIFACT_MANIFEST_JSON = OUTPUT_DIR / "ARTIFACT_MANIFEST.json"
 CHECKSUMS_PATH = OUTPUT_DIR / "CHECKSUMS.sha256"
 SOURCE_STEP50_MATRIX_JSON = (
     ROOT
@@ -178,6 +179,7 @@ def run() -> dict[str, Any]:
         },
     )
     SUMMARY_MD.write_text(_summary_markdown(payload), encoding="utf-8")
+    _write_json(ARTIFACT_MANIFEST_JSON, _artifact_manifest(payload))
     _write_checksums(OUTPUT_DIR)
     return payload
 
@@ -852,11 +854,51 @@ def _summary_markdown(payload: Mapping[str, Any]) -> str:
             f"- Matrix CSV: `{_repo_relative(MATRIX_CSV)}`",
             f"- History JSON: `{_repo_relative(HISTORY_JSON)}`",
             f"- Scenario diagnostics: `{_repo_relative(SCENARIO_DIAGNOSTICS_DIR)}`",
+            f"- Artifact manifest: `{_repo_relative(ARTIFACT_MANIFEST_JSON)}`",
             f"- Checksums: `{_repo_relative(CHECKSUMS_PATH)}`",
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def _artifact_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "manifest_schema_version": "validation_artifact_manifest_v1",
+        "artifact_group": "selected_formulation_fluent_parity",
+        "source_script": SOURCE_SCRIPT,
+        "generated_from_commit": "unknown",
+        "inputs": {
+            "source_step50_matrix": _repo_relative(SOURCE_STEP50_MATRIX_JSON),
+            "source_step50_history": _repo_relative(SOURCE_STEP50_HISTORY_JSON),
+            "active_contract_manifest": _repo_relative(
+                ACTIVE_CONTRACT_MANIFEST_JSON
+            ),
+            "fluent_reference_contract": str(
+                payload.get("fluent_reference_contract", "")
+            ),
+        },
+        "outputs": {
+            "matrix_json": _manifest_output(MATRIX_JSON),
+            "matrix_csv": _manifest_output(MATRIX_CSV),
+            "history_json": _manifest_output(HISTORY_JSON),
+            "summary_md": _manifest_output(SUMMARY_MD),
+        },
+        "claim_policy": {
+            "fluent_parity_claimed": bool(payload.get("fluent_parity_claimed")),
+            "candidate_status": str(payload.get("candidate_status", "")),
+            "reference_contract_status": str(
+                payload.get("reference_contract_status", "")
+            ),
+        },
+    }
+
+
+def _manifest_output(path: Path) -> dict[str, str]:
+    return {
+        "path": _repo_relative(path),
+        "sha256": _sha256_file(path),
+    }
 
 
 def _read_json(path: Path) -> Any:

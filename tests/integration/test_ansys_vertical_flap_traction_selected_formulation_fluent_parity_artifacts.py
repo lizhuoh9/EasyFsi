@@ -30,6 +30,7 @@ MATRIX_JSON = DIAG_ROOT / "traction_selected_formulation_fluent_parity_matrix.js
 MATRIX_CSV = DIAG_ROOT / "traction_selected_formulation_fluent_parity_matrix.csv"
 HISTORY_JSON = DIAG_ROOT / "traction_selected_formulation_fluent_parity_history.json"
 SUMMARY_MD = DIAG_ROOT / "traction_selected_formulation_fluent_parity_summary.md"
+ARTIFACT_MANIFEST = DIAG_ROOT / "ARTIFACT_MANIFEST.json"
 CHECKSUMS = DIAG_ROOT / "CHECKSUMS.sha256"
 
 EXPECTED_SOURCE_SCRIPT = (
@@ -49,7 +50,14 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
     unittest.TestCase
 ):
     def test_fluent_parity_matrix_records_reference_incomplete_boundary(self):
-        for path in (MATRIX_JSON, MATRIX_CSV, HISTORY_JSON, SUMMARY_MD, CHECKSUMS):
+        for path in (
+            MATRIX_JSON,
+            MATRIX_CSV,
+            HISTORY_JSON,
+            SUMMARY_MD,
+            ARTIFACT_MANIFEST,
+            CHECKSUMS,
+        ):
             self.assertTrue(path.exists(), path)
 
         payload = _read_json(MATRIX_JSON)
@@ -249,6 +257,7 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
         )
         self.assertIn("selected-formulation Fluent parity", summary)
         self.assertIn("does not claim Fluent parity", summary)
+        self.assertIn("Artifact manifest", summary)
         self.assertNotIn("fluent_parity_validated", summary)
         self.assertNotIn("Fluent parity validated", summary)
         self.assertIn(EXPECTED_CANDIDATE_STATUS, summary)
@@ -265,6 +274,7 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
             MATRIX_CSV.name,
             HISTORY_JSON.name,
             SUMMARY_MD.name,
+            ARTIFACT_MANIFEST.name,
         ):
             self.assertIn(artifact, checksum_rows)
             self.assertEqual(checksum_rows[artifact], _sha256_file(DIAG_ROOT / artifact))
@@ -277,6 +287,31 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
                 checksum_rows[diagnostics_rel.as_posix()],
                 _sha256_file(DIAG_ROOT / diagnostics_rel),
             )
+
+        manifest = _read_json(ARTIFACT_MANIFEST)
+        self.assertEqual(
+            manifest["manifest_schema_version"],
+            "validation_artifact_manifest_v1",
+        )
+        self.assertEqual(
+            manifest["artifact_group"],
+            "selected_formulation_fluent_parity",
+        )
+        self.assertFalse(Path(manifest["source_script"]).is_absolute())
+        self.assertFalse(manifest["claim_policy"]["fluent_parity_claimed"])
+        self.assertEqual(
+            manifest["claim_policy"]["candidate_status"],
+            EXPECTED_CANDIDATE_STATUS,
+        )
+        self.assertEqual(
+            manifest["claim_policy"]["reference_contract_status"],
+            "fluent_reference_incomplete",
+        )
+        for output in manifest["outputs"].values():
+            output_path = Path(output["path"])
+            self.assertFalse(output_path.is_absolute())
+            self.assertEqual(output["sha256"], _sha256_file(output_path))
+            self.assertIn(output_path.relative_to(DIAG_ROOT).as_posix(), checksum_rows)
 
 
 def _read_json(path: Path):

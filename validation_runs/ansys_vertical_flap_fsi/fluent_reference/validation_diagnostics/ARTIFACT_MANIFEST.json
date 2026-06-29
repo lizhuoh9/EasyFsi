@@ -1,0 +1,33 @@
+{
+  "artifact_group": "fluent_reference_collection",
+  "claim_policy": {
+    "fluent_parity_claimed": false,
+    "reason": "reference incomplete"
+  },
+  "generated_from_commit": "unknown",
+  "inputs": {
+    "current_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
+    "public_tutorial_evidence_map": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/public_tutorial_evidence_map.json",
+    "source_exports_root": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports"
+  },
+  "manifest_schema_version": "validation_artifact_manifest_v1",
+  "outputs": {
+    "candidate_contract": {
+      "path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_candidate_contract.json",
+      "sha256": "dc6aefe0b37721b94ca122a94c90696f145974a5a4888905ba7b745fb4610737"
+    },
+    "matrix_csv": {
+      "path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_matrix.csv",
+      "sha256": "55977b8551546bacd42792c716d20fe170c13f6e5405088dc9f5d59f579a5fbc"
+    },
+    "matrix_json": {
+      "path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_matrix.json",
+      "sha256": "3301335a963aeb1bb1c84bd3da520e65d628e07ef737427662d8f8a2aaf0d781"
+    },
+    "summary_md": {
+      "path": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_summary.md",
+      "sha256": "ec81424cba3251bc78b9e0f857d57ea14d36583b5e3c58c795ac8be9574ecb6d"
+    }
+  },
+  "source_script": "validation_runs/ansys_vertical_flap_fsi/scripts/run_fluent_reference_collection_validation.py"
+}

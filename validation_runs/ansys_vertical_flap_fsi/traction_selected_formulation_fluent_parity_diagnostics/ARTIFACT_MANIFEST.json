@@ -1,0 +1,35 @@
+{
+  "artifact_group": "selected_formulation_fluent_parity",
+  "claim_policy": {
+    "candidate_status": "fluent_parity_blocked_reference_incomplete",
+    "fluent_parity_claimed": false,
+    "reference_contract_status": "fluent_reference_incomplete"
+  },
+  "generated_from_commit": "unknown",
+  "inputs": {
+    "active_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
+    "fluent_reference_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",
+    "source_step50_history": "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_coupled_step50_diagnostics/traction_selected_formulation_coupled_step50_history.json",
+    "source_step50_matrix": "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_coupled_step50_diagnostics/traction_selected_formulation_coupled_step50_matrix.json"
+  },
+  "manifest_schema_version": "validation_artifact_manifest_v1",
+  "outputs": {
+    "history_json": {
+      "path": "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/traction_selected_formulation_fluent_parity_history.json",
+      "sha256": "2612e18759f42d303ca9cd94a735b084c3f3ccb1c665ec5b77b87383aaec0da7"
+    },
+    "matrix_csv": {
+      "path": "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/traction_selected_formulation_fluent_parity_matrix.csv",
+      "sha256": "0159bd119b72bacddcea0af835732bc502308f89c57bcd0a4d76765c08591ab0"
+    },
+    "matrix_json": {
+      "path": "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/traction_selected_formulation_fluent_parity_matrix.json",
+      "sha256": "450853adfec4ca0314725d561dfe738f2b41856903466ff8df9c0d9df92a58a4"
+    },
+    "summary_md": {
+      "path": "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/traction_selected_formulation_fluent_parity_summary.md",
+      "sha256": "ed34eee995454d45fe0abde018a2fdaa87db48f5308d925a7854bc675c0ab971"
+    }
+  },
+  "source_script": "validation_runs/ansys_vertical_flap_fsi/scripts/run_traction_selected_formulation_fluent_parity.py"
+}

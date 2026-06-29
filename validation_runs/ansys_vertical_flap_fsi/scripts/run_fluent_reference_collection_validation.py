@@ -32,6 +32,7 @@ MATRIX_JSON = OUTPUT_DIR / "fluent_reference_collection_matrix.json"
 MATRIX_CSV = OUTPUT_DIR / "fluent_reference_collection_matrix.csv"
 SUMMARY_MD = OUTPUT_DIR / "fluent_reference_collection_summary.md"
 CANDIDATE_CONTRACT_JSON = OUTPUT_DIR / "fluent_reference_collection_candidate_contract.json"
+ARTIFACT_MANIFEST_JSON = OUTPUT_DIR / "ARTIFACT_MANIFEST.json"
 CHECKSUMS_PATH = OUTPUT_DIR / "CHECKSUMS.sha256"
 CURRENT_CONTRACT_JSON = REFERENCE_ROOT / "fluent_reference_contract_2026-06-27.json"
 ACTIVE_CONTRACT_MANIFEST_JSON = (
@@ -169,6 +170,70 @@ CSV_COLUMNS = [
 
 
 def run() -> dict[str, Any]:
+    return _run()
+
+
+def run_with_paths(
+    *,
+    source_exports_root: Path,
+    current_contract_json: Path,
+    output_dir: Path,
+    active_manifest_json: Path,
+) -> dict[str, Any]:
+    original = {
+        "SOURCE_EXPORTS_ROOT": SOURCE_EXPORTS_ROOT,
+        "PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON": PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON,
+        "OUTPUT_DIR": OUTPUT_DIR,
+        "MATRIX_JSON": MATRIX_JSON,
+        "MATRIX_CSV": MATRIX_CSV,
+        "SUMMARY_MD": SUMMARY_MD,
+        "CANDIDATE_CONTRACT_JSON": CANDIDATE_CONTRACT_JSON,
+        "ARTIFACT_MANIFEST_JSON": ARTIFACT_MANIFEST_JSON,
+        "CHECKSUMS_PATH": CHECKSUMS_PATH,
+        "CURRENT_CONTRACT_JSON": CURRENT_CONTRACT_JSON,
+        "ACTIVE_CONTRACT_MANIFEST_JSON": ACTIVE_CONTRACT_MANIFEST_JSON,
+    }
+    try:
+        _set_paths(
+            source_exports_root=source_exports_root,
+            current_contract_json=current_contract_json,
+            output_dir=output_dir,
+            active_manifest_json=active_manifest_json,
+        )
+        return _run()
+    finally:
+        globals().update(original)
+
+
+def _set_paths(
+    *,
+    source_exports_root: Path,
+    current_contract_json: Path,
+    output_dir: Path,
+    active_manifest_json: Path,
+) -> None:
+    globals().update(
+        {
+            "SOURCE_EXPORTS_ROOT": source_exports_root,
+            "PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON": (
+                source_exports_root / "public_tutorial_evidence_map.json"
+            ),
+            "OUTPUT_DIR": output_dir,
+            "MATRIX_JSON": output_dir / "fluent_reference_collection_matrix.json",
+            "MATRIX_CSV": output_dir / "fluent_reference_collection_matrix.csv",
+            "SUMMARY_MD": output_dir / "fluent_reference_collection_summary.md",
+            "CANDIDATE_CONTRACT_JSON": (
+                output_dir / "fluent_reference_collection_candidate_contract.json"
+            ),
+            "ARTIFACT_MANIFEST_JSON": output_dir / "ARTIFACT_MANIFEST.json",
+            "CHECKSUMS_PATH": output_dir / "CHECKSUMS.sha256",
+            "CURRENT_CONTRACT_JSON": current_contract_json,
+            "ACTIVE_CONTRACT_MANIFEST_JSON": active_manifest_json,
+        }
+    )
+
+
+def _run() -> dict[str, Any]:
     _prepare_output_dir()
     current_contract = _read_json(CURRENT_CONTRACT_JSON)
     source_checks = [_source_check(spec) for spec in METRIC_SPECS]
@@ -210,6 +275,7 @@ def run() -> dict[str, Any]:
     _write_json(MATRIX_JSON, payload)
     _write_csv(MATRIX_CSV, rows)
     SUMMARY_MD.write_text(_summary_markdown(payload), encoding="utf-8")
+    _write_json(ARTIFACT_MANIFEST_JSON, _artifact_manifest(payload))
     _write_checksums(OUTPUT_DIR)
     return payload
 
@@ -620,11 +686,52 @@ def _summary_markdown(payload: Mapping[str, Any]) -> str:
                 "- Public tutorial evidence map: "
                 f"`{_repo_relative(PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON)}`"
             ),
+            f"- Artifact manifest: `{_repo_relative(ARTIFACT_MANIFEST_JSON)}`",
             f"- Checksums: `{_repo_relative(CHECKSUMS_PATH)}`",
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def _artifact_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
+    reference_complete = (
+        payload.get("candidate_contract_status") == CONTRACT_COMPLETE
+    )
+    return {
+        "manifest_schema_version": "validation_artifact_manifest_v1",
+        "artifact_group": "fluent_reference_collection",
+        "source_script": SOURCE_SCRIPT,
+        "generated_from_commit": "unknown",
+        "inputs": {
+            "current_contract": _repo_relative(CURRENT_CONTRACT_JSON),
+            "source_exports_root": _repo_relative(SOURCE_EXPORTS_ROOT),
+            "public_tutorial_evidence_map": _repo_relative(
+                PUBLIC_TUTORIAL_EVIDENCE_MAP_JSON
+            ),
+        },
+        "outputs": {
+            "matrix_json": _manifest_output(MATRIX_JSON),
+            "matrix_csv": _manifest_output(MATRIX_CSV),
+            "candidate_contract": _manifest_output(CANDIDATE_CONTRACT_JSON),
+            "summary_md": _manifest_output(SUMMARY_MD),
+        },
+        "claim_policy": {
+            "fluent_parity_claimed": False,
+            "reason": (
+                "reference complete but collection does not evaluate parity"
+                if reference_complete
+                else "reference incomplete"
+            ),
+        },
+    }
+
+
+def _manifest_output(path: Path) -> dict[str, str]:
+    return {
+        "path": _repo_relative(path),
+        "sha256": _sha256_file(path),
+    }
 
 
 def _reference_values(
