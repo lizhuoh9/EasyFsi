@@ -152,6 +152,39 @@ class AnsysVerticalFlapGenericSolverArtifactTests(unittest.TestCase):
         self.assertNotIn("transition_seeded_from_anchor_artifact", summary)
         self.assertNotIn("Fluent parity validated", summary)
 
+    def test_tip_displacement_export_matches_runtime_vector(self) -> None:
+        history = _read_json(HISTORY_JSON)["history"]
+        with TIP_CSV.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), len(history))
+        exported_norms = [float(row["tip_displacement_norm_m"]) for row in rows]
+        self.assertGreater(
+            max(exported_norms),
+            0.0,
+            "tip export must not silently zero a nonzero runtime vector",
+        )
+        for export_row, history_row in zip(rows, history):
+            tip_vector = history_row["tip_mean_displacement_m"]
+            expected_norm = sum(float(value) ** 2 for value in tip_vector) ** 0.5
+
+            self.assertAlmostEqual(
+                float(export_row["tip_displacement_x_m"]),
+                float(tip_vector[0]),
+            )
+            self.assertAlmostEqual(
+                float(export_row["tip_displacement_y_m"]),
+                float(tip_vector[1]),
+            )
+            self.assertAlmostEqual(
+                float(export_row["tip_displacement_z_m"]),
+                float(tip_vector[2]),
+            )
+            self.assertAlmostEqual(
+                float(export_row["tip_displacement_norm_m"]),
+                expected_norm,
+            )
+
     def test_history_and_checksums_are_consistent(self) -> None:
         payload = _read_json(MATRIX_JSON)
         history = _read_json(HISTORY_JSON)
