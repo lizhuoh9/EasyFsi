@@ -25,6 +25,9 @@ PUBLIC_EVIDENCE = "public_tutorial_evidence_map.json"
 BLOCKER_COLLECTION_VALIDATOR_REQUIRES_COMMIT_IMPORT = (
     "collection_validator_requires_commit_import"
 )
+BLOCKER_SOURCE_EXPORTS_COMMIT_REQUIRES_COLLECTION_VALIDATOR = (
+    "source_exports_commit_requires_collection_validator"
+)
 REQUIRED_ARTIFACTS = tuple(str(spec["artifact"]) for spec in collection.METRIC_SPECS)
 REQUIRED_FILES = REQUIRED_ARTIFACTS + (REQUIRED_METADATA,)
 
@@ -80,35 +83,14 @@ def import_real_fluent_source_exports(
         input_dir,
         current_contract_json=current_contract_json,
     )
-    if run_collection_validator:
-        _validate_ready_after_staged_copy(
-            input_dir=input_dir,
-            current_contract_json=current_contract_json,
-        )
-
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    copied = _copy_required_files(input_dir=input_dir, destination_dir=destination_dir)
-    _ensure_public_evidence_map(destination_dir)
-
-    collection_payload: dict[str, Any] | None = None
-    if run_collection_validator:
-        collection_payload = collection.run_with_paths(
-            source_exports_root=destination_dir,
-            current_contract_json=current_contract_json,
-            output_dir=output_dir,
-            active_manifest_json=active_manifest_json,
-        )
-        if not _collection_ready(collection_payload):
-            summary = {
-                "ready": False,
-                "input_dir": input_dir.as_posix(),
-                "destination_dir": destination_dir.as_posix(),
-                "copied_files": copied,
-                "copied_file_count": len(copied),
-                "blockers": _collection_blockers(collection_payload),
-                "collection": collection_payload,
-            }
-            raise ImportPreflightError(summary)
+    copied, collection_payload = _commit_required_files_atomically(
+        input_dir=input_dir,
+        destination_dir=destination_dir,
+        current_contract_json=current_contract_json,
+        output_dir=output_dir,
+        active_manifest_json=active_manifest_json,
+        run_collection_validator=run_collection_validator,
+    )
 
     return {
         "ready": True,
@@ -121,35 +103,132 @@ def import_real_fluent_source_exports(
     }
 
 
-def _validate_ready_after_staged_copy(
+def _commit_required_files_atomically(
     *,
     input_dir: Path,
+    destination_dir: Path,
     current_contract_json: Path,
-) -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_root = Path(tmp)
-        staged_source_exports = tmp_root / "source_exports"
-        staged_output = tmp_root / "diagnostics"
-        staged_active_manifest = tmp_root / "active_fluent_reference_contract.json"
-        _copy_required_files(input_dir=input_dir, destination_dir=staged_source_exports)
-        _ensure_public_evidence_map(staged_source_exports)
-        payload = collection.run_with_paths(
-            source_exports_root=staged_source_exports,
-            current_contract_json=current_contract_json,
-            output_dir=staged_output,
-            active_manifest_json=staged_active_manifest,
+    output_dir: Path,
+    active_manifest_json: Path,
+    run_collection_validator: bool,
+) -> tuple[list[str], dict[str, Any] | None]:
+    destination_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination_dir.name}.staging-",
+            dir=destination_dir.parent,
         )
-        if _collection_ready(payload):
-            return
-        raise ImportPreflightError(
-            {
-                "ready": False,
-                "input_dir": input_dir.as_posix(),
-                "destination_dir": staged_source_exports.as_posix(),
-                "blockers": _collection_blockers(payload),
-                "collection": payload,
-            }
-        )
+    )
+    backup_dir: Path | None = None
+    installed_staging = False
+    copied = _destination_required_file_paths(destination_dir)
+    collection_payload: dict[str, Any] | None = None
+
+    try:
+        _copy_required_files(input_dir=input_dir, destination_dir=staging_dir)
+        _ensure_public_evidence_map(staging_dir)
+        if run_collection_validator:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_root = Path(tmp)
+                _validate_collection_ready(
+                    source_exports_root=staging_dir,
+                    input_dir=input_dir,
+                    destination_dir=staging_dir,
+                    current_contract_json=current_contract_json,
+                    output_dir=tmp_root / "diagnostics",
+                    active_manifest_json=(
+                        tmp_root / "active_fluent_reference_contract.json"
+                    ),
+                    copied_files=copied,
+                )
+
+        if destination_dir.exists():
+            backup_dir = _unique_sibling_path(destination_dir, "backup")
+            destination_dir.replace(backup_dir)
+        staging_dir.replace(destination_dir)
+        installed_staging = True
+
+        if run_collection_validator:
+            collection_payload = _validate_collection_ready(
+                source_exports_root=destination_dir,
+                input_dir=input_dir,
+                destination_dir=destination_dir,
+                current_contract_json=current_contract_json,
+                output_dir=output_dir,
+                active_manifest_json=active_manifest_json,
+                copied_files=copied,
+            )
+
+        if backup_dir is not None and backup_dir.exists():
+            _remove_path_tree(backup_dir)
+        return copied, collection_payload
+    except Exception:
+        if installed_staging:
+            _remove_path_tree(destination_dir)
+            if backup_dir is not None and backup_dir.exists():
+                backup_dir.replace(destination_dir)
+        elif (
+            backup_dir is not None
+            and backup_dir.exists()
+            and not destination_dir.exists()
+        ):
+            backup_dir.replace(destination_dir)
+        raise
+    finally:
+        if staging_dir.exists():
+            _remove_path_tree(staging_dir)
+
+
+def _validate_collection_ready(
+    *,
+    source_exports_root: Path,
+    input_dir: Path,
+    destination_dir: Path,
+    current_contract_json: Path,
+    output_dir: Path,
+    active_manifest_json: Path,
+    copied_files: list[str],
+) -> dict[str, Any]:
+    payload = collection.run_with_paths(
+        source_exports_root=source_exports_root,
+        current_contract_json=current_contract_json,
+        output_dir=output_dir,
+        active_manifest_json=active_manifest_json,
+    )
+    if _collection_ready(payload):
+        return payload
+    raise ImportPreflightError(
+        {
+            "ready": False,
+            "input_dir": input_dir.as_posix(),
+            "destination_dir": destination_dir.as_posix(),
+            "copied_files": copied_files,
+            "copied_file_count": len(copied_files),
+            "blockers": _collection_blockers(payload),
+            "collection": payload,
+        }
+    )
+
+
+def _destination_required_file_paths(destination_dir: Path) -> list[str]:
+    return [(destination_dir / name).as_posix() for name in REQUIRED_FILES]
+
+
+def _unique_sibling_path(path: Path, suffix: str) -> Path:
+    for index in range(1000):
+        candidate = path.parent / f".{path.name}.{suffix}-{index}"
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"could not allocate sibling {suffix} path for {path}")
+
+
+def _remove_path_tree(path: Path) -> None:
+    if not path.exists():
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
 
 
 def _preflight_summary(
@@ -286,6 +365,28 @@ def _cli_invalid_preflight_option_summary(
     }
 
 
+def _cli_invalid_commit_import_option_summary(
+    *,
+    input_dir: Path,
+    destination_dir: Path,
+    blockers: Iterable[str],
+) -> dict[str, Any]:
+    return {
+        "mode": "commit_import",
+        "ready": False,
+        "input_dir": Path(input_dir).as_posix(),
+        "destination_dir": Path(destination_dir).as_posix(),
+        "blockers": list(blockers),
+        "copied_files": [],
+        "copied_file_count": 0,
+        "collection": None,
+    }
+
+
+def _same_resolved_path(left: Path, right: Path) -> bool:
+    return Path(left).resolve() == Path(right).resolve()
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -323,6 +424,19 @@ def main(argv: Iterable[str] | None = None) -> int:
             input_dir=args.input_dir,
             destination_dir=args.destination_dir,
             blockers=[BLOCKER_COLLECTION_VALIDATOR_REQUIRES_COMMIT_IMPORT],
+        )
+        print(json.dumps(summary, indent=2, sort_keys=True), file=sys.stderr)
+        return 1
+
+    if (
+        args.commit_import
+        and not args.run_collection_validator
+        and _same_resolved_path(args.destination_dir, SOURCE_EXPORTS_ROOT)
+    ):
+        summary = _cli_invalid_commit_import_option_summary(
+            input_dir=args.input_dir,
+            destination_dir=args.destination_dir,
+            blockers=[BLOCKER_SOURCE_EXPORTS_COMMIT_REQUIRES_COLLECTION_VALIDATOR],
         )
         print(json.dumps(summary, indent=2, sort_keys=True), file=sys.stderr)
         return 1
