@@ -74,9 +74,22 @@ BLOCKER_FORCE = "fluent_force_reference_missing"
 BLOCKER_FLOW = "fluent_flow_reference_missing"
 BLOCKER_PRESSURE = "fluent_pressure_reference_missing"
 BLOCKER_PROVENANCE = "fluent_reference_provenance_incomplete"
+BLOCKER_METADATA_DISALLOWED_PROVENANCE = (
+    "fluent_reference_metadata_disallowed_provenance"
+)
 BLOCKER_TOLERANCES = "fluent_reference_tolerances_incomplete"
 
 MISSING_VALUES = {"", "missing", "todo", "tbd", "n/a", "na", "null", "none"}
+DISALLOWED_METADATA_PROVENANCE_TERMS = (
+    "easyfsi",
+    "hibm-mpm",
+    "synthetic",
+    "fixture",
+    "placeholder",
+    "not fluent truth",
+    "validation_runs",
+    "not_collected",
+)
 
 METRIC_SPECS = [
     {
@@ -344,6 +357,8 @@ def _metadata_check() -> dict[str, Any]:
             "required_fields": REQUIRED_METADATA_FIELDS,
             "observed_fields": {},
             "missing_fields": REQUIRED_METADATA_FIELDS,
+            "semantic_mismatches": [],
+            "disallowed_provenance": [],
             "source_provenance": _missing_source_provenance(),
         }
 
@@ -354,17 +369,25 @@ def _metadata_check() -> dict[str, Any]:
         if _is_missing(observed.get(_normalize_field(field), ""))
     ]
     semantic_mismatches = _metadata_semantic_mismatches(observed, missing)
-    complete = not missing and not semantic_mismatches
+    disallowed_provenance = (
+        [] if ALLOW_TEST_SOURCES else _metadata_disallowed_provenance(observed)
+    )
+    complete = not missing and not semantic_mismatches and not disallowed_provenance
+    blocker = _metadata_blocker(
+        complete=complete,
+        disallowed_provenance=disallowed_provenance,
+    )
     return {
         "artifact": path.name,
         "source_path": _repo_relative(path),
         "file_status": "present_complete" if complete else "present_incomplete",
         "provenance_status": "complete" if complete else "incomplete",
-        "blocker": None if complete else BLOCKER_PROVENANCE,
+        "blocker": blocker,
         "required_fields": REQUIRED_METADATA_FIELDS,
         "observed_fields": observed,
         "missing_fields": missing,
         "semantic_mismatches": semantic_mismatches,
+        "disallowed_provenance": disallowed_provenance,
         "source_provenance": (
             {
                 "document": observed[_normalize_field("Source document")],
@@ -694,8 +717,12 @@ def _real_fluent_metadata_gate(
         "source_path": str(metadata_check["source_path"]),
         "file_status": str(metadata_check["file_status"]),
         "provenance_status": str(metadata_check["provenance_status"]),
+        "blocker": metadata_check.get("blocker"),
         "missing_fields": list(metadata_check.get("missing_fields", [])),
         "semantic_mismatches": semantic_mismatches,
+        "disallowed_provenance": list(
+            metadata_check.get("disallowed_provenance", [])
+        ),
         "ready": ready,
     }
 
@@ -779,10 +806,19 @@ def _source_export_gate_detail(source_export: Mapping[str, Any]) -> str:
 def _metadata_gate_detail(metadata_gate: Mapping[str, Any]) -> str:
     missing_fields = ",".join(metadata_gate.get("missing_fields", []))
     semantic_mismatch_count = len(metadata_gate.get("semantic_mismatches", []))
+    disallowed_terms = ",".join(
+        sorted(
+            {
+                str(match.get("term", ""))
+                for match in metadata_gate.get("disallowed_provenance", [])
+            }
+        )
+    )
     return (
         f"provenance_status={metadata_gate['provenance_status']}; "
         f"missing_fields={missing_fields}; "
-        f"semantic_mismatch_count={semantic_mismatch_count}"
+        f"semantic_mismatch_count={semantic_mismatch_count}; "
+        f"disallowed_terms={disallowed_terms}"
     )
 
 
@@ -1012,8 +1048,43 @@ def _metadata_semantic_mismatches(
     return mismatches
 
 
+def _metadata_disallowed_provenance(
+    observed: Mapping[str, str],
+) -> list[dict[str, str]]:
+    matches: list[dict[str, str]] = []
+    for field, value in observed.items():
+        normalized = _normalize_provenance_text(value)
+        for term in DISALLOWED_METADATA_PROVENANCE_TERMS:
+            if term not in normalized:
+                continue
+            matches.append(
+                {
+                    "field": field,
+                    "term": term,
+                    "value": str(value),
+                }
+            )
+    return matches
+
+
+def _metadata_blocker(
+    *,
+    complete: bool,
+    disallowed_provenance: Iterable[Mapping[str, str]],
+) -> str | None:
+    if complete:
+        return None
+    if list(disallowed_provenance):
+        return BLOCKER_METADATA_DISALLOWED_PROVENANCE
+    return BLOCKER_PROVENANCE
+
+
 def _normalize_field(value: str) -> str:
     return " ".join(value.lower().split())
+
+
+def _normalize_provenance_text(value: str) -> str:
+    return " ".join(value.strip().lower().replace("\\", "/").split())
 
 
 def _is_missing(value: Any) -> bool:
@@ -1130,6 +1201,9 @@ def _blocker_detail(blocker: str) -> str:
         BLOCKER_FLOW: "Fluent flow/outlet source export is missing final-step values",
         BLOCKER_PRESSURE: "Fluent pressure source export is missing final-step values",
         BLOCKER_PROVENANCE: "Fluent source provenance metadata is incomplete",
+        BLOCKER_METADATA_DISALLOWED_PROVENANCE: (
+            "Fluent metadata points at non-Fluent source provenance"
+        ),
         "fluent_reference_comparison_metadata_incomplete": (
             "Fluent displacement/sign/pressure convention metadata is incomplete"
         ),
