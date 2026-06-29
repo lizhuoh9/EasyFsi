@@ -83,6 +83,7 @@ jobs:
             tests\integration\test_ansys_vertical_flap_fluent_source_export_schema.py `
             tests\integration\test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic.py `
             tests\tools\test_validation_artifact_hygiene.py `
+            tests\tools\test_ansys_vertical_flap_validation_package.py `
             tests\solvers\test_pressure_sample_pair_provider_contract.py
 
       - name: Run runtime pressure-pair and generic architecture contracts
@@ -396,6 +397,13 @@ jobs:
         run: |
           python -m unittest `
             tests.tools.test_validation_artifact_hygiene `
+            -v
+
+      - name: Run ANSYS vertical-flap validation package migration test
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.tools.test_ansys_vertical_flap_validation_package `
             -v
 
       - name: Run validation artifact hygiene checker

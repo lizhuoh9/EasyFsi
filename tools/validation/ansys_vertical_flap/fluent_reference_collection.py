@@ -9,8 +9,6 @@ import shutil
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-import sys
-
 from .fluent_reference_contract_schema import (
     EXPECTED_METRIC_UNITS,
     validate_fluent_reference_contract,
@@ -1029,20 +1027,3 @@ def _float_value(value: Any) -> float | None:
 
 def _float_equals(lhs: float | None, rhs: float) -> bool:
     return lhs is not None and abs(lhs - rhs) <= 1.0e-12
-
-
-def main() -> int:
-    try:
-        payload = run()
-    except Exception as exc:  # pragma: no cover - command-line failure path
-        print(f"[fluent_reference_collection] ERROR: {exc}", file=sys.stderr)
-        return 1
-    print(
-        "[fluent_reference_collection] wrote "
-        f"{payload['candidate_status']} to {OUTPUT_DIR}"
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

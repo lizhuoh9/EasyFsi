@@ -9,8 +9,6 @@ import shutil
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-import sys
-
 from .fluent_reference_contract_schema import validate_fluent_reference_contract
 
 
@@ -1095,20 +1093,3 @@ def _repo_relative(path: Path | str) -> str:
 
 def _sha256_file(path: Path | str) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
-
-def main() -> int:
-    try:
-        payload = run()
-    except Exception as exc:  # pragma: no cover - command-line failure path
-        print(f"[traction_selected_formulation_fluent_parity] ERROR: {exc}", file=sys.stderr)
-        return 1
-    print(
-        "[traction_selected_formulation_fluent_parity] wrote "
-        f"{payload['candidate_status']} to {OUTPUT_DIR}"
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

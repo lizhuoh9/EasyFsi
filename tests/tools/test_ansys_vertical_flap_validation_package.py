@@ -1,13 +1,41 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
+import io
+import sys
 import unittest
 from pathlib import Path
 
 
 SCRIPT_ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi" / "scripts"
 PACKAGE_PREFIX = "tools.validation.ansys_vertical_flap"
+PACKAGE_ROOT = Path("tools") / "validation" / "ansys_vertical_flap"
+
+PACKAGE_MODULES = (
+    PACKAGE_ROOT / "fluent_reference_contract_schema.py",
+    PACKAGE_ROOT / "fluent_source_export_schema.py",
+    PACKAGE_ROOT / "fluent_reference_collection.py",
+    PACKAGE_ROOT / "fluent_parity.py",
+    PACKAGE_ROOT / "fluent_artifact_policy.py",
+    PACKAGE_ROOT / "validation_artifact_hygiene.py",
+    PACKAGE_ROOT / "policy_report_writer.py",
+)
+
+CLI_WRAPPERS = (
+    SCRIPT_ROOT / "check_fluent_artifact_policy.py",
+    SCRIPT_ROOT / "check_validation_artifact_hygiene.py",
+    SCRIPT_ROOT / "run_fluent_reference_collection_validation.py",
+    SCRIPT_ROOT / "run_traction_selected_formulation_fluent_parity.py",
+    Path("scripts") / "check_validation_artifact_hygiene.py",
+)
+
+ARGPARSE_WRAPPERS = (
+    SCRIPT_ROOT / "check_fluent_artifact_policy.py",
+    SCRIPT_ROOT / "check_validation_artifact_hygiene.py",
+    Path("scripts") / "check_validation_artifact_hygiene.py",
+)
 
 
 def _load_module(name: str, path: Path):
@@ -108,6 +136,46 @@ class AnsysVerticalFlapValidationPackageTests(unittest.TestCase):
                 text = path.read_text(encoding="utf-8")
                 for definition in definitions:
                     self.assertNotIn(definition, text)
+
+    def test_package_modules_do_not_own_cli_entrypoints(self):
+        for path in PACKAGE_MODULES:
+            with self.subTest(path=path.as_posix()):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("def main(", text)
+                self.assertNotIn('if __name__ == "__main__"', text)
+
+    def test_package_modules_do_not_own_argparse_boundaries(self):
+        for path in (
+            PACKAGE_ROOT / "fluent_artifact_policy.py",
+            PACKAGE_ROOT / "validation_artifact_hygiene.py",
+        ):
+            with self.subTest(path=path.as_posix()):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("argparse.ArgumentParser", text)
+
+    def test_cli_wrappers_own_cli_entrypoints(self):
+        for path in CLI_WRAPPERS:
+            with self.subTest(path=path.as_posix()):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("def main(", text)
+
+    def test_argparse_wrappers_own_argparse_boundaries(self):
+        for path in ARGPARSE_WRAPPERS:
+            with self.subTest(path=path.as_posix()):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("argparse.ArgumentParser", text)
+
+    def test_policy_and_hygiene_wrapper_mains_preserve_success_exit(self):
+        for path in ARGPARSE_WRAPPERS:
+            with self.subTest(path=path.as_posix()):
+                module = _load_module(path.stem, path)
+                previous_argv = sys.argv[:]
+                try:
+                    sys.argv = [path.as_posix()]
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(module.main(), 0)
+                finally:
+                    sys.argv = previous_argv
 
 
 if __name__ == "__main__":

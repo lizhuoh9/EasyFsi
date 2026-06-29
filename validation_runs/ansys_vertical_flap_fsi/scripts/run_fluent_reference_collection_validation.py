@@ -16,5 +16,18 @@ def __getattr__(name: str):
     return getattr(_impl, name)
 
 
+def main() -> int:
+    try:
+        payload = _impl.run()
+    except Exception as exc:  # pragma: no cover - command-line failure path
+        print(f"[fluent_reference_collection] ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(
+        "[fluent_reference_collection] wrote "
+        f"{payload['candidate_status']} to {_impl.OUTPUT_DIR}"
+    )
+    return 0
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

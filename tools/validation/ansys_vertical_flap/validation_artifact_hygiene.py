@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import re
-import sys
 from pathlib import Path
 from typing import Any, Iterable
-
-from .policy_report_writer import write_json_report
-
 
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
 DEFAULT_ROOTS = (
@@ -159,23 +154,3 @@ def _add_violation(
             "detail": detail,
         }
     )
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--write-report",
-        type=Path,
-        help="Optional path to write the checker JSON report.",
-    )
-    args = parser.parse_args()
-
-    result = check_validation_artifact_hygiene()
-    if args.write_report is not None:
-        write_json_report(args.write_report, result)
-    print(json.dumps(result, indent=2, sort_keys=True))
-    return 0 if result["status"] == "passed" else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
