@@ -22,6 +22,38 @@ FLUENT_SOURCE = (
     "ANSYS Fluent 2025 R1 two-way FSI vertical flap run "
     "fluent-run-2026-07-01 report export"
 )
+PREFLIGHT_JSON_KEYS = {
+    "mode",
+    "ready",
+    "input_dir",
+    "destination_dir",
+    "required_files",
+    "blockers",
+    "source_checks",
+    "metadata_check",
+    "real_fluent_import_gate",
+    "copied_files",
+    "copied_file_count",
+    "collection",
+}
+COMMIT_IMPORT_JSON_KEYS = {
+    "mode",
+    "ready",
+    "input_dir",
+    "destination_dir",
+    "copied_files",
+    "copied_file_count",
+    "preflight",
+    "collection",
+}
+FAILURE_JSON_KEYS = {
+    "mode",
+    "ready",
+    "blockers",
+    "copied_file_count",
+    "copied_files",
+    "destination_dir",
+}
 
 CSV_SPECS = {
     "fluent_tip_displacement_history.csv": (
@@ -269,6 +301,7 @@ class AnsysVerticalFlapRealFluentSourceExportImportTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result.stdout)
+            self.assertLessEqual(PREFLIGHT_JSON_KEYS, set(payload))
             self.assertEqual(payload["mode"], "preflight")
             self.assertTrue(payload["ready"])
             self.assertEqual(payload["copied_file_count"], 0)
@@ -303,6 +336,7 @@ class AnsysVerticalFlapRealFluentSourceExportImportTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result.stdout)
+            self.assertLessEqual(COMMIT_IMPORT_JSON_KEYS, set(payload))
             gate = payload["collection"]["real_fluent_import_gate"]
             self.assertEqual(payload["mode"], "commit_import")
             self.assertTrue(payload["ready"])
@@ -328,8 +362,41 @@ class AnsysVerticalFlapRealFluentSourceExportImportTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             payload = json.loads(result.stderr)
+            self.assertLessEqual(FAILURE_JSON_KEYS, set(payload))
             self.assertFalse(payload["ready"])
             self.assertIn("schema_only", payload["blockers"])
+            self.assertFalse(destination.exists())
+
+    def test_cli_rejects_collection_validator_without_commit_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "destination"
+            current_contract = root / "fluent_reference_contract.json"
+            _write_complete_bundle(source)
+            _write_complete_current_contract(current_contract)
+
+            result = _run_importer_cli(
+                "--input-dir",
+                source,
+                "--destination-dir",
+                destination,
+                "--current-contract-json",
+                current_contract,
+                "--run-collection-validator",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            payload = json.loads(result.stderr)
+            self.assertLessEqual(FAILURE_JSON_KEYS, set(payload))
+            self.assertEqual(payload["mode"], "preflight")
+            self.assertFalse(payload["ready"])
+            self.assertIn(
+                "collection_validator_requires_commit_import",
+                payload["blockers"],
+            )
+            self.assertEqual(payload["copied_file_count"], 0)
+            self.assertEqual(payload["copied_files"], [])
             self.assertFalse(destination.exists())
 
 
