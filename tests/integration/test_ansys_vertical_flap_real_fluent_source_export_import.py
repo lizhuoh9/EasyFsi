@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -246,6 +248,100 @@ class AnsysVerticalFlapRealFluentSourceExportImportTests(unittest.TestCase):
         self.assertTrue(gate["can_run_solver_evaluation"])
         self.assertFalse(gate["fluent_parity_claimed"])
         self.assertEqual(gate["blockers"], [])
+
+    def test_cli_default_preflight_does_not_copy_complete_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "destination"
+            current_contract = root / "fluent_reference_contract.json"
+            _write_complete_bundle(source)
+            _write_complete_current_contract(current_contract)
+
+            result = _run_importer_cli(
+                "--input-dir",
+                source,
+                "--destination-dir",
+                destination,
+                "--current-contract-json",
+                current_contract,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["mode"], "preflight")
+            self.assertTrue(payload["ready"])
+            self.assertEqual(payload["copied_file_count"], 0)
+            self.assertEqual(payload["copied_files"], [])
+            self.assertFalse(destination.exists())
+
+    def test_cli_commit_import_copies_after_staged_collection_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "destination"
+            output_dir = root / "diagnostics"
+            active_manifest = root / "active_fluent_reference_contract.json"
+            current_contract = root / "fluent_reference_contract.json"
+            _write_complete_bundle(source)
+            _write_complete_current_contract(current_contract)
+
+            result = _run_importer_cli(
+                "--input-dir",
+                source,
+                "--destination-dir",
+                destination,
+                "--current-contract-json",
+                current_contract,
+                "--output-dir",
+                output_dir,
+                "--active-manifest-json",
+                active_manifest,
+                "--run-collection-validator",
+                "--commit-import",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            gate = payload["collection"]["real_fluent_import_gate"]
+            self.assertEqual(payload["mode"], "commit_import")
+            self.assertTrue(payload["ready"])
+            self.assertEqual(payload["copied_file_count"], 5)
+            self.assertTrue(
+                (destination / "fluent_tip_displacement_history.csv").exists()
+            )
+            self.assertEqual(gate["status"], "ready_for_real_fluent_import")
+            self.assertTrue(gate["can_import_real_fluent_reference"])
+            self.assertTrue(gate["can_run_solver_evaluation"])
+            self.assertFalse(gate["fluent_parity_claimed"])
+
+    def test_cli_schema_only_preflight_fails_without_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "destination"
+
+            result = _run_importer_cli(
+                "--input-dir",
+                SOURCE_EXPORTS_ROOT,
+                "--destination-dir",
+                destination,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            payload = json.loads(result.stderr)
+            self.assertFalse(payload["ready"])
+            self.assertIn("schema_only", payload["blockers"])
+            self.assertFalse(destination.exists())
+
+
+def _run_importer_cli(*args: object) -> subprocess.CompletedProcess[str]:
+    command = [sys.executable, str(IMPORTER_PATH), *(str(arg) for arg in args)]
+    return subprocess.run(
+        command,
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 def _write_complete_bundle(

@@ -250,9 +250,27 @@ def _ensure_public_evidence_map(destination_dir: Path) -> None:
     shutil.copy2(source, destination)
 
 
+def _cli_preflight_summary(
+    preflight: Mapping[str, Any],
+    *,
+    destination_dir: Path,
+) -> dict[str, Any]:
+    return {
+        **dict(preflight),
+        "mode": "preflight",
+        "destination_dir": Path(destination_dir).as_posix(),
+        "copied_files": [],
+        "copied_file_count": 0,
+        "collection": None,
+    }
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Import validated real ANSYS Fluent vertical-flap source exports."
+        description=(
+            "Preflight or import validated real ANSYS Fluent vertical-flap "
+            "source exports."
+        )
     )
     parser.add_argument("--input-dir", required=True, type=Path)
     parser.add_argument(
@@ -272,19 +290,43 @@ def main(argv: Iterable[str] | None = None) -> int:
         default=ACTIVE_CONTRACT_MANIFEST_JSON,
     )
     parser.add_argument("--run-collection-validator", action="store_true")
+    parser.add_argument(
+        "--commit-import",
+        action="store_true",
+        help="Copy validated files into the destination after preflight passes.",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     try:
-        summary = import_real_fluent_source_exports(
-            input_dir=args.input_dir,
-            destination_dir=args.destination_dir,
-            current_contract_json=args.current_contract_json,
-            output_dir=args.output_dir,
-            active_manifest_json=args.active_manifest_json,
-            run_collection_validator=args.run_collection_validator,
-        )
+        if args.commit_import:
+            imported = import_real_fluent_source_exports(
+                input_dir=args.input_dir,
+                destination_dir=args.destination_dir,
+                current_contract_json=args.current_contract_json,
+                output_dir=args.output_dir,
+                active_manifest_json=args.active_manifest_json,
+                run_collection_validator=args.run_collection_validator,
+            )
+            summary = {**imported, "mode": "commit_import"}
+        else:
+            preflight = validate_import_bundle(
+                args.input_dir,
+                current_contract_json=args.current_contract_json,
+            )
+            summary = _cli_preflight_summary(
+                preflight,
+                destination_dir=args.destination_dir,
+            )
     except ImportPreflightError as exc:
-        print(json.dumps(exc.summary, indent=2, sort_keys=True), file=sys.stderr)
+        failure_summary = dict(exc.summary)
+        if args.commit_import:
+            failure_summary = {**failure_summary, "mode": "commit_import"}
+        else:
+            failure_summary = _cli_preflight_summary(
+                failure_summary,
+                destination_dir=args.destination_dir,
+            )
+        print(json.dumps(failure_summary, indent=2, sort_keys=True), file=sys.stderr)
         return 1
 
     print(json.dumps(summary, indent=2, sort_keys=True))
