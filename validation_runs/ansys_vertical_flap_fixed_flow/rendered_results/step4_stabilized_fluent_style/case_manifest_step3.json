@@ -1,0 +1,74 @@
+{
+  "case": "ansys_vertical_flap_fixed_flow",
+  "claims": {
+    "fluent_parity": "not_claimed",
+    "fsi": "not_claimed",
+    "solver_result": "step4_solver_stabilization"
+  },
+  "forbidden_sources": {
+    "traction_shared_snapshot_diagnostics": "not_used"
+  },
+  "generated_files": {
+    "Uy_full": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/Uy_full.png",
+    "case_manifest_step3": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/case_manifest_step3.json",
+    "centerline_streamwise_minus_Uz": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/centerline_streamwise_minus_Uz.csv",
+    "downstream_profiles_streamwise_minus_Uz": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/downstream_profiles_streamwise_minus_Uz.csv",
+    "geometry_overlay": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/geometry_overlay.png",
+    "mass_balance_plot": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/mass_balance_plot.png",
+    "pressure_full": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/pressure_full.png",
+    "solver_history_plot": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/solver_history_plot.png",
+    "speed_full_autoscale": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/speed_full_autoscale.png",
+    "speed_full_fluent_scale_0_28p1": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/speed_full_fluent_scale_0_28p1.png",
+    "streamwise_minus_Uz_autoscale": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/streamwise_minus_Uz_autoscale.png",
+    "streamwise_minus_Uz_fluent_scale_0_28p1": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/streamwise_minus_Uz_fluent_scale_0_28p1.png",
+    "throat_profile_streamwise_minus_Uz": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/throat_profile_streamwise_minus_Uz.csv",
+    "validation_report": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style/validation_report.md"
+  },
+  "output_root": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style",
+  "quality": {
+    "incompressibility_quality": {
+      "reason": "divergence_l2=102.47; divergence_linf=3294.59; divergence_l2_excluding_near_solid=95.3213; divergence_linf_excluding_near_solid=3294.59; poisson_residual_linf=7.81799e+09; poisson_residual_linf_relative=0.000928157",
+      "status": "pass"
+    },
+    "mass_quality": {
+      "reason": "final mass imbalance rel = 0",
+      "status": "pass"
+    },
+    "metrics": {
+      "centerline_max_u": 28.792658303269867,
+      "divergence_l2": 102.4702818243457,
+      "divergence_l2_excluding_near_solid": 95.32129478863361,
+      "divergence_linf": 3294.5903263167083,
+      "divergence_linf_excluding_near_solid": 3294.5903263167047,
+      "mass_imbalance_rel": 0.0,
+      "mass_imbalance_rel_corrected": 0.0,
+      "mass_imbalance_rel_raw": 0.022704949795576444,
+      "max_speed": 42.24141638420523,
+      "max_u": 31.110758213440633,
+      "p99_speed": 26.14541605813142,
+      "poisson_residual_linf": 7817986904.923208,
+      "poisson_residual_linf_relative": 0.00092815698399869
+    },
+    "overall_status": "candidate_not_parity",
+    "thresholds": {
+      "inlet_u": 7.0,
+      "max_divergence_l2_warn": 100.0,
+      "max_divergence_linf_warn": 10000.0,
+      "max_mass_imbalance_rel": 0.05,
+      "max_poisson_residual_linf_relative": 0.001,
+      "max_poisson_residual_linf_warn": 100000000.0
+    },
+    "visual_candidate": {
+      "reason": "centerline jet exists",
+      "status": "pass"
+    }
+  },
+  "scope": "Fluent-style visualization and numerical quality report for Step 4 stabilized solver output; no Fluent parity claim",
+  "sources": {
+    "final_fields": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/fields/final_fields_stabilized.npz",
+    "mass_balance": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/logs/mass_balance_stabilized.csv",
+    "solver_history": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/logs/solver_history_stabilized.csv",
+    "step2_manifest": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/case_manifest_step4_solver_stabilization.json"
+  },
+  "step": "step3_fluent_style_postprocess"
+}

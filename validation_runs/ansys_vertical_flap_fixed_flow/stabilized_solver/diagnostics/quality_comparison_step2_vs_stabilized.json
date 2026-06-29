@@ -1,0 +1,76 @@
+{
+  "baseline_step2": {
+    "centerline_max_u": 0.0,
+    "divergence_l2": 192.42452494985085,
+    "divergence_l2_excluding_near_solid": 35.60559481460496,
+    "divergence_linf": 23170.072681120233,
+    "divergence_linf_excluding_near_solid": 3439.4059978329306,
+    "mass_imbalance_rel": 0.0,
+    "max_speed": 37.56318328445503,
+    "max_u": 37.56318316174613,
+    "operator": "finite_volume_recomputed_from_step2_fields",
+    "poisson_residual_linf": 0.0
+  },
+  "claims": {
+    "fluent_parity": "not_claimed",
+    "fsi": "not_claimed"
+  },
+  "quality": {
+    "incompressibility_quality": {
+      "reason": "divergence_l2=102.47; divergence_linf=3294.59; divergence_l2_excluding_near_solid=95.3213; divergence_linf_excluding_near_solid=3294.59; poisson_residual_linf=7.81799e+09; poisson_residual_linf_relative=0.000928157",
+      "status": "pass"
+    },
+    "mass_quality": {
+      "reason": "final mass imbalance rel = 0",
+      "status": "pass"
+    },
+    "metrics": {
+      "centerline_max_u": 28.792658303269867,
+      "divergence_l2": 102.4702818243457,
+      "divergence_l2_excluding_near_solid": 95.32129478863361,
+      "divergence_linf": 3294.5903263167083,
+      "divergence_linf_excluding_near_solid": 3294.5903263167047,
+      "mass_imbalance_rel": 0.0,
+      "mass_imbalance_rel_corrected": 0.0,
+      "mass_imbalance_rel_raw": 0.022704949795576444,
+      "max_speed": 42.24141638420523,
+      "max_u": 31.110758213440633,
+      "p99_speed": 26.14541605813142,
+      "poisson_residual_linf": 7817986904.923208,
+      "poisson_residual_linf_relative": 0.00092815698399869
+    },
+    "overall_status": "candidate_not_parity",
+    "thresholds": {
+      "inlet_u": 7.0,
+      "max_divergence_l2_warn": 100.0,
+      "max_divergence_linf_warn": 10000.0,
+      "max_mass_imbalance_rel": 0.05,
+      "max_poisson_residual_linf_relative": 0.001,
+      "max_poisson_residual_linf_warn": 100000000.0
+    },
+    "visual_candidate": {
+      "reason": "centerline jet exists",
+      "status": "pass"
+    }
+  },
+  "quality_delta": {
+    "divergence_l2_reduction_factor": 2.018693990430312,
+    "mass_imbalance_reduction_factor": 1.0,
+    "poisson_relative_status": "pass"
+  },
+  "stabilized": {
+    "centerline_max_u": 28.792658303269867,
+    "divergence_l2": 102.4702818243457,
+    "divergence_l2_excluding_near_solid": 95.32129478863361,
+    "divergence_linf": 3294.5903263167083,
+    "divergence_linf_excluding_near_solid": 3294.5903263167047,
+    "initial_divergence_l2_excluding_near_solid": 147.53191791796846,
+    "initialization_mode": "uniform",
+    "mass_imbalance_rel_corrected": 0.0,
+    "mass_imbalance_rel_raw": 0.022704949795576444,
+    "max_speed": 42.24141638420523,
+    "max_u": 31.110758213440633,
+    "poisson_residual_linf": 7817986904.923208,
+    "poisson_residual_linf_relative": 0.00092815698399869
+  }
+}

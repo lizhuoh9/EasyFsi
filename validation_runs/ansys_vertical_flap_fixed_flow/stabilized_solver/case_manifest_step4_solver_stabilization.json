@@ -1,0 +1,130 @@
+{
+  "case": "ansys_vertical_flap_fixed_flow",
+  "claims": {
+    "fluent_parity": "not_claimed",
+    "fsi": "not_claimed",
+    "solver_result": "step4_solver_stabilization"
+  },
+  "final_summary": {
+    "centerline_max_s": 0.0467966573816156,
+    "centerline_max_u": 28.792658303269867,
+    "centerline_y": 0.00015748031496062853,
+    "completed_steps": 121,
+    "divergence_l2": 102.4702818243457,
+    "divergence_l2_excluding_near_solid": 95.32129478863361,
+    "divergence_linf": 3294.5903263167083,
+    "divergence_linf_excluding_near_solid": 3294.5903263167047,
+    "history_rows": 14,
+    "initial_centerline_max_s": 0.0,
+    "initial_centerline_max_u": 7.0,
+    "initial_centerline_y": 0.00015748031496062853,
+    "initial_divergence_l2": 1360.9490176205352,
+    "initial_divergence_l2_excluding_near_solid": 0.0,
+    "initial_divergence_linf": 20941.666666666668,
+    "initial_divergence_linf_excluding_near_solid": 0.0,
+    "initialization_mode": "uniform",
+    "inlet_flux": 0.27779527559055117,
+    "interior_max_speed_excluding_near_solid": 42.24141638420523,
+    "mass_imbalance": 0.0,
+    "mass_imbalance_rel": 0.0,
+    "mass_imbalance_rel_corrected": 0.0,
+    "mass_imbalance_rel_raw": 0.022704949795576444,
+    "max_abs_v": 32.187250403031925,
+    "max_speed": 42.24141638420523,
+    "max_u": 31.110758213440633,
+    "outlet_flux": 0.27779527559055117,
+    "p99_speed": 26.14541605813142,
+    "poisson_iters": 140,
+    "poisson_residual_linf": 7817986904.923208,
+    "poisson_residual_linf_relative": 0.00092815698399869,
+    "predicted_divergence_l2_excluding_near_solid": 147.53191791796846
+  },
+  "forbidden_sources": {
+    "traction_shared_snapshot_diagnostics": "not_used"
+  },
+  "generated_files": {
+    "case_manifest_step4_solver_stabilization": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/case_manifest_step4_solver_stabilization.json",
+    "final_fields_stabilized": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/fields/final_fields_stabilized.npz",
+    "initialization_sensitivity": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/diagnostics/initialization_sensitivity.csv",
+    "mass_balance_stabilized": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/logs/mass_balance_stabilized.csv",
+    "poisson_history_stabilized": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/logs/poisson_history_stabilized.csv",
+    "quality_comparison_step2_vs_stabilized": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/diagnostics/quality_comparison_step2_vs_stabilized.json",
+    "solver_history_stabilized": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/logs/solver_history_stabilized.csv"
+  },
+  "numerical_method": {
+    "advection": "upwind",
+    "diffusion": "explicit",
+    "outlet_flux_correction": true,
+    "pressure_poisson": "masked_sor",
+    "projection_metrics": "finite_volume",
+    "type": "fractional_step_projection"
+  },
+  "output_root": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver",
+  "quality": {
+    "incompressibility_quality": {
+      "reason": "divergence_l2=102.47; divergence_linf=3294.59; divergence_l2_excluding_near_solid=95.3213; divergence_linf_excluding_near_solid=3294.59; poisson_residual_linf=7.81799e+09; poisson_residual_linf_relative=0.000928157",
+      "status": "pass"
+    },
+    "mass_quality": {
+      "reason": "final mass imbalance rel = 0",
+      "status": "pass"
+    },
+    "metrics": {
+      "centerline_max_u": 28.792658303269867,
+      "divergence_l2": 102.4702818243457,
+      "divergence_l2_excluding_near_solid": 95.32129478863361,
+      "divergence_linf": 3294.5903263167083,
+      "divergence_linf_excluding_near_solid": 3294.5903263167047,
+      "mass_imbalance_rel": 0.0,
+      "mass_imbalance_rel_corrected": 0.0,
+      "mass_imbalance_rel_raw": 0.022704949795576444,
+      "max_speed": 42.24141638420523,
+      "max_u": 31.110758213440633,
+      "p99_speed": 26.14541605813142,
+      "poisson_residual_linf": 7817986904.923208,
+      "poisson_residual_linf_relative": 0.00092815698399869
+    },
+    "overall_status": "candidate_not_parity",
+    "thresholds": {
+      "inlet_u": 7.0,
+      "max_divergence_l2_warn": 100.0,
+      "max_divergence_linf_warn": 10000.0,
+      "max_mass_imbalance_rel": 0.05,
+      "max_poisson_residual_linf_relative": 0.001,
+      "max_poisson_residual_linf_warn": 100000000.0
+    },
+    "visual_candidate": {
+      "reason": "centerline jet exists",
+      "status": "pass"
+    }
+  },
+  "scope": "fixed-flap stabilized projection solver candidate; no Fluent parity claim",
+  "solver_config": {
+    "cfl": 0.2,
+    "divergence_tolerance": 0.001,
+    "history_interval": 10,
+    "initialization_mode": "uniform",
+    "max_steps": 120,
+    "outlet_flux_correction": true,
+    "poisson_check_interval": 20,
+    "poisson_compatibility_correction": true,
+    "poisson_max_iters": 260,
+    "poisson_method": "sor",
+    "poisson_omega": 1.65,
+    "poisson_tolerance_abs": 0.0001,
+    "poisson_tolerance_rel": 0.001,
+    "steady_tolerance": 0.0,
+    "write_checkpoints": false
+  },
+  "sources": {
+    "bc_map": "validation_runs/ansys_vertical_flap_fixed_flow/preprocess/bc_map.npz",
+    "geometry_mask": "validation_runs/ansys_vertical_flap_fixed_flow/preprocess/geometry_mask.npz"
+  },
+  "step": "step4_solver_stabilization",
+  "variable_convention": {
+    "Uz": "-u",
+    "left_to_right_display_flow": "u_positive_Uz_negative",
+    "u": "streamwise_minus_Uz",
+    "v": "Uy"
+  }
+}

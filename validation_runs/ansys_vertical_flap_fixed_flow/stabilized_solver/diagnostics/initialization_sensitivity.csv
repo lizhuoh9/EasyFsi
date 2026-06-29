@@ -1,0 +1,3 @@
+initialization_mode,initial_centerline_max_u,final_centerline_max_u,final_max_u,completed_steps,poisson_residual_linf_relative,fluent_parity,fsi
+uniform,7.0,25.31451391595701,39.546207640505564,33,0.000929706504623039,not_claimed,not_claimed
+structured_jet,27.5625,28.52261303864128,34.59565733178097,33,0.000821756524038757,not_claimed,not_claimed
