@@ -12,7 +12,8 @@ CHECKLIST = (
     / "refactoring"
     / "ANSYS_VERTICAL_FLAP_BRANCH_MERGE_CHECKLIST_2026-06-29.md"
 )
-BASELINE_COMMIT = "c94332888fe09d792a119086a4969f78b03bb134"
+ARTIFACT_GENERATION_SOURCE_COMMIT = "c94332888fe09d792a119086a4969f78b03bb134"
+REVIEWED_HEAD_COMMIT = "25b8c60074f3cbcda4f24c611b97e2cf7fca6dc9"
 
 
 class AnsysVerticalFlapBranchReviewDocsTests(unittest.TestCase):
@@ -42,8 +43,12 @@ class AnsysVerticalFlapBranchReviewDocsTests(unittest.TestCase):
         text = CHECKLIST.read_text(encoding="utf-8")
 
         for phrase in (
-            "Commit SHA",
             "Branch:",
+            f"Reviewed HEAD commit at checklist update: `{REVIEWED_HEAD_COMMIT}`",
+            (
+                "Artifact generation source commit: "
+                f"`{ARTIFACT_GENERATION_SOURCE_COMMIT}`"
+            ),
             "GitHub Actions run URL / run id",
             "Local interpreter path",
             "py_compile",
@@ -58,16 +63,22 @@ class AnsysVerticalFlapBranchReviewDocsTests(unittest.TestCase):
             "No EasyFsi",
             "No HIBM-MPM",
             "CI run URL",
-            BASELINE_COMMIT,
+            ARTIFACT_GENERATION_SOURCE_COMMIT,
+            REVIEWED_HEAD_COMMIT,
             "53 tests OK",
+            "80 tests OK",
             "Fluent artifact policy checker: `PASSED_LOCAL`",
             "Validation artifact hygiene checker: `PASSED_LOCAL`",
+            "artifact_generation_source_commit",
+            "artifact_committed_in_review_head",
             "Remote CI evidence: `BLOCKED_PENDING_MANUAL_GITHUB_ACTIONS_CHECK`",
             "Remote CI source: `NOT_AVAILABLE_CONNECTOR_EMPTY`",
             "GitHub Actions run URL / run id: `BLOCKED_PENDING_MANUAL_GITHUB_ACTIONS_CHECK`",
         ):
             self.assertIn(phrase, text)
 
+        self.assertNotIn("Commit SHA", text)
+        self.assertNotIn("Result: `PENDING`", text)
         self.assertNotIn("PENDING_FINAL_COMMIT", text)
         self.assertNotIn("PENDING_REMOTE_CI_RUN", text)
 

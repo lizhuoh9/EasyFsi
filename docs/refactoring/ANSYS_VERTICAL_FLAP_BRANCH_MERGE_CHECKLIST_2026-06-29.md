@@ -4,7 +4,8 @@ Branch: `solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
 
 ## Commit And CI
 
-- Commit SHA: `c94332888fe09d792a119086a4969f78b03bb134`
+- Reviewed HEAD commit at checklist update: `25b8c60074f3cbcda4f24c611b97e2cf7fca6dc9`
+- Artifact generation source commit: `c94332888fe09d792a119086a4969f78b03bb134`
 - GitHub Actions run URL / run id: `BLOCKED_PENDING_MANUAL_GITHUB_ACTIONS_CHECK`
 - CI run URL: `BLOCKED_PENDING_MANUAL_GITHUB_ACTIONS_CHECK`
 - Remote CI evidence: `BLOCKED_PENDING_MANUAL_GITHUB_ACTIONS_CHECK`
@@ -35,7 +36,7 @@ python -m py_compile `
   scripts\check_validation_artifact_hygiene.py
 ```
 
-Result: `PENDING`
+Result: `PASSED_LOCAL`
 Recorded local evidence: `PASSED_LOCAL`
 
 ### Artifact Regeneration
@@ -46,7 +47,7 @@ python validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_for
 ```
 
 Result: `PASSED_LOCAL`
-Evidence: collection and parity artifacts regenerated from commit `c94332888fe09d792a119086a4969f78b03bb134` and ref `solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`.
+Evidence: collection and parity artifacts regenerated from artifact generation source commit `c94332888fe09d792a119086a4969f78b03bb134` and ref `solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`; the reviewed HEAD at checklist update was `25b8c60074f3cbcda4f24c611b97e2cf7fca6dc9`.
 
 ### Focused Unit Tests
 
@@ -109,9 +110,15 @@ Select-String -Path <changed-files> -Pattern 'api[_-]?key','password','secret','
 - Collection manifest provenance:
   - `generated_from_commit=c94332888fe09d792a119086a4969f78b03bb134`
   - `generated_from_ref=solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
+  - `artifact_generation_source_commit=c94332888fe09d792a119086a4969f78b03bb134`
+  - `artifact_generation_source_ref=solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
+  - `artifact_committed_in_review_head=25b8c60074f3cbcda4f24c611b97e2cf7fca6dc9`
 - Parity manifest provenance:
   - `generated_from_commit=c94332888fe09d792a119086a4969f78b03bb134`
   - `generated_from_ref=solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
+  - `artifact_generation_source_commit=c94332888fe09d792a119086a4969f78b03bb134`
+  - `artifact_generation_source_ref=solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
+  - `artifact_committed_in_review_head=25b8c60074f3cbcda4f24c611b97e2cf7fca6dc9`
 
 ## Reviewer Sign-Off
 

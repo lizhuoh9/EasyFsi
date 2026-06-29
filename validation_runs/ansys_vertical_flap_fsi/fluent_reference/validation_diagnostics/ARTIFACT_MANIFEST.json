@@ -1,4 +1,7 @@
 {
+  "artifact_committed_in_review_head": "25b8c60074f3cbcda4f24c611b97e2cf7fca6dc9",
+  "artifact_generation_source_commit": "c94332888fe09d792a119086a4969f78b03bb134",
+  "artifact_generation_source_ref": "solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25",
   "artifact_group": "fluent_reference_collection",
   "claim_policy": {
     "fluent_parity_claimed": false,

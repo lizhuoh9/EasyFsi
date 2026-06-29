@@ -53,8 +53,12 @@ DEFAULT_GENERATED_FROM_COMMIT = "c94332888fe09d792a119086a4969f78b03bb134"
 DEFAULT_GENERATED_FROM_REF = (
     "solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25"
 )
+DEFAULT_ARTIFACT_COMMITTED_IN_REVIEW_HEAD = (
+    "25b8c60074f3cbcda4f24c611b97e2cf7fca6dc9"
+)
 GENERATED_FROM_COMMIT_ENV = "EASYFSI_VALIDATION_COMMIT"
 GENERATED_FROM_REF_ENV = "EASYFSI_VALIDATION_REF"
+ARTIFACT_COMMITTED_IN_REVIEW_HEAD_ENV = "EASYFSI_VALIDATION_REVIEW_HEAD"
 SCENARIO = "selected_formulation_fluent_parity"
 SOURCE_STEP50_SCENARIO = "selected_formulation_coupled_step50"
 REFERENCE_FORMULATION_CANDIDATE = (
@@ -876,6 +880,9 @@ def _artifact_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
         "source_script": SOURCE_SCRIPT,
         "generated_from_commit": _generated_from_commit(),
         "generated_from_ref": _generated_from_ref(),
+        "artifact_generation_source_commit": _generated_from_commit(),
+        "artifact_generation_source_ref": _generated_from_ref(),
+        "artifact_committed_in_review_head": _artifact_committed_in_review_head(),
         "inputs": {
             "source_step50_matrix": _repo_relative(SOURCE_STEP50_MATRIX_JSON),
             "source_step50_history": _repo_relative(SOURCE_STEP50_HISTORY_JSON),
@@ -913,6 +920,13 @@ def _generated_from_ref() -> str:
     return os.environ.get(
         GENERATED_FROM_REF_ENV,
         DEFAULT_GENERATED_FROM_REF,
+    )
+
+
+def _artifact_committed_in_review_head() -> str:
+    return os.environ.get(
+        ARTIFACT_COMMITTED_IN_REVIEW_HEAD_ENV,
+        DEFAULT_ARTIFACT_COMMITTED_IN_REVIEW_HEAD,
     )
 
 

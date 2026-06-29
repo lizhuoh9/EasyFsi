@@ -33,6 +33,9 @@ EXPECTED_GENERATED_FROM_COMMIT = "c94332888fe09d792a119086a4969f78b03bb134"
 EXPECTED_GENERATED_FROM_REF = (
     "solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25"
 )
+EXPECTED_ARTIFACT_COMMITTED_IN_REVIEW_HEAD = (
+    "25b8c60074f3cbcda4f24c611b97e2cf7fca6dc9"
+)
 EXPECTED_BLOCKERS = {
     "fluent_displacement_reference_missing",
     "fluent_force_reference_missing",
@@ -366,13 +369,27 @@ def _assert_manifest_provenance(
 ) -> None:
     commit = manifest.get("generated_from_commit")
     ref = manifest.get("generated_from_ref")
+    source_commit = manifest.get("artifact_generation_source_commit")
+    source_ref = manifest.get("artifact_generation_source_ref")
+    review_head = manifest.get("artifact_committed_in_review_head")
 
     test_case.assertEqual(commit, EXPECTED_GENERATED_FROM_COMMIT)
     test_case.assertNotEqual(commit, "unknown")
-    test_case.assertIsInstance(commit, str)
-    test_case.assertEqual(len(str(commit)), 40)
-    test_case.assertTrue(all(char in "0123456789abcdef" for char in str(commit)))
     test_case.assertEqual(ref, EXPECTED_GENERATED_FROM_REF)
+    test_case.assertEqual(source_commit, EXPECTED_GENERATED_FROM_COMMIT)
+    test_case.assertEqual(source_ref, EXPECTED_GENERATED_FROM_REF)
+    test_case.assertEqual(review_head, EXPECTED_ARTIFACT_COMMITTED_IN_REVIEW_HEAD)
+    for commit_like in (commit, source_commit, review_head):
+        _assert_commit_sha(test_case, commit_like)
+
+
+def _assert_commit_sha(
+    test_case: unittest.TestCase,
+    value: object,
+) -> None:
+    test_case.assertIsInstance(value, str)
+    test_case.assertEqual(len(str(value)), 40)
+    test_case.assertTrue(all(char in "0123456789abcdef" for char in str(value)))
 
 
 def _read_checksums(path: Path) -> dict[str, str]:
