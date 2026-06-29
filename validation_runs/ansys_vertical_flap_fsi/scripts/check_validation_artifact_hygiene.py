@@ -8,8 +8,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.validation.ansys_vertical_flap import fluent_reference_collection as _impl  # noqa: E402
-from tools.validation.ansys_vertical_flap.fluent_reference_collection import *  # noqa: F401,F403,E402
+from tools.validation.ansys_vertical_flap import validation_artifact_hygiene as _impl  # noqa: E402
+from tools.validation.ansys_vertical_flap.validation_artifact_hygiene import *  # noqa: F401,F403,E402
 
 
 def __getattr__(name: str):
