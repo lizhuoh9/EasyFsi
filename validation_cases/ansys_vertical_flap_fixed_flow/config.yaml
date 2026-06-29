@@ -1,0 +1,26 @@
+case: ansys_vertical_flap_fixed_flow
+description: fixed-flap official-flow preprocessing contract only
+
+grid:
+  ns: 360
+  ny: 128
+
+geometry:
+  duct_length: 0.120
+  duct_height: 0.040
+  flap_center_s: 0.048
+  flap_thickness: 0.0030
+  gap_height: 0.0100
+  wall_cells_are_solid: true
+
+fluid:
+  rho: 1000.0
+  mu: 0.001
+
+boundary_conditions:
+  inlet_Uz: -7.0
+  inlet_Uy: 0.0
+  outlet_pressure: 0.0
+
+output:
+  root: validation_runs/ansys_vertical_flap_fixed_flow

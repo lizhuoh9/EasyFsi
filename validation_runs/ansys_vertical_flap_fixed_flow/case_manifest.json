@@ -1,0 +1,47 @@
+{
+  "axis_order": {
+    "array_shape": "(ny, ns)",
+    "axis0": "y",
+    "axis1": "display streamwise coordinate s",
+    "physical_z": "-s"
+  },
+  "boundary_conditions": {
+    "inlet_Uy": 0.0,
+    "inlet_Uz": -7.0,
+    "outlet_pressure": 0.0
+  },
+  "case": "ansys_vertical_flap_fixed_flow",
+  "claims": {
+    "fluent_parity": "not_claimed",
+    "fsi": "not_claimed",
+    "solver_result": "not_claimed"
+  },
+  "fluid": {
+    "mu": 0.001,
+    "rho": 1000.0
+  },
+  "generated_files": {
+    "bc_map": "validation_runs/ansys_vertical_flap_fixed_flow/preprocess/bc_map.npz",
+    "case_manifest": "validation_runs/ansys_vertical_flap_fixed_flow/case_manifest.json",
+    "geometry_mask": "validation_runs/ansys_vertical_flap_fixed_flow/preprocess/geometry_mask.npz",
+    "geometry_preview": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/geometry_preview.png",
+    "initial_fields": "validation_runs/ansys_vertical_flap_fixed_flow/fields/initial_fields.npz"
+  },
+  "geometry": {
+    "duct_height": 0.04,
+    "duct_length": 0.12,
+    "flap_center_s": 0.048,
+    "flap_thickness": 0.003,
+    "gap_height": 0.01,
+    "wall_cells_are_solid": true
+  },
+  "grid": {
+    "ns": 360,
+    "ny": 128
+  },
+  "output_root": "validation_runs/ansys_vertical_flap_fixed_flow",
+  "scope": "fixed-flap flow preprocessing only; no solver step executed",
+  "sign_convention": "left_to_right_display_flow_has_Uz_negative",
+  "source": "validation_cases/ansys_vertical_flap_fixed_flow/config.yaml",
+  "streamwise_display_velocity": "-Uz"
+}
