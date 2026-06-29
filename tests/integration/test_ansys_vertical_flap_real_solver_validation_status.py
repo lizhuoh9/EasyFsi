@@ -19,6 +19,8 @@ class AnsysVerticalFlapRealSolverValidationStatusTests(unittest.TestCase):
         self.assertIn("generic_solver_selected_formulation_step50_passed", text)
         self.assertIn("selected_formulation_coupled_step50_timeout", text)
         self.assertIn("real_fluent_bundle_unavailable", text)
+        self.assertIn("tip_displacement_export_status = runtime_vector_mapped", text)
+        self.assertIn("tip_mean_displacement_m", text)
         self.assertIn("fluent_parity_claimed: false", text)
         self.assertIn("No source_exports promotion was performed", text)
 

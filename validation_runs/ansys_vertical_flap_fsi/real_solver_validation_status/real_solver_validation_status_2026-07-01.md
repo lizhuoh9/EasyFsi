@@ -41,9 +41,9 @@ Observed result:
 ```text
 candidate_status = generic_solver_selected_formulation_step50_passed
 completed_step_count = 50
-max_displacement_m = 2.298969411640428e-05
-max_pressure_abs_pa = 488.50444618549903
-max_velocity_mps = 31.764066696166992
+max_displacement_m = 2.2977244952926412e-05
+max_pressure_abs_pa = 488.50444533121583
+max_velocity_mps = 31.76406478881836
 fluent_parity_claimed = False
 ```
 
@@ -52,6 +52,21 @@ Generated/updated evidence:
 ```text
 validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/
 ```
+
+Tip displacement export correction:
+
+```text
+tip_displacement_export_status = runtime_vector_mapped
+tip_displacement_source_field = tip_mean_displacement_m
+tip_displacement_columns = tip_displacement_x_m, tip_displacement_y_m, tip_displacement_z_m, tip_displacement_norm_m
+```
+
+The generic solver runtime history stores `tip_mean_displacement_m` as a
+three-component displacement vector. The export now maps that vector directly
+into `easyfsi_tip_displacement_history.csv` and computes
+`tip_displacement_norm_m` from the vector components. `max_displacement_m`
+remains the whole-field displacement envelope and is still recorded separately.
+This EasyFsi export correction does not make a Fluent parity claim.
 
 ### Selected Formulation Coupled Step50
 
@@ -82,13 +97,14 @@ Command:
 & 'D:\working\taichi\env\python.exe' -m unittest `
   tests.integration.test_ansys_vertical_flap_traction_selected_formulation_coupled_step50_artifacts `
   tests.integration.test_ansys_vertical_flap_generic_solver_artifacts `
+  tests.integration.test_ansys_vertical_flap_real_solver_validation_status `
   -v
 ```
 
 Observed result:
 
 ```text
-11 tests passed
+13 tests passed
 ```
 
 Interpretation:
@@ -130,4 +146,3 @@ fluent_parity_status: blocked_reference_incomplete
 
 This pass does not validate solver-vs-Fluent parity. It only records a fresh
 EasyFsi generic solver run and the current blocker for the real Fluent side.
-

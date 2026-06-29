@@ -355,14 +355,16 @@ def _tip_export_row(
     solver_config: FsiSolverConfig,
 ) -> dict[str, Any]:
     step = _step(row)
-    tip_z = _float_or_zero(row.get("tip_mean_displacement_m"))
+    tip = _tip_displacement_vector(row.get("tip_mean_displacement_m"))
     return {
         "step": step,
         "time_s": _time_s(step, solver_config),
-        "tip_displacement_x_m": 0.0,
-        "tip_displacement_y_m": 0.0,
-        "tip_displacement_z_m": tip_z,
-        "tip_displacement_norm_m": abs(tip_z),
+        "tip_displacement_x_m": tip[0],
+        "tip_displacement_y_m": tip[1],
+        "tip_displacement_z_m": tip[2],
+        "tip_displacement_norm_m": math.sqrt(
+            sum(component * component for component in tip)
+        ),
         "max_displacement_m": _float_or_zero(row.get("max_displacement_m")),
         "source": EXPORT_SOURCE,
     }
@@ -473,6 +475,11 @@ def _summary_markdown(payload: Mapping[str, Any]) -> str:
             "- Pressure-pair cells are generated from runtime marker geometry "
             "through the generic pressure sample pair contract."
         ),
+        (
+            "- Tip displacement CSV columns are mapped from the runtime "
+            "`tip_mean_displacement_m` vector; `max_displacement_m` remains "
+            "the whole-field displacement envelope."
+        ),
         "",
         "## Files",
         "",
@@ -567,6 +574,14 @@ def _vector(value: Any) -> tuple[float, ...]:
             return ()
         vector.append(float(component))
     return tuple(vector)
+
+
+def _tip_displacement_vector(value: Any) -> tuple[float, float, float]:
+    vector = _vector(value)
+    if len(vector) >= 3:
+        return (vector[0], vector[1], vector[2])
+    scalar = _float_or_zero(value)
+    return (0.0, 0.0, scalar)
 
 
 def _step(row: Mapping[str, Any]) -> int:

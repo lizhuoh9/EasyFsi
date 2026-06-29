@@ -24,6 +24,7 @@ This artifact invokes the generic FSI solver boundary for the ANSYS vertical-fla
 - Does not claim Fluent parity.
 - Does not complete Fluent reference exports.
 - Pressure-pair cells are generated from runtime marker geometry through the generic pressure sample pair contract.
+- Tip displacement CSV columns are mapped from the runtime `tip_mean_displacement_m` vector; `max_displacement_m` remains the whole-field displacement envelope.
 
 ## Files
 
