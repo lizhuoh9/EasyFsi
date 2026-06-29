@@ -84,6 +84,7 @@ jobs:
             tests\integration\test_ansys_vertical_flap_fluent_source_export_schema.py `
             tests\integration\test_ansys_vertical_flap_real_fluent_source_export_import.py `
             tests\integration\test_ansys_vertical_flap_real_fluent_source_export_artifacts.py `
+            tests\integration\test_ansys_vertical_flap_real_solver_validation_status.py `
             tests\integration\test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic.py `
             tests\tools\test_validation_artifact_hygiene.py `
             tests\solvers\test_pressure_sample_pair_provider_contract.py
@@ -275,6 +276,7 @@ jobs:
         run: |
           python -m unittest `
             tests.integration.test_ansys_vertical_flap_generic_solver_artifacts `
+            tests.integration.test_ansys_vertical_flap_real_solver_validation_status `
             -v
 
       - name: Scan generic solver artifacts for forbidden transition states
