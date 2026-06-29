@@ -12,6 +12,7 @@ from pathlib import Path
 SCRIPT_ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi" / "scripts"
 PACKAGE_PREFIX = "tools.validation.ansys_vertical_flap"
 PACKAGE_ROOT = Path("tools") / "validation" / "ansys_vertical_flap"
+WORKFLOW_PATH = Path(".github") / "workflows" / "ansys-vertical-flap-validation.yml"
 
 PACKAGE_MODULES = (
     PACKAGE_ROOT / "fluent_reference_contract_schema.py",
@@ -44,6 +45,10 @@ def _load_module(name: str, path: Path):
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _normalized_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
 class AnsysVerticalFlapValidationPackageTests(unittest.TestCase):
@@ -176,6 +181,41 @@ class AnsysVerticalFlapValidationPackageTests(unittest.TestCase):
                         self.assertEqual(module.main(), 0)
                 finally:
                     sys.argv = previous_argv
+
+    def test_workflow_keeps_stacked_solver_pr_ci_routing(self):
+        text = _normalized_text(WORKFLOW_PATH)
+
+        self.assertIn(
+            "  push:\n"
+            "    branches:\n"
+            "      - main\n"
+            "      - solver/**\n"
+            "      - codex/**",
+            text,
+        )
+        self.assertIn(
+            "  pull_request:\n"
+            "    branches:\n"
+            "      - main\n"
+            "      - solver/**",
+            text,
+        )
+
+    def test_workflow_keeps_package_migration_guard(self):
+        text = _normalized_text(WORKFLOW_PATH)
+
+        self.assertIn(
+            r"tests\tools\test_ansys_vertical_flap_validation_package.py",
+            text,
+        )
+        self.assertIn(
+            "Run ANSYS vertical-flap validation package migration test",
+            text,
+        )
+        self.assertIn(
+            "tests.tools.test_ansys_vertical_flap_validation_package",
+            text,
+        )
 
 
 if __name__ == "__main__":
