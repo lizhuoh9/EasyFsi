@@ -1,0 +1,63 @@
+{
+  "case": "ansys_vertical_flap_fixed_flow",
+  "claims": {
+    "fluent_parity": "not_claimed",
+    "fsi": "not_claimed",
+    "solver_result": "fixed_flap_projection_solver"
+  },
+  "final_summary": {
+    "centerline_max_s": 0.05181058495821727,
+    "centerline_max_u": 37.56318316174613,
+    "centerline_y": 0.00015748031496062853,
+    "completed_steps": 200,
+    "history_rows": 21,
+    "inlet_flux": 0.27779527559055117,
+    "interior_max_speed_excluding_near_solid": 37.56318328445503,
+    "mass_imbalance": -0.003494489266958667,
+    "mass_imbalance_rel": -0.01257936895985688,
+    "max_abs_v": 19.882503443844726,
+    "max_speed": 37.56318328445503,
+    "max_u": 37.56318316174613,
+    "outlet_flux": 0.2743007863235925,
+    "p99_speed": 33.05373931417339
+  },
+  "forbidden_sources": {
+    "traction_shared_snapshot_diagnostics": "not_used"
+  },
+  "generated_files": {
+    "case_manifest_step2": "validation_runs/ansys_vertical_flap_fixed_flow/case_manifest_step2.json",
+    "final_fields": "validation_runs/ansys_vertical_flap_fixed_flow/fields/final_fields.npz",
+    "mass_balance": "validation_runs/ansys_vertical_flap_fixed_flow/logs/mass_balance.csv",
+    "solver_history": "validation_runs/ansys_vertical_flap_fixed_flow/logs/solver_history.csv"
+  },
+  "numerical_method": {
+    "advection": "upwind",
+    "diffusion": "explicit",
+    "pressure_poisson": "masked_weighted_jacobi",
+    "type": "fractional_step_projection"
+  },
+  "output_root": "validation_runs/ansys_vertical_flap_fixed_flow",
+  "scope": "fixed-flap incompressible projection solver result; no Fluent parity claim",
+  "solver_config": {
+    "cfl": 0.35,
+    "divergence_tolerance": 0.001,
+    "history_interval": 10,
+    "max_steps": 200,
+    "poisson_max_iters": 80,
+    "poisson_omega": 1.0,
+    "poisson_tolerance": 1e-05,
+    "steady_tolerance": 0.0,
+    "write_checkpoints": false
+  },
+  "sources": {
+    "bc_map": "validation_runs/ansys_vertical_flap_fixed_flow/preprocess/bc_map.npz",
+    "geometry_mask": "validation_runs/ansys_vertical_flap_fixed_flow/preprocess/geometry_mask.npz"
+  },
+  "step": "step2_fixed_flap_projection_solver",
+  "variable_convention": {
+    "Uz": "-u",
+    "left_to_right_display_flow": "u_positive_Uz_negative",
+    "u": "streamwise_minus_Uz",
+    "v": "Uy"
+  }
+}
