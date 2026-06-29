@@ -1,0 +1,68 @@
+{
+  "case": "ansys_vertical_flap_fixed_flow",
+  "claims": {
+    "fluent_parity": "not_claimed",
+    "fsi": "not_claimed",
+    "solver_result": "step2_fixed_flap_projection_solver"
+  },
+  "forbidden_sources": {
+    "traction_shared_snapshot_diagnostics": "not_used"
+  },
+  "generated_files": {
+    "Uy_full": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/Uy_full.png",
+    "case_manifest_step3": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/case_manifest_step3.json",
+    "centerline_streamwise_minus_Uz": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/centerline_streamwise_minus_Uz.csv",
+    "downstream_profiles_streamwise_minus_Uz": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/downstream_profiles_streamwise_minus_Uz.csv",
+    "geometry_overlay": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/geometry_overlay.png",
+    "mass_balance_plot": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/mass_balance_plot.png",
+    "pressure_full": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/pressure_full.png",
+    "solver_history_plot": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/solver_history_plot.png",
+    "speed_full_autoscale": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/speed_full_autoscale.png",
+    "speed_full_fluent_scale_0_28p1": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/speed_full_fluent_scale_0_28p1.png",
+    "streamwise_minus_Uz_autoscale": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/streamwise_minus_Uz_autoscale.png",
+    "streamwise_minus_Uz_fluent_scale_0_28p1": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/streamwise_minus_Uz_fluent_scale_0_28p1.png",
+    "throat_profile_streamwise_minus_Uz": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/throat_profile_streamwise_minus_Uz.csv",
+    "validation_report": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style/validation_report.md"
+  },
+  "output_root": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step3_fluent_style",
+  "quality": {
+    "incompressibility_quality": {
+      "reason": "divergence_l2=71.2592; divergence_linf=8316.93; poisson_residual_linf=4.3153e+09",
+      "status": "warn"
+    },
+    "mass_quality": {
+      "reason": "final mass imbalance rel = 0.0125794",
+      "status": "pass"
+    },
+    "metrics": {
+      "centerline_max_u": 37.56318316174613,
+      "divergence_l2": 71.25918584662395,
+      "divergence_linf": 8316.927865894577,
+      "mass_imbalance_rel": -0.01257936895985688,
+      "max_speed": 37.56318328445503,
+      "max_u": 37.56318316174613,
+      "p99_speed": 33.05373931417339,
+      "poisson_residual_linf": 4315295785.201493
+    },
+    "overall_status": "diagnostic_only_not_parity",
+    "thresholds": {
+      "inlet_u": 7.0,
+      "max_divergence_l2_warn": 100.0,
+      "max_divergence_linf_warn": 10000.0,
+      "max_mass_imbalance_rel": 0.05,
+      "max_poisson_residual_linf_warn": 100000000.0
+    },
+    "visual_candidate": {
+      "reason": "centerline jet exists",
+      "status": "pass"
+    }
+  },
+  "scope": "Fluent-style visualization and numerical quality report for Step 2 solver output; no Fluent parity claim",
+  "sources": {
+    "final_fields": "validation_runs/ansys_vertical_flap_fixed_flow/fields/final_fields.npz",
+    "mass_balance": "validation_runs/ansys_vertical_flap_fixed_flow/logs/mass_balance.csv",
+    "solver_history": "validation_runs/ansys_vertical_flap_fixed_flow/logs/solver_history.csv",
+    "step2_manifest": "validation_runs/ansys_vertical_flap_fixed_flow/case_manifest_step2.json"
+  },
+  "step": "step3_fluent_style_postprocess"
+}
