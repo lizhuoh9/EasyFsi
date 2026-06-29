@@ -82,16 +82,45 @@ class AnsysVerticalFlapFluentSourceExportSchemaTests(unittest.TestCase):
     def test_missing_metric_value_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "force.csv"
-            _write(path, "step,time_s,force_z_N,source\n50,0.025,,synthetic\n")
+            _write(path, _complete_row(metric_value="", source="Fluent run export 2026-06-28"))
 
             result = _validate(path)
 
         self.assertEqual(result["file_status"], "present_missing_metric_value")
 
+    def test_disallowed_source_provenance_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "force.csv"
+            _write(
+                path,
+                _complete_row(
+                    source="EasyFsi/HIBM-MPM validation_runs placeholder not Fluent truth"
+                ),
+            )
+
+            result = _validate(path)
+
+        self.assertEqual(result["file_status"], "present_disallowed_source_provenance")
+        self.assertEqual(result["metric_status"], "missing")
+        self.assertEqual(result["reference_values"], {})
+        self.assertIn("disallowed_source_provenance", result["blockers"])
+
+    def test_test_sources_require_explicit_allowance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "force.csv"
+            _write(path, _complete_row(source="synthetic-test-only-not-fluent-truth"))
+
+            blocked = _validate(path)
+            allowed = _validate(path, allow_test_sources=True)
+
+        self.assertEqual(blocked["file_status"], "present_disallowed_source_provenance")
+        self.assertEqual(allowed["file_status"], "present_complete")
+        self.assertEqual(allowed["reference_values"], {"force_z_N": 2.0})
+
     def test_complete_row_returns_reference_value(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "force.csv"
-            _write(path, "step,time_s,force_z_N,source\n50,0.025,2.0,synthetic\n")
+            _write(path, _complete_row(source="Fluent run export 2026-06-28"))
 
             result = _validate(path)
 
@@ -100,12 +129,17 @@ class AnsysVerticalFlapFluentSourceExportSchemaTests(unittest.TestCase):
         self.assertEqual(result["reference_values"], {"force_z_N": 2.0})
 
 
-def _validate(path: Path):
+def _validate(path: Path, *, allow_test_sources: bool = False):
     return SCHEMA.validate_source_export_csv(
         path,
         HEADER,
         reference_value_columns=REFERENCE_COLUMNS,
+        allow_test_sources=allow_test_sources,
     )
+
+
+def _complete_row(*, metric_value: object = 2.0, source: str) -> str:
+    return f"step,time_s,force_z_N,source\n50,0.025,{metric_value},{source}\n"
 
 
 def _write(path: Path, text: str) -> None:

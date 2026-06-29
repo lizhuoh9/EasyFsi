@@ -40,6 +40,7 @@ ACTIVE_CONTRACT_MANIFEST_JSON = (
     REFERENCE_ROOT / "active_fluent_reference_contract.json"
 )
 ACTIVE_MANIFEST_SCHEMA_VERSION = "active_fluent_reference_contract_manifest_v1"
+ALLOW_TEST_SOURCES = False
 
 SOURCE_SCRIPT = (
     "validation_runs/ansys_vertical_flap_fsi/scripts/"
@@ -190,6 +191,7 @@ def run_with_paths(
     current_contract_json: Path,
     output_dir: Path,
     active_manifest_json: Path,
+    allow_test_sources: bool = False,
 ) -> dict[str, Any]:
     original = {
         "SOURCE_EXPORTS_ROOT": SOURCE_EXPORTS_ROOT,
@@ -203,6 +205,7 @@ def run_with_paths(
         "CHECKSUMS_PATH": CHECKSUMS_PATH,
         "CURRENT_CONTRACT_JSON": CURRENT_CONTRACT_JSON,
         "ACTIVE_CONTRACT_MANIFEST_JSON": ACTIVE_CONTRACT_MANIFEST_JSON,
+        "ALLOW_TEST_SOURCES": ALLOW_TEST_SOURCES,
     }
     try:
         _set_paths(
@@ -210,6 +213,7 @@ def run_with_paths(
             current_contract_json=current_contract_json,
             output_dir=output_dir,
             active_manifest_json=active_manifest_json,
+            allow_test_sources=allow_test_sources,
         )
         return _run()
     finally:
@@ -222,6 +226,7 @@ def _set_paths(
     current_contract_json: Path,
     output_dir: Path,
     active_manifest_json: Path,
+    allow_test_sources: bool,
 ) -> None:
     globals().update(
         {
@@ -240,6 +245,7 @@ def _set_paths(
             "CHECKSUMS_PATH": output_dir / "CHECKSUMS.sha256",
             "CURRENT_CONTRACT_JSON": current_contract_json,
             "ACTIVE_CONTRACT_MANIFEST_JSON": active_manifest_json,
+            "ALLOW_TEST_SOURCES": allow_test_sources,
         }
     )
 
@@ -300,6 +306,7 @@ def _source_check(spec: Mapping[str, Any]) -> dict[str, Any]:
         required_final_step=EXPECTED_STEP_COUNT,
         expected_final_time=EXPECTED_TOTAL_TIME_S,
         reference_value_columns=spec["reference_values"],
+        allow_test_sources=ALLOW_TEST_SOURCES,
     )
     values_complete = validation["metric_status"] == "available"
 

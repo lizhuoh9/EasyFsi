@@ -91,6 +91,7 @@ class AnsysVerticalFlapFluentReferenceSyntheticPipelineTests(unittest.TestCase):
                 current_contract_json=current_contract,
                 output_dir=output_dir,
                 active_manifest_json=active_manifest,
+                allow_test_sources=True,
             )
 
             candidate = _read_json(
@@ -133,6 +134,7 @@ class AnsysVerticalFlapFluentReferenceSyntheticPipelineTests(unittest.TestCase):
                 current_contract_json=current_contract,
                 output_dir=output_dir,
                 active_manifest_json=active_manifest,
+                allow_test_sources=True,
             )
             contract = _read_json(
                 output_dir / "fluent_reference_collection_candidate_contract.json"

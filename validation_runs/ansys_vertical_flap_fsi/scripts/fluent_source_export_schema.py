@@ -7,6 +7,17 @@ from typing import Any, Mapping, Sequence
 
 
 MISSING_VALUES = {"", "missing", "todo", "tbd", "n/a", "na", "null", "none"}
+DISALLOWED_SOURCE_PROVENANCE_TERMS = (
+    "easyfsi",
+    "hibm-mpm",
+    "synthetic",
+    "fixture",
+    "placeholder",
+    "public tutorial",
+    "not fluent truth",
+    "validation_runs",
+    "not_collected",
+)
 
 
 def validate_source_export_csv(
@@ -16,6 +27,7 @@ def validate_source_export_csv(
     required_final_step: int = 50,
     expected_final_time: float = 0.025,
     reference_value_columns: Mapping[str, str] | None = None,
+    allow_test_sources: bool = False,
 ) -> dict[str, Any]:
     reference_value_columns = reference_value_columns or {}
     if not path.exists():
@@ -97,6 +109,17 @@ def validate_source_export_csv(
             final_time_s=final_time,
         )
 
+    source = str(final_row.get("source", ""))
+    if not allow_test_sources and _has_disallowed_source_provenance(source):
+        return _present_missing(
+            observed_columns=observed_columns,
+            row_count=len(rows),
+            file_status="present_disallowed_source_provenance",
+            final_step_status="passed",
+            blocker="disallowed_source_provenance",
+            final_time_s=final_time,
+        )
+
     reference_values = {}
     for metric, column in reference_value_columns.items():
         value = _float_value(final_row.get(column))
@@ -160,6 +183,11 @@ def _final_step_row(
 
 def _is_missing(value: Any) -> bool:
     return str(value).strip().lower() in MISSING_VALUES
+
+
+def _has_disallowed_source_provenance(value: str) -> bool:
+    normalized = " ".join(value.strip().lower().replace("\\", "/").split())
+    return any(term in normalized for term in DISALLOWED_SOURCE_PROVENANCE_TERMS)
 
 
 def _int_value(value: Any) -> int | None:
