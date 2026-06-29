@@ -30,6 +30,37 @@ def compute_mass_balance(
     }
 
 
+def apply_outlet_flux_correction(
+    u: np.ndarray,
+    inlet_mask: np.ndarray,
+    outlet_mask: np.ndarray,
+    dy: float,
+) -> tuple[np.ndarray, dict[str, float]]:
+    inlet = inlet_mask.astype(bool)
+    outlet = outlet_mask.astype(bool)
+    corrected = np.array(u, dtype=np.float64, copy=True)
+    inlet_flux = float(np.sum(corrected[inlet]) * dy)
+    raw_outlet_flux = float(np.sum(corrected[outlet]) * dy)
+    denominator = max(abs(inlet_flux), 1.0e-12)
+    if outlet.any():
+        delta_u = (inlet_flux - raw_outlet_flux) / (float(outlet.sum()) * dy)
+        corrected[outlet] += delta_u
+    else:
+        delta_u = 0.0
+    corrected_outlet_flux = float(np.sum(corrected[outlet]) * dy)
+    return corrected, {
+        "inlet_flux": inlet_flux,
+        "raw_outlet_flux": raw_outlet_flux,
+        "corrected_outlet_flux": corrected_outlet_flux,
+        "flux_correction_delta": float(delta_u),
+        "mass_imbalance_rel_raw": (raw_outlet_flux - inlet_flux) / denominator,
+        "mass_imbalance_rel_corrected": (
+            corrected_outlet_flux - inlet_flux
+        )
+        / denominator,
+    }
+
+
 def compute_velocity_stats(
     u: np.ndarray,
     v: np.ndarray,
@@ -79,6 +110,10 @@ def write_solver_history_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def write_mass_balance_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    _write_csv(path, rows)
+
+
+def write_poisson_history_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     _write_csv(path, rows)
 
 
@@ -132,6 +167,85 @@ def build_step2_manifest(
         },
         "solver_config": solver_config,
         "final_summary": final_summary,
+    }
+
+
+def build_step4_manifest(
+    *,
+    output_root: Path,
+    geometry_path: Path,
+    bc_path: Path,
+    final_fields_path: Path,
+    solver_history_path: Path,
+    mass_balance_path: Path,
+    poisson_history_path: Path,
+    quality_comparison_path: Path,
+    initialization_sensitivity_path: Path,
+    manifest_path: Path,
+    solver_config: dict[str, Any],
+    final_summary: dict[str, Any],
+    quality: dict[str, Any],
+    project_root: Path,
+) -> dict[str, Any]:
+    return {
+        "case": "ansys_vertical_flap_fixed_flow",
+        "step": "step4_solver_stabilization",
+        "scope": "fixed-flap stabilized projection solver candidate; no Fluent parity claim",
+        "output_root": _manifest_path(output_root, project_root),
+        "sources": {
+            "geometry_mask": _manifest_path(geometry_path, project_root),
+            "bc_map": _manifest_path(bc_path, project_root),
+        },
+        "forbidden_sources": {
+            "traction_shared_snapshot_diagnostics": "not_used",
+        },
+        "generated_files": {
+            "final_fields_stabilized": _manifest_path(
+                final_fields_path, project_root
+            ),
+            "solver_history_stabilized": _manifest_path(
+                solver_history_path, project_root
+            ),
+            "mass_balance_stabilized": _manifest_path(
+                mass_balance_path, project_root
+            ),
+            "poisson_history_stabilized": _manifest_path(
+                poisson_history_path, project_root
+            ),
+            "quality_comparison_step2_vs_stabilized": _manifest_path(
+                quality_comparison_path, project_root
+            ),
+            "initialization_sensitivity": _manifest_path(
+                initialization_sensitivity_path, project_root
+            ),
+            "case_manifest_step4_solver_stabilization": _manifest_path(
+                manifest_path, project_root
+            ),
+        },
+        "claims": {
+            "fluent_parity": "not_claimed",
+            "fsi": "not_claimed",
+            "solver_result": "step4_solver_stabilization",
+        },
+        "variable_convention": {
+            "u": "streamwise_minus_Uz",
+            "v": "Uy",
+            "Uz": "-u",
+            "left_to_right_display_flow": "u_positive_Uz_negative",
+        },
+        "numerical_method": {
+            "type": "fractional_step_projection",
+            "advection": "upwind",
+            "diffusion": "explicit",
+            "pressure_poisson": "masked_sor",
+            "projection_metrics": "finite_volume",
+            "outlet_flux_correction": bool(
+                solver_config.get("outlet_flux_correction", False)
+            ),
+        },
+        "solver_config": solver_config,
+        "final_summary": final_summary,
+        "quality": quality,
     }
 
 

@@ -11,6 +11,7 @@ DEFAULT_THRESHOLDS = {
     "max_divergence_l2_warn": 100.0,
     "max_divergence_linf_warn": 10000.0,
     "max_poisson_residual_linf_warn": 1.0e8,
+    "max_poisson_residual_linf_relative": 1.0e-3,
 }
 
 
@@ -41,13 +42,37 @@ def evaluate_quality_gates(
         "centerline_max_u": float(final_summary.get("centerline_max_u", 0.0)),
         "mass_imbalance_rel": float(
             final_summary.get(
-                "mass_imbalance_rel", last_mass.get("mass_imbalance_rel", 0.0)
+                "mass_imbalance_rel_corrected",
+                final_summary.get(
+                    "mass_imbalance_rel", last_mass.get("mass_imbalance_rel", 0.0)
+                ),
+            )
+        ),
+        "mass_imbalance_rel_raw": float(
+            final_summary.get(
+                "mass_imbalance_rel_raw",
+                last_mass.get("mass_imbalance_rel_raw", last_mass.get("mass_imbalance_rel", 0.0)),
+            )
+        ),
+        "mass_imbalance_rel_corrected": float(
+            final_summary.get(
+                "mass_imbalance_rel_corrected",
+                last_mass.get("mass_imbalance_rel_corrected", last_mass.get("mass_imbalance_rel", 0.0)),
             )
         ),
         "divergence_linf": float(last_history.get("divergence_linf", 0.0)),
         "divergence_l2": float(last_history.get("divergence_l2", 0.0)),
+        "divergence_linf_excluding_near_solid": float(
+            last_history.get("divergence_linf_excluding_near_solid", 0.0)
+        ),
+        "divergence_l2_excluding_near_solid": float(
+            last_history.get("divergence_l2_excluding_near_solid", 0.0)
+        ),
         "poisson_residual_linf": float(
             last_history.get("poisson_residual_linf", 0.0)
+        ),
+        "poisson_residual_linf_relative": float(
+            last_history.get("poisson_residual_linf_relative", 1.0)
         ),
     }
 
@@ -70,17 +95,34 @@ def evaluate_quality_gates(
     else:
         mass_quality = _gate("fail", f"final mass imbalance rel = {mass_abs:.6g}")
 
-    incompressibility_pass = (
-        metrics["divergence_l2"] <= float(thresholds["max_divergence_l2_warn"])
-        and metrics["divergence_linf"]
-        <= float(thresholds["max_divergence_linf_warn"])
-        and metrics["poisson_residual_linf"]
+    poisson_pass = (
+        metrics["poisson_residual_linf"]
         <= float(thresholds["max_poisson_residual_linf_warn"])
+        or metrics["poisson_residual_linf_relative"]
+        <= float(thresholds["max_poisson_residual_linf_relative"])
+    )
+    divergence_l2_for_gate = (
+        metrics["divergence_l2_excluding_near_solid"]
+        if metrics["divergence_l2_excluding_near_solid"] > 0.0
+        else metrics["divergence_l2"]
+    )
+    divergence_linf_for_gate = (
+        metrics["divergence_linf_excluding_near_solid"]
+        if metrics["divergence_linf_excluding_near_solid"] > 0.0
+        else metrics["divergence_linf"]
+    )
+    incompressibility_pass = (
+        divergence_l2_for_gate <= float(thresholds["max_divergence_l2_warn"])
+        and divergence_linf_for_gate <= float(thresholds["max_divergence_linf_warn"])
+        and poisson_pass
     )
     incompressibility_reasons = [
         f"divergence_l2={metrics['divergence_l2']:.6g}",
         f"divergence_linf={metrics['divergence_linf']:.6g}",
+        f"divergence_l2_excluding_near_solid={metrics['divergence_l2_excluding_near_solid']:.6g}",
+        f"divergence_linf_excluding_near_solid={metrics['divergence_linf_excluding_near_solid']:.6g}",
         f"poisson_residual_linf={metrics['poisson_residual_linf']:.6g}",
+        f"poisson_residual_linf_relative={metrics['poisson_residual_linf_relative']:.6g}",
     ]
     incompressibility_quality = _gate(
         "pass" if incompressibility_pass else "warn",

@@ -39,6 +39,11 @@ def run_fluent_style_postprocess(
     step2_manifest_path = Path(step2_manifest_path)
     output_root = _resolve_output_root(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    options = config or {}
+    source_label = str(options.get("source_label", "Step 2 solver output"))
+    solver_result = str(
+        options.get("solver_result", "step2_fixed_flap_projection_solver")
+    )
 
     fields = dict(np.load(final_fields_path))
     history_rows = load_solver_history(solver_history_path)
@@ -49,7 +54,9 @@ def run_fluent_style_postprocess(
         history_rows, mass_rows, final_summary, (config or {}).get("quality_gates")
     )
 
-    figures = _write_figures(output_root, fields, history_rows, mass_rows)
+    figures = _write_figures(
+        output_root, fields, history_rows, mass_rows, source_label
+    )
     profiles = _write_profiles(output_root, fields)
     profile_summary = summarize_profiles(
         extract_centerline_profile(fields),
@@ -64,6 +71,7 @@ def run_fluent_style_postprocess(
         figures=figures,
         profiles=profiles,
         profile_summary=profile_summary,
+        source_label=source_label,
     )
     manifest_path = output_root / "case_manifest_step3.json"
     manifest = _build_manifest(
@@ -77,6 +85,8 @@ def run_fluent_style_postprocess(
         report_path=report_path,
         manifest_path=manifest_path,
         quality=quality,
+        source_label=source_label,
+        solver_result=solver_result,
     )
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -97,6 +107,7 @@ def _write_figures(
     fields: dict[str, np.ndarray],
     history_rows: list[dict[str, float]],
     mass_rows: list[dict[str, float]],
+    source_label: str,
 ) -> dict[str, str]:
     solid = fields["solid_mask"].astype(bool)
     max_speed = float(np.max(fields["speed"][~solid]))
@@ -122,7 +133,7 @@ def _write_figures(
         fields["Y"],
         fields["speed"],
         solid,
-        "Step 2 solver output; no Fluent parity claim",
+        f"{source_label}; no Fluent parity claim",
         "|U| (m/s)",
         vmin=0.0,
         vmax=28.1,
@@ -133,7 +144,7 @@ def _write_figures(
         fields["Y"],
         fields["speed"],
         solid,
-        "Step 2 solver output; no Fluent parity claim",
+        f"{source_label}; no Fluent parity claim",
         "|U| (m/s)",
         vmin=0.0,
         vmax=max_speed,
@@ -144,7 +155,7 @@ def _write_figures(
         fields["Y"],
         fields["streamwise_minus_Uz"],
         solid,
-        "Step 2 solver output; no Fluent parity claim",
+        f"{source_label}; no Fluent parity claim",
         "streamwise -Uz (m/s)",
         vmin=0.0,
         vmax=28.1,
@@ -155,7 +166,7 @@ def _write_figures(
         fields["Y"],
         fields["streamwise_minus_Uz"],
         solid,
-        "Step 2 solver output; no Fluent parity claim",
+        f"{source_label}; no Fluent parity claim",
         "streamwise -Uz (m/s)",
         vmin=0.0,
         vmax=max_streamwise,
@@ -166,7 +177,7 @@ def _write_figures(
         fields["Y"],
         fields["Uy"],
         solid,
-        "Step 2 solver output; no Fluent parity claim",
+        f"{source_label}; no Fluent parity claim",
         "Uy (m/s)",
         vmin=-max_uy,
         vmax=max_uy,
@@ -178,7 +189,7 @@ def _write_figures(
         fields["Y"],
         fields["p"],
         solid,
-        "Step 2 solver output; no Fluent parity claim",
+        f"{source_label}; no Fluent parity claim",
         "p",
     )
     plot_geometry_overlay(
@@ -230,11 +241,13 @@ def _build_manifest(
     report_path: Path,
     manifest_path: Path,
     quality: dict[str, Any],
+    source_label: str,
+    solver_result: str,
 ) -> dict[str, Any]:
     return {
         "case": "ansys_vertical_flap_fixed_flow",
         "step": "step3_fluent_style_postprocess",
-        "scope": "Fluent-style visualization and numerical quality report for Step 2 solver output; no Fluent parity claim",
+        "scope": f"Fluent-style visualization and numerical quality report for {source_label}; no Fluent parity claim",
         "output_root": _manifest_path(output_root),
         "sources": {
             "final_fields": _manifest_path(final_fields_path),
@@ -255,7 +268,7 @@ def _build_manifest(
         "claims": {
             "fluent_parity": "not_claimed",
             "fsi": "not_claimed",
-            "solver_result": "step2_fixed_flap_projection_solver",
+            "solver_result": solver_result,
         },
     }
 

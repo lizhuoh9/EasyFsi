@@ -26,6 +26,27 @@ def compute_divergence(
     return divergence
 
 
+def compute_fv_divergence(
+    u: np.ndarray,
+    v: np.ndarray,
+    fluid_mask: np.ndarray,
+    solid_mask: np.ndarray,
+    ds: float,
+    dy: float,
+) -> np.ndarray:
+    del solid_mask
+    fluid = fluid_mask.astype(bool)
+    center_u = np.asarray(u, dtype=np.float64)
+    center_v = np.asarray(v, dtype=np.float64)
+    east_u = _face_value(center_u, fluid, axis=1, direction=1)
+    west_u = _face_value(center_u, fluid, axis=1, direction=-1)
+    north_v = _face_value(center_v, fluid, axis=0, direction=1)
+    south_v = _face_value(center_v, fluid, axis=0, direction=-1)
+    divergence = (east_u - west_u) / ds + (north_v - south_v) / dy
+    divergence[~fluid] = 0.0
+    return divergence
+
+
 def laplacian(
     phi: np.ndarray,
     fluid_mask: np.ndarray,
@@ -67,6 +88,52 @@ def compute_pressure_gradient(
     dp_ds[~fluid] = 0.0
     dp_dy[~fluid] = 0.0
     return dp_ds, dp_dy
+
+
+def compute_fv_pressure_gradient(
+    p: np.ndarray,
+    fluid_mask: np.ndarray,
+    solid_mask: np.ndarray,
+    outlet_mask: np.ndarray,
+    ds: float,
+    dy: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    del solid_mask, outlet_mask
+    fluid = fluid_mask.astype(bool)
+    pressure = np.asarray(p, dtype=np.float64)
+    p_e = _neighbor_value(pressure, fluid, axis=1, direction=1, solid_value=None)
+    p_w = _neighbor_value(pressure, fluid, axis=1, direction=-1, solid_value=None)
+    p_n = _neighbor_value(pressure, fluid, axis=0, direction=1, solid_value=None)
+    p_s = _neighbor_value(pressure, fluid, axis=0, direction=-1, solid_value=None)
+    e_fluid = _shift_with_edge(fluid, axis=1, direction=1)
+    w_fluid = _shift_with_edge(fluid, axis=1, direction=-1)
+    n_fluid = _shift_with_edge(fluid, axis=0, direction=1)
+    s_fluid = _shift_with_edge(fluid, axis=0, direction=-1)
+
+    ds_denominator = np.where(e_fluid & w_fluid, 2.0 * ds, ds)
+    dy_denominator = np.where(n_fluid & s_fluid, 2.0 * dy, dy)
+    dp_ds = (p_e - p_w) / ds_denominator
+    dp_dy = (p_n - p_s) / dy_denominator
+    dp_ds[~fluid] = 0.0
+    dp_dy[~fluid] = 0.0
+    return dp_ds, dp_dy
+
+
+def compute_interior_divergence_metrics(
+    divergence: np.ndarray,
+    fluid_mask: np.ndarray,
+    near_solid_mask: np.ndarray,
+) -> dict[str, float]:
+    fluid = fluid_mask.astype(bool)
+    near_solid = near_solid_mask.astype(bool)
+    values = np.asarray(divergence, dtype=np.float64)[fluid]
+    interior_values = np.asarray(divergence, dtype=np.float64)[fluid & ~near_solid]
+    return {
+        "divergence_linf": _linf(values),
+        "divergence_l2": _l2(values),
+        "divergence_linf_excluding_near_solid": _linf(interior_values),
+        "divergence_l2_excluding_near_solid": _l2(interior_values),
+    }
 
 
 def apply_velocity_bc(
@@ -138,6 +205,27 @@ def _central_derivative(
     derivative = (forward - backward) / (2.0 * spacing)
     derivative[~fluid] = 0.0
     return derivative
+
+
+def _face_value(
+    values: np.ndarray,
+    fluid: np.ndarray,
+    *,
+    axis: int,
+    direction: int,
+) -> np.ndarray:
+    neighbor = _shift_with_edge(values, axis=axis, direction=direction)
+    neighbor_fluid = _shift_with_edge(fluid, axis=axis, direction=direction)
+    center = np.asarray(values, dtype=np.float64)
+    return np.where(neighbor_fluid, 0.5 * (center + neighbor), 0.0)
+
+
+def _linf(values: np.ndarray) -> float:
+    return float(np.max(np.abs(values))) if values.size else 0.0
+
+
+def _l2(values: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(values * values))) if values.size else 0.0
 
 
 def _neighbor_no_slip(

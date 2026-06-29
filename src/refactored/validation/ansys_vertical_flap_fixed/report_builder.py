@@ -12,6 +12,7 @@ def build_validation_report(
     figures: dict[str, str],
     profiles: dict[str, str],
     profile_summary: dict[str, Any],
+    source_label: str = "Step 2 solver output",
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -21,7 +22,7 @@ def build_validation_report(
         "",
         "## Scope",
         "",
-        "- Source: Step 2 solver output.",
+        f"- Source: {source_label}.",
         "- No Fluent parity claim.",
         "- No FSI claim.",
         "- traction_shared_snapshot_diagnostics not used.",
@@ -35,9 +36,14 @@ def build_validation_report(
         f"| max_speed | {field_summary.get('max_speed', metrics['max_speed']):.9g} |",
         f"| centerline_max_u | {profile_summary['centerline_max_u']:.9g} |",
         f"| mass_imbalance_rel | {metrics['mass_imbalance_rel']:.9g} |",
+        f"| mass_imbalance_rel_raw | {metrics.get('mass_imbalance_rel_raw', metrics['mass_imbalance_rel']):.9g} |",
+        f"| mass_imbalance_rel_corrected | {metrics.get('mass_imbalance_rel_corrected', metrics['mass_imbalance_rel']):.9g} |",
         f"| divergence_linf | {metrics['divergence_linf']:.9g} |",
         f"| divergence_l2 | {metrics['divergence_l2']:.9g} |",
+        f"| divergence_linf_excluding_near_solid | {metrics.get('divergence_linf_excluding_near_solid', 0.0):.9g} |",
+        f"| divergence_l2_excluding_near_solid | {metrics.get('divergence_l2_excluding_near_solid', 0.0):.9g} |",
         f"| poisson_residual_linf | {metrics['poisson_residual_linf']:.9g} |",
+        f"| poisson_residual_linf_relative | {metrics.get('poisson_residual_linf_relative', 1.0):.9g} |",
         f"| throat_max_u | {profile_summary['throat_max_u']:.9g} |",
         f"| throat_mean_u | {profile_summary['throat_mean_u']:.9g} |",
         "",

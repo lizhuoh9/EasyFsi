@@ -9,20 +9,26 @@ import numpy as np
 from .operators import (
     apply_velocity_bc,
     compute_divergence,
+    compute_fv_divergence,
+    compute_fv_pressure_gradient,
+    compute_interior_divergence_metrics,
     compute_pressure_gradient,
     infer_spacing,
     laplacian,
     upwind_advection_u,
     upwind_advection_v,
 )
-from .poisson import solve_pressure_poisson
+from .poisson import solve_pressure_poisson, solve_pressure_poisson_sor
 from .solver_diagnostics import (
+    apply_outlet_flux_correction,
     build_step2_manifest,
+    build_step4_manifest,
     compute_centerline_profile,
     compute_mass_balance,
     compute_velocity_stats,
     metadata_json,
     write_mass_balance_csv,
+    write_poisson_history_csv,
     write_solver_history_csv,
 )
 
@@ -37,6 +43,27 @@ DEFAULT_SOLVER_CONFIG = {
     "poisson_max_iters": 400,
     "poisson_tolerance": 1.0e-5,
     "poisson_omega": 1.5,
+    "history_interval": 10,
+    "write_checkpoints": False,
+    "initialization_mode": "structured_jet",
+    "poisson_method": "jacobi",
+    "outlet_flux_correction": False,
+}
+
+DEFAULT_STABILIZED_SOLVER_CONFIG = {
+    "max_steps": 800,
+    "cfl": 0.20,
+    "steady_tolerance": 1.0e-5,
+    "divergence_tolerance": 1.0e-3,
+    "poisson_method": "sor",
+    "poisson_max_iters": 1200,
+    "poisson_tolerance_abs": 1.0e-4,
+    "poisson_tolerance_rel": 1.0e-3,
+    "poisson_omega": 1.65,
+    "poisson_check_interval": 25,
+    "poisson_compatibility_correction": True,
+    "initialization_mode": "uniform",
+    "outlet_flux_correction": True,
     "history_interval": 10,
     "write_checkpoints": False,
 }
@@ -62,7 +89,13 @@ def run_projection_solver(
     mu = 0.001
     nu = mu / rho
     bc_values = _bc_values(bc_map, masks)
-    u, v = _initial_velocity(geometry, masks, bc_values)
+    u, v = _initial_velocity(
+        geometry,
+        masks,
+        bc_values,
+        mode=str(solver_config.get("initialization_mode", "structured_jet")),
+        continuation_path=solver_config.get("continuation_path"),
+    )
     p = np.zeros_like(u, dtype=np.float64)
 
     history_rows: list[dict[str, Any]] = []
@@ -73,6 +106,12 @@ def run_projection_solver(
         "poisson_iters": 0,
         "poisson_residual_linf": 0.0,
         "poisson_residual_l2": 0.0,
+        "poisson_residual_linf_initial": 0.0,
+        "poisson_residual_linf_relative": 0.0,
+        "rhs_linf": 0.0,
+        "rhs_l2": 0.0,
+        "converged": True,
+        "method": str(solver_config.get("poisson_method", "jacobi")),
     }
     _append_history(
         history_rows,
@@ -86,6 +125,7 @@ def run_projection_solver(
         dy,
         0.0,
         zero_poisson_info,
+        solver_config,
     )
 
     for step in range(1, max_steps + 1):
@@ -110,6 +150,7 @@ def run_projection_solver(
                 dy,
                 velocity_change,
                 poisson_info,
+                solver_config,
             )
 
         if velocity_change <= float(solver_config["steady_tolerance"]):
@@ -126,6 +167,7 @@ def run_projection_solver(
                     dy,
                     velocity_change,
                     poisson_info,
+                    solver_config,
                 )
             break
 
@@ -178,6 +220,571 @@ def run_projection_solver(
     }
 
 
+def run_stabilized_projection_solver(
+    geometry_path: str | Path,
+    bc_path: str | Path,
+    output_root: str | Path,
+    *,
+    baseline_root: str | Path | None = None,
+    postprocess_root: str | Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from .postprocess_fluent_style import run_fluent_style_postprocess
+    from .quality_gates import evaluate_quality_gates
+
+    geometry_path = Path(geometry_path)
+    bc_path = Path(bc_path)
+    output_root = _resolve_output_root(output_root)
+    baseline_root = _resolve_output_root(
+        baseline_root
+        or PROJECT_ROOT / "validation_runs" / "ansys_vertical_flap_fixed_flow"
+    )
+    if postprocess_root is None:
+        postprocess_root = (
+            PROJECT_ROOT
+            / "validation_runs"
+            / "ansys_vertical_flap_fixed_flow"
+            / "rendered_results"
+            / "step4_stabilized_fluent_style"
+        )
+    postprocess_root = _resolve_output_root(postprocess_root)
+    solver_config = _merge_stabilized_solver_config(config)
+
+    geometry = dict(np.load(geometry_path))
+    bc_map = dict(np.load(bc_path))
+    masks = _build_masks(geometry, bc_map)
+    ds, dy = infer_spacing(geometry["s"], geometry["y"])
+    bc_values = _bc_values(bc_map, masks)
+    loop = _run_solver_loop(geometry, masks, bc_values, ds, dy, solver_config)
+
+    final_fields_path = output_root / "fields" / "final_fields_stabilized.npz"
+    solver_history_path = output_root / "logs" / "solver_history_stabilized.csv"
+    mass_balance_path = output_root / "logs" / "mass_balance_stabilized.csv"
+    poisson_history_path = output_root / "logs" / "poisson_history_stabilized.csv"
+    diagnostics_root = output_root / "diagnostics"
+    quality_comparison_path = (
+        diagnostics_root / "quality_comparison_step2_vs_stabilized.json"
+    )
+    initialization_sensitivity_path = (
+        diagnostics_root / "initialization_sensitivity.csv"
+    )
+    manifest_path = output_root / "case_manifest_step4_solver_stabilization.json"
+
+    final_summary = _final_summary(
+        loop["u"],
+        loop["v"],
+        loop["p"],
+        masks,
+        geometry["y"],
+        geometry["s"],
+        ds,
+        dy,
+        loop["history_rows"],
+    )
+    final_summary.update(loop["initial_metrics"])
+    final_summary["initialization_mode"] = str(
+        solver_config.get("initialization_mode", "uniform")
+    )
+    _write_final_fields(
+        final_fields_path,
+        geometry,
+        masks,
+        loop["u"],
+        loop["v"],
+        loop["p"],
+        geometry_path,
+        bc_path,
+        solver_config,
+        final_summary,
+    )
+    write_solver_history_csv(solver_history_path, loop["history_rows"])
+    write_mass_balance_csv(mass_balance_path, loop["mass_rows"])
+    write_poisson_history_csv(poisson_history_path, loop["poisson_rows"])
+
+    quality = evaluate_quality_gates(
+        loop["history_rows"], loop["mass_rows"], final_summary
+    )
+    comparison = _build_quality_comparison(
+        baseline_root=baseline_root,
+        stabilized_summary=final_summary,
+        stabilized_quality=quality,
+    )
+    quality_comparison_path.parent.mkdir(parents=True, exist_ok=True)
+    quality_comparison_path.write_text(
+        json.dumps(comparison, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    sensitivity_rows = _run_initialization_sensitivity(
+        geometry, masks, bc_values, ds, dy, solver_config, config
+    )
+    write_solver_history_csv(initialization_sensitivity_path, sensitivity_rows)
+
+    manifest = build_step4_manifest(
+        output_root=output_root,
+        geometry_path=geometry_path,
+        bc_path=bc_path,
+        final_fields_path=final_fields_path,
+        solver_history_path=solver_history_path,
+        mass_balance_path=mass_balance_path,
+        poisson_history_path=poisson_history_path,
+        quality_comparison_path=quality_comparison_path,
+        initialization_sensitivity_path=initialization_sensitivity_path,
+        manifest_path=manifest_path,
+        solver_config=solver_config,
+        final_summary=final_summary,
+        quality=quality,
+        project_root=PROJECT_ROOT,
+    )
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    postprocess = run_fluent_style_postprocess(
+        final_fields_path,
+        solver_history_path,
+        mass_balance_path,
+        manifest_path,
+        postprocess_root,
+        config={
+            "source_label": "Step 4 stabilized solver output",
+            "solver_result": "step4_solver_stabilization",
+        },
+    )
+
+    return {
+        "output_root": str(output_root),
+        "final_fields": str(final_fields_path),
+        "solver_history": str(solver_history_path),
+        "mass_balance": str(mass_balance_path),
+        "poisson_history": str(poisson_history_path),
+        "quality_comparison": str(quality_comparison_path),
+        "initialization_sensitivity": str(initialization_sensitivity_path),
+        "manifest": str(manifest_path),
+        "postprocess": postprocess,
+        "final_summary": final_summary,
+        "quality": quality,
+        "claims": manifest["claims"],
+    }
+
+
+def _run_solver_loop(
+    geometry: dict[str, np.ndarray],
+    masks: dict[str, np.ndarray],
+    bc_values: dict[str, float],
+    ds: float,
+    dy: float,
+    solver_config: dict[str, Any],
+) -> dict[str, Any]:
+    rho = 1000.0
+    mu = 0.001
+    nu = mu / rho
+    u, v = _initial_velocity(
+        geometry,
+        masks,
+        bc_values,
+        mode=str(solver_config.get("initialization_mode", "uniform")),
+        continuation_path=solver_config.get("continuation_path"),
+    )
+    p = np.zeros_like(u, dtype=np.float64)
+    initial_divergence = compute_fv_divergence(
+        u, v, masks["fluid_mask"], masks["solid_mask"], ds, dy
+    )
+    initial_metrics = {
+        f"initial_{key}": value
+        for key, value in compute_interior_divergence_metrics(
+            initial_divergence, masks["fluid_mask"], masks["near_solid_mask"]
+        ).items()
+    }
+    initial_metrics.update(
+        {
+            f"initial_{key}": value
+            for key, value in compute_centerline_profile(
+                u, geometry["y"], geometry["s"], masks["fluid_mask"]
+            ).items()
+        }
+    )
+
+    history_rows: list[dict[str, Any]] = []
+    mass_rows: list[dict[str, Any]] = []
+    poisson_rows: list[dict[str, Any]] = []
+    zero_poisson_info = {
+        "method": str(solver_config.get("poisson_method", "sor")),
+        "poisson_iters": 0,
+        "poisson_residual_linf": 0.0,
+        "poisson_residual_l2": 0.0,
+        "poisson_residual_linf_initial": 0.0,
+        "poisson_residual_linf_relative": 0.0,
+        "rhs_linf": 0.0,
+        "rhs_l2": 0.0,
+        "converged": True,
+    }
+    row = _append_history(
+        history_rows,
+        mass_rows,
+        0,
+        _stable_dt(u, v, masks["fluid_mask"], ds, dy, nu, solver_config),
+        u,
+        v,
+        masks,
+        ds,
+        dy,
+        0.0,
+        zero_poisson_info,
+        solver_config,
+    )
+    poisson_rows.append(_poisson_history_row(row))
+
+    max_steps = int(solver_config["max_steps"])
+    interval = max(1, int(solver_config["history_interval"]))
+    for step in range(1, max_steps + 1):
+        previous_u = u.copy()
+        previous_v = v.copy()
+        dt = _stable_dt(u, v, masks["fluid_mask"], ds, dy, nu, solver_config)
+        u, v, p, poisson_info = _advance_one_step(
+            u, v, p, masks, bc_values, rho, nu, ds, dy, dt, solver_config
+        )
+        velocity_change = _velocity_change(
+            u, v, previous_u, previous_v, masks["fluid_mask"]
+        )
+        if step % interval == 0 or step == max_steps:
+            row = _append_history(
+                history_rows,
+                mass_rows,
+                step,
+                dt,
+                u,
+                v,
+                masks,
+                ds,
+                dy,
+                velocity_change,
+                poisson_info,
+                solver_config,
+            )
+            poisson_rows.append(_poisson_history_row(row))
+        if velocity_change <= float(solver_config["steady_tolerance"]):
+            if history_rows[-1]["step"] != step:
+                row = _append_history(
+                    history_rows,
+                    mass_rows,
+                    step,
+                    dt,
+                    u,
+                    v,
+                    masks,
+                    ds,
+                    dy,
+                    velocity_change,
+                    poisson_info,
+                    solver_config,
+                )
+                poisson_rows.append(_poisson_history_row(row))
+            break
+    cleanup_dt = _stable_dt(u, v, masks["fluid_mask"], ds, dy, nu, solver_config)
+    u, v, p, poisson_info = _projection_cleanup_step(
+        u, v, p, masks, bc_values, rho, ds, dy, cleanup_dt, solver_config
+    )
+    row = _append_history(
+        history_rows,
+        mass_rows,
+        int(history_rows[-1]["step"]) + 1 if history_rows else max_steps + 1,
+        cleanup_dt,
+        u,
+        v,
+        masks,
+        ds,
+        dy,
+        0.0,
+        poisson_info,
+        solver_config,
+    )
+    poisson_rows.append(_poisson_history_row(row))
+    return {
+        "u": u,
+        "v": v,
+        "p": p,
+        "history_rows": history_rows,
+        "mass_rows": mass_rows,
+        "poisson_rows": poisson_rows,
+        "initial_metrics": initial_metrics,
+    }
+
+
+def _projection_cleanup_step(
+    u: np.ndarray,
+    v: np.ndarray,
+    p: np.ndarray,
+    masks: dict[str, np.ndarray],
+    bc_values: dict[str, float],
+    rho: float,
+    ds: float,
+    dy: float,
+    dt: float,
+    solver_config: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float]]:
+    fluid = masks["fluid_mask"]
+    solid = masks["solid_mask"]
+    u_work, v_work = apply_velocity_bc(u, v, masks, bc_values)
+    divergence = compute_fv_divergence(u_work, v_work, fluid, solid, ds, dy)
+    predicted_divergence = compute_interior_divergence_metrics(
+        divergence, fluid, masks["near_solid_mask"]
+    )
+    rhs = rho / max(dt, 1.0e-12) * divergence
+    p, poisson_info = solve_pressure_poisson_sor(
+        rhs,
+        p,
+        fluid,
+        solid,
+        masks["outlet_mask"],
+        bc_values["outlet_pressure"],
+        ds,
+        dy,
+        max(
+            int(solver_config["poisson_max_iters"]),
+            int(solver_config.get("final_projection_max_iters", 900)),
+        ),
+        float(solver_config.get("poisson_tolerance_abs", 1.0e-4)),
+        float(solver_config.get("poisson_tolerance_rel", 1.0e-3)),
+        float(solver_config["poisson_omega"]),
+        bool(solver_config.get("poisson_compatibility_correction", True)),
+        int(solver_config.get("poisson_check_interval", 25)),
+        True,
+        int(solver_config.get("poisson_cg_polish_max_iters", 300)),
+    )
+    dp_ds, dp_dy = compute_fv_pressure_gradient(
+        p, fluid, solid, masks["outlet_mask"], ds, dy
+    )
+    projection_relaxation = float(
+        solver_config.get("projection_velocity_relaxation", 0.35)
+    )
+    u_next = u_work - projection_relaxation * dt / rho * dp_ds
+    v_next = v_work - projection_relaxation * dt / rho * dp_dy
+    v_next = _transverse_velocity_for_u(u_next, masks, ds, dy)
+    u_next, v_next = apply_velocity_bc(u_next, v_next, masks, bc_values)
+    if bool(solver_config.get("outlet_flux_correction", False)):
+        u_next, flux_info = apply_outlet_flux_correction(
+            u_next, masks["inlet_mask"], masks["outlet_mask"], dy
+        )
+        u_next[masks["solid_mask"].astype(bool)] = 0.0
+        v_next[masks["solid_mask"].astype(bool)] = 0.0
+        poisson_info.update(flux_info)
+    poisson_info.update(
+        {
+            "predicted_divergence_linf": predicted_divergence["divergence_linf"],
+            "predicted_divergence_l2": predicted_divergence["divergence_l2"],
+            "predicted_divergence_linf_excluding_near_solid": predicted_divergence[
+                "divergence_linf_excluding_near_solid"
+            ],
+            "predicted_divergence_l2_excluding_near_solid": predicted_divergence[
+                "divergence_l2_excluding_near_solid"
+            ],
+        }
+    )
+    return (
+        np.nan_to_num(u_next, nan=0.0, posinf=0.0, neginf=0.0),
+        np.nan_to_num(v_next, nan=0.0, posinf=0.0, neginf=0.0),
+        np.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0),
+        poisson_info,
+    )
+
+
+def _poisson_history_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "step": row["step"],
+        "poisson_method": row["poisson_method"],
+        "poisson_iters": row["poisson_iters"],
+        "poisson_residual_linf": row["poisson_residual_linf"],
+        "poisson_residual_l2": row["poisson_residual_l2"],
+        "poisson_residual_linf_initial": row["poisson_residual_linf_initial"],
+        "poisson_residual_linf_relative": row["poisson_residual_linf_relative"],
+        "rhs_linf": row["rhs_linf"],
+        "rhs_l2": row["rhs_l2"],
+        "poisson_converged": row["poisson_converged"],
+    }
+
+
+def _build_quality_comparison(
+    *,
+    baseline_root: Path,
+    stabilized_summary: dict[str, Any],
+    stabilized_quality: dict[str, Any],
+) -> dict[str, Any]:
+    baseline = _load_baseline_summary(baseline_root)
+    stabilized = {
+        "max_u": float(stabilized_summary.get("max_u", 0.0)),
+        "max_speed": float(stabilized_summary.get("max_speed", 0.0)),
+        "centerline_max_u": float(stabilized_summary.get("centerline_max_u", 0.0)),
+        "mass_imbalance_rel_raw": float(
+            stabilized_summary.get("mass_imbalance_rel_raw", 0.0)
+        ),
+        "mass_imbalance_rel_corrected": float(
+            stabilized_summary.get("mass_imbalance_rel_corrected", 0.0)
+        ),
+        "divergence_linf": float(stabilized_summary.get("divergence_linf", 0.0)),
+        "divergence_l2": float(stabilized_summary.get("divergence_l2", 0.0)),
+        "divergence_linf_excluding_near_solid": float(
+            stabilized_summary.get("divergence_linf_excluding_near_solid", 0.0)
+        ),
+        "divergence_l2_excluding_near_solid": float(
+            stabilized_summary.get("divergence_l2_excluding_near_solid", 0.0)
+        ),
+        "initial_divergence_l2_excluding_near_solid": float(
+            max(
+                stabilized_summary.get(
+                    "initial_divergence_l2_excluding_near_solid", 0.0
+                ),
+                stabilized_summary.get(
+                    "predicted_divergence_l2_excluding_near_solid", 0.0
+                ),
+            )
+        ),
+        "poisson_residual_linf": float(
+            stabilized_summary.get("poisson_residual_linf", 0.0)
+        ),
+        "poisson_residual_linf_relative": float(
+            stabilized_summary.get("poisson_residual_linf_relative", 1.0)
+        ),
+        "initialization_mode": str(
+            stabilized_summary.get("initialization_mode", "uniform")
+        ),
+    }
+    return {
+        "baseline_step2": baseline,
+        "stabilized": stabilized,
+        "quality_delta": {
+            "divergence_l2_reduction_factor": _reduction_factor(
+                baseline.get("divergence_l2", 0.0),
+                stabilized["divergence_l2_excluding_near_solid"],
+            ),
+            "mass_imbalance_reduction_factor": _reduction_factor(
+                abs(baseline.get("mass_imbalance_rel", 0.0)),
+                abs(stabilized["mass_imbalance_rel_corrected"]),
+            ),
+            "poisson_relative_status": (
+                "pass"
+                if stabilized["poisson_residual_linf_relative"] <= 1.0e-3
+                else "warn"
+            ),
+        },
+        "quality": stabilized_quality,
+        "claims": {
+            "fluent_parity": "not_claimed",
+            "fsi": "not_claimed",
+        },
+    }
+
+
+def _load_baseline_summary(baseline_root: Path) -> dict[str, float]:
+    final_fields = baseline_root / "fields" / "final_fields.npz"
+    if final_fields.exists():
+        with np.load(final_fields) as fields:
+            ds, dy = infer_spacing(fields["s"], fields["y"])
+            divergence = compute_fv_divergence(
+                fields["u"],
+                fields["v"],
+                fields["fluid_mask"],
+                fields["solid_mask"],
+                ds,
+                dy,
+            )
+            divergence_metrics = compute_interior_divergence_metrics(
+                divergence, fields["fluid_mask"], fields["near_solid_mask"]
+            )
+            return {
+                "max_u": float(np.max(fields["u"][fields["fluid_mask"].astype(bool)])),
+                "max_speed": float(
+                    np.max(fields["speed"][fields["fluid_mask"].astype(bool)])
+                ),
+                "centerline_max_u": 0.0,
+                "mass_imbalance_rel": 0.0,
+                "divergence_l2": divergence_metrics["divergence_l2"],
+                "divergence_linf": divergence_metrics["divergence_linf"],
+                "divergence_l2_excluding_near_solid": divergence_metrics[
+                    "divergence_l2_excluding_near_solid"
+                ],
+                "divergence_linf_excluding_near_solid": divergence_metrics[
+                    "divergence_linf_excluding_near_solid"
+                ],
+                "poisson_residual_linf": 0.0,
+                "operator": "finite_volume_recomputed_from_step2_fields",
+            }
+    step3_manifest = (
+        baseline_root / "rendered_results" / "step3_fluent_style" / "case_manifest_step3.json"
+    )
+    if step3_manifest.exists():
+        manifest = json.loads(step3_manifest.read_text(encoding="utf-8"))
+        metrics = manifest.get("quality", {}).get("metrics", {})
+        return {
+            "max_u": float(metrics.get("max_u", 0.0)),
+            "max_speed": float(metrics.get("max_speed", 0.0)),
+            "centerline_max_u": float(metrics.get("centerline_max_u", 0.0)),
+            "mass_imbalance_rel": float(metrics.get("mass_imbalance_rel", 0.0)),
+            "divergence_l2": float(metrics.get("divergence_l2", 0.0)),
+            "divergence_linf": float(metrics.get("divergence_linf", 0.0)),
+            "poisson_residual_linf": float(
+                metrics.get("poisson_residual_linf", 0.0)
+            ),
+        }
+    return {
+        "max_u": 0.0,
+        "max_speed": 0.0,
+        "centerline_max_u": 0.0,
+        "mass_imbalance_rel": 0.0,
+        "divergence_l2": 0.0,
+        "divergence_linf": 0.0,
+        "poisson_residual_linf": 0.0,
+    }
+
+
+def _reduction_factor(before: float, after: float) -> float:
+    if abs(after) <= 1.0e-30:
+        return float("inf") if abs(before) > 0.0 else 1.0
+    return float(abs(before) / abs(after))
+
+
+def _run_initialization_sensitivity(
+    geometry: dict[str, np.ndarray],
+    masks: dict[str, np.ndarray],
+    bc_values: dict[str, float],
+    ds: float,
+    dy: float,
+    solver_config: dict[str, Any],
+    raw_config: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    sensitivity_config = dict(solver_config)
+    sensitivity = (raw_config or {}).get("sensitivity", {})
+    if sensitivity:
+        sensitivity_config.update(sensitivity)
+    rows = []
+    for mode in ("uniform", "structured_jet"):
+        mode_config = dict(sensitivity_config)
+        mode_config["initialization_mode"] = mode
+        initial_u, _ = _initial_velocity(geometry, masks, bc_values, mode=mode)
+        initial_centerline = compute_centerline_profile(
+            initial_u, geometry["y"], geometry["s"], masks["fluid_mask"]
+        )
+        loop = _run_solver_loop(geometry, masks, bc_values, ds, dy, mode_config)
+        final_centerline = compute_centerline_profile(
+            loop["u"], geometry["y"], geometry["s"], masks["fluid_mask"]
+        )
+        rows.append(
+            {
+                "initialization_mode": mode,
+                "initial_centerline_max_u": initial_centerline["centerline_max_u"],
+                "final_centerline_max_u": final_centerline["centerline_max_u"],
+                "final_max_u": float(np.max(loop["u"][masks["fluid_mask"]])),
+                "completed_steps": loop["history_rows"][-1]["step"],
+                "poisson_residual_linf_relative": loop["history_rows"][-1][
+                    "poisson_residual_linf_relative"
+                ],
+                "fluent_parity": "not_claimed",
+                "fsi": "not_claimed",
+            }
+        )
+    return rows
+
+
 def _advance_one_step(
     u: np.ndarray,
     v: np.ndarray,
@@ -203,24 +810,102 @@ def _advance_one_step(
     v_star = v + dt * (-adv_v + nu * diff_v)
     u_star, v_star = apply_velocity_bc(u_star, v_star, masks, bc_values)
 
-    rhs = rho / max(dt, 1.0e-12) * compute_divergence(u_star, v_star, fluid, ds, dy)
-    p, poisson_info = solve_pressure_poisson(
-        rhs,
-        p,
-        fluid,
-        solid,
-        masks["outlet_mask"],
-        bc_values["outlet_pressure"],
-        ds,
-        dy,
-        int(solver_config["poisson_max_iters"]),
-        float(solver_config["poisson_tolerance"]),
-        float(solver_config["poisson_omega"]),
+    use_fv = str(solver_config.get("poisson_method", "jacobi")) == "sor"
+    if use_fv:
+        divergence = compute_fv_divergence(u_star, v_star, fluid, solid, ds, dy)
+    else:
+        divergence = compute_divergence(u_star, v_star, fluid, ds, dy)
+    predicted_divergence = compute_interior_divergence_metrics(
+        divergence, fluid, masks["near_solid_mask"]
     )
-    dp_ds, dp_dy = compute_pressure_gradient(p, fluid, ds, dy)
-    u_next = u_star - dt / rho * dp_ds
-    v_next = v_star - dt / rho * dp_dy
+    rhs = rho / max(dt, 1.0e-12) * divergence
+
+    if use_fv:
+        p, poisson_info = solve_pressure_poisson_sor(
+            rhs,
+            p,
+            fluid,
+            solid,
+            masks["outlet_mask"],
+            bc_values["outlet_pressure"],
+            ds,
+            dy,
+            int(solver_config["poisson_max_iters"]),
+            float(solver_config.get("poisson_tolerance_abs", 1.0e-4)),
+            float(solver_config.get("poisson_tolerance_rel", 1.0e-3)),
+            float(solver_config["poisson_omega"]),
+            bool(solver_config.get("poisson_compatibility_correction", True)),
+            int(solver_config.get("poisson_check_interval", 25)),
+        )
+        dp_ds, dp_dy = compute_fv_pressure_gradient(
+            p, fluid, solid, masks["outlet_mask"], ds, dy
+        )
+    else:
+        p, poisson_info = solve_pressure_poisson(
+            rhs,
+            p,
+            fluid,
+            solid,
+            masks["outlet_mask"],
+            bc_values["outlet_pressure"],
+            ds,
+            dy,
+            int(solver_config["poisson_max_iters"]),
+            float(solver_config["poisson_tolerance"]),
+            float(solver_config["poisson_omega"]),
+        )
+        poisson_info.update(
+            {
+                "method": "masked_weighted_jacobi",
+                "poisson_residual_linf_initial": poisson_info[
+                    "poisson_residual_linf"
+                ],
+                "poisson_residual_linf_relative": 1.0,
+                "rhs_linf": float(np.max(np.abs(rhs[fluid]))) if fluid.any() else 0.0,
+                "rhs_l2": float(np.sqrt(np.mean(rhs[fluid] * rhs[fluid])))
+                if fluid.any()
+                else 0.0,
+                "converged": poisson_info["poisson_residual_linf"]
+                <= float(solver_config["poisson_tolerance"]),
+            }
+        )
+        dp_ds, dp_dy = compute_pressure_gradient(p, fluid, ds, dy)
+    poisson_info.update(
+        {
+            "predicted_divergence_linf": predicted_divergence["divergence_linf"],
+            "predicted_divergence_l2": predicted_divergence["divergence_l2"],
+            "predicted_divergence_linf_excluding_near_solid": predicted_divergence[
+                "divergence_linf_excluding_near_solid"
+            ],
+            "predicted_divergence_l2_excluding_near_solid": predicted_divergence[
+                "divergence_l2_excluding_near_solid"
+            ],
+        }
+    )
+    projection_relaxation = float(
+        solver_config.get("projection_velocity_relaxation", 0.35 if use_fv else 1.0)
+    )
+    u_next = u_star - projection_relaxation * dt / rho * dp_ds
+    v_next = v_star - projection_relaxation * dt / rho * dp_dy
     u_next, v_next = apply_velocity_bc(u_next, v_next, masks, bc_values)
+    if bool(solver_config.get("area_flux_projection", use_fv)):
+        u_next = _relax_column_flux_profile(
+            u_next,
+            masks,
+            bc_values,
+            strength=float(solver_config.get("area_flux_projection_strength", 0.01)),
+        )
+        v_next = _transverse_velocity_for_u(u_next, masks, ds, dy)
+        u_next, v_next = apply_velocity_bc(u_next, v_next, masks, bc_values)
+    if bool(solver_config.get("outlet_flux_correction", False)):
+        u_next, flux_info = apply_outlet_flux_correction(
+            u_next, masks["inlet_mask"], masks["outlet_mask"], dy
+        )
+        u_next, v_next = apply_velocity_bc(u_next, v_next, masks, bc_values)
+        u_next[masks["outlet_mask"].astype(bool)] = flux_info[
+            "corrected_outlet_flux"
+        ] / max(float(np.count_nonzero(masks["outlet_mask"])) * dy, 1.0e-12)
+        poisson_info.update(flux_info)
     return (
         np.nan_to_num(u_next, nan=0.0, posinf=0.0, neginf=0.0),
         np.nan_to_num(v_next, nan=0.0, posinf=0.0, neginf=0.0),
@@ -230,6 +915,46 @@ def _advance_one_step(
 
 
 def _initial_velocity(
+    geometry: dict[str, np.ndarray],
+    masks: dict[str, np.ndarray],
+    bc_values: dict[str, float],
+    mode: str = "structured_jet",
+    continuation_path: str | Path | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if mode == "uniform":
+        return _uniform_initial_velocity(masks, bc_values)
+    if mode == "continuation":
+        if continuation_path is None:
+            raise ValueError("continuation_path is required for continuation mode")
+        return _continuation_initial_velocity(continuation_path, masks, bc_values)
+    if mode != "structured_jet":
+        raise ValueError(f"Unsupported initialization_mode={mode!r}")
+    return _structured_jet_initial_velocity(geometry, masks, bc_values)
+
+
+def _uniform_initial_velocity(
+    masks: dict[str, np.ndarray],
+    bc_values: dict[str, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    fluid = masks["fluid_mask"].astype(bool)
+    u = np.zeros_like(fluid, dtype=np.float64)
+    v = np.zeros_like(u)
+    u[fluid] = float(bc_values["inlet_u"])
+    return apply_velocity_bc(u, v, masks, bc_values)
+
+
+def _continuation_initial_velocity(
+    continuation_path: str | Path,
+    masks: dict[str, np.ndarray],
+    bc_values: dict[str, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    with np.load(continuation_path) as fields:
+        u = np.array(fields["u"], dtype=np.float64, copy=True)
+        v = np.array(fields["v"], dtype=np.float64, copy=True)
+    return apply_velocity_bc(u, v, masks, bc_values)
+
+
+def _structured_jet_initial_velocity(
     geometry: dict[str, np.ndarray],
     masks: dict[str, np.ndarray],
     bc_values: dict[str, float],
@@ -290,21 +1015,60 @@ def _history_row(
 ) -> dict[str, Any]:
     fluid = masks["fluid_mask"].astype(bool)
     stats = compute_velocity_stats(u, v, fluid, masks["near_solid_mask"])
-    divergence_values = divergence[fluid]
-    divergence_linf = float(np.max(np.abs(divergence_values))) if divergence_values.size else 0.0
-    divergence_l2 = float(np.sqrt(np.mean(divergence_values * divergence_values))) if divergence_values.size else 0.0
+    divergence_metrics = compute_interior_divergence_metrics(
+        divergence, fluid, masks["near_solid_mask"]
+    )
     return {
         "step": int(step),
         "dt": float(dt),
         **stats,
-        "divergence_linf": divergence_linf,
-        "divergence_l2": divergence_l2,
+        **divergence_metrics,
         "inlet_flux": mass["inlet_flux"],
         "outlet_flux": mass["outlet_flux"],
         "mass_imbalance_rel": mass["mass_imbalance_rel"],
+        "raw_outlet_flux": float(
+            poisson_info.get("raw_outlet_flux", mass["outlet_flux"])
+        ),
+        "corrected_outlet_flux": float(
+            poisson_info.get("corrected_outlet_flux", mass["outlet_flux"])
+        ),
+        "flux_correction_delta": float(poisson_info.get("flux_correction_delta", 0.0)),
+        "mass_imbalance_rel_raw": float(
+            poisson_info.get("mass_imbalance_rel_raw", mass["mass_imbalance_rel"])
+        ),
+        "mass_imbalance_rel_corrected": float(
+            poisson_info.get(
+                "mass_imbalance_rel_corrected", mass["mass_imbalance_rel"]
+            )
+        ),
         "velocity_change_l2_rel": float(velocity_change),
-        "poisson_iters": int(poisson_info["poisson_iters"]),
-        "poisson_residual_linf": float(poisson_info["poisson_residual_linf"]),
+        "poisson_method": str(poisson_info.get("method", "unknown")),
+        "poisson_iters": int(poisson_info.get("poisson_iters", 0)),
+        "poisson_residual_linf": float(
+            poisson_info.get("poisson_residual_linf", 0.0)
+        ),
+        "poisson_residual_l2": float(poisson_info.get("poisson_residual_l2", 0.0)),
+        "poisson_residual_linf_initial": float(
+            poisson_info.get("poisson_residual_linf_initial", 0.0)
+        ),
+        "poisson_residual_linf_relative": float(
+            poisson_info.get("poisson_residual_linf_relative", 1.0)
+        ),
+        "rhs_linf": float(poisson_info.get("rhs_linf", 0.0)),
+        "rhs_l2": float(poisson_info.get("rhs_l2", 0.0)),
+        "poisson_converged": int(bool(poisson_info.get("converged", False))),
+        "predicted_divergence_linf": float(
+            poisson_info.get("predicted_divergence_linf", 0.0)
+        ),
+        "predicted_divergence_l2": float(
+            poisson_info.get("predicted_divergence_l2", 0.0)
+        ),
+        "predicted_divergence_linf_excluding_near_solid": float(
+            poisson_info.get("predicted_divergence_linf_excluding_near_solid", 0.0)
+        ),
+        "predicted_divergence_l2_excluding_near_solid": float(
+            poisson_info.get("predicted_divergence_l2_excluding_near_solid", 0.0)
+        ),
         "ds": float(ds),
         "dy": float(dy),
     }
@@ -322,27 +1086,43 @@ def _append_history(
     dy: float,
     velocity_change: float,
     poisson_info: dict[str, float],
-) -> None:
-    divergence = compute_divergence(u, v, masks["fluid_mask"], ds, dy)
+    solver_config: dict[str, Any],
+) -> dict[str, Any]:
+    if str(solver_config.get("poisson_method", "jacobi")) == "sor":
+        divergence = compute_fv_divergence(
+            u, v, masks["fluid_mask"], masks["solid_mask"], ds, dy
+        )
+    else:
+        divergence = compute_divergence(u, v, masks["fluid_mask"], ds, dy)
     mass = compute_mass_balance(
         u, v, masks["inlet_mask"], masks["outlet_mask"], ds, dy
     )
-    history_rows.append(
-        _history_row(
-            step,
-            dt,
-            u,
-            v,
-            divergence,
-            masks,
-            ds,
-            dy,
-            mass,
-            velocity_change,
-            poisson_info,
-        )
+    row = _history_row(
+        step,
+        dt,
+        u,
+        v,
+        divergence,
+        masks,
+        ds,
+        dy,
+        mass,
+        velocity_change,
+        poisson_info,
     )
-    mass_rows.append({"step": step, **mass})
+    history_rows.append(row)
+    mass_rows.append(
+        {
+            "step": step,
+            **mass,
+            "raw_outlet_flux": row["raw_outlet_flux"],
+            "corrected_outlet_flux": row["corrected_outlet_flux"],
+            "flux_correction_delta": row["flux_correction_delta"],
+            "mass_imbalance_rel_raw": row["mass_imbalance_rel_raw"],
+            "mass_imbalance_rel_corrected": row["mass_imbalance_rel_corrected"],
+        }
+    )
+    return row
 
 
 def _final_summary(
@@ -360,10 +1140,44 @@ def _final_summary(
     mass = compute_mass_balance(u, v, masks["inlet_mask"], masks["outlet_mask"], ds, dy)
     stats = compute_velocity_stats(u, v, masks["fluid_mask"], masks["near_solid_mask"])
     centerline = compute_centerline_profile(u, y, s, masks["fluid_mask"])
+    last_history = history_rows[-1] if history_rows else {}
+    predicted_l2_excluding_near_solid = max(
+        (
+            float(row.get("predicted_divergence_l2_excluding_near_solid", 0.0))
+            for row in history_rows
+        ),
+        default=0.0,
+    )
     return {
         **stats,
         **mass,
         **centerline,
+        "mass_imbalance_rel_raw": float(
+            last_history.get("mass_imbalance_rel_raw", mass["mass_imbalance_rel"])
+        ),
+        "mass_imbalance_rel_corrected": float(
+            last_history.get(
+                "mass_imbalance_rel_corrected", mass["mass_imbalance_rel"]
+            )
+        ),
+        "divergence_linf": float(last_history.get("divergence_linf", 0.0)),
+        "divergence_l2": float(last_history.get("divergence_l2", 0.0)),
+        "divergence_linf_excluding_near_solid": float(
+            last_history.get("divergence_linf_excluding_near_solid", 0.0)
+        ),
+        "divergence_l2_excluding_near_solid": float(
+            last_history.get("divergence_l2_excluding_near_solid", 0.0)
+        ),
+        "poisson_residual_linf": float(
+            last_history.get("poisson_residual_linf", 0.0)
+        ),
+        "poisson_residual_linf_relative": float(
+            last_history.get("poisson_residual_linf_relative", 1.0)
+        ),
+        "poisson_iters": int(last_history.get("poisson_iters", 0)),
+        "predicted_divergence_l2_excluding_near_solid": (
+            predicted_l2_excluding_near_solid
+        ),
         "history_rows": len(history_rows),
         "completed_steps": int(history_rows[-1]["step"]) if history_rows else 0,
     }
@@ -503,6 +1317,19 @@ def _merge_solver_config(config: dict[str, Any] | None) -> dict[str, Any]:
     return merged
 
 
+def _merge_stabilized_solver_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(DEFAULT_STABILIZED_SOLVER_CONFIG)
+    if config:
+        solver = config.get("solver", config)
+        merged.update(solver)
+    merged["poisson_method"] = "sor"
+    merged["initialization_mode"] = str(merged.get("initialization_mode", "uniform"))
+    merged["outlet_flux_correction"] = bool(
+        merged.get("outlet_flux_correction", True)
+    )
+    return merged
+
+
 def _resolve_output_root(path: str | Path) -> Path:
     path = Path(path)
     if path.is_absolute():
@@ -545,6 +1372,83 @@ def _balance_column_flux(
         balanced[mask, column] -= (current_sum - target_sum) / float(mask.sum())
     balanced[~fluid] = 0.0
     return balanced
+
+
+def _relax_column_flux_profile(
+    u: np.ndarray,
+    masks: dict[str, np.ndarray],
+    bc_values: dict[str, float],
+    *,
+    strength: float,
+) -> np.ndarray:
+    fluid = masks["fluid_mask"].astype(bool)
+    corrected = np.array(u, dtype=np.float64, copy=True)
+    inlet_count = max(float(fluid[:, 0].sum()), 1.0)
+    fluid_counts = np.maximum(fluid.sum(axis=0).astype(np.float64), 1.0)
+    target = float(bc_values["inlet_u"]) * inlet_count / fluid_counts
+    blend = min(max(float(strength), 0.0), 1.0)
+    for column in range(corrected.shape[1]):
+        mask = fluid[:, column]
+        if not mask.any():
+            corrected[:, column] = 0.0
+            continue
+        corrected[mask, column] = (
+            (1.0 - blend) * corrected[mask, column] + blend * target[column]
+        )
+    corrected[~fluid] = 0.0
+    return corrected
+
+
+def _transverse_velocity_for_u(
+    u: np.ndarray,
+    masks: dict[str, np.ndarray],
+    ds: float,
+    dy: float,
+) -> np.ndarray:
+    fluid = masks["fluid_mask"].astype(bool)
+    horizontal = _horizontal_fv_divergence_component(u, fluid, ds)
+    v = np.zeros_like(u, dtype=np.float64)
+    for column in range(u.shape[1]):
+        rows = np.where(fluid[:, column])[0]
+        if rows.size < 2:
+            continue
+        for segment in _contiguous_segments(rows):
+            if segment.size < 2:
+                continue
+            h = horizontal[segment, column]
+            faces = np.zeros(segment.size + 1, dtype=np.float64)
+            for idx in range(segment.size):
+                faces[idx + 1] = faces[idx] - h[idx] * dy
+            faces -= np.linspace(0.0, faces[-1], segment.size + 1)
+            values = np.zeros(segment.size, dtype=np.float64)
+            for idx in range(1, segment.size):
+                values[idx] = 2.0 * faces[idx] - values[idx - 1]
+            v[segment, column] = values
+    v[~fluid] = 0.0
+    return v
+
+
+def _horizontal_fv_divergence_component(
+    u: np.ndarray, fluid: np.ndarray, ds: float
+) -> np.ndarray:
+    east = np.zeros_like(u, dtype=np.float64)
+    west = np.zeros_like(u, dtype=np.float64)
+    east[:, :-1] = np.where(
+        fluid[:, :-1] & fluid[:, 1:], 0.5 * (u[:, :-1] + u[:, 1:]), 0.0
+    )
+    east[:, -1] = np.where(fluid[:, -1], u[:, -1], 0.0)
+    west[:, 1:] = np.where(
+        fluid[:, 1:] & fluid[:, :-1], 0.5 * (u[:, 1:] + u[:, :-1]), 0.0
+    )
+    west[:, 0] = np.where(fluid[:, 0], u[:, 0], 0.0)
+    component = (east - west) / ds
+    component[~fluid] = 0.0
+    return component
+
+
+def _contiguous_segments(rows: np.ndarray) -> list[np.ndarray]:
+    breaks = np.where(np.diff(rows) > 1)[0] + 1
+    return [segment for segment in np.split(rows, breaks) if segment.size]
 
 
 def _manifest_path(path: Path) -> str:
