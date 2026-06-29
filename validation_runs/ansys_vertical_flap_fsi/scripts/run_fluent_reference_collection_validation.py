@@ -40,6 +40,9 @@ ACTIVE_CONTRACT_MANIFEST_JSON = (
     REFERENCE_ROOT / "active_fluent_reference_contract.json"
 )
 ACTIVE_MANIFEST_SCHEMA_VERSION = "active_fluent_reference_contract_manifest_v1"
+REAL_FLUENT_IMPORT_GATE_SCHEMA_VERSION = (
+    "ansys_vertical_flap_real_fluent_import_gate_v1"
+)
 ALLOW_TEST_SOURCES = False
 
 SOURCE_SCRIPT = (
@@ -604,6 +607,12 @@ def _payload(
         "promotion_status": active_manifest["promotion_status"],
         "recommended_action": active_manifest["recommended_action"],
         "promotion_blockers": active_manifest["promotion_blockers"],
+        "real_fluent_import_gate": _real_fluent_import_gate(
+            source_checks=source_checks,
+            metadata_check=metadata_check,
+            candidate_contract=candidate_contract,
+            active_manifest=active_manifest,
+        ),
         "candidate_status": candidate_status,
         "candidate_contract_status": candidate_contract["contract_status"],
         "candidate_blockers": blockers,
@@ -617,6 +626,164 @@ def _payload(
         "schema_validation": candidate_contract["schema_validation"],
         "rows": rows,
     }
+
+
+def _real_fluent_import_gate(
+    *,
+    source_checks: list[Mapping[str, Any]],
+    metadata_check: Mapping[str, Any],
+    candidate_contract: Mapping[str, Any],
+    active_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    source_exports = [
+        _real_fluent_source_export_gate_row(check) for check in source_checks
+    ]
+    metadata_gate = _real_fluent_metadata_gate(metadata_check)
+    blockers = _real_fluent_import_blockers(
+        source_exports=source_exports,
+        metadata_gate=metadata_gate,
+        candidate_contract=candidate_contract,
+        active_manifest=active_manifest,
+    )
+    ready = not blockers
+    return {
+        "gate_schema_version": REAL_FLUENT_IMPORT_GATE_SCHEMA_VERSION,
+        "status": (
+            "ready_for_real_fluent_import"
+            if ready
+            else "blocked_real_fluent_import_incomplete"
+        ),
+        "can_import_real_fluent_reference": ready,
+        "can_run_solver_evaluation": ready,
+        "fluent_parity_claimed": False,
+        "source_exports": source_exports,
+        "metadata": metadata_gate,
+        "candidate_contract_status": str(candidate_contract["contract_status"]),
+        "promotion_status": str(active_manifest["promotion_status"]),
+        "blockers": blockers,
+    }
+
+
+def _real_fluent_source_export_gate_row(
+    check: Mapping[str, Any],
+) -> dict[str, Any]:
+    schema_blockers = [str(blocker) for blocker in check.get("schema_blockers", [])]
+    ready = check.get("metric_status") == "available" and not schema_blockers
+    return {
+        "artifact": str(check["artifact"]),
+        "metric_group": str(check["metric_group"]),
+        "source_path": str(check["source_path"]),
+        "file_status": str(check["file_status"]),
+        "final_step_status": str(check["final_step_status"]),
+        "metric_status": str(check["metric_status"]),
+        "schema_blockers": schema_blockers,
+        "ready": ready,
+    }
+
+
+def _real_fluent_metadata_gate(
+    metadata_check: Mapping[str, Any],
+) -> dict[str, Any]:
+    semantic_mismatches = list(metadata_check.get("semantic_mismatches", []))
+    ready = (
+        metadata_check.get("provenance_status") == "complete"
+        and not semantic_mismatches
+    )
+    return {
+        "artifact": str(metadata_check["artifact"]),
+        "source_path": str(metadata_check["source_path"]),
+        "file_status": str(metadata_check["file_status"]),
+        "provenance_status": str(metadata_check["provenance_status"]),
+        "missing_fields": list(metadata_check.get("missing_fields", [])),
+        "semantic_mismatches": semantic_mismatches,
+        "ready": ready,
+    }
+
+
+def _real_fluent_import_blockers(
+    *,
+    source_exports: list[Mapping[str, Any]],
+    metadata_gate: Mapping[str, Any],
+    candidate_contract: Mapping[str, Any],
+    active_manifest: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    blockers: list[dict[str, str]] = []
+    for source_export in source_exports:
+        if source_export["ready"]:
+            continue
+        blockers.append(
+            {
+                "blocker": "source_export_not_ready",
+                "artifact": str(source_export["artifact"]),
+                "detail": _source_export_gate_detail(source_export),
+            }
+        )
+
+    if not metadata_gate["ready"]:
+        blockers.append(
+            {
+                "blocker": "metadata_not_ready",
+                "artifact": str(metadata_gate["artifact"]),
+                "detail": _metadata_gate_detail(metadata_gate),
+            }
+        )
+
+    if ALLOW_TEST_SOURCES:
+        blockers.append(
+            {
+                "blocker": "test_source_allowance_enabled",
+                "artifact": "source_exports",
+                "detail": (
+                    "allow_test_sources=True is reserved for temp-only "
+                    "comparison mechanics"
+                ),
+            }
+        )
+
+    if candidate_contract["contract_status"] != CONTRACT_COMPLETE:
+        blockers.append(
+            {
+                "blocker": "candidate_contract_incomplete",
+                "artifact": _repo_relative(CANDIDATE_CONTRACT_JSON),
+                "detail": (
+                    "candidate contract is "
+                    f"{candidate_contract['contract_status']}"
+                ),
+            }
+        )
+
+    if active_manifest["promotion_status"] != "ready_for_versioned_contract_promotion":
+        blockers.append(
+            {
+                "blocker": "active_manifest_promotion_blocked",
+                "artifact": _repo_relative(ACTIVE_CONTRACT_MANIFEST_JSON),
+                "detail": (
+                    "active manifest promotion is "
+                    f"{active_manifest['promotion_status']}"
+                ),
+            }
+        )
+    return blockers
+
+
+def _source_export_gate_detail(source_export: Mapping[str, Any]) -> str:
+    schema_blockers = ",".join(source_export.get("schema_blockers", []))
+    return (
+        f"file_status={source_export['file_status']}; "
+        f"final_step_status={source_export['final_step_status']}; "
+        f"metric_status={source_export['metric_status']}; "
+        f"schema_blockers={schema_blockers}"
+    )
+
+
+def _metadata_gate_detail(metadata_gate: Mapping[str, Any]) -> str:
+    missing_fields = ",".join(metadata_gate.get("missing_fields", []))
+    semantic_mismatch_count = len(metadata_gate.get("semantic_mismatches", []))
+    return (
+        f"provenance_status={metadata_gate['provenance_status']}; "
+        f"missing_fields={missing_fields}; "
+        f"semantic_mismatch_count={semantic_mismatch_count}"
+    )
 
 
 def _csv_rows(
