@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import csv
 import json
 import tempfile
 import unittest
@@ -39,6 +40,42 @@ PARITY = _load_module(
 
 
 class AnsysVerticalFlapFluentReferenceSyntheticPipelineTests(unittest.TestCase):
+    def test_easyfsi_hibm_source_exports_do_not_complete_collection_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_exports = root / "source_exports"
+            output_dir = root / "diagnostics"
+            active_manifest = root / "active_fluent_reference_contract.json"
+            current_contract = root / "fluent_reference_contract.json"
+            _write_complete_current_contract(current_contract)
+            BUILDER.build_synthetic_fluent_reference_fixture(source_exports)
+            _rewrite_csv_sources(
+                source_exports,
+                "EasyFsi/HIBM-MPM validation_runs placeholder not Fluent truth",
+            )
+
+            payload = COLLECTION.run_with_paths(
+                source_exports_root=source_exports,
+                current_contract_json=current_contract,
+                output_dir=output_dir,
+                active_manifest_json=active_manifest,
+            )
+            candidate = _read_json(
+                output_dir / "fluent_reference_collection_candidate_contract.json"
+            )
+
+        self.assertEqual(
+            payload["candidate_status"],
+            "fluent_reference_collection_pending",
+        )
+        self.assertEqual(candidate["contract_status"], "fluent_reference_incomplete")
+        self.assertLess(candidate["schema_validation"]["validated_metric_count"], 5)
+        self.assertEqual(payload["promotion_status"], "blocked_reference_incomplete")
+        for check in payload["source_checks"]:
+            self.assertEqual(check["metric_status"], "missing")
+            self.assertIn("disallowed_source_provenance", check["schema_blockers"])
+            self.assertEqual(check["reference_values"], {})
+
     def test_synthetic_source_exports_complete_collection_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -137,6 +174,21 @@ def _write_complete_current_contract(path: Path) -> None:
         "pressure_sanity_absolute": _tolerance(5.0, "absolute_error"),
     }
     path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _rewrite_csv_sources(source_exports: Path, source: str) -> None:
+    for path in source_exports.glob("*.csv"):
+        with path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            fieldnames = list(reader.fieldnames or [])
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                updated = dict(row)
+                updated["source"] = source
+                writer.writerow(updated)
 
 
 def _tolerance(value: float, comparator: str) -> dict[str, object]:
