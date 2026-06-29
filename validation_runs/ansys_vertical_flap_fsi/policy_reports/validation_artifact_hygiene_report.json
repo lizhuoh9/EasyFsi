@@ -1,0 +1,23 @@
+{
+  "checked_file_count": 13,
+  "checked_files": [
+    "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/ARTIFACT_MANIFEST.json",
+    "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/CHECKSUMS.sha256",
+    "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_candidate_contract.json",
+    "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_matrix.csv",
+    "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_matrix.json",
+    "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_summary.md",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/ARTIFACT_MANIFEST.json",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/CHECKSUMS.sha256",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/scenario_diagnostics/selected_formulation_fluent_parity.json",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/traction_selected_formulation_fluent_parity_history.json",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/traction_selected_formulation_fluent_parity_matrix.csv",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/traction_selected_formulation_fluent_parity_matrix.json",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/traction_selected_formulation_fluent_parity_summary.md"
+  ],
+  "checker": "check_validation_artifact_hygiene",
+  "policy": "validation_artifact_hygiene_v1",
+  "policy_id": "validation_artifact_hygiene_v1",
+  "status": "passed",
+  "violations": []
+}

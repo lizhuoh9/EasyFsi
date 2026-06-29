@@ -29,6 +29,10 @@ EXPECTED_SOURCE_SCRIPT = (
 )
 EXPECTED_CANDIDATE_STATUS = "fluent_reference_collection_pending"
 EXPECTED_CONTRACT_STATUS = "fluent_reference_incomplete"
+EXPECTED_GENERATED_FROM_COMMIT = "c94332888fe09d792a119086a4969f78b03bb134"
+EXPECTED_GENERATED_FROM_REF = (
+    "solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25"
+)
 EXPECTED_BLOCKERS = {
     "fluent_displacement_reference_missing",
     "fluent_force_reference_missing",
@@ -341,6 +345,7 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
             "validation_artifact_manifest_v1",
         )
         self.assertEqual(manifest["artifact_group"], "fluent_reference_collection")
+        _assert_manifest_provenance(self, manifest)
         self.assertFalse(Path(manifest["source_script"]).is_absolute())
         self.assertFalse(manifest["claim_policy"]["fluent_parity_claimed"])
         self.assertEqual(manifest["claim_policy"]["reason"], "reference incomplete")
@@ -353,6 +358,21 @@ class AnsysVerticalFlapFluentReferenceCollectionArtifactTests(unittest.TestCase)
 
 def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _assert_manifest_provenance(
+    test_case: unittest.TestCase,
+    manifest: dict[str, object],
+) -> None:
+    commit = manifest.get("generated_from_commit")
+    ref = manifest.get("generated_from_ref")
+
+    test_case.assertEqual(commit, EXPECTED_GENERATED_FROM_COMMIT)
+    test_case.assertNotEqual(commit, "unknown")
+    test_case.assertIsInstance(commit, str)
+    test_case.assertEqual(len(str(commit)), 40)
+    test_case.assertTrue(all(char in "0123456789abcdef" for char in str(commit)))
+    test_case.assertEqual(ref, EXPECTED_GENERATED_FROM_REF)
 
 
 def _read_checksums(path: Path) -> dict[str, str]:

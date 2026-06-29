@@ -2,6 +2,15 @@
 
 Branch: `solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
 
+## Review Navigation
+
+- Merge checklist: `docs/refactoring/ANSYS_VERTICAL_FLAP_BRANCH_MERGE_CHECKLIST_2026-06-29.md`
+- PR split strategy: `docs/refactoring/ANSYS_VERTICAL_FLAP_PR_SPLIT_STRATEGY_2026-06-29.md`
+- Real Fluent import gate: `docs/validation/ANSYS_VERTICAL_FLAP_REAL_FLUENT_IMPORT_GATE_2026-06-29.md`
+- Collection artifact manifest: `validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/ARTIFACT_MANIFEST.json`
+- Parity artifact manifest: `validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/ARTIFACT_MANIFEST.json`
+- Policy reports: `validation_runs/ansys_vertical_flap_fsi/policy_reports/`
+
 ## Review Scope
 
 This branch keeps the ANSYS vertical-flap Fluent parity workflow fail-closed while the real Fluent reference contract remains incomplete. The branch adds contract-v1 schema hardening, source-export CSV validation, active-manifest validation, public tutorial evidence policy, export protocol documentation, and CI checks that prevent overclaiming.
@@ -86,6 +95,8 @@ If the full branch is too large to review as one PR, split in this order:
 3. Collection/parity artifact generation and manifests.
 4. Synthetic dry-run and JSON-aware policy checks.
 5. Runtime pressure-pair and generic solver evidence if reviewers require a separate physics review.
+
+For the fuller five-slice review sequence, use `docs/refactoring/ANSYS_VERTICAL_FLAP_PR_SPLIT_STRATEGY_2026-06-29.md`.
 
 ## Focused Verification
 

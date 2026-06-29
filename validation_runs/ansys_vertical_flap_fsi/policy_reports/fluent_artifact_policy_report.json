@@ -1,0 +1,17 @@
+{
+  "checked_file_count": 7,
+  "checked_files": [
+    "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/ARTIFACT_MANIFEST.json",
+    "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_candidate_contract.json",
+    "validation_runs/ansys_vertical_flap_fsi/fluent_reference/validation_diagnostics/fluent_reference_collection_matrix.json",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/ARTIFACT_MANIFEST.json",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/scenario_diagnostics/selected_formulation_fluent_parity.json",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/traction_selected_formulation_fluent_parity_history.json",
+    "validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_fluent_parity_diagnostics/traction_selected_formulation_fluent_parity_matrix.json"
+  ],
+  "checker": "check_fluent_artifact_policy",
+  "policy": "fluent_artifact_policy_v1",
+  "policy_id": "fluent_artifact_policy_v1",
+  "status": "passed",
+  "violations": []
+}

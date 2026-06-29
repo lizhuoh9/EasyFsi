@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -38,7 +39,9 @@ def check_fluent_artifact_policy(
             _check_payload(path, payload, violations)
 
     return {
+        "checker": "check_fluent_artifact_policy",
         "policy": "fluent_artifact_policy_v1",
+        "policy_id": "fluent_artifact_policy_v1",
         "checked_file_count": len(checked_files),
         "checked_files": checked_files,
         "status": "passed" if not violations else "failed",
@@ -187,9 +190,27 @@ def _add_violation(
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--write-report",
+        type=Path,
+        help="Optional path to write the checker JSON report.",
+    )
+    args = parser.parse_args()
+
     result = check_fluent_artifact_policy()
+    if args.write_report is not None:
+        _write_json_report(args.write_report, result)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["status"] == "passed" else 1
+
+
+def _write_json_report(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

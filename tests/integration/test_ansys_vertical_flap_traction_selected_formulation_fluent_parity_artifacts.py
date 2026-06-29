@@ -40,6 +40,10 @@ EXPECTED_SOURCE_SCRIPT = (
 EXPECTED_CANDIDATE = "anchored_dual_face_pressure_pair_with_per_face_one_sided"
 EXPECTED_SCENARIO = "selected_formulation_fluent_parity"
 EXPECTED_CANDIDATE_STATUS = "fluent_parity_blocked_reference_incomplete"
+EXPECTED_GENERATED_FROM_COMMIT = "c94332888fe09d792a119086a4969f78b03bb134"
+EXPECTED_GENERATED_FROM_REF = (
+    "solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25"
+)
 EXPECTED_ACTIVE_BLOCKERS = {
     "fluent_reference_incomplete",
     "no_fluent_parity_claim",
@@ -297,6 +301,7 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
             manifest["artifact_group"],
             "selected_formulation_fluent_parity",
         )
+        _assert_manifest_provenance(self, manifest)
         self.assertFalse(Path(manifest["source_script"]).is_absolute())
         self.assertFalse(manifest["claim_policy"]["fluent_parity_claimed"])
         self.assertEqual(
@@ -316,6 +321,21 @@ class AnsysVerticalFlapSelectedFormulationFluentParityArtifactTests(
 
 def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _assert_manifest_provenance(
+    test_case: unittest.TestCase,
+    manifest: dict[str, object],
+) -> None:
+    commit = manifest.get("generated_from_commit")
+    ref = manifest.get("generated_from_ref")
+
+    test_case.assertEqual(commit, EXPECTED_GENERATED_FROM_COMMIT)
+    test_case.assertNotEqual(commit, "unknown")
+    test_case.assertIsInstance(commit, str)
+    test_case.assertEqual(len(str(commit)), 40)
+    test_case.assertTrue(all(char in "0123456789abcdef" for char in str(commit)))
+    test_case.assertEqual(ref, EXPECTED_GENERATED_FROM_REF)
 
 
 def _read_checksums(path: Path) -> dict[str, str]:

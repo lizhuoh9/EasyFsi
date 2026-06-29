@@ -75,6 +75,9 @@ jobs:
             tests\integration\test_ansys_vertical_flap_generic_solver_artifacts.py `
             tests\integration\test_ansys_vertical_flap_branch_review_docs.py `
             tests\integration\test_ansys_vertical_flap_fluent_artifact_policy.py `
+            tests\integration\test_ansys_vertical_flap_policy_reports.py `
+            tests\integration\test_refactoring_docs_are_nonempty.py `
+            tests\integration\test_ansys_vertical_flap_real_fluent_import_gate_doc.py `
             tests\integration\test_ansys_vertical_flap_fluent_reference_export_protocol.py `
             tests\integration\test_ansys_vertical_flap_fluent_reference_synthetic_pipeline.py `
             tests\integration\test_ansys_vertical_flap_fluent_source_export_schema.py `
@@ -322,6 +325,20 @@ jobs:
             tests.integration.test_ansys_vertical_flap_branch_review_docs `
             -v
 
+      - name: Run refactoring docs non-empty test
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.integration.test_refactoring_docs_are_nonempty `
+            -v
+
+      - name: Run real Fluent import gate doc test
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.integration.test_ansys_vertical_flap_real_fluent_import_gate_doc `
+            -v
+
       - name: Run Fluent synthetic reference pipeline test
         shell: pwsh
         run: |
@@ -372,7 +389,7 @@ jobs:
       - name: Run JSON-aware Fluent artifact policy checker
         shell: pwsh
         run: |
-          python validation_runs\ansys_vertical_flap_fsi\scripts\check_fluent_artifact_policy.py
+          python validation_runs\ansys_vertical_flap_fsi\scripts\check_fluent_artifact_policy.py --write-report validation_runs\ansys_vertical_flap_fsi\policy_reports\fluent_artifact_policy_report.json
 
       - name: Run validation artifact hygiene test
         shell: pwsh
@@ -384,7 +401,14 @@ jobs:
       - name: Run validation artifact hygiene checker
         shell: pwsh
         run: |
-          python scripts\check_validation_artifact_hygiene.py
+          python scripts\check_validation_artifact_hygiene.py --write-report validation_runs\ansys_vertical_flap_fsi\policy_reports\validation_artifact_hygiene_report.json
+
+      - name: Run Fluent policy report artifact test
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.integration.test_ansys_vertical_flap_policy_reports `
+            -v
 
       - name: Run archive artifact test - preflow release step20
         shell: pwsh

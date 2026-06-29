@@ -5,7 +5,8 @@
     "fluent_parity_claimed": false,
     "reference_contract_status": "fluent_reference_incomplete"
   },
-  "generated_from_commit": "unknown",
+  "generated_from_commit": "c94332888fe09d792a119086a4969f78b03bb134",
+  "generated_from_ref": "solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25",
   "inputs": {
     "active_contract_manifest": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/active_fluent_reference_contract.json",
     "fluent_reference_contract": "validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json",

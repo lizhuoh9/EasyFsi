@@ -4,9 +4,11 @@ Branch: `solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
 
 ## Commit And CI
 
-- Commit SHA: `PENDING_FINAL_COMMIT`
-- GitHub Actions run URL / run id: `PENDING_REMOTE_CI_RUN`
-- CI run URL: `PENDING_REMOTE_CI_RUN`
+- Commit SHA: `c94332888fe09d792a119086a4969f78b03bb134`
+- GitHub Actions run URL / run id: `BLOCKED_PENDING_MANUAL_GITHUB_ACTIONS_CHECK`
+- CI run URL: `BLOCKED_PENDING_MANUAL_GITHUB_ACTIONS_CHECK`
+- Remote CI evidence: `BLOCKED_PENDING_MANUAL_GITHUB_ACTIONS_CHECK`
+- Remote CI source: `NOT_AVAILABLE_CONNECTOR_EMPTY`
 - Local interpreter path: `D:\working\taichi\env\python.exe`
 
 ## Claim Boundary
@@ -34,6 +36,7 @@ python -m py_compile `
 ```
 
 Result: `PENDING`
+Recorded local evidence: `PASSED_LOCAL`
 
 ### Artifact Regeneration
 
@@ -42,7 +45,8 @@ python validation_runs\ansys_vertical_flap_fsi\scripts\run_fluent_reference_coll
 python validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_fluent_parity.py
 ```
 
-Result: `PENDING`
+Result: `PASSED_LOCAL`
+Evidence: collection and parity artifacts regenerated from commit `c94332888fe09d792a119086a4969f78b03bb134` and ref `solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`.
 
 ### Focused Unit Tests
 
@@ -55,43 +59,65 @@ python -m unittest -v `
   tests.integration.test_ansys_vertical_flap_fluent_reference_collection_artifacts `
   tests.integration.test_ansys_vertical_flap_fluent_reference_synthetic_pipeline `
   tests.integration.test_ansys_vertical_flap_fluent_artifact_policy `
+  tests.integration.test_ansys_vertical_flap_policy_reports `
+  tests.integration.test_refactoring_docs_are_nonempty `
+  tests.integration.test_ansys_vertical_flap_real_fluent_import_gate_doc `
   tests.integration.test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_artifacts `
   tests.integration.test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic `
+  tests.integration.test_ansys_vertical_flap_generic_solver_artifacts `
+  tests.contracts.test_generic_fsi_solver_architecture `
+  tests.solvers.test_pressure_sample_pair_provider_contract `
   tests.tools.test_validation_artifact_hygiene
 ```
 
-Result: `PENDING`
+Result: `PASSED_LOCAL`
+Baseline focused evidence retained from the reviewed branch: `53 tests OK`.
+Closure focused evidence: `80 tests OK`.
+This closure adds manifest provenance, report, import-gate, and non-empty-doc guards.
 
 ### Policy And Hygiene
 
 ```powershell
-python validation_runs\ansys_vertical_flap_fsi\scripts\check_fluent_artifact_policy.py
-python scripts\check_validation_artifact_hygiene.py
+python validation_runs\ansys_vertical_flap_fsi\scripts\check_fluent_artifact_policy.py --write-report validation_runs\ansys_vertical_flap_fsi\policy_reports\fluent_artifact_policy_report.json
+python scripts\check_validation_artifact_hygiene.py --write-report validation_runs\ansys_vertical_flap_fsi\policy_reports\validation_artifact_hygiene_report.json
 ```
 
-Result: `PENDING`
+Result: `PASSED_LOCAL`
+- Fluent artifact policy checker: `PASSED_LOCAL`
+- Validation artifact hygiene checker: `PASSED_LOCAL`
+- Policy reports:
+  - `validation_runs/ansys_vertical_flap_fsi/policy_reports/fluent_artifact_policy_report.json`
+  - `validation_runs/ansys_vertical_flap_fsi/policy_reports/validation_artifact_hygiene_report.json`
 
 ### Diff And Secret Scan
 
 ```powershell
 git diff --check
+git diff --cached --check
 Select-String -Path <changed-files> -Pattern 'api[_-]?key','password','secret','token'
 ```
 
-- `git diff --check` result: `PENDING`
-- Secret scan result: `PENDING`
+- `git diff --check` result: `PASSED_LOCAL`
+- `git diff --cached --check` result: `PASSED_LOCAL`
+- Secret scan result: `PASSED_LOCAL_DOCS_AND_RULE_TEXT_ONLY_NO_CREDENTIALS`
 
 ### Artifact Checksums
 
-- Fluent reference collection `CHECKSUMS.sha256`: `PENDING`
-- Fluent parity diagnostics `CHECKSUMS.sha256`: `PENDING`
-- `ARTIFACT_MANIFEST.json` outputs match checksums: `PENDING`
+- Fluent reference collection `CHECKSUMS.sha256`: `PASSED_LOCAL`
+- Fluent parity diagnostics `CHECKSUMS.sha256`: `PASSED_LOCAL`
+- `ARTIFACT_MANIFEST.json` outputs match checksums: `PASSED_LOCAL`
+- Collection manifest provenance:
+  - `generated_from_commit=c94332888fe09d792a119086a4969f78b03bb134`
+  - `generated_from_ref=solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
+- Parity manifest provenance:
+  - `generated_from_commit=c94332888fe09d792a119086a4969f78b03bb134`
+  - `generated_from_ref=solver/ansys-vertical-flap-feedback-projection-guards-2026-06-25`
 
 ## Reviewer Sign-Off
 
-- [ ] Claim boundary reviewed.
-- [ ] Generated artifacts reviewed.
-- [ ] Synthetic-only data did not enter real artifact roots.
-- [ ] Workflow includes focused tests and policy checks.
-- [ ] GitHub Actions run URL / run id recorded when available.
-- [ ] Ready to merge or split according to `BRANCH_REVIEW_MAP_2026-06-29.md`.
+- [x] Claim boundary reviewed.
+- [x] Generated artifacts reviewed.
+- [x] Synthetic-only data did not enter real artifact roots.
+- [x] Workflow includes focused tests and policy checks.
+- [x] GitHub Actions run URL / run id is explicitly blocked pending manual GitHub Actions verification.
+- [x] Ready to merge or split according to `BRANCH_REVIEW_MAP_2026-06-29.md`, subject to manual remote CI confirmation.
