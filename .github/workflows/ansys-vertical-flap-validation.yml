@@ -65,6 +65,7 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\check_fluent_artifact_policy.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\fluent_reference_contract_schema.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\fluent_source_export_schema.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\import_real_fluent_source_exports.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_fluent_reference_collection_validation.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_fluent_parity.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py `
@@ -81,6 +82,8 @@ jobs:
             tests\integration\test_ansys_vertical_flap_fluent_reference_export_protocol.py `
             tests\integration\test_ansys_vertical_flap_fluent_reference_synthetic_pipeline.py `
             tests\integration\test_ansys_vertical_flap_fluent_source_export_schema.py `
+            tests\integration\test_ansys_vertical_flap_real_fluent_source_export_import.py `
+            tests\integration\test_ansys_vertical_flap_real_fluent_source_export_artifacts.py `
             tests\integration\test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic.py `
             tests\tools\test_validation_artifact_hygiene.py `
             tests\solvers\test_pressure_sample_pair_provider_contract.py
@@ -309,6 +312,14 @@ jobs:
         run: |
           python -m unittest `
             tests.integration.test_ansys_vertical_flap_fluent_source_export_schema `
+            -v
+
+      - name: Run real Fluent importer CLI and source export artifact tests
+        shell: pwsh
+        run: |
+          python -m unittest `
+            tests.integration.test_ansys_vertical_flap_real_fluent_source_export_import `
+            tests.integration.test_ansys_vertical_flap_real_fluent_source_export_artifacts `
             -v
 
       - name: Run Fluent reference export protocol test

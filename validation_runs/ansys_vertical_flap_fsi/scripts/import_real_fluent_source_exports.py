@@ -22,6 +22,9 @@ OUTPUT_DIR = collection.OUTPUT_DIR
 ACTIVE_CONTRACT_MANIFEST_JSON = collection.ACTIVE_CONTRACT_MANIFEST_JSON
 REQUIRED_METADATA = "fluent_metadata_2026-06-28.md"
 PUBLIC_EVIDENCE = "public_tutorial_evidence_map.json"
+BLOCKER_COLLECTION_VALIDATOR_REQUIRES_COMMIT_IMPORT = (
+    "collection_validator_requires_commit_import"
+)
 REQUIRED_ARTIFACTS = tuple(str(spec["artifact"]) for spec in collection.METRIC_SPECS)
 REQUIRED_FILES = REQUIRED_ARTIFACTS + (REQUIRED_METADATA,)
 
@@ -265,6 +268,24 @@ def _cli_preflight_summary(
     }
 
 
+def _cli_invalid_preflight_option_summary(
+    *,
+    input_dir: Path,
+    destination_dir: Path,
+    blockers: Iterable[str],
+) -> dict[str, Any]:
+    return {
+        "mode": "preflight",
+        "ready": False,
+        "input_dir": Path(input_dir).as_posix(),
+        "destination_dir": Path(destination_dir).as_posix(),
+        "blockers": list(blockers),
+        "copied_files": [],
+        "copied_file_count": 0,
+        "collection": None,
+    }
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -296,6 +317,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="Copy validated files into the destination after preflight passes.",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.run_collection_validator and not args.commit_import:
+        summary = _cli_invalid_preflight_option_summary(
+            input_dir=args.input_dir,
+            destination_dir=args.destination_dir,
+            blockers=[BLOCKER_COLLECTION_VALIDATOR_REQUIRES_COMMIT_IMPORT],
+        )
+        print(json.dumps(summary, indent=2, sort_keys=True), file=sys.stderr)
+        return 1
 
     try:
         if args.commit_import:
