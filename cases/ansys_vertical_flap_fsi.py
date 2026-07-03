@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any
 
-from simulation_core.generic_fsi_solver import (
+from simulation_core.drivers.generic_fsi_solver import (
     DiagnosticsConfig,
     FluidDomain,
     FsiProblem,
@@ -19,13 +19,15 @@ from simulation_core.generic_fsi_solver import (
     SurfaceRegionPolicy,
     TractionConfig,
 )
-from simulation_core.fsi_driver import FsiCaseSpec
+from simulation_core.drivers.fsi_driver import FsiCaseSpec
 from benchmarks.official.official_benchmark_solver import (
     OfficialBenchmarkRunSpec,
     run_official_fsi_benchmark,
 )
 from benchmarks.official.solid_mpm_fsi_runner import (
+    OUT_OF_PLANE_BOUNDARY_POLICY,
     run_rectangular_solid_marker_mpm_fsi_smoke,
+    slab_equivalence_diagnostics,
 )
 
 
@@ -44,7 +46,18 @@ ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS: dict[str, dict[str, object]] = {
 
 
 ANSYS_VERTICAL_FLAP_REFERENCE_RESULTS: dict[str, float | int | tuple[float, float]] = {
-    "max_displacement_m": 5.1e-5,
+    # Official Fluent 2025 R1 intrinsic-FSI tutorial rerun, structure monitor
+    # `official_fsi_50step_monitor_timeseries.csv` column
+    # `solid_max_total_col0_col6_m` at step 50 (t = 0.025 s): 5.829606e-5 m.
+    # This is a same-time snapshot on the downswing of a lightly damped
+    # ringing response (period ~= 8.5 ms), NOT a steady value: the run peaks
+    # at 4.316392e-4 m (step 9, t = 0.0045 s).
+    "max_displacement_m": 5.8296e-5,
+    # Peak over the 50-step run (same monitor column, step 9, t = 0.0045 s);
+    # use this for amplitude comparisons that must not depend on ringing phase.
+    "max_displacement_peak_over_run_m": 4.3164e-4,
+    "max_displacement_peak_time_s": 4.5e-3,
+    "displacement_ringing_period_s": 8.5e-3,
     "local_velocity_peak_mps": 28.1,
     "local_velocity_peak_range_mps": (20.0, 29.0),
     "time_step_s": 5.0e-4,
@@ -75,6 +88,8 @@ ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
     },
     "fluid": {
         "material": "air",
+        "density_kgm3": 1.2,
+        "viscosity_pa_s": 1.8e-5,
         "inlet_velocity_mps": 10.0,
         "outlet": "pressure-outlet",
         "symmetry_plane": "upper boundary of lower half-domain",
@@ -84,6 +99,8 @@ ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
         "density_kgm3": 1600.0,
         "young_modulus_pa": 1.0e6,
         "poisson_ratio": 0.47,
+        "constitutive_model": "linear-elastic",
+        "stress_state": "plane-stress",
     },
     "solid_boundary": {
         "flap_attach": "fixed x/y displacement",
@@ -133,11 +150,12 @@ class VerticalFlapFsiConfig:
     flap_streamwise_min_m: float = 0.050
     flap_streamwise_max_m: float = 0.053
     inlet_velocity_mps: float = 10.0
-    air_density_kgm3: float = 1.225
+    air_density_kgm3: float = 1.2
     air_viscosity_pa_s: float = 1.8e-5
     solid_density_kgm3: float = 1600.0
     young_modulus_pa: float = 1.0e6
     poisson_ratio: float = 0.47
+    solid_constitutive_model: str = "plane_stress_linear_elastic"
     dt_s: float = 5.0e-4
     step_count: int = 50
     grid_nodes: tuple[int, int, int] = (4, 32, 64)
@@ -147,7 +165,9 @@ class VerticalFlapFsiConfig:
     flow_pressure_solver: str = "fv_jacobi"
     flow_cg_tolerance: float = 1.0e-6
     flow_divergence_cleanup_iterations: int = 0
+    flow_projection_velocity_inlet_zmax: bool = False
     velocity_damping: float = 0.995
+    solid_velocity_transfer_flip_blend: float = 0.0
     solid_substeps: int = 1600
     solid_cfl_target: float = 0.5
     preflow_steps: int = 0
@@ -156,12 +176,44 @@ class VerticalFlapFsiConfig:
     flow_reset_pressure_each_step: bool = False
     flow_reinitialize_inlet_each_step: bool = False
     flow_driver_mode: str = "projection_only"
+    preflow_flow_driver_mode: str | None = None
     flow_inlet_source_strength: float = 1.0
     flow_inlet_source_ramp_steps: int = 0
     flow_inlet_source_profile: str = "constant"
     flow_inlet_source_schedule_scope: str = "global"
+    flow_advection_scheme: str = "euler"
+    flow_predictor_substeps: int = 8
+    flow_predictor_kinematic_viscosity_multiplier: float = 1.0
+    flow_predictor_no_slip_domain_walls: tuple[str, ...] = ("ymin",)
+    flow_symmetry_domain_walls: tuple[str, ...] = ("ymax",)
+    flow_ymin_no_slip_rows: int = 0
+    flow_obstacle_no_slip_layers: int = 0
+    flow_obstacle_no_slip_weight: float = 1.0
+    flow_obstacle_cap_no_slip_weight: float | None = None
+    flow_obstacle_wake_no_slip_layers: int = 0
+    flow_obstacle_wake_no_slip_weight: float = 0.5
+    flow_obstacle_normal_velocity_policy: str = "face_clamp"
+    flow_solid_boundary_mode: str = "hibm_sharp_marker_rows"
+    flow_hibm_sharp_search_radius_m: float | None = None
+    flow_hibm_sharp_interior_probe_distance_m: float | None = None
+    flow_hibm_sharp_interpolate_velocity_rows: bool = True
     flow_pressure_outlet_enabled: bool = True
+    flow_pressure_outlet_backflow_policy: str = "allow"
     flow_outlet_balance_policy: str = "report_only"
+    update_fluid_obstacle_from_solid: bool = False
+    # Root-clamp integrity (2026-07-03 static-cantilever audit): with
+    # "pure_fixed_mass", mixed fixed/free grid nodes stay mobile and fixed
+    # particles contribute mass but no stress, so the root clamp has no
+    # elastic restoring path - the flap creeps monotonically past static
+    # equilibrium (pure-solid probe: 8.57e-4 m and rising at t=0.025 s vs
+    # Euler-Bernoulli 2.14e-4 m; on refined grids the clamp fails entirely
+    # and the flap free-falls, ejecting particles). "any_fixed_particle"
+    # locks every node touched by a fixed particle, reproducing the
+    # tutorial's rigid flap_attach constraint (probe: 2.23e-4 m, settled).
+    fixed_node_lock_policy: str = "any_fixed_particle"
+    preserve_marker_velocity_constraints: bool = True
+    marker_velocity_constraint_blend: float = 1.0
+    marker_velocity_constraint_solid_mobility_ratio: float = 0.0
     traction_marker_layout: str = "dual_physical_faces"
     traction_pressure_sampling_mode: str = "two_sided_pressure_jump"
     traction_include_viscous: bool = False
@@ -187,7 +239,15 @@ class VerticalFlapFsiConfig:
     allow_selected_traction_formulation_coupled_smoke: bool = False
     allow_selected_traction_formulation_coupled_long_validation: bool = False
     export_final_flow_snapshot: bool = False
-    enforce_plane_strain_x: bool = True
+    enforce_plane_strain_x: bool = False
+    # Opt-in guard (2026-07-03 fine-flap ejection audit): refuse to run when
+    # solid particle spacing exceeds solid_seeding_max_spacing_cells background
+    # cells on the y/z axes. Under-seeded MPM solids numerically fracture at
+    # the root clamp and free-fall (grid 4x256x320 with counts (1, 64, 12) put
+    # ~2 cells between y layers and ejected particles by step 30).
+    enforce_solid_seeding_limit: bool = False
+    solid_seeding_max_spacing_cells: float = 1.5
+    preserve_marker_area_during_surface_feedback: bool = True
     mpm_support_radius_m: float = 0.006
     displacement_tolerance: float = 0.05
     velocity_peak_tolerance: float = 0.05
@@ -324,6 +384,12 @@ class AnsysVerticalFlapProblem:
             include_viscous=False,
         )
         runtime_discretization_model = "cartesian-3d-half-domain"
+        slab_diagnostics = slab_equivalence_diagnostics(
+            config,
+            conceptual_coordinate_model=CASE_SPEC.coordinate_model,
+            runtime_discretization_model=runtime_discretization_model,
+            out_of_plane_boundary_policy=OUT_OF_PLANE_BOUNDARY_POLICY,
+        )
         runtime_bounds_m = (
             (0.0, 0.0, 0.0),
             (
@@ -366,6 +432,24 @@ class AnsysVerticalFlapProblem:
                 "selected_traction_preset": ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET,
                 "conceptual_coordinate_model": CASE_SPEC.coordinate_model,
                 "runtime_discretization_model": runtime_discretization_model,
+                "extrusion_depth_m": slab_diagnostics["extrusion_depth_m"],
+                "extrusion_depth_source": slab_diagnostics["extrusion_depth_source"],
+                "span_is_extrusion_depth": slab_diagnostics[
+                    "span_is_extrusion_depth"
+                ],
+                "flap_streamwise_thickness_m": slab_diagnostics[
+                    "flap_streamwise_thickness_m"
+                ],
+                "flap_thickness_is_streamwise_not_extrusion": slab_diagnostics[
+                    "flap_thickness_is_streamwise_not_extrusion"
+                ],
+                "out_of_plane_axis": slab_diagnostics["out_of_plane_axis"],
+                "out_of_plane_boundary_policy": slab_diagnostics[
+                    "out_of_plane_boundary_policy"
+                ],
+                "out_of_plane_boundary_residual_modeling_error": slab_diagnostics[
+                    "out_of_plane_boundary_residual_modeling_error"
+                ],
                 "runtime_domain_mode": ANSYS_VERTICAL_FLAP_CASE_METADATA[
                     "geometry"
                 ]["modeled_domain"],
@@ -408,7 +492,7 @@ def selected_formulation_solver_config(
         raise ValueError(
             f"unsupported pressure_pair_provider_mode: {pressure_pair_provider_mode!r}"
         )
-    return VerticalFlapFsiConfig(
+    config = VerticalFlapFsiConfig(
         step_count=step_count,
         traction_pressure_sampling_mode="one_sided_surface_pressure",
         traction_pressure_probe_origin_mode="physical_face_offset",
@@ -436,6 +520,7 @@ def selected_formulation_solver_config(
         allow_selected_traction_formulation_coupled_smoke=True,
         allow_selected_traction_formulation_coupled_long_validation=True,
     )
+    return with_local_surface_force_support(config)
 
 
 def _run_ansys_vertical_flap_generic_runtime(
@@ -546,11 +631,26 @@ def _build_parser() -> argparse.ArgumentParser:
             "projection_only",
             "reinitialize_inlet_each_step_diagnostic",
             "sustained_boundary_inlet",
+            "sustained_boundary_predictor",
             "sustained_volume_source_inlet",
             "sustained_inlet_predictor",
             "sharp_hibm_mpm_reference",
         ),
         help="Explicit flow driver path for ANSYS vertical-flap diagnostics.",
+    )
+    parser.add_argument(
+        "--preflow-flow-driver-mode",
+        default=VerticalFlapFsiConfig.preflow_flow_driver_mode,
+        choices=(
+            "projection_only",
+            "reinitialize_inlet_each_step_diagnostic",
+            "sustained_boundary_inlet",
+            "sustained_boundary_predictor",
+            "sustained_volume_source_inlet",
+            "sustained_inlet_predictor",
+            "sharp_hibm_mpm_reference",
+        ),
+        help="Optional fixed-solid preflow driver override.",
     )
     parser.add_argument(
         "--flow-inlet-source-strength",
@@ -577,9 +677,100 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Whether source ramps continue across preflow/FSI phases.",
     )
     parser.add_argument(
+        "--flow-advection-scheme",
+        default=VerticalFlapFsiConfig.flow_advection_scheme,
+        choices=("euler", "rk2"),
+        help="Advection scheme used by predictor-style flow drivers.",
+    )
+    parser.add_argument(
+        "--flow-predictor-substeps",
+        type=int,
+        default=VerticalFlapFsiConfig.flow_predictor_substeps,
+        help="Number of core predictor substeps inside each FSI flow step.",
+    )
+    parser.add_argument(
+        "--flow-predictor-kinematic-viscosity-multiplier",
+        type=float,
+        default=VerticalFlapFsiConfig.flow_predictor_kinematic_viscosity_multiplier,
+        help="Multiplier on material nu used by predictor-style flow drivers.",
+    )
+    parser.add_argument(
+        "--flow-predictor-no-slip-domain-walls",
+        default=",".join(VerticalFlapFsiConfig.flow_predictor_no_slip_domain_walls),
+        help="Comma-separated domain faces with no-slip predictor wall diffusion.",
+    )
+    parser.add_argument(
+        "--flow-symmetry-domain-walls",
+        default=",".join(VerticalFlapFsiConfig.flow_symmetry_domain_walls),
+        help="Comma-separated domain faces using symmetry wall velocity constraints.",
+    )
+    parser.add_argument(
+        "--flow-divergence-cleanup-iterations",
+        type=int,
+        default=VerticalFlapFsiConfig.flow_divergence_cleanup_iterations,
+        help="Post-projection local divergence cleanup iterations.",
+    )
+    parser.add_argument(
+        "--flow-ymin-no-slip-rows",
+        type=int,
+        default=VerticalFlapFsiConfig.flow_ymin_no_slip_rows,
+        help="Number of near-ymin fluid rows constrained to zero velocity.",
+    )
+    parser.add_argument(
+        "--flow-obstacle-no-slip-layers",
+        type=int,
+        default=VerticalFlapFsiConfig.flow_obstacle_no_slip_layers,
+        help="Number of fluid layers adjacent to obstacle cells constrained to zero velocity.",
+    )
+    parser.add_argument(
+        "--flow-obstacle-no-slip-weight",
+        type=float,
+        default=VerticalFlapFsiConfig.flow_obstacle_no_slip_weight,
+        help="Projection weight for obstacle-adjacent no-slip rows.",
+    )
+    parser.add_argument(
+        "--flow-obstacle-cap-no-slip-weight",
+        type=float,
+        default=VerticalFlapFsiConfig.flow_obstacle_cap_no_slip_weight,
+        help=(
+            "Optional projection weight for non-streamwise obstacle cap rows; "
+            "omit to use --flow-obstacle-no-slip-weight."
+        ),
+    )
+    parser.add_argument(
+        "--flow-obstacle-wake-no-slip-layers",
+        type=int,
+        default=VerticalFlapFsiConfig.flow_obstacle_wake_no_slip_layers,
+        help="Downstream wake-only no-slip layers behind obstacle cells.",
+    )
+    parser.add_argument(
+        "--flow-obstacle-wake-no-slip-weight",
+        type=float,
+        default=VerticalFlapFsiConfig.flow_obstacle_wake_no_slip_weight,
+        help="Projection weight for downstream wake-only no-slip rows.",
+    )
+    parser.add_argument(
+        "--flow-obstacle-normal-velocity-policy",
+        default=VerticalFlapFsiConfig.flow_obstacle_normal_velocity_policy,
+        choices=("face_clamp", "cell_zero_only"),
+        help="Generic obstacle normal-velocity clamp policy.",
+    )
+    parser.add_argument(
+        "--flow-solid-boundary-mode",
+        default=VerticalFlapFsiConfig.flow_solid_boundary_mode,
+        choices=("cell_obstacle_layers", "hibm_sharp_marker_rows"),
+        help="Generic solid-wall boundary representation used by the fluid projection.",
+    )
+    parser.add_argument(
         "--disable-pressure-outlet",
         action="store_true",
         help="Diagnostic mode: disable zmin pressure outlet during projection.",
+    )
+    parser.add_argument(
+        "--flow-pressure-outlet-backflow-policy",
+        default=VerticalFlapFsiConfig.flow_pressure_outlet_backflow_policy,
+        choices=("clamp", "allow"),
+        help="Generic pressure-outlet backflow handling policy.",
     )
     parser.add_argument(
         "--flow-outlet-balance-policy",
@@ -587,8 +778,34 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("report_only",),
         help="Outlet balance policy; this diagnostic step is report-only.",
     )
+    parser.add_argument(
+        "--disable-marker-velocity-constraints",
+        action="store_true",
+        help="Diagnostic mode: do not preserve marker velocity constraints during projection.",
+    )
+    parser.add_argument(
+        "--marker-velocity-constraint-blend",
+        type=float,
+        default=VerticalFlapFsiConfig.marker_velocity_constraint_blend,
+        help="Blend factor used when marker velocity constraints are preserved.",
+    )
+    parser.add_argument(
+        "--marker-velocity-constraint-solid-mobility-ratio",
+        type=float,
+        default=VerticalFlapFsiConfig.marker_velocity_constraint_solid_mobility_ratio,
+        help="Solid mobility ratio used when marker velocity constraints are preserved.",
+    )
+    parser.add_argument(
+        "--export-final-flow-snapshot",
+        action="store_true",
+        help="Include the final structured pressure/velocity field in the report.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
+
+
+def _parse_wall_names(value: str) -> tuple[str, ...]:
+    return tuple(part.strip().lower() for part in str(value).split(",") if part.strip())
 
 
 def main(argv: list[str] | None = None) -> dict[str, object]:
@@ -602,12 +819,54 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
             flow_reset_pressure_each_step=args.flow_reset_pressure_each_step,
             flow_reinitialize_inlet_each_step=args.flow_reinitialize_inlet_each_step,
             flow_driver_mode=args.flow_driver_mode,
+            preflow_flow_driver_mode=args.preflow_flow_driver_mode,
             flow_inlet_source_strength=args.flow_inlet_source_strength,
             flow_inlet_source_ramp_steps=args.flow_inlet_source_ramp_steps,
             flow_inlet_source_profile=args.flow_inlet_source_profile,
             flow_inlet_source_schedule_scope=args.flow_inlet_source_schedule_scope,
+            flow_advection_scheme=args.flow_advection_scheme,
+            flow_predictor_substeps=args.flow_predictor_substeps,
+            flow_predictor_kinematic_viscosity_multiplier=(
+                args.flow_predictor_kinematic_viscosity_multiplier
+            ),
+            flow_predictor_no_slip_domain_walls=_parse_wall_names(
+                args.flow_predictor_no_slip_domain_walls
+            ),
+            flow_symmetry_domain_walls=_parse_wall_names(
+                args.flow_symmetry_domain_walls
+            ),
+            flow_divergence_cleanup_iterations=(
+                args.flow_divergence_cleanup_iterations
+            ),
+            flow_ymin_no_slip_rows=args.flow_ymin_no_slip_rows,
+            flow_obstacle_no_slip_layers=args.flow_obstacle_no_slip_layers,
+            flow_obstacle_no_slip_weight=args.flow_obstacle_no_slip_weight,
+            flow_obstacle_cap_no_slip_weight=(
+                args.flow_obstacle_cap_no_slip_weight
+            ),
+            flow_obstacle_wake_no_slip_layers=(
+                args.flow_obstacle_wake_no_slip_layers
+            ),
+            flow_obstacle_wake_no_slip_weight=(
+                args.flow_obstacle_wake_no_slip_weight
+            ),
+            flow_obstacle_normal_velocity_policy=(
+                args.flow_obstacle_normal_velocity_policy
+            ),
+            flow_solid_boundary_mode=args.flow_solid_boundary_mode,
             flow_pressure_outlet_enabled=not args.disable_pressure_outlet,
+            flow_pressure_outlet_backflow_policy=(
+                args.flow_pressure_outlet_backflow_policy
+            ),
             flow_outlet_balance_policy=args.flow_outlet_balance_policy,
+            preserve_marker_velocity_constraints=(
+                not args.disable_marker_velocity_constraints
+            ),
+            marker_velocity_constraint_blend=args.marker_velocity_constraint_blend,
+            marker_velocity_constraint_solid_mobility_ratio=(
+                args.marker_velocity_constraint_solid_mobility_ratio
+            ),
+            export_final_flow_snapshot=args.export_final_flow_snapshot,
         )
     )
     if args.json:

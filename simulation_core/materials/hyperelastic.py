@@ -3,7 +3,7 @@ from math import sqrt
 
 import taichi as ti
 
-from simulation_core.runtime import TaichiRuntimeConfig, init_taichi
+from simulation_core.diagnostics.runtime import TaichiRuntimeConfig, init_taichi
 
 
 PSI_TO_PA = 6894.757293168

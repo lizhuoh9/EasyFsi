@@ -51,7 +51,7 @@ class SourceStaticContractTests(unittest.TestCase):
                 self.assertNotIn(token, source, msg=f"{path}: {token}")
 
     def test_projected_ibm_config_exposes_only_full_3d_region_velocities(self) -> None:
-        source = _read("simulation_core/projected_ibm.py")
+        source = _read("simulation_core/coupling/projected_ibm.py")
 
         self.assertIn("primary_velocity_mps: tuple[float, float, float]", source)
         self.assertIn("secondary_velocity_mps: tuple[float, float, float]", source)
@@ -83,9 +83,13 @@ class SourceStaticContractTests(unittest.TestCase):
             ") / self.cell_width_x_m[i]",
             source,
         )
-        self.assertIn("def compute_divergence(self, *, pressure_outlet_zmin: bool = False)", source)
+        self.assertIn("def compute_divergence(", source)
+        self.assertIn("pressure_outlet_zmin: bool = False,", source)
+        self.assertIn("velocity_inlet_zmax: bool = False,", source)
         self.assertIn("if pressure_outlet_zmin == 1 and k == 0:", source)
         self.assertIn("bottom_velocity_z = self.velocity[i, j, k].z", source)
+        self.assertIn("if velocity_inlet_zmax == 1 and k == self.nz - 1:", source)
+        self.assertIn("top_velocity_z = self.velocity[i, j, k].z", source)
         self.assertIn("(right_velocity_x - left_velocity_x) / self.cell_width_x_m[i]", source)
         self.assertIn("self.obstacle[i + 1, j, k] == 0", source)
         self.assertIn("grad.x = (center - self.pressure[im, j, k]) / self.center_distance_x_m[i]", source)
@@ -118,7 +122,43 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertIn("self.velocity[0, j, k].x = 0.0", source)
         self.assertIn("self.velocity[i, 0, k].y = 0.0", source)
         self.assertIn("self.velocity[i, j, 0].z = 0.0", source)
-        self.assertNotIn("self.velocity[self.nx - 1, j, k].x = 0.0", source)
+        # self.velocity[self.nx - 1, j, k].x = 0.0 lives in
+        # _apply_symmetry_domain_walls_kernel's xmax branch (mirror-plane
+        # symmetry BCs), NOT in _apply_closed_boundary_no_normal_flow_kernel:
+        # that predictor no-slip-wall kernel is min-side only, pinned below.
+        self.assertIn("self.velocity[self.nx - 1, j, k].x = 0.0", source)
+        # _apply_closed_boundary_no_normal_flow_kernel must stay min-side
+        # only: in this backward-face (MAC) velocity layout, index 0 is the
+        # only real outward wall face per axis; nx-1/ny-1/nz-1 are interior
+        # faces already governed by the pressure projection's missing-
+        # neighbor convention, so clamping them here would overwrite a
+        # correctly projected value (this was removed as a physics
+        # regression - see the kernel's own comment).
+        self.assertIn(
+            "    def _apply_closed_boundary_no_normal_flow_kernel(self, pressure_outlet_zmin: ti.i32):\n"
+            "        # Only the domain min-side faces (index 0) are actual outward wall\n"
+            "        # faces in this backward-face velocity layout: velocity[i,j,k]\n"
+            "        # stores the face between cell (..k-1) and cell (..k), so index 0\n"
+            "        # is the wall face of cell 0 (no cell -1 exists) while index\n"
+            "        # nx-1/ny-1/nz-1 is an INTERIOR face between the last two cells,\n"
+            "        # already governed by the pressure projection. The Poisson matrix\n"
+            "        # and divergence stencil already enforce no-flux at the max walls\n"
+            "        # via the missing-neighbor convention, so clamping those interior\n"
+            "        # faces here would overwrite a correctly projected value.\n"
+            "        for j, k in ti.ndrange(self.ny, self.nz):\n"
+            "            if self.velocity_dirichlet_boundary_active[0, j, k] == 0:\n"
+            "                self.velocity[0, j, k].x = 0.0\n"
+            "        for i, k in ti.ndrange(self.nx, self.nz):\n"
+            "            if self.velocity_dirichlet_boundary_active[i, 0, k] == 0:\n"
+            "                self.velocity[i, 0, k].y = 0.0\n"
+            "        for i, j in ti.ndrange(self.nx, self.ny):\n"
+            "            if (\n"
+            "                pressure_outlet_zmin == 0\n"
+            "                and self.velocity_dirichlet_boundary_active[i, j, 0] == 0\n"
+            "            ):\n"
+            "                self.velocity[i, j, 0].z = 0.0\n",
+            source,
+        )
         self.assertIn("def _clear_pressure_correction_kernel", source)
         self.assertIn("self._clear_pressure_correction_kernel()", source)
         self.assertIn("while upper - lower > 1:", source)
@@ -225,7 +265,7 @@ class SourceStaticContractTests(unittest.TestCase):
         )
 
     def test_fsi_source_spreads_fluid_stress_action_and_preserves_grid_force(self) -> None:
-        source = _read("simulation_core/tri_surface.py")
+        source = _read("simulation_core/coupling/tri_surface.py")
 
         self.assertIn("sample_has_fluid_support = _sampled_fluid_weight > 1.0e-12", source)
         self.assertIn("sample_area = area if sample_has_fluid_support else 0.0", source)
@@ -238,7 +278,7 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertIn("renormalized_weight = weight / valid_weight_sum", source)
 
     def test_tri_surface_report_marks_inapplicable_shared_fields_nonfinite(self) -> None:
-        source = _read("simulation_core/tri_surface.py")
+        source = _read("simulation_core/coupling/tri_surface.py")
 
         self.assertIn("def report(self, *,", source)
         self.assertIn("stress_fields_computed: bool", source)
@@ -258,7 +298,7 @@ class SourceStaticContractTests(unittest.TestCase):
         )
 
     def test_neo_hookean_region_normal_pressure_matches_fsi_traction_sign(self) -> None:
-        tri_surface_source = _read("simulation_core/tri_surface.py")
+        tri_surface_source = _read("simulation_core/coupling/tri_surface.py")
         neo_hookean_source = _read(NEO_HOOKEAN_MPM_SOURCE)
 
         self.assertIn(
@@ -271,8 +311,8 @@ class SourceStaticContractTests(unittest.TestCase):
         )
 
     def test_tri_surface_uses_cartesian_grid_fields_for_probe_mapping(self) -> None:
-        source = _read("simulation_core/tri_surface.py")
-        projected_ibm_source = _read("simulation_core/projected_ibm.py")
+        source = _read("simulation_core/coupling/tri_surface.py")
+        projected_ibm_source = _read("simulation_core/coupling/projected_ibm.py")
         squid_source = _read_squid_sources()
 
         self.assertIn("_grid_coordinate_from_fields", source)
@@ -299,7 +339,7 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertNotIn("obstacle_volume_m3() / simulator.fluid.spec.cell_volume_m3", squid_source)
 
     def test_projected_ibm_reports_time_averaged_action_reaction_force(self) -> None:
-        source = _read("simulation_core/projected_ibm.py")
+        source = _read("simulation_core/coupling/projected_ibm.py")
 
         self.assertIn("primary_fluid_impulse_n_s", source)
         self.assertIn("secondary_fluid_impulse_n_s", source)

@@ -60,6 +60,98 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
+class ProjectionSolverMaterialPropertyTests(unittest.TestCase):
+    def test_stabilized_solver_uses_configured_fluid_properties(self):
+        from refactored.validation.ansys_vertical_flap_fixed.projection_solver import (
+            _fluid_properties,
+            _merge_stabilized_solver_config,
+        )
+
+        solver_config = _merge_stabilized_solver_config(
+            {
+                "solver": {"max_steps": 1},
+                "fluid": {"rho": 1.2, "mu": 1.8e-5},
+            }
+        )
+
+        rho, mu = _fluid_properties(solver_config)
+        self.assertAlmostEqual(rho, 1.2)
+        self.assertAlmostEqual(mu, 1.8e-5)
+
+    def test_outlet_flux_correction_preserves_outlet_profile_shape(self):
+        from refactored.validation.ansys_vertical_flap_fixed.projection_solver import (
+            _advance_one_step,
+        )
+
+        fluid = np.ones((2, 3), dtype=bool)
+        masks = {
+            "fluid_mask": fluid,
+            "solid_mask": np.zeros_like(fluid),
+            "near_solid_mask": np.zeros_like(fluid),
+            "inlet_mask": np.array(
+                [[True, False, False], [True, False, False]], dtype=bool
+            ),
+            "outlet_mask": np.array(
+                [[False, False, True], [False, False, True]], dtype=bool
+            ),
+        }
+        u = np.array([[10.0, 20.0, 0.0], [10.0, 12.0, 0.0]], dtype=np.float64)
+        v = np.zeros_like(u)
+        p = np.zeros_like(u)
+
+        u_next, _, _, info = _advance_one_step(
+            u,
+            v,
+            p,
+            masks,
+            {"inlet_u": 10.0, "inlet_v": 0.0, "outlet_pressure": 0.0},
+            rho=1.2,
+            nu=0.0,
+            ds=1.0,
+            dy=1.0,
+            dt=0.0,
+            solver_config={
+                "poisson_method": "sor",
+                "poisson_max_iters": 0,
+                "poisson_tolerance_abs": 1.0e-4,
+                "poisson_tolerance_rel": 1.0e-3,
+                "poisson_omega": 1.0,
+                "poisson_compatibility_correction": False,
+                "poisson_check_interval": 1,
+                "projection_velocity_relaxation": 0.0,
+                "area_flux_projection": False,
+                "outlet_flux_correction": True,
+            },
+        )
+
+        outlet = u_next[:, -1]
+        np.testing.assert_allclose(outlet, np.array([14.0, 6.0]), atol=1.0e-12)
+        self.assertAlmostEqual(outlet[0] - outlet[1], 8.0)
+        self.assertAlmostEqual(info["corrected_outlet_flux"], 20.0)
+
+    def test_area_flux_projection_preserves_column_profile_shape(self):
+        from refactored.validation.ansys_vertical_flap_fixed.projection_solver import (
+            _relax_column_flux_profile,
+        )
+
+        fluid = np.ones((2, 3), dtype=bool)
+        masks = {"fluid_mask": fluid}
+        u = np.array([[10.0, 20.0, 8.0], [10.0, 12.0, 4.0]], dtype=np.float64)
+
+        corrected = _relax_column_flux_profile(
+            u,
+            masks,
+            {"inlet_u": 10.0},
+            strength=0.5,
+        )
+
+        np.testing.assert_allclose(
+            corrected[:, 1], np.array([17.0, 9.0]), atol=1.0e-12
+        )
+        self.assertAlmostEqual(corrected[0, 1] - corrected[1, 1], 8.0)
+        self.assertAlmostEqual(float(np.mean(corrected[:, 1])), 13.0)
+
+
 class AnsysVerticalFlapFixedFlowStep4SolverStabilizationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

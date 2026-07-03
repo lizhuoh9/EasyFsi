@@ -12,9 +12,10 @@ from simulation_core import (
     TaichiRuntimeConfig,
     TriSurfaceRegionDiagnostics,
 )
-from simulation_core.projected_ibm import (
+from simulation_core.coupling.projected_ibm import (
     ProjectedIbmRegionPairStepConfig,
     ProjectedIbmRegionPairStepReport,
+    _projected_ibm_probe_distance_m,
     advance_projected_ibm_region_pair_fluid_step,
 )
 
@@ -538,7 +539,9 @@ class ProjectedIbmRegionPairStepTests(unittest.TestCase):
         self.assertAlmostEqual(report.pressure_interface_matrix_max_abs_diagonal, 7.75)
         self.assertEqual(report.pressure_interface_matrix_active_cells, 9)
 
-    def test_pressure_robin_matrix_target_uses_post_projection_pressure_forces(self) -> None:
+    def test_pressure_robin_matrix_final_report_is_separate_from_applied_impulse(
+        self,
+    ) -> None:
         fluid = _FakeFluid()
         diagnostics = _FakeSurfaceDiagnostics()
 
@@ -554,22 +557,29 @@ class ProjectedIbmRegionPairStepTests(unittest.TestCase):
         )
 
         self.assertEqual(len(diagnostics.force_calls), 3)
-        self.assertEqual(len(diagnostics.post_projection_force_calls), 3)
+        self.assertEqual(len(diagnostics.post_projection_force_calls), 1)
+        self.assertEqual(report.force_report.kind, "post_projection_force")
         np.testing.assert_allclose(
             report.interface_reaction_target.primary_force_n,
-            (-7.0, 8.0, -9.0),
+            (-1.0, 2.0, -3.0),
             rtol=0.0,
             atol=1.0e-12,
         )
         np.testing.assert_allclose(
             report.interface_reaction_target.secondary_force_n,
-            (10.0, -11.0, 12.0),
+            (4.0, -5.0, 6.0),
             rtol=0.0,
             atol=1.0e-12,
         )
         self.assertEqual(
             report.primary_interface_reaction_balance.residual_norm_n,
             0.0,
+        )
+        np.testing.assert_allclose(
+            report.primary_equivalent_fluid_force_n,
+            (1.0, -2.0, 3.0),
+            rtol=0.0,
+            atol=1.0e-12,
         )
 
     def test_constraint_force_solid_mobility_ratio_is_forwarded_to_surface_force_pass(self) -> None:
@@ -1074,7 +1084,20 @@ class ProjectedIbmRegionPairStepTests(unittest.TestCase):
             )
         )
 
-    def test_nonuniform_grid_uses_one_probe_distance_for_force_and_constraints(self) -> None:
+    def test_probe_distance_uses_local_grid_contract_on_nonuniform_grid(self) -> None:
+        uniform = SimpleNamespace(grid=SimpleNamespace(is_uniform=True))
+        nonuniform = SimpleNamespace(grid=SimpleNamespace(is_uniform=False))
+
+        self.assertEqual(
+            _projected_ibm_probe_distance_m(uniform, (0.01, 0.02, 0.03)),
+            0.01,
+        )
+        self.assertEqual(
+            _projected_ibm_probe_distance_m(nonuniform, (0.01, 0.02, 0.03)),
+            0.0,
+        )
+
+    def test_nonuniform_grid_requests_local_probe_distance_for_force_and_constraints(self) -> None:
         fluid = _FakeFluid()
         fluid.grid = SimpleNamespace(is_uniform=False)
         diagnostics = _FakeSurfaceDiagnostics()
@@ -1082,15 +1105,23 @@ class ProjectedIbmRegionPairStepTests(unittest.TestCase):
         advance_projected_ibm_region_pair_fluid_step(
             fluid,
             diagnostics,
-            _config(velocity_constraint_blend=0.6, ibm_correction_iterations=2),
+            _config(
+                velocity_constraint_blend=0.6,
+                ibm_correction_iterations=2,
+                primary_pressure_robin_impedance_ns_m=1.0,
+                primary_interface_area_m2=0.5,
+            ),
         )
 
-        self.assertTrue(all(call["probe_distance_m"] == 0.01 for call in diagnostics.force_calls))
+        self.assertTrue(all(call["probe_distance_m"] == 0.0 for call in diagnostics.force_calls))
         self.assertTrue(
             all("control_volume_thickness_m" not in call for call in diagnostics.force_calls)
         )
         self.assertTrue(
-            all(call["probe_distance_m"] == 0.01 for call in diagnostics.velocity_constraint_calls)
+            all(call["probe_distance_m"] == 0.0 for call in diagnostics.velocity_constraint_calls)
+        )
+        self.assertTrue(
+            all(call["probe_distance_m"] == 0.0 for call in diagnostics.pressure_matrix_calls)
         )
 
     def test_full_3d_target_velocities_are_forwarded_to_surface_diagnostics(self) -> None:

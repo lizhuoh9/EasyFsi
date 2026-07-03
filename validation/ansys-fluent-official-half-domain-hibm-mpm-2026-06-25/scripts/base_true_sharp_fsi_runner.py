@@ -25,19 +25,21 @@ from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     with_local_surface_force_support,
 )
 from benchmarks.official.solid_mpm_fsi_runner import (  # noqa: E402
+    OUT_OF_PLANE_BOUNDARY_POLICY,
     PRIMARY_REGION_ID,
     SECONDARY_UNUSED_REGION_ID,
     _lame_parameters,
+    slab_equivalence_diagnostics,
 )
-from simulation_core.fluid import CartesianFluidSolver, FluidDomainSpec  # noqa: E402
-from simulation_core.hibm_mpm import (  # noqa: E402
+from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec  # noqa: E402
+from simulation_core.coupling.hibm_mpm import (  # noqa: E402
     HibmMpmIbBoundaryConditions,
     HibmMpmIbNodeSearch,
     HibmMpmSurfaceMarkers,
     advance_hibm_mpm_sharp_mpm_step,
 )
-from simulation_core.neo_hookean_mpm import NeoHookeanMpmState  # noqa: E402
-from simulation_core.runtime import TaichiRuntimeConfig  # noqa: E402
+from simulation_core.solids.neo_hookean_mpm import NeoHookeanMpmState  # noqa: E402
+from simulation_core.diagnostics.runtime import TaichiRuntimeConfig  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent
@@ -413,9 +415,12 @@ def _write_history(history: list[dict[str, Any]]) -> None:
     fields = [
         "step",
         "time_s",
+        "extrusion_depth_m",
         "stress_valid_marker_count",
         "stress_invalid_marker_count",
         "marker_force_z_n",
+        "marker_force_z_per_depth_npm",
+        "solid_mass_per_depth_kgpm",
         "scatter_active_particle_count",
         "projection_l2",
         "projection_max_abs",
@@ -443,6 +448,44 @@ def _write_history(history: list[dict[str, Any]]) -> None:
             writer.writerow({key: row[key] for key in fields})
 
 
+def _marker_total_area_m2(markers: HibmMpmSurfaceMarkers) -> float:
+    marker_count = int(markers.marker_count)
+    if marker_count <= 0:
+        return 0.0
+    return float(np.sum(markers.A_gamma_m2.to_numpy()[:marker_count]))
+
+
+def _solid_mass_total_kg(solid: NeoHookeanMpmState) -> float:
+    particle_count = int(solid.particle_count)
+    if particle_count <= 0:
+        return 0.0
+    return float(np.sum(solid.mass_kg.to_numpy()[:particle_count]))
+
+
+def _full_domain_slab_diagnostics(
+    *,
+    config: VerticalFlapFsiConfig,
+    solid: NeoHookeanMpmState,
+    markers: HibmMpmSurfaceMarkers,
+    marker_force_total_n: tuple[float, float, float] | list[float] | np.ndarray | None,
+    max_displacement_m: float | None,
+) -> dict[str, object]:
+    return slab_equivalence_diagnostics(
+        config,
+        interface_force_total_n=marker_force_total_n,
+        pressure_force_total_n=marker_force_total_n,
+        marker_total_area_m2=_marker_total_area_m2(markers),
+        solid_mass_total_kg=_solid_mass_total_kg(solid),
+        max_displacement_m=max_displacement_m,
+        flap_count=len(FLAP_NAMES),
+        marker_face_count=2 * len(FLAP_NAMES),
+        conceptual_coordinate_model="cartesian-2d",
+        runtime_discretization_model="cartesian-3d-full-domain-two-flap",
+        out_of_plane_boundary_policy=OUT_OF_PLANE_BOUNDARY_POLICY,
+        pressure_force_source="true_sharp_fsi_marker_forces_total",
+    )
+
+
 def _write_field_snapshot(
     *,
     path: Path,
@@ -461,6 +504,7 @@ def _write_field_snapshot(
         duct_length_m=np.asarray(float(config.duct_length_m), dtype=np.float64),
         duct_height_m=np.asarray(float(config.duct_height_m), dtype=np.float64),
         span_m=np.asarray(float(config.span_m), dtype=np.float64),
+        extrusion_depth_m=np.asarray(float(config.span_m), dtype=np.float64),
         flap_height_m=np.asarray(float(config.flap_height_m), dtype=np.float64),
         flap_thickness_m=np.asarray(float(config.flap_thickness_m), dtype=np.float64),
         pressure_pa=fluid.pressure.to_numpy(),
@@ -631,6 +675,7 @@ def run(
             "solid_substeps": int(config.solid_substeps),
             "mpm_support_radius_m": float(config.mpm_support_radius_m),
             "markers_per_face": int(markers_per_face),
+            "extrusion_depth_m": float(config.span_m),
         },
     )
     for preflow_index in range(preflow_count):
@@ -641,13 +686,26 @@ def run(
         preflow_velocity_dirichlet = latest_preflow_load.velocity_dirichlet
         preflow_pressure_neumann = latest_preflow_load.pressure_neumann
         preflow_no_slip = latest_preflow_load.no_slip_residual
+        preflow_displacement = _solid_displacement(solid, masks)
+        preflow_slab = _full_domain_slab_diagnostics(
+            config=config,
+            solid=solid,
+            markers=markers,
+            marker_force_total_n=latest_preflow_load.marker_forces.total_marker_force_n,
+            max_displacement_m=float(preflow_displacement["max_displacement_m"]),
+        )
         preflow_row = {
             "preflow_step": preflow_index + 1,
             "physical_time_s": 0.0,
+            "extrusion_depth_m": preflow_slab["extrusion_depth_m"],
             "stress_valid_marker_count": latest_preflow_load.fluid_stress.valid_marker_count,
             "stress_invalid_marker_count": latest_preflow_load.fluid_stress.invalid_marker_count,
             "marker_force_z_n": latest_preflow_load.marker_forces.total_marker_force_n[2],
-            "scatter_active_particle_count": latest_preflow_load.mpm_force_scatter.active_particle_count,
+            "marker_force_z_per_depth_npm": preflow_slab[
+                "interface_force_z_per_depth_N_per_m"
+            ],
+            "solid_mass_per_depth_kgpm": preflow_slab["solid_mass_per_depth_kgpm"],
+            "scatter_active_particle_count": latest_preflow_load.mpm_force_scatter.active_pair_count,
             "projection_l2": float(preflow_projection.get("l2", 0.0)),
             "projection_max_abs": float(preflow_projection.get("max_abs", 0.0)),
             **preflow_speed,
@@ -682,6 +740,7 @@ def run(
                 "solid_substeps": int(config.solid_substeps),
                 "mpm_support_radius_m": float(config.mpm_support_radius_m),
                 "markers_per_face": int(markers_per_face),
+                "extrusion_depth_m": float(config.span_m),
             },
         )
         _log(
@@ -747,13 +806,25 @@ def run(
         next_pressure_neumann = latest_report.next_pressure_neumann
         post_solid_no_slip = latest_report.post_solid_no_slip_residual
         surface_feedback = latest_report.surface_feedback
+        slab_diagnostics = _full_domain_slab_diagnostics(
+            config=config,
+            solid=solid,
+            markers=markers,
+            marker_force_total_n=load.marker_forces.total_marker_force_n,
+            max_displacement_m=float(displacement["max_displacement_m"]),
+        )
         row = {
             "step": step_index + 1,
             "time_s": (step_index + 1) * float(config.dt_s),
+            "extrusion_depth_m": slab_diagnostics["extrusion_depth_m"],
             "stress_valid_marker_count": load.fluid_stress.valid_marker_count,
             "stress_invalid_marker_count": load.fluid_stress.invalid_marker_count,
             "marker_force_z_n": load.marker_forces.total_marker_force_n[2],
-            "scatter_active_particle_count": load.mpm_force_scatter.active_particle_count,
+            "marker_force_z_per_depth_npm": slab_diagnostics[
+                "interface_force_z_per_depth_N_per_m"
+            ],
+            "solid_mass_per_depth_kgpm": slab_diagnostics["solid_mass_per_depth_kgpm"],
+            "scatter_active_particle_count": load.mpm_force_scatter.active_pair_count,
             "projection_l2": float(projection.get("l2", 0.0)),
             "projection_max_abs": float(projection.get("max_abs", 0.0)),
             **displacement,
@@ -809,6 +880,7 @@ def run(
                 "solid_substeps": int(config.solid_substeps),
                 "mpm_support_radius_m": float(config.mpm_support_radius_m),
                 "markers_per_face": int(markers_per_face),
+                "extrusion_depth_m": float(config.span_m),
             },
         )
         _log(
@@ -842,12 +914,21 @@ def run(
         fluid_speed_max_mps=float(final_speed["fluid_speed_max_mps"]),
         fluid_speed_p999_mps=float(final_speed["fluid_speed_p999_mps"]),
     )
+    final_slab_diagnostics = _full_domain_slab_diagnostics(
+        config=config,
+        solid=solid,
+        markers=markers,
+        marker_force_total_n=latest_report.fluid_to_mpm_loads.marker_forces.total_marker_force_n,
+        max_displacement_m=float(final_displacement["max_displacement_m"]),
+    )
     report = {
         "case": "full-domain-two-flap-true-sharp-fsi",
         "config": asdict(config),
         "solver_path": "advance_hibm_mpm_sharp_mpm_step",
         "full_domain_two_flap": True,
-        "flap_count": 2,
+        # flap_count / max_displacement_m are provided by final_slab_diagnostics
+        # (flap_count=len(FLAP_NAMES)); do not shadow them with literals here.
+        **final_slab_diagnostics,
         "mpm_support_radius_m": float(config.mpm_support_radius_m),
         "thin_wall_pressure_sampling": {
             **pressure_sampling_policy,
@@ -901,6 +982,7 @@ def run(
             "solid_substeps": int(config.solid_substeps),
             "mpm_support_radius_m": float(config.mpm_support_radius_m),
             "markers_per_face": int(markers_per_face),
+            "extrusion_depth_m": float(config.span_m),
         },
     )
     return report

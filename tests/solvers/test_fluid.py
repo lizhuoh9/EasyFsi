@@ -1,11 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import unittest
 
 import numpy as np
 import taichi as ti
 
-from simulation_core.fluid import CartesianFluidSolver, FluidDomainSpec
+from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec
 
 
 class CartesianFluidSolverTests(unittest.TestCase):

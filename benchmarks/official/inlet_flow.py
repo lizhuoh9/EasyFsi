@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import taichi as ti
 
-from simulation_core.runtime import TaichiRuntimeConfig, init_taichi
+from simulation_core.diagnostics.runtime import TaichiRuntimeConfig, init_taichi
 
 
 @dataclass(frozen=True)

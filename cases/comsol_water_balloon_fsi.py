@@ -23,8 +23,8 @@ from benchmarks.official.ogden_membrane import (
     OgdenMembraneMaterial,
     stretch_from_volume_ratio,
 )
-from simulation_core.fsi_driver import FsiCaseSpec
-from simulation_core.validation import ReferenceCurve
+from simulation_core.drivers.fsi_driver import FsiCaseSpec
+from simulation_core.diagnostics.validation import ReferenceCurve
 
 
 COMSOL_WATER_BALLOON_OGDEN_ALPHA = (1.3, 5.0, -2.0)

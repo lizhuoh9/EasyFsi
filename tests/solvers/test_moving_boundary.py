@@ -5,8 +5,8 @@ import unittest
 
 class MovingBoundaryTests(unittest.TestCase):
     def test_full_mesh_displacement_uses_all_mapped_components(self) -> None:
-        from simulation_core.interface_pair import InterfacePairMap, PairMapEntry
-        from simulation_core.moving_boundary import MovingBoundaryCondition
+        from simulation_core.coupling.interface_pair import InterfacePairMap, PairMapEntry
+        from simulation_core.coupling.moving_boundary import MovingBoundaryCondition
 
         boundary = MovingBoundaryCondition(
             name="all-components",
@@ -23,8 +23,8 @@ class MovingBoundaryTests(unittest.TestCase):
         )
 
     def test_normal_mesh_displacement_keeps_tangent_free(self) -> None:
-        from simulation_core.interface_pair import InterfacePairMap, PairMapEntry
-        from simulation_core.moving_boundary import MovingBoundaryCondition
+        from simulation_core.coupling.interface_pair import InterfacePairMap, PairMapEntry
+        from simulation_core.coupling.moving_boundary import MovingBoundaryCondition
 
         boundary = MovingBoundaryCondition(
             name="normal-only",

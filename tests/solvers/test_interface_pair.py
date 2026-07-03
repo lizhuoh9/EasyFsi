@@ -5,7 +5,7 @@ import unittest
 
 class InterfacePairMapTests(unittest.TestCase):
     def test_pair_map_transfers_full_vector_displacements(self) -> None:
-        from simulation_core.interface_pair import InterfacePairMap, PairMapEntry
+        from simulation_core.coupling.interface_pair import InterfacePairMap, PairMapEntry
 
         pair_map = InterfacePairMap(
             target_count=2,
@@ -21,7 +21,7 @@ class InterfacePairMapTests(unittest.TestCase):
         self.assertEqual(mapped, ((0.5, 3.0, 0.0), (0.0, 4.0, 0.0)))
 
     def test_pair_map_transfers_normal_component_only(self) -> None:
-        from simulation_core.interface_pair import InterfacePairMap, PairMapEntry
+        from simulation_core.coupling.interface_pair import InterfacePairMap, PairMapEntry
 
         pair_map = InterfacePairMap(
             target_count=1,
@@ -36,8 +36,8 @@ class InterfacePairMapTests(unittest.TestCase):
         self.assertEqual(mapped, ((3.0, 0.0, 0.0),))
 
     def test_pair_map_transposes_fluid_forces_as_equal_opposite_solid_reactions(self) -> None:
-        from simulation_core.fsi_coupling import action_reaction_balance
-        from simulation_core.interface_pair import InterfacePairMap, PairMapEntry
+        from simulation_core.coupling.fsi_coupling import action_reaction_balance
+        from simulation_core.coupling.interface_pair import InterfacePairMap, PairMapEntry
 
         pair_map = InterfacePairMap(
             target_count=2,

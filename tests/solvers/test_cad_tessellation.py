@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 import trimesh
 
-from simulation_core.cad_tessellation import (
+from simulation_core.geometry_tools.cad_tessellation import (
     StepCurveEntity,
     StepPartEntity,
     StepSurfaceEntity,

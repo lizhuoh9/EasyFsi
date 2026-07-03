@@ -30,24 +30,20 @@ def _import_roots(path: Path) -> set[str]:
     return roots
 
 
-LEGACY_SHIMS = {
-    "fluid.py": "simulation_core.fluids",
-    "hibm_mpm.py": "simulation_core.coupling.hibm_mpm",
-    "neo_hookean_mpm.py": "simulation_core.solids.neo_hookean_mpm",
-    "mooney_shell_mpm.py": "simulation_core.solids.mooney_shell",
-    "geometry.py": "simulation_core.geometry_tools.surface_mesh",
-    "coordinate_models.py": "simulation_core.geometry_tools.coordinate_models",
-    "fluid_domain.py": "simulation_core.geometry_tools.fluid_domain",
-    "cad_import.py": "simulation_core.geometry_tools.cad_import",
-    "cad_tessellation.py": "simulation_core.geometry_tools.cad_tessellation",
-    "hyperelastic.py": "simulation_core.materials.hyperelastic",
-    "validation.py": "simulation_core.diagnostics.validation",
-    "time_stepping.py": "simulation_core.diagnostics.time_stepping",
-}
-
 PACKAGE_IMPLEMENTATIONS = {
     ("fluids", "solver.py"): "class CartesianFluidSolver",
+    ("coupling", "fsi_coupling.py"): "class InterfaceReactionFixedPointResult",
+    ("coupling", "hibm.py"): "def classify_hibm_near_boundary_nodes",
     ("coupling", "hibm_mpm", "core.py"): "class HibmMpmSharpCouplingState",
+    ("coupling", "interface_pair.py"): "class InterfacePairMap",
+    ("coupling", "moving_boundary.py"): "class MovingBoundaryCondition",
+    ("coupling", "pressure_interface.py"): "def far_pressure_side_normal_sign_from_direction",
+    ("coupling", "pressure_sample_pairs.py"): "class PressureSamplePair",
+    ("coupling", "projected_ibm.py"): "class ProjectedIbmRegionPairStepConfig",
+    ("coupling", "tri_surface.py"): "class TriSurfaceRegionDiagnostics",
+    ("diagnostics", "runtime.py"): "class TaichiRuntimeConfig",
+    ("drivers", "fsi_driver.py"): "class FsiDriver",
+    ("drivers", "generic_fsi_solver.py"): "class FsiProblem",
     ("solids", "neo_hookean_mpm.py"): "class NeoHookeanMpmState",
     ("solids", "mooney_shell", "core.py"): "class TriMooneyShellMpmState",
     ("geometry_tools", "surface_mesh.py"): "class SurfaceMesh",
@@ -59,16 +55,28 @@ PACKAGE_IMPLEMENTATIONS = {
 
 PACKAGE_IMPLEMENTATION_ROOTS = (
     REPO_ROOT / "simulation_core" / "fluids",
-    REPO_ROOT / "simulation_core" / "coupling" / "hibm_mpm",
+    REPO_ROOT / "simulation_core" / "coupling",
     REPO_ROOT / "simulation_core" / "solids",
     REPO_ROOT / "simulation_core" / "geometry_tools",
     REPO_ROOT / "simulation_core" / "materials",
     REPO_ROOT / "simulation_core" / "diagnostics",
+    REPO_ROOT / "simulation_core" / "drivers",
 )
 
-LEGACY_SHIM_IMPORTS = (
+LEGACY_IMPORT_TOKENS = (
     "from simulation_core.fluid import",
+    "from simulation_core.fsi_coupling import",
+    "from simulation_core.fsi_driver import",
+    "from simulation_core.generic_fsi_solver import",
+    "from simulation_core.hibm import",
     "from simulation_core.hibm_mpm import",
+    "from simulation_core.interface_pair import",
+    "from simulation_core.moving_boundary import",
+    "from simulation_core.pressure_interface import",
+    "from simulation_core.pressure_sample_pairs import",
+    "from simulation_core.projected_ibm import",
+    "from simulation_core.runtime import",
+    "from simulation_core.tri_surface import",
     "from simulation_core.neo_hookean_mpm import",
     "from simulation_core.mooney_shell_mpm import",
     "from simulation_core.geometry import",
@@ -124,6 +132,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             "fluids",
             "solids",
             "coupling",
+            "drivers",
             "geometry_tools",
             "materials",
             "diagnostics",
@@ -133,37 +142,14 @@ class ArchitectureBoundaryTests(unittest.TestCase):
                 msg=f"missing simulation_core facade package: {name}",
             )
 
-    def test_simulation_core_legacy_modules_still_exist_during_facade_migration(self) -> None:
-        for name in LEGACY_SHIMS:
-            self.assertTrue(
-                (REPO_ROOT / "simulation_core" / name).exists(),
-                msg=f"missing legacy simulation_core module: {name}",
-            )
+    def test_root_simulation_core_contains_only_package_facade(self) -> None:
+        expected = {"__init__.py"}
+        actual = {
+            path.name
+            for path in (REPO_ROOT / "simulation_core").glob("*.py")
+        }
 
-    def test_legacy_simulation_core_modules_are_shims(self) -> None:
-        forbidden_tokens = (
-            "@ti.kernel",
-            "@ti.data_oriented",
-            "class CartesianFluidSolver",
-            "class HibmMpmSurfaceMarkers",
-            "class HibmMpmSharpCouplingState",
-            "class NeoHookeanMpmState",
-            "class TriMooneyShellMpmState",
-            "class UvMooneyShellMpmState",
-            "class SurfaceMesh",
-            "class NeoHookeanMaterial",
-            "class ReferenceCurve",
-            "class CflSubstepController",
-        )
-
-        for filename, import_target in LEGACY_SHIMS.items():
-            source = (REPO_ROOT / "simulation_core" / filename).read_text(
-                encoding="utf-8"
-            )
-
-            self.assertIn(import_target, source, msg=filename)
-            for token in forbidden_tokens:
-                self.assertNotIn(token, source, msg=f"{filename}: {token}")
+        self.assertEqual(actual, expected)
 
     def test_package_implementations_live_under_layered_packages(self) -> None:
         for parts, token in PACKAGE_IMPLEMENTATIONS.items():
@@ -177,7 +163,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         for root in PACKAGE_IMPLEMENTATION_ROOTS:
             for path in _python_files(root):
                 source = path.read_text(encoding="utf-8")
-                for token in LEGACY_SHIM_IMPORTS:
+                for token in LEGACY_IMPORT_TOKENS:
                     self.assertNotIn(token, source, msg=f"{path}: {token}")
 
     def test_root_public_api_imports_use_layered_facades(self) -> None:
@@ -193,6 +179,9 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertIn("from .diagnostics import", source)
         self.assertNotIn("from .fluid import", source)
         self.assertNotIn("from .hibm_mpm import", source)
+        self.assertNotIn("_COMPAT_MODULE_ALIASES", source)
+        self.assertNotIn("_install_compat_module_aliases", source)
+        self.assertNotIn("sys.modules[f", source)
 
     def test_hibm_mpm_support_modules_do_not_import_core(self) -> None:
         for name in (

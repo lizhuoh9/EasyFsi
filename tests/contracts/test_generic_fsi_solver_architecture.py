@@ -7,7 +7,7 @@ import unittest
 
 class GenericFsiSolverArchitectureTests(unittest.TestCase):
     def test_core_exposes_case_agnostic_fsi_driver_contract(self) -> None:
-        from simulation_core.fsi_driver import FsiCaseSpec, FsiDriver
+        from simulation_core.drivers.fsi_driver import FsiCaseSpec, FsiDriver
 
         spec = FsiCaseSpec(
             case_id="toy-fluid-solid",
@@ -70,7 +70,7 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
         )
 
     def test_generic_solver_boundary_is_case_agnostic_and_injected(self) -> None:
-        from simulation_core.generic_fsi_solver import (
+        from simulation_core.drivers.generic_fsi_solver import (
             DiagnosticsConfig,
             FluidDomain,
             FsiProblem,
@@ -147,15 +147,15 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
         )
         self.assertEqual(result.artifacts["matrix"], "toy-matrix.json")
 
-        source = (Path("simulation_core") / "generic_fsi_solver.py").read_text(
-            encoding="utf-8"
-        )
+        source = (
+            Path("simulation_core") / "drivers" / "generic_fsi_solver.py"
+        ).read_text(encoding="utf-8")
         forbidden_terms = ("ansys", "fluent", "vertical_flap", "vertical flap")
         for term in forbidden_terms:
             self.assertNotIn(term, source.lower())
 
     def test_pressure_pair_provider_reports_transition_replay_explicitly(self) -> None:
-        from simulation_core.generic_fsi_solver import PressureSamplePairProvider
+        from simulation_core.drivers.generic_fsi_solver import PressureSamplePairProvider
 
         provider = PressureSamplePairProvider(
             mode="runtime_anchored_cell_pair",
@@ -175,12 +175,12 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
         )
 
     def test_core_fluid_domain_is_not_axisymmetric_by_default(self) -> None:
-        from simulation_core.coordinate_models import (
+        from simulation_core.geometry_tools.coordinate_models import (
             Axisymmetric2DCoordinateModel,
             Cartesian2DCoordinateModel,
             Cartesian3DCoordinateModel,
         )
-        from simulation_core.fluid_domain import (
+        from simulation_core.geometry_tools.fluid_domain import (
             AxisAlignedBoundary,
             BoundaryRegion,
             FluidDomain,
@@ -205,7 +205,7 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
         self.assertEqual(Axisymmetric2DCoordinateModel(radial_axis="x").dimension, 2)
 
     def test_pressure_outlet_boundary_is_axis_aligned_not_case_named(self) -> None:
-        from simulation_core.fluid_domain import AxisAlignedBoundary
+        from simulation_core.geometry_tools.fluid_domain import AxisAlignedBoundary
 
         outlet = AxisAlignedBoundary.pressure_outlet(axis="z", side="min")
 

@@ -153,7 +153,7 @@ from simulation_core import (
     build_graded_grid,
     fsi_coupling_mode_report,
 )
-from simulation_core.fsi_coupling import (
+from simulation_core.coupling.fsi_coupling import (
     InterfaceReactionRelaxationState,
     InterfaceReactionTargetEvaluation,
     aitken_relaxation_factor,
@@ -161,7 +161,7 @@ from simulation_core.fsi_coupling import (
     relax_interface_reaction_forces,
     solve_interface_reaction_fixed_point,
 )
-from simulation_core.hibm_mpm import (
+from simulation_core.coupling.hibm_mpm import (
     HibmMpmIbBoundaryConditions,
     HibmMpmSharpCouplingState,
     HibmMpmVelocityDirichletBoundaryReport,
@@ -716,7 +716,11 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         fluid.velocity_dirichlet_boundary_active[0, 1, 0] = 0
         fluid.velocity_dirichlet_boundary_marker_region_id[0, 1, 0] = 3
 
-        counts = HibmMpmIbBoundaryConditions._velocity_dirichlet_region_row_counts(
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(4, 4, 4),
+            marker_capacity=1,
+        )
+        counts = boundary._velocity_dirichlet_region_row_counts(
             fluid.velocity_dirichlet_boundary_active,
             fluid.velocity_dirichlet_boundary_marker_region_id,
             primary_region_id=3,
@@ -751,6 +755,13 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         fluid.last_hibm_pressure_unreached_component_count = 1
         fluid.last_hibm_pressure_unreached_component_overflow = False
         fluid.last_hibm_pressure_component_labels_converged = True
+        # Mirrors what mark_hibm_pressure_outlet_disconnected_nonprojectable_cells()
+        # would have already computed device-side before this report runs:
+        # [1, 1, 1] sits on an active, region-owned velocity-Dirichlet row,
+        # so the narrower nonprojectable count excludes it (only [1, 1, 2]
+        # counts there) while the raw unreached count includes both.
+        fluid.last_hibm_pressure_unreached_cell_count = 1
+        fluid.last_hibm_pressure_unreached_raw_cell_count = 2
 
         report = hibm_mpm_pressure_disconnected_region_report(
             fluid,
@@ -7056,10 +7067,18 @@ END-ISO-10303-21;
             sharp_fields,
         )
         self.assertIn(
+            "hibm_pressure_neumann_gradient_max_abs_pa_per_m",
+            sharp_fields,
+        )
+        # C2g/Z2: hibm_pressure_neumann_gradient_raw_max_abs_pa_per_m was
+        # removed - it duplicated max_abs_pa_per_m exactly (same
+        # ti.abs(normal_gradient) expression, no limiter differentiated
+        # them).
+        self.assertNotIn(
             "hibm_pressure_neumann_gradient_raw_max_abs_pa_per_m",
             sharp_fields,
         )
-        self.assertIn("hibm_pressure_neumann_gradient_limited_count", sharp_fields)
+        self.assertNotIn("hibm_pressure_neumann_gradient_limited_count", sharp_fields)
         self.assertIn("solid_mpm_grid_out_of_bounds_particle_count", sharp_fields)
         self.assertNotIn("projected_ibm_residual_mps", sharp_fields)
         self.assertNotIn("projected_ibm_residual_l2_mps", sharp_fields)
@@ -7247,7 +7266,12 @@ END-ISO-10303-21;
 
         self.assertIn('"fluid_grid_min_spacing_m"', source)
         self.assertIn('"fluid_grid_max_spacing_m"', source)
-        self.assertIn("fluid_probe_distance_m = min(fluid_grid_axis_min_spacing_m)", source)
+        self.assertIn(
+            "fluid_probe_distance_m = (\n"
+            "        0.0 if graded_grid_enabled else min(fluid_grid_axis_min_spacing_m)\n"
+            "    )",
+            source,
+        )
         self.assertIn("fluid_grid_spacing_m = (\n        None", source)
         self.assertIn('summary_json = result.get("summary_json")', source)
         self.assertNotIn(

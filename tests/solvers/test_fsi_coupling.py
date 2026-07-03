@@ -1,9 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import math
 import unittest
 
-from simulation_core.fsi_coupling import (
+from simulation_core.coupling.fsi_coupling import (
     InterfaceReactionRelaxationState,
     InterfaceReactionStepUpdate,
     InterfaceReactionTargetEvaluation,
@@ -70,12 +70,12 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
         self.assertAlmostEqual(first.relaxation, 0.5)
         self.assertEqual(first.update.residual_n, (5.0, -4.0))
         self.assertEqual(first.update.force_n, (5.0, -4.0))
-        self.assertEqual(first.next_state.previous_residual_n, (5.0, -4.0))
+        self.assertEqual(first.next_state.previous_residual_n, (10.0, -8.0))
         self.assertAlmostEqual(first.next_state.relaxation, 0.5)
-        self.assertAlmostEqual(second.relaxation, 1.0)
-        self.assertAlmostEqual(second.update.force_n[0], 7.5)
-        self.assertAlmostEqual(second.update.force_n[1], -6.0)
-        self.assertEqual(second.next_state.previous_residual_n, (0.0, 0.0))
+        self.assertAlmostEqual(second.relaxation, 2.0 / 3.0)
+        self.assertAlmostEqual(second.update.force_n[0], 20.0 / 3.0)
+        self.assertAlmostEqual(second.update.force_n[1], -16.0 / 3.0)
+        self.assertEqual(second.next_state.previous_residual_n, (2.5, -2.0))
 
     def test_interface_reaction_aitken_lower_bound_is_configurable(self) -> None:
         state = InterfaceReactionRelaxationState(

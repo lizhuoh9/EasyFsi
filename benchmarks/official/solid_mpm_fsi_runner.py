@@ -9,14 +9,18 @@ from typing import Any
 
 import numpy as np
 
-from simulation_core.fluid import CartesianFluidSolver, FluidDomainSpec
-from simulation_core.hibm_mpm import HibmMpmSurfaceMarkers
-from simulation_core.neo_hookean_mpm import NeoHookeanMpmState
-from simulation_core.pressure_sample_pairs import (
+from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec
+from simulation_core.coupling.hibm_mpm import (
+    HibmMpmIbBoundaryConditions,
+    HibmMpmIbNodeSearch,
+    HibmMpmSurfaceMarkers,
+)
+from simulation_core.solids.neo_hookean_mpm import NeoHookeanMpmState
+from simulation_core.coupling.pressure_sample_pairs import (
     PressureSamplePairMap,
     RuntimeAnchoredCellPairProvider,
 )
-from simulation_core.runtime import TaichiRuntimeConfig
+from simulation_core.diagnostics.runtime import TaichiRuntimeConfig
 
 
 PRIMARY_REGION_ID = 101
@@ -25,14 +29,28 @@ SECONDARY_UNUSED_REGION_ID = SECONDARY_REGION_ID
 STREAMWISE_AXIS_INDEX = 2
 OUT_OF_PLANE_AXIS_INDEX = 0
 AXIS_NAMES = ("x", "y", "z")
+OUT_OF_PLANE_BOUNDARY_POLICY = "finite_slab_x_faces_no_periodic_or_slip"
+OUT_OF_PLANE_BOUNDARY_NOTE = (
+    "The official case is conceptual 2D. This runner extrudes it into a finite "
+    "3D slab and does not yet impose a strict periodic/slip condition on the "
+    "out-of-plane x faces, so depth-normalized quantities are diagnostic rather "
+    "than a full Fluent parity claim."
+)
 FLOW_SOLUTION_MODE = "computed_projection"
 DEFAULT_SOLID_CFL_TARGET = 0.5
 FLOW_DRIVER_PROJECTION_ONLY = "projection_only"
 FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC = "reinitialize_inlet_each_step_diagnostic"
 FLOW_DRIVER_SUSTAINED_BOUNDARY = "sustained_boundary_inlet"
+FLOW_DRIVER_SUSTAINED_BOUNDARY_PREDICTOR = "sustained_boundary_predictor"
 FLOW_DRIVER_SUSTAINED_SOURCE = "sustained_volume_source_inlet"
 FLOW_DRIVER_SUSTAINED_PREDICTOR = "sustained_inlet_predictor"
 FLOW_DRIVER_SHARP_REFERENCE = "sharp_hibm_mpm_reference"
+FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS = "cell_obstacle_layers"
+FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS = "hibm_sharp_marker_rows"
+FLOW_SOLID_BOUNDARY_MODES = {
+    FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS,
+    FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS,
+}
 FLOW_INLET_SOURCE_PROFILES = {"constant", "linear_ramp"}
 FLOW_INLET_SOURCE_SCHEDULE_SCOPES = {"global", "phase_local"}
 FLOW_OUTLET_BALANCE_POLICIES = {"report_only"}
@@ -87,6 +105,7 @@ SUPPORTED_FORMAL_FLOW_DRIVER_MODES = {
     FLOW_DRIVER_PROJECTION_ONLY,
     FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC,
     FLOW_DRIVER_SUSTAINED_BOUNDARY,
+    FLOW_DRIVER_SUSTAINED_BOUNDARY_PREDICTOR,
     FLOW_DRIVER_SUSTAINED_SOURCE,
     FLOW_DRIVER_SUSTAINED_PREDICTOR,
     FLOW_DRIVER_SHARP_REFERENCE,
@@ -108,6 +127,54 @@ FLOW_SOURCE_REPORT_KEYS = (
     "pressure_outlet_flux_ratio",
     "velocity_outlet_flux_ratio",
 )
+FLOW_OBSTACLE_NORMAL_VELOCITY_POLICIES = {"face_clamp", "cell_zero_only"}
+FLOW_PRESSURE_OUTLET_BACKFLOW_POLICIES = {"clamp", "allow"}
+FLOW_PROJECTION_REPORT_KEYS = (
+    "pressure_solver_requested",
+    "pressure_solver",
+    "pressure_outlet_backflow_policy",
+    "obstacle_normal_velocity_policy",
+    "pressure_solver_forced_to_fv_cg",
+    "pressure_solver_force_reason",
+    "pressure_solve_failed",
+    "pressure_solve_failure_action",
+    "pressure_projection_physical_failure",
+    "pressure_projection_physical_failure_reason",
+    "pressure_projection_physical_failure_action",
+    "pressure_nullspace_policy",
+    "l2",
+    "max_abs",
+    "pre_projection_l2",
+    "pre_projection_max_abs",
+    "projection_l2",
+    "projection_max_abs",
+    "post_boundary_l2",
+    "post_boundary_max_abs",
+    "cg_project_calls",
+    "cg_iterations_max",
+    "cg_relative_residual_max",
+    "cg_converged_all",
+    "cg_breakdown_count",
+    "cg_breakdown_code",
+    "cg_breakdown",
+    "flow_symmetry_domain_walls",
+    "fsi_pressure_snapshot_updated",
+)
+FLOW_ADVECTION_SCHEMES = {"euler", "rk2"}
+FLOW_PREDICTOR_NO_SLIP_WALL_INDEX = {
+    "xmin": 0,
+    "xmax": 1,
+    "ymin": 2,
+    "ymax": 3,
+    "zmin": 4,
+    "zmax": 5,
+}
+SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN = "3d_neo_hookean"
+SOLID_CONSTITUTIVE_MODEL_PLANE_STRESS_LINEAR = "plane_stress_linear_elastic"
+SOLID_CONSTITUTIVE_MODELS = {
+    SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN,
+    SOLID_CONSTITUTIVE_MODEL_PLANE_STRESS_LINEAR,
+}
 
 
 def run_rectangular_solid_marker_mpm_fsi_smoke(
@@ -136,6 +203,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     mu_pa, lambda_pa = _lame_parameters(config)
     solid_substep_cfl = solid_substep_cfl_report(config)
     solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])
+    solid_seeding = _enforce_solid_seeding_limit(config)
     preflow_report = _run_fixed_solid_preflow(markers, fluid, solid, config)
     preflow_history = preflow_report["preflow_history"]
 
@@ -144,6 +212,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     latest_scatter_report = None
     latest_solid_report = None
     latest_feedback_report = None
+    latest_dynamic_obstacle_report = _fluid_obstacle_update_disabled_report()
     latest_flow_report = None
     latest_feedback_constraint_report = None
     fluid_projection_count = 0
@@ -153,7 +222,8 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     feedback_constraint_cells: set[tuple[int, int, int]] = set()
     history: list[dict[str, object]] = []
     apply_feedback = bool(getattr(config, "apply_marker_feedback_to_fluid", True))
-    flow_driver_mode = _effective_flow_driver_mode(config)
+    flow_driver_mode = _effective_flow_driver_mode(config, flow_phase="fsi")
+    sharp_boundary_cache: dict[str, object] = {}
 
     for step_index in range(config.step_count):
         if _flow_driver_requires_full_field_reinitialize(flow_driver_mode):
@@ -173,6 +243,8 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         latest_flow_report = _flow_advance_current_step(
             fluid,
             config,
+            markers=markers,
+            sharp_boundary_cache=sharp_boundary_cache,
             flow_phase="fsi",
             step_index_local=step_index,
             step_index_global=len(preflow_history) + step_index,
@@ -219,8 +291,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             support_radius_m=config.mpm_support_radius_m,
         )
         solid_substep_dt_s = config.dt_s / float(solid_substeps)
-        solid_substep_velocity_damping = config.velocity_damping ** (
-            1.0 / float(solid_substeps)
+        solid_substep_velocity_damping = _solid_substep_velocity_damping(
+            config,
+            solid_substeps=solid_substeps,
         )
         for _solid_substep in range(solid_substeps):
             latest_solid_report = solid.step(
@@ -230,6 +303,19 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 primary_region_id=PRIMARY_REGION_ID,
                 secondary_region_id=SECONDARY_REGION_ID,
                 velocity_damping=solid_substep_velocity_damping,
+                fixed_node_lock_policy=str(
+                    getattr(config, "fixed_node_lock_policy", "any_fixed_particle")
+                ),
+                constitutive_model=str(
+                    getattr(
+                        config,
+                        "solid_constitutive_model",
+                        SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN,
+                    )
+                ),
+                velocity_transfer_flip_blend=float(
+                    getattr(config, "solid_velocity_transfer_flip_blend", 0.0)
+                ),
             )
             if config.enforce_plane_strain_x:
                 solid.enforce_rest_x_plane()
@@ -241,6 +327,14 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             particle_count=solid.particle_count,
             support_radius_m=config.mpm_support_radius_m,
             dt_s=config.dt_s,
+            preserve_marker_area=bool(
+                getattr(config, "preserve_marker_area_during_surface_feedback", False)
+            ),
+        )
+        latest_dynamic_obstacle_report = _update_fluid_obstacle_from_solid(
+            fluid,
+            solid,
+            config,
         )
         feedback_available_for_projection = True
         step_displacement = _solid_displacement_report(solid, fixed_mask, tip_mask)
@@ -292,6 +386,101 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                     "flow_predictor_applied"
                 ],
                 "flow_predictor_note": latest_flow_report["flow_predictor_note"],
+                "flow_predictor_kinematic_viscosity_m2_s": latest_flow_report[
+                    "flow_predictor_kinematic_viscosity_m2_s"
+                ],
+                "flow_predictor_no_slip_domain_walls": latest_flow_report[
+                    "flow_predictor_no_slip_domain_walls"
+                ],
+                "flow_obstacle_no_slip_layers": latest_flow_report[
+                    "flow_obstacle_no_slip_layers"
+                ],
+                "flow_obstacle_no_slip_weight": latest_flow_report[
+                    "flow_obstacle_no_slip_weight"
+                ],
+                "flow_solid_boundary_mode": latest_flow_report[
+                    "flow_solid_boundary_mode"
+                ],
+                "flow_obstacle_normal_velocity_policy": latest_flow_report[
+                    "flow_obstacle_normal_velocity_policy"
+                ],
+                "flow_pressure_outlet_backflow_policy": latest_flow_report[
+                    "flow_pressure_outlet_backflow_policy"
+                ],
+                "hibm_sharp_marker_boundary_enabled": latest_flow_report[
+                    "hibm_sharp_marker_boundary_enabled"
+                ],
+                "hibm_sharp_marker_boundary_search_reused": latest_flow_report[
+                    "hibm_sharp_marker_boundary_search_reused"
+                ],
+                "hibm_sharp_marker_boundary_near_node_count": latest_flow_report[
+                    "hibm_sharp_marker_boundary_near_node_count"
+                ],
+                "hibm_sharp_marker_boundary_external_node_count": latest_flow_report[
+                    "hibm_sharp_marker_boundary_external_node_count"
+                ],
+                "hibm_sharp_marker_boundary_internal_node_count": latest_flow_report[
+                    "hibm_sharp_marker_boundary_internal_node_count"
+                ],
+                "hibm_sharp_marker_boundary_internal_obstacle_cell_count": (
+                    latest_flow_report[
+                        "hibm_sharp_marker_boundary_internal_obstacle_cell_count"
+                    ]
+                ),
+                "hibm_sharp_marker_boundary_no_slip_rows": latest_flow_report[
+                    "hibm_sharp_marker_boundary_no_slip_rows"
+                ],
+                "hibm_sharp_marker_boundary_pressure_neumann_rows": (
+                    latest_flow_report[
+                        "hibm_sharp_marker_boundary_pressure_neumann_rows"
+                    ]
+                ),
+                "hibm_sharp_marker_boundary_pressure_gradient_updated": (
+                    latest_flow_report[
+                        "hibm_sharp_marker_boundary_pressure_gradient_updated"
+                    ]
+                ),
+                "hibm_pressure_neumann_skipped_velocity_dirichlet_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_skipped_velocity_dirichlet_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_skipped_obstacle_owner_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_skipped_obstacle_owner_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_relocated_obstacle_owner_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_relocated_obstacle_owner_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_duplicate_owner_count": latest_flow_report[
+                    "hibm_pressure_neumann_duplicate_owner_count"
+                ],
+                "hibm_pressure_neumann_invalid_reconstruction_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_invalid_reconstruction_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_invalid_unreconstructable_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_invalid_unreconstructable_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_invalid_bad_marker_count": latest_flow_report[
+                    "hibm_pressure_neumann_invalid_bad_marker_count"
+                ],
+                "hibm_pressure_neumann_invalid_nonpositive_volume_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_invalid_nonpositive_volume_count"
+                    ]
+                ),
                 "flow_inlet_boundary_active_cell_count": latest_flow_report[
                     "flow_inlet_boundary_active_cell_count"
                 ],
@@ -365,6 +554,17 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                         "fluid_feedback_constraint_projection_participating_cell_count"
                     ]
                 ),
+                "fluid_marker_velocity_constraints_enabled": (
+                    latest_feedback_constraint_report[
+                        "fluid_marker_velocity_constraints_enabled"
+                    ]
+                ),
+                "fluid_marker_velocity_constraint_active_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_marker_velocity_constraint_active_cell_count"
+                    ]
+                ),
+                **latest_dynamic_obstacle_report,
                 "no_slip_residual_before_mps": latest_feedback_constraint_report[
                     "no_slip_residual_before_mps"
                 ],
@@ -389,8 +589,22 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "pressure_min_pa": latest_flow_report["pressure_min_pa"],
                 "pressure_max_pa": latest_flow_report["pressure_max_pa"],
                 "flow_projection_report": latest_flow_report["projection_report"],
+                **_flow_projection_report_fields(latest_flow_report),
                 **_flow_source_report_fields(latest_flow_report),
                 "solid_substeps_selected": solid_substeps,
+                "solid_constitutive_model": str(
+                    getattr(
+                        config,
+                        "solid_constitutive_model",
+                        SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN,
+                    )
+                ),
+                "solid_fixed_node_lock_policy": str(
+                    getattr(config, "fixed_node_lock_policy", "any_fixed_particle")
+                ),
+                "solid_velocity_transfer_flip_blend": float(
+                    getattr(config, "solid_velocity_transfer_flip_blend", 0.0)
+                ),
                 "solid_estimated_cfl": solid_substep_cfl["solid_estimated_cfl"],
                 "stress_valid_marker_count": latest_stress_report.valid_marker_count,
                 "stress_invalid_marker_count": (
@@ -402,13 +616,48 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "feedback_invalid_marker_count": (
                     latest_feedback_report.invalid_marker_count
                 ),
+                "surface_feedback_preserve_marker_area": bool(
+                    getattr(
+                        config,
+                        "preserve_marker_area_during_surface_feedback",
+                        False,
+                    )
+                ),
+                "surface_feedback_geometry_updated_marker_count": (
+                    latest_feedback_report.geometry_updated_marker_count
+                ),
+                "surface_feedback_max_area_change_m2": (
+                    latest_feedback_report.max_marker_area_change_m2
+                ),
                 "total_marker_force_n": latest_force_report.total_marker_force_n,
                 **_marker_force_report_fields(latest_force_report),
                 **_stress_sampling_report_fields(latest_stress_report),
-                **_marker_traction_report_fields(markers),
+                **_marker_traction_report_fields(
+                    markers, include_face_diagnostics=False
+                ),
                 **anchor_install_report,
                 **_scatter_report_fields(latest_scatter_report),
                 "mpm_external_force_n": latest_solid_report.external_force_n,
+                "mpm_primary_mean_velocity_mps": (
+                    latest_solid_report.primary_mean_velocity_mps
+                ),
+                "mpm_secondary_mean_velocity_mps": (
+                    latest_solid_report.secondary_mean_velocity_mps
+                ),
+                "mpm_primary_mean_displacement_m": (
+                    latest_solid_report.primary_mean_displacement_m
+                ),
+                "mpm_secondary_mean_displacement_m": (
+                    latest_solid_report.secondary_mean_displacement_m
+                ),
+                "mpm_active_grid_nodes": latest_solid_report.active_grid_nodes,
+                "mpm_grid_out_of_bounds_particle_count": (
+                    latest_solid_report.grid_out_of_bounds_particle_count
+                ),
+                "mpm_max_speed_mps": latest_solid_report.max_speed_mps,
+                "mpm_deformation_clamp_count": (
+                    latest_solid_report.deformation_clamp_count
+                ),
                 "max_displacement_m": step_displacement["max_displacement_m"],
                 "root_max_displacement_m": step_displacement[
                     "root_max_displacement_m"
@@ -456,6 +705,20 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     velocity_relative_error = (
         abs(local_velocity_peak_mps - reference_velocity_peak) / reference_velocity_peak
     )
+    pressure_force_source = (
+        "total_marker_force_n_pressure_only"
+        if not _traction_include_viscous(config)
+        else "total_marker_force_n_pressure_plus_viscous"
+    )
+    slab_diagnostics = slab_equivalence_diagnostics(
+        config,
+        interface_force_total_n=latest_force_report.total_marker_force_n,
+        pressure_force_total_n=latest_force_report.total_marker_force_n,
+        marker_total_area_m2=_marker_total_area_m2(markers),
+        solid_mass_total_kg=latest_solid_report.total_mass_kg,
+        max_displacement_m=max_displacement,
+        pressure_force_source=pressure_force_source,
+    )
 
     return {
         "case": case_id,
@@ -464,6 +727,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "flow_solution_mode": FLOW_SOLUTION_MODE,
         "streamwise_axis": AXIS_NAMES[STREAMWISE_AXIS_INDEX],
         "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
+        **slab_diagnostics,
         **preflow_report,
         "apply_marker_feedback_to_fluid": apply_feedback,
         "flow_driver_mode": flow_driver_mode,
@@ -516,6 +780,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "marker_count_per_face": int(config.marker_count),
         "marker_count_actual": int(markers.marker_count),
         "flow_projection_iterations_actual": int(config.flow_projection_iterations),
+        "solid_seeding_report": solid_seeding,
         "solid_substep_cfl_report": solid_substep_cfl,
         "solid_substeps_requested": solid_substep_cfl["solid_substeps_requested"],
         "solid_substeps_selected": solid_substep_cfl["solid_substeps_selected"],
@@ -529,7 +794,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "solid_min_grid_spacing_m": solid_substep_cfl["solid_min_grid_spacing_m"],
         "solid_cfl_target": solid_substep_cfl["solid_cfl_target"],
         "computed_result_sources": {
-            "pressure_pa": "fluid.pressure",
+            "pressure_pa": "fluid.fsi_pressure",
             "local_velocity_peak_mps": "max(norm(fluid.velocity))",
             "fluid_interface_force_n": "HIBM marker traction integral",
             "max_displacement_m": "solid.x-rest_x",
@@ -607,6 +872,16 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "fluid_feedback_constraint_projection_participating_cell_count"
             ]
         ),
+        "fluid_marker_velocity_constraints_enabled": (
+            latest_feedback_constraint_report[
+                "fluid_marker_velocity_constraints_enabled"
+            ]
+        ),
+        "fluid_marker_velocity_constraint_active_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_marker_velocity_constraint_active_cell_count"
+            ]
+        ),
         "no_slip_residual_before_mps": latest_feedback_constraint_report[
             "no_slip_residual_before_mps"
         ],
@@ -632,11 +907,11 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "total_marker_force_n": latest_force_report.total_marker_force_n,
         **_marker_force_report_fields(latest_force_report),
         **_stress_sampling_report_fields(latest_stress_report),
-        **_marker_traction_report_fields(markers),
+        **_marker_traction_report_fields(markers, include_face_diagnostics=True),
         **anchor_install_report,
         "scatter_invalid_marker_count": latest_scatter_report.invalid_marker_count,
         "scatter_active_marker_count": latest_scatter_report.active_marker_count,
-        "scatter_active_particle_count": latest_scatter_report.active_particle_count,
+        "scatter_active_particle_count": latest_scatter_report.active_pair_count,
         **_scatter_report_fields(latest_scatter_report),
         "mpm_external_force_n": latest_solid_report.external_force_n,
         "surface_feedback_updated_marker_count": (
@@ -653,6 +928,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             primary_region_id=PRIMARY_REGION_ID,
             secondary_region_id=SECONDARY_REGION_ID,
             streamwise_axis_index=STREAMWISE_AXIS_INDEX,
+            include_face_diagnostics=True,
         ),
         "pressure_pair_anchor_pair_map": pressure_pair_anchor_pair_map,
         "history": history,
@@ -660,6 +936,11 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "reference_max_displacement_m": reference_displacement,
         "max_displacement_relative_error": displacement_relative_error,
         "displacement_tolerance": config.displacement_tolerance,
+        "final_flow_field_snapshot": (
+            _flow_field_snapshot(fluid)
+            if history and bool(getattr(config, "export_final_flow_snapshot", False))
+            else {}
+        ),
         **displacement,
     }
 
@@ -689,6 +970,14 @@ def _preflow_only_report(
         abs(local_velocity_peak_mps - reference_velocity_peak) / reference_velocity_peak
     )
     flow_driver_mode = _effective_flow_driver_mode(config)
+    slab_diagnostics = slab_equivalence_diagnostics(
+        config,
+        interface_force_total_n=marker_force,
+        pressure_force_total_n=marker_force,
+        marker_total_area_m2=_marker_total_area_m2(markers),
+        max_displacement_m=displacement["max_displacement_m"],
+        pressure_force_source="preflow_total_marker_force_n_pressure_only",
+    )
     return {
         "case": case_id,
         "case_metadata": dict(case_metadata),
@@ -696,6 +985,7 @@ def _preflow_only_report(
         "flow_solution_mode": FLOW_SOLUTION_MODE,
         "streamwise_axis": AXIS_NAMES[STREAMWISE_AXIS_INDEX],
         "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
+        **slab_diagnostics,
         **preflow_report,
         "apply_marker_feedback_to_fluid": bool(
             getattr(config, "apply_marker_feedback_to_fluid", True)
@@ -761,7 +1051,7 @@ def _preflow_only_report(
         "solid_min_grid_spacing_m": solid_substep_cfl["solid_min_grid_spacing_m"],
         "solid_cfl_target": solid_substep_cfl["solid_cfl_target"],
         "computed_result_sources": {
-            "pressure_pa": "fluid.pressure",
+            "pressure_pa": "fluid.fsi_pressure",
             "local_velocity_peak_mps": "max(norm(fluid.velocity))",
             "fluid_interface_force_n": "HIBM marker traction integral",
             "max_displacement_m": "solid.x-rest_x",
@@ -782,7 +1072,7 @@ def _preflow_only_report(
         **_flow_source_report_fields(latest_preflow),
         "computed_pressure_min_pa": latest_preflow["pressure_min_pa"],
         "computed_pressure_max_pa": latest_preflow["pressure_max_pa"],
-        "pressure_sign_convention": "fluid.pressure projection field is sampled directly",
+        "pressure_sign_convention": "fluid.fsi_pressure feedback field is sampled for reports and traction",
         "local_velocity_peak_mps": local_velocity_peak_mps,
         "fluid_speed_p99_mps": latest_preflow["fluid_speed_p99_mps"],
         "fluid_speed_p999_mps": latest_preflow["fluid_speed_p999_mps"],
@@ -793,18 +1083,46 @@ def _preflow_only_report(
         "fluid_recompute_count": int(preflow_report["preflow_steps_completed"]),
         "fluid_projection_count": int(preflow_report["preflow_steps_completed"]),
         "fluid_projection_after_feedback_count": 0,
-        "fluid_projection_consumed_feedback_count": 0,
-        "fluid_projection_consumed_feedback": False,
-        "fluid_feedback_constraint_marker_count": 0,
-        "fluid_feedback_constraint_active_cell_count": 0,
-        "fluid_feedback_constraint_cleared_cell_count": 0,
-        "fluid_feedback_constraint_obstacle_cell_count": 0,
-        "fluid_feedback_constraint_non_obstacle_cell_count": 0,
-        "fluid_feedback_constraint_projection_participating_cell_count": 0,
-        "no_slip_residual_before_mps": "",
-        "no_slip_residual_after_mps": "",
-        "no_slip_target_residual_after_assembly_mps": "",
-        "no_slip_projected_residual_after_projection_mps": 0.0,
+        "fluid_projection_consumed_feedback_count": int(
+            bool(latest_preflow["fluid_marker_velocity_constraints_enabled"])
+        ),
+        "fluid_projection_consumed_feedback": bool(
+            latest_preflow["fluid_marker_velocity_constraints_enabled"]
+        ),
+        "fluid_feedback_constraint_marker_count": latest_preflow[
+            "fluid_feedback_constraint_marker_count"
+        ],
+        "fluid_feedback_constraint_active_cell_count": latest_preflow[
+            "fluid_feedback_constraint_active_cell_count"
+        ],
+        "fluid_feedback_constraint_cleared_cell_count": latest_preflow[
+            "fluid_feedback_constraint_cleared_cell_count"
+        ],
+        "fluid_feedback_constraint_obstacle_cell_count": latest_preflow[
+            "fluid_feedback_constraint_obstacle_cell_count"
+        ],
+        "fluid_feedback_constraint_non_obstacle_cell_count": latest_preflow[
+            "fluid_feedback_constraint_non_obstacle_cell_count"
+        ],
+        "fluid_feedback_constraint_projection_participating_cell_count": latest_preflow[
+            "fluid_feedback_constraint_projection_participating_cell_count"
+        ],
+        "fluid_marker_velocity_constraints_enabled": latest_preflow[
+            "fluid_marker_velocity_constraints_enabled"
+        ],
+        "fluid_marker_velocity_constraint_active_cell_count": latest_preflow[
+            "fluid_marker_velocity_constraint_active_cell_count"
+        ],
+        "no_slip_residual_before_mps": latest_preflow[
+            "no_slip_residual_before_mps"
+        ],
+        "no_slip_residual_after_mps": latest_preflow["no_slip_residual_after_mps"],
+        "no_slip_target_residual_after_assembly_mps": latest_preflow[
+            "no_slip_target_residual_after_assembly_mps"
+        ],
+        "no_slip_projected_residual_after_projection_mps": latest_preflow[
+            "no_slip_projected_residual_after_projection_mps"
+        ],
         "stress_valid_marker_count": latest_preflow["stress_valid_marker_count"],
         "stress_invalid_marker_count": latest_preflow["stress_invalid_marker_count"],
         "two_sided_pressure_marker_count": latest_preflow[
@@ -1137,15 +1455,26 @@ def traction_formulation_supported(config: Any) -> tuple[bool, str]:
 
 
 def _validate_rectangular_solid_config(config: Any) -> None:
-    flow_driver_mode = str(
-        getattr(config, "flow_driver_mode", FLOW_DRIVER_PROJECTION_ONLY)
-    )
-    if flow_driver_mode not in SUPPORTED_FORMAL_FLOW_DRIVER_MODES:
-        raise ValueError(f"unsupported flow_driver_mode: {flow_driver_mode!r}")
-    if flow_driver_mode == FLOW_DRIVER_SHARP_REFERENCE:
-        raise ValueError(
-            "sharp_hibm_mpm_reference is reserved for a later sharp-path runner"
+    solid_boundary_mode = _flow_solid_boundary_mode(config)
+    if solid_boundary_mode not in FLOW_SOLID_BOUNDARY_MODES:
+        raise ValueError(f"unsupported flow_solid_boundary_mode: {solid_boundary_mode!r}")
+    for mode_field_name in ("flow_driver_mode", "preflow_flow_driver_mode"):
+        flow_driver_mode = getattr(config, mode_field_name, None)
+        if flow_driver_mode is None and mode_field_name == "preflow_flow_driver_mode":
+            continue
+        flow_driver_mode = str(
+            FLOW_DRIVER_PROJECTION_ONLY
+            if flow_driver_mode is None
+            else flow_driver_mode
         )
+        if not flow_driver_mode and mode_field_name == "preflow_flow_driver_mode":
+            continue
+        if flow_driver_mode not in SUPPORTED_FORMAL_FLOW_DRIVER_MODES:
+            raise ValueError(f"unsupported {mode_field_name}: {flow_driver_mode!r}")
+        if flow_driver_mode == FLOW_DRIVER_SHARP_REFERENCE:
+            raise ValueError(
+                "sharp_hibm_mpm_reference is reserved for a later sharp-path runner"
+            )
     source_strength = float(getattr(config, "flow_inlet_source_strength", 1.0))
     if not math.isfinite(source_strength) or source_strength < 0.0:
         raise ValueError("flow_inlet_source_strength must be finite and non-negative")
@@ -1157,12 +1486,87 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError(
             f"unsupported flow_inlet_source_schedule_scope: {source_scope!r}"
         )
+    advection_scheme = str(getattr(config, "flow_advection_scheme", "euler")).lower()
+    if advection_scheme not in FLOW_ADVECTION_SCHEMES:
+        raise ValueError(f"unsupported flow_advection_scheme: {advection_scheme!r}")
+    predictor_substeps = int(getattr(config, "flow_predictor_substeps", 1))
+    if predictor_substeps <= 0:
+        raise ValueError("flow_predictor_substeps must be positive")
+    ymin_no_slip_rows = int(getattr(config, "flow_ymin_no_slip_rows", 0))
+    if ymin_no_slip_rows < 0:
+        raise ValueError("flow_ymin_no_slip_rows must be non-negative")
+    obstacle_no_slip_layers = int(getattr(config, "flow_obstacle_no_slip_layers", 0))
+    if obstacle_no_slip_layers < 0:
+        raise ValueError("flow_obstacle_no_slip_layers must be non-negative")
+    obstacle_no_slip_weight = float(getattr(config, "flow_obstacle_no_slip_weight", 1.0))
+    if not math.isfinite(obstacle_no_slip_weight) or not 0.0 <= obstacle_no_slip_weight <= 1.0:
+        raise ValueError("flow_obstacle_no_slip_weight must be in [0, 1]")
+    obstacle_cap_no_slip_weight = getattr(
+        config,
+        "flow_obstacle_cap_no_slip_weight",
+        None,
+    )
+    if obstacle_cap_no_slip_weight is not None:
+        obstacle_cap_no_slip_weight = float(obstacle_cap_no_slip_weight)
+        if (
+            not math.isfinite(obstacle_cap_no_slip_weight)
+            or not 0.0 <= obstacle_cap_no_slip_weight <= 1.0
+        ):
+            raise ValueError("flow_obstacle_cap_no_slip_weight must be in [0, 1]")
+    obstacle_wake_no_slip_layers = int(
+        getattr(config, "flow_obstacle_wake_no_slip_layers", 0)
+    )
+    if obstacle_wake_no_slip_layers < 0:
+        raise ValueError("flow_obstacle_wake_no_slip_layers must be non-negative")
+    obstacle_wake_no_slip_weight = float(
+        getattr(config, "flow_obstacle_wake_no_slip_weight", 0.5)
+    )
+    if (
+        not math.isfinite(obstacle_wake_no_slip_weight)
+        or not 0.0 <= obstacle_wake_no_slip_weight <= 1.0
+    ):
+        raise ValueError("flow_obstacle_wake_no_slip_weight must be in [0, 1]")
+    viscosity_multiplier = float(
+        getattr(config, "flow_predictor_kinematic_viscosity_multiplier", 1.0)
+    )
+    if not math.isfinite(viscosity_multiplier) or viscosity_multiplier < 0.0:
+        raise ValueError(
+            "flow_predictor_kinematic_viscosity_multiplier must be finite and non-negative"
+        )
+    _flow_predictor_no_slip_domain_walls(config)
+    _flow_symmetry_domain_walls(config)
+    constraint_blend = float(getattr(config, "marker_velocity_constraint_blend", 1.0))
+    if not math.isfinite(constraint_blend) or not 0.0 <= constraint_blend <= 1.0:
+        raise ValueError("marker_velocity_constraint_blend must be in [0, 1]")
+    constraint_mobility_ratio = float(
+        getattr(config, "marker_velocity_constraint_solid_mobility_ratio", 0.0)
+    )
+    if not math.isfinite(constraint_mobility_ratio) or constraint_mobility_ratio < 0.0:
+        raise ValueError(
+            "marker_velocity_constraint_solid_mobility_ratio must be finite and non-negative"
+        )
     ramp_steps = int(getattr(config, "flow_inlet_source_ramp_steps", 0))
     if ramp_steps < 0:
         raise ValueError("flow_inlet_source_ramp_steps must be non-negative")
     outlet_policy = str(getattr(config, "flow_outlet_balance_policy", "report_only"))
     if outlet_policy not in FLOW_OUTLET_BALANCE_POLICIES:
         raise ValueError(f"unsupported flow_outlet_balance_policy: {outlet_policy!r}")
+    pressure_outlet_backflow_policy = str(
+        getattr(config, "flow_pressure_outlet_backflow_policy", "clamp")
+    )
+    if pressure_outlet_backflow_policy not in FLOW_PRESSURE_OUTLET_BACKFLOW_POLICIES:
+        raise ValueError(
+            "unsupported flow_pressure_outlet_backflow_policy: "
+            f"{pressure_outlet_backflow_policy!r}"
+        )
+    obstacle_normal_velocity_policy = str(
+        getattr(config, "flow_obstacle_normal_velocity_policy", "face_clamp")
+    )
+    if obstacle_normal_velocity_policy not in FLOW_OBSTACLE_NORMAL_VELOCITY_POLICIES:
+        raise ValueError(
+            "unsupported flow_obstacle_normal_velocity_policy: "
+            f"{obstacle_normal_velocity_policy!r}"
+        )
     marker_layout = _traction_marker_layout(config)
     if marker_layout not in TRACTION_MARKER_LAYOUTS:
         raise ValueError(f"unsupported traction_marker_layout: {marker_layout!r}")
@@ -1361,6 +1765,11 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError("dt_s must be positive")
     if config.solid_substeps <= 0:
         raise ValueError("solid_substeps must be positive")
+    solid_velocity_transfer_flip_blend = float(
+        getattr(config, "solid_velocity_transfer_flip_blend", 0.0)
+    )
+    if not 0.0 <= solid_velocity_transfer_flip_blend <= 1.0:
+        raise ValueError("solid_velocity_transfer_flip_blend must be in [0, 1]")
     if int(getattr(config, "preflow_steps", 0)) < 0:
         raise ValueError("preflow_steps must be non-negative")
     if float(getattr(config, "preflow_convergence_tolerance", 0.0)) < 0.0:
@@ -1390,6 +1799,43 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError("velocity_peak_tolerance must be positive")
     if not (0.0 < config.poisson_ratio < 0.5):
         raise ValueError("poisson_ratio must be in (0, 0.5)")
+    solid_model = str(
+        getattr(
+            config,
+            "solid_constitutive_model",
+            SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN,
+        )
+    )
+    if solid_model not in SOLID_CONSTITUTIVE_MODELS:
+        raise ValueError(
+            f"solid_constitutive_model must be one of "
+            f"{sorted(SOLID_CONSTITUTIVE_MODELS)!r}; got {solid_model!r}"
+        )
+
+
+def _flow_solid_boundary_mode(config: Any) -> str:
+    return str(
+        getattr(
+            config,
+            "flow_solid_boundary_mode",
+            FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS,
+        )
+    )
+
+
+def _flow_pressure_outlet_backflow_policy(config: Any) -> str:
+    return str(getattr(config, "flow_pressure_outlet_backflow_policy", "clamp"))
+
+
+def _flow_obstacle_normal_velocity_policy(config: Any) -> str:
+    return str(getattr(config, "flow_obstacle_normal_velocity_policy", "face_clamp"))
+
+
+def _use_hibm_sharp_marker_boundary(config: Any) -> bool:
+    return (
+        _flow_solid_boundary_mode(config)
+        == FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS
+    )
 
 
 def _domain_bounds(config: Any) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -1399,6 +1845,10 @@ def _domain_bounds(config: Any) -> tuple[tuple[float, float, float], tuple[float
     )
 
 
+def _official_streamwise_to_solver_z(config: Any, streamwise_m: float) -> float:
+    return float(config.duct_length_m) - float(streamwise_m)
+
+
 def _solid_box(config: Any) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
     center_z = 0.5 * config.duct_length_m
     z_min = getattr(config, "flap_streamwise_min_m", None)
@@ -1406,6 +1856,11 @@ def _solid_box(config: Any) -> tuple[tuple[float, float, float], tuple[float, fl
     if z_min is None or z_max is None:
         z_min = center_z - 0.5 * config.flap_thickness_m
         z_max = center_z + 0.5 * config.flap_thickness_m
+    else:
+        solver_z_min = _official_streamwise_to_solver_z(config, z_max)
+        solver_z_max = _official_streamwise_to_solver_z(config, z_min)
+        z_min = min(solver_z_min, solver_z_max)
+        z_max = max(solver_z_min, solver_z_max)
     root_y = 0.0
     return (
         (
@@ -1421,11 +1876,58 @@ def _solid_box(config: Any) -> tuple[tuple[float, float, float], tuple[float, fl
     )
 
 
+def _solid_mpm_bounds(
+    config: Any,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    domain_min, domain_max = _domain_bounds(config)
+    solid_min, solid_max = _solid_box(config)
+    base_dy = (float(domain_max[1]) - float(domain_min[1])) / float(
+        config.grid_nodes[1]
+    )
+    pad_y = 3.0 * base_dy
+    return (
+        (
+            float(domain_min[0]),
+            min(float(domain_min[1]), float(solid_min[1]) - pad_y),
+            float(domain_min[2]),
+        ),
+        (
+            float(domain_max[0]),
+            max(float(domain_max[1]), float(solid_max[1]) + pad_y),
+            float(domain_max[2]),
+        ),
+    )
+
+
+def _solid_mpm_grid_spacing_m(config: Any) -> tuple[float, float, float]:
+    bounds_min, bounds_max = _solid_mpm_bounds(config)
+    grid_nodes = tuple(int(value) for value in config.grid_nodes)
+    return tuple(
+        (float(max_value) - float(min_value)) / float(node_count)
+        for min_value, max_value, node_count in zip(
+            bounds_min,
+            bounds_max,
+            grid_nodes,
+            strict=True,
+        )
+    )
+
+
 def _lame_parameters(config: Any) -> tuple[float, float]:
     young = float(config.young_modulus_pa)
     nu = float(config.poisson_ratio)
     mu = young / (2.0 * (1.0 + nu))
-    lam = young * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+    solid_model = str(
+        getattr(
+            config,
+            "solid_constitutive_model",
+            SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN,
+        )
+    )
+    if solid_model == SOLID_CONSTITUTIVE_MODEL_PLANE_STRESS_LINEAR:
+        lam = young * nu / (1.0 - nu * nu)
+    else:
+        lam = young * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
     return mu, lam
 
 
@@ -1434,7 +1936,7 @@ def solid_substep_cfl_report(config: Any) -> dict[str, object]:
     wave_speed_mps = math.sqrt(
         (lam + 2.0 * mu) / float(config.solid_density_kgm3)
     )
-    min_spacing_m = min(_grid_spacing_m(config))
+    min_spacing_m = min(_solid_mpm_grid_spacing_m(config))
     cfl_target = float(getattr(config, "solid_cfl_target", DEFAULT_SOLID_CFL_TARGET))
     requested_substeps = int(config.solid_substeps)
     cfl_minimum = max(
@@ -1463,6 +1965,87 @@ def solid_substep_cfl_report(config: Any) -> dict[str, object]:
     }
 
 
+def solid_seeding_report(config: Any) -> dict[str, object]:
+    """Per-axis MPM particle spacing relative to the solid background grid.
+
+    Explicit MPM loses inter-particle grid connectivity when particle
+    spacing exceeds roughly one background cell: the quadratic B-spline
+    stencils of adjacent particle layers stop sharing well-supported nodes,
+    the body numerically fractures, and a fixed-root cantilever free-falls
+    instead of bending (observed on the 2026-07-02 fine flap campaign:
+    grid 4x256x320 with solid_particle_counts (1, 64, 12) put ~2 cells
+    between wall-normal particle layers and ejected particles by step 30,
+    while (1, 256, 20) on the same grid rings stably about the
+    Euler-Bernoulli static deflection).
+
+    The span axis (x) is excluded from the guard: the vertical-flap slab is
+    a 2D-equivalent extrusion with an x-uniform solution, where a single
+    particle column is intentional and empirically sound.
+    """
+    solid_min, solid_max = _solid_box(config)
+    grid_spacing_m = _solid_mpm_grid_spacing_m(config)
+    particle_counts = tuple(int(value) for value in config.solid_particle_counts)
+    particle_spacing_m = tuple(
+        (float(solid_max[axis]) - float(solid_min[axis]))
+        / float(max(particle_counts[axis], 1))
+        for axis in range(3)
+    )
+    spacing_cells = tuple(
+        particle_spacing_m[axis] / grid_spacing_m[axis] for axis in range(3)
+    )
+    max_spacing_cells = float(
+        getattr(config, "solid_seeding_max_spacing_cells", 1.5)
+    )
+    guard_enabled = bool(getattr(config, "enforce_solid_seeding_limit", False))
+    guarded_axes = (1, 2)  # wall-normal (y) and streamwise (z); x is span
+    worst_guarded_spacing_cells = max(
+        spacing_cells[axis] for axis in guarded_axes
+    )
+    return {
+        "solid_particle_spacing_m": particle_spacing_m,
+        "solid_grid_spacing_m": grid_spacing_m,
+        "solid_particle_spacing_cells": spacing_cells,
+        "solid_seeding_guarded_axes": guarded_axes,
+        "solid_seeding_worst_guarded_spacing_cells": worst_guarded_spacing_cells,
+        "solid_seeding_max_spacing_cells": max_spacing_cells,
+        "solid_seeding_guard_enabled": guard_enabled,
+        "solid_seeding_guard_satisfied": (
+            worst_guarded_spacing_cells <= max_spacing_cells
+        ),
+    }
+
+
+def _enforce_solid_seeding_limit(config: Any) -> dict[str, object]:
+    report = solid_seeding_report(config)
+    if report["solid_seeding_guard_enabled"] and not report[
+        "solid_seeding_guard_satisfied"
+    ]:
+        spacing_cells = report["solid_particle_spacing_cells"]
+        raise ValueError(
+            "solid particle seeding is too sparse for the MPM background "
+            f"grid: particle spacing per cell (x, y, z) = "
+            f"({spacing_cells[0]:.2f}, {spacing_cells[1]:.2f}, "
+            f"{spacing_cells[2]:.2f}) exceeds "
+            f"{report['solid_seeding_max_spacing_cells']:.2f} on a guarded "
+            "axis (y/z); increase solid_particle_counts so adjacent particle "
+            "layers stay within ~1 background cell, or disable "
+            "enforce_solid_seeding_limit"
+        )
+    return report
+
+
+def _solid_substep_velocity_damping(config: Any, *, solid_substeps: int) -> float:
+    substeps = int(solid_substeps)
+    if substeps <= 0:
+        raise ValueError("solid_substeps must be positive")
+    damping = float(getattr(config, "velocity_damping", 1.0))
+    if damping < 0.0:
+        raise ValueError("velocity_damping must be non-negative")
+    if damping == 0.0 or substeps == 1:
+        return damping
+    return damping ** (1.0 / float(substeps))
+
+
 def _grid_spacing_m(config: Any) -> tuple[float, float, float]:
     bounds_min, bounds_max = _domain_bounds(config)
     return tuple(
@@ -1470,6 +2053,182 @@ def _grid_spacing_m(config: Any) -> tuple[float, float, float]:
         / float(config.grid_nodes[axis])
         for axis in range(3)
     )
+
+
+def _positive_finite(value: object, *, field_name: str) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{field_name} must be finite and positive")
+    return result
+
+
+def _finite_vector3(
+    value: tuple[float, float, float] | list[float] | np.ndarray | None,
+    *,
+    field_name: str,
+) -> tuple[float, float, float]:
+    if value is None:
+        return (0.0, 0.0, 0.0)
+    if len(value) != 3:
+        raise ValueError(f"{field_name} must contain exactly 3 components")
+    result = tuple(float(component) for component in value)
+    if not all(math.isfinite(component) for component in result):
+        raise ValueError(f"{field_name} must contain finite values")
+    return result
+
+
+def _divide_vector3(
+    value: tuple[float, float, float],
+    denominator: float,
+) -> tuple[float, float, float]:
+    return tuple(float(component) / denominator for component in value)
+
+
+def _marker_total_area_m2(markers: HibmMpmSurfaceMarkers) -> float:
+    marker_count = int(getattr(markers, "marker_count", 0))
+    if marker_count <= 0:
+        return 0.0
+    return float(np.sum(markers.A_gamma_m2.to_numpy()[:marker_count]))
+
+
+def slab_equivalence_diagnostics(
+    config: Any,
+    *,
+    interface_force_total_n: tuple[float, float, float]
+    | list[float]
+    | np.ndarray
+    | None = None,
+    pressure_force_total_n: tuple[float, float, float]
+    | list[float]
+    | np.ndarray
+    | None = None,
+    marker_total_area_m2: float | None = None,
+    solid_mass_total_kg: float | None = None,
+    max_displacement_m: float | None = None,
+    flap_count: int = 1,
+    marker_face_count: int | None = None,
+    conceptual_coordinate_model: str = "cartesian-2d",
+    runtime_discretization_model: str = "cartesian-3d-half-domain",
+    out_of_plane_boundary_policy: str = OUT_OF_PLANE_BOUNDARY_POLICY,
+    pressure_force_source: str = "marker_traction_pressure_integral",
+) -> dict[str, object]:
+    extrusion_depth_m = _positive_finite(
+        getattr(config, "span_m"),
+        field_name="span_m/extrusion_depth_m",
+    )
+    solid_min, solid_max = _solid_box(config)
+    flap_height_m = _positive_finite(
+        float(solid_max[1]) - float(solid_min[1]),
+        field_name="flap_height_m",
+    )
+    flap_streamwise_thickness_m = _positive_finite(
+        float(solid_max[2]) - float(solid_min[2]),
+        field_name="flap_streamwise_thickness_m",
+    )
+    resolved_flap_count = int(flap_count)
+    if resolved_flap_count <= 0:
+        raise ValueError("flap_count must be positive")
+    resolved_marker_face_count = (
+        _traction_marker_face_count(config)
+        if marker_face_count is None
+        else int(marker_face_count)
+    )
+    if resolved_marker_face_count <= 0:
+        raise ValueError("marker_face_count must be positive")
+    expected_marker_total_area_m2 = (
+        float(resolved_marker_face_count) * flap_height_m * extrusion_depth_m
+    )
+    resolved_marker_total_area_m2 = (
+        expected_marker_total_area_m2
+        if marker_total_area_m2 is None
+        else float(marker_total_area_m2)
+    )
+    if (
+        not math.isfinite(resolved_marker_total_area_m2)
+        or resolved_marker_total_area_m2 < 0.0
+    ):
+        raise ValueError("marker_total_area_m2 must be finite and non-negative")
+
+    expected_solid_volume_m3 = (
+        float(resolved_flap_count)
+        * extrusion_depth_m
+        * flap_height_m
+        * flap_streamwise_thickness_m
+    )
+    expected_solid_mass_kg = (
+        expected_solid_volume_m3 * float(config.solid_density_kgm3)
+    )
+    resolved_solid_mass_kg = (
+        expected_solid_mass_kg
+        if solid_mass_total_kg is None
+        else float(solid_mass_total_kg)
+    )
+    if not math.isfinite(resolved_solid_mass_kg) or resolved_solid_mass_kg < 0.0:
+        raise ValueError("solid_mass_total_kg must be finite and non-negative")
+
+    interface_force = _finite_vector3(
+        interface_force_total_n,
+        field_name="interface_force_total_n",
+    )
+    pressure_force = _finite_vector3(
+        pressure_force_total_n,
+        field_name="pressure_force_total_n",
+    )
+    interface_force_per_depth = _divide_vector3(interface_force, extrusion_depth_m)
+    pressure_force_per_depth = _divide_vector3(pressure_force, extrusion_depth_m)
+
+    displacement_value: float | str = (
+        "" if max_displacement_m is None else float(max_displacement_m)
+    )
+    if displacement_value != "" and not math.isfinite(float(displacement_value)):
+        raise ValueError("max_displacement_m must be finite")
+
+    return {
+        "conceptual_coordinate_model": str(conceptual_coordinate_model),
+        "runtime_discretization_model": str(runtime_discretization_model),
+        "streamwise_axis": AXIS_NAMES[STREAMWISE_AXIS_INDEX],
+        "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
+        "extrusion_depth_m": extrusion_depth_m,
+        "extrusion_depth_source": "VerticalFlapFsiConfig.span_m",
+        "span_m": extrusion_depth_m,
+        "span_is_extrusion_depth": True,
+        "flap_streamwise_thickness_m": flap_streamwise_thickness_m,
+        "flap_streamwise_thickness_source": (
+            "VerticalFlapFsiConfig.flap_thickness_m"
+        ),
+        "flap_thickness_is_streamwise_not_extrusion": True,
+        "flap_count": resolved_flap_count,
+        "marker_face_count": int(resolved_marker_face_count),
+        "marker_total_area_m2": resolved_marker_total_area_m2,
+        "marker_expected_total_area_m2": expected_marker_total_area_m2,
+        "marker_total_area_per_depth_m": (
+            resolved_marker_total_area_m2 / extrusion_depth_m
+        ),
+        "solid_volume_total_m3": expected_solid_volume_m3,
+        "solid_volume_per_depth_m2": expected_solid_volume_m3 / extrusion_depth_m,
+        "solid_mass_total_kg": resolved_solid_mass_kg,
+        "solid_expected_mass_total_kg": expected_solid_mass_kg,
+        "solid_mass_per_depth_kgpm": resolved_solid_mass_kg / extrusion_depth_m,
+        "interface_force_total_n": interface_force,
+        "interface_force_z_N": interface_force[2],
+        "interface_force_per_depth_npm": interface_force_per_depth,
+        "interface_force_z_per_depth_N_per_m": interface_force_per_depth[2],
+        "pressure_force_total_n": pressure_force,
+        "pressure_force_z_N": pressure_force[2],
+        "pressure_force_per_depth_npm": pressure_force_per_depth,
+        "pressure_force_z_per_depth_N_per_m": pressure_force_per_depth[2],
+        "pressure_force_source": str(pressure_force_source),
+        "max_displacement_m": displacement_value,
+        "displacement_depth_scaling_expectation": (
+            "depth_invariant_when_force_and_mass_scale_together"
+        ),
+        "out_of_plane_boundary_policy": str(out_of_plane_boundary_policy),
+        "out_of_plane_boundary_residual_modeling_error": (
+            str(out_of_plane_boundary_policy) != "strict_periodic_or_slip"
+        ),
+        "out_of_plane_boundary_note": OUT_OF_PLANE_BOUNDARY_NOTE,
+        "fluent_parity_claimed": False,
+    }
 
 
 def _is_official_half_domain(case_metadata: Mapping[str, Any]) -> bool:
@@ -1502,7 +2261,7 @@ def _build_fluid(config: Any, runtime: TaichiRuntimeConfig) -> CartesianFluidSol
         ),
         runtime=runtime,
     )
-    fluid.obstacle.from_numpy(_solid_obstacle(config))
+    fluid.obstacle.from_numpy(_initial_fluid_obstacle(config))
     return fluid
 
 
@@ -1543,6 +2302,142 @@ def _solid_obstacle(config: Any) -> np.ndarray:
     return obstacle
 
 
+def _initial_fluid_obstacle(config: Any) -> np.ndarray:
+    if _use_hibm_sharp_marker_boundary(config):
+        return np.zeros(tuple(int(value) for value in config.grid_nodes), dtype=np.int32)
+    return _solid_obstacle(config)
+
+
+def _fluid_obstacle_update_disabled_report() -> dict[str, object]:
+    return {
+        "fluid_dynamic_obstacle_update_enabled": False,
+        "fluid_dynamic_obstacle_cell_count": "",
+        "fluid_dynamic_obstacle_added_cell_count": "",
+        "fluid_dynamic_obstacle_removed_cell_count": "",
+    }
+
+
+def _update_fluid_obstacle_from_solid(
+    fluid: CartesianFluidSolver,
+    solid: NeoHookeanMpmState,
+    config: Any,
+) -> dict[str, object]:
+    if (
+        not bool(getattr(config, "update_fluid_obstacle_from_solid", False))
+        or _use_hibm_sharp_marker_boundary(config)
+    ):
+        return _fluid_obstacle_update_disabled_report()
+
+    device_update = getattr(fluid, "update_dynamic_flap_obstacle_from_particles", None)
+    row_count = int(config.solid_particle_counts[1])
+    if device_update is not None and row_count <= int(config.grid_nodes[1]):
+        solid_min, solid_max = _solid_box(config)
+        report = device_update(
+            solid.x,
+            solid.rest_x,
+            particle_count=solid.particle_count,
+            row_count=row_count,
+            solid_min_m=solid_min,
+            solid_max_m=solid_max,
+            flap_height_m=float(config.flap_height_m),
+            min_thickness_m=float(config.flap_thickness_m),
+        )
+        return {
+            "fluid_dynamic_obstacle_update_enabled": True,
+            **report,
+        }
+
+    previous_obstacle = fluid.obstacle.to_numpy()
+    obstacle = _solid_obstacle_from_mpm_particles(solid, config)
+    velocity = fluid.velocity.to_numpy()
+    velocity_prev = fluid.velocity_prev.to_numpy()
+    solid_cells = obstacle != 0
+    velocity[solid_cells] = 0.0
+    velocity_prev[solid_cells] = 0.0
+    fluid.obstacle.from_numpy(obstacle)
+    fluid.velocity.from_numpy(velocity)
+    fluid.velocity_prev.from_numpy(velocity_prev)
+    return {
+        "fluid_dynamic_obstacle_update_enabled": True,
+        "fluid_dynamic_obstacle_cell_count": int(np.count_nonzero(obstacle)),
+        "fluid_dynamic_obstacle_added_cell_count": int(
+            np.count_nonzero((obstacle != 0) & (previous_obstacle == 0))
+        ),
+        "fluid_dynamic_obstacle_removed_cell_count": int(
+            np.count_nonzero((obstacle == 0) & (previous_obstacle != 0))
+        ),
+    }
+
+
+def _solid_obstacle_from_mpm_particles(
+    solid: NeoHookeanMpmState,
+    config: Any,
+) -> np.ndarray:
+    nx, ny, nz = config.grid_nodes
+    bounds_min, bounds_max = _domain_bounds(config)
+    dx = (bounds_max[0] - bounds_min[0]) / nx
+    dy = (bounds_max[1] - bounds_min[1]) / ny
+    dz = (bounds_max[2] - bounds_min[2]) / nz
+    positions = solid.x.to_numpy()[: solid.particle_count]
+    rest = solid.rest_x.to_numpy()[: solid.particle_count]
+    obstacle = np.zeros((nx, ny, nz), dtype=np.int32)
+    if positions.size == 0:
+        return obstacle
+
+    solid_min, solid_max = _solid_box(config)
+    row_height = float(config.flap_height_m) / float(config.solid_particle_counts[1])
+    x_min = float(solid_min[0])
+    x_max = float(solid_max[0])
+    # Group by rest-y row so the deformed flap remains a continuous thin wall
+    # instead of a cloud of isolated obstacle cells on coarse grids.
+    row_count = int(config.solid_particle_counts[1])
+    row_indices = np.clip(
+        np.floor((rest[:, 1] - solid_min[1]) / max(row_height, 1.0e-12)).astype(int),
+        0,
+        row_count - 1,
+    )
+
+    row_particle_count = np.bincount(row_indices, minlength=row_count).astype(np.int32)
+    active_rows = row_particle_count > 0
+    y_sum = np.bincount(row_indices, weights=positions[:, 1], minlength=row_count)
+    y_center = np.zeros(row_count, dtype=np.float64)
+    y_center[active_rows] = y_sum[active_rows] / row_particle_count[active_rows]
+    y_min = y_center - 0.5 * row_height
+    y_max = y_center + 0.5 * row_height
+
+    z_min = np.full(row_count, np.inf, dtype=np.float64)
+    z_max = np.full(row_count, -np.inf, dtype=np.float64)
+    np.minimum.at(z_min, row_indices, positions[:, 2])
+    np.maximum.at(z_max, row_indices, positions[:, 2])
+    # Keep at least the physical thickness represented even when all
+    # particles in a row compress into the same streamwise cell.
+    too_thin = active_rows & (
+        (z_max - z_min) < 0.25 * float(config.flap_thickness_m)
+    )
+    z_mid = 0.5 * (z_min[too_thin] + z_max[too_thin])
+    half_thickness = 0.5 * float(config.flap_thickness_m)
+    z_min[too_thin] = z_mid - half_thickness
+    z_max[too_thin] = z_mid + half_thickness
+
+    x_cell_min = bounds_min[0] + np.arange(nx, dtype=np.float64) * dx
+    y_cell_min = bounds_min[1] + np.arange(ny, dtype=np.float64) * dy
+    z_cell_min = bounds_min[2] + np.arange(nz, dtype=np.float64) * dz
+    x_overlap = (x_cell_min < x_max) & ((x_cell_min + dx) > x_min)
+    y_overlap = (
+        active_rows[:, None]
+        & (y_cell_min[None, :] < y_max[:, None])
+        & ((y_cell_min[None, :] + dy) > y_min[:, None])
+    )
+    z_overlap = (
+        active_rows[:, None]
+        & (z_cell_min[None, :] < z_max[:, None])
+        & ((z_cell_min[None, :] + dz) > z_min[:, None])
+    )
+    yz_overlap = np.any(y_overlap[:, :, None] & z_overlap[:, None, :], axis=0)
+    obstacle[x_overlap, :, :] = yz_overlap.astype(np.int32)
+    return obstacle
+
+
 def _initialize_inlet_flow(
     fluid: CartesianFluidSolver,
     config: Any,
@@ -1556,15 +2451,35 @@ def _initialize_inlet_flow(
     fluid.velocity_prev.from_numpy(velocity)
 
     active = np.zeros((nx, ny, nz), dtype=np.int32)
-    active[:, :, nz - 1] = 1
     values = np.zeros((nx, ny, nz, 3), dtype=np.float32)
+    weights = np.zeros((nx, ny, nz), dtype=np.float32)
+    _apply_ymin_no_slip_rows(
+        active,
+        values,
+        weights,
+        obstacle,
+        config,
+    )
+    if not _use_hibm_sharp_marker_boundary(config):
+        _apply_obstacle_no_slip_rows(
+            active,
+            values,
+            weights,
+            obstacle,
+            config,
+        )
+    active[:, :, nz - 1] = 1
     values[:, :, nz - 1, STREAMWISE_AXIS_INDEX] = -float(config.inlet_velocity_mps)
+    weights[:, :, nz - 1] = 1.0
+    active[obstacle != 0] = 0
+    values[obstacle != 0] = 0.0
+    weights[obstacle != 0] = 0.0
     fluid.velocity_dirichlet_boundary_active.from_numpy(active)
     fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
-    fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(
-        active.astype(np.float32)
-    )
-    fluid.pressure.from_numpy(np.zeros((nx, ny, nz), dtype=np.float32))
+    fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+    zero_pressure = np.zeros((nx, ny, nz), dtype=np.float32)
+    fluid.pressure.from_numpy(zero_pressure)
+    fluid.fsi_pressure.from_numpy(zero_pressure)
     return obstacle
 
 
@@ -1581,28 +2496,456 @@ def _project_current_flow(
     *,
     reset_pressure: bool,
 ) -> dict[str, object]:
+    preserve_velocity_constraints = bool(
+        getattr(config, "preserve_marker_velocity_constraints", True)
+    )
     projection_report = dict(
         fluid.project(
             iterations=config.flow_projection_iterations,
             pressure_outlet_zmin=bool(
                 getattr(config, "flow_pressure_outlet_enabled", True)
             ),
+            pressure_outlet_backflow_policy=str(
+                getattr(config, "flow_pressure_outlet_backflow_policy", "clamp")
+            ),
+            obstacle_normal_velocity_policy=str(
+                getattr(config, "flow_obstacle_normal_velocity_policy", "face_clamp")
+            ),
+            preserve_velocity_constraints=preserve_velocity_constraints,
+            velocity_constraint_blend=float(
+                getattr(config, "marker_velocity_constraint_blend", 1.0)
+            ),
+            velocity_constraint_solid_mobility_ratio=float(
+                getattr(
+                    config,
+                    "marker_velocity_constraint_solid_mobility_ratio",
+                    0.0,
+                )
+            ),
             reset_pressure=reset_pressure,
             pressure_solver=config.flow_pressure_solver,
             cg_tolerance=config.flow_cg_tolerance,
             divergence_cleanup_iterations=config.flow_divergence_cleanup_iterations,
+            velocity_inlet_zmax=bool(
+                getattr(config, "flow_projection_velocity_inlet_zmax", False)
+            ),
         )
     )
+    symmetry_domain_walls = _flow_symmetry_domain_walls(config)
+    if any(symmetry_domain_walls):
+        fluid.apply_symmetry_domain_walls(symmetry_domain_walls)
+    projection_report["flow_symmetry_domain_walls"] = [
+        bool(flag) for flag in symmetry_domain_walls
+    ]
     projection_report.update(
         fluid.pressure_outlet_fv_flux_report(dt_s=float(config.dt_s))
     )
-    return _flow_state_report(fluid, projection_report)
+    projection_report["fsi_pressure_snapshot_updated"] = bool(
+        fluid.snapshot_pressure(preserve_if_current_is_zero=True)
+    )
+    return _flow_state_report(
+        fluid,
+        projection_report,
+        include_percentiles=bool(getattr(config, "flow_report_include_percentiles", False)),
+    )
+
+
+def _empty_hibm_sharp_marker_boundary_report() -> dict[str, object]:
+    return {
+        "flow_solid_boundary_mode": FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS,
+        "hibm_sharp_marker_boundary_enabled": False,
+        "hibm_sharp_marker_boundary_search_reused": False,
+        "hibm_sharp_marker_boundary_near_node_count": 0,
+        "hibm_sharp_marker_boundary_external_node_count": 0,
+        "hibm_sharp_marker_boundary_internal_node_count": 0,
+        "hibm_sharp_marker_boundary_internal_obstacle_cell_count": 0,
+        "hibm_sharp_marker_boundary_no_slip_rows": 0,
+        "hibm_sharp_marker_boundary_pressure_neumann_rows": 0,
+        "hibm_sharp_marker_boundary_pressure_gradient_updated": False,
+        "hibm_pressure_neumann_skipped_velocity_dirichlet_count": 0,
+        "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count": 0,
+        "hibm_pressure_neumann_skipped_obstacle_owner_count": 0,
+        "hibm_pressure_neumann_relocated_obstacle_owner_count": 0,
+        "hibm_pressure_neumann_duplicate_owner_count": 0,
+        "hibm_pressure_neumann_invalid_reconstruction_count": 0,
+        "hibm_pressure_neumann_invalid_unreconstructable_count": 0,
+        "hibm_pressure_neumann_invalid_bad_marker_count": 0,
+        "hibm_pressure_neumann_invalid_nonpositive_volume_count": 0,
+    }
+
+
+def _hibm_sharp_search_radius_m(config: Any) -> float:
+    configured = getattr(config, "flow_hibm_sharp_search_radius_m", None)
+    if configured is not None:
+        return float(configured)
+    return 2.5 * max(_grid_spacing_m(config))
+
+
+def _hibm_sharp_interior_probe_distance_m(config: Any) -> float:
+    configured = getattr(config, "flow_hibm_sharp_interior_probe_distance_m", None)
+    if configured is not None:
+        return float(configured)
+    return 1.5 * max(_grid_spacing_m(config))
+
+
+def _apply_hibm_sharp_marker_boundary_to_fluid(
+    markers: HibmMpmSurfaceMarkers | None,
+    fluid: CartesianFluidSolver,
+    config: Any,
+    *,
+    update_pressure_gradient: bool,
+    boundary_cache: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if not _use_hibm_sharp_marker_boundary(config):
+        return _empty_hibm_sharp_marker_boundary_report()
+    if markers is None:
+        raise ValueError("hibm_sharp_marker_rows requires surface markers")
+
+    bounds_min, bounds_max = _domain_bounds(config)
+    marker_capacity = max(
+        int(getattr(markers, "marker_capacity", 0)),
+        int(getattr(markers, "marker_count", 0)),
+        1,
+    )
+    search_radius_m = _hibm_sharp_search_radius_m(config)
+    interior_probe_distance_m = _hibm_sharp_interior_probe_distance_m(config)
+    cache_key = (
+        tuple(config.grid_nodes),
+        tuple(float(value) for value in bounds_min),
+        tuple(float(value) for value in bounds_max),
+        int(marker_capacity),
+        float(search_radius_m),
+        float(interior_probe_distance_m),
+    )
+    cache_entry = (
+        boundary_cache.get("hibm_sharp_marker_boundary")
+        if boundary_cache is not None
+        else None
+    )
+    search_reused = bool(
+        isinstance(cache_entry, dict) and cache_entry.get("cache_key") == cache_key
+    )
+    if search_reused:
+        ib_search = cache_entry["ib_search"]
+        ib_boundary = cache_entry["ib_boundary"]
+    else:
+        runtime = TaichiRuntimeConfig(arch="cuda")
+        ib_search = HibmMpmIbNodeSearch(
+            grid_nodes=tuple(config.grid_nodes),
+            bounds_min_m=bounds_min,
+            bounds_max_m=bounds_max,
+            marker_capacity=marker_capacity,
+            runtime=runtime,
+        )
+        ib_boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=tuple(config.grid_nodes),
+            marker_capacity=marker_capacity,
+            runtime=runtime,
+        )
+        if boundary_cache is not None:
+            boundary_cache["hibm_sharp_marker_boundary"] = {
+                "cache_key": cache_key,
+                "ib_search": ib_search,
+                "ib_boundary": ib_boundary,
+            }
+    search_report = ib_search.search_and_classify_grid_fields(
+        markers,
+        cell_center_x_m=fluid.cell_center_x_m,
+        cell_center_y_m=fluid.cell_center_y_m,
+        cell_center_z_m=fluid.cell_center_z_m,
+        search_radius_m=search_radius_m,
+        interior_probe_distance_m=interior_probe_distance_m,
+        classify_far_internal_nodes=False,
+    )
+    internal_obstacle_cell_count = fluid.apply_hibm_internal_obstacles(
+        ib_search.node_kind_code,
+        internal_node_code=HibmMpmIbNodeSearch._NODE_INTERNAL,
+        convert_internal_nodes=True,
+    )
+    if update_pressure_gradient:
+        markers.update_pressure_neumann_gradient_from_fluid_predictor(
+            ib_boundary.marker_pressure_neumann_gradient_field,
+            velocity_field=fluid.velocity,
+            obstacle_field=fluid.obstacle,
+            cell_face_x_m=fluid.cell_face_x_m,
+            cell_face_y_m=fluid.cell_face_y_m,
+            cell_face_z_m=fluid.cell_face_z_m,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            grid_nodes=fluid.grid.grid_nodes,
+            density_kgm3=float(config.air_density_kgm3),
+            dt_s=float(config.dt_s),
+            probe_distance_m=interior_probe_distance_m,
+        )
+    ib_boundary.build_from_search_device_fields(
+        ib_search,
+        markers,
+        marker_pressure_neumann_gradient_pa_per_m_field=(
+            ib_boundary.marker_pressure_neumann_gradient_field
+        ),
+    )
+    velocity_report = ib_boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
+        fluid.velocity_dirichlet_boundary_active,
+        fluid.velocity_dirichlet_boundary_value_mps,
+        fluid.velocity_dirichlet_boundary_projection_weight,
+        fluid.obstacle,
+        fluid.velocity,
+        ib_search,
+        cell_face_x_m=fluid.cell_face_x_m,
+        cell_face_y_m=fluid.cell_face_y_m,
+        cell_face_z_m=fluid.cell_face_z_m,
+        cell_center_x_m=fluid.cell_center_x_m,
+        cell_center_y_m=fluid.cell_center_y_m,
+        cell_center_z_m=fluid.cell_center_z_m,
+        grid_nodes=fluid.grid.grid_nodes,
+        velocity_dirichlet_marker_region_id=(
+            fluid.velocity_dirichlet_boundary_marker_region_id
+        ),
+        marker_region_id=markers.region_id,
+        primary_region_id=PRIMARY_REGION_ID,
+        secondary_region_id=SECONDARY_REGION_ID,
+        interpolate_interior_velocity=bool(
+            getattr(config, "flow_hibm_sharp_interpolate_velocity_rows", True)
+        ),
+    )
+    fluid.clear_pressure_interface_matrix_terms()
+    pressure_report = ib_boundary.assemble_pressure_neumann_matrix_rows(
+        fluid.pressure_interface_matrix_diagonal,
+        fluid.pressure_interface_matrix_rhs,
+        fluid.pressure_interface_coupling_active,
+        fluid.pressure_interface_coupling_neighbor,
+        fluid.pressure_interface_coupling_coefficient,
+        fluid.obstacle,
+        fluid.velocity_dirichlet_boundary_active,
+        fluid.cell_width_x_m,
+        fluid.cell_width_y_m,
+        fluid.cell_width_z_m,
+        ib_search,
+        markers,
+        pressure_coupling_extra_neighbor=(
+            fluid.pressure_interface_coupling_extra_neighbor
+        ),
+        pressure_coupling_extra_coefficient=(
+            fluid.pressure_interface_coupling_extra_coefficient
+        ),
+        pressure_interface_row_count=fluid.pressure_interface_row_count,
+        pressure_interface_row_owner=fluid.pressure_interface_row_owner,
+        pressure_interface_row_neighbor=fluid.pressure_interface_row_neighbor,
+        pressure_interface_row_transmissibility=(
+            fluid.pressure_interface_row_transmissibility
+        ),
+        pressure_interface_row_capacity=fluid.pressure_interface_row_capacity,
+        cell_face_x_m=fluid.cell_face_x_m,
+        cell_face_y_m=fluid.cell_face_y_m,
+        cell_face_z_m=fluid.cell_face_z_m,
+        cell_center_x_m=fluid.cell_center_x_m,
+        cell_center_y_m=fluid.cell_center_y_m,
+        cell_center_z_m=fluid.cell_center_z_m,
+        grid_nodes=fluid.grid.grid_nodes,
+    )
+    return {
+        "flow_solid_boundary_mode": _flow_solid_boundary_mode(config),
+        "hibm_sharp_marker_boundary_enabled": True,
+        "hibm_sharp_marker_boundary_search_reused": bool(search_reused),
+        "hibm_sharp_marker_boundary_near_node_count": (
+            search_report.near_boundary_node_count
+        ),
+        "hibm_sharp_marker_boundary_external_node_count": (
+            search_report.external_ib_node_count
+        ),
+        "hibm_sharp_marker_boundary_internal_node_count": (
+            search_report.internal_node_count
+        ),
+        "hibm_sharp_marker_boundary_internal_obstacle_cell_count": (
+            int(internal_obstacle_cell_count)
+        ),
+        "hibm_sharp_marker_boundary_no_slip_rows": (
+            velocity_report.active_velocity_dirichlet_rows
+        ),
+        "hibm_sharp_marker_boundary_pressure_neumann_rows": (
+            pressure_report.active_pressure_neumann_rows
+        ),
+        "hibm_sharp_marker_boundary_pressure_gradient_updated": bool(
+            update_pressure_gradient
+        ),
+        "hibm_pressure_neumann_skipped_velocity_dirichlet_count": (
+            pressure_report.skipped_velocity_dirichlet_row_count
+        ),
+        "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count": (
+            pressure_report.skipped_pressure_boundary_adjacent_row_count
+        ),
+        "hibm_pressure_neumann_skipped_obstacle_owner_count": (
+            pressure_report.skipped_obstacle_owner_row_count
+        ),
+        "hibm_pressure_neumann_relocated_obstacle_owner_count": (
+            pressure_report.relocated_obstacle_owner_row_count
+        ),
+        "hibm_pressure_neumann_duplicate_owner_count": (
+            pressure_report.duplicate_owner_row_count
+        ),
+        "hibm_pressure_neumann_invalid_reconstruction_count": (
+            pressure_report.invalid_reconstruction_row_count
+        ),
+        "hibm_pressure_neumann_invalid_unreconstructable_count": (
+            pressure_report.invalid_unreconstructable_row_count
+        ),
+        "hibm_pressure_neumann_invalid_bad_marker_count": (
+            pressure_report.invalid_bad_marker_row_count
+        ),
+        "hibm_pressure_neumann_invalid_nonpositive_volume_count": (
+            pressure_report.invalid_nonpositive_volume_row_count
+        ),
+    }
+
+
+def _flow_predictor_kinematic_viscosity_m2_s(config: Any) -> float:
+    molecular_nu = float(getattr(config, "air_viscosity_pa_s", 0.0)) / max(
+        float(getattr(config, "air_density_kgm3", 1.0)),
+        1.0e-30,
+    )
+    multiplier = float(
+        getattr(config, "flow_predictor_kinematic_viscosity_multiplier", 1.0)
+    )
+    return molecular_nu * multiplier
+
+
+def _flow_predictor_no_slip_domain_walls(
+    config: Any,
+) -> tuple[bool, bool, bool, bool, bool, bool]:
+    return _flow_domain_wall_flags(
+        config,
+        field_name="flow_predictor_no_slip_domain_walls",
+    )
+
+
+def _flow_symmetry_domain_walls(
+    config: Any,
+) -> tuple[bool, bool, bool, bool, bool, bool]:
+    return _flow_domain_wall_flags(
+        config,
+        field_name="flow_symmetry_domain_walls",
+    )
+
+
+def _flow_domain_wall_flags(
+    config: Any,
+    *,
+    field_name: str,
+) -> tuple[bool, bool, bool, bool, bool, bool]:
+    raw_walls = getattr(config, field_name, ())
+    if raw_walls is None:
+        names: tuple[str, ...] = ()
+    elif isinstance(raw_walls, str):
+        names = tuple(
+            part.strip().lower()
+            for part in raw_walls.split(",")
+            if part.strip()
+        )
+    else:
+        names = tuple(str(part).strip().lower() for part in raw_walls if str(part).strip())
+    flags = [False, False, False, False, False, False]
+    unsupported = sorted(
+        {name for name in names if name not in FLOW_PREDICTOR_NO_SLIP_WALL_INDEX}
+    )
+    if unsupported:
+        raise ValueError(
+            f"unsupported {field_name} entries: {unsupported!r}"
+        )
+    for name in names:
+        flags[FLOW_PREDICTOR_NO_SLIP_WALL_INDEX[name]] = True
+    return tuple(flags)
+
+
+def _apply_ymin_no_slip_rows(
+    active: np.ndarray,
+    values: np.ndarray,
+    weights: np.ndarray,
+    obstacle: np.ndarray,
+    config: Any,
+) -> None:
+    rows = int(getattr(config, "flow_ymin_no_slip_rows", 0))
+    if rows <= 0:
+        return
+    row_count = min(rows, active.shape[1])
+    fluid_rows = obstacle[:, :row_count, :] == 0
+    active_rows = active[:, :row_count, :]
+    values_rows = values[:, :row_count, :, :]
+    weights_rows = weights[:, :row_count, :]
+    preserved_rows = active_rows != 0
+    apply_rows = np.logical_and(fluid_rows, ~preserved_rows)
+    clear_rows = np.logical_and(~fluid_rows, ~preserved_rows)
+
+    active_rows[apply_rows] = 1
+    values_rows[apply_rows, :] = 0.0
+    weights_rows[apply_rows] = 1.0
+
+    active_rows[clear_rows] = 0
+    values_rows[clear_rows, :] = 0.0
+    weights_rows[clear_rows] = 0.0
+
+
+def _apply_obstacle_no_slip_rows(
+    active: np.ndarray,
+    values: np.ndarray,
+    weights: np.ndarray,
+    obstacle: np.ndarray,
+    config: Any,
+) -> int:
+    layers = int(getattr(config, "flow_obstacle_no_slip_layers", 0))
+    wake_layers = int(getattr(config, "flow_obstacle_wake_no_slip_layers", 0))
+    if layers <= 0 and wake_layers <= 0:
+        return 0
+    weight = float(getattr(config, "flow_obstacle_no_slip_weight", 1.0))
+    cap_weight_config = getattr(config, "flow_obstacle_cap_no_slip_weight", None)
+    cap_weight = weight if cap_weight_config is None else float(cap_weight_config)
+    wake_weight = float(getattr(config, "flow_obstacle_wake_no_slip_weight", 0.5))
+    fluid_mask = obstacle == 0
+    solid_front = obstacle != 0
+    selected = np.zeros_like(fluid_mask, dtype=bool)
+    row_weights = np.zeros_like(weights, dtype=np.float32)
+    for _layer in range(layers):
+        x_adjacent = np.zeros_like(fluid_mask, dtype=bool)
+        x_adjacent[1:, :, :] |= solid_front[:-1, :, :]
+        x_adjacent[:-1, :, :] |= solid_front[1:, :, :]
+        y_adjacent = np.zeros_like(fluid_mask, dtype=bool)
+        y_adjacent[:, 1:, :] |= solid_front[:, :-1, :]
+        y_adjacent[:, :-1, :] |= solid_front[:, 1:, :]
+        z_adjacent = np.zeros_like(fluid_mask, dtype=bool)
+        z_adjacent[:, :, 1:] |= solid_front[:, :, :-1]
+        z_adjacent[:, :, :-1] |= solid_front[:, :, 1:]
+        adjacent_by_axis = (x_adjacent, y_adjacent, z_adjacent)
+        adjacent = np.zeros_like(fluid_mask, dtype=bool)
+        cap_adjacent = np.zeros_like(fluid_mask, dtype=bool)
+        for axis, axis_adjacent in enumerate(adjacent_by_axis):
+            adjacent |= axis_adjacent
+            if axis != STREAMWISE_AXIS_INDEX:
+                cap_adjacent |= axis_adjacent
+        layer_cells = adjacent & fluid_mask & ~selected
+        selected |= layer_cells
+        row_weights[layer_cells] = weight
+        row_weights[layer_cells & cap_adjacent] = cap_weight
+        solid_front = solid_front | layer_cells
+    solid_mask = obstacle != 0
+    for layer_index in range(1, wake_layers + 1):
+        shifted = np.zeros_like(fluid_mask, dtype=bool)
+        shifted[:, :, :-layer_index] |= solid_mask[:, :, layer_index:]
+        layer_cells = shifted & fluid_mask & ~selected
+        selected |= layer_cells
+        row_weights[layer_cells] = wake_weight
+    constrained = selected & (row_weights > 0.0)
+    active[constrained] = 1
+    values[constrained] = 0.0
+    weights[constrained] = row_weights[constrained]
+    return int(np.count_nonzero(constrained))
 
 
 def _flow_advance_current_step(
     fluid: CartesianFluidSolver,
     config: Any,
     *,
+    markers: HibmMpmSurfaceMarkers | None = None,
+    sharp_boundary_cache: dict[str, object] | None = None,
     flow_phase: str,
     step_index_local: int,
     step_index_global: int,
@@ -1615,7 +2958,7 @@ def _flow_advance_current_step(
         step_index_local=step_index_local,
         step_index_global=step_index_global,
     )
-    mode = _effective_flow_driver_mode(config)
+    mode = _effective_flow_driver_mode(config, flow_phase=flow_phase)
     fluid.clear_volume_source()
     driver_report = _flow_driver_report(
         mode=mode,
@@ -1641,27 +2984,68 @@ def _flow_advance_current_step(
             inlet_boundary_report=boundary_report,
             volume_source_applied=False,
         )
-    elif mode in {FLOW_DRIVER_SUSTAINED_SOURCE, FLOW_DRIVER_SUSTAINED_PREDICTOR}:
+    elif mode in {
+        FLOW_DRIVER_SUSTAINED_BOUNDARY_PREDICTOR,
+        FLOW_DRIVER_SUSTAINED_SOURCE,
+        FLOW_DRIVER_SUSTAINED_PREDICTOR,
+    }:
         boundary_report = _refresh_zmax_inlet_boundary(fluid, config)
-        source_factor = _flow_inlet_source_factor(config, source_schedule_step_index)
-        source_normal_velocity_mps = -float(config.inlet_velocity_mps) * source_factor
-        fluid.add_zmax_velocity_inlet_volume_source(
-            normal_velocity_mps=source_normal_velocity_mps,
-        )
+        volume_source_applied = mode in {
+            FLOW_DRIVER_SUSTAINED_SOURCE,
+            FLOW_DRIVER_SUSTAINED_PREDICTOR,
+        }
+        if volume_source_applied:
+            source_factor = _flow_inlet_source_factor(config, source_schedule_step_index)
+            source_normal_velocity_mps = -float(config.inlet_velocity_mps) * source_factor
+            fluid.add_zmax_velocity_inlet_volume_source(
+                normal_velocity_mps=source_normal_velocity_mps,
+            )
+        else:
+            source_factor = 0.0
+            source_normal_velocity_mps = 0.0
+        predictor_applied = mode in {
+            FLOW_DRIVER_SUSTAINED_BOUNDARY_PREDICTOR,
+            FLOW_DRIVER_SUSTAINED_PREDICTOR,
+        }
+        predictor_note = ""
+        predictor_kinematic_viscosity_m2_s = 0.0
+        predictor_no_slip_domain_walls = _flow_predictor_no_slip_domain_walls(config)
+        if predictor_applied:
+            advection_scheme = str(
+                getattr(config, "flow_advection_scheme", "euler")
+            ).lower()
+            predictor_substeps = int(getattr(config, "flow_predictor_substeps", 1))
+            predictor_dt_s = float(config.dt_s) / float(predictor_substeps)
+            predictor_kinematic_viscosity_m2_s = (
+                _flow_predictor_kinematic_viscosity_m2_s(config)
+            )
+            for _predictor_substep in range(predictor_substeps):
+                fluid.apply_velocity_dirichlet_boundary_rows(read_report=False)
+                fluid.predict(
+                    dt_s=predictor_dt_s,
+                    advection_scheme=advection_scheme,
+                    kinematic_viscosity_m2_s=predictor_kinematic_viscosity_m2_s,
+                    no_slip_domain_walls=predictor_no_slip_domain_walls,
+                )
+            fluid.apply_velocity_dirichlet_boundary_rows(read_report=False)
+            predictor_note = (
+                "core fluid predictor applied before pressure projection "
+                f"(advection_scheme={advection_scheme}, "
+                f"substeps={predictor_substeps}, "
+                f"nu={predictor_kinematic_viscosity_m2_s:g} m^2/s, "
+                f"no_slip_domain_walls={predictor_no_slip_domain_walls})"
+            )
         driver_report = _flow_driver_report(
             mode=mode,
             full_field_reinitialized=False,
             inlet_boundary_report=boundary_report,
-            volume_source_applied=True,
+            volume_source_applied=volume_source_applied,
             source_factor=source_factor,
             source_normal_velocity_mps=source_normal_velocity_mps,
-            predictor_applied=False,
-            predictor_note=(
-                "diagnostic source-driven projection path; no separate "
-                "predictor/advection step is applied yet"
-                if mode == FLOW_DRIVER_SUSTAINED_PREDICTOR
-                else ""
-            ),
+            predictor_applied=predictor_applied,
+            predictor_note=predictor_note,
+            predictor_kinematic_viscosity_m2_s=predictor_kinematic_viscosity_m2_s,
+            predictor_no_slip_domain_walls=predictor_no_slip_domain_walls,
         )
     elif mode == FLOW_DRIVER_SHARP_REFERENCE:
         raise RuntimeError(
@@ -1670,14 +3054,21 @@ def _flow_advance_current_step(
     else:  # pragma: no cover - protected by config validation.
         raise RuntimeError(f"unsupported flow_driver_mode: {mode!r}")
 
+    sharp_boundary_report = _apply_hibm_sharp_marker_boundary_to_fluid(
+        markers,
+        fluid,
+        config,
+        update_pressure_gradient=True,
+        boundary_cache=sharp_boundary_cache,
+    )
     flow_report = _project_current_flow(
         fluid,
         config,
         reset_pressure=reset_pressure,
     )
+    flow_report.update(sharp_boundary_report)
     flow_report.update(driver_report)
     flow_report["flow_phase"] = str(flow_phase)
-    flow_report["flow_step_index"] = int(step_index_local)
     flow_report["flow_step_index_local"] = int(step_index_local)
     flow_report["flow_step_index_global"] = int(step_index_global)
     flow_report["flow_pressure_reset_applied"] = bool(reset_pressure)
@@ -1693,13 +3084,42 @@ def _flow_advance_current_step(
             preflow_history=preflow_history,
         )
     )
-    flow_report["flow_preflow_history_rows"] = len(preflow_history)
+    flow_report["flow_obstacle_no_slip_layers"] = int(
+        getattr(config, "flow_obstacle_no_slip_layers", 0)
+    )
+    flow_report["flow_obstacle_no_slip_weight"] = float(
+        getattr(config, "flow_obstacle_no_slip_weight", 1.0)
+    )
+    cap_no_slip_weight = getattr(config, "flow_obstacle_cap_no_slip_weight", None)
+    flow_report["flow_obstacle_cap_no_slip_weight"] = (
+        None if cap_no_slip_weight is None else float(cap_no_slip_weight)
+    )
+    flow_report["flow_obstacle_wake_no_slip_layers"] = int(
+        getattr(config, "flow_obstacle_wake_no_slip_layers", 0)
+    )
+    flow_report["flow_obstacle_wake_no_slip_weight"] = float(
+        getattr(config, "flow_obstacle_wake_no_slip_weight", 0.5)
+    )
+    flow_report["flow_solid_boundary_mode"] = _flow_solid_boundary_mode(config)
+    flow_report["flow_obstacle_normal_velocity_policy"] = (
+        _flow_obstacle_normal_velocity_policy(config)
+    )
+    flow_report["flow_pressure_outlet_backflow_policy"] = (
+        _flow_pressure_outlet_backflow_policy(config)
+    )
+    flow_report["flow_projection_velocity_inlet_zmax"] = bool(
+        getattr(config, "flow_projection_velocity_inlet_zmax", False)
+    )
     return flow_report
 
 
-def _effective_flow_driver_mode(config: Any) -> str:
+def _effective_flow_driver_mode(config: Any, *, flow_phase: str = "fsi") -> str:
     if bool(getattr(config, "flow_reinitialize_inlet_each_step", False)):
         return FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC
+    if str(flow_phase) == "preflow":
+        preflow_mode = getattr(config, "preflow_flow_driver_mode", None)
+        if preflow_mode is not None and str(preflow_mode):
+            return str(preflow_mode)
     return str(getattr(config, "flow_driver_mode", FLOW_DRIVER_PROJECTION_ONLY))
 
 
@@ -1769,6 +3189,15 @@ def _flow_driver_report(
     source_normal_velocity_mps: float = 0.0,
     predictor_applied: bool = False,
     predictor_note: str = "",
+    predictor_kinematic_viscosity_m2_s: float = 0.0,
+    predictor_no_slip_domain_walls: tuple[bool, bool, bool, bool, bool, bool] = (
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ),
 ) -> dict[str, object]:
     inlet_reapplied = bool(inlet_boundary_report)
     return {
@@ -1788,18 +3217,62 @@ def _flow_driver_report(
         "flow_inlet_source_normal_velocity_mps": float(source_normal_velocity_mps),
         "flow_predictor_applied": bool(predictor_applied),
         "flow_predictor_note": str(predictor_note),
+        "flow_predictor_kinematic_viscosity_m2_s": float(
+            predictor_kinematic_viscosity_m2_s
+        ),
+        "flow_predictor_no_slip_domain_walls": [
+            bool(flag) for flag in predictor_no_slip_domain_walls
+        ],
     }
+
+
+def _zmax_inlet_boundary_device_refresh_compatible(config: Any) -> bool:
+    if int(getattr(config, "flow_ymin_no_slip_rows", 0)) > 0:
+        return False
+    if _use_hibm_sharp_marker_boundary(config):
+        return True
+    return (
+        int(getattr(config, "flow_obstacle_no_slip_layers", 0)) <= 0
+        and int(getattr(config, "flow_obstacle_wake_no_slip_layers", 0)) <= 0
+    )
 
 
 def _refresh_zmax_inlet_boundary(
     fluid: CartesianFluidSolver,
     config: Any,
 ) -> dict[str, object]:
+    device_refresh = getattr(fluid, "refresh_zmax_inlet_boundary", None)
+    if (
+        device_refresh is not None
+        and _zmax_inlet_boundary_device_refresh_compatible(config)
+    ):
+        return dict(
+            device_refresh(
+                inlet_velocity_mps=float(config.inlet_velocity_mps),
+                streamwise_axis_index=STREAMWISE_AXIS_INDEX,
+            )
+        )
+
     active = fluid.velocity_dirichlet_boundary_active.to_numpy()
     values = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
     weights = fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
     obstacle = fluid.obstacle.to_numpy()
     k = int(config.grid_nodes[2]) - 1
+    _apply_ymin_no_slip_rows(
+        active,
+        values,
+        weights,
+        obstacle,
+        config,
+    )
+    if not _use_hibm_sharp_marker_boundary(config):
+        _apply_obstacle_no_slip_rows(
+            active,
+            values,
+            weights,
+            obstacle,
+            config,
+        )
     fluid_mask = obstacle[:, :, k] == 0
 
     active[:, :, k] = fluid_mask.astype(np.int32)
@@ -1818,6 +3291,9 @@ def _refresh_zmax_inlet_boundary(
 def _zmax_inlet_boundary_report(
     fluid: CartesianFluidSolver,
 ) -> dict[str, object]:
+    device_report = getattr(fluid, "zmax_inlet_boundary_report", None)
+    if device_report is not None:
+        return dict(device_report())
     active = fluid.velocity_dirichlet_boundary_active.to_numpy()
     obstacle = fluid.obstacle.to_numpy()
     k = active.shape[2] - 1
@@ -1841,17 +3317,31 @@ def _run_fixed_solid_preflow(
     tolerance = float(getattr(config, "preflow_convergence_tolerance", 0.0))
     history: list[dict[str, object]] = []
     previous_row: dict[str, object] | None = None
+    previous_feedback_constraint_cells: set[tuple[int, int, int]] = set()
     converged = requested_steps == 0
     stop_reason = "not_requested" if requested_steps == 0 else "max_steps"
+    sharp_boundary_cache: dict[str, object] = {}
 
     for preflow_index in range(requested_steps):
         if _flow_driver_requires_full_field_reinitialize(
-            _effective_flow_driver_mode(config)
+            _effective_flow_driver_mode(config, flow_phase="preflow")
         ):
             _initialize_computed_flow(fluid, config)
+        feedback_constraint_report = _apply_marker_feedback_to_fluid(
+            markers,
+            fluid,
+            config,
+            feedback_available=bool(getattr(config, "apply_marker_feedback_to_fluid", True)),
+            previous_feedback_constraint_cells=previous_feedback_constraint_cells,
+        )
+        previous_feedback_constraint_cells = set(
+            feedback_constraint_report.get("_feedback_constraint_cells", set())
+        )
         flow_report = _flow_advance_current_step(
             fluid,
             config,
+            markers=markers,
+            sharp_boundary_cache=sharp_boundary_cache,
             flow_phase="preflow",
             step_index_local=preflow_index,
             step_index_global=preflow_index,
@@ -1859,6 +3349,18 @@ def _run_fixed_solid_preflow(
             reset_pressure=(
                 bool(getattr(config, "flow_reset_pressure_each_step", False))
                 or preflow_index == 0
+            ),
+        )
+        feedback_constraint_report[
+            "no_slip_projected_residual_after_projection_mps"
+        ] = _measure_projected_no_slip_residual(
+            markers,
+            fluid,
+            config,
+            feedback_consumed=bool(
+                feedback_constraint_report[
+                    "fluid_marker_velocity_constraints_enabled"
+                ]
             ),
         )
         stress_report = _sample_stress_to_marker_forces(markers, fluid, config)
@@ -1915,12 +3417,130 @@ def _run_fixed_solid_preflow(
             ),
             "flow_predictor_applied": flow_report["flow_predictor_applied"],
             "flow_predictor_note": flow_report["flow_predictor_note"],
+            "flow_predictor_kinematic_viscosity_m2_s": flow_report[
+                "flow_predictor_kinematic_viscosity_m2_s"
+            ],
+            "flow_predictor_no_slip_domain_walls": flow_report[
+                "flow_predictor_no_slip_domain_walls"
+            ],
+            "flow_obstacle_no_slip_layers": flow_report["flow_obstacle_no_slip_layers"],
+            "flow_obstacle_no_slip_weight": flow_report["flow_obstacle_no_slip_weight"],
+            "flow_solid_boundary_mode": flow_report["flow_solid_boundary_mode"],
+            "flow_obstacle_normal_velocity_policy": flow_report[
+                "flow_obstacle_normal_velocity_policy"
+            ],
+            "flow_pressure_outlet_backflow_policy": flow_report[
+                "flow_pressure_outlet_backflow_policy"
+            ],
+            "hibm_sharp_marker_boundary_enabled": flow_report[
+                "hibm_sharp_marker_boundary_enabled"
+            ],
+            "hibm_sharp_marker_boundary_search_reused": flow_report[
+                "hibm_sharp_marker_boundary_search_reused"
+            ],
+            "hibm_sharp_marker_boundary_near_node_count": flow_report[
+                "hibm_sharp_marker_boundary_near_node_count"
+            ],
+            "hibm_sharp_marker_boundary_external_node_count": flow_report[
+                "hibm_sharp_marker_boundary_external_node_count"
+            ],
+            "hibm_sharp_marker_boundary_internal_node_count": flow_report[
+                "hibm_sharp_marker_boundary_internal_node_count"
+            ],
+            "hibm_sharp_marker_boundary_internal_obstacle_cell_count": flow_report[
+                "hibm_sharp_marker_boundary_internal_obstacle_cell_count"
+            ],
+            "hibm_sharp_marker_boundary_no_slip_rows": flow_report[
+                "hibm_sharp_marker_boundary_no_slip_rows"
+            ],
+            "hibm_sharp_marker_boundary_pressure_neumann_rows": flow_report[
+                "hibm_sharp_marker_boundary_pressure_neumann_rows"
+            ],
+            "hibm_sharp_marker_boundary_pressure_gradient_updated": flow_report[
+                "hibm_sharp_marker_boundary_pressure_gradient_updated"
+            ],
+            "hibm_pressure_neumann_skipped_velocity_dirichlet_count": flow_report[
+                "hibm_pressure_neumann_skipped_velocity_dirichlet_count"
+            ],
+            "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count": (
+                flow_report[
+                    "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count"
+                ]
+            ),
+            "hibm_pressure_neumann_skipped_obstacle_owner_count": flow_report[
+                "hibm_pressure_neumann_skipped_obstacle_owner_count"
+            ],
+            "hibm_pressure_neumann_relocated_obstacle_owner_count": flow_report[
+                "hibm_pressure_neumann_relocated_obstacle_owner_count"
+            ],
+            "hibm_pressure_neumann_duplicate_owner_count": flow_report[
+                "hibm_pressure_neumann_duplicate_owner_count"
+            ],
+            "hibm_pressure_neumann_invalid_reconstruction_count": flow_report[
+                "hibm_pressure_neumann_invalid_reconstruction_count"
+            ],
+            "hibm_pressure_neumann_invalid_unreconstructable_count": flow_report[
+                "hibm_pressure_neumann_invalid_unreconstructable_count"
+            ],
+            "hibm_pressure_neumann_invalid_bad_marker_count": flow_report[
+                "hibm_pressure_neumann_invalid_bad_marker_count"
+            ],
+            "hibm_pressure_neumann_invalid_nonpositive_volume_count": flow_report[
+                "hibm_pressure_neumann_invalid_nonpositive_volume_count"
+            ],
             "flow_inlet_boundary_active_cell_count": flow_report[
                 "flow_inlet_boundary_active_cell_count"
             ],
             "flow_inlet_boundary_obstacle_cell_count": flow_report[
                 "flow_inlet_boundary_obstacle_cell_count"
             ],
+            "apply_marker_feedback_to_fluid": bool(
+                getattr(config, "apply_marker_feedback_to_fluid", True)
+            ),
+            "fluid_marker_velocity_constraints_enabled": (
+                feedback_constraint_report["fluid_marker_velocity_constraints_enabled"]
+            ),
+            "fluid_marker_velocity_constraint_active_cell_count": (
+                feedback_constraint_report[
+                    "fluid_marker_velocity_constraint_active_cell_count"
+                ]
+            ),
+            "fluid_feedback_constraint_marker_count": (
+                feedback_constraint_report["fluid_feedback_constraint_marker_count"]
+            ),
+            "fluid_feedback_constraint_active_cell_count": (
+                feedback_constraint_report["fluid_feedback_constraint_active_cell_count"]
+            ),
+            "fluid_feedback_constraint_cleared_cell_count": (
+                feedback_constraint_report["fluid_feedback_constraint_cleared_cell_count"]
+            ),
+            "fluid_feedback_constraint_obstacle_cell_count": (
+                feedback_constraint_report["fluid_feedback_constraint_obstacle_cell_count"]
+            ),
+            "fluid_feedback_constraint_non_obstacle_cell_count": (
+                feedback_constraint_report[
+                    "fluid_feedback_constraint_non_obstacle_cell_count"
+                ]
+            ),
+            "fluid_feedback_constraint_projection_participating_cell_count": (
+                feedback_constraint_report[
+                    "fluid_feedback_constraint_projection_participating_cell_count"
+                ]
+            ),
+            "no_slip_residual_before_mps": (
+                feedback_constraint_report["no_slip_residual_before_mps"]
+            ),
+            "no_slip_residual_after_mps": (
+                feedback_constraint_report["no_slip_residual_after_mps"]
+            ),
+            "no_slip_target_residual_after_assembly_mps": (
+                feedback_constraint_report["no_slip_target_residual_after_assembly_mps"]
+            ),
+            "no_slip_projected_residual_after_projection_mps": (
+                feedback_constraint_report[
+                    "no_slip_projected_residual_after_projection_mps"
+                ]
+            ),
             "flow_phase": flow_report["flow_phase"],
             "flow_step_index_local": flow_report["flow_step_index_local"],
             "flow_step_index_global": flow_report["flow_step_index_global"],
@@ -1940,6 +3560,7 @@ def _run_fixed_solid_preflow(
             "pressure_min_pa": flow_report["pressure_min_pa"],
             "pressure_max_pa": flow_report["pressure_max_pa"],
             "flow_projection_report": flow_report["projection_report"],
+            **_flow_projection_report_fields(flow_report),
             **_flow_source_report_fields(flow_report),
             "stress_valid_marker_count": stress_report.valid_marker_count,
             "stress_invalid_marker_count": stress_report.invalid_marker_count,
@@ -1950,10 +3571,12 @@ def _run_fixed_solid_preflow(
             "mpm_external_force_n": scatter_report.total_mpm_external_force_n,
             "scatter_invalid_marker_count": scatter_report.invalid_marker_count,
             "scatter_active_marker_count": scatter_report.active_marker_count,
-            "scatter_active_particle_count": scatter_report.active_particle_count,
+            "scatter_active_particle_count": scatter_report.active_pair_count,
             **_marker_force_report_fields(force_report),
             **_stress_sampling_report_fields(stress_report),
-            **_marker_traction_report_fields(markers),
+            **_marker_traction_report_fields(
+                markers, include_face_diagnostics=False
+            ),
             **_scatter_report_fields(scatter_report),
         }
         if previous_row is not None:
@@ -1994,6 +3617,7 @@ def _run_fixed_solid_preflow(
             markers.stress_face_diagnostics(
                 primary_region_id=PRIMARY_REGION_ID,
                 secondary_region_id=SECONDARY_REGION_ID,
+                include_face_diagnostics=True,
             )
             if history
             else {}
@@ -2019,9 +3643,15 @@ def _relative_delta(current: object, previous: object) -> float:
 
 def _flow_field_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
     snapshot = {
-        "pressure": fluid.pressure.to_numpy(),
+        "pressure": _fluid_feedback_pressure_numpy(fluid),
         "velocity": fluid.velocity.to_numpy(),
         "obstacle": fluid.obstacle.to_numpy(),
+        "velocity_dirichlet_boundary_active": (
+            fluid.velocity_dirichlet_boundary_active.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_projection_weight": (
+            fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+        ),
         "cell_face_x_m": fluid.cell_face_x_m.to_numpy(),
         "cell_face_y_m": fluid.cell_face_y_m.to_numpy(),
         "cell_face_z_m": fluid.cell_face_z_m.to_numpy(),
@@ -2038,6 +3668,14 @@ def _flow_field_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
     return snapshot
 
 
+def _fluid_feedback_pressure_field(fluid: CartesianFluidSolver):
+    return getattr(fluid, "fsi_pressure", fluid.pressure)
+
+
+def _fluid_feedback_pressure_numpy(fluid: CartesianFluidSolver) -> np.ndarray:
+    return _fluid_feedback_pressure_field(fluid).to_numpy()
+
+
 def _apply_marker_feedback_to_fluid(
     markers: HibmMpmSurfaceMarkers,
     fluid: CartesianFluidSolver,
@@ -2046,21 +3684,75 @@ def _apply_marker_feedback_to_fluid(
     feedback_available: bool,
     previous_feedback_constraint_cells: set[tuple[int, int, int]],
 ) -> dict[str, object]:
+    apply_device = getattr(fluid, "apply_marker_feedback_constraints", None)
+    marker_region_field = getattr(markers, "region_id", None)
+    if apply_device is not None and marker_region_field is not None:
+        report = apply_device(
+            markers.x_gamma_m,
+            markers.v_gamma_mps,
+            marker_region_field,
+            int(markers.marker_count),
+            feedback_available=feedback_available,
+            preserve_velocity_constraints=bool(
+                getattr(config, "preserve_marker_velocity_constraints", True)
+            ),
+            primary_region_id=PRIMARY_REGION_ID,
+            secondary_region_id=SECONDARY_REGION_ID,
+        )
+        report["_feedback_constraint_cells"] = set()
+        return report
+
+    return _apply_marker_feedback_to_fluid_host_fallback(
+        markers,
+        fluid,
+        config,
+        feedback_available=feedback_available,
+        previous_feedback_constraint_cells=previous_feedback_constraint_cells,
+    )
+
+
+def _apply_marker_feedback_to_fluid_host_fallback(
+    markers: HibmMpmSurfaceMarkers,
+    fluid: CartesianFluidSolver,
+    config: Any,
+    *,
+    feedback_available: bool,
+    previous_feedback_constraint_cells: set[tuple[int, int, int]],
+) -> dict[str, object]:
+    preserve_velocity_constraints = bool(
+        getattr(config, "preserve_marker_velocity_constraints", True)
+    )
+    _clear_fluid_velocity_constraints(fluid)
+
     active = fluid.velocity_dirichlet_boundary_active.to_numpy()
     values = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
     weights = fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+    row_region_field = getattr(
+        fluid,
+        "velocity_dirichlet_boundary_marker_region_id",
+        None,
+    )
+    row_regions = (
+        row_region_field.to_numpy()
+        if row_region_field is not None
+        else None
+    )
 
     cleared_cell_count = 0
     for i, j, k in previous_feedback_constraint_cells:
         active[i, j, k] = 0
         values[i, j, k] = 0.0
         weights[i, j, k] = 0.0
+        if row_regions is not None:
+            row_regions[i, j, k] = -1
         cleared_cell_count += 1
 
     if not feedback_available:
         fluid.velocity_dirichlet_boundary_active.from_numpy(active)
         fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
         fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+        if row_region_field is not None and row_regions is not None:
+            row_region_field.from_numpy(row_regions)
         return _empty_feedback_constraint_report(cleared_cell_count)
 
     marker_count = int(markers.marker_count)
@@ -2068,18 +3760,28 @@ def _apply_marker_feedback_to_fluid(
         fluid.velocity_dirichlet_boundary_active.from_numpy(active)
         fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
         fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+        if row_region_field is not None and row_regions is not None:
+            row_region_field.from_numpy(row_regions)
         return _empty_feedback_constraint_report(cleared_cell_count)
 
     marker_positions = markers.x_gamma_m.to_numpy()[:marker_count]
     marker_velocities = markers.v_gamma_mps.to_numpy()[:marker_count]
+    marker_region_ids = _marker_region_ids(markers, marker_count)
     velocity = fluid.velocity.to_numpy()
 
     marker_cells = _marker_grid_cells(marker_positions, config)
 
     target_sum: dict[tuple[int, int, int], np.ndarray] = {}
     target_count: dict[tuple[int, int, int], int] = {}
+    target_regions: dict[tuple[int, int, int], set[int]] = {}
+    target_primary_sum: dict[tuple[int, int, int], np.ndarray] = {}
+    target_primary_count: dict[tuple[int, int, int], int] = {}
+    target_secondary_sum: dict[tuple[int, int, int], np.ndarray] = {}
+    target_secondary_count: dict[tuple[int, int, int], int] = {}
     before_residuals: list[float] = []
-    for cell, marker_velocity in zip(marker_cells, marker_velocities):
+    for marker_index, (cell, marker_velocity) in enumerate(
+        zip(marker_cells, marker_velocities)
+    ):
         i, j, k = (int(cell[0]), int(cell[1]), int(cell[2]))
         key = (i, j, k)
         target_sum[key] = target_sum.get(key, np.zeros(3, dtype=np.float64)) + np.asarray(
@@ -2087,12 +3789,41 @@ def _apply_marker_feedback_to_fluid(
             dtype=np.float64,
         )
         target_count[key] = target_count.get(key, 0) + 1
+        marker_region_id = int(marker_region_ids[marker_index])
+        target_regions.setdefault(key, set()).add(marker_region_id)
+        if marker_region_id == PRIMARY_REGION_ID:
+            target_primary_sum[key] = target_primary_sum.get(
+                key,
+                np.zeros(3, dtype=np.float64),
+            ) + np.asarray(marker_velocity, dtype=np.float64)
+            target_primary_count[key] = target_primary_count.get(key, 0) + 1
+        elif marker_region_id == SECONDARY_REGION_ID:
+            target_secondary_sum[key] = target_secondary_sum.get(
+                key,
+                np.zeros(3, dtype=np.float64),
+            ) + np.asarray(marker_velocity, dtype=np.float64)
+            target_secondary_count[key] = target_secondary_count.get(key, 0) + 1
         before_residuals.append(float(np.linalg.norm(velocity[i, j, k] - marker_velocity)))
 
     for (i, j, k), summed_velocity in target_sum.items():
         active[i, j, k] = 1
         values[i, j, k] = summed_velocity / float(target_count[(i, j, k)])
         weights[i, j, k] = 1.0
+        if row_regions is not None:
+            regions = target_regions[(i, j, k)]
+            row_regions[i, j, k] = next(iter(regions)) if len(regions) == 1 else -1
+
+    constraint_active_cell_count = 0
+    if preserve_velocity_constraints:
+        constraint_active_cell_count = _write_marker_velocity_constraints(
+            fluid,
+            target_sum=target_sum,
+            target_count=target_count,
+            target_primary_sum=target_primary_sum,
+            target_primary_count=target_primary_count,
+            target_secondary_sum=target_secondary_sum,
+            target_secondary_count=target_secondary_count,
+        )
 
     after_residuals: list[float] = []
     for cell, marker_velocity in zip(marker_cells, marker_velocities):
@@ -2102,6 +3833,8 @@ def _apply_marker_feedback_to_fluid(
     fluid.velocity_dirichlet_boundary_active.from_numpy(active)
     fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
     fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+    if row_region_field is not None and row_regions is not None:
+        row_region_field.from_numpy(row_regions)
 
     obstacle = fluid.obstacle.to_numpy()
     active_cell_count = len(target_sum)
@@ -2117,6 +3850,8 @@ def _apply_marker_feedback_to_fluid(
         "fluid_feedback_constraint_projection_participating_cell_count": (
             non_obstacle_cell_count
         ),
+        "fluid_marker_velocity_constraints_enabled": preserve_velocity_constraints,
+        "fluid_marker_velocity_constraint_active_cell_count": constraint_active_cell_count,
         "no_slip_residual_before_mps": max(before_residuals, default=0.0),
         "no_slip_residual_after_mps": max(after_residuals, default=0.0),
         "no_slip_target_residual_after_assembly_mps": max(
@@ -2126,6 +3861,74 @@ def _apply_marker_feedback_to_fluid(
         "no_slip_projected_residual_after_projection_mps": 0.0,
         "_feedback_constraint_cells": set(target_sum),
     }
+
+
+def _clear_fluid_velocity_constraints(fluid: CartesianFluidSolver) -> None:
+    fluid.clear_velocity_constraints()
+
+
+def _marker_region_ids(
+    markers: HibmMpmSurfaceMarkers,
+    marker_count: int,
+) -> np.ndarray:
+    region_field = getattr(markers, "region_id", None)
+    if region_field is None:
+        return np.full(marker_count, -1, dtype=np.int32)
+    return np.asarray(region_field.to_numpy()[:marker_count], dtype=np.int32)
+
+
+def _write_marker_velocity_constraints(
+    fluid: CartesianFluidSolver,
+    *,
+    target_sum: Mapping[tuple[int, int, int], np.ndarray],
+    target_count: Mapping[tuple[int, int, int], int],
+    target_primary_sum: Mapping[tuple[int, int, int], np.ndarray],
+    target_primary_count: Mapping[tuple[int, int, int], int],
+    target_secondary_sum: Mapping[tuple[int, int, int], np.ndarray],
+    target_secondary_count: Mapping[tuple[int, int, int], int],
+) -> int:
+    required_fields = (
+        "velocity_constraint_sum",
+        "velocity_constraint_weight",
+        "velocity_constraint_primary_sum",
+        "velocity_constraint_primary_weight",
+        "velocity_constraint_secondary_sum",
+        "velocity_constraint_secondary_weight",
+    )
+    if any(getattr(fluid, name, None) is None for name in required_fields):
+        return 0
+
+    constraint_sum = fluid.velocity_constraint_sum.to_numpy()
+    constraint_weight = fluid.velocity_constraint_weight.to_numpy()
+    primary_sum = fluid.velocity_constraint_primary_sum.to_numpy()
+    primary_weight = fluid.velocity_constraint_primary_weight.to_numpy()
+    secondary_sum = fluid.velocity_constraint_secondary_sum.to_numpy()
+    secondary_weight = fluid.velocity_constraint_secondary_weight.to_numpy()
+
+    for (i, j, k), summed_velocity in target_sum.items():
+        count = float(target_count[(i, j, k)])
+        constraint_sum[i, j, k] = np.asarray(summed_velocity, dtype=np.float64)
+        constraint_weight[i, j, k] = count
+        if (i, j, k) in target_primary_sum:
+            primary_sum[i, j, k] = np.asarray(
+                target_primary_sum[(i, j, k)],
+                dtype=np.float64,
+            )
+            primary_weight[i, j, k] = float(target_primary_count[(i, j, k)])
+        if (i, j, k) in target_secondary_sum:
+            secondary_sum[i, j, k] = np.asarray(
+                target_secondary_sum[(i, j, k)],
+                dtype=np.float64,
+            )
+            secondary_weight[i, j, k] = float(target_secondary_count[(i, j, k)])
+
+    fluid.velocity_constraint_sum.from_numpy(constraint_sum)
+    fluid.velocity_constraint_weight.from_numpy(constraint_weight)
+    fluid.velocity_constraint_primary_sum.from_numpy(primary_sum)
+    fluid.velocity_constraint_primary_weight.from_numpy(primary_weight)
+    fluid.velocity_constraint_secondary_sum.from_numpy(secondary_sum)
+    fluid.velocity_constraint_secondary_weight.from_numpy(secondary_weight)
+    return len(target_sum)
 
 
 def _empty_feedback_constraint_report(
@@ -2139,6 +3942,8 @@ def _empty_feedback_constraint_report(
         "fluid_feedback_constraint_obstacle_cell_count": 0,
         "fluid_feedback_constraint_non_obstacle_cell_count": 0,
         "fluid_feedback_constraint_projection_participating_cell_count": 0,
+        "fluid_marker_velocity_constraints_enabled": False,
+        "fluid_marker_velocity_constraint_active_cell_count": 0,
         "no_slip_residual_before_mps": "",
         "no_slip_residual_after_mps": "",
         "no_slip_target_residual_after_assembly_mps": "",
@@ -2160,6 +3965,16 @@ def _measure_projected_no_slip_residual(
     marker_count = int(markers.marker_count)
     if marker_count <= 0:
         return 0.0
+
+    measure_device = getattr(fluid, "marker_feedback_projected_residual_mps", None)
+    if measure_device is not None:
+        return float(
+            measure_device(
+                markers.x_gamma_m,
+                markers.v_gamma_mps,
+                marker_count,
+            )
+        )
 
     marker_positions = markers.x_gamma_m.to_numpy()[:marker_count]
     marker_velocities = markers.v_gamma_mps.to_numpy()[:marker_count]
@@ -2189,19 +4004,50 @@ def _marker_grid_cells(
 def _flow_state_report(
     fluid: CartesianFluidSolver,
     projection_report: Any,
+    *,
+    include_percentiles: bool = False,
 ) -> dict[str, object]:
+    device_report = getattr(fluid, "flow_state_report", None)
+    if device_report is not None:
+        state = dict(
+            device_report(
+                pressure_field=_fluid_feedback_pressure_field(fluid),
+                include_percentiles=bool(include_percentiles),
+            )
+        )
+        return {
+            "mode": FLOW_SOLUTION_MODE,
+            "projection_report": projection_report,
+            "obstacle_cell_count": int(state["obstacle_cell_count"]),
+            "fluid_cell_count": int(state["fluid_cell_count"]),
+            "local_velocity_peak_mps": float(state["local_velocity_peak_mps"]),
+            "fluid_speed_p99_mps": state["fluid_speed_p99_mps"],
+            "fluid_speed_p999_mps": state["fluid_speed_p999_mps"],
+            "pressure_min_pa": float(state["pressure_min_pa"]),
+            "pressure_max_pa": float(state["pressure_max_pa"]),
+            "pressure_sign_convention": "fluid.fsi_pressure feedback field is sampled for reports and traction",
+            **_flow_source_report_fields(projection_report),
+        }
+
     obstacle = fluid.obstacle.to_numpy()
     velocity = fluid.velocity.to_numpy()
-    pressure = fluid.pressure.to_numpy()
+    pressure = _fluid_feedback_pressure_numpy(fluid)
     non_obstacle = obstacle == 0
     speed = np.linalg.norm(velocity, axis=3)
     active_speed = speed[non_obstacle]
-    if active_speed.size:
+    if bool(include_percentiles) and active_speed.size:
         speed_p99 = float(np.percentile(active_speed, 99.0))
         speed_p999 = float(np.percentile(active_speed, 99.9))
     else:
-        speed_p99 = 0.0
-        speed_p999 = 0.0
+        speed_p99 = "" if active_speed.size else 0.0
+        speed_p999 = "" if active_speed.size else 0.0
+    active_pressure = pressure[non_obstacle]
+    if active_pressure.size:
+        pressure_min_pa = float(active_pressure.min())
+        pressure_max_pa = float(active_pressure.max())
+    else:
+        pressure_min_pa = 0.0
+        pressure_max_pa = 0.0
     return {
         "mode": FLOW_SOLUTION_MODE,
         "projection_report": projection_report,
@@ -2210,9 +4056,9 @@ def _flow_state_report(
         "local_velocity_peak_mps": float(active_speed.max(initial=0.0)),
         "fluid_speed_p99_mps": speed_p99,
         "fluid_speed_p999_mps": speed_p999,
-        "pressure_min_pa": float(pressure[non_obstacle].min(initial=0.0)),
-        "pressure_max_pa": float(pressure[non_obstacle].max(initial=0.0)),
-        "pressure_sign_convention": "fluid.pressure projection field is sampled directly",
+        "pressure_min_pa": pressure_min_pa,
+        "pressure_max_pa": pressure_max_pa,
+        "pressure_sign_convention": "fluid.fsi_pressure feedback field is sampled for reports and traction",
         **_flow_source_report_fields(projection_report),
     }
 
@@ -2230,6 +4076,24 @@ def _flow_source_report_fields(report: Any) -> dict[str, object]:
         fields["velocity_outlet_flux_ratio"] = report.get(
             "zmin_velocity_outlet_to_abs_source_ratio",
             report.get("zmin_velocity_outlet_to_positive_source_ratio", ""),
+        )
+    return fields
+
+
+def _flow_projection_report_fields(report: Any) -> dict[str, object]:
+    if not isinstance(report, Mapping):
+        return {f"flow_projection_{key}": "" for key in FLOW_PROJECTION_REPORT_KEYS}
+    projection_report = report.get("projection_report", report)
+    if not isinstance(projection_report, Mapping):
+        projection_report = {}
+    fields = {
+        f"flow_projection_{key}": projection_report.get(key, "")
+        for key in FLOW_PROJECTION_REPORT_KEYS
+    }
+    if fields["flow_projection_fsi_pressure_snapshot_updated"] == "":
+        fields["flow_projection_fsi_pressure_snapshot_updated"] = report.get(
+            "fsi_pressure_snapshot_updated",
+            "",
         )
     return fields
 
@@ -2311,11 +4175,16 @@ def _stress_sampling_report_fields(report: Any) -> dict[str, object]:
     }
 
 
-def _marker_traction_report_fields(markers: HibmMpmSurfaceMarkers) -> dict[str, object]:
+def _marker_traction_report_fields(
+    markers: HibmMpmSurfaceMarkers,
+    *,
+    include_face_diagnostics: bool = True,
+) -> dict[str, object]:
     return markers.stress_face_diagnostics(
         primary_region_id=PRIMARY_REGION_ID,
         secondary_region_id=SECONDARY_REGION_ID,
         streamwise_axis_index=STREAMWISE_AXIS_INDEX,
+        include_face_diagnostics=include_face_diagnostics,
     )
 
 
@@ -2734,7 +4603,7 @@ def _build_solid(
     config: Any,
     runtime: TaichiRuntimeConfig,
 ) -> NeoHookeanMpmState:
-    bounds_min, bounds_max = _domain_bounds(config)
+    bounds_min, bounds_max = _solid_mpm_bounds(config)
     capacity = math.prod(config.solid_particle_counts)
     solid = NeoHookeanMpmState(
         particle_capacity=capacity,
@@ -2829,7 +4698,7 @@ def _sample_stress_to_marker_forces(
     )
     report = markers.sample_fluid_stress_to_marker_tractions(
         fluid.velocity,
-        fluid.pressure,
+        _fluid_feedback_pressure_field(fluid),
         fluid.obstacle,
         fluid.cell_face_x_m,
         fluid.cell_face_y_m,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from simulation_core.fsi_coupling import (
+from simulation_core.coupling.fsi_coupling import (
     ForceBalanceReport,
     INTERFACE_REACTION_SOLVER_CHOICES,
     InterfaceReactionFixedPointResult,
@@ -49,21 +49,32 @@ from simulation_core.coupling.hibm_mpm import (
     hibm_mpm_sharp_step_summary,
     require_implemented_fsi_coupling_mode,
 )
-from simulation_core.pressure_interface import (
+from simulation_core.coupling.pressure_interface import (
     PRESSURE_INTERFACE_COUPLING_EXTRA_SLOTS,
     PRESSURE_INTERFACE_COUPLING_SLOT_COUNT,
     far_pressure_side_normal_sign_from_direction,
 )
-from simulation_core.projected_ibm import (
-    ProjectedIbmRegionPairStepConfig,
-    ProjectedIbmRegionPairStepReport,
-    advance_projected_ibm_region_pair_fluid_step,
-)
-from simulation_core.tri_surface import (
+from simulation_core.coupling.tri_surface import (
     TriSurfaceDiagnosticReport,
     TriSurfaceForcePairReport,
     TriSurfaceRegionDiagnostics,
 )
+
+_PROJECTED_IBM_EXPORTS = {
+    "ProjectedIbmRegionPairStepConfig",
+    "ProjectedIbmRegionPairStepReport",
+    "advance_projected_ibm_region_pair_fluid_step",
+}
+
+
+def __getattr__(name: str):
+    if name in _PROJECTED_IBM_EXPORTS:
+        from simulation_core.coupling import projected_ibm
+
+        value = getattr(projected_ibm, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "FSI_COUPLING_MODE_CHOICES",

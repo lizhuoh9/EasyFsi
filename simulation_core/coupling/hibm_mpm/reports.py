@@ -68,7 +68,7 @@ class HibmMpmNoSlipResidualReport:
 class HibmMpmMpmForceScatterReport:
     active_marker_count: int
     invalid_marker_count: int
-    active_particle_count: int
+    active_pair_count: int
     total_marker_force_n: tuple[float, float, float]
     total_mpm_external_force_n: tuple[float, float, float]
     action_reaction_residual_n: float
@@ -191,8 +191,6 @@ class HibmMpmPressureNeumannMatrixReport:
 class HibmMpmPressureNeumannGradientReport:
     active_marker_count: int
     max_abs_gradient_pa_per_m: float
-    max_raw_abs_gradient_pa_per_m: float = 0.0
-    limited_gradient_count: int = 0
 
 
 @dataclass(frozen=True)

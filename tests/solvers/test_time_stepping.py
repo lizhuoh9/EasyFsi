@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from simulation_core.time_stepping import CflSubstepController
+from simulation_core.diagnostics.time_stepping import CflSubstepController
 
 
 class CflSubstepControllerTests(unittest.TestCase):

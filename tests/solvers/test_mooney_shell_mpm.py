@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import inspect
 import math
@@ -6,8 +6,8 @@ import unittest
 
 import numpy as np
 
-from simulation_core.geometry import SurfaceMesh, UvSphereResolution, make_uv_sphere
-from simulation_core.mooney_shell_mpm import TriMooneyShellMpmState, UvMooneyShellMpmState
+from simulation_core.geometry_tools import SurfaceMesh, UvSphereResolution, make_uv_sphere
+from simulation_core.solids.mooney_shell import TriMooneyShellMpmState, UvMooneyShellMpmState
 
 
 def _triangle_mooney_membrane_energy(
@@ -324,6 +324,28 @@ class UvMooneyShellMpmStateTests(unittest.TestCase):
         self.assertAlmostEqual(report.mean_radial_stretch, 1.0, delta=2.0e-6)
         self.assertAlmostEqual(report.max_radial_stretch_error, 0.0, delta=2.0e-6)
 
+    def test_uv_nan_particle_is_rejected_without_nan_report_values(self) -> None:
+        resolution = UvSphereResolution(latitude_bands=4, longitude_segments=8)
+        state = UvMooneyShellMpmState(
+            resolution,
+            radius_m=1.0,
+            thickness_m=0.05,
+            density_kgm3=1.0,
+            c1_pa=20.0,
+            c2_pa=10.0,
+            grid_nodes=(16, 16, 16),
+        )
+        positions = state.x.to_numpy()
+        positions[0, 0] = np.nan
+        state.x.from_numpy(positions.astype(np.float32))
+
+        report = state.step(dt_s=0.0, pressure_pa=0.0, velocity_damping=1.0)
+
+        self.assertGreaterEqual(report.grid_out_of_bounds_particle_count, 1)
+        self.assertTrue(np.isfinite(report.internal_force_rms_n))
+        self.assertTrue(np.isfinite(report.mean_radial_stretch))
+        self.assertTrue(np.isfinite(report.max_radial_stretch_error))
+
     def test_velocity_damping_does_not_pollute_transfer_diagnostic(self) -> None:
         resolution = UvSphereResolution(latitude_bands=8, longitude_segments=25)
         state = UvMooneyShellMpmState(
@@ -590,6 +612,68 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             dtype=np.float32,
         )
         np.testing.assert_allclose(internal_force[0], expected_force_a, rtol=5.0e-4, atol=1.0e-6)
+
+    def test_plain_tri_step_uses_region_thickness_for_mooney_stiffness(self) -> None:
+        rest_vertices = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        mesh = SurfaceMesh(
+            vertices=rest_vertices,
+            faces=np.array([[0, 1, 2]], dtype=np.int32),
+        )
+        global_thickness_m = 0.01
+        primary_thickness_m = 0.05
+        c1_pa = 20.0
+        c2_pa = 10.0
+        stretch = 1.2
+        current_vertices = rest_vertices * stretch
+        state = TriMooneyShellMpmState(
+            mesh,
+            thickness_m=global_thickness_m,
+            density_kgm3=1.0,
+            c1_pa=c1_pa,
+            c2_pa=c2_pa,
+            face_region_id=np.array([7], dtype=np.int32),
+            primary_region_id=7,
+            secondary_region_id=8,
+            primary_thickness_m=primary_thickness_m,
+            secondary_thickness_m=0.02,
+            require_nonempty_region_counts=False,
+            grid_nodes=(12, 12, 12),
+            bounds_padding_fraction=1.0,
+        )
+        state.x.from_numpy(current_vertices.astype(np.float32))
+
+        state.step(dt_s=0.0, pressure_pa=0.0, velocity_damping=1.0)
+        internal_force = state.internal_force_n.to_numpy()
+        expected_force = _finite_difference_mooney_force(
+            rest_vertices,
+            current_vertices,
+            thickness_m=primary_thickness_m,
+            c1_pa=c1_pa,
+            c2_pa=c2_pa,
+        )
+
+        self.assertGreater(
+            float(np.linalg.norm(expected_force)),
+            4.0 * float(
+                np.linalg.norm(
+                    _finite_difference_mooney_force(
+                        rest_vertices,
+                        current_vertices,
+                        thickness_m=global_thickness_m,
+                        c1_pa=c1_pa,
+                        c2_pa=c2_pa,
+                    )
+                )
+            ),
+        )
+        np.testing.assert_allclose(internal_force, expected_force, rtol=2.0e-3, atol=2.0e-5)
 
     def test_area_preserving_in_plane_stretch_matches_mooney_energy_gradient(self) -> None:
         rest_vertices = np.array(
@@ -1502,6 +1586,61 @@ class TriMooneyShellMpmStateTests(unittest.TestCase):
             -1000.0 * face_area_m2,
             delta=2.0e-7,
         )
+
+    def test_external_force_step_does_not_bake_body_force_into_preserved_load(self) -> None:
+        mesh = SurfaceMesh(
+            vertices=np.array(
+                [
+                    [-0.004, -0.004, 0.0],
+                    [0.004, -0.004, 0.0],
+                    [-0.004, 0.004, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+            faces=np.array([[0, 1, 2]], dtype=np.int32),
+        )
+        state = TriMooneyShellMpmState(
+            mesh,
+            thickness_m=0.003,
+            density_kgm3=1040.0,
+            c1_pa=20.0,
+            c2_pa=10.0,
+            face_region_id=np.array([7], dtype=np.int32),
+            primary_region_id=7,
+            secondary_region_id=8,
+            primary_thickness_m=0.003,
+            secondary_thickness_m=0.0025,
+            require_nonempty_region_counts=False,
+            grid_nodes=(16, 16, 16),
+            bounds_padding_fraction=1.0,
+        )
+        original_force = np.zeros((state.particle_count, 3), dtype=np.float32)
+        original_force[:, 0] = 2.0e-3
+        state.external_force_n.from_numpy(original_force)
+
+        first = state.advance_with_external_forces(
+            dt_s=0.0,
+            primary_region_id=7,
+            secondary_region_id=8,
+            velocity_damping=1.0,
+            flip_blend=1.0,
+            body_acceleration_mps2=(0.0, 0.0, -9.81),
+        )
+        state.advance_with_external_forces(
+            dt_s=0.0,
+            primary_region_id=7,
+            secondary_region_id=8,
+            velocity_damping=1.0,
+            flip_blend=1.0,
+            body_acceleration_mps2=(0.0, 0.0, -9.81),
+        )
+
+        np.testing.assert_allclose(
+            state.external_force_n.to_numpy(),
+            original_force,
+            atol=1.0e-9,
+        )
+        self.assertLess(first.total_force_n[2], 0.0)
 
     def test_near_singular_tri_face_reports_finite_force(self) -> None:
         mesh = SurfaceMesh(

@@ -2,28 +2,31 @@ from dataclasses import dataclass
 
 import taichi as ti
 
-from simulation_core.runtime import TaichiRuntimeConfig, init_taichi
+from simulation_core.diagnostics.runtime import TaichiRuntimeConfig, init_taichi
 
 
 MIN_DEFORMATION_SINGULAR_VALUE = 1.0e-2
 MAX_DEFORMATION_SINGULAR_VALUE = 1.0e2
+FIXED_NODE_LOCK_ANY_FIXED_PARTICLE = 0
+FIXED_NODE_LOCK_PURE_FIXED_MASS = 1
+FIXED_NODE_LOCK_POLICIES = {
+    "any_fixed_particle": FIXED_NODE_LOCK_ANY_FIXED_PARTICLE,
+    "pure_fixed_mass": FIXED_NODE_LOCK_PURE_FIXED_MASS,
+}
+CONSTITUTIVE_NEO_HOOKEAN = 0
+CONSTITUTIVE_LINEAR_ELASTIC = 1
+CONSTITUTIVE_MODELS = {
+    "3d_neo_hookean": CONSTITUTIVE_NEO_HOOKEAN,
+    "neo_hookean": CONSTITUTIVE_NEO_HOOKEAN,
+    "linear_elastic": CONSTITUTIVE_LINEAR_ELASTIC,
+    "plane_stress_linear_elastic": CONSTITUTIVE_LINEAR_ELASTIC,
+}
 
 
 def _vector3(value: tuple[float, float, float], name: str) -> tuple[float, float, float]:
     if len(value) != 3:
         raise ValueError(f"{name} must contain exactly 3 components")
     return (float(value[0]), float(value[1]), float(value[2]))
-
-
-def _raise_if_all_particles_out_of_bounds(
-    particle_count: int,
-    grid_out_of_bounds_particle_count: int,
-) -> None:
-    if particle_count > 0 and grid_out_of_bounds_particle_count == particle_count:
-        raise RuntimeError(
-            f"all {particle_count} MPM particles are outside the background grid; "
-            "the solid has left the simulation domain"
-        )
 
 
 def _raise_if_out_of_bounds_exceeds_tolerance(
@@ -140,10 +143,16 @@ class NeoHookeanMpmState:
         self.surface_normal = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
         self.rest_surface_normal = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
         self.external_force_n = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
-        self.rest_center_m = ti.Vector.field(3, dtype=ti.f32, shape=())
 
         self.grid_mass_kg = ti.field(dtype=ti.f32, shape=self.grid_nodes)
+        self.grid_fixed_mass_kg = ti.field(dtype=ti.f32, shape=self.grid_nodes)
+        self.grid_free_mass_kg = ti.field(dtype=ti.f32, shape=self.grid_nodes)
         self.grid_velocity_mps = ti.Vector.field(3, dtype=ti.f32, shape=self.grid_nodes)
+        self.grid_velocity_before_update_mps = ti.Vector.field(
+            3,
+            dtype=ti.f32,
+            shape=self.grid_nodes,
+        )
         self.grid_force_n = ti.Vector.field(3, dtype=ti.f32, shape=self.grid_nodes)
         self.grid_fixed_node = ti.field(dtype=ti.i32, shape=self.grid_nodes)
 
@@ -174,7 +183,7 @@ class NeoHookeanMpmState:
         self.report_secondary_count = ti.field(dtype=ti.i32, shape=())
         self.report_float_snapshot = ti.Vector.field(28, dtype=ti.f32, shape=())
         self.report_count_snapshot = ti.Vector.field(6, dtype=ti.i32, shape=())
-        self.report_host_snapshot = ti.field(dtype=ti.f32, shape=34)
+        self.report_host_snapshot = ti.field(dtype=ti.f64, shape=34)
         self.primary_mass_kg = ti.field(dtype=ti.f32, shape=())
         self.secondary_mass_kg = ti.field(dtype=ti.f32, shape=())
         self.last_report_host_reads = 0
@@ -224,24 +233,6 @@ class NeoHookeanMpmState:
                 self.mass_kg[p] = density_kgm3 * particle_volume
                 self.external_force_n[p] = ti.Vector([0.0, 0.0, 0.0])
 
-    @ti.kernel
-    def _update_rest_center_kernel(self, particle_count: ti.i32):
-        self.rest_center_m[None] = ti.Vector([0.0, 0.0, 0.0])
-        for p in range(self.particle_capacity):
-            if p < particle_count:
-                ti.atomic_add(self.rest_center_m[None].x, self.rest_x[p].x)
-                ti.atomic_add(self.rest_center_m[None].y, self.rest_x[p].y)
-                ti.atomic_add(self.rest_center_m[None].z, self.rest_x[p].z)
-
-    @ti.kernel
-    def _normalize_rest_center_kernel(self, particle_count: ti.i32):
-        if particle_count > 0:
-            self.rest_center_m[None] = self.rest_center_m[None] / ti.cast(particle_count, ti.f32)
-
-    def _update_rest_center(self) -> None:
-        self._update_rest_center_kernel(int(self.particle_count))
-        self._normalize_rest_center_kernel(int(self.particle_count))
-
     def initialize_box(
         self,
         *,
@@ -271,7 +262,6 @@ class NeoHookeanMpmState:
         )
         self.require_nonempty_region_counts = False
         self.require_nonempty_secondary_region_count = False
-        self._update_rest_center()
 
     @ti.kernel
     def _initialize_layered_tri_surface_kernel(
@@ -398,10 +388,17 @@ class NeoHookeanMpmState:
             float(secondary_thickness_m),
         )
         self.require_nonempty_region_counts = True
+        # Mirrors TriMooneyShellMpmState's require_nonempty_primary_region_count
+        # gating: only require the secondary region to be nonempty when the
+        # mesh could plausibly carry secondary-region faces at all. A
+        # primary-only mesh (secondary_region_id absent from active_regions,
+        # with primary_region_id present) must not be forced through the
+        # secondary-region guard in report().
+        primary_region_present = int(primary_region_id) in active_regions
+        secondary_region_present = int(secondary_region_id) in active_regions
         self.require_nonempty_secondary_region_count = (
-            int(secondary_region_id) in active_regions or int(fixed_region_id) < 0
+            secondary_region_present or not primary_region_present
         )
-        self._update_rest_center()
 
     @ti.kernel
     def _set_layered_region_loads_kernel(
@@ -754,10 +751,18 @@ class NeoHookeanMpmState:
         velocity_damping: ti.f32,
         primary_region_id: ti.i32,
         secondary_region_id: ti.i32,
+        fixed_node_lock_policy: ti.i32,
+        constitutive_model: ti.i32,
+        velocity_transfer_flip_blend: ti.f32,
     ):
         for i, j, k in self.grid_mass_kg:
             self.grid_mass_kg[i, j, k] = 0.0
+            self.grid_fixed_mass_kg[i, j, k] = 0.0
+            self.grid_free_mass_kg[i, j, k] = 0.0
             self.grid_velocity_mps[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            self.grid_velocity_before_update_mps[i, j, k] = ti.Vector(
+                [0.0, 0.0, 0.0]
+            )
             self.grid_force_n[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.grid_fixed_node[i, j, k] = 0
         self._clear_report_func()
@@ -802,6 +807,14 @@ class NeoHookeanMpmState:
                 J = Fp.determinant()
                 FinvT = Fp.inverse().transpose()
                 P = mu_pa * (Fp - FinvT) + lambda_pa * ti.log(J) * FinvT
+                stress_map = P @ Fp.transpose()
+                if constitutive_model == CONSTITUTIVE_LINEAR_ELASTIC:
+                    displacement_gradient = Fp - self._identity()
+                    strain = 0.5 * (
+                        displacement_gradient + displacement_gradient.transpose()
+                    )
+                    P = 2.0 * mu_pa * strain + lambda_pa * strain.trace() * self._identity()
+                    stress_map = P
                 inv_dx2 = ti.Matrix(
                     [
                         [4.0 / (self.dx[0] * self.dx[0]), 0.0, 0.0],
@@ -809,8 +822,9 @@ class NeoHookeanMpmState:
                         [0.0, 0.0, 4.0 / (self.dx[2] * self.dx[2])],
                     ]
                 )
-                stress = -dt_s * self.volume_m3[p] * ((P @ Fp.transpose()) @ inv_dx2)
-                affine = stress + self.mass_kg[p] * self.C[p]
+                stress = -dt_s * self.volume_m3[p] * (stress_map @ inv_dx2)
+                inertial_affine = self.mass_kg[p] * self.C[p]
+                affine = stress + inertial_affine
                 particle_momentum = self.mass_kg[p] * self.v[p]
                 particle_external_force = self.external_force_n[p]
                 if self.fixed_particle[p] != 0:
@@ -818,21 +832,28 @@ class NeoHookeanMpmState:
                     # carry zero momentum, zero affine/stress contribution,
                     # and an inert external force.
                     particle_momentum = ti.Vector([0.0, 0.0, 0.0])
+                    inertial_affine = ti.Matrix.zero(ti.f32, 3, 3)
                     affine = ti.Matrix.zero(ti.f32, 3, 3)
                     particle_external_force = ti.Vector([0.0, 0.0, 0.0])
-                self._atomic_add_vector(self.report_particle_momentum_kg_mps, particle_momentum)
-                self._atomic_add_vector(self.report_external_force_n, particle_external_force)
                 ti.atomic_add(self.report_total_mass_kg[None], self.mass_kg[p])
                 ti.atomic_add(self.report_total_volume_m3[None], self.volume_m3[p])
-                ti.atomic_add(
-                    self.report_particle_momentum_square_sum[None],
-                    particle_momentum.dot(particle_momentum),
-                )
                 ti.atomic_max(self.report_max_abs_j[None], ti.abs(J))
 
                 if self._particle_grid_stencil_out_of_bounds(Xp) != 0:
                     ti.atomic_add(self.report_grid_out_of_bounds_particle_count[None], 1)
                 else:
+                    self._atomic_add_vector(
+                        self.report_particle_momentum_kg_mps,
+                        particle_momentum,
+                    )
+                    self._atomic_add_vector(
+                        self.report_external_force_n,
+                        particle_external_force,
+                    )
+                    ti.atomic_add(
+                        self.report_particle_momentum_square_sum[None],
+                        particle_momentum.dot(particle_momentum),
+                    )
                     for ox, oy, oz in ti.static(ti.ndrange(3, 3, 3)):
                         node = base + ti.Vector([ox, oy, oz])
                         weight = wx[ox] * wy[oy] * wz[oz]
@@ -843,27 +864,59 @@ class NeoHookeanMpmState:
                                 (ti.cast(oz, ti.f32) - fx.z) * self.dx[2],
                             ]
                         )
+                        inertial_momentum = weight * (
+                            particle_momentum + inertial_affine @ dpos
+                        )
                         momentum = weight * (particle_momentum + affine @ dpos)
                         force = weight * particle_external_force
-                        ti.atomic_add(self.grid_mass_kg[node], weight * self.mass_kg[p])
+                        weighted_mass = weight * self.mass_kg[p]
+                        ti.atomic_add(self.grid_mass_kg[node], weighted_mass)
+                        if self.fixed_particle[p] != 0:
+                            ti.atomic_add(self.grid_fixed_mass_kg[node], weighted_mass)
+                        else:
+                            ti.atomic_add(self.grid_free_mass_kg[node], weighted_mass)
+                        ti.atomic_add(
+                            self.grid_velocity_before_update_mps[node].x,
+                            inertial_momentum.x,
+                        )
+                        ti.atomic_add(
+                            self.grid_velocity_before_update_mps[node].y,
+                            inertial_momentum.y,
+                        )
+                        ti.atomic_add(
+                            self.grid_velocity_before_update_mps[node].z,
+                            inertial_momentum.z,
+                        )
                         ti.atomic_add(self.grid_velocity_mps[node].x, momentum.x)
                         ti.atomic_add(self.grid_velocity_mps[node].y, momentum.y)
                         ti.atomic_add(self.grid_velocity_mps[node].z, momentum.z)
                         ti.atomic_add(self.grid_force_n[node].x, force.x)
                         ti.atomic_add(self.grid_force_n[node].y, force.y)
                         ti.atomic_add(self.grid_force_n[node].z, force.z)
-                        if self.fixed_particle[p] != 0 and weight > 0.0:
-                            self.grid_fixed_node[node] = 1
 
         for i, j, k in self.grid_mass_kg:
             mass = self.grid_mass_kg[i, j, k]
             if mass > 1.0e-20:
-                velocity = self.grid_velocity_mps[i, j, k] / mass
-                velocity += dt_s * self.grid_force_n[i, j, k] / mass
+                fixed_mass = self.grid_fixed_mass_kg[i, j, k]
+                free_mass = self.grid_free_mass_kg[i, j, k]
+                if fixed_mass > 0.0:
+                    if fixed_node_lock_policy == FIXED_NODE_LOCK_ANY_FIXED_PARTICLE:
+                        self.grid_fixed_node[i, j, k] = 1
+                    elif free_mass <= 1.0e-20:
+                        self.grid_fixed_node[i, j, k] = 1
+                velocity_before_update = (
+                    self.grid_velocity_before_update_mps[i, j, k] / mass
+                )
+                velocity = (
+                    self.grid_velocity_mps[i, j, k] / mass
+                    + dt_s * self.grid_force_n[i, j, k] / mass
+                )
                 transfer_velocity = velocity
                 velocity *= velocity_damping
                 if self.grid_fixed_node[i, j, k] != 0:
                     velocity = ti.Vector([0.0, 0.0, 0.0])
+                    velocity_before_update = ti.Vector([0.0, 0.0, 0.0])
+                self.grid_velocity_before_update_mps[i, j, k] = velocity_before_update
                 self.grid_velocity_mps[i, j, k] = velocity
                 self._atomic_add_vector(
                     self.report_transfer_grid_momentum_kg_mps,
@@ -883,6 +936,7 @@ class NeoHookeanMpmState:
                     wy = self._weights(fx.y)
                     wz = self._weights(fx.z)
                     new_v = ti.Vector([0.0, 0.0, 0.0])
+                    new_v_flip = self.v[p]
                     new_C = ti.Matrix.zero(ti.f32, 3, 3)
                     for ox, oy, oz in ti.static(ti.ndrange(3, 3, 3)):
                         node = base + ti.Vector([ox, oy, oz])
@@ -895,7 +949,9 @@ class NeoHookeanMpmState:
                             ]
                         )
                         grid_v = self.grid_velocity_mps[node]
+                        grid_v_before = self.grid_velocity_before_update_mps[node]
                         new_v += weight * grid_v
+                        new_v_flip += weight * (grid_v - grid_v_before)
                         new_C += weight * (
                             grid_v.outer_product(
                                 ti.Vector(
@@ -908,6 +964,10 @@ class NeoHookeanMpmState:
                             )
                         )
                     if self.fixed_particle[p] == 0:
+                        new_v = (
+                            (1.0 - velocity_transfer_flip_blend) * new_v
+                            + velocity_transfer_flip_blend * new_v_flip
+                        )
                         self.v[p] = new_v
                         self.C[p] = new_C
                         position_increment = (
@@ -943,14 +1003,10 @@ class NeoHookeanMpmState:
                         self._atomic_add_vector(self.report_secondary_displacement_sum_m, self.x[p] - self.rest_x[p])
                         self._atomic_add_vector(self.report_secondary_velocity_sum_mps, self.v[p])
                         ti.atomic_add(self.report_secondary_count[None], 1)
-
-        for p in range(self.particle_capacity):
-            if p < particle_count:
-                coord = self._particle_grid_coordinate(p)
-                if self._particle_grid_stencil_out_of_bounds(coord) == 0:
                     self._atomic_add_vector(self.report_current_center_sum_m, self.x[p])
                     self._atomic_add_vector(self.report_radial_rest_center_sum_m, self.rest_x[p])
                     ti.atomic_add(self.report_radial_center_count[None], 1)
+
         radial_center_count = ti.max(ti.cast(self.report_radial_center_count[None], ti.f32), 1.0)
         current_center = self.report_current_center_sum_m[None] / radial_center_count
         rest_center = self.report_radial_rest_center_sum_m[None] / radial_center_count
@@ -1026,7 +1082,7 @@ class NeoHookeanMpmState:
         for snapshot_index in ti.static(range(6)):
             self.report_host_snapshot[28 + snapshot_index] = ti.cast(
                 packed_counts[snapshot_index],
-                ti.f32,
+                ti.f64,
             )
 
     def step(
@@ -1038,10 +1094,28 @@ class NeoHookeanMpmState:
         primary_region_id: int,
         secondary_region_id: int,
         velocity_damping: float = 1.0,
+        fixed_node_lock_policy: str = "any_fixed_particle",
+        constitutive_model: str = "neo_hookean",
+        velocity_transfer_flip_blend: float = 0.0,
         read_report: bool = True,
     ) -> NeoHookeanMpmReport | None:
         if self.particle_count <= 0:
             raise ValueError("initialize particles before stepping")
+        if fixed_node_lock_policy not in FIXED_NODE_LOCK_POLICIES:
+            choices = ", ".join(sorted(FIXED_NODE_LOCK_POLICIES))
+            raise ValueError(
+                f"fixed_node_lock_policy must be one of {choices}; "
+                f"got {fixed_node_lock_policy!r}"
+            )
+        if constitutive_model not in CONSTITUTIVE_MODELS:
+            choices = ", ".join(sorted(CONSTITUTIVE_MODELS))
+            raise ValueError(
+                f"constitutive_model must be one of {choices}; "
+                f"got {constitutive_model!r}"
+            )
+        flip_blend = float(velocity_transfer_flip_blend)
+        if not 0.0 <= flip_blend <= 1.0:
+            raise ValueError("velocity_transfer_flip_blend must be in [0, 1]")
         self._step_kernel(
             int(self.particle_count),
             float(dt_s),
@@ -1050,6 +1124,9 @@ class NeoHookeanMpmState:
             float(velocity_damping),
             int(primary_region_id),
             int(secondary_region_id),
+            int(FIXED_NODE_LOCK_POLICIES[fixed_node_lock_policy]),
+            int(CONSTITUTIVE_MODELS[constitutive_model]),
+            flip_blend,
         )
         if not read_report:
             self.last_report_host_reads = 0

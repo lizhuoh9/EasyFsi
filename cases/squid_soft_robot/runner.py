@@ -50,11 +50,11 @@ from simulation_core import (
     update_interface_reaction_for_next_step,
     vector_norm,
 )
-from simulation_core.hyperelastic import ecoflex_0010_material
-from simulation_core.pressure_interface import (
+from simulation_core.materials.hyperelastic import ecoflex_0010_material
+from simulation_core.coupling.pressure_interface import (
     far_pressure_side_normal_sign_from_direction,
 )
-from simulation_core.runtime import init_taichi
+from simulation_core.diagnostics.runtime import init_taichi
 
 from .cli import (
     FLUID_ADVECTION_SCHEME_CHOICES,
@@ -1179,7 +1179,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     fluid_grid_axis_min_spacing_m = cartesian_grid_axis_min_spacing_m(fluid_grid)
     fluid_grid_axis_max_spacing_m = cartesian_grid_axis_max_spacing_m(fluid_grid)
     fluid_grid_uniform_spacing_m = cartesian_grid_uniform_spacing_m(fluid_grid)
-    fluid_probe_distance_m = min(fluid_grid_axis_min_spacing_m)
+    fluid_probe_distance_m = (
+        0.0 if graded_grid_enabled else min(fluid_grid_axis_min_spacing_m)
+    )
     initial_fluid_obstacle_mode = "disabled"
     source_config_fluid_topology_report: dict[str, object] = {
         "enabled": False,

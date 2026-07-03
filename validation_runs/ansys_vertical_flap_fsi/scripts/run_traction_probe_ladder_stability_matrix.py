@@ -20,7 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.official import solid_mpm_fsi_runner  # noqa: E402
-from simulation_core.runtime import TaichiRuntimeConfig  # noqa: E402
+from simulation_core.diagnostics.runtime import TaichiRuntimeConfig  # noqa: E402
 from validation_runs.ansys_vertical_flap_fsi.scripts import (  # noqa: E402
     run_traction_probe_offset_decoupling_matrix as offset_decoupling,
 )

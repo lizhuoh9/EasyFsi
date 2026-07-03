@@ -23,6 +23,18 @@ The raw ANSYS tutorial zip/mesh/journal was used only to confirm the source
 case dimensions and journal settings. Those third-party tutorial assets are not
 redistributed here.
 
+## 2D to 3D slab equivalence
+
+The official case is conceptual 2D, while the local HIBM-MPM runner is 3D. The
+local run treats `span_m` as the out-of-plane slab extrusion depth and reports
+both 3D totals (`N`, `kg`, `m^2`) and depth-normalized 2D quantities (`N/m`,
+`kg/m`, `m`) through the shared slab diagnostics.
+
+See `docs/ANSYS_VERTICAL_FLAP_2D_TO_3D_SLAB_EQUIVALENCE.md` for the comparison
+contract. This diagnostic contract does not change the archived Fluent reference
+numbers and does not turn this one-step HIBM-MPM rerun into a 50-step Fluent
+parity claim.
+
 ## Main run
 
 Command used from the repository root:

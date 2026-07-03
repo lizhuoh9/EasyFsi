@@ -15,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from cases.ansys_vertical_flap_fsi import build_ansys_vertical_flap_generic_problem
-from simulation_core.generic_fsi_solver import (
+from simulation_core.drivers.generic_fsi_solver import (
     DiagnosticsConfig,
     FsiRunResult,
     FsiSolverConfig,

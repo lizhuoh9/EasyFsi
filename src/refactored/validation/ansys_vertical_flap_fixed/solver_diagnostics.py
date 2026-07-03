@@ -274,4 +274,4 @@ def _manifest_path(path: Path, project_root: Path) -> str:
 
 
 def metadata_json(payload: dict[str, Any]) -> np.ndarray:
-    return np.array(json.dumps(payload, sort_keys=True), dtype=np.unicode_)
+    return np.array(json.dumps(payload, sort_keys=True), dtype=np.str_)

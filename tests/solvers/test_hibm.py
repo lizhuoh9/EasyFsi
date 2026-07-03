@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import inspect
@@ -28,24 +28,60 @@ from simulation_core import (
     assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
     hibm_mpm_sharp_step_summary,
 )
-from simulation_core.hibm import (
+from simulation_core.coupling.hibm import (
     build_hibm_ib_node_boundary_conditions,
     classify_hibm_near_boundary_nodes,
     compute_hibm_surface_tractions,
 )
-from simulation_core.hibm_mpm import (
+from simulation_core.coupling.hibm_mpm import (
     HibmMpmExternalForceClearReport,
     HibmMpmMpmForceScatterReport,
     HibmMpmPressureNeumannMatrixReport,
     hibm_mpm_external_force_fresh_for_solid_step,
 )
-from simulation_core.pressure_interface import PRESSURE_INTERFACE_COUPLING_SLOT_COUNT
+from simulation_core.coupling.hibm_mpm.core import (
+    _select_hibm_pressure_projection_solver,
+    hibm_mpm_pressure_disconnected_region_report,
+)
+from simulation_core.coupling.pressure_interface import PRESSURE_INTERFACE_COUPLING_SLOT_COUNT
 
 
 HIBM_MPM_CORE_SOURCE = Path("simulation_core/coupling/hibm_mpm/core.py")
+HIBM_MPM_REPORTS_SOURCE = Path("simulation_core/coupling/hibm_mpm/reports.py")
 
 
 class HibmMpmSurfaceMarkerTests(unittest.TestCase):
+    def test_pressure_disconnected_report_skips_grid_download_when_count_is_zero(
+        self,
+    ) -> None:
+        class _NoDownloadField:
+            def to_numpy(self):
+                raise AssertionError("zero-unreached report should not download grids")
+
+        fluid = SimpleNamespace(
+            obstacle=_NoDownloadField(),
+            hibm_pressure_outlet_reachable=_NoDownloadField(),
+            hibm_pressure_reachability_barrier=_NoDownloadField(),
+            velocity_dirichlet_boundary_active=_NoDownloadField(),
+            velocity_dirichlet_boundary_marker_region_id=_NoDownloadField(),
+            last_hibm_pressure_unreached_cell_count=0,
+            # The gate checks the raw (non-Dirichlet-excluded) unreached
+            # count, since that matches the population this report itself
+            # locates via the host `unreached` mask below.
+            last_hibm_pressure_unreached_raw_cell_count=0,
+            last_hibm_pressure_unreached_component_count=0,
+            last_hibm_pressure_component_labels_converged=True,
+        )
+
+        report = hibm_mpm_pressure_disconnected_region_report(
+            fluid,
+            primary_region_id=7,
+            secondary_region_id=8,
+        )
+
+        self.assertEqual(report.cell_count, 0)
+        self.assertEqual(report.component_count, 0)
+
     def test_pressure_sampling_accumulates_pressure_in_f64(self) -> None:
         source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
 
@@ -93,11 +129,161 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         self.assertIn("_face_mean_pressure_pa", face_source)
         self.assertIn('"pressure_jump_pa"', face_source)
 
-    def test_pressure_neumann_rows_force_fv_multigrid_to_fv_cg(self) -> None:
+    def test_stress_sample_marker_diagnostics_are_opt_in(self) -> None:
+        source = inspect.getsource(
+            HibmMpmSurfaceMarkers.sample_fluid_stress_to_marker_tractions
+        )
+
+        self.assertIn("include_marker_diagnostics: bool = False", source)
+        self.assertIn("if include_marker_diagnostics", source)
+        self.assertNotIn("marker_diagnostics=self.stress_marker_diagnostics()", source)
+
+    def test_legacy_viscous_marker_kernels_are_removed(self) -> None:
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertNotIn("def _add_viscous_marker_tractions_kernel", source)
+        self.assertNotIn("def _add_split_viscous_marker_tractions_kernel", source)
+
+    def test_next_pressure_neumann_gradient_uses_substep_dt(self) -> None:
         source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn(
-            'effective_pressure_solver in {"jacobi", "compact_jacobi", "fv_multigrid"}',
+            "post_solid_pressure_neumann_dt = pressure_neumann_dt / float(",
+            source,
+        )
+        self.assertIn("dt_s=post_solid_pressure_neumann_dt", source)
+
+    def test_pressure_neumann_gradient_dead_limiter_schema_removed(self) -> None:
+        core_source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
+        reports_source = HIBM_MPM_REPORTS_SOURCE.read_text(encoding="utf-8")
+
+        self.assertNotIn("gradient_limited_count", core_source)
+        self.assertNotIn("limited_gradient_count", reports_source)
+
+    def test_post_solid_step_skips_overwritten_reachability_floods(self) -> None:
+        source = inspect.getsource(advance_hibm_mpm_sharp_mpm_step)
+
+        self.assertIn(
+            "if int(next_solid_band_nonprojectable_cell_count) <= 0:",
+            source,
+        )
+        band_loop = source[
+            source.index("for _next_band_pass in range(8):") :
+            source.index("use_next_air_backed_reachability_barrier =")
+        ]
+        self.assertNotIn(
+            "mark_hibm_pressure_outlet_disconnected_nonprojectable_cells",
+            band_loop,
+        )
+        refresh_window = source[
+            source.index("reachability_needs_normal_refresh =") :
+            source.index("next_projection_overflow_cell_count_before")
+        ]
+        self.assertIn("bool(use_next_air_backed_reachability_barrier)", refresh_window)
+        self.assertIn("int(next_air_backed_cell_count) > 0", refresh_window)
+        self.assertIn(
+            "> row_cloud_orphan_cell_count_before_air_seed",
+            refresh_window,
+        )
+
+    def test_post_solid_step_reuses_ib_classification_when_marker_geometry_static(
+        self,
+    ) -> None:
+        source = inspect.getsource(advance_hibm_mpm_sharp_mpm_step)
+
+        self.assertIn("marker_geometry_changed = (", source)
+        self.assertIn("feedback_report.max_marker_displacement_m", source)
+        self.assertIn("feedback_report.max_marker_normal_change", source)
+        second_search = source[
+            source.index("marker_geometry_changed = (") :
+            source.index("next_pressure_neumann_gradient_report = None")
+        ]
+        self.assertIn("if marker_geometry_changed:", second_search)
+        self.assertIn("ib_search.search_and_classify_grid_fields", second_search)
+        self.assertIn("next_ib_report = load_report.ib_node_search", second_search)
+
+    def test_two_sided_stress_nearest_cell_uses_centered_rounding(self) -> None:
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "i_near = ti.min(ti.max(ti.floor(grid_coordinate.x + 0.5, ti.i32), 0), nx - 1)",
+            source,
+        )
+        self.assertIn(
+            "j_near = ti.min(ti.max(ti.floor(grid_coordinate.y + 0.5, ti.i32), 0), ny - 1)",
+            source,
+        )
+        self.assertIn(
+            "k_near = ti.min(ti.max(ti.floor(grid_coordinate.z + 0.5, ti.i32), 0), nz - 1)",
+            source,
+        )
+        self.assertNotIn(
+            "i_near = ti.min(ti.max(ti.floor(grid_coordinate.x, ti.i32), 0), nx - 1)",
+            source,
+        )
+
+    def test_mirrored_closure_discards_dry_side_gradient(self) -> None:
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
+
+        mirrored_branch = source[
+            source.index("and far_pressure_side_normal_sign <= 0.5") :
+            source.index("viscous_mode = 4")
+        ]
+
+        self.assertIn("inside_pressure = far_pressure_pa", mirrored_branch)
+        self.assertIn(
+            "inside_gradient = ti.Matrix.zero(ti.f32, 3, 3)",
+            mirrored_branch,
+        )
+        self.assertIn("gradient = outside_gradient - inside_gradient", mirrored_branch)
+
+    def test_pressure_neumann_rows_force_iterative_non_cg_solvers_to_fv_cg(self) -> None:
+        source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "HIBM_PRESSURE_NEUMANN_FV_CG_REQUIRED_SOLVERS = frozenset(",
+            source,
+        )
+        for solver_name in ("jacobi", "compact_jacobi", "fv_jacobi", "fv_multigrid"):
+            self.assertIn(
+                f'"{solver_name}"',
+                source,
+            )
+        self.assertIn(
+            "pressure_solver in HIBM_PRESSURE_NEUMANN_FV_CG_REQUIRED_SOLVERS",
+            source,
+        )
+
+    def test_pressure_neumann_solver_selection_forces_fv_jacobi_to_fv_cg(self) -> None:
+        self.assertEqual(
+            _select_hibm_pressure_projection_solver(
+                requested_pressure_solver="fv_jacobi",
+                active_pressure_neumann_rows=3,
+            ),
+            ("fv_cg", True, "hibm_pressure_neumann_requires_fv_solver"),
+        )
+        self.assertEqual(
+            _select_hibm_pressure_projection_solver(
+                requested_pressure_solver="fv_cg",
+                active_pressure_neumann_rows=3,
+            ),
+            ("fv_cg", False, ""),
+        )
+        self.assertEqual(
+            _select_hibm_pressure_projection_solver(
+                requested_pressure_solver="fv_jacobi",
+                active_pressure_neumann_rows=0,
+            ),
+            ("fv_jacobi", False, ""),
+        )
+
+    def test_pressure_neumann_rows_do_not_reject_adjacent_ib_velocity_faces(self) -> None:
+        source = inspect.getsource(
+            HibmMpmIbBoundaryConditions._assemble_pressure_neumann_matrix_rows_kernel
+        )
+
+        self.assertNotIn(
+            "_pressure_neumann_cell_touches_velocity_dirichlet_projection_face",
             source,
         )
 
@@ -338,6 +524,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         self.assertEqual(report.primary_stress_invalid_marker_count, 1)
         self.assertEqual(report.secondary_stress_valid_marker_count, 1)
         self.assertEqual(report.secondary_stress_invalid_marker_count, 0)
+        self.assertAlmostEqual(report.action_reaction_residual_n, 4.0)
 
     def test_marker_loader_rejects_invalid_geometry(self) -> None:
         markers = HibmMpmSurfaceMarkers(marker_capacity=1)
@@ -911,7 +1098,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
 
         self.assertEqual(report.active_marker_count, 1)
         self.assertEqual(report.invalid_marker_count, 0)
-        self.assertEqual(report.active_particle_count, 1)
+        self.assertEqual(report.active_pair_count, 1)
         self.assertEqual(solid.external_force_n[0], (1.0, -2.0, 3.0))
         self.assertEqual(report.total_marker_force_n, (1.0, -2.0, 3.0))
         self.assertEqual(report.total_mpm_external_force_n, (1.0, -2.0, 3.0))
@@ -950,7 +1137,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         )
 
         self.assertEqual(report.active_marker_count, 1)
-        self.assertEqual(report.active_particle_count, 2)
+        self.assertEqual(report.active_pair_count, 2)
         self.assertAlmostEqual(solid.external_force_n[0][2], 2.0, delta=1.0e-5)
         self.assertAlmostEqual(solid.external_force_n[1][2], 2.0, delta=1.0e-5)
         self.assertAlmostEqual(report.total_mpm_external_force_n[2], 4.0, delta=1.0e-5)
@@ -1087,6 +1274,50 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         self.assertEqual(markers.marker_normal(0), (0.0, 1.0, 0.0))
         self.assertAlmostEqual(float(markers.A_gamma_m2[0]), 0.75, delta=1.0e-6)
         self.assertAlmostEqual(report.max_marker_area_change_m2, 0.5, delta=1.0e-6)
+        self.assertGreater(report.max_marker_normal_change, 0.0)
+
+    def test_surface_feedback_can_preserve_marker_area_for_volume_particle_proxy(
+        self,
+    ) -> None:
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.5, 0.5, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(0.25,),
+            region_ids=(303,),
+        )
+        solid = NeoHookeanMpmState(
+            particle_capacity=1,
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            grid_nodes=(4, 4, 4),
+        )
+        solid.initialize_box(
+            particle_counts=(1, 1, 1),
+            box_min_m=(0.45, 0.45, 0.45),
+            box_max_m=(0.55, 0.55, 0.55),
+            density_kgm3=1000.0,
+        )
+        solid.surface_normal[0] = (0.0, 1.0, 0.0)
+        solid.area_weight_m2[0] = 0.75
+
+        report = markers.update_surface_feedback_from_mpm_surface_particles(
+            solid.x,
+            solid.v,
+            solid.surface_normal,
+            solid.area_weight_m2,
+            particle_count=solid.particle_count,
+            support_radius_m=0.5,
+            dt_s=0.1,
+            preserve_marker_area=True,
+        )
+
+        self.assertEqual(report.updated_marker_count, 1)
+        self.assertEqual(report.geometry_updated_marker_count, 1)
+        self.assertEqual(markers.marker_normal(0), (0.0, 1.0, 0.0))
+        self.assertAlmostEqual(float(markers.A_gamma_m2[0]), 0.25, delta=1.0e-6)
+        self.assertAlmostEqual(report.max_marker_area_change_m2, 0.0, delta=1.0e-9)
         self.assertGreater(report.max_marker_normal_change, 0.0)
 
     def test_surface_feedback_advances_marker_by_velocity_not_particle_centroid(
@@ -1617,6 +1848,85 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             42.0,
         )
 
+    def test_velocity_dirichlet_region_stamp_is_deterministic_on_anchor_conflict(
+        self,
+    ) -> None:
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(3, 3, 3),
+            marker_capacity=2,
+        )
+        velocity_dirichlet_active = ti.field(dtype=ti.i32, shape=(3, 3, 3))
+        marker_region_id_out = ti.field(dtype=ti.i32, shape=(3, 3, 3))
+        nearest_marker = ti.field(dtype=ti.i32, shape=(3, 3, 3))
+        node_anchor_cell = ti.Vector.field(3, dtype=ti.i32, shape=(3, 3, 3))
+        marker_region_id = ti.field(dtype=ti.i32, shape=2)
+
+        boundary.active_ib_node.fill(0)
+        velocity_dirichlet_active.fill(0)
+        marker_region_id_out.fill(42)
+        nearest_marker.fill(-1)
+        node_anchor_cell.fill((-1, -1, -1))
+        marker_region_id[0] = 7
+        marker_region_id[1] = 8
+
+        boundary.active_ib_node[0, 0, 0] = 1
+        boundary.active_ib_node[0, 0, 1] = 1
+        nearest_marker[0, 0, 0] = 0
+        nearest_marker[0, 0, 1] = 1
+        node_anchor_cell[0, 0, 0] = (1, 1, 1)
+        node_anchor_cell[0, 0, 1] = (1, 1, 1)
+        velocity_dirichlet_active[0, 0, 0] = 1
+        velocity_dirichlet_active[0, 0, 1] = 1
+        velocity_dirichlet_active[1, 1, 1] = 1
+        velocity_dirichlet_active[2, 2, 2] = 1
+
+        boundary._stamp_velocity_dirichlet_marker_regions_kernel(
+            velocity_dirichlet_active,
+            marker_region_id_out,
+            nearest_marker,
+            node_anchor_cell,
+            marker_region_id,
+            2,
+        )
+
+        self.assertEqual(int(marker_region_id_out[0, 0, 0]), 7)
+        self.assertEqual(int(marker_region_id_out[0, 0, 1]), 8)
+        self.assertEqual(int(marker_region_id_out[1, 1, 1]), -1)
+        self.assertEqual(int(marker_region_id_out[2, 2, 2]), 42)
+
+    def test_velocity_dirichlet_region_counts_stay_device_side(self) -> None:
+        source = inspect.getsource(
+            HibmMpmIbBoundaryConditions._velocity_dirichlet_region_row_counts
+        )
+        self.assertNotIn(".to_numpy()", source)
+
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(2, 2, 2),
+            marker_capacity=1,
+        )
+        velocity_dirichlet_active = ti.field(dtype=ti.i32, shape=(2, 2, 2))
+        marker_region_id = ti.field(dtype=ti.i32, shape=(2, 2, 2))
+        velocity_dirichlet_active.fill(0)
+        marker_region_id.fill(-1)
+
+        velocity_dirichlet_active[0, 0, 0] = 1
+        velocity_dirichlet_active[0, 0, 1] = 1
+        velocity_dirichlet_active[0, 1, 0] = 1
+        velocity_dirichlet_active[1, 0, 0] = 1
+        marker_region_id[0, 0, 0] = 7
+        marker_region_id[0, 0, 1] = 8
+        marker_region_id[0, 1, 0] = 9
+
+        self.assertEqual(
+            boundary._velocity_dirichlet_region_row_counts(
+                velocity_dirichlet_active,
+                marker_region_id,
+                primary_region_id=7,
+                secondary_region_id=8,
+            ),
+            (1, 1, 1, 1),
+        )
+
     def test_triangle_projection_interpolates_curved_surface_boundary_targets(
         self,
     ) -> None:
@@ -1851,9 +2161,12 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
         )
 
         self.assertEqual(report.active_marker_count, 1)
-        self.assertEqual(report.limited_gradient_count, 0)
+        # C2g/Z2: max_raw_abs_gradient_pa_per_m was removed - it was
+        # written from the exact same ti.abs(normal_gradient) expression
+        # as max_abs_gradient_pa_per_m with no limiter differentiating
+        # them, so the two fields were provably identical.
         self.assertAlmostEqual(
-            report.max_raw_abs_gradient_pa_per_m,
+            report.max_abs_gradient_pa_per_m,
             2.0e7,
             delta=2.0e3,
         )
@@ -1967,6 +2280,70 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
         self.assertLess(fluid.cg_z[2, 2, 2], 0.0)
         self.assertGreater(fluid.cg_z[2, 2, 3], 0.0)
 
+    def test_pressure_neumann_zero_area_rows_do_not_claim_owner_slots(self) -> None:
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(0.0,),
+            region_ids=(7,),
+        )
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(4, 4, 4),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=1,
+        )
+        search.search_and_classify(
+            markers,
+            search_radius_m=0.13,
+            interior_probe_distance_m=0.125,
+        )
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(4, 4, 4),
+            marker_capacity=1,
+        )
+        boundary.build_from_search(
+            search,
+            markers,
+            marker_pressure_neumann_gradient_pa_per_m=(25.0,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+
+        report = boundary.assemble_pressure_neumann_matrix_rows(
+            fluid.pressure_interface_matrix_diagonal,
+            fluid.pressure_interface_matrix_rhs,
+            fluid.pressure_interface_coupling_active,
+            fluid.pressure_interface_coupling_neighbor,
+            fluid.pressure_interface_coupling_coefficient,
+            fluid.obstacle,
+            fluid.velocity_dirichlet_boundary_active,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            search,
+            markers,
+            cell_face_x_m=fluid.cell_face_x_m,
+            cell_face_y_m=fluid.cell_face_y_m,
+            cell_face_z_m=fluid.cell_face_z_m,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            grid_nodes=fluid.grid.grid_nodes,
+            velocity_dirichlet_marker_region_id=(
+                fluid.velocity_dirichlet_boundary_marker_region_id
+            ),
+            marker_region_id=markers.region_id,
+        )
+
+        self.assertEqual(report.active_pressure_neumann_rows, 0)
+        self.assertEqual(report.invalid_nonpositive_volume_row_count, 1)
+        self.assertEqual(int(fluid.pressure_interface_coupling_active[2, 2, 2]), 0)
+
     def test_pressure_neumann_rowlist_compacts_duplicate_owner_neighbor_pairs(
         self,
     ) -> None:
@@ -2068,7 +2445,39 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             delta=1.0e-5,
         )
 
-    def test_pressure_neumann_matrix_rejects_row_adjacent_to_velocity_dirichlet_face(
+    def test_pressure_neumann_rowlist_compaction_stays_device_side(self) -> None:
+        source = inspect.getsource(
+            HibmMpmIbBoundaryConditions._compact_pressure_interface_row_list
+        )
+
+        self.assertIn("_compact_pressure_interface_row_list_kernel", source)
+        self.assertNotIn(".to_numpy(", source)
+        self.assertNotIn(".from_numpy(", source)
+    def test_pressure_neumann_rowlist_overflow_reports_materialized_capacity(
+        self,
+    ) -> None:
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(4, 4, 4),
+            marker_capacity=1,
+        )
+        row_count = ti.field(dtype=ti.i32, shape=())
+        owner = ti.Vector.field(3, dtype=ti.i32, shape=2)
+        neighbor = ti.Vector.field(3, dtype=ti.i32, shape=2)
+        transmissibility = ti.field(dtype=ti.f32, shape=2)
+        row_count[None] = 3
+
+        compacted_count = boundary._compact_pressure_interface_row_list(
+            row_count,
+            owner,
+            neighbor,
+            transmissibility,
+            pressure_interface_row_capacity=2,
+        )
+
+        self.assertEqual(compacted_count, 2)
+        self.assertEqual(int(row_count[None]), 2)
+
+    def test_pressure_neumann_matrix_allows_row_adjacent_to_velocity_dirichlet_face(
         self,
     ) -> None:
         markers = HibmMpmSurfaceMarkers(marker_capacity=1)
@@ -2144,12 +2553,15 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             marker_region_id=markers.region_id,
         )
 
-        self.assertEqual(report.active_pressure_neumann_rows, 0)
+        self.assertEqual(report.active_pressure_neumann_rows, 1)
         self.assertEqual(report.invalid_reconstruction_row_count, 0)
-        self.assertEqual(report.skipped_pressure_boundary_adjacent_row_count, 1)
-        self.assertEqual(int(fluid.pressure_interface_row_count[None]), 0)
-        self.assertEqual(float(fluid.pressure_interface_matrix_diagonal[owner]), 0.0)
-        self.assertEqual(float(fluid.pressure_interface_matrix_diagonal[neighbor]), 0.0)
+        self.assertEqual(report.skipped_pressure_boundary_adjacent_row_count, 0)
+        self.assertEqual(int(fluid.pressure_interface_row_count[None]), 1)
+        self.assertGreater(float(fluid.pressure_interface_matrix_diagonal[owner]), 0.0)
+        self.assertGreater(
+            float(fluid.pressure_interface_matrix_diagonal[neighbor]),
+            0.0,
+        )
 
     def test_pressure_neumann_matrix_relocates_velocity_dirichlet_owner(self) -> None:
         markers = HibmMpmSurfaceMarkers(marker_capacity=1)
@@ -2642,6 +3054,86 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
         self.assertEqual(report.skipped_obstacle_owner_row_count, 0)
         self.assertEqual(report.relocated_obstacle_owner_row_count, 1)
         self.assertEqual(int(fluid.pressure_interface_coupling_active[anchor]), 1)
+
+    def test_owner_relocation_walk_must_not_cross_thin_solid_wall(self) -> None:
+        # C2b (H1 mirror for the pressure-Neumann owner-relocation walk).
+        # 16^3 unit box, cell width 1/16 = 0.0625, centers z_c(k) =
+        # (k+0.5)/16. Marker/node at cell-center column i=j=8, boundary
+        # z = 0.5 (face between cells 7 and 8), normal +z. Node's own cell
+        # (8, 8, 8) is obstacle, so the row owner must relocate.
+        #
+        # side_index 0 walks from the node's own side (+z, start_distance
+        # = node_distance = 0.03125): cells 8..15 are ALL obstacle, so this
+        # side finds nothing.
+        #
+        # side_index 1 walks from boundary_point along -z (start_distance
+        # = 0): its first candidate (walk_step 0.03125) lands in cell 7,
+        # which is a thin BASE-solid wall - the crossing guard must latch
+        # there and side 1 must never accept anything beyond it, even
+        # though genuine (but physically unrelated, opposite-compartment)
+        # water sits in cells 0..6. Without the guard the walk would
+        # tunnel through cell 7 and claim cell 6 as the pressure row's
+        # owner.
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.53125, 0.53125, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(16, 16, 16),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=1,
+        )
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(16, 16, 16),
+            marker_capacity=1,
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(16, 16, 16), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        node = (8, 8, 8)
+        boundary.active_ib_node[node] = 1
+        boundary.pressure_neumann_normal_field[node] = (0.0, 0.0, 1.0)
+        boundary.pressure_neumann_gradient_field[node] = 25.0
+        search.nearest_marker[node] = 0
+        search.node_boundary_point_m[node] = (0.53125, 0.53125, 0.5)
+        search.node_interior_fluid_point_m[node] = (0.53125, 0.53125, 0.8)
+        obstacle = np.zeros((16, 16, 16), dtype=np.int32)
+        obstacle[:, :, 7:] = 1
+        fluid.obstacle.from_numpy(obstacle)
+
+        report = boundary.assemble_pressure_neumann_matrix_rows(
+            fluid.pressure_interface_matrix_diagonal,
+            fluid.pressure_interface_matrix_rhs,
+            fluid.pressure_interface_coupling_active,
+            fluid.pressure_interface_coupling_neighbor,
+            fluid.pressure_interface_coupling_coefficient,
+            fluid.obstacle,
+            fluid.velocity_dirichlet_boundary_active,
+            fluid.cell_width_x_m,
+            fluid.cell_width_y_m,
+            fluid.cell_width_z_m,
+            search,
+            markers,
+            cell_face_x_m=fluid.cell_face_x_m,
+            cell_face_y_m=fluid.cell_face_y_m,
+            cell_face_z_m=fluid.cell_face_z_m,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            grid_nodes=fluid.grid.grid_nodes,
+        )
+
+        self.assertEqual(report.active_pressure_neumann_rows, 0)
+        self.assertEqual(report.skipped_obstacle_owner_row_count, 1)
+        self.assertEqual(report.relocated_obstacle_owner_row_count, 0)
+        for cell in ((8, 8, 6), (8, 8, 5), (8, 8, 4), (8, 8, 3), (8, 8, 2)):
+            self.assertEqual(int(fluid.pressure_interface_coupling_active[cell]), 0)
 
     def test_pressure_neumann_duplicate_owner_rows_use_distinct_coupling_slots(
         self,
@@ -3837,6 +4329,7 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
         report = boundary.assemble_velocity_dirichlet_boundary_rows(
             fluid.velocity_dirichlet_boundary_active,
             fluid.velocity_dirichlet_boundary_value_mps,
+            fluid.velocity_dirichlet_boundary_projection_weight,
             fluid.obstacle,
         )
         apply_report = fluid.apply_velocity_dirichlet_boundary_rows(read_report=True)
@@ -4124,9 +4617,15 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             (0.08, 0.0, 0.0),
             atol=1.0e-6,
         )
+        # C2a: relocated rows pin full-strength enforcement (weight = 1.0)
+        # regardless of the sampled reconstruction_alpha (0.6 here) - the
+        # target velocity blend above still uses the sampled alpha, but the
+        # projection weight applied by the blended solve must not decay to
+        # an inert value just because the row was relocated to a cell
+        # further from the boundary than its raw reconstruction distance.
         self.assertAlmostEqual(
             float(fluid.velocity_dirichlet_boundary_projection_weight[3, 2, 2]),
-            0.6,
+            1.0,
             delta=1.0e-6,
         )
 
@@ -4405,6 +4904,7 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
         boundary.assemble_velocity_dirichlet_boundary_rows(
             fluid.velocity_dirichlet_boundary_active,
             fluid.velocity_dirichlet_boundary_value_mps,
+            fluid.velocity_dirichlet_boundary_projection_weight,
             fluid.obstacle,
         )
 
@@ -4532,6 +5032,50 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
         self.assertLess(guard, scatter)
         self.assertIn("raise RuntimeError", source[guard:no_slip])
         self.assertIn("pressure solve failed", source[guard:no_slip])
+
+    def test_sharp_step_path_threads_velocity_inlet_zmax_into_every_projection(
+        self,
+    ) -> None:
+        for entry_point in (
+            assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
+            advance_hibm_mpm_sharp_mpm_step,
+            advance_hibm_mpm_sharp_neo_hookean_step,
+        ):
+            parameter = inspect.signature(entry_point).parameters[
+                "velocity_inlet_zmax"
+            ]
+            self.assertIs(parameter.default, False)
+
+        assemble_source = inspect.getsource(
+            assemble_hibm_mpm_sharp_fluid_to_mpm_loads
+        )
+        self.assertEqual(
+            assemble_source.count("velocity_inlet_zmax=bool(velocity_inlet_zmax),"),
+            3,
+        )
+        self.assertIn(
+            "fluid.compute_divergence(\n"
+            "        pressure_outlet_zmin=bool(pressure_outlet_zmin),\n"
+            "        velocity_inlet_zmax=bool(velocity_inlet_zmax),\n"
+            "    )",
+            assemble_source,
+        )
+
+        advance_source = inspect.getsource(advance_hibm_mpm_sharp_mpm_step)
+        self.assertEqual(
+            advance_source.count("velocity_inlet_zmax=bool(velocity_inlet_zmax),"),
+            2,
+        )
+
+        neo_hookean_source = inspect.getsource(
+            advance_hibm_mpm_sharp_neo_hookean_step
+        )
+        self.assertEqual(
+            neo_hookean_source.count(
+                "velocity_inlet_zmax=bool(velocity_inlet_zmax),"
+            ),
+            1,
+        )
 
     def test_sharp_fluid_to_mpm_load_assembly_uses_taichi_fields_not_legacy_constraints(
         self,
@@ -5302,7 +5846,7 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            report.fluid_to_mpm_loads.mpm_force_scatter.active_particle_count,
+            report.fluid_to_mpm_loads.mpm_force_scatter.active_pair_count,
             1,
         )
         self.assertAlmostEqual(
@@ -5762,8 +6306,6 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             "hibm_pressure_neumann_max_diagonal_per_m2",
             "hibm_pressure_neumann_active_marker_count",
             "hibm_pressure_neumann_max_rows_per_marker",
-            "hibm_pressure_neumann_gradient_raw_max_abs_pa_per_m",
-            "hibm_pressure_neumann_gradient_limited_count",
             "hibm_full_stress_viscous_gradient_invalid_marker_count",
             "hibm_marker_primary_count",
             "hibm_marker_secondary_count",
@@ -6085,7 +6627,7 @@ class HibmMpmSharpPathFailFastTests(unittest.TestCase):
             *,
             cleared_particle_count: int,
             active_marker_count: int,
-            active_particle_count: int,
+            active_pair_count: int,
             residual_n: float,
         ):
             return SimpleNamespace(
@@ -6096,7 +6638,7 @@ class HibmMpmSharpPathFailFastTests(unittest.TestCase):
                 mpm_force_scatter=HibmMpmMpmForceScatterReport(
                     active_marker_count=active_marker_count,
                     invalid_marker_count=0,
-                    active_particle_count=active_particle_count,
+                    active_pair_count=active_pair_count,
                     total_marker_force_n=(0.0, 0.0, 0.0),
                     total_mpm_external_force_n=(0.0, 0.0, 0.0),
                     action_reaction_residual_n=residual_n,
@@ -6108,7 +6650,7 @@ class HibmMpmSharpPathFailFastTests(unittest.TestCase):
                 load_report(
                     cleared_particle_count=1,
                     active_marker_count=1,
-                    active_particle_count=1,
+                    active_pair_count=1,
                     residual_n=0.0,
                 )
             )
@@ -6118,7 +6660,7 @@ class HibmMpmSharpPathFailFastTests(unittest.TestCase):
                 load_report(
                     cleared_particle_count=1,
                     active_marker_count=1,
-                    active_particle_count=0,
+                    active_pair_count=0,
                     residual_n=0.0,
                 )
             )
@@ -6128,7 +6670,7 @@ class HibmMpmSharpPathFailFastTests(unittest.TestCase):
                 load_report(
                     cleared_particle_count=1,
                     active_marker_count=1,
-                    active_particle_count=1,
+                    active_pair_count=1,
                     residual_n=float("nan"),
                 )
             )
@@ -7086,6 +7628,7 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         values = np.zeros((4, 4, 4, 3), dtype=np.float32)
         weights = np.zeros((4, 4, 4), dtype=np.float32)
         marker_regions = np.full((4, 4, 4), -1, dtype=np.int32)
+        owned_rows = np.zeros((4, 4, 4), dtype=np.int32)
         active[0, 0, 3] = 1
         values[0, 0, 3] = (0.0, 0.0, -10.0)
         weights[0, 0, 3] = 1.0
@@ -7093,10 +7636,16 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         values[0, 0, 2] = (9.0, 9.0, 9.0)
         weights[0, 0, 2] = 0.5
         marker_regions[0, 0, 2] = 7
+        active[0, 0, 1] = 1
+        values[0, 0, 1] = (3.0, 3.0, 3.0)
+        weights[0, 0, 1] = 0.25
+        marker_regions[0, 0, 1] = 7
+        owned_rows[0, 0, 1] = 1
         fluid.velocity_dirichlet_boundary_active.from_numpy(active)
         fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
         fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
         fluid.velocity_dirichlet_boundary_marker_region_id.from_numpy(marker_regions)
+        boundary.velocity_dirichlet_owned_row.from_numpy(owned_rows)
 
         report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
             fluid.velocity_dirichlet_boundary_active,
@@ -7131,10 +7680,14 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         np.testing.assert_allclose(values_after[0, 0, 3], (0.0, 0.0, -10.0))
         self.assertAlmostEqual(float(weights_after[0, 0, 3]), 1.0)
         self.assertEqual(int(marker_regions_after[0, 0, 3]), -1)
-        self.assertEqual(int(active_after[0, 0, 2]), 0)
-        np.testing.assert_allclose(values_after[0, 0, 2], (0.0, 0.0, 0.0))
-        self.assertAlmostEqual(float(weights_after[0, 0, 2]), 0.0)
-        self.assertEqual(int(marker_regions_after[0, 0, 2]), -1)
+        self.assertEqual(int(active_after[0, 0, 2]), 1)
+        np.testing.assert_allclose(values_after[0, 0, 2], (9.0, 9.0, 9.0))
+        self.assertAlmostEqual(float(weights_after[0, 0, 2]), 0.5)
+        self.assertEqual(int(marker_regions_after[0, 0, 2]), 7)
+        self.assertEqual(int(active_after[0, 0, 1]), 0)
+        np.testing.assert_allclose(values_after[0, 0, 1], (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(float(weights_after[0, 0, 1]), 0.0)
+        self.assertEqual(int(marker_regions_after[0, 0, 1]), -1)
 
     def test_sampling_view_lets_closure_fire_through_converted_sealed_water(
         self,
@@ -7277,7 +7830,7 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
         # bitwise-unchanged: no closure, no fill, no view.
         import inspect
 
-        import simulation_core.hibm_mpm as hibm_mpm_module
+        import simulation_core.coupling.hibm_mpm as hibm_mpm_module
 
         source = inspect.getsource(
             hibm_mpm_module.assemble_hibm_mpm_sharp_fluid_to_mpm_loads
@@ -7493,7 +8046,7 @@ class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
     def test_sharp_reports_carry_band_population_split_fields(self) -> None:
         import dataclasses
 
-        from simulation_core.hibm_mpm import (
+        from simulation_core.coupling.hibm_mpm import (
             HibmMpmSharpFluidToMpmLoadReport,
             HibmMpmSharpMpmStepReport,
         )
@@ -7580,7 +8133,7 @@ class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
     def test_pressure_disconnected_reports_carry_component_distribution(self) -> None:
         import dataclasses
 
-        from simulation_core.hibm_mpm import HibmMpmPressureDisconnectedRegionReport
+        from simulation_core.coupling.hibm_mpm import HibmMpmPressureDisconnectedRegionReport
 
         fields = {
             field.name: field
@@ -7603,7 +8156,7 @@ class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
     def test_every_band_call_site_passes_node_classification(self) -> None:
         import inspect
 
-        import simulation_core.hibm_mpm as hibm_mpm_module
+        import simulation_core.coupling.hibm_mpm as hibm_mpm_module
 
         source = inspect.getsource(hibm_mpm_module)
         fragments = source.split(
@@ -7634,7 +8187,7 @@ class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
     def test_step_summary_exposes_band_population_split_counts(self) -> None:
         import inspect
 
-        import simulation_core.hibm_mpm as hibm_mpm_module
+        import simulation_core.coupling.hibm_mpm as hibm_mpm_module
 
         source = inspect.getsource(hibm_mpm_module)
         self.assertIn('"hibm_solid_band_interior_cell_count"', source)
@@ -7798,6 +8351,7 @@ class HibmMpmTwoSidedExtendedWalkTests(unittest.TestCase):
             fluid.grid.grid_nodes,
             viscosity_pa_s=0.0,
             two_sided_pressure=True,
+            include_marker_diagnostics=True,
             **kwargs,
         )
 
@@ -7811,7 +8365,7 @@ class HibmMpmTwoSidedExtendedWalkTests(unittest.TestCase):
         #            = (0, 0, -3.0),
         # and the new counter must report exactly this one marker (it is a
         # subset of two_sided_pressure_marker_count, the family convention of
-        # far_pressure_closed_extended ⊂ far_pressure_closed).
+        # far_pressure_closed_extended 鈯?far_pressure_closed).
         markers, fluid, sampling_view = self._thin_slab_fixture(wall_inside=False)
 
         report = self._sample(
@@ -8110,6 +8664,9 @@ class HibmMpmOneSidedPressureInterfaceTests(unittest.TestCase):
         self.assertEqual(report.one_sided_pressure_marker_count, 1)
         self.assertEqual(report.one_sided_extended_marker_count, 0)
         self.assertEqual(report.far_pressure_closed_marker_count, 0)
+        summary = markers.stress_face_diagnostics(primary_region_id=8)
+        self.assertEqual(summary["one_sided_marker_count"], 1)
+        self.assertEqual(summary["one_sided_anchor_selected_marker_count"], 0)
         traction = markers.marker_traction_pa(0)
         self.assertAlmostEqual(traction[0], 0.0, delta=1.0e-4)
         self.assertAlmostEqual(traction[1], 0.0, delta=1.0e-4)
@@ -8916,17 +9473,17 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         unreached = fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
             pressure_outlet_zmin=True,
         )
-        self.assertEqual(unreached, 2)
-        self.assertEqual(fluid.last_hibm_pressure_unreached_component_raw_count, 2)
+        self.assertEqual(unreached, 1)
+        self.assertEqual(fluid.last_hibm_pressure_unreached_component_raw_count, 1)
 
         converted = fluid.convert_hibm_row_cloud_orphan_components(
             max_component_cells=1,
         )
 
-        self.assertEqual(converted, 2)
-        self.assertEqual(fluid.last_hibm_row_cloud_orphan_component_count, 2)
+        self.assertEqual(converted, 1)
+        self.assertEqual(fluid.last_hibm_row_cloud_orphan_component_count, 1)
         self.assertEqual(int(fluid.obstacle[2, 2, 3]), 1)
-        self.assertEqual(int(fluid.obstacle[2, 2, 4]), 1)
+        self.assertEqual(int(fluid.obstacle[2, 2, 4]), 0)
 
     def test_row_cloud_orphan_conversion_cleans_overflow_singletons_without_row_stamp(
         self,
@@ -9018,11 +9575,11 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
             pressure_outlet_zmin=True,
         )
 
-        self.assertEqual(unreached, 2)
-        self.assertEqual(fluid.last_hibm_pressure_unreached_component_raw_count, 2)
+        self.assertEqual(unreached, 1)
+        self.assertEqual(fluid.last_hibm_pressure_unreached_component_raw_count, 1)
         self.assertEqual(
             fluid.last_hibm_pressure_unreached_component_singleton_count,
-            2,
+            1,
         )
         fluid.last_hibm_pressure_unreached_component_overflow = True
 
@@ -9031,10 +9588,10 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
             overflow_singletons_only=True,
         )
 
-        self.assertEqual(converted, 2)
-        self.assertEqual(fluid.last_hibm_row_cloud_orphan_component_count, 2)
+        self.assertEqual(converted, 1)
+        self.assertEqual(fluid.last_hibm_row_cloud_orphan_component_count, 1)
         self.assertEqual(int(fluid.obstacle[2, 2, 3]), 1)
-        self.assertEqual(int(fluid.obstacle[2, 2, 4]), 1)
+        self.assertEqual(int(fluid.obstacle[2, 2, 4]), 0)
 
     def test_overflow_singleton_cleanup_preserves_no_slip_row_neighborhood(
         self,
@@ -9561,7 +10118,7 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         # opt-in gate, default False = the block is dead code.
         import inspect
 
-        import simulation_core.hibm_mpm as hibm_mpm_module
+        import simulation_core.coupling.hibm_mpm as hibm_mpm_module
 
         source = inspect.getsource(
             hibm_mpm_module.assemble_hibm_mpm_sharp_fluid_to_mpm_loads

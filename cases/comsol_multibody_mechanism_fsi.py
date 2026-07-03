@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from simulation_core.fsi_driver import FsiCaseSpec
+from simulation_core.drivers.fsi_driver import FsiCaseSpec
 from benchmarks.official.multibody_pair_fsi import (
     PairHingeMultibodyFsiConfig,
     run_pair_hinge_multibody_fsi_smoke,
@@ -12,7 +12,7 @@ from benchmarks.official.official_benchmark_solver import (
     OfficialBenchmarkRunSpec,
     run_official_fsi_benchmark,
 )
-from simulation_core.validation import ReferenceCurve
+from simulation_core.diagnostics.validation import ReferenceCurve
 
 
 OFFICIAL_FIGURE7_SOURCE = (

@@ -267,8 +267,6 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_pressure_neumann_gradient_available",
     "hibm_pressure_neumann_gradient_active_marker_count",
     "hibm_pressure_neumann_gradient_max_abs_pa_per_m",
-    "hibm_pressure_neumann_gradient_raw_max_abs_pa_per_m",
-    "hibm_pressure_neumann_gradient_limited_count",
     "hibm_added_mass_stability_measured",
     "hibm_semi_implicit_coupling_enabled",
     "hibm_semi_implicit_coupling_matrix_active",

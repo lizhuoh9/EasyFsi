@@ -12,20 +12,20 @@
 
 | metric | value |
 |---|---:|
-| max_u | 31.1107582 |
-| max_speed | 42.2414164 |
-| centerline_max_u | 28.7926583 |
-| mass_imbalance_rel | 0 |
-| mass_imbalance_rel_raw | 0.0227049498 |
-| mass_imbalance_rel_corrected | 0 |
-| divergence_linf | 3294.59033 |
-| divergence_l2 | 102.470282 |
-| divergence_linf_excluding_near_solid | 3294.59033 |
-| divergence_l2_excluding_near_solid | 95.3212948 |
-| poisson_residual_linf | 7.8179869e+09 |
-| poisson_residual_linf_relative | 0.000928156984 |
-| throat_max_u | 29.5289996 |
-| throat_mean_u | 27.9468856 |
+| max_u | 25.3180284 |
+| max_speed | 26.8868206 |
+| centerline_max_u | 18.5629764 |
+| mass_imbalance_rel | 5.59517159e-16 |
+| mass_imbalance_rel_raw | -0.143895068 |
+| mass_imbalance_rel_corrected | 5.59517159e-16 |
+| divergence_linf | 2584.41235 |
+| divergence_l2 | 195.312418 |
+| divergence_linf_excluding_near_solid | 2584.41235 |
+| divergence_l2_excluding_near_solid | 195.469337 |
+| poisson_residual_linf | 1.36449525e+09 |
+| poisson_residual_linf_relative | 0.000994944433 |
+| throat_max_u | 16.1719177 |
+| throat_mean_u | 9.26410701 |
 
 ## Visual Outputs
 
@@ -50,9 +50,9 @@
 | gate | status | reason |
 |---|---|---|
 | visual_candidate | pass | centerline jet exists |
-| mass_quality | pass | final mass imbalance rel = 0 |
-| incompressibility_quality | pass | divergence_l2=102.47; divergence_linf=3294.59; divergence_l2_excluding_near_solid=95.3213; divergence_linf_excluding_near_solid=3294.59; poisson_residual_linf=7.81799e+09; poisson_residual_linf_relative=0.000928157 |
-| overall_status | candidate_not_parity | candidate_not_parity still means no Fluent parity claim without official numeric exports |
+| mass_quality | pass | final mass imbalance rel = 5.59517e-16 |
+| incompressibility_quality | warn | divergence_l2=195.312; divergence_linf=2584.41; divergence_l2_excluding_near_solid=195.469; divergence_linf_excluding_near_solid=2584.41; poisson_residual_linf=1.3645e+09; poisson_residual_linf_relative=0.000994944 |
+| overall_status | diagnostic_only_not_parity | candidate_not_parity still means no Fluent parity claim without official numeric exports |
 
 ## Interpretation
 

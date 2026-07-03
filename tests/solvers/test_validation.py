@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import unittest
 
-from simulation_core.validation import (
+from simulation_core.diagnostics.validation import (
     ReferenceCurve,
     boundary_drive_compliance_report,
     checks_passed,

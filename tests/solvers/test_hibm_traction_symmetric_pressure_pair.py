@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -106,6 +107,19 @@ class HibmMpmTractionSymmetricPressurePairTests(unittest.TestCase):
             diagnostic["outside_probe_multiplier"],
         )
         self.assertLessEqual(diagnostic["pressure_pair_symmetry_residual_cells"], 1.0e-8)
+
+    def test_symmetric_cell_pair_has_independent_ladder_fallback_diagnostic_path(self):
+        source = Path("simulation_core/coupling/hibm_mpm/core.py").read_text(
+            encoding="utf-8"
+        )
+
+        symmetric_policy = source.index("if pressure_pair_policy_code == 1:")
+        independent_policy = source.index("elif pressure_pair_policy_code == 0:")
+        fallback_path = source.index("diagnostic_pressure_pair_fallback_used = 1")
+        selected_pair_reset = source.index("diagnostic_pressure_pair_fallback_used = 0")
+        self.assertLess(symmetric_policy, fallback_path)
+        self.assertLess(fallback_path, independent_policy)
+        self.assertLess(selected_pair_reset, fallback_path)
 
     def test_invalid_symmetric_pair_controls_fail_fast(self):
         markers, fluid = _single_marker_fixture()

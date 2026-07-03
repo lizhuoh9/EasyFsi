@@ -4,9 +4,9 @@ import math
 from dataclasses import asdict, dataclass
 
 from benchmarks.official.inlet_flow import TimeWindowedInletFlow
-from simulation_core.geometry import UvSphereResolution
-from simulation_core.mooney_shell_mpm import UvMooneyShellMpmState
-from simulation_core.runtime import TaichiRuntimeConfig
+from simulation_core.geometry_tools import UvSphereResolution
+from simulation_core.solids import UvMooneyShellMpmState
+from simulation_core.diagnostics.runtime import TaichiRuntimeConfig
 
 
 @dataclass(frozen=True)

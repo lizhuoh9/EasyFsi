@@ -34,6 +34,8 @@ from .solver_diagnostics import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_FLUID_DENSITY_KGM3 = 1000.0
+DEFAULT_FLUID_VISCOSITY_PA_S = 0.001
 
 DEFAULT_SOLVER_CONFIG = {
     "max_steps": 1200,
@@ -85,8 +87,7 @@ def run_projection_solver(
     masks = _build_masks(geometry, bc_map)
     ds, dy = infer_spacing(geometry["s"], geometry["y"])
 
-    rho = 1000.0
-    mu = 0.001
+    rho, mu = _fluid_properties(solver_config)
     nu = mu / rho
     bc_values = _bc_values(bc_map, masks)
     u, v = _initial_velocity(
@@ -376,8 +377,7 @@ def _run_solver_loop(
     dy: float,
     solver_config: dict[str, Any],
 ) -> dict[str, Any]:
-    rho = 1000.0
-    mu = 0.001
+    rho, mu = _fluid_properties(solver_config)
     nu = mu / rho
     u, v = _initial_velocity(
         geometry,
@@ -901,10 +901,8 @@ def _advance_one_step(
         u_next, flux_info = apply_outlet_flux_correction(
             u_next, masks["inlet_mask"], masks["outlet_mask"], dy
         )
-        u_next, v_next = apply_velocity_bc(u_next, v_next, masks, bc_values)
-        u_next[masks["outlet_mask"].astype(bool)] = flux_info[
-            "corrected_outlet_flux"
-        ] / max(float(np.count_nonzero(masks["outlet_mask"])) * dy, 1.0e-12)
+        u_next[masks["solid_mask"].astype(bool)] = 0.0
+        v_next[masks["solid_mask"].astype(bool)] = 0.0
         poisson_info.update(flux_info)
     return (
         np.nan_to_num(u_next, nan=0.0, posinf=0.0, neginf=0.0),
@@ -1314,6 +1312,7 @@ def _merge_solver_config(config: dict[str, Any] | None) -> dict[str, Any]:
     if config:
         solver = config.get("solver", config)
         merged.update(solver)
+        _merge_fluid_properties(merged, config)
     return merged
 
 
@@ -1322,12 +1321,58 @@ def _merge_stabilized_solver_config(config: dict[str, Any] | None) -> dict[str, 
     if config:
         solver = config.get("solver", config)
         merged.update(solver)
+        _merge_fluid_properties(merged, config)
     merged["poisson_method"] = "sor"
     merged["initialization_mode"] = str(merged.get("initialization_mode", "uniform"))
     merged["outlet_flux_correction"] = bool(
         merged.get("outlet_flux_correction", True)
     )
     return merged
+
+
+def _merge_fluid_properties(
+    merged: dict[str, Any],
+    config: dict[str, Any],
+) -> None:
+    # Ordered least-specific first; later entries override earlier ones, so the
+    # most-specific source (an explicit `fluid` block) wins over a stray flat
+    # rho/mu carried on the bare config/solver dict.
+    candidates: list[Any] = [config]
+    solver = config.get("solver")
+    if isinstance(solver, dict):
+        candidates.append(solver)
+        solver_fluid = solver.get("fluid")
+        if isinstance(solver_fluid, dict):
+            candidates.append(solver_fluid)
+    top_level_fluid = config.get("fluid")
+    if isinstance(top_level_fluid, dict):
+        candidates.append(top_level_fluid)
+
+    for source in candidates:
+        if not isinstance(source, dict):
+            continue
+        if "density_kgm3" in source:
+            merged["density_kgm3"] = float(source["density_kgm3"])
+        elif "rho" in source:
+            merged["density_kgm3"] = float(source["rho"])
+        if "viscosity_pa_s" in source:
+            merged["viscosity_pa_s"] = float(source["viscosity_pa_s"])
+        elif "mu" in source:
+            merged["viscosity_pa_s"] = float(source["mu"])
+
+
+def _fluid_properties(solver_config: dict[str, Any]) -> tuple[float, float]:
+    density = float(
+        solver_config.get("density_kgm3", DEFAULT_FLUID_DENSITY_KGM3)
+    )
+    viscosity = float(
+        solver_config.get("viscosity_pa_s", DEFAULT_FLUID_VISCOSITY_PA_S)
+    )
+    if density <= 0.0:
+        raise ValueError("density_kgm3 must be positive")
+    if viscosity < 0.0:
+        raise ValueError("viscosity_pa_s must be non-negative")
+    return density, viscosity
 
 
 def _resolve_output_root(path: str | Path) -> Path:
@@ -1392,9 +1437,8 @@ def _relax_column_flux_profile(
         if not mask.any():
             corrected[:, column] = 0.0
             continue
-        corrected[mask, column] = (
-            (1.0 - blend) * corrected[mask, column] + blend * target[column]
-        )
+        current_mean = float(np.mean(corrected[mask, column]))
+        corrected[mask, column] += blend * (float(target[column]) - current_mean)
     corrected[~fluid] = 0.0
     return corrected
 

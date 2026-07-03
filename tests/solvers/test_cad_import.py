@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from simulation_core.cad_import import (
+from simulation_core.geometry_tools.cad_import import (
     cad_provenance_report,
     parse_step_cad_summary,
 )

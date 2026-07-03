@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from simulation_core.fsi_driver import FsiCaseSpec
+from simulation_core.drivers.fsi_driver import FsiCaseSpec
 
 
 BenchmarkRunner = Callable[[Any], Mapping[str, object]]

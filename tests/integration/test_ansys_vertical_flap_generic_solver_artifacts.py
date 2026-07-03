@@ -6,7 +6,7 @@ import json
 import unittest
 from pathlib import Path
 
-from simulation_core.pressure_sample_pairs import (
+from simulation_core.coupling.pressure_sample_pairs import (
     PressureSamplePair,
     pressure_sample_pair_map_sha256,
 )

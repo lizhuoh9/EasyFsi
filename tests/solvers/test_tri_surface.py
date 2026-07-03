@@ -50,12 +50,31 @@ class TriSurfaceRegionDiagnosticsTests(unittest.TestCase):
         ):
             self.assertNotIn(token, source, msg=token)
 
+    def test_report_only_active_force_cell_count_uses_linear_hash_pack(self) -> None:
+        source = inspect.getsource(
+            TriSurfaceRegionDiagnostics._pack_report_only_active_force_cell_count
+        )
+
+        self.assertIn("report_force_cell_hash_keys", source)
+        self.assertIn("report_force_cell_hash_force_n", source)
+        self.assertNotIn("for previous in range(index)", source)
+        self.assertNotIn("for candidate in range(stored_count)", source)
+
     def test_surface_stress_diagnostics_require_explicit_viscosity(self) -> None:
         parameter = inspect.signature(
             TriSurfaceRegionDiagnostics.diagnose_from_fields
         ).parameters["viscosity_pa_s"]
 
         self.assertIs(parameter.default, inspect.Parameter.empty)
+
+    def test_pressure_matrix_terms_use_local_probe_distance_when_requested(self) -> None:
+        source = inspect.getsource(
+            TriSurfaceRegionDiagnostics._spread_pressure_interface_matrix_terms_kernel
+        )
+
+        self.assertIn("effective_probe_distance_m <= 0.0", source)
+        self.assertIn("_local_normal_probe_distance_m", source)
+        self.assertIn("sample_probe = (", source)
 
     def test_pressure_traction_and_zero_residual_on_static_triangle(self) -> None:
         runtime = TaichiRuntimeConfig(arch="cuda")

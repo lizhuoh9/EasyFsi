@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import unittest
 
-from simulation_core.pressure_sample_pairs import (
+from simulation_core.coupling.pressure_sample_pairs import (
     PressureSamplePair,
     PressureSamplePairMap,
     RuntimeAnchoredCellPairProvider,
@@ -209,7 +209,7 @@ class PressureSamplePairProviderContractTests(unittest.TestCase):
         self.assertNotEqual(first.pair_map_sha256, reversed_sha)
 
     def test_contract_is_case_agnostic(self) -> None:
-        import simulation_core.pressure_sample_pairs as pressure_sample_pairs
+        import simulation_core.coupling.pressure_sample_pairs as pressure_sample_pairs
 
         source = inspect.getsource(pressure_sample_pairs)
         for term in ("ansys", "fluent", "vertical_flap", "vertical flap"):

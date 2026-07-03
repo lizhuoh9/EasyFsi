@@ -6,7 +6,7 @@ from simulation_core.solids.mooney_shell.reports import (
     UvMooneyShellMpmReport,
 )
 from simulation_core.geometry_tools.surface_mesh import SurfaceMesh, UvSphereResolution
-from simulation_core.runtime import TaichiRuntimeConfig, init_taichi
+from simulation_core.diagnostics.runtime import TaichiRuntimeConfig, init_taichi
 
 
 def _unique_undirected_edges(faces: np.ndarray) -> np.ndarray:
@@ -136,11 +136,10 @@ class TriMooneyShellMpmState:
             regions = np.asarray(face_region_id, dtype=np.int32)
             if regions.shape != (mesh.face_count,):
                 raise ValueError("face_region_id must have shape (face_count,)")
+        primary_region_present = bool(np.any(regions == int(primary_region_id)))
+        secondary_region_present = bool(np.any(regions == int(secondary_region_id)))
         region_counts_required = (
-            bool(
-                np.any(regions == int(primary_region_id))
-                or np.any(regions == int(secondary_region_id))
-            )
+            bool(primary_region_present or secondary_region_present)
             if require_nonempty_region_counts is None
             else bool(require_nonempty_region_counts)
         )
@@ -159,6 +158,11 @@ class TriMooneyShellMpmState:
         self.fixed_region_id = int(fixed_region_id)
         self.out_of_bounds_particle_tolerance = int(out_of_bounds_particle_tolerance)
         self.require_nonempty_region_counts = region_counts_required
+        self.require_nonempty_primary_region_count = (
+            primary_region_present or not secondary_region_present
+            if require_nonempty_region_counts is None
+            else region_counts_required
+        )
         self.primary_thickness_m = float(thickness_m if primary_thickness_m is None else primary_thickness_m)
         self.secondary_thickness_m = float(thickness_m if secondary_thickness_m is None else secondary_thickness_m)
         self.grid_nodes = tuple(int(value) for value in grid_nodes)
@@ -184,10 +188,13 @@ class TriMooneyShellMpmState:
         self.external_force_n = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_count)
         self.vertex_region_id = ti.field(dtype=ti.i32, shape=self.particle_count)
         self.fixed_particle = ti.field(dtype=ti.i32, shape=self.particle_count)
-        self.rest_center_m = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.face_indices = ti.Vector.field(3, dtype=ti.i32, shape=self.face_count)
         self.face_region_id = ti.field(dtype=ti.i32, shape=self.face_count)
         self.edge_indices = ti.Vector.field(2, dtype=ti.i32, shape=max(self.edge_count, 1))
+        self.face_rest_area_m2 = ti.field(dtype=ti.f32, shape=self.face_count)
+        self.face_rest_normal = ti.Vector.field(3, dtype=ti.f32, shape=self.face_count)
+        self.face_rest_dm_inv = ti.Vector.field(3, dtype=ti.f32, shape=self.face_count)
+        self.face_rest_valid = ti.field(dtype=ti.i32, shape=self.face_count)
 
         self.grid_mass_kg = ti.field(dtype=ti.f32, shape=self.grid_nodes)
         self.grid_velocity_mps = ti.Vector.field(3, dtype=ti.f32, shape=self.grid_nodes)
@@ -226,8 +233,6 @@ class TriMooneyShellMpmState:
         self.report_host_snapshot = ti.field(dtype=ti.f64, shape=37)
         self.primary_area_m2 = ti.field(dtype=ti.f32, shape=())
         self.secondary_area_m2 = ti.field(dtype=ti.f32, shape=())
-        self.primary_mass_kg = ti.field(dtype=ti.f32, shape=())
-        self.secondary_mass_kg = ti.field(dtype=ti.f32, shape=())
         self.last_report_host_reads = 0
 
         self.x.from_numpy(vertices)
@@ -246,21 +251,42 @@ class TriMooneyShellMpmState:
             float(self.primary_thickness_m),
             float(self.secondary_thickness_m),
         )
-        self._update_rest_center()
+        self._init_face_rest_geometry_kernel()
 
     @ti.kernel
-    def _update_rest_center_kernel(self):
-        self.rest_center_m[None] = ti.Vector([0.0, 0.0, 0.0])
-        for p in range(self.particle_count):
-            self._atomic_add_vector(self.rest_center_m, self.rest_x[p])
-
-    @ti.kernel
-    def _normalize_rest_center_kernel(self):
-        self.rest_center_m[None] = self.rest_center_m[None] / ti.cast(self.particle_count, ti.f32)
-
-    def _update_rest_center(self) -> None:
-        self._update_rest_center_kernel()
-        self._normalize_rest_center_kernel()
+    def _init_face_rest_geometry_kernel(self):
+        for f in range(self.face_count):
+            face = self.face_indices[f]
+            rest_a = self.rest_x[face.x]
+            rest_b = self.rest_x[face.y]
+            rest_c = self.rest_x[face.z]
+            rest_area_vec = (rest_b - rest_a).cross(rest_c - rest_a)
+            rest_area_vec_norm = rest_area_vec.norm()
+            rest_area_m2 = 0.5 * rest_area_vec_norm
+            valid = 0
+            rest_normal = ti.Vector([0.0, 0.0, 0.0])
+            inv00 = 0.0
+            inv01 = 0.0
+            inv11 = 0.0
+            if rest_area_m2 > 1.0e-12 and rest_area_vec_norm > 1.0e-12:
+                rest_normal = rest_area_vec / rest_area_vec_norm
+                rest_edge0 = rest_b - rest_a
+                rest_edge0_len = rest_edge0.norm()
+                if rest_edge0_len > 1.0e-12:
+                    rest_t0 = rest_edge0 / rest_edge0_len
+                    rest_t1 = rest_normal.cross(rest_t0)
+                    rest_ac = rest_c - rest_a
+                    rest_xc = rest_ac.dot(rest_t0)
+                    rest_yc = rest_ac.dot(rest_t1)
+                    if ti.abs(rest_yc) > 1.0e-12:
+                        valid = 1
+                        inv00 = 1.0 / rest_edge0_len
+                        inv01 = -rest_xc / (rest_edge0_len * rest_yc)
+                        inv11 = 1.0 / rest_yc
+            self.face_rest_area_m2[f] = rest_area_m2
+            self.face_rest_normal[f] = rest_normal
+            self.face_rest_dm_inv[f] = ti.Vector([inv00, inv01, inv11])
+            self.face_rest_valid[f] = valid
 
     @ti.func
     def _clear_reports(self):
@@ -486,8 +512,6 @@ class TriMooneyShellMpmState:
     ):
         self.primary_area_m2[None] = 0.0
         self.secondary_area_m2[None] = 0.0
-        self.primary_mass_kg[None] = 0.0
-        self.secondary_mass_kg[None] = 0.0
         for p in range(self.particle_count):
             self.v[p] = ti.Vector([0.0, 0.0, 0.0])
             self.u[p] = ti.Vector([0.0, 0.0, 0.0])
@@ -522,17 +546,14 @@ class TriMooneyShellMpmState:
             rest_b = self.rest_x[face.y]
             rest_c = self.rest_x[face.z]
             area = 0.5 * (rest_b - rest_a).cross(rest_c - rest_a).norm()
-            mass = density_kgm3 * local_thickness * area
             if fixed_region_id >= 0 and region == fixed_region_id:
                 self.fixed_particle[face.x] = 1
                 self.fixed_particle[face.y] = 1
                 self.fixed_particle[face.z] = 1
             if region == primary_region_id:
                 ti.atomic_add(self.primary_area_m2[None], area)
-                ti.atomic_add(self.primary_mass_kg[None], mass)
             elif region == secondary_region_id:
                 ti.atomic_add(self.secondary_area_m2[None], area)
-                ti.atomic_add(self.secondary_mass_kg[None], mass)
         self._update_particle_surface_normals()
 
     @ti.func
@@ -556,83 +577,71 @@ class TriMooneyShellMpmState:
         return limited
 
     @ti.func
-    def _accumulate_mooney_face(self, ia, ib, ic, pressure_pa, thickness_m):
-        rest_a = self.rest_x[ia]
-        rest_b = self.rest_x[ib]
-        rest_c = self.rest_x[ic]
+    def _accumulate_mooney_face(self, f, ia, ib, ic, pressure_pa, thickness_m):
         a = self.x[ia]
         b = self.x[ib]
         c = self.x[ic]
-        rest_area_vec = (rest_b - rest_a).cross(rest_c - rest_a)
         area_vec = (b - a).cross(c - a)
-        rest_area_m2 = 0.5 * rest_area_vec.norm()
-        rest_area_vec_norm = rest_area_vec.norm()
         area_vec_norm = area_vec.norm()
         area_m2 = 0.5 * area_vec_norm
-        if rest_area_m2 > 1.0e-12 and rest_area_vec_norm > 1.0e-12:
-            rest_normal = rest_area_vec / rest_area_vec_norm
-            rest_edge0 = rest_b - rest_a
-            rest_edge0_len = rest_edge0.norm()
-            if rest_edge0_len > 1.0e-12:
-                rest_t0 = rest_edge0 / rest_edge0_len
-                rest_t1 = rest_normal.cross(rest_t0)
-                rest_ac = rest_c - rest_a
-                rest_xc = rest_ac.dot(rest_t0)
-                rest_yc = rest_ac.dot(rest_t1)
-                if ti.abs(rest_yc) > 1.0e-12:
-                    inv00 = 1.0 / rest_edge0_len
-                    inv01 = -rest_xc / (rest_edge0_len * rest_yc)
-                    inv11 = 1.0 / rest_yc
-                    edge_current0 = b - a
-                    edge_current1 = c - a
-                    f0 = edge_current0 * inv00
-                    f1 = edge_current0 * inv01 + edge_current1 * inv11
-                    c00 = f0.dot(f0)
-                    c01 = f0.dot(f1)
-                    c11 = f1.dot(f1)
-                    c_cap = 1.0e6
-                    c00 = ti.min(c00, c_cap)
-                    c01 = ti.min(ti.max(c01, -c_cap), c_cap)
-                    c11 = ti.min(c11, c_cap)
-                    det_c = ti.max(c00 * c11 - c01 * c01, 1.0e-6)
-                    inv_det_c = 1.0 / det_c
-                    inv_c00 = c11 * inv_det_c
-                    inv_c01 = -c01 * inv_det_c
-                    inv_c11 = c00 * inv_det_c
-                    trace_c = c00 + c11
-                    s00 = self.c1_pa * (1.0 - inv_c00 * inv_det_c) + self.c2_pa * (
-                        det_c * inv_c00 + inv_det_c - trace_c * inv_det_c * inv_c00
-                    )
-                    s01 = self.c1_pa * (-inv_c01 * inv_det_c) + self.c2_pa * (
-                        det_c * inv_c01 - trace_c * inv_det_c * inv_c01
-                    )
-                    s11 = self.c1_pa * (1.0 - inv_c11 * inv_det_c) + self.c2_pa * (
-                        det_c * inv_c11 + inv_det_c - trace_c * inv_det_c * inv_c11
-                    )
-                    p0 = self.membrane_force_scale * 2.0 * (f0 * s00 + f1 * s01)
-                    p1 = self.membrane_force_scale * 2.0 * (f0 * s01 + f1 * s11)
-                    rest_volume_m3 = thickness_m * rest_area_m2
-                    grad_edge0 = rest_volume_m3 * (p0 * inv00 + p1 * inv01)
-                    grad_edge1 = rest_volume_m3 * (p1 * inv11)
-                    force_cap_n = (
-                        self.membrane_force_scale
-                        * (self.c1_pa + self.c2_pa)
-                        * thickness_m
-                        * ti.sqrt(rest_area_m2)
-                        * 100.0
-                    )
-                    self._atomic_add_particle_force(
-                        ia,
-                        self._limit_vector_norm(grad_edge0 + grad_edge1, force_cap_n),
-                    )
-                    self._atomic_add_particle_force(
-                        ib,
-                        self._limit_vector_norm(-grad_edge0, force_cap_n),
-                    )
-                    self._atomic_add_particle_force(
-                        ic,
-                        self._limit_vector_norm(-grad_edge1, force_cap_n),
-                    )
+        rest_area_m2 = self.face_rest_area_m2[f]
+        rest_normal = self.face_rest_normal[f]
+        if rest_area_m2 > 1.0e-12:
+            if self.face_rest_valid[f] != 0:
+                dm_inv = self.face_rest_dm_inv[f]
+                inv00 = dm_inv.x
+                inv01 = dm_inv.y
+                inv11 = dm_inv.z
+                edge_current0 = b - a
+                edge_current1 = c - a
+                f0 = edge_current0 * inv00
+                f1 = edge_current0 * inv01 + edge_current1 * inv11
+                c00 = f0.dot(f0)
+                c01 = f0.dot(f1)
+                c11 = f1.dot(f1)
+                c_cap = 1.0e6
+                c00 = ti.min(c00, c_cap)
+                c01 = ti.min(ti.max(c01, -c_cap), c_cap)
+                c11 = ti.min(c11, c_cap)
+                det_c = ti.max(c00 * c11 - c01 * c01, 1.0e-6)
+                inv_det_c = 1.0 / det_c
+                inv_c00 = c11 * inv_det_c
+                inv_c01 = -c01 * inv_det_c
+                inv_c11 = c00 * inv_det_c
+                trace_c = c00 + c11
+                s00 = self.c1_pa * (1.0 - inv_c00 * inv_det_c) + self.c2_pa * (
+                    det_c * inv_c00 + inv_det_c - trace_c * inv_det_c * inv_c00
+                )
+                s01 = self.c1_pa * (-inv_c01 * inv_det_c) + self.c2_pa * (
+                    det_c * inv_c01 - trace_c * inv_det_c * inv_c01
+                )
+                s11 = self.c1_pa * (1.0 - inv_c11 * inv_det_c) + self.c2_pa * (
+                    det_c * inv_c11 + inv_det_c - trace_c * inv_det_c * inv_c11
+                )
+                p0 = self.membrane_force_scale * 2.0 * (f0 * s00 + f1 * s01)
+                p1 = self.membrane_force_scale * 2.0 * (f0 * s01 + f1 * s11)
+                rest_volume_m3 = thickness_m * rest_area_m2
+                grad_edge0 = rest_volume_m3 * (p0 * inv00 + p1 * inv01)
+                grad_edge1 = rest_volume_m3 * (p1 * inv11)
+                force_cap_n = (
+                    self.membrane_force_scale
+                    * (self.c1_pa + self.c2_pa)
+                    * thickness_m
+                    * ti.sqrt(rest_area_m2)
+                    * 100.0
+                )
+                self._atomic_add_particle_force(
+                    ia,
+                    self._limit_vector_norm(grad_edge0 + grad_edge1, force_cap_n),
+                )
+                self._atomic_add_particle_force(
+                    ib,
+                    self._limit_vector_norm(-grad_edge0, force_cap_n),
+                )
+                self._atomic_add_particle_force(
+                    ic,
+                    self._limit_vector_norm(-grad_edge1, force_cap_n),
+                )
             normal = rest_normal
             if area_vec_norm > 1.0e-12:
                 normal = area_vec / area_vec_norm
@@ -648,7 +657,15 @@ class TriMooneyShellMpmState:
             self.external_force_n[p] = ti.Vector([0.0, 0.0, 0.0])
         for f in range(self.face_count):
             face = self.face_indices[f]
-            self._accumulate_mooney_face(face.x, face.y, face.z, pressure_pa, self.thickness_m)
+            region = self.face_region_id[f]
+            thickness_m = self.thickness_m
+            if region == self.primary_region_id:
+                thickness_m = self.primary_thickness_m
+            elif region == self.secondary_region_id:
+                thickness_m = self.secondary_thickness_m
+            elif self.fixed_region_id >= 0 and region == self.fixed_region_id:
+                thickness_m = self.primary_thickness_m
+            self._accumulate_mooney_face(f, face.x, face.y, face.z, pressure_pa, thickness_m)
         for e in range(self.edge_count):
             edge = self.edge_indices[e]
             self._accumulate_edge_strain_stat(edge.x, edge.y)
@@ -678,16 +695,13 @@ class TriMooneyShellMpmState:
         for f in range(self.face_count):
             face = self.face_indices[f]
             region = self.face_region_id[f]
-            rest_a = self.rest_x[face.x]
-            rest_b = self.rest_x[face.y]
-            rest_c = self.rest_x[face.z]
-            area = 0.5 * (rest_b - rest_a).cross(rest_c - rest_a).norm()
+            area = self.face_rest_area_m2[f]
             thickness_m = self.thickness_m
             if region == primary_region_id:
                 thickness_m = self.primary_thickness_m
             elif region == secondary_region_id:
                 thickness_m = self.secondary_thickness_m
-            self._accumulate_mooney_face(face.x, face.y, face.z, 0.0, thickness_m)
+            self._accumulate_mooney_face(f, face.x, face.y, face.z, 0.0, thickness_m)
             face_external_force = ti.Vector([0.0, 0.0, 0.0])
             if region == primary_area_load_region_id:
                 face_external_force += primary_area_load_npm2 * area
@@ -761,7 +775,7 @@ class TriMooneyShellMpmState:
         return out_of_bounds
 
     @ti.func
-    def _scatter_particle(self, p):
+    def _scatter_particle_with_total_force(self, p, total_force):
         coord = self._particle_grid_coordinate(p)
         base = ti.Vector(
             [
@@ -778,7 +792,6 @@ class TriMooneyShellMpmState:
             ]
         )
         momentum = self.mass_kg[p] * self.v[p]
-        total_force = self.internal_force_n[p] + self.external_force_n[p]
         if self.fixed_particle[p] == 0:
             for ox, oy, oz in ti.static(ti.ndrange(2, 2, 2)):
                 weight = (
@@ -794,6 +807,13 @@ class TriMooneyShellMpmState:
                 ti.atomic_add(self.grid_force_n[node].x, weight * total_force.x)
                 ti.atomic_add(self.grid_force_n[node].y, weight * total_force.y)
                 ti.atomic_add(self.grid_force_n[node].z, weight * total_force.z)
+
+    @ti.func
+    def _scatter_particle(self, p):
+        self._scatter_particle_with_total_force(
+            p,
+            self.internal_force_n[p] + self.external_force_n[p],
+        )
 
     @ti.func
     def _interpolate_grid_velocity(self, p):
@@ -880,19 +900,24 @@ class TriMooneyShellMpmState:
         )
 
         for p in range(self.particle_count):
-            self.external_force_n[p] += self.mass_kg[p] * body_acceleration
+            body_force_n = self.mass_kg[p] * body_acceleration
+            external_force_n = self.external_force_n[p] + body_force_n
+            self.external_force_n[p] = external_force_n
             coord = self._particle_grid_coordinate(p)
             if self._particle_grid_out_of_bounds(coord) != 0:
                 ti.atomic_add(self.report_grid_out_of_bounds_particle_count[None], 1)
             else:
-                self._scatter_particle(p)
+                self._scatter_particle_with_total_force(
+                    p,
+                    self.internal_force_n[p] + external_force_n,
+                )
             self._atomic_add_vector(self.report_internal_force_sum_n, self.internal_force_n[p])
             ti.atomic_add(
                 self.report_internal_force_square_sum_n2[None],
                 self.internal_force_n[p].dot(self.internal_force_n[p]),
             )
             particle_momentum = self.mass_kg[p] * self.v[p]
-            total_force = self.internal_force_n[p] + self.external_force_n[p]
+            total_force = self.internal_force_n[p] + external_force_n
             if self.fixed_particle[p] != 0:
                 particle_momentum = ti.Vector([0.0, 0.0, 0.0])
                 total_force = ti.Vector([0.0, 0.0, 0.0])
@@ -1054,19 +1079,25 @@ class TriMooneyShellMpmState:
         )
 
         for p in range(self.particle_count):
-            self.external_force_n[p] += self.mass_kg[p] * body_acceleration
+            body_force_n = self.mass_kg[p] * body_acceleration
+            external_force_n = self.external_force_n[p] + body_force_n
+            if preserve_existing_external_force == 0:
+                self.external_force_n[p] = external_force_n
             coord = self._particle_grid_coordinate(p)
             if self._particle_grid_out_of_bounds(coord) != 0:
                 ti.atomic_add(self.report_grid_out_of_bounds_particle_count[None], 1)
             else:
-                self._scatter_particle(p)
+                self._scatter_particle_with_total_force(
+                    p,
+                    self.internal_force_n[p] + external_force_n,
+                )
             self._atomic_add_vector(self.report_internal_force_sum_n, self.internal_force_n[p])
             ti.atomic_add(
                 self.report_internal_force_square_sum_n2[None],
                 self.internal_force_n[p].dot(self.internal_force_n[p]),
             )
             particle_momentum = self.mass_kg[p] * self.v[p]
-            total_force = self.internal_force_n[p] + self.external_force_n[p]
+            total_force = self.internal_force_n[p] + external_force_n
             if self.fixed_particle[p] != 0:
                 particle_momentum = ti.Vector([0.0, 0.0, 0.0])
                 total_force = ti.Vector([0.0, 0.0, 0.0])
@@ -1328,8 +1359,11 @@ class TriMooneyShellMpmState:
         primary_particle_count = int(counts[3])
         secondary_particle_count = int(counts[4])
         if self.require_nonempty_region_counts:
+            primary_count_for_guard = primary_particle_count
+            if not self.require_nonempty_primary_region_count:
+                primary_count_for_guard = 1
             _raise_if_required_shell_region_empty(
-                primary_count=primary_particle_count,
+                primary_count=primary_count_for_guard,
                 secondary_count=secondary_particle_count,
             )
         primary_count = max(primary_particle_count, 1)
@@ -1461,7 +1495,6 @@ class UvMooneyShellMpmState:
         self.surface_normal = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_count)
         self.internal_force_n = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_count)
         self.external_force_n = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_count)
-        self.rest_center_m = ti.Vector.field(3, dtype=ti.f32, shape=())
 
         self.grid_mass_kg = ti.field(dtype=ti.f32, shape=self.grid_nodes)
         self.grid_velocity_mps = ti.Vector.field(3, dtype=ti.f32, shape=self.grid_nodes)
@@ -1499,7 +1532,6 @@ class UvMooneyShellMpmState:
             float(thickness_m),
             float(density_kgm3),
         )
-        self._update_rest_center()
 
     @ti.func
     def _ring_index(self, ring, segment):
@@ -1560,20 +1592,6 @@ class UvMooneyShellMpmState:
         for p in range(self.particle_count):
             self.mass_kg[p] = density_kgm3 * thickness_m * self.area_weight_m2[p]
         self._update_particle_surface_normals()
-
-    @ti.kernel
-    def _update_rest_center_kernel(self):
-        self.rest_center_m[None] = ti.Vector([0.0, 0.0, 0.0])
-        for p in range(self.particle_count):
-            self._atomic_add_vector(self.rest_center_m, self.rest_x[p])
-
-    @ti.kernel
-    def _normalize_rest_center_kernel(self):
-        self.rest_center_m[None] = self.rest_center_m[None] / ti.cast(self.particle_count, ti.f32)
-
-    def _update_rest_center(self) -> None:
-        self._update_rest_center_kernel()
-        self._normalize_rest_center_kernel()
 
     @ti.func
     def _accumulate_face_area(self, ia, ib, ic):
@@ -1703,22 +1721,37 @@ class UvMooneyShellMpmState:
             )
 
     @ti.func
+    def _scalar_is_safe(self, value):
+        return value == value and ti.abs(value) < 1.0e30
+
+    @ti.func
+    def _vector_is_safe(self, value):
+        return (
+            self._scalar_is_safe(value.x)
+            and self._scalar_is_safe(value.y)
+            and self._scalar_is_safe(value.z)
+        )
+
+    @ti.func
     def _atomic_add_vector(self, field, value):
-        ti.atomic_add(field[None].x, value.x)
-        ti.atomic_add(field[None].y, value.y)
-        ti.atomic_add(field[None].z, value.z)
+        if self._vector_is_safe(value):
+            ti.atomic_add(field[None].x, value.x)
+            ti.atomic_add(field[None].y, value.y)
+            ti.atomic_add(field[None].z, value.z)
 
     @ti.func
     def _atomic_add_particle_force(self, index, value):
-        ti.atomic_add(self.internal_force_n[index].x, value.x)
-        ti.atomic_add(self.internal_force_n[index].y, value.y)
-        ti.atomic_add(self.internal_force_n[index].z, value.z)
+        if self._vector_is_safe(value):
+            ti.atomic_add(self.internal_force_n[index].x, value.x)
+            ti.atomic_add(self.internal_force_n[index].y, value.y)
+            ti.atomic_add(self.internal_force_n[index].z, value.z)
 
     @ti.func
     def _atomic_add_particle_external_force(self, index, value):
-        ti.atomic_add(self.external_force_n[index].x, value.x)
-        ti.atomic_add(self.external_force_n[index].y, value.y)
-        ti.atomic_add(self.external_force_n[index].z, value.z)
+        if self._vector_is_safe(value):
+            ti.atomic_add(self.external_force_n[index].x, value.x)
+            ti.atomic_add(self.external_force_n[index].y, value.y)
+            ti.atomic_add(self.external_force_n[index].z, value.z)
 
     @ti.func
     def _accumulate_edge_strain_stat(self, ia, ib):
@@ -1864,6 +1897,8 @@ class UvMooneyShellMpmState:
     @ti.func
     def _particle_grid_out_of_bounds(self, coord):
         out_of_bounds = 0
+        if self._vector_is_safe(coord) == 0:
+            out_of_bounds = 1
         if coord.x < 0.0 or coord.x > ti.cast(self.nx - 1, ti.f32):
             out_of_bounds = 1
         if coord.y < 0.0 or coord.y > ti.cast(self.ny - 1, ti.f32):

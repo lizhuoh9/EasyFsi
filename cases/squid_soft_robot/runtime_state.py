@@ -3,7 +3,7 @@ from collections.abc import Sequence
 import taichi as ti
 
 from simulation_core import CartesianFluidSolver, FluidDomainSpec, TaichiRuntimeConfig
-from simulation_core.runtime import init_taichi
+from simulation_core.diagnostics.runtime import init_taichi
 
 from .history import divergence_sample_report_fields
 from .setup import cartesian_grid_axis_min_spacing_m, nozzle_taper_geometry

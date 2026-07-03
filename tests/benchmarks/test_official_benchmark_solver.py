@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from simulation_core.fsi_driver import FsiCaseSpec
+from simulation_core.drivers.fsi_driver import FsiCaseSpec
 from benchmarks.official.official_benchmark_solver import (
     OfficialBenchmarkRunSpec,
     run_official_fsi_benchmark,

@@ -8,7 +8,6 @@ import taichi as ti
 from simulation_core.fluids.constants import (
     CG_PRECONDITIONER_CHOICES,
     HIBM_PRESSURE_COMPONENT_CAPACITY,
-    HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS,
     HIBM_UNREACHED_COMPONENT_SMALL_THRESHOLD_CELLS,
     PRESSURE_OUTLET_AUTO_CLEANUP_ACCEPTANCE_MARGIN,
     PRESSURE_OUTLET_AUTO_CLEANUP_MAX_PASSES,
@@ -25,11 +24,29 @@ from simulation_core.fluids.reports import (
     VelocityDirichletBoundaryReport,
 )
 from simulation_core.fluids.spec import FluidDomainSpec
-from simulation_core.pressure_interface import (
+from simulation_core.coupling.pressure_interface import (
     PRESSURE_INTERFACE_COUPLING_EXTRA_SLOTS,
     PRESSURE_INTERFACE_COUPLING_SLOT_COUNT,
 )
-from simulation_core.runtime import TaichiRuntimeConfig, init_taichi
+from simulation_core.diagnostics.runtime import TaichiRuntimeConfig, init_taichi
+
+
+PREDICTOR_ADVECTION_CFL_FAIL_FAST_LIMIT = 10.0
+PREDICTOR_BACKTRACE_OBSTACLE_MARCH_MAX_STEPS = 64
+HIBM_REACHABILITY_FLOOD_BATCH_SWEEPS = 8
+PRESSURE_OUTLET_BACKFLOW_POLICIES = {"clamp", "allow"}
+OBSTACLE_NORMAL_VELOCITY_POLICIES = {"face_clamp", "cell_zero_only"}
+PRESSURE_INTERFACE_MATRIX_FV_CG_REQUIRED_SOLVERS = frozenset(
+    (
+        "jacobi",
+        "compact_jacobi",
+        "fv_jacobi",
+        "fv_multigrid",
+    )
+)
+PRESSURE_INTERFACE_MATRIX_FV_CG_FORCE_REASON = (
+    "pressure_interface_matrix_requires_rowlist_fv_cg"
+)
 
 
 @ti.data_oriented
@@ -109,6 +126,7 @@ class CartesianFluidSolver:
         self.saved_velocity = ti.Vector.field(3, dtype=ti.f32, shape=shape)
         self.pressure = ti.field(dtype=ti.f64, shape=shape)
         self.saved_pressure = ti.field(dtype=ti.f64, shape=shape)
+        self.saved_pressure_interface_matrix_rhs = ti.field(dtype=ti.f64, shape=shape)
         self.fsi_pressure = ti.field(dtype=ti.f64, shape=shape)
         self.pressure_tmp = ti.field(dtype=ti.f64, shape=shape)
         self.pressure_accum = ti.field(dtype=ti.f64, shape=shape)
@@ -167,6 +185,38 @@ class CartesianFluidSolver:
             dtype=ti.i32,
             shape=shape,
         )
+        self.hibm_unreached_raw_component_cell_count = ti.field(
+            dtype=ti.i32,
+            shape=shape,
+        )
+        self.hibm_unreached_component_compact_raw_label = ti.field(
+            dtype=ti.i32,
+            shape=HIBM_PRESSURE_COMPONENT_CAPACITY,
+        )
+        self.hibm_unreached_component_compact_cell_count = ti.field(
+            dtype=ti.i32,
+            shape=HIBM_PRESSURE_COMPONENT_CAPACITY,
+        )
+        self.report_hibm_unreached_component_raw_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_unreached_component_largest_cell_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_unreached_component_singleton_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_unreached_component_small_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_unreached_component_small_cell_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.hibm_pressure_reachability_barrier = ti.field(
             dtype=ti.i32,
             shape=shape,
@@ -179,7 +229,6 @@ class CartesianFluidSolver:
             dtype=ti.f64,
             shape=HIBM_PRESSURE_COMPONENT_CAPACITY,
         )
-        self.cg_unreached_component_scan = ti.field(dtype=ti.i32, shape=())
         # S2-A12 declared air-backed closure regions: per-cell air tag,
         # fixed-capacity unreached-component selection mask (written by
         # the marker-side far-side seed scan), and conversion reports.
@@ -192,6 +241,39 @@ class CartesianFluidSolver:
         self.report_hibm_air_backed_components = ti.field(dtype=ti.i32, shape=())
         self.report_hibm_air_backed_cell_volume_m3 = ti.field(
             dtype=ti.f64,
+            shape=(),
+        )
+        self.hibm_row_cloud_component_cell_count = ti.field(
+            dtype=ti.i32,
+            shape=HIBM_PRESSURE_COMPONENT_CAPACITY,
+        )
+        self.hibm_row_cloud_component_touches_row = ti.field(
+            dtype=ti.i32,
+            shape=HIBM_PRESSURE_COMPONENT_CAPACITY,
+        )
+        self.hibm_row_cloud_component_touches_protected = ti.field(
+            dtype=ti.i32,
+            shape=HIBM_PRESSURE_COMPONENT_CAPACITY,
+        )
+        self.hibm_row_cloud_component_selected = ti.field(
+            dtype=ti.i32,
+            shape=HIBM_PRESSURE_COMPONENT_CAPACITY,
+        )
+        self.report_hibm_row_cloud_orphan_cells = ti.field(dtype=ti.i32, shape=())
+        self.report_hibm_row_cloud_orphan_components = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_row_cloud_raw_component_cell_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_row_cloud_raw_component_touches_row = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_hibm_row_cloud_raw_component_touches_protected = ti.field(
+            dtype=ti.i32,
             shape=(),
         )
         # R2-H1 observability: overlap between the flood-unreachable anchoring
@@ -233,8 +315,6 @@ class CartesianFluidSolver:
         self.cg_beta_numerator = ti.field(dtype=ti.f64, shape=())
         self.cg_alpha = ti.field(dtype=ti.f64, shape=())
         self.cg_beta = ti.field(dtype=ti.f64, shape=())
-        self.cg_weighted_sum = ti.field(dtype=ti.f64, shape=())
-        self.cg_free_volume = ti.field(dtype=ti.f64, shape=())
         self.cg_weighted_mean = ti.field(dtype=ti.f64, shape=())
         self.cg_breakdown_code = ti.field(dtype=ti.i32, shape=())
         self.cg_breakdown_dAd = ti.field(dtype=ti.f64, shape=())
@@ -244,8 +324,23 @@ class CartesianFluidSolver:
         self._pcg_mg_tmp = [self.cg_Ad]
         self.force = ti.Vector.field(3, dtype=ti.f32, shape=shape)
         self.obstacle = ti.field(dtype=ti.i32, shape=shape)
+        self.dynamic_obstacle_candidate = ti.field(dtype=ti.i32, shape=shape)
+        self.dynamic_obstacle_row_count = ti.field(dtype=ti.i32, shape=self.ny)
+        self.dynamic_obstacle_row_y_sum_m = ti.field(dtype=ti.f64, shape=self.ny)
+        self.dynamic_obstacle_row_z_min_m = ti.field(dtype=ti.f64, shape=self.ny)
+        self.dynamic_obstacle_row_z_max_m = ti.field(dtype=ti.f64, shape=self.ny)
+        self.report_dynamic_obstacle_cell_count = ti.field(dtype=ti.i32, shape=())
+        self.report_dynamic_obstacle_added_cell_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_dynamic_obstacle_removed_cell_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.hibm_fresh_fluid_cell = ti.field(dtype=ti.i32, shape=shape)
         self.hibm_solid_band_protection_cell = ti.field(dtype=ti.i32, shape=shape)
+        self.hibm_solid_band_candidate_cell = ti.field(dtype=ti.i32, shape=shape)
         self.hibm_no_slip_sampling_obstacle = ti.field(dtype=ti.i32, shape=shape)
         self.velocity_constraint_sum = ti.Vector.field(3, dtype=ti.f32, shape=shape)
         self.velocity_constraint_weight = ti.field(dtype=ti.f32, shape=shape)
@@ -253,6 +348,11 @@ class CartesianFluidSolver:
         self.velocity_constraint_primary_weight = ti.field(dtype=ti.f32, shape=shape)
         self.velocity_constraint_secondary_sum = ti.Vector.field(3, dtype=ti.f32, shape=shape)
         self.velocity_constraint_secondary_weight = ti.field(dtype=ti.f32, shape=shape)
+        self.marker_feedback_target_sum = ti.Vector.field(3, dtype=ti.f32, shape=shape)
+        self.marker_feedback_target_weight = ti.field(dtype=ti.f32, shape=shape)
+        self.marker_feedback_owned = ti.field(dtype=ti.i32, shape=shape)
+        self.marker_feedback_region_min = ti.field(dtype=ti.i32, shape=shape)
+        self.marker_feedback_region_max = ti.field(dtype=ti.i32, shape=shape)
         self.velocity_dirichlet_boundary_active = ti.field(dtype=ti.i32, shape=shape)
         self.velocity_dirichlet_boundary_value_mps = ti.Vector.field(
             3,
@@ -270,6 +370,11 @@ class CartesianFluidSolver:
         self.reduction_sum = ti.field(dtype=ti.f64, shape=())
         self.reduction_max = ti.field(dtype=ti.f64, shape=())
         self.reduction_count = ti.field(dtype=ti.i32, shape=())
+        self.report_flow_state_obstacle_cells = ti.field(dtype=ti.i32, shape=())
+        self.report_flow_state_fluid_cells = ti.field(dtype=ti.i32, shape=())
+        self.report_flow_state_velocity_peak_mps = ti.field(dtype=ti.f64, shape=())
+        self.report_flow_state_pressure_min_pa = ti.field(dtype=ti.f64, shape=())
+        self.report_flow_state_pressure_max_pa = ti.field(dtype=ti.f64, shape=())
         self.divergence_report_snapshot = ti.Vector.field(3, dtype=ti.f64, shape=())
         # 18 slots: 16 partition slots + 2 anchored-unreached slots; must
         # match the static slot range of _divergence_final_report_kernel.
@@ -302,6 +407,15 @@ class CartesianFluidSolver:
         self.report_velocity_constraint_momentum_delta_n_s = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_velocity_constraint_primary_momentum_delta_n_s = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_velocity_constraint_secondary_momentum_delta_n_s = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.report_marker_feedback_marker_count = ti.field(dtype=ti.i32, shape=())
+        self.report_marker_feedback_active_cell_count = ti.field(dtype=ti.i32, shape=())
+        self.report_marker_feedback_cleared_cell_count = ti.field(dtype=ti.i32, shape=())
+        self.report_marker_feedback_obstacle_cell_count = ti.field(dtype=ti.i32, shape=())
+        self.report_marker_feedback_non_obstacle_cell_count = ti.field(dtype=ti.i32, shape=())
+        self.report_marker_feedback_constraint_active_cell_count = ti.field(dtype=ti.i32, shape=())
+        self.report_marker_feedback_residual_before_max_mps = ti.field(dtype=ti.f32, shape=())
+        self.report_marker_feedback_residual_after_max_mps = ti.field(dtype=ti.f32, shape=())
+        self.report_marker_feedback_projected_residual_max_mps = ti.field(dtype=ti.f32, shape=())
         self.velocity_constraint_primary_impulse_n_s = ti.Vector.field(3, dtype=ti.f64, shape=())
         self.velocity_constraint_secondary_impulse_n_s = ti.Vector.field(3, dtype=ti.f64, shape=())
         self.report_velocity_dirichlet_boundary_cells = ti.field(dtype=ti.i32, shape=())
@@ -343,6 +457,14 @@ class CartesianFluidSolver:
         self.report_zmin_pressure_step_pre_velocity_outlet_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.report_zmin_projection_post_pressure_velocity_outlet_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.report_zmin_projection_post_boundary_velocity_outlet_flux_m3s = ti.field(dtype=ti.f32, shape=())
+        self.report_zmax_inlet_boundary_active_cells = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        self.report_zmax_inlet_boundary_obstacle_cells = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.pressure_outlet_report_snapshot = ti.Vector.field(10, dtype=ti.f32, shape=())
         self.report_pressure_interface_matrix_diagonal_integral = ti.field(dtype=ti.f64, shape=())
         self.report_pressure_interface_matrix_rhs_integral = ti.field(dtype=ti.f64, shape=())
@@ -373,6 +495,17 @@ class CartesianFluidSolver:
             shape=(),
         )
         self.report_hibm_pressure_disconnected_nonprojectable_cells = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        # Raw unreached-cell count without the velocity-Dirichlet-row
+        # exclusion applied to report_hibm_pressure_disconnected_nonprojectable_cells
+        # above. hibm_mpm_pressure_disconnected_region_report() reports a
+        # broader "any (obstacle==0 & barrier==0 & reachable==0) cell"
+        # population (it also locates cells touched by pressure-interface
+        # row stencils), so its zero-cost early-exit gate must check this
+        # raw count, not the narrower nonprojectable one.
+        self.report_hibm_pressure_disconnected_unreached_raw_cells = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -424,6 +557,9 @@ class CartesianFluidSolver:
         self._mg_velocity_dirichlet_boundary_projection_weight = [
             self.velocity_dirichlet_boundary_projection_weight
         ]
+        self._mg_velocity_dirichlet_boundary_marker_region_id = [
+            self.velocity_dirichlet_boundary_marker_region_id
+        ]
         self._mg_pressure_interface_matrix_diagonal = [
             self.pressure_interface_matrix_diagonal
         ]
@@ -443,6 +579,9 @@ class CartesianFluidSolver:
             self._mg_velocity_dirichlet_boundary_projection_weight.append(
                 ti.field(dtype=ti.f32, shape=level_shape)
             )
+            self._mg_velocity_dirichlet_boundary_marker_region_id.append(
+                ti.field(dtype=ti.i32, shape=level_shape)
+            )
             self._mg_pressure_interface_matrix_diagonal.append(
                 ti.field(dtype=ti.f32, shape=level_shape)
             )
@@ -459,7 +598,6 @@ class CartesianFluidSolver:
         self.last_cg_converged = False
         self.last_cg_breakdown = ""
         self.last_cg_host_residual_checks = 0
-        self.last_cg_mean_host_reads = 0
         self.last_cg_mean_projection_count = 0
         self.last_cg_unreached_set_mean_projection_count = 0
         self.last_cg_restart_count = 0
@@ -467,6 +605,7 @@ class CartesianFluidSolver:
         self.last_cg_restart_policy = ""
         self.last_cg_breakdown_dAd = 0.0
         self.last_hibm_pressure_unreached_cell_count = 0
+        self.last_hibm_pressure_unreached_raw_cell_count = 0
         self.last_hibm_pressure_reachability_converged = True
         self.last_hibm_pressure_reachability_sweeps = 0
         self.last_hibm_pressure_reachability_reused = False
@@ -522,7 +661,6 @@ class CartesianFluidSolver:
         self.last_project_cg_iterations_total = 0
         self.last_project_cg_iterations_max = 0
         self.last_project_cg_host_residual_checks = 0
-        self.last_project_cg_mean_host_reads = 0
         self.last_project_cg_mean_projection_count = 0
         self.last_project_cg_unreached_set_mean_projection_count = 0
         self.last_project_cg_restart_count = 0
@@ -590,6 +728,7 @@ class CartesianFluidSolver:
             self.saved_velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.pressure[i, j, k] = 0.0
             self.saved_pressure[i, j, k] = 0.0
+            self.saved_pressure_interface_matrix_rhs[i, j, k] = 0.0
             self.fsi_pressure[i, j, k] = 0.0
             self.pressure_tmp[i, j, k] = 0.0
             self.pressure_accum[i, j, k] = 0.0
@@ -628,6 +767,7 @@ class CartesianFluidSolver:
             self.bicgstab_t[i, j, k] = 0.0
             self.force[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.obstacle[i, j, k] = 0
+            self.dynamic_obstacle_candidate[i, j, k] = 0
             self.hibm_base_obstacle[i, j, k] = 0
             self.hibm_pressure_outlet_reachable[i, j, k] = 0
             self.hibm_pressure_outlet_reachable_next[i, j, k] = 0
@@ -644,6 +784,11 @@ class CartesianFluidSolver:
             self.velocity_constraint_primary_weight[i, j, k] = 0.0
             self.velocity_constraint_secondary_sum[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.velocity_constraint_secondary_weight[i, j, k] = 0.0
+            self.marker_feedback_target_sum[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            self.marker_feedback_target_weight[i, j, k] = 0.0
+            self.marker_feedback_owned[i, j, k] = 0
+            self.marker_feedback_region_min[i, j, k] = 2147483647
+            self.marker_feedback_region_max[i, j, k] = -2147483648
             self.velocity_dirichlet_boundary_active[i, j, k] = 0
             self.velocity_dirichlet_boundary_value_mps[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.velocity_dirichlet_boundary_projection_weight[i, j, k] = 0.0
@@ -662,6 +807,15 @@ class CartesianFluidSolver:
         self.report_velocity_constraint_momentum_delta_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_velocity_constraint_primary_momentum_delta_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_velocity_constraint_secondary_momentum_delta_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
+        self.report_marker_feedback_marker_count[None] = 0
+        self.report_marker_feedback_active_cell_count[None] = 0
+        self.report_marker_feedback_cleared_cell_count[None] = 0
+        self.report_marker_feedback_obstacle_cell_count[None] = 0
+        self.report_marker_feedback_non_obstacle_cell_count[None] = 0
+        self.report_marker_feedback_constraint_active_cell_count[None] = 0
+        self.report_marker_feedback_residual_before_max_mps[None] = 0.0
+        self.report_marker_feedback_residual_after_max_mps[None] = 0.0
+        self.report_marker_feedback_projected_residual_max_mps[None] = 0.0
         self.velocity_constraint_primary_impulse_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
         self.velocity_constraint_secondary_impulse_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_velocity_dirichlet_boundary_cells[None] = 0
@@ -701,8 +855,6 @@ class CartesianFluidSolver:
         self.cg_beta_numerator[None] = 0.0
         self.cg_alpha[None] = 0.0
         self.cg_beta[None] = 0.0
-        self.cg_weighted_sum[None] = 0.0
-        self.cg_free_volume[None] = 0.0
         self.cg_weighted_mean[None] = 0.0
         self.cg_breakdown_code[None] = 0
         self.cg_breakdown_dAd[None] = 0.0
@@ -718,8 +870,34 @@ class CartesianFluidSolver:
         self.report_hibm_air_backed_cells[None] = 0
         self.report_hibm_air_backed_components[None] = 0
         self.report_hibm_air_backed_cell_volume_m3[None] = 0.0
+        self.report_dynamic_obstacle_cell_count[None] = 0
+        self.report_dynamic_obstacle_added_cell_count[None] = 0
+        self.report_dynamic_obstacle_removed_cell_count[None] = 0
+        for row in self.dynamic_obstacle_row_count:
+            self.dynamic_obstacle_row_count[row] = 0
+            self.dynamic_obstacle_row_y_sum_m[row] = 0.0
+            self.dynamic_obstacle_row_z_min_m[row] = 1.0e30
+            self.dynamic_obstacle_row_z_max_m[row] = -1.0e30
+        self.report_hibm_unreached_component_raw_count[None] = 0
+        self.report_hibm_unreached_component_largest_cell_count[None] = 0
+        self.report_hibm_unreached_component_singleton_count[None] = 0
+        self.report_hibm_unreached_component_small_count[None] = 0
+        self.report_hibm_unreached_component_small_cell_count[None] = 0
+        for i, j, k in self.hibm_unreached_raw_component_cell_count:
+            self.hibm_unreached_raw_component_cell_count[i, j, k] = 0
         for slot in self.hibm_air_component_selected:
             self.hibm_air_component_selected[slot] = 0
+            self.hibm_unreached_component_compact_raw_label[slot] = 1 << 30
+            self.hibm_unreached_component_compact_cell_count[slot] = 0
+            self.hibm_row_cloud_component_cell_count[slot] = 0
+            self.hibm_row_cloud_component_touches_row[slot] = 0
+            self.hibm_row_cloud_component_touches_protected[slot] = 0
+            self.hibm_row_cloud_component_selected[slot] = 0
+        self.report_hibm_row_cloud_orphan_cells[None] = 0
+        self.report_hibm_row_cloud_orphan_components[None] = 0
+        self.report_hibm_row_cloud_raw_component_cell_count[None] = 0
+        self.report_hibm_row_cloud_raw_component_touches_row[None] = 0
+        self.report_hibm_row_cloud_raw_component_touches_protected[None] = 0
 
     def clear(self) -> None:
         self._clear_kernel()
@@ -749,6 +927,188 @@ class CartesianFluidSolver:
             )
         self.hibm_solid_band_protection_cell.from_numpy(array)
 
+    @ti.func
+    def _intervals_overlap(
+        self,
+        cell_min: ti.f64,
+        cell_max: ti.f64,
+        box_min: ti.f64,
+        box_max: ti.f64,
+    ):
+        return cell_min <= box_max and cell_max >= box_min
+
+    @ti.kernel
+    def _reset_dynamic_flap_obstacle_candidate_kernel(self):
+        self.report_dynamic_obstacle_cell_count[None] = 0
+        self.report_dynamic_obstacle_added_cell_count[None] = 0
+        self.report_dynamic_obstacle_removed_cell_count[None] = 0
+        for i, j, k in self.dynamic_obstacle_candidate:
+            self.dynamic_obstacle_candidate[i, j, k] = 0
+        for row in self.dynamic_obstacle_row_count:
+            self.dynamic_obstacle_row_count[row] = 0
+            self.dynamic_obstacle_row_y_sum_m[row] = 0.0
+            self.dynamic_obstacle_row_z_min_m[row] = 1.0e30
+            self.dynamic_obstacle_row_z_max_m[row] = -1.0e30
+
+    @ti.kernel
+    def _accumulate_dynamic_flap_obstacle_rows_kernel(
+        self,
+        particle_position_m: ti.template(),
+        particle_rest_position_m: ti.template(),
+        particle_count: ti.i32,
+        row_count: ti.i32,
+        solid_min_y_m: ti.f64,
+        row_height_m: ti.f64,
+    ):
+        for p in range(particle_count):
+            row_index = ti.cast(
+                ti.floor(
+                    (
+                        ti.cast(particle_rest_position_m[p].y, ti.f64)
+                        - solid_min_y_m
+                    )
+                    / ti.max(row_height_m, 1.0e-12)
+                ),
+                ti.i32,
+            )
+            row_index = ti.max(0, ti.min(row_count - 1, row_index))
+            if 0 <= row_index < self.ny:
+                position = particle_position_m[p]
+                ti.atomic_add(self.dynamic_obstacle_row_count[row_index], 1)
+                ti.atomic_add(
+                    self.dynamic_obstacle_row_y_sum_m[row_index],
+                    ti.cast(position.y, ti.f64),
+                )
+                ti.atomic_min(
+                    self.dynamic_obstacle_row_z_min_m[row_index],
+                    ti.cast(position.z, ti.f64),
+                )
+                ti.atomic_max(
+                    self.dynamic_obstacle_row_z_max_m[row_index],
+                    ti.cast(position.z, ti.f64),
+                )
+
+    @ti.kernel
+    def _rasterize_dynamic_flap_obstacle_candidate_kernel(
+        self,
+        row_count: ti.i32,
+        solid_min_x_m: ti.f64,
+        solid_max_x_m: ti.f64,
+        row_height_m: ti.f64,
+        min_thickness_m: ti.f64,
+    ):
+        for i, j, k in self.dynamic_obstacle_candidate:
+            candidate = 0
+            cell_min_x = ti.cast(self.cell_face_x_m[i], ti.f64)
+            cell_max_x = ti.cast(self.cell_face_x_m[i + 1], ti.f64)
+            cell_min_y = ti.cast(self.cell_face_y_m[j], ti.f64)
+            cell_max_y = ti.cast(self.cell_face_y_m[j + 1], ti.f64)
+            cell_min_z = ti.cast(self.cell_face_z_m[k], ti.f64)
+            cell_max_z = ti.cast(self.cell_face_z_m[k + 1], ti.f64)
+            for row in range(self.ny):
+                if (
+                    row < row_count
+                    and self.dynamic_obstacle_row_count[row] > 0
+                    and candidate == 0
+                ):
+                    y_center = (
+                        self.dynamic_obstacle_row_y_sum_m[row]
+                        / ti.cast(self.dynamic_obstacle_row_count[row], ti.f64)
+                    )
+                    y_min = y_center - 0.5 * row_height_m
+                    y_max = y_center + 0.5 * row_height_m
+                    z_min = self.dynamic_obstacle_row_z_min_m[row]
+                    z_max = self.dynamic_obstacle_row_z_max_m[row]
+                    if (z_max - z_min) < 0.25 * min_thickness_m:
+                        z_mid = 0.5 * (z_min + z_max)
+                        half_thickness = 0.5 * min_thickness_m
+                        z_min = z_mid - half_thickness
+                        z_max = z_mid + half_thickness
+                    if (
+                        self._intervals_overlap(
+                            cell_min_x,
+                            cell_max_x,
+                            solid_min_x_m,
+                            solid_max_x_m,
+                        )
+                        and self._intervals_overlap(cell_min_y, cell_max_y, y_min, y_max)
+                        and self._intervals_overlap(cell_min_z, cell_max_z, z_min, z_max)
+                    ):
+                        candidate = 1
+            self.dynamic_obstacle_candidate[i, j, k] = candidate
+
+    @ti.kernel
+    def _apply_dynamic_flap_obstacle_candidate_kernel(self):
+        for i, j, k in self.obstacle:
+            previous = self.obstacle[i, j, k]
+            candidate = self.dynamic_obstacle_candidate[i, j, k]
+            if candidate != 0:
+                ti.atomic_add(self.report_dynamic_obstacle_cell_count[None], 1)
+                if previous == 0:
+                    ti.atomic_add(
+                        self.report_dynamic_obstacle_added_cell_count[None],
+                        1,
+                    )
+                self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+                self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            elif previous != 0:
+                ti.atomic_add(
+                    self.report_dynamic_obstacle_removed_cell_count[None],
+                    1,
+                )
+            self.obstacle[i, j, k] = candidate
+
+    def update_dynamic_flap_obstacle_from_particles(
+        self,
+        particle_position_m,
+        particle_rest_position_m,
+        *,
+        particle_count: int,
+        row_count: int,
+        solid_min_m: tuple[float, float, float],
+        solid_max_m: tuple[float, float, float],
+        flap_height_m: float,
+        min_thickness_m: float = 0.0,
+    ) -> dict[str, int]:
+        rows = int(row_count)
+        if rows <= 0:
+            raise ValueError("row_count must be positive")
+        if rows > self.ny:
+            raise ValueError("row_count exceeds fluid y-grid capacity")
+        count = max(0, int(particle_count))
+        row_height = float(flap_height_m) / float(rows)
+        if row_height <= 0.0 or not math.isfinite(row_height):
+            raise ValueError("flap_height_m must define a positive row height")
+        self._reset_dynamic_flap_obstacle_candidate_kernel()
+        self._accumulate_dynamic_flap_obstacle_rows_kernel(
+            particle_position_m,
+            particle_rest_position_m,
+            int(count),
+            int(rows),
+            float(solid_min_m[1]),
+            float(row_height),
+        )
+        self._rasterize_dynamic_flap_obstacle_candidate_kernel(
+            int(rows),
+            float(solid_min_m[0]),
+            float(solid_max_m[0]),
+            float(row_height),
+            float(min_thickness_m),
+        )
+        self._apply_dynamic_flap_obstacle_candidate_kernel()
+        self._invalidate_hibm_pressure_reachability()
+        return {
+            "fluid_dynamic_obstacle_cell_count": int(
+                self.report_dynamic_obstacle_cell_count[None]
+            ),
+            "fluid_dynamic_obstacle_added_cell_count": int(
+                self.report_dynamic_obstacle_added_cell_count[None]
+            ),
+            "fluid_dynamic_obstacle_removed_cell_count": int(
+                self.report_dynamic_obstacle_removed_cell_count[None]
+            ),
+        }
+
     @ti.kernel
     def _build_hibm_no_slip_sampling_obstacle_kernel(self):
         for i, j, k in self.obstacle:
@@ -764,15 +1124,6 @@ class CartesianFluidSolver:
     def _ensure_hibm_base_obstacle(self) -> None:
         if not self._hibm_base_obstacle_initialized:
             self.snapshot_hibm_base_obstacle()
-
-    @ti.kernel
-    def _reset_obstacle_to_hibm_base_kernel(self):
-        for i, j, k in self.obstacle:
-            self.obstacle[i, j, k] = self.hibm_base_obstacle[i, j, k]
-
-    def reset_obstacle_to_hibm_base(self) -> None:
-        self._ensure_hibm_base_obstacle()
-        self._reset_obstacle_to_hibm_base_kernel()
 
     @ti.kernel
     def _apply_hibm_internal_obstacles_kernel(
@@ -861,6 +1212,8 @@ class CartesianFluidSolver:
     ):
         self.report_hibm_solid_band_nonprojectable_cells[None] = 0
         for i, j, k in self.obstacle:
+            self.hibm_solid_band_candidate_cell[i, j, k] = 0
+        for i, j, k in self.obstacle:
             if (
                 self.obstacle[i, j, k] == 0
                 and not self._divergence_stencil_has_pressure_correctable_face(
@@ -870,6 +1223,9 @@ class CartesianFluidSolver:
                     pressure_outlet_zmin,
                 )
             ):
+                self.hibm_solid_band_candidate_cell[i, j, k] = 1
+        for i, j, k in self.obstacle:
+            if self.hibm_solid_band_candidate_cell[i, j, k] != 0:
                 if convert_to_obstacle == 1:
                     self.obstacle[i, j, k] = 1
                     self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
@@ -896,6 +1252,8 @@ class CartesianFluidSolver:
         self.report_hibm_solid_band_enclosed_water_cells[None] = 0
         self.report_hibm_solid_band_velocity_dirichlet_protected_cells[None] = 0
         self.report_hibm_solid_band_mask_protected_cells[None] = 0
+        for i, j, k in self.obstacle:
+            self.hibm_solid_band_candidate_cell[i, j, k] = 0
         for i, j, k in self.obstacle:
             if (
                 self.obstacle[i, j, k] == 0
@@ -1011,16 +1369,11 @@ class CartesianFluidSolver:
                         1,
                     )
                 if (
-                    convert_to_obstacle == 1
-                    and protected_velocity_dirichlet == 0
+                    protected_velocity_dirichlet == 0
                     and protected_solid_band_mask == 0
                     and (interior_only == 0 or is_interior_sliver == 1)
                 ):
-                    self.obstacle[i, j, k] = 1
-                    self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
-                    self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
-                    self.volume_source_s[i, j, k] = 0.0
-                    self.divergence[i, j, k] = 0.0
+                    self.hibm_solid_band_candidate_cell[i, j, k] = 1
                 if (
                     protected_velocity_dirichlet == 0
                     and protected_solid_band_mask == 0
@@ -1030,6 +1383,16 @@ class CartesianFluidSolver:
                         self.report_hibm_solid_band_nonprojectable_cells[None],
                         1,
                     )
+        for i, j, k in self.obstacle:
+            if (
+                convert_to_obstacle == 1
+                and self.hibm_solid_band_candidate_cell[i, j, k] != 0
+            ):
+                self.obstacle[i, j, k] = 1
+                self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+                self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+                self.volume_source_s[i, j, k] = 0.0
+                self.divergence[i, j, k] = 0.0
 
     def mark_hibm_solid_band_nonprojectable_cells(
         self,
@@ -1310,27 +1673,48 @@ class CartesianFluidSolver:
             )
 
     @ti.kernel
-    def _count_hibm_pressure_outlet_reachable_kernel(self) -> ti.i32:
-        count = 0
+    def _expand_and_commit_hibm_pressure_outlet_reachable_kernel(self):
+        # Same monotonic expand+commit as the two kernels above, but the
+        # per-sweep changed count accumulates into reduction_count instead
+        # of syncing to host, so callers can batch several sweeps between
+        # host reads.
+        changed = 0
         for i, j, k in self.obstacle:
-            if self.hibm_pressure_outlet_reachable[i, j, k] != 0:
-                count += 1
-        return count
+            reachable = self.hibm_pressure_outlet_reachable[i, j, k]
+            if (
+                self.obstacle[i, j, k] == 0
+                and self.hibm_pressure_reachability_barrier[i, j, k] == 0
+                and reachable == 0
+                and self._pressure_outlet_reachable_neighbor_exists(i, j, k)
+            ):
+                reachable = 1
+                changed += 1
+            self.hibm_pressure_outlet_reachable_next[i, j, k] = reachable
+        ti.atomic_add(self.reduction_count[None], changed)
+        for i, j, k in self.obstacle:
+            self.hibm_pressure_outlet_reachable[i, j, k] = (
+                self.hibm_pressure_outlet_reachable_next[i, j, k]
+            )
 
     @ti.kernel
     def _count_hibm_pressure_outlet_unreached_cells_kernel(self):
         self.report_hibm_pressure_disconnected_nonprojectable_cells[None] = 0
+        self.report_hibm_pressure_disconnected_unreached_raw_cells[None] = 0
         for i, j, k in self.obstacle:
             if (
                 self.obstacle[i, j, k] == 0
                 and self.hibm_pressure_reachability_barrier[i, j, k] == 0
-                and not self._velocity_dirichlet_pressure_barrier(i, j, k)
                 and self.hibm_pressure_outlet_reachable[i, j, k] == 0
             ):
                 ti.atomic_add(
-                    self.report_hibm_pressure_disconnected_nonprojectable_cells[None],
+                    self.report_hibm_pressure_disconnected_unreached_raw_cells[None],
                     1,
                 )
+                if not self._velocity_dirichlet_pressure_barrier(i, j, k):
+                    ti.atomic_add(
+                        self.report_hibm_pressure_disconnected_nonprojectable_cells[None],
+                        1,
+                    )
 
     def _reset_hibm_pressure_unreached_component_distribution_stats(self) -> None:
         self.last_hibm_pressure_unreached_component_raw_count = 0
@@ -1377,6 +1761,7 @@ class CartesianFluidSolver:
         """
         if not pressure_outlet_zmin:
             self.last_hibm_pressure_unreached_cell_count = 0
+            self.last_hibm_pressure_unreached_raw_cell_count = 0
             self.last_hibm_pressure_reachability_converged = True
             self.last_hibm_pressure_reachability_sweeps = 0
             self.last_hibm_pressure_reachability_reused = False
@@ -1424,6 +1809,7 @@ class CartesianFluidSolver:
                 return int(self._hibm_pressure_unreached_count)
         self._hibm_reachability_checksum = None
         self.last_hibm_pressure_unreached_cell_count = 0
+        self.last_hibm_pressure_unreached_raw_cell_count = 0
         self.last_hibm_pressure_reachability_converged = True
         self.last_hibm_pressure_reachability_sweeps = 0
         self.last_hibm_pressure_reachability_reused = False
@@ -1435,11 +1821,16 @@ class CartesianFluidSolver:
         self._init_hibm_pressure_outlet_reachable_kernel()
         max_sweeps = max(1, 32 * int(self.nx + self.ny + self.nz))
         converged = False
-        for _ in range(max_sweeps):
-            changed = int(self._expand_hibm_pressure_outlet_reachable_kernel())
-            self._commit_hibm_pressure_outlet_reachable_kernel()
-            self.last_hibm_pressure_reachability_sweeps += 1
-            if changed == 0:
+        sweeps_done = 0
+        while sweeps_done < max_sweeps:
+            batch_sweeps = min(HIBM_REACHABILITY_FLOOD_BATCH_SWEEPS, max_sweeps - sweeps_done)
+            self.reduction_count[None] = 0
+            for _ in range(batch_sweeps):
+                self._expand_and_commit_hibm_pressure_outlet_reachable_kernel()
+            batch_changed = int(self.reduction_count[None])
+            sweeps_done += batch_sweeps
+            self.last_hibm_pressure_reachability_sweeps = sweeps_done
+            if batch_changed == 0:
                 converged = True
                 break
         self.last_hibm_pressure_reachability_converged = converged
@@ -1449,6 +1840,9 @@ class CartesianFluidSolver:
         )
         self.last_hibm_pressure_unreached_cell_count = unreached
         self._hibm_pressure_unreached_count = unreached
+        self.last_hibm_pressure_unreached_raw_cell_count = int(
+            self.report_hibm_pressure_disconnected_unreached_raw_cells[None]
+        )
         self.last_hibm_pressure_unreached_component_count = 0
         self._hibm_pressure_unreached_component_count = 0
         self.last_hibm_pressure_unreached_component_overflow = False
@@ -1464,7 +1858,7 @@ class CartesianFluidSolver:
             # propagation reached a fixed point, so one physical component may
             # still carry several labels (partial merge).
             self.last_hibm_pressure_component_labels_converged = labels_converged
-            component_count = self._compact_hibm_unreached_component_labels_host()
+            component_count = self._compact_hibm_unreached_component_labels_device()
             self.last_hibm_pressure_unreached_component_count = component_count
             self._hibm_pressure_unreached_component_count = component_count
         self._hibm_reachability_checksum = pattern_checksum
@@ -1544,6 +1938,302 @@ class CartesianFluidSolver:
         )
         return converted
 
+    @ti.func
+    def _row_cloud_valid_unreached_cell(self, i: ti.i32, j: ti.i32, k: ti.i32):
+        return (
+            self.obstacle[i, j, k] == 0
+            and self.hibm_pressure_reachability_barrier[i, j, k] == 0
+            and not self._velocity_dirichlet_pressure_barrier(i, j, k)
+            and self.hibm_pressure_outlet_reachable[i, j, k] == 0
+        )
+
+    @ti.func
+    def _row_cloud_stencil_touches_marker_row(
+        self,
+        i: ti.i32,
+        j: ti.i32,
+        k: ti.i32,
+    ):
+        touches = self.velocity_dirichlet_boundary_marker_region_id[i, j, k] >= 0
+        if i < self.nx - 1:
+            touches = (
+                touches
+                or self.velocity_dirichlet_boundary_marker_region_id[i + 1, j, k]
+                >= 0
+            )
+        if j < self.ny - 1:
+            touches = (
+                touches
+                or self.velocity_dirichlet_boundary_marker_region_id[i, j + 1, k]
+                >= 0
+            )
+        if k < self.nz - 1:
+            touches = (
+                touches
+                or self.velocity_dirichlet_boundary_marker_region_id[i, j, k + 1]
+                >= 0
+            )
+        return touches
+
+    @ti.func
+    def _row_cloud_cell_is_protected(
+        self,
+        i: ti.i32,
+        j: ti.i32,
+        k: ti.i32,
+        protect_radius: ti.template(),
+        protect_solid_band_mask: ti.template(),
+    ):
+        protected = False
+        if ti.static(protect_radius < 0):
+            protected = False
+        elif ti.static(protect_radius == 0):
+            protected = self.velocity_dirichlet_boundary_active[i, j, k] != 0
+        elif ti.static(protect_radius <= 4):
+            for di in ti.static(range(-protect_radius, protect_radius + 1)):
+                for dj in ti.static(range(-protect_radius, protect_radius + 1)):
+                    for dk in ti.static(range(-protect_radius, protect_radius + 1)):
+                        ni = i + di
+                        nj = j + dj
+                        nk = k + dk
+                        if (
+                            0 <= ni < self.nx
+                            and 0 <= nj < self.ny
+                            and 0 <= nk < self.nz
+                            and self.velocity_dirichlet_boundary_active[
+                                ni,
+                                nj,
+                                nk,
+                            ]
+                            != 0
+                        ):
+                            protected = True
+        else:
+            protected = True
+        if ti.static(protect_solid_band_mask != 0):
+            protected = protected or self.hibm_solid_band_protection_cell[i, j, k] != 0
+        return protected
+
+    @ti.func
+    def _row_cloud_label_has_same_valid_neighbor(
+        self,
+        i: ti.i32,
+        j: ti.i32,
+        k: ti.i32,
+        label: ti.i32,
+    ):
+        has_neighbor = False
+        if i > 0:
+            has_neighbor = (
+                has_neighbor
+                or (
+                    self._row_cloud_valid_unreached_cell(i - 1, j, k)
+                    and self.hibm_pressure_unreached_component_label[i - 1, j, k]
+                    == label
+                )
+            )
+        if i < self.nx - 1:
+            has_neighbor = (
+                has_neighbor
+                or (
+                    self._row_cloud_valid_unreached_cell(i + 1, j, k)
+                    and self.hibm_pressure_unreached_component_label[i + 1, j, k]
+                    == label
+                )
+            )
+        if j > 0:
+            has_neighbor = (
+                has_neighbor
+                or (
+                    self._row_cloud_valid_unreached_cell(i, j - 1, k)
+                    and self.hibm_pressure_unreached_component_label[i, j - 1, k]
+                    == label
+                )
+            )
+        if j < self.ny - 1:
+            has_neighbor = (
+                has_neighbor
+                or (
+                    self._row_cloud_valid_unreached_cell(i, j + 1, k)
+                    and self.hibm_pressure_unreached_component_label[i, j + 1, k]
+                    == label
+                )
+            )
+        if k > 0:
+            has_neighbor = (
+                has_neighbor
+                or (
+                    self._row_cloud_valid_unreached_cell(i, j, k - 1)
+                    and self.hibm_pressure_unreached_component_label[i, j, k - 1]
+                    == label
+                )
+            )
+        if k < self.nz - 1:
+            has_neighbor = (
+                has_neighbor
+                or (
+                    self._row_cloud_valid_unreached_cell(i, j, k + 1)
+                    and self.hibm_pressure_unreached_component_label[i, j, k + 1]
+                    == label
+                )
+            )
+        return has_neighbor
+
+    @ti.func
+    def _convert_row_cloud_cell_to_obstacle(self, i: ti.i32, j: ti.i32, k: ti.i32):
+        self.obstacle[i, j, k] = 1
+        self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+        self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+        self.volume_source_s[i, j, k] = 0.0
+        self.divergence[i, j, k] = 0.0
+
+    @ti.kernel
+    def _reset_row_cloud_orphan_cleanup_report_kernel(self):
+        self.report_hibm_row_cloud_orphan_cells[None] = 0
+        self.report_hibm_row_cloud_orphan_components[None] = 0
+        self.report_hibm_row_cloud_raw_component_cell_count[None] = 0
+        self.report_hibm_row_cloud_raw_component_touches_row[None] = 0
+        self.report_hibm_row_cloud_raw_component_touches_protected[None] = 0
+        for component in range(HIBM_PRESSURE_COMPONENT_CAPACITY):
+            self.hibm_row_cloud_component_cell_count[component] = 0
+            self.hibm_row_cloud_component_touches_row[component] = 0
+            self.hibm_row_cloud_component_touches_protected[component] = 0
+            self.hibm_row_cloud_component_selected[component] = 0
+
+    @ti.kernel
+    def _accumulate_row_cloud_compact_component_stats_kernel(
+        self,
+        protect_radius: ti.template(),
+        protect_solid_band_mask: ti.template(),
+    ):
+        for component in range(HIBM_PRESSURE_COMPONENT_CAPACITY):
+            self.hibm_row_cloud_component_cell_count[component] = 0
+            self.hibm_row_cloud_component_touches_row[component] = 0
+            self.hibm_row_cloud_component_touches_protected[component] = 0
+            self.hibm_row_cloud_component_selected[component] = 0
+        for i, j, k in self.obstacle:
+            if self._row_cloud_valid_unreached_cell(i, j, k):
+                label = self.hibm_pressure_unreached_component_label[i, j, k]
+                if label >= -HIBM_PRESSURE_COMPONENT_CAPACITY and label <= -1:
+                    component = -label - 1
+                    ti.atomic_add(
+                        self.hibm_row_cloud_component_cell_count[component],
+                        1,
+                    )
+                    if self._row_cloud_stencil_touches_marker_row(i, j, k):
+                        ti.atomic_or(
+                            self.hibm_row_cloud_component_touches_row[component],
+                            1,
+                        )
+                    if self._row_cloud_cell_is_protected(
+                        i,
+                        j,
+                        k,
+                        protect_radius,
+                        protect_solid_band_mask,
+                    ):
+                        ti.atomic_or(
+                            self.hibm_row_cloud_component_touches_protected[
+                                component
+                            ],
+                            1,
+                        )
+
+    @ti.kernel
+    def _convert_row_cloud_compact_components_kernel(
+        self,
+        max_cells: ti.i32,
+        overflow_singleton_cleanup: ti.i32,
+        overflow_singletons_only: ti.i32,
+        convert_unstamped_small_components: ti.i32,
+    ) -> ti.i32:
+        converted = 0
+        for component in range(HIBM_PRESSURE_COMPONENT_CAPACITY):
+            selected = 0
+            cell_count = self.hibm_row_cloud_component_cell_count[component]
+            if cell_count > 0 and cell_count <= max_cells:
+                if overflow_singletons_only != 0:
+                    if overflow_singleton_cleanup != 0 and cell_count == 1:
+                        selected = 1
+                elif convert_unstamped_small_components != 0:
+                    selected = 1
+                else:
+                    if (
+                        self.hibm_row_cloud_component_touches_row[component] != 0
+                        or (
+                            overflow_singleton_cleanup != 0
+                            and cell_count == 1
+                        )
+                    ):
+                        selected = 1
+                if self.hibm_row_cloud_component_touches_protected[component] != 0:
+                    selected = 0
+            self.hibm_row_cloud_component_selected[component] = selected
+            if selected != 0:
+                ti.atomic_add(self.report_hibm_row_cloud_orphan_components[None], 1)
+        for i, j, k in self.obstacle:
+            if self._row_cloud_valid_unreached_cell(i, j, k):
+                label = self.hibm_pressure_unreached_component_label[i, j, k]
+                if label >= -HIBM_PRESSURE_COMPONENT_CAPACITY and label <= -1:
+                    component = -label - 1
+                    if self.hibm_row_cloud_component_selected[component] != 0:
+                        self._convert_row_cloud_cell_to_obstacle(i, j, k)
+                        converted += 1
+        ti.atomic_add(self.report_hibm_row_cloud_orphan_cells[None], converted)
+        return converted
+
+    @ti.kernel
+    def _convert_row_cloud_raw_singletons_kernel(
+        self,
+        max_cells: ti.i32,
+        overflow_singleton_cleanup: ti.i32,
+        overflow_singletons_only: ti.i32,
+        convert_unstamped_small_components: ti.i32,
+        protect_radius: ti.template(),
+        protect_solid_band_mask: ti.template(),
+    ) -> ti.i32:
+        converted = 0
+        for i, j, k in self.obstacle:
+            if self._row_cloud_valid_unreached_cell(i, j, k):
+                label = self.hibm_pressure_unreached_component_label[i, j, k]
+                if label >= 0 and label < (1 << 30) and max_cells >= 1:
+                    singleton = not self._row_cloud_label_has_same_valid_neighbor(
+                        i,
+                        j,
+                        k,
+                        label,
+                    )
+                    selected = 0
+                    if singleton:
+                        if overflow_singletons_only != 0:
+                            if overflow_singleton_cleanup != 0:
+                                selected = 1
+                        elif convert_unstamped_small_components != 0:
+                            selected = 1
+                        else:
+                            if (
+                                self._row_cloud_stencil_touches_marker_row(i, j, k)
+                                or overflow_singleton_cleanup != 0
+                            ):
+                                selected = 1
+                    if self._row_cloud_cell_is_protected(
+                        i,
+                        j,
+                        k,
+                        protect_radius,
+                        protect_solid_band_mask,
+                    ):
+                        selected = 0
+                    if selected != 0:
+                        ti.atomic_add(
+                            self.report_hibm_row_cloud_orphan_components[None],
+                            1,
+                        )
+                        self._convert_row_cloud_cell_to_obstacle(i, j, k)
+                        converted += 1
+        ti.atomic_add(self.report_hibm_row_cloud_orphan_cells[None], converted)
+        return converted
+
     def convert_hibm_row_cloud_orphan_components(
         self,
         *,
@@ -1574,196 +2264,56 @@ class CartesianFluidSolver:
         self.last_hibm_row_cloud_orphan_component_count = 0
         if max_cells <= 0:
             return 0
-
-        obstacle = self.obstacle.to_numpy()
-        reachable = self.hibm_pressure_outlet_reachable.to_numpy()
-        barrier = self.hibm_pressure_reachability_barrier.to_numpy()
-        valid = (
-            (obstacle == 0)
-            & (barrier == 0)
-            & (reachable == 0)
-        )
-        if not np.any(valid):
-            return 0
-
-        nx, ny, nz = valid.shape
-        protected = np.zeros(valid.shape, dtype=bool)
-        protect_radius = max(0, int(protect_velocity_dirichlet_radius_cells))
-        if int(protect_velocity_dirichlet_radius_cells) >= 0:
-            row_active = self.velocity_dirichlet_boundary_active.to_numpy() != 0
-            for row_i, row_j, row_k in np.argwhere(row_active):
-                i0 = max(0, int(row_i) - protect_radius)
-                i1 = min(nx, int(row_i) + protect_radius + 1)
-                j0 = max(0, int(row_j) - protect_radius)
-                j1 = min(ny, int(row_j) + protect_radius + 1)
-                k0 = max(0, int(row_k) - protect_radius)
-                k1 = min(nz, int(row_k) + protect_radius + 1)
-                protected[i0:i1, j0:j1, k0:k1] = True
-        if bool(protect_solid_band_mask):
-            protected |= self.hibm_solid_band_protection_cell.to_numpy() != 0
-
         overflow_singleton_cleanup = bool(
             self.last_hibm_pressure_unreached_component_overflow
         )
-        row_region = self.velocity_dirichlet_boundary_marker_region_id.to_numpy()
-        row_touch = row_region >= 0
-        stencil_touch = row_touch.copy()
-        stencil_touch[:-1, :, :] |= row_touch[1:, :, :]
-        stencil_touch[:, :-1, :] |= row_touch[:, 1:, :]
-        stencil_touch[:, :, :-1] |= row_touch[:, :, 1:]
+        if bool(overflow_singletons_only) and (
+            not overflow_singleton_cleanup
+            or not bool(self.last_hibm_pressure_component_labels_converged)
+        ):
+            return 0
+        if bool(convert_unstamped_small_components) and not bool(
+            self.last_hibm_pressure_component_labels_converged
+        ):
+            return 0
 
-        visited = np.zeros(valid.shape, dtype=bool)
-        convert_mask = np.zeros(valid.shape, dtype=bool)
-        selected_component_count = 0
+        protect_radius = int(protect_velocity_dirichlet_radius_cells)
+        if protect_radius >= 0:
+            protect_radius = max(0, protect_radius)
+        protect_solid = 1 if bool(protect_solid_band_mask) else 0
+        self._reset_row_cloud_orphan_cleanup_report_kernel()
+        component_count = int(
+            getattr(self, "_hibm_pressure_unreached_component_count", 0)
+        )
+        if component_count > 0:
+            self._accumulate_row_cloud_compact_component_stats_kernel(
+                int(protect_radius),
+                int(protect_solid),
+            )
+            self._convert_row_cloud_compact_components_kernel(
+                int(max_cells),
+                1 if overflow_singleton_cleanup else 0,
+                1 if bool(overflow_singletons_only) else 0,
+                1 if bool(convert_unstamped_small_components) else 0,
+            )
 
-        if bool(overflow_singletons_only):
-            if (
-                not overflow_singleton_cleanup
-                or not bool(self.last_hibm_pressure_component_labels_converged)
-            ):
-                return 0
-            labels = self.hibm_pressure_unreached_component_label.to_numpy()
-            label_values = labels[valid]
-            label_values = label_values[label_values < (1 << 30)]
-            if label_values.size <= 0:
-                return 0
-            component_labels, component_sizes = np.unique(
-                label_values,
-                return_counts=True,
-            )
-            singleton_labels = component_labels[component_sizes == 1]
-            if singleton_labels.size <= 0:
-                return 0
-            convert_mask = valid & np.isin(labels, singleton_labels)
-            protected_singletons = int(np.count_nonzero(convert_mask & protected))
-            if protected_singletons > 0:
-                convert_mask &= ~protected
-            selected_component_count = int(np.count_nonzero(convert_mask))
-        elif bool(convert_unstamped_small_components):
-            if not bool(self.last_hibm_pressure_component_labels_converged):
-                return 0
-            labels = self.hibm_pressure_unreached_component_label.to_numpy()
-            label_values = labels[valid]
-            label_values = label_values[label_values < (1 << 30)]
-            if label_values.size <= 0:
-                return 0
-            component_labels, component_sizes = np.unique(
-                label_values,
-                return_counts=True,
-            )
-            small_labels = component_labels[component_sizes <= max_cells]
-            if small_labels.size <= 0:
-                return 0
-            protected_label_values = labels[valid & protected]
-            protected_label_values = protected_label_values[
-                protected_label_values < (1 << 30)
-            ]
-            if protected_label_values.size > 0:
-                small_labels = np.setdiff1d(
-                    small_labels,
-                    np.unique(protected_label_values),
-                    assume_unique=False,
-                )
-            if small_labels.size <= 0:
-                return 0
-            convert_mask = valid & np.isin(labels, small_labels)
-            selected_component_count = int(small_labels.size)
-        else:
-            labels = self.hibm_pressure_unreached_component_label.to_numpy()
-            label_values = labels[valid]
-            label_values = label_values[label_values < (1 << 30)]
-            use_component_labels = (
-                bool(self.last_hibm_pressure_component_labels_converged)
-                and label_values.size > 0
-            )
-            if use_component_labels:
-                component_labels, component_sizes = np.unique(
-                    label_values,
-                    return_counts=True,
-                )
-                for component_label, component_size in zip(
-                    component_labels,
-                    component_sizes,
-                ):
-                    if int(component_size) > max_cells:
-                        continue
-                    component_mask = valid & (labels == int(component_label))
-                    if not np.any(component_mask):
-                        continue
-                    touches_row = bool(np.any(component_mask & stencil_touch))
-                    touches_protected = bool(np.any(component_mask & protected))
-                    is_overflow_singleton = (
-                        overflow_singleton_cleanup and int(component_size) == 1
-                    )
-                    selected = (touches_row or is_overflow_singleton)
-                    selected = selected and not touches_protected
-                    if selected:
-                        selected_component_count += 1
-                        convert_mask |= component_mask
-            else:
-                for seed_i, seed_j, seed_k in np.argwhere(valid):
-                    seed = (int(seed_i), int(seed_j), int(seed_k))
-                    if visited[seed]:
-                        continue
-                    stack = [seed]
-                    visited[seed] = True
-                    cells: list[tuple[int, int, int]] = []
-                    touches_row = False
-                    touches_protected = False
-                    while stack:
-                        i, j, k = stack.pop()
-                        cells.append((i, j, k))
-                        touches_row = touches_row or bool(stencil_touch[i, j, k])
-                        touches_protected = touches_protected or bool(
-                            protected[i, j, k]
-                        )
-                        for ni, nj, nk in (
-                            (i - 1, j, k),
-                            (i + 1, j, k),
-                            (i, j - 1, k),
-                            (i, j + 1, k),
-                            (i, j, k - 1),
-                            (i, j, k + 1),
-                        ):
-                            if (
-                                0 <= ni < nx
-                                and 0 <= nj < ny
-                                and 0 <= nk < nz
-                                and valid[ni, nj, nk]
-                                and not visited[ni, nj, nk]
-                            ):
-                                visited[ni, nj, nk] = True
-                                stack.append((ni, nj, nk))
-                    is_overflow_singleton = (
-                        overflow_singleton_cleanup and len(cells) == 1
-                    )
-                    selected = touches_row or is_overflow_singleton
-                    selected = selected and not touches_protected
-                    if len(cells) <= max_cells and selected:
-                        selected_component_count += 1
-                        for cell in cells:
-                            convert_mask[cell] = True
-        converted = int(np.count_nonzero(convert_mask))
+        self._convert_row_cloud_raw_singletons_kernel(
+            int(max_cells),
+            1 if overflow_singleton_cleanup else 0,
+            1 if bool(overflow_singletons_only) else 0,
+            1 if bool(convert_unstamped_small_components) else 0,
+            int(protect_radius),
+            int(protect_solid),
+        )
+
+        converted = int(self.report_hibm_row_cloud_orphan_cells[None])
         if converted <= 0:
             return 0
 
-        obstacle[convert_mask] = 1
-        velocity = self.velocity.to_numpy()
-        velocity_prev = self.velocity_prev.to_numpy()
-        volume_source = self.volume_source_s.to_numpy()
-        divergence = self.divergence.to_numpy()
-        velocity[convert_mask] = 0.0
-        velocity_prev[convert_mask] = 0.0
-        volume_source[convert_mask] = 0.0
-        divergence[convert_mask] = 0.0
-        self.obstacle.from_numpy(obstacle)
-        self.velocity.from_numpy(velocity)
-        self.velocity_prev.from_numpy(velocity_prev)
-        self.volume_source_s.from_numpy(volume_source)
-        self.divergence.from_numpy(divergence)
-
         self.last_hibm_row_cloud_orphan_cell_count = converted
-        self.last_hibm_row_cloud_orphan_component_count = int(selected_component_count)
+        self.last_hibm_row_cloud_orphan_component_count = int(
+            self.report_hibm_row_cloud_orphan_components[None]
+        )
         return converted
 
     @ti.kernel
@@ -1975,6 +2525,9 @@ class CartesianFluidSolver:
         for i, j, k in self.velocity:
             self.saved_velocity[i, j, k] = self.velocity[i, j, k]
             self.saved_pressure[i, j, k] = self.pressure[i, j, k]
+            self.saved_pressure_interface_matrix_rhs[i, j, k] = (
+                self.pressure_interface_matrix_rhs[i, j, k]
+            )
 
     @ti.kernel
     def _restore_projection_cleanup_state_kernel(self):
@@ -1983,6 +2536,9 @@ class CartesianFluidSolver:
             self.pressure[i, j, k] = self.saved_pressure[i, j, k]
             self.pressure_tmp[i, j, k] = self.saved_pressure[i, j, k]
             self.pressure_accum[i, j, k] = self.saved_pressure[i, j, k]
+            self.pressure_interface_matrix_rhs[i, j, k] = (
+                self.saved_pressure_interface_matrix_rhs[i, j, k]
+            )
 
     @ti.kernel
     def _restore_state_kernel(self):
@@ -2019,9 +2575,15 @@ class CartesianFluidSolver:
             self.velocity_constraint_primary_weight[i, j, k] = 0.0
             self.velocity_constraint_secondary_sum[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.velocity_constraint_secondary_weight[i, j, k] = 0.0
+            self.marker_feedback_target_sum[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            self.marker_feedback_target_weight[i, j, k] = 0.0
             self.velocity_dirichlet_boundary_active[i, j, k] = 0
             self.velocity_dirichlet_boundary_value_mps[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.velocity_dirichlet_boundary_projection_weight[i, j, k] = 0.0
+            self.velocity_dirichlet_boundary_marker_region_id[i, j, k] = -1
+            self.marker_feedback_owned[i, j, k] = 0
+            self.marker_feedback_region_min[i, j, k] = 2147483647
+            self.marker_feedback_region_max[i, j, k] = -2147483648
             self.hibm_air_cell[i, j, k] = 0
 
     def save_state(self) -> None:
@@ -2031,6 +2593,7 @@ class CartesianFluidSolver:
         self._restore_state_kernel()
         self._hibm_pressure_unreached_count = 0
         self.last_hibm_pressure_unreached_cell_count = 0
+        self.last_hibm_pressure_unreached_raw_cell_count = 0
         self._hibm_pressure_unreached_component_count = 0
         self.last_hibm_pressure_unreached_component_count = 0
         self.last_hibm_pressure_unreached_component_overflow = False
@@ -2232,12 +2795,100 @@ class CartesianFluidSolver:
     def _grid_coordinate_z(self, z):
         return self._axis_grid_coordinate_device(z, self.cell_face_z_m, self.cell_center_z_m, self.nz)
 
+    @ti.func
+    def _cell_index_from_faces_device(
+        self,
+        value,
+        faces: ti.template(),
+        count: ti.i32,
+    ):
+        index = 0
+        if value <= faces[0]:
+            index = 0
+        elif value >= faces[count]:
+            index = count - 1
+        else:
+            lower = 0
+            upper = count
+            while upper - lower > 1:
+                middle = (lower + upper) // 2
+                if value >= faces[middle]:
+                    lower = middle
+                else:
+                    upper = middle
+            index = lower
+        return ti.min(ti.max(index, 0), count - 1)
+
+    @ti.func
+    def _backtrace_crosses_obstacle(self, i, j, k, x, y, z):
+        blocked = 0
+        gx = self._grid_coordinate_x(x)
+        gy = self._grid_coordinate_y(y)
+        gz = self._grid_coordinate_z(z)
+        target_i = ti.min(ti.max(ti.floor(gx + 0.5, ti.i32), 0), self.nx - 1)
+        target_j = ti.min(ti.max(ti.floor(gy + 0.5, ti.i32), 0), self.ny - 1)
+        target_k = ti.min(ti.max(ti.floor(gz + 0.5, ti.i32), 0), self.nz - 1)
+        delta_i = ti.abs(target_i - i)
+        delta_j = ti.abs(target_j - j)
+        delta_k = ti.abs(target_k - k)
+        steps = ti.max(delta_i, ti.max(delta_j, delta_k))
+        march_steps = ti.min(steps, PREDICTOR_BACKTRACE_OBSTACLE_MARCH_MAX_STEPS)
+        step = 1
+        while step <= march_steps:
+            fraction = ti.cast(step, ti.f32) / ti.cast(march_steps, ti.f32)
+            sample_i = ti.min(
+                ti.max(
+                    ti.floor(
+                        ti.cast(i, ti.f32)
+                        + (gx - ti.cast(i, ti.f32)) * fraction
+                        + 0.5,
+                        ti.i32,
+                    ),
+                    0,
+                ),
+                self.nx - 1,
+            )
+            sample_j = ti.min(
+                ti.max(
+                    ti.floor(
+                        ti.cast(j, ti.f32)
+                        + (gy - ti.cast(j, ti.f32)) * fraction
+                        + 0.5,
+                        ti.i32,
+                    ),
+                    0,
+                ),
+                self.ny - 1,
+            )
+            sample_k = ti.min(
+                ti.max(
+                    ti.floor(
+                        ti.cast(k, ti.f32)
+                        + (gz - ti.cast(k, ti.f32)) * fraction
+                        + 0.5,
+                        ti.i32,
+                    ),
+                    0,
+                ),
+                self.nz - 1,
+            )
+            if self.obstacle[sample_i, sample_j, sample_k] != 0:
+                blocked = 1
+            step += 1
+        return blocked
+
     @ti.kernel
     def _predict_kernel(
         self,
         dt_s: ti.f32,
         nu_m2_s: ti.f32,
         advection_scheme_code: ti.i32,
+        no_slip_xmin: ti.i32,
+        no_slip_xmax: ti.i32,
+        no_slip_ymin: ti.i32,
+        no_slip_ymax: ti.i32,
+        no_slip_zmin: ti.i32,
+        no_slip_zmax: ti.i32,
     ):
         for i, j, k in self.velocity:
             if self.obstacle[i, j, k] == 1:
@@ -2255,19 +2906,32 @@ class CartesianFluidSolver:
                     mid_gx = self._grid_coordinate_x(mid_x)
                     mid_gy = self._grid_coordinate_y(mid_y)
                     mid_gz = self._grid_coordinate_z(mid_z)
-                    trace_velocity = self._sample_velocity_prev_trilinear(
-                        mid_gx,
-                        mid_gy,
-                        mid_gz,
-                        center,
-                    )
+                    if (
+                        self._backtrace_crosses_obstacle(
+                            i, j, k, mid_x, mid_y, mid_z
+                        )
+                        == 0
+                    ):
+                        trace_velocity = self._sample_velocity_prev_trilinear(
+                            mid_gx,
+                            mid_gy,
+                            mid_gz,
+                            center,
+                        )
                 back_x = x - dt_s * trace_velocity.x
                 back_y = y - dt_s * trace_velocity.y
                 back_z = z - dt_s * trace_velocity.z
                 gx = self._grid_coordinate_x(back_x)
                 gy = self._grid_coordinate_y(back_y)
                 gz = self._grid_coordinate_z(back_z)
-                advected = self._sample_velocity_prev_trilinear(gx, gy, gz, center)
+                advected = center
+                if (
+                    self._backtrace_crosses_obstacle(
+                        i, j, k, back_x, back_y, back_z
+                    )
+                    == 0
+                ):
+                    advected = self._sample_velocity_prev_trilinear(gx, gy, gz, center)
 
                 im = ti.max(i - 1, 0)
                 ip = ti.min(i + 1, self.nx - 1)
@@ -2281,18 +2945,48 @@ class CartesianFluidSolver:
                 flux_y_forward = ti.Vector([0.0, 0.0, 0.0])
                 flux_z_backward = ti.Vector([0.0, 0.0, 0.0])
                 flux_z_forward = ti.Vector([0.0, 0.0, 0.0])
-                if i > 0 and self.obstacle[im, j, k] == 0:
-                    flux_x_backward = (center - self.velocity_prev[im, j, k]) / self.center_distance_x_m[i]
-                if i < self.nx - 1 and self.obstacle[ip, j, k] == 0:
-                    flux_x_forward = (self.velocity_prev[ip, j, k] - center) / self.center_distance_x_m[i + 1]
-                if j > 0 and self.obstacle[i, jm, k] == 0:
-                    flux_y_backward = (center - self.velocity_prev[i, jm, k]) / self.center_distance_y_m[j]
-                if j < self.ny - 1 and self.obstacle[i, jp, k] == 0:
-                    flux_y_forward = (self.velocity_prev[i, jp, k] - center) / self.center_distance_y_m[j + 1]
-                if k > 0 and self.obstacle[i, j, km] == 0:
-                    flux_z_backward = (center - self.velocity_prev[i, j, km]) / self.center_distance_z_m[k]
-                if k < self.nz - 1 and self.obstacle[i, j, kp] == 0:
-                    flux_z_forward = (self.velocity_prev[i, j, kp] - center) / self.center_distance_z_m[k + 1]
+                if i > 0:
+                    if self.obstacle[im, j, k] == 0:
+                        flux_x_backward = (center - self.velocity_prev[im, j, k]) / self.center_distance_x_m[i]
+                    else:
+                        flux_x_backward = center / (0.5 * self.cell_width_x_m[i])
+                elif no_slip_xmin != 0:
+                    flux_x_backward = center / (0.5 * self.cell_width_x_m[i])
+                if i < self.nx - 1:
+                    if self.obstacle[ip, j, k] == 0:
+                        flux_x_forward = (self.velocity_prev[ip, j, k] - center) / self.center_distance_x_m[i + 1]
+                    else:
+                        flux_x_forward = -center / (0.5 * self.cell_width_x_m[i])
+                elif no_slip_xmax != 0:
+                    flux_x_forward = -center / (0.5 * self.cell_width_x_m[i])
+                if j > 0:
+                    if self.obstacle[i, jm, k] == 0:
+                        flux_y_backward = (center - self.velocity_prev[i, jm, k]) / self.center_distance_y_m[j]
+                    else:
+                        flux_y_backward = center / (0.5 * self.cell_width_y_m[j])
+                elif no_slip_ymin != 0:
+                    flux_y_backward = center / (0.5 * self.cell_width_y_m[j])
+                if j < self.ny - 1:
+                    if self.obstacle[i, jp, k] == 0:
+                        flux_y_forward = (self.velocity_prev[i, jp, k] - center) / self.center_distance_y_m[j + 1]
+                    else:
+                        flux_y_forward = -center / (0.5 * self.cell_width_y_m[j])
+                elif no_slip_ymax != 0:
+                    flux_y_forward = -center / (0.5 * self.cell_width_y_m[j])
+                if k > 0:
+                    if self.obstacle[i, j, km] == 0:
+                        flux_z_backward = (center - self.velocity_prev[i, j, km]) / self.center_distance_z_m[k]
+                    else:
+                        flux_z_backward = center / (0.5 * self.cell_width_z_m[k])
+                elif no_slip_zmin != 0:
+                    flux_z_backward = center / (0.5 * self.cell_width_z_m[k])
+                if k < self.nz - 1:
+                    if self.obstacle[i, j, kp] == 0:
+                        flux_z_forward = (self.velocity_prev[i, j, kp] - center) / self.center_distance_z_m[k + 1]
+                    else:
+                        flux_z_forward = -center / (0.5 * self.cell_width_z_m[k])
+                elif no_slip_zmax != 0:
+                    flux_z_forward = -center / (0.5 * self.cell_width_z_m[k])
                 laplacian = (
                     (flux_x_forward - flux_x_backward) / self.cell_width_x_m[i]
                     + (flux_y_forward - flux_y_backward) / self.cell_width_y_m[j]
@@ -2300,19 +2994,168 @@ class CartesianFluidSolver:
                 )
                 self.velocity[i, j, k] = advected + dt_s * nu_m2_s * laplacian
 
-    def predict(self, dt_s: float | None = None, *, advection_scheme: str = "euler") -> None:
+    @ti.kernel
+    def _max_fluid_speed_kernel(self) -> ti.f64:
+        self.reduction_max[None] = 0.0
+        for i, j, k in self.velocity:
+            if self.obstacle[i, j, k] == 0:
+                ti.atomic_max(
+                    self.reduction_max[None],
+                    ti.cast(self.velocity[i, j, k].norm(), ti.f64),
+                )
+        return self.reduction_max[None]
+
+    def predict(
+        self,
+        dt_s: float | None = None,
+        *,
+        advection_scheme: str = "euler",
+        kinematic_viscosity_m2_s: float | None = None,
+        no_slip_domain_walls: tuple[bool, bool, bool, bool, bool, bool] | None = None,
+    ) -> None:
         step_dt_s = self.dt if dt_s is None else float(dt_s)
         if step_dt_s <= 0.0:
             raise ValueError("dt_s must be positive")
         scheme = str(advection_scheme).lower()
         if scheme not in {"euler", "rk2"}:
             raise ValueError(f"unsupported advection_scheme: {advection_scheme!r}")
+        nu_m2_s = (
+            float(self.mu / self.rho)
+            if kinematic_viscosity_m2_s is None
+            else float(kinematic_viscosity_m2_s)
+        )
+        if not math.isfinite(nu_m2_s) or nu_m2_s < 0.0:
+            raise ValueError("kinematic_viscosity_m2_s must be finite and non-negative")
+        max_speed_mps = float(self._max_fluid_speed_kernel())
+        advection_cfl = max_speed_mps * step_dt_s / max(
+            min(self.dx, self.dy, self.dz),
+            1.0e-30,
+        )
+        if (
+            not math.isfinite(advection_cfl)
+            or advection_cfl > PREDICTOR_ADVECTION_CFL_FAIL_FAST_LIMIT
+        ):
+            raise ValueError(
+                "velocity field is too large for explicit predictor advection "
+                "stability; "
+                f"advection_cfl={advection_cfl:g}, "
+                f"limit={PREDICTOR_ADVECTION_CFL_FAIL_FAST_LIMIT:g}"
+            )
+        diffusion_cfl = 2.0 * nu_m2_s * step_dt_s * (
+            1.0 / max(self.dx * self.dx, 1.0e-30)
+            + 1.0 / max(self.dy * self.dy, 1.0e-30)
+            + 1.0 / max(self.dz * self.dz, 1.0e-30)
+        )
+        if diffusion_cfl > 1.0:
+            raise ValueError(
+                "kinematic_viscosity_m2_s is too large for explicit predictor "
+                f"diffusion stability; diffusion_cfl={diffusion_cfl:g}"
+            )
+        if no_slip_domain_walls is None:
+            wall_flags = (False, False, False, False, False, False)
+        else:
+            wall_flags = tuple(bool(flag) for flag in no_slip_domain_walls)
+            if len(wall_flags) != 6:
+                raise ValueError(
+                    "no_slip_domain_walls must contain six booleans: "
+                    "(xmin, xmax, ymin, ymax, zmin, zmax)"
+                )
         self._copy_velocity_to_prev_kernel()
         self._predict_kernel(
             float(step_dt_s),
-            float(self.mu / self.rho),
+            nu_m2_s,
             1 if scheme == "rk2" else 0,
+            1 if wall_flags[0] else 0,
+            1 if wall_flags[1] else 0,
+            1 if wall_flags[2] else 0,
+            1 if wall_flags[3] else 0,
+            1 if wall_flags[4] else 0,
+            1 if wall_flags[5] else 0,
         )
+
+    def apply_symmetry_domain_walls(
+        self,
+        symmetry_domain_walls: tuple[bool, bool, bool, bool, bool, bool],
+    ) -> None:
+        wall_flags = tuple(bool(flag) for flag in symmetry_domain_walls)
+        if len(wall_flags) != 6:
+            raise ValueError(
+                "symmetry_domain_walls must contain six booleans: "
+                "(xmin, xmax, ymin, ymax, zmin, zmax)"
+            )
+        self._apply_symmetry_domain_walls_kernel(
+            1 if wall_flags[0] else 0,
+            1 if wall_flags[1] else 0,
+            1 if wall_flags[2] else 0,
+            1 if wall_flags[3] else 0,
+            1 if wall_flags[4] else 0,
+            1 if wall_flags[5] else 0,
+        )
+
+    @ti.kernel
+    def _apply_symmetry_domain_walls_kernel(
+        self,
+        xmin: ti.i32,
+        xmax: ti.i32,
+        ymin: ti.i32,
+        ymax: ti.i32,
+        zmin: ti.i32,
+        zmax: ti.i32,
+    ):
+        if xmin != 0:
+            for j, k in ti.ndrange(self.ny, self.nz):
+                if self.velocity_dirichlet_boundary_active[0, j, k] == 0:
+                    self.velocity[0, j, k].x = 0.0
+                    if self.nx > 1:
+                        self.velocity[0, j, k].y = self.velocity[1, j, k].y
+                        self.velocity[0, j, k].z = self.velocity[1, j, k].z
+        if xmax != 0:
+            for j, k in ti.ndrange(self.ny, self.nz):
+                if self.velocity_dirichlet_boundary_active[self.nx - 1, j, k] == 0:
+                    self.velocity[self.nx - 1, j, k].x = 0.0
+                    if self.nx > 1:
+                        self.velocity[self.nx - 1, j, k].y = (
+                            self.velocity[self.nx - 2, j, k].y
+                        )
+                        self.velocity[self.nx - 1, j, k].z = (
+                            self.velocity[self.nx - 2, j, k].z
+                        )
+        if ymin != 0:
+            for i, k in ti.ndrange(self.nx, self.nz):
+                if self.velocity_dirichlet_boundary_active[i, 0, k] == 0:
+                    self.velocity[i, 0, k].y = 0.0
+                    if self.ny > 1:
+                        self.velocity[i, 0, k].x = self.velocity[i, 1, k].x
+                        self.velocity[i, 0, k].z = self.velocity[i, 1, k].z
+        if ymax != 0:
+            for i, k in ti.ndrange(self.nx, self.nz):
+                if self.velocity_dirichlet_boundary_active[i, self.ny - 1, k] == 0:
+                    self.velocity[i, self.ny - 1, k].y = 0.0
+                    if self.ny > 1:
+                        self.velocity[i, self.ny - 1, k].x = (
+                            self.velocity[i, self.ny - 2, k].x
+                        )
+                        self.velocity[i, self.ny - 1, k].z = (
+                            self.velocity[i, self.ny - 2, k].z
+                        )
+        if zmin != 0:
+            for i, j in ti.ndrange(self.nx, self.ny):
+                if self.velocity_dirichlet_boundary_active[i, j, 0] == 0:
+                    self.velocity[i, j, 0].z = 0.0
+                    if self.nz > 1:
+                        self.velocity[i, j, 0].x = self.velocity[i, j, 1].x
+                        self.velocity[i, j, 0].y = self.velocity[i, j, 1].y
+        if zmax != 0:
+            for i, j in ti.ndrange(self.nx, self.ny):
+                if self.velocity_dirichlet_boundary_active[i, j, self.nz - 1] == 0:
+                    self.velocity[i, j, self.nz - 1].z = 0.0
+                    if self.nz > 1:
+                        self.velocity[i, j, self.nz - 1].x = (
+                            self.velocity[i, j, self.nz - 2].x
+                        )
+                        self.velocity[i, j, self.nz - 1].y = (
+                            self.velocity[i, j, self.nz - 2].y
+                        )
 
     @ti.kernel
     def _clear_velocity_constraints_kernel(self):
@@ -2334,6 +3177,313 @@ class CartesianFluidSolver:
         self._clear_velocity_constraints_kernel()
 
     @ti.kernel
+    def _clear_marker_feedback_constraints_kernel(self):
+        self.report_marker_feedback_marker_count[None] = 0
+        self.report_marker_feedback_active_cell_count[None] = 0
+        self.report_marker_feedback_cleared_cell_count[None] = 0
+        self.report_marker_feedback_obstacle_cell_count[None] = 0
+        self.report_marker_feedback_non_obstacle_cell_count[None] = 0
+        self.report_marker_feedback_constraint_active_cell_count[None] = 0
+        self.report_marker_feedback_residual_before_max_mps[None] = 0.0
+        self.report_marker_feedback_residual_after_max_mps[None] = 0.0
+        self.report_marker_feedback_projected_residual_max_mps[None] = 0.0
+        for i, j, k in self.velocity_constraint_weight:
+            self.velocity_constraint_sum[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            self.velocity_constraint_weight[i, j, k] = 0.0
+            self.velocity_constraint_primary_sum[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            self.velocity_constraint_primary_weight[i, j, k] = 0.0
+            self.velocity_constraint_secondary_sum[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            self.velocity_constraint_secondary_weight[i, j, k] = 0.0
+            self.marker_feedback_target_sum[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            self.marker_feedback_target_weight[i, j, k] = 0.0
+            self.marker_feedback_region_min[i, j, k] = 2147483647
+            self.marker_feedback_region_max[i, j, k] = -2147483648
+            if self.marker_feedback_owned[i, j, k] != 0:
+                self.velocity_dirichlet_boundary_active[i, j, k] = 0
+                self.velocity_dirichlet_boundary_value_mps[i, j, k] = ti.Vector(
+                    [0.0, 0.0, 0.0]
+                )
+                self.velocity_dirichlet_boundary_projection_weight[i, j, k] = 0.0
+                self.velocity_dirichlet_boundary_marker_region_id[i, j, k] = -1
+                self.marker_feedback_owned[i, j, k] = 0
+                ti.atomic_add(
+                    self.report_marker_feedback_cleared_cell_count[None],
+                    1,
+                )
+
+    @ti.kernel
+    def _scatter_marker_feedback_constraints_kernel(
+        self,
+        marker_position_m: ti.template(),
+        marker_velocity_mps: ti.template(),
+        marker_region_id: ti.template(),
+        marker_count: ti.i32,
+        preserve_velocity_constraints: ti.i32,
+        primary_region_id: ti.i32,
+        secondary_region_id: ti.i32,
+    ):
+        self.report_marker_feedback_marker_count[None] = marker_count
+        for marker in range(marker_count):
+            position = marker_position_m[marker]
+            marker_velocity = marker_velocity_mps[marker]
+            i = self._cell_index_from_faces_device(
+                position.x,
+                self.cell_face_x_m,
+                self.nx,
+            )
+            j = self._cell_index_from_faces_device(
+                position.y,
+                self.cell_face_y_m,
+                self.ny,
+            )
+            k = self._cell_index_from_faces_device(
+                position.z,
+                self.cell_face_z_m,
+                self.nz,
+            )
+            residual_before = (self.velocity[i, j, k] - marker_velocity).norm()
+            ti.atomic_max(
+                self.report_marker_feedback_residual_before_max_mps[None],
+                residual_before,
+            )
+            for axis in ti.static(range(3)):
+                ti.atomic_add(
+                    self.marker_feedback_target_sum[i, j, k][axis],
+                    marker_velocity[axis],
+                )
+                if preserve_velocity_constraints != 0:
+                    ti.atomic_add(
+                        self.velocity_constraint_sum[i, j, k][axis],
+                        marker_velocity[axis],
+                    )
+            ti.atomic_add(self.marker_feedback_target_weight[i, j, k], 1.0)
+            if preserve_velocity_constraints != 0:
+                ti.atomic_add(self.velocity_constraint_weight[i, j, k], 1.0)
+            region_id = marker_region_id[marker]
+            ti.atomic_min(self.marker_feedback_region_min[i, j, k], region_id)
+            ti.atomic_max(self.marker_feedback_region_max[i, j, k], region_id)
+            if preserve_velocity_constraints != 0 and region_id == primary_region_id:
+                for axis in ti.static(range(3)):
+                    ti.atomic_add(
+                        self.velocity_constraint_primary_sum[i, j, k][axis],
+                        marker_velocity[axis],
+                    )
+                ti.atomic_add(self.velocity_constraint_primary_weight[i, j, k], 1.0)
+            if preserve_velocity_constraints != 0 and region_id == secondary_region_id:
+                for axis in ti.static(range(3)):
+                    ti.atomic_add(
+                        self.velocity_constraint_secondary_sum[i, j, k][axis],
+                        marker_velocity[axis],
+                    )
+                ti.atomic_add(
+                    self.velocity_constraint_secondary_weight[i, j, k],
+                    1.0,
+                )
+
+    @ti.kernel
+    def _finalize_marker_feedback_constraints_kernel(
+        self,
+        preserve_velocity_constraints: ti.i32,
+    ):
+        for i, j, k in self.velocity_dirichlet_boundary_active:
+            count = self.marker_feedback_target_weight[i, j, k]
+            if count > 0.0:
+                for axis in ti.static(range(3)):
+                    self.velocity_dirichlet_boundary_value_mps[i, j, k][axis] = (
+                        self.marker_feedback_target_sum[i, j, k][axis] / count
+                    )
+                self.velocity_dirichlet_boundary_projection_weight[i, j, k] = 1.0
+                self.velocity_dirichlet_boundary_active[i, j, k] = 1
+                self.marker_feedback_owned[i, j, k] = 1
+                region_min = self.marker_feedback_region_min[i, j, k]
+                region_max = self.marker_feedback_region_max[i, j, k]
+                if region_min == region_max:
+                    self.velocity_dirichlet_boundary_marker_region_id[i, j, k] = (
+                        region_min
+                    )
+                else:
+                    self.velocity_dirichlet_boundary_marker_region_id[i, j, k] = -1
+                ti.atomic_add(
+                    self.report_marker_feedback_active_cell_count[None],
+                    1,
+                )
+                if self.obstacle[i, j, k] != 0:
+                    ti.atomic_add(
+                        self.report_marker_feedback_obstacle_cell_count[None],
+                        1,
+                    )
+                else:
+                    ti.atomic_add(
+                        self.report_marker_feedback_non_obstacle_cell_count[None],
+                        1,
+                    )
+                if preserve_velocity_constraints != 0:
+                    ti.atomic_add(
+                        self.report_marker_feedback_constraint_active_cell_count[
+                            None
+                        ],
+                        1,
+                    )
+
+    @ti.kernel
+    def _measure_marker_feedback_target_residual_kernel(
+        self,
+        marker_position_m: ti.template(),
+        marker_velocity_mps: ti.template(),
+        marker_count: ti.i32,
+    ):
+        for marker in range(marker_count):
+            position = marker_position_m[marker]
+            marker_velocity = marker_velocity_mps[marker]
+            i = self._cell_index_from_faces_device(
+                position.x,
+                self.cell_face_x_m,
+                self.nx,
+            )
+            j = self._cell_index_from_faces_device(
+                position.y,
+                self.cell_face_y_m,
+                self.ny,
+            )
+            k = self._cell_index_from_faces_device(
+                position.z,
+                self.cell_face_z_m,
+                self.nz,
+            )
+            residual_after = (
+                self.velocity_dirichlet_boundary_value_mps[i, j, k]
+                - marker_velocity
+            ).norm()
+            ti.atomic_max(
+                self.report_marker_feedback_residual_after_max_mps[None],
+                residual_after,
+            )
+
+    @ti.kernel
+    def _measure_marker_feedback_projected_residual_kernel(
+        self,
+        marker_position_m: ti.template(),
+        marker_velocity_mps: ti.template(),
+        marker_count: ti.i32,
+    ):
+        self.report_marker_feedback_projected_residual_max_mps[None] = 0.0
+        for marker in range(marker_count):
+            position = marker_position_m[marker]
+            marker_velocity = marker_velocity_mps[marker]
+            i = self._cell_index_from_faces_device(position.x, self.cell_face_x_m, self.nx)
+            j = self._cell_index_from_faces_device(position.y, self.cell_face_y_m, self.ny)
+            k = self._cell_index_from_faces_device(position.z, self.cell_face_z_m, self.nz)
+            residual = (self.velocity[i, j, k] - marker_velocity).norm()
+            ti.atomic_max(
+                self.report_marker_feedback_projected_residual_max_mps[None],
+                residual,
+            )
+
+    def apply_marker_feedback_constraints(
+        self,
+        marker_position_m,
+        marker_velocity_mps,
+        marker_region_id,
+        marker_count: int,
+        *,
+        feedback_available: bool,
+        preserve_velocity_constraints: bool,
+        primary_region_id: int,
+        secondary_region_id: int,
+    ) -> dict[str, object]:
+        self._clear_marker_feedback_constraints_kernel()
+        if feedback_available and int(marker_count) > 0:
+            self._scatter_marker_feedback_constraints_kernel(
+                marker_position_m,
+                marker_velocity_mps,
+                marker_region_id,
+                int(marker_count),
+                1 if preserve_velocity_constraints else 0,
+                int(primary_region_id),
+                int(secondary_region_id),
+            )
+            self._finalize_marker_feedback_constraints_kernel(
+                1 if preserve_velocity_constraints else 0,
+            )
+            self._measure_marker_feedback_target_residual_kernel(
+                marker_position_m,
+                marker_velocity_mps,
+                int(marker_count),
+            )
+        return self.marker_feedback_constraint_report(
+            feedback_available=feedback_available,
+            preserve_velocity_constraints=preserve_velocity_constraints,
+        )
+
+    def marker_feedback_constraint_report(
+        self,
+        *,
+        feedback_available: bool,
+        preserve_velocity_constraints: bool,
+    ) -> dict[str, object]:
+        active_cell_count = int(self.report_marker_feedback_active_cell_count[None])
+        non_obstacle_cell_count = int(
+            self.report_marker_feedback_non_obstacle_cell_count[None]
+        )
+        consumed_feedback = bool(feedback_available and active_cell_count > 0)
+        return {
+            "fluid_projection_consumed_feedback": consumed_feedback,
+            "fluid_feedback_constraint_marker_count": (
+                int(self.report_marker_feedback_marker_count[None])
+                if feedback_available
+                else 0
+            ),
+            "fluid_feedback_constraint_active_cell_count": active_cell_count,
+            "fluid_feedback_constraint_cleared_cell_count": int(
+                self.report_marker_feedback_cleared_cell_count[None]
+            ),
+            "fluid_feedback_constraint_obstacle_cell_count": int(
+                self.report_marker_feedback_obstacle_cell_count[None]
+            ),
+            "fluid_feedback_constraint_non_obstacle_cell_count": non_obstacle_cell_count,
+            "fluid_feedback_constraint_projection_participating_cell_count": (
+                non_obstacle_cell_count
+            ),
+            "fluid_marker_velocity_constraints_enabled": bool(
+                preserve_velocity_constraints and consumed_feedback
+            ),
+            "fluid_marker_velocity_constraint_active_cell_count": int(
+                self.report_marker_feedback_constraint_active_cell_count[None]
+            ),
+            "no_slip_residual_before_mps": (
+                float(self.report_marker_feedback_residual_before_max_mps[None])
+                if feedback_available
+                else ""
+            ),
+            "no_slip_residual_after_mps": (
+                float(self.report_marker_feedback_residual_after_max_mps[None])
+                if feedback_available
+                else ""
+            ),
+            "no_slip_target_residual_after_assembly_mps": (
+                float(self.report_marker_feedback_residual_after_max_mps[None])
+                if feedback_available
+                else ""
+            ),
+            "no_slip_projected_residual_after_projection_mps": 0.0,
+        }
+
+    def marker_feedback_projected_residual_mps(
+        self,
+        marker_position_m,
+        marker_velocity_mps,
+        marker_count: int,
+    ) -> float:
+        if int(marker_count) <= 0:
+            return 0.0
+        self._measure_marker_feedback_projected_residual_kernel(
+            marker_position_m,
+            marker_velocity_mps,
+            int(marker_count),
+        )
+        return float(self.report_marker_feedback_projected_residual_max_mps[None])
+
+    @ti.kernel
     def _apply_velocity_dirichlet_boundary_rows_kernel(
         self,
         read_report: ti.i32,
@@ -2351,7 +3501,21 @@ class CartesianFluidSolver:
                 and self.obstacle[i, j, k] == 0
             ):
                 old_velocity = self.velocity[i, j, k]
-                new_velocity = self.velocity_dirichlet_boundary_value_mps[i, j, k]
+                weight = ti.min(
+                    1.0,
+                    ti.max(
+                        0.0,
+                        self.velocity_dirichlet_boundary_projection_weight[i, j, k],
+                    ),
+                )
+                if (
+                    preserve_projected_rows != 0
+                    and self.velocity_dirichlet_boundary_marker_region_id[i, j, k]
+                    >= 0
+                ):
+                    weight = 1.0
+                target_velocity = self.velocity_dirichlet_boundary_value_mps[i, j, k]
+                new_velocity = old_velocity + weight * (target_velocity - old_velocity)
                 velocity_delta = new_velocity - old_velocity
                 self.velocity[i, j, k] = new_velocity
                 if read_report != 0:
@@ -2901,6 +4065,40 @@ class CartesianFluidSolver:
         }
 
     @ti.kernel
+    def _pressure_interface_matrix_policy_probe_kernel(self):
+        self.report_pressure_interface_matrix_max_abs_diagonal[None] = 0.0
+        self.report_pressure_interface_matrix_active_cells[None] = 0
+        self.report_pressure_interface_matrix_row_count[None] = (
+            self.pressure_interface_row_count[None]
+        )
+        self.report_pressure_interface_matrix_active_row_count[None] = ti.min(
+            self.pressure_interface_row_count[None],
+            self.pressure_interface_row_capacity,
+        )
+        for i, j, k in self.pressure_interface_matrix_diagonal:
+            diagonal = self.pressure_interface_matrix_diagonal[i, j, k]
+            rhs = self.pressure_interface_matrix_rhs[i, j, k]
+            if ti.abs(diagonal) > 0.0 or ti.abs(rhs) > 0.0:
+                ti.atomic_add(self.report_pressure_interface_matrix_active_cells[None], 1)
+            ti.atomic_max(
+                self.report_pressure_interface_matrix_max_abs_diagonal[None],
+                ti.abs(diagonal),
+            )
+
+    def _pressure_interface_matrix_policy_report(self) -> dict[str, float | int]:
+        self._pressure_interface_matrix_policy_probe_kernel()
+        return {
+            "max_abs_diagonal": float(
+                self.report_pressure_interface_matrix_max_abs_diagonal[None]
+            ),
+            "active_cells": int(self.report_pressure_interface_matrix_active_cells[None]),
+            "row_count": int(self.report_pressure_interface_matrix_row_count[None]),
+            "row_active_count": int(
+                self.report_pressure_interface_matrix_active_row_count[None]
+            ),
+        }
+
+    @ti.kernel
     def _sum_obstacle_volume_kernel(self):
         self.reduction_sum[None] = 0.0
         for i, j, k in self.obstacle:
@@ -2921,6 +4119,146 @@ class CartesianFluidSolver:
     def obstacle_cell_count(self) -> int:
         self._count_obstacle_cells_kernel()
         return int(self.reduction_count[None])
+
+    @ti.kernel
+    def _flow_state_report_kernel(self, pressure_field: ti.template()):
+        self.report_flow_state_obstacle_cells[None] = 0
+        self.report_flow_state_fluid_cells[None] = 0
+        self.report_flow_state_velocity_peak_mps[None] = 0.0
+        self.report_flow_state_pressure_min_pa[None] = 1.0e300
+        self.report_flow_state_pressure_max_pa[None] = -1.0e300
+        for i, j, k in self.obstacle:
+            if self.obstacle[i, j, k] != 0:
+                ti.atomic_add(self.report_flow_state_obstacle_cells[None], 1)
+            else:
+                ti.atomic_add(self.report_flow_state_fluid_cells[None], 1)
+                ti.atomic_max(
+                    self.report_flow_state_velocity_peak_mps[None],
+                    ti.cast(self.velocity[i, j, k].norm(), ti.f64),
+                )
+                pressure = ti.cast(pressure_field[i, j, k], ti.f64)
+                ti.atomic_min(self.report_flow_state_pressure_min_pa[None], pressure)
+                ti.atomic_max(self.report_flow_state_pressure_max_pa[None], pressure)
+        if self.report_flow_state_fluid_cells[None] == 0:
+            self.report_flow_state_pressure_min_pa[None] = 0.0
+            self.report_flow_state_pressure_max_pa[None] = 0.0
+
+    def flow_state_report(
+        self,
+        *,
+        pressure_field=None,
+        include_percentiles: bool = False,
+    ) -> dict[str, float | int]:
+        pressure_source = self.fsi_pressure if pressure_field is None else pressure_field
+        self._flow_state_report_kernel(pressure_source)
+        report: dict[str, float | int] = {
+            "obstacle_cell_count": int(self.report_flow_state_obstacle_cells[None]),
+            "fluid_cell_count": int(self.report_flow_state_fluid_cells[None]),
+            "local_velocity_peak_mps": float(
+                self.report_flow_state_velocity_peak_mps[None]
+            ),
+            "pressure_min_pa": float(self.report_flow_state_pressure_min_pa[None]),
+            "pressure_max_pa": float(self.report_flow_state_pressure_max_pa[None]),
+        }
+        if include_percentiles:
+            obstacle = self.obstacle.to_numpy()
+            velocity = self.velocity.to_numpy()
+            non_obstacle = obstacle == 0
+            speed = np.linalg.norm(velocity, axis=3)
+            active_speed = speed[non_obstacle]
+            report["fluid_speed_p99_mps"] = (
+                float(np.percentile(active_speed, 99.0)) if active_speed.size else 0.0
+            )
+            report["fluid_speed_p999_mps"] = (
+                float(np.percentile(active_speed, 99.9)) if active_speed.size else 0.0
+            )
+        else:
+            report["fluid_speed_p99_mps"] = ""
+            report["fluid_speed_p999_mps"] = ""
+        return report
+
+    @ti.kernel
+    def _refresh_zmax_inlet_boundary_kernel(
+        self,
+        inlet_velocity_mps: ti.f32,
+        streamwise_axis_index: ti.i32,
+    ):
+        self.report_zmax_inlet_boundary_active_cells[None] = 0
+        self.report_zmax_inlet_boundary_obstacle_cells[None] = 0
+        inlet_k = self.nz - 1
+        for i, j in ti.ndrange(self.nx, self.ny):
+            target = ti.Vector([0.0, 0.0, 0.0])
+            if streamwise_axis_index == 0:
+                target.x = -inlet_velocity_mps
+            elif streamwise_axis_index == 1:
+                target.y = -inlet_velocity_mps
+            else:
+                target.z = -inlet_velocity_mps
+            if self.obstacle[i, j, inlet_k] == 0:
+                self.velocity_dirichlet_boundary_active[i, j, inlet_k] = 1
+                self.velocity_dirichlet_boundary_value_mps[i, j, inlet_k] = target
+                self.velocity_dirichlet_boundary_projection_weight[i, j, inlet_k] = 1.0
+                self.velocity_dirichlet_boundary_marker_region_id[i, j, inlet_k] = -1
+                ti.atomic_add(
+                    self.report_zmax_inlet_boundary_active_cells[None],
+                    1,
+                )
+            else:
+                self.velocity_dirichlet_boundary_active[i, j, inlet_k] = 0
+                self.velocity_dirichlet_boundary_value_mps[i, j, inlet_k] = ti.Vector(
+                    [0.0, 0.0, 0.0]
+                )
+                self.velocity_dirichlet_boundary_projection_weight[i, j, inlet_k] = 0.0
+                self.velocity_dirichlet_boundary_marker_region_id[i, j, inlet_k] = -1
+
+    def refresh_zmax_inlet_boundary(
+        self,
+        *,
+        inlet_velocity_mps: float,
+        streamwise_axis_index: int = 2,
+    ) -> dict[str, int]:
+        axis = int(streamwise_axis_index)
+        if axis not in (0, 1, 2):
+            raise ValueError(
+                f"streamwise_axis_index must be 0, 1, or 2, got {axis!r}"
+            )
+        self._refresh_zmax_inlet_boundary_kernel(float(inlet_velocity_mps), axis)
+        return {
+            "flow_inlet_boundary_active_cell_count": int(
+                self.report_zmax_inlet_boundary_active_cells[None]
+            ),
+            "flow_inlet_boundary_obstacle_cell_count": int(
+                self.report_zmax_inlet_boundary_obstacle_cells[None]
+            ),
+        }
+
+    @ti.kernel
+    def _zmax_inlet_boundary_report_kernel(self):
+        self.report_zmax_inlet_boundary_active_cells[None] = 0
+        self.report_zmax_inlet_boundary_obstacle_cells[None] = 0
+        inlet_k = self.nz - 1
+        for i, j in ti.ndrange(self.nx, self.ny):
+            if self.velocity_dirichlet_boundary_active[i, j, inlet_k] != 0:
+                ti.atomic_add(
+                    self.report_zmax_inlet_boundary_active_cells[None],
+                    1,
+                )
+                if self.obstacle[i, j, inlet_k] != 0:
+                    ti.atomic_add(
+                        self.report_zmax_inlet_boundary_obstacle_cells[None],
+                        1,
+                    )
+
+    def zmax_inlet_boundary_report(self) -> dict[str, int]:
+        self._zmax_inlet_boundary_report_kernel()
+        return {
+            "flow_inlet_boundary_active_cell_count": int(
+                self.report_zmax_inlet_boundary_active_cells[None]
+            ),
+            "flow_inlet_boundary_obstacle_cell_count": int(
+                self.report_zmax_inlet_boundary_obstacle_cells[None]
+            ),
+        }
 
     @ti.kernel
     def _apply_obstacle_velocity_kernel(self, vx: ti.f32, vy: ti.f32, vz: ti.f32):
@@ -3138,105 +4476,11 @@ class CartesianFluidSolver:
             active_velocity_cells=int(self.report_active_velocity_cells[None]),
         )
 
-    @ti.func
-    def _sample_pressure_trilinear(self, gx, gy, gz):
-        i0 = ti.min(ti.max(ti.floor(gx, ti.i32), 0), self.nx - 2)
-        j0 = ti.min(ti.max(ti.floor(gy, ti.i32), 0), self.ny - 2)
-        k0 = ti.min(ti.max(ti.floor(gz, ti.i32), 0), self.nz - 2)
-        tx = ti.min(ti.max(gx - ti.cast(i0, ti.f32), 0.0), 1.0)
-        ty = ti.min(ti.max(gy - ti.cast(j0, ti.f32), 0.0), 1.0)
-        tz = ti.min(ti.max(gz - ti.cast(k0, ti.f32), 0.0), 1.0)
-        value = 0.0
-        for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
-            wx = 1.0 - tx if oi == 0 else tx
-            wy = 1.0 - ty if oj == 0 else ty
-            wz = 1.0 - tz if ok == 0 else tz
-            value += wx * wy * wz * self.pressure[i0 + oi, j0 + oj, k0 + ok]
-        return value
-
-    @ti.func
-    def _sample_velocity_trilinear(self, gx, gy, gz):
-        i0 = ti.min(ti.max(ti.floor(gx, ti.i32), 0), self.nx - 2)
-        j0 = ti.min(ti.max(ti.floor(gy, ti.i32), 0), self.ny - 2)
-        k0 = ti.min(ti.max(ti.floor(gz, ti.i32), 0), self.nz - 2)
-        tx = ti.min(ti.max(gx - ti.cast(i0, ti.f32), 0.0), 1.0)
-        ty = ti.min(ti.max(gy - ti.cast(j0, ti.f32), 0.0), 1.0)
-        tz = ti.min(ti.max(gz - ti.cast(k0, ti.f32), 0.0), 1.0)
-        value = ti.Vector([0.0, 0.0, 0.0])
-        for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
-            wx = 1.0 - tx if oi == 0 else tx
-            wy = 1.0 - ty if oj == 0 else ty
-            wz = 1.0 - tz if ok == 0 else tz
-            value += wx * wy * wz * self.velocity[i0 + oi, j0 + oj, k0 + ok]
-        return value
-
-    @ti.kernel
-    def _write_xz_plane_kernel(
-        self,
-        pressure_plane: ti.template(),
-        velocity_u_plane: ti.template(),
-        velocity_w_plane: ti.template(),
-        plane_nx: ti.i32,
-        plane_nz: ti.i32,
-        x_min: ti.f32,
-        x_max: ti.f32,
-        y_m: ti.f32,
-        z_min: ti.f32,
-        z_max: ti.f32,
-        xmin: ti.f32,
-        ymin: ti.f32,
-        zmin: ti.f32,
-        dx: ti.f32,
-        dy: ti.f32,
-        dz: ti.f32,
-    ):
-        for k, i in pressure_plane:
-            x = x_min + (x_max - x_min) * ti.cast(i, ti.f32) / ti.cast(plane_nx - 1, ti.f32)
-            z = z_min + (z_max - z_min) * ti.cast(k, ti.f32) / ti.cast(plane_nz - 1, ti.f32)
-            gx = self._grid_coordinate_x(x)
-            gy = self._grid_coordinate_y(y_m)
-            gz = self._grid_coordinate_z(z)
-            pressure_plane[k, i] = self._sample_pressure_trilinear(gx, gy, gz)
-            velocity = self._sample_velocity_trilinear(gx, gy, gz)
-            velocity_u_plane[k, i] = velocity.x
-            velocity_w_plane[k, i] = velocity.z
-
-    def write_xz_plane(
-        self,
-        pressure_plane,
-        velocity_u_plane,
-        velocity_w_plane,
-        plane_shape: tuple[int, int],
-        x_bounds_m: tuple[float, float],
-        y_m: float,
-        z_bounds_m: tuple[float, float],
-    ) -> None:
-        plane_nz, plane_nx = plane_shape
-        if plane_nx < 2 or plane_nz < 2:
-            raise ValueError("plane_shape must be at least (2, 2)")
-        self._write_xz_plane_kernel(
-            pressure_plane,
-            velocity_u_plane,
-            velocity_w_plane,
-            int(plane_nx),
-            int(plane_nz),
-            float(x_bounds_m[0]),
-            float(x_bounds_m[1]),
-            float(y_m),
-            float(z_bounds_m[0]),
-            float(z_bounds_m[1]),
-            float(self.bounds_min[0]),
-            float(self.bounds_min[1]),
-            float(self.bounds_min[2]),
-            float(self.dx),
-            float(self.dy),
-            float(self.dz),
-        )
-
     @ti.kernel
     def _compute_divergence_kernel(
         self,
         pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax: ti.i32,
     ):
         for i, j, k in self.divergence:
             if self.obstacle[i, j, k] == 1:
@@ -3262,7 +4506,9 @@ class CartesianFluidSolver:
                     bottom_velocity_z = self.velocity[i, j, k].z
                 elif k > 0 and self.obstacle[i, j, k - 1] == 0:
                     bottom_velocity_z = self.velocity[i, j, k].z
-                if k < self.nz - 1 and self.obstacle[i, j, k + 1] == 0:
+                if velocity_inlet_zmax == 1 and k == self.nz - 1:
+                    top_velocity_z = self.velocity[i, j, k].z
+                elif k < self.nz - 1 and self.obstacle[i, j, k + 1] == 0:
                     top_velocity_z = self.velocity[i, j, k + 1].z
 
                 self.divergence[i, j, k] = (
@@ -3271,9 +4517,15 @@ class CartesianFluidSolver:
                     + (top_velocity_z - bottom_velocity_z) / self.cell_width_z_m[k]
                 )
 
-    def compute_divergence(self, *, pressure_outlet_zmin: bool = False) -> None:
+    def compute_divergence(
+        self,
+        *,
+        pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool = False,
+    ) -> None:
         self._compute_divergence_kernel(
             1 if pressure_outlet_zmin else 0,
+            1 if velocity_inlet_zmax else 0,
         )
 
     @ti.kernel
@@ -3472,33 +4724,6 @@ class CartesianFluidSolver:
                 or self.velocity_dirichlet_boundary_active[i, j, k + 1] != 0
             )
         return uses_dirichlet
-
-    @ti.func
-    def _divergence_stencil_touches_velocity_dirichlet_region(
-        self,
-        i: ti.i32,
-        j: ti.i32,
-        k: ti.i32,
-    ):
-        touches_region = (
-            self.velocity_dirichlet_boundary_marker_region_id[i, j, k] >= 0
-        )
-        if i < self.nx - 1:
-            touches_region = (
-                touches_region
-                or self.velocity_dirichlet_boundary_marker_region_id[i + 1, j, k] >= 0
-            )
-        if j < self.ny - 1:
-            touches_region = (
-                touches_region
-                or self.velocity_dirichlet_boundary_marker_region_id[i, j + 1, k] >= 0
-            )
-        if k < self.nz - 1:
-            touches_region = (
-                touches_region
-                or self.velocity_dirichlet_boundary_marker_region_id[i, j, k + 1] >= 0
-            )
-        return touches_region
 
     @ti.func
     def _divergence_stencil_has_pressure_correctable_face(
@@ -3859,8 +5084,38 @@ class CartesianFluidSolver:
     def clear_pressure(self) -> None:
         self._clear_pressure_kernel()
 
-    def snapshot_pressure(self) -> None:
+    @ti.kernel
+    def _pressure_field_finite_and_max_abs_kernel(self):
+        self.reduction_max[None] = 0.0
+        self.reduction_count[None] = 0
+        for i, j, k in self.pressure:
+            value = self.pressure[i, j, k]
+            if ti.math.isnan(value) or ti.math.isinf(value):
+                self.reduction_count[None] = 1
+            else:
+                ti.atomic_max(self.reduction_max[None], ti.abs(ti.cast(value, ti.f64)))
+
+    def _pressure_field_is_finite(self) -> bool:
+        self._pressure_field_finite_and_max_abs_kernel()
+        return int(self.reduction_count[None]) == 0
+
+    def snapshot_pressure(
+        self,
+        *,
+        preserve_if_current_is_zero: bool = False,
+        min_abs_pa: float = 1.0e-30,
+    ) -> bool:
+        if preserve_if_current_is_zero:
+            min_abs = float(min_abs_pa)
+            if not math.isfinite(min_abs) or min_abs < 0.0:
+                raise ValueError("min_abs_pa must be finite and non-negative")
+            self._pressure_field_finite_and_max_abs_kernel()
+            if int(self.reduction_count[None]) != 0:
+                raise ValueError("cannot snapshot non-finite pressure field")
+            if self.pressure.shape[0] == 0 or float(self.reduction_max[None]) <= min_abs:
+                return False
         self._copy_scalar_field_kernel(self.fsi_pressure, self.pressure)
+        return True
 
     @ti.func
     def _fv_pressure_neighbor_sum_denominator(
@@ -3869,6 +5124,7 @@ class CartesianFluidSolver:
         obstacle: ti.template(),
         velocity_dirichlet_boundary_active: ti.template(),
         velocity_dirichlet_boundary_projection_weight: ti.template(),
+        velocity_dirichlet_boundary_marker_region_id: ti.template(),
         cell_width_x_m: ti.template(),
         cell_width_y_m: ti.template(),
         cell_width_z_m: ti.template(),
@@ -3887,7 +5143,10 @@ class CartesianFluidSolver:
         denominator = ti.cast(0.0, ti.f64)
         if i > 0 and obstacle[i - 1, j, k] == 0:
             face_weight = ti.cast(1.0, ti.f64)
-            if velocity_dirichlet_boundary_active[i, j, k] != 0:
+            if (
+                velocity_dirichlet_boundary_active[i, j, k] != 0
+                and velocity_dirichlet_boundary_marker_region_id[i, j, k] >= 0
+            ):
                 face_weight = ti.min(
                     ti.max(
                         ti.cast(
@@ -3906,7 +5165,10 @@ class CartesianFluidSolver:
             denominator += coeff * face_weight
         if i < nx - 1 and obstacle[i + 1, j, k] == 0:
             face_weight = ti.cast(1.0, ti.f64)
-            if velocity_dirichlet_boundary_active[i + 1, j, k] != 0:
+            if (
+                velocity_dirichlet_boundary_active[i + 1, j, k] != 0
+                and velocity_dirichlet_boundary_marker_region_id[i + 1, j, k] >= 0
+            ):
                 face_weight = ti.min(
                     ti.max(
                         ti.cast(
@@ -3925,7 +5187,10 @@ class CartesianFluidSolver:
             denominator += coeff * face_weight
         if j > 0 and obstacle[i, j - 1, k] == 0:
             face_weight = ti.cast(1.0, ti.f64)
-            if velocity_dirichlet_boundary_active[i, j, k] != 0:
+            if (
+                velocity_dirichlet_boundary_active[i, j, k] != 0
+                and velocity_dirichlet_boundary_marker_region_id[i, j, k] >= 0
+            ):
                 face_weight = ti.min(
                     ti.max(
                         ti.cast(
@@ -3944,7 +5209,10 @@ class CartesianFluidSolver:
             denominator += coeff * face_weight
         if j < ny - 1 and obstacle[i, j + 1, k] == 0:
             face_weight = ti.cast(1.0, ti.f64)
-            if velocity_dirichlet_boundary_active[i, j + 1, k] != 0:
+            if (
+                velocity_dirichlet_boundary_active[i, j + 1, k] != 0
+                and velocity_dirichlet_boundary_marker_region_id[i, j + 1, k] >= 0
+            ):
                 face_weight = ti.min(
                     ti.max(
                         ti.cast(
@@ -3963,7 +5231,10 @@ class CartesianFluidSolver:
             denominator += coeff * face_weight
         if k > 0 and obstacle[i, j, k - 1] == 0:
             face_weight = ti.cast(1.0, ti.f64)
-            if velocity_dirichlet_boundary_active[i, j, k] != 0:
+            if (
+                velocity_dirichlet_boundary_active[i, j, k] != 0
+                and velocity_dirichlet_boundary_marker_region_id[i, j, k] >= 0
+            ):
                 face_weight = ti.min(
                     ti.max(
                         ti.cast(
@@ -3982,7 +5253,10 @@ class CartesianFluidSolver:
             denominator += coeff * face_weight
         if k < nz - 1 and obstacle[i, j, k + 1] == 0:
             face_weight = ti.cast(1.0, ti.f64)
-            if velocity_dirichlet_boundary_active[i, j, k + 1] != 0:
+            if (
+                velocity_dirichlet_boundary_active[i, j, k + 1] != 0
+                and velocity_dirichlet_boundary_marker_region_id[i, j, k + 1] >= 0
+            ):
                 face_weight = ti.min(
                     ti.max(
                         ti.cast(
@@ -4015,6 +5289,7 @@ class CartesianFluidSolver:
         obstacle: ti.template(),
         velocity_dirichlet_boundary_active: ti.template(),
         velocity_dirichlet_boundary_projection_weight: ti.template(),
+        velocity_dirichlet_boundary_marker_region_id: ti.template(),
         tmp: ti.template(),
         cell_width_x_m: ti.template(),
         cell_width_y_m: ti.template(),
@@ -4037,6 +5312,7 @@ class CartesianFluidSolver:
                     obstacle,
                     velocity_dirichlet_boundary_active,
                     velocity_dirichlet_boundary_projection_weight,
+                    velocity_dirichlet_boundary_marker_region_id,
                     cell_width_x_m,
                     cell_width_y_m,
                     cell_width_z_m,
@@ -4078,6 +5354,7 @@ class CartesianFluidSolver:
                     self.obstacle,
                     self.velocity_dirichlet_boundary_active,
                     self.velocity_dirichlet_boundary_projection_weight,
+                    self.velocity_dirichlet_boundary_marker_region_id,
                     self.cell_width_x_m,
                     self.cell_width_y_m,
                     self.cell_width_z_m,
@@ -4110,6 +5387,7 @@ class CartesianFluidSolver:
                     self.obstacle,
                     self.velocity_dirichlet_boundary_active,
                     self.velocity_dirichlet_boundary_projection_weight,
+                    self.velocity_dirichlet_boundary_marker_region_id,
                     self.cell_width_x_m,
                     self.cell_width_y_m,
                     self.cell_width_z_m,
@@ -4447,19 +5725,6 @@ class CartesianFluidSolver:
                 )
 
     @ti.kernel
-    def _weighted_sum_kernel(self, field: ti.template()) -> ti.f64:
-        total = ti.cast(0.0, ti.f64)
-        for i, j, k in field:
-            if self.obstacle[i, j, k] == 0:
-                volume_m3 = (
-                    ti.cast(self.cell_width_x_m[i], ti.f64)
-                    * ti.cast(self.cell_width_y_m[j], ti.f64)
-                    * ti.cast(self.cell_width_z_m[k], ti.f64)
-                )
-                total += ti.cast(field[i, j, k], ti.f64) * volume_m3
-        return total
-
-    @ti.kernel
     def _weighted_mean_to_cg_field_kernel(self, field: ti.template(), multiplier: ti.f64):
         total = ti.cast(0.0, ti.f64)
         volume_total = ti.cast(0.0, ti.f64)
@@ -4472,31 +5737,9 @@ class CartesianFluidSolver:
                 )
                 total += ti.cast(field[i, j, k], ti.f64) * volume_m3
                 volume_total += volume_m3
-        self.cg_weighted_sum[None] = total
-        self.cg_free_volume[None] = volume_total
         self.cg_weighted_mean[None] = 0.0
         if volume_total > 0.0:
             self.cg_weighted_mean[None] = multiplier * total / volume_total
-
-    @ti.kernel
-    def _free_cell_volume_sum_kernel(self) -> ti.f64:
-        total = ti.cast(0.0, ti.f64)
-        for i, j, k in self.obstacle:
-            if self.obstacle[i, j, k] == 0:
-                total += (
-                    ti.cast(self.cell_width_x_m[i], ti.f64)
-                    * ti.cast(self.cell_width_y_m[j], ti.f64)
-                    * ti.cast(self.cell_width_z_m[k], ti.f64)
-                )
-        return total
-
-    @ti.kernel
-    def _subtract_weighted_mean_kernel(self, field: ti.template(), weighted_mean: ti.f64):
-        for i, j, k in field:
-            if self.obstacle[i, j, k] == 0:
-                field[i, j, k] -= weighted_mean
-            else:
-                field[i, j, k] = 0.0
 
     @ti.kernel
     def _subtract_cg_weighted_mean_kernel(self, field: ti.template()):
@@ -4543,6 +5786,7 @@ class CartesianFluidSolver:
             if (
                 self.obstacle[i, j, k] == 0
                 and self.hibm_pressure_reachability_barrier[i, j, k] == 0
+                and not self._velocity_dirichlet_pressure_barrier(i, j, k)
                 and self.hibm_pressure_outlet_reachable[i, j, k] == 0
             ):
                 field[i, j, k] -= mean
@@ -4555,6 +5799,7 @@ class CartesianFluidSolver:
                 self.obstacle[i, j, k] == 0
                 and self.hibm_pressure_reachability_barrier[i, j, k] == 0
                 and self.hibm_pressure_outlet_reachable[i, j, k] == 0
+                and not self._velocity_dirichlet_pressure_barrier(i, j, k)
             ):
                 label = (i * self.ny + j) * self.nz + k
             self.hibm_pressure_unreached_component_label[i, j, k] = label
@@ -4567,6 +5812,7 @@ class CartesianFluidSolver:
                 self.obstacle[i, j, k] == 0
                 and self.hibm_pressure_reachability_barrier[i, j, k] == 0
                 and self.hibm_pressure_outlet_reachable[i, j, k] == 0
+                and not self._velocity_dirichlet_pressure_barrier(i, j, k)
             ):
                 label = self.hibm_pressure_unreached_component_label[i, j, k]
                 best = label
@@ -4642,56 +5888,130 @@ class CartesianFluidSolver:
         return changed
 
     @ti.kernel
-    def _scan_min_unreached_raw_label_kernel(self):
-        self.cg_unreached_component_scan[None] = 1 << 30
+    def _accumulate_hibm_unreached_raw_component_counts_kernel(self):
+        for i, j, k in self.hibm_unreached_raw_component_cell_count:
+            self.hibm_unreached_raw_component_cell_count[i, j, k] = 0
+        for component in range(HIBM_PRESSURE_COMPONENT_CAPACITY):
+            self.hibm_unreached_component_compact_raw_label[component] = 1 << 30
+            self.hibm_unreached_component_compact_cell_count[component] = 0
         for i, j, k in self.obstacle:
-            if (
-                self.obstacle[i, j, k] == 0
-                and self.hibm_pressure_reachability_barrier[i, j, k] == 0
-                and self.hibm_pressure_outlet_reachable[i, j, k] == 0
-            ):
+            if self._row_cloud_valid_unreached_cell(i, j, k):
                 label = self.hibm_pressure_unreached_component_label[i, j, k]
-                if label >= 0:
-                    ti.atomic_min(self.cg_unreached_component_scan[None], label)
+                if label >= 0 and label < (1 << 30):
+                    seed_i = label // (self.ny * self.nz)
+                    remainder = label - seed_i * self.ny * self.nz
+                    seed_j = remainder // self.nz
+                    seed_k = remainder - seed_j * self.nz
+                    if (
+                        0 <= seed_i < self.nx
+                        and 0 <= seed_j < self.ny
+                        and 0 <= seed_k < self.nz
+                    ):
+                        ti.atomic_add(
+                            self.hibm_unreached_raw_component_cell_count[
+                                seed_i,
+                                seed_j,
+                                seed_k,
+                            ],
+                            1,
+                        )
 
     @ti.kernel
-    def _assign_unreached_component_id_kernel(
+    def _scan_hibm_unreached_raw_component_counts_kernel(
         self,
-        raw_label: ti.i32,
-        compact_label: ti.i32,
+        small_threshold_cells: ti.i32,
+    ):
+        self.report_hibm_unreached_component_raw_count[None] = 0
+        self.report_hibm_unreached_component_largest_cell_count[None] = 0
+        self.report_hibm_unreached_component_singleton_count[None] = 0
+        self.report_hibm_unreached_component_small_count[None] = 0
+        self.report_hibm_unreached_component_small_cell_count[None] = 0
+        ti.loop_config(serialize=True)
+        for i in range(self.nx):
+            for j in range(self.ny):
+                for k in range(self.nz):
+                    cell_count = self.hibm_unreached_raw_component_cell_count[
+                        i,
+                        j,
+                        k,
+                    ]
+                    if cell_count > 0:
+                        rank = self.report_hibm_unreached_component_raw_count[None]
+                        self.report_hibm_unreached_component_raw_count[None] = (
+                            rank + 1
+                        )
+                        if (
+                            cell_count
+                            > self.report_hibm_unreached_component_largest_cell_count[
+                                None
+                            ]
+                        ):
+                            self.report_hibm_unreached_component_largest_cell_count[
+                                None
+                            ] = cell_count
+                        if cell_count == 1:
+                            self.report_hibm_unreached_component_singleton_count[
+                                None
+                            ] += 1
+                        if cell_count <= small_threshold_cells:
+                            self.report_hibm_unreached_component_small_count[
+                                None
+                            ] += 1
+                            self.report_hibm_unreached_component_small_cell_count[
+                                None
+                            ] += cell_count
+                        if rank < HIBM_PRESSURE_COMPONENT_CAPACITY:
+                            self.hibm_unreached_component_compact_raw_label[rank] = (
+                                (i * self.ny + j) * self.nz + k
+                            )
+                            self.hibm_unreached_component_compact_cell_count[
+                                rank
+                            ] = cell_count
+
+    @ti.kernel
+    def _assign_hibm_unreached_compact_component_labels_kernel(
+        self,
+        component_count: ti.i32,
     ):
         for i, j, k in self.obstacle:
-            if (
-                self.obstacle[i, j, k] == 0
-                and self.hibm_pressure_reachability_barrier[i, j, k] == 0
-                and self.hibm_pressure_outlet_reachable[i, j, k] == 0
-                and self.hibm_pressure_unreached_component_label[i, j, k] == raw_label
-            ):
-                self.hibm_pressure_unreached_component_label[i, j, k] = compact_label
+            if self._row_cloud_valid_unreached_cell(i, j, k):
+                label = self.hibm_pressure_unreached_component_label[i, j, k]
+                if label >= 0 and label < (1 << 30):
+                    compact_label = label
+                    for component in range(HIBM_PRESSURE_COMPONENT_CAPACITY):
+                        if (
+                            component < component_count
+                            and label
+                            == self.hibm_unreached_component_compact_raw_label[
+                                component
+                            ]
+                        ):
+                            compact_label = -(component + 1)
+                    self.hibm_pressure_unreached_component_label[i, j, k] = (
+                        compact_label
+                    )
 
-    def _compact_hibm_unreached_component_labels_host(self) -> int:
-        labels = self.hibm_pressure_unreached_component_label.to_numpy()
-        valid = (labels >= 0) & (labels < (1 << 30))
-        raw_labels, raw_counts = np.unique(labels[valid], return_counts=True)
-        raw_component_count = int(raw_labels.size)
+    def _compact_hibm_unreached_component_labels_device(self) -> int:
+        threshold = max(
+            0,
+            int(self.last_hibm_pressure_unreached_component_small_threshold_cells),
+        )
+        self._accumulate_hibm_unreached_raw_component_counts_kernel()
+        self._scan_hibm_unreached_raw_component_counts_kernel(int(threshold))
+        raw_component_count = int(self.report_hibm_unreached_component_raw_count[None])
         self.last_hibm_pressure_unreached_component_raw_count = raw_component_count
         if raw_component_count > 0:
-            counts = raw_counts.astype(np.int64, copy=False)
-            threshold = int(
-                self.last_hibm_pressure_unreached_component_small_threshold_cells
-            )
-            small_mask = counts <= max(0, threshold)
             self.last_hibm_pressure_unreached_component_largest_cell_count = int(
-                counts.max()
+                self.report_hibm_unreached_component_largest_cell_count[None]
             )
             self.last_hibm_pressure_unreached_component_singleton_count = int(
-                np.count_nonzero(counts == 1)
+                self.report_hibm_unreached_component_singleton_count[None]
             )
             self.last_hibm_pressure_unreached_component_small_count = int(
-                np.count_nonzero(small_mask)
+                self.report_hibm_unreached_component_small_count[None]
             )
             self.last_hibm_pressure_unreached_component_small_cell_count = int(
-                counts[small_mask].sum()
+                self.report_hibm_unreached_component_small_cell_count[None]
             )
         else:
             self._reset_hibm_pressure_unreached_component_distribution_stats()
@@ -4699,16 +6019,10 @@ class CartesianFluidSolver:
             raw_component_count,
             HIBM_PRESSURE_COMPONENT_CAPACITY,
         )
-        selected_labels = raw_labels[:component_count]
         if component_count > 0:
-            values = labels[valid]
-            ranks = np.searchsorted(selected_labels, values)
-            in_bounds = ranks < component_count
-            matched = np.zeros(values.shape, dtype=bool)
-            matched[in_bounds] = selected_labels[ranks[in_bounds]] == values[in_bounds]
-            values[matched] = -(ranks[matched].astype(np.int32) + 1)
-            labels[valid] = values
-        self.hibm_pressure_unreached_component_label.from_numpy(labels)
+            self._assign_hibm_unreached_compact_component_labels_kernel(
+                int(component_count),
+            )
         self.last_hibm_pressure_unreached_component_overflow = (
             raw_component_count > HIBM_PRESSURE_COMPONENT_CAPACITY
         )
@@ -4811,9 +6125,9 @@ class CartesianFluidSolver:
         max_abs_mean = 0.0
         max_abs_integral = 0.0
         tolerance = max(0.0, float(mean_abs_tolerance))
-        for component in range(component_count):
-            volume = float(self.cg_unreached_component_volume[component])
-            integral = float(self.cg_unreached_component_sum[component])
+        volumes = self.cg_unreached_component_volume.to_numpy()[:component_count]
+        integrals = self.cg_unreached_component_sum.to_numpy()[:component_count]
+        for volume, integral in zip(volumes.tolist(), integrals.tolist()):
             abs_integral = abs(integral)
             max_abs_integral = max(max_abs_integral, abs_integral)
             if volume <= 0.0:
@@ -5076,6 +6390,7 @@ class CartesianFluidSolver:
         obstacle: ti.template(),
         velocity_dirichlet_boundary_active: ti.template(),
         velocity_dirichlet_boundary_projection_weight: ti.template(),
+        velocity_dirichlet_boundary_marker_region_id: ti.template(),
         residual: ti.template(),
         cell_width_x_m: ti.template(),
         cell_width_y_m: ti.template(),
@@ -5097,6 +6412,7 @@ class CartesianFluidSolver:
                     obstacle,
                     velocity_dirichlet_boundary_active,
                     velocity_dirichlet_boundary_projection_weight,
+                    velocity_dirichlet_boundary_marker_region_id,
                     cell_width_x_m,
                     cell_width_y_m,
                     cell_width_z_m,
@@ -5123,6 +6439,7 @@ class CartesianFluidSolver:
         fine_obstacle: ti.template(),
         fine_velocity_dirichlet_boundary_active: ti.template(),
         fine_velocity_dirichlet_boundary_projection_weight: ti.template(),
+        fine_velocity_dirichlet_boundary_marker_region_id: ti.template(),
         fine_cell_width_x_m: ti.template(),
         fine_cell_width_y_m: ti.template(),
         fine_cell_width_z_m: ti.template(),
@@ -5134,6 +6451,7 @@ class CartesianFluidSolver:
         coarse_obstacle: ti.template(),
         coarse_velocity_dirichlet_boundary_active: ti.template(),
         coarse_velocity_dirichlet_boundary_projection_weight: ti.template(),
+        coarse_velocity_dirichlet_boundary_marker_region_id: ti.template(),
         fine_nx: ti.i32,
         fine_ny: ti.i32,
         fine_nz: ti.i32,
@@ -5145,6 +6463,7 @@ class CartesianFluidSolver:
             obstacle_count = 0
             velocity_dirichlet_count = 0
             velocity_dirichlet_weight = 0.0
+            velocity_dirichlet_marker_region_id = -1
             for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
                 fi = 2 * i + oi
                 fj = 2 * j + oj
@@ -5155,6 +6474,14 @@ class CartesianFluidSolver:
                         velocity_dirichlet_weight = ti.max(
                             velocity_dirichlet_weight,
                             fine_velocity_dirichlet_boundary_projection_weight[
+                                fi,
+                                fj,
+                                fk,
+                            ],
+                        )
+                        velocity_dirichlet_marker_region_id = ti.max(
+                            velocity_dirichlet_marker_region_id,
+                            fine_velocity_dirichlet_boundary_marker_region_id[
                                 fi,
                                 fj,
                                 fk,
@@ -5189,9 +6516,13 @@ class CartesianFluidSolver:
                 coarse_velocity_dirichlet_boundary_projection_weight[i, j, k] = (
                     velocity_dirichlet_weight
                 )
+                coarse_velocity_dirichlet_boundary_marker_region_id[i, j, k] = (
+                    velocity_dirichlet_marker_region_id
+                )
             else:
                 coarse_velocity_dirichlet_boundary_active[i, j, k] = 0
                 coarse_velocity_dirichlet_boundary_projection_weight[i, j, k] = 0.0
+                coarse_velocity_dirichlet_boundary_marker_region_id[i, j, k] = -1
             coarse_pressure[i, j, k] = 0.0
             coarse_tmp[i, j, k] = 0.0
             coarse_residual[i, j, k] = 0.0
@@ -5271,10 +6602,7 @@ class CartesianFluidSolver:
                 )
 
     @ti.kernel
-    def _pressure_outlet_fv_flux_report_kernel(
-        self,
-        dt_over_rho: ti.f32,
-    ):
+    def _pressure_outlet_fv_flux_report_kernel(self):
         self.report_source_volume_flux_m3s[None] = 0.0
         self.report_positive_source_volume_flux_m3s[None] = 0.0
         self.report_abs_source_volume_flux_m3s[None] = 0.0
@@ -5403,20 +6731,53 @@ class CartesianFluidSolver:
             self.pressure_tmp[i, j, k] = corrected
 
     @ti.kernel
-    def _apply_pressure_outlet_zmin_kernel(self):
+    def _apply_closed_boundary_no_normal_flow_kernel(self, pressure_outlet_zmin: ti.i32):
+        # Only the domain min-side faces (index 0) are actual outward wall
+        # faces in this backward-face velocity layout: velocity[i,j,k]
+        # stores the face between cell (..k-1) and cell (..k), so index 0
+        # is the wall face of cell 0 (no cell -1 exists) while index
+        # nx-1/ny-1/nz-1 is an INTERIOR face between the last two cells,
+        # already governed by the pressure projection. The Poisson matrix
+        # and divergence stencil already enforce no-flux at the max walls
+        # via the missing-neighbor convention, so clamping those interior
+        # faces here would overwrite a correctly projected value.
+        for j, k in ti.ndrange(self.ny, self.nz):
+            if self.velocity_dirichlet_boundary_active[0, j, k] == 0:
+                self.velocity[0, j, k].x = 0.0
+        for i, k in ti.ndrange(self.nx, self.nz):
+            if self.velocity_dirichlet_boundary_active[i, 0, k] == 0:
+                self.velocity[i, 0, k].y = 0.0
         for i, j in ti.ndrange(self.nx, self.ny):
-            self.pressure[i, j, 0] = 0.0
-            self.pressure_tmp[i, j, 0] = 0.0
+            if (
+                pressure_outlet_zmin == 0
+                and self.velocity_dirichlet_boundary_active[i, j, 0] == 0
+            ):
+                self.velocity[i, j, 0].z = 0.0
 
     @ti.kernel
-    def _apply_closed_boundary_no_normal_flow_kernel(self, pressure_outlet_zmin: ti.i32):
-        for j, k in ti.ndrange(self.ny, self.nz):
-            self.velocity[0, j, k].x = 0.0
-        for i, k in ti.ndrange(self.nx, self.nz):
-            self.velocity[i, 0, k].y = 0.0
-        for i, j in ti.ndrange(self.nx, self.ny):
-            if pressure_outlet_zmin == 0:
-                self.velocity[i, j, 0].z = 0.0
+    def _apply_obstacle_no_normal_flow_kernel(self):
+        for i, j, k in self.velocity:
+            if (
+                self.obstacle[i, j, k] != 0
+                or (i > 0 and self.obstacle[i - 1, j, k] != 0)
+            ):
+                self.velocity[i, j, k].x = 0.0
+            if (
+                self.obstacle[i, j, k] != 0
+                or (j > 0 and self.obstacle[i, j - 1, k] != 0)
+            ):
+                self.velocity[i, j, k].y = 0.0
+            if (
+                self.obstacle[i, j, k] != 0
+                or (k > 0 and self.obstacle[i, j, k - 1] != 0)
+            ):
+                self.velocity[i, j, k].z = 0.0
+
+    @ti.kernel
+    def _zero_obstacle_cell_velocity_kernel(self):
+        for i, j, k in self.velocity:
+            if self.obstacle[i, j, k] != 0:
+                self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
 
     @ti.kernel
     def _subtract_pressure_gradient_kernel(
@@ -5751,6 +7112,7 @@ class CartesianFluidSolver:
         obstacle: object,
         velocity_dirichlet_boundary_active: object,
         velocity_dirichlet_boundary_projection_weight: object,
+        velocity_dirichlet_boundary_marker_region_id: object,
         tmp: object,
         cell_width_x_m: object,
         cell_width_y_m: object,
@@ -5771,6 +7133,7 @@ class CartesianFluidSolver:
                 obstacle,
                 velocity_dirichlet_boundary_active,
                 velocity_dirichlet_boundary_projection_weight,
+                velocity_dirichlet_boundary_marker_region_id,
                 tmp,
                 cell_width_x_m,
                 cell_width_y_m,
@@ -5807,6 +7170,9 @@ class CartesianFluidSolver:
             velocity_dirichlet_boundary_projection_weight=self._mg_velocity_dirichlet_boundary_projection_weight[
                 level
             ],
+            velocity_dirichlet_boundary_marker_region_id=self._mg_velocity_dirichlet_boundary_marker_region_id[
+                level
+            ],
             tmp=self._mg_tmp[level],
             cell_width_x_m=self._mg_cell_width_x_m[level],
             cell_width_y_m=self._mg_cell_width_y_m[level],
@@ -5829,6 +7195,7 @@ class CartesianFluidSolver:
             self._mg_obstacle[level],
             self._mg_velocity_dirichlet_boundary_active[level],
             self._mg_velocity_dirichlet_boundary_projection_weight[level],
+            self._mg_velocity_dirichlet_boundary_marker_region_id[level],
             self._mg_residual[level],
             self._mg_cell_width_x_m[level],
             self._mg_cell_width_y_m[level],
@@ -5918,6 +7285,7 @@ class CartesianFluidSolver:
                     self._mg_obstacle[level],
                     self._mg_velocity_dirichlet_boundary_active[level],
                     self._mg_velocity_dirichlet_boundary_projection_weight[level],
+                    self._mg_velocity_dirichlet_boundary_marker_region_id[level],
                     self._mg_cell_width_x_m[level],
                     self._mg_cell_width_y_m[level],
                     self._mg_cell_width_z_m[level],
@@ -5929,6 +7297,7 @@ class CartesianFluidSolver:
                     self._mg_obstacle[level + 1],
                     self._mg_velocity_dirichlet_boundary_active[level + 1],
                     self._mg_velocity_dirichlet_boundary_projection_weight[level + 1],
+                    self._mg_velocity_dirichlet_boundary_marker_region_id[level + 1],
                     int(fine_shape[0]),
                     int(fine_shape[1]),
                     int(fine_shape[2]),
@@ -5999,6 +7368,9 @@ class CartesianFluidSolver:
                 velocity_dirichlet_boundary_projection_weight=self._mg_velocity_dirichlet_boundary_projection_weight[
                     0
                 ],
+                velocity_dirichlet_boundary_marker_region_id=self._mg_velocity_dirichlet_boundary_marker_region_id[
+                    0
+                ],
                 tmp=self._pcg_mg_tmp[0],
                 cell_width_x_m=self._mg_cell_width_x_m[0],
                 cell_width_y_m=self._mg_cell_width_y_m[0],
@@ -6028,6 +7400,9 @@ class CartesianFluidSolver:
                 velocity_dirichlet_boundary_projection_weight=self._mg_velocity_dirichlet_boundary_projection_weight[
                     level
                 ],
+                velocity_dirichlet_boundary_marker_region_id=self._mg_velocity_dirichlet_boundary_marker_region_id[
+                    level
+                ],
                 tmp=self._pcg_mg_tmp[level],
                 cell_width_x_m=self._mg_cell_width_x_m[level],
                 cell_width_y_m=self._mg_cell_width_y_m[level],
@@ -6048,6 +7423,7 @@ class CartesianFluidSolver:
                 self._mg_obstacle[level],
                 self._mg_velocity_dirichlet_boundary_active[level],
                 self._mg_velocity_dirichlet_boundary_projection_weight[level],
+                self._mg_velocity_dirichlet_boundary_marker_region_id[level],
                 self._pcg_mg_residual[level],
                 self._mg_cell_width_x_m[level],
                 self._mg_cell_width_y_m[level],
@@ -6066,6 +7442,7 @@ class CartesianFluidSolver:
                 self._mg_obstacle[level],
                 self._mg_velocity_dirichlet_boundary_active[level],
                 self._mg_velocity_dirichlet_boundary_projection_weight[level],
+                self._mg_velocity_dirichlet_boundary_marker_region_id[level],
                 self._mg_cell_width_x_m[level],
                 self._mg_cell_width_y_m[level],
                 self._mg_cell_width_z_m[level],
@@ -6077,6 +7454,7 @@ class CartesianFluidSolver:
                 self._mg_obstacle[level + 1],
                 self._mg_velocity_dirichlet_boundary_active[level + 1],
                 self._mg_velocity_dirichlet_boundary_projection_weight[level + 1],
+                self._mg_velocity_dirichlet_boundary_marker_region_id[level + 1],
                 int(shape[0]),
                 int(shape[1]),
                 int(shape[2]),
@@ -6093,6 +7471,9 @@ class CartesianFluidSolver:
                 level_count - 1
             ],
             velocity_dirichlet_boundary_projection_weight=self._mg_velocity_dirichlet_boundary_projection_weight[
+                level_count - 1
+            ],
+            velocity_dirichlet_boundary_marker_region_id=self._mg_velocity_dirichlet_boundary_marker_region_id[
                 level_count - 1
             ],
             tmp=self._pcg_mg_tmp[level_count - 1],
@@ -6129,6 +7510,9 @@ class CartesianFluidSolver:
                     level
                 ],
                 velocity_dirichlet_boundary_projection_weight=self._mg_velocity_dirichlet_boundary_projection_weight[
+                    level
+                ],
+                velocity_dirichlet_boundary_marker_region_id=self._mg_velocity_dirichlet_boundary_marker_region_id[
                     level
                 ],
                 tmp=self._pcg_mg_tmp[level],
@@ -6425,6 +7809,7 @@ class CartesianFluidSolver:
         preconditioner: str = "auto",
         remove_nullspace_mean: bool = True,
         pressure_interface_matrix_active: bool = False,
+        report_requested: bool = True,
     ) -> None:
         max_iters = max(1, int(iterations))
         relative_tolerance = max(0.0, float(tolerance))
@@ -6438,7 +7823,6 @@ class CartesianFluidSolver:
         self.last_cg_converged = False
         self.last_cg_breakdown = ""
         self.last_cg_host_residual_checks = 0
-        self.last_cg_mean_host_reads = 0
         self.last_cg_mean_projection_count = 0
         self.last_cg_unreached_set_mean_projection_count = 0
         self.last_cg_restart_count = 0
@@ -6453,11 +7837,13 @@ class CartesianFluidSolver:
         self.last_hibm_unreached_cells_with_interface_diagonal = 0
         self.last_hibm_unreached_cells_with_interface_coupling = 0
         self.last_hibm_unreached_components_with_interface_hits = 0
-        if anchor_unreached:
+        if anchor_unreached and report_requested:
             # R2-H1: before the unreached-set mean subtraction anchors the
             # flood-disconnected components, measure how much of that set the
             # interface matrix terms already anchor/connect. Overlap here means
-            # the zero-mean projection perturbs a non-singular subsystem.
+            # the zero-mean projection perturbs a non-singular subsystem. Only
+            # the project() report consumes these three counters, so skip the
+            # scan on the hot path when reporting isn't requested.
             self._record_unreached_interface_hit_diagnostics()
 
         self._prepare_fv_multigrid_rhs(rhs_scale)
@@ -6708,6 +8094,7 @@ class CartesianFluidSolver:
         cg_preconditioner: str = "auto",
         remove_nullspace_mean: bool = True,
         pressure_interface_matrix_active: bool = False,
+        report_requested: bool = True,
     ) -> None:
         if pressure_solver in {"jacobi", "compact_jacobi"}:
             self._solve_pressure_poisson(
@@ -6745,6 +8132,7 @@ class CartesianFluidSolver:
                 pressure_interface_matrix_active=bool(
                     pressure_interface_matrix_active
                 ),
+                report_requested=bool(report_requested),
             )
             return
         raise ValueError(f"unsupported pressure_solver: {pressure_solver!r}")
@@ -6753,9 +8141,7 @@ class CartesianFluidSolver:
         step_dt_s = self.dt if dt_s is None else float(dt_s)
         if step_dt_s <= 0.0:
             raise ValueError("dt_s must be positive")
-        self._pressure_outlet_fv_flux_report_kernel(
-            float(step_dt_s / self.rho),
-        )
+        self._pressure_outlet_fv_flux_report_kernel()
         snapshot = self.pressure_outlet_report_snapshot[None]
         source_volume_flux_m3s = float(snapshot[0])
         pressure_outlet_flux_m3s = float(snapshot[1])
@@ -6884,6 +8270,9 @@ class CartesianFluidSolver:
         self,
         iterations: int = 40,
         pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool = False,
+        pressure_outlet_backflow_policy: str = "clamp",
+        obstacle_normal_velocity_policy: str = "face_clamp",
         dt_s: float | None = None,
         preserve_velocity_constraints: bool = False,
         velocity_constraint_blend: float = 1.0,
@@ -6904,6 +8293,17 @@ class CartesianFluidSolver:
         step_dt_s = self.dt if dt_s is None else float(dt_s)
         if step_dt_s <= 0.0:
             raise ValueError("dt_s must be positive")
+        pressure_outlet_backflow_policy_name = str(pressure_outlet_backflow_policy)
+        if pressure_outlet_backflow_policy_name not in PRESSURE_OUTLET_BACKFLOW_POLICIES:
+            raise ValueError(
+                "pressure_outlet_backflow_policy must be 'clamp' or 'allow'"
+            )
+        obstacle_normal_velocity_policy_name = str(obstacle_normal_velocity_policy)
+        if obstacle_normal_velocity_policy_name not in OBSTACLE_NORMAL_VELOCITY_POLICIES:
+            raise ValueError(
+                "obstacle_normal_velocity_policy must be 'face_clamp' "
+                "or 'cell_zero_only'"
+            )
         constraint_blend = float(velocity_constraint_blend)
         if not 0.0 <= constraint_blend <= 1.0:
             raise ValueError("velocity_constraint_blend must be in [0, 1]")
@@ -6947,7 +8347,7 @@ class CartesianFluidSolver:
         report_requested = bool(read_report)
         self.last_divergence_report_host_reads = 0
         empty_stats = {"max_abs": math.nan, "l2": math.nan}
-        pressure_interface_policy_report = self.pressure_interface_matrix_terms_report()
+        pressure_interface_policy_report = self._pressure_interface_matrix_policy_report()
         pressure_interface_matrix_active = (
             int(pressure_interface_policy_report["active_cells"]) > 0
             or int(pressure_interface_policy_report["row_count"]) > 0
@@ -6956,12 +8356,13 @@ class CartesianFluidSolver:
         )
         pressure_solver_forced_to_fv_cg = False
         pressure_solver_force_reason = ""
-        if pressure_interface_matrix_active and pressure_solver_name == "fv_multigrid":
+        if (
+            pressure_interface_matrix_active
+            and pressure_solver_name in PRESSURE_INTERFACE_MATRIX_FV_CG_REQUIRED_SOLVERS
+        ):
             pressure_solver_name = "fv_cg"
             pressure_solver_forced_to_fv_cg = True
-            pressure_solver_force_reason = (
-                "pressure_interface_matrix_requires_rowlist_fv_cg"
-            )
+            pressure_solver_force_reason = PRESSURE_INTERFACE_MATRIX_FV_CG_FORCE_REASON
         pressure_system_anchored_by_interface_matrix = (
             not bool(pressure_outlet_zmin)
             and float(pressure_interface_policy_report["max_abs_diagonal"]) > 0.0
@@ -6987,7 +8388,6 @@ class CartesianFluidSolver:
         self.last_project_cg_iterations_total = 0
         self.last_project_cg_iterations_max = 0
         self.last_project_cg_host_residual_checks = 0
-        self.last_project_cg_mean_host_reads = 0
         self.last_project_cg_mean_projection_count = 0
         self.last_project_cg_unreached_set_mean_projection_count = 0
         self.last_project_cg_restart_count = 0
@@ -7029,7 +8429,6 @@ class CartesianFluidSolver:
                 int(self.last_cg_iterations),
             )
             self.last_project_cg_host_residual_checks += int(self.last_cg_host_residual_checks)
-            self.last_project_cg_mean_host_reads += int(self.last_cg_mean_host_reads)
             self.last_project_cg_mean_projection_count += int(
                 self.last_cg_mean_projection_count
             )
@@ -7072,6 +8471,8 @@ class CartesianFluidSolver:
             nonlocal pressure_projection_unreached_incompatible_component_count
             nonlocal pressure_projection_unreached_rhs_mean_max_abs
             nonlocal pressure_projection_unreached_rhs_integral_max_abs
+            if not pressure_outlet_zmin:
+                return
             incompatible_count = int(
                 self.last_hibm_unreached_incompatible_component_count
             )
@@ -7114,9 +8515,12 @@ class CartesianFluidSolver:
             if pressure_solver_name != "fv_cg" or bool(self.last_cg_converged):
                 return
             if pressure_solve_failure_policy_name != "raise":
-                pressure_solve_failure_action = (
-                    "reported_cleared_pressure_correction"
-                )
+                if self._pressure_field_is_finite():
+                    pressure_solve_failure_action = (
+                        "reported_kept_nonconverged_pressure_correction"
+                    )
+                    return
+                pressure_solve_failure_action = "reported_cleared_nonfinite_pressure_correction"
                 self._clear_pressure_kernel()
                 return
             raise RuntimeError(
@@ -7207,9 +8611,17 @@ class CartesianFluidSolver:
                     velocity_dirichlet_boundary_momentum_delta_n_s[2]
                     + float(momentum_delta[2]),
                 )
-            if pressure_outlet_zmin:
+            if (
+                pressure_outlet_zmin
+                and pressure_outlet_backflow_policy_name == "clamp"
+            ):
                 self._apply_zmin_no_backflow_kernel()
+            if pressure_outlet_zmin:
                 self._apply_closed_boundary_no_normal_flow_kernel(1)
+            if obstacle_normal_velocity_policy_name == "face_clamp":
+                self._apply_obstacle_no_normal_flow_kernel()
+            else:
+                self._zero_obstacle_cell_velocity_kernel()
 
         def cleanup_required_from_current_residual() -> bool:
             self._divergence_residual_stats_kernel(
@@ -7285,7 +8697,10 @@ class CartesianFluidSolver:
                 )
         if pressure_outlet_zmin:
             self._record_zmin_projection_pre_velocity_flux_kernel()
-        self.compute_divergence(pressure_outlet_zmin=pressure_outlet_zmin)
+        self.compute_divergence(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+        )
         if report_requested:
             pre_projection_raw_stats = self.divergence_stats()
             pre_projection_stats = self.divergence_residual_stats()
@@ -7322,6 +8737,7 @@ class CartesianFluidSolver:
             cg_preconditioner=cg_preconditioner_name,
             remove_nullspace_mean=pressure_nullspace_zero_mean_projection_applied,
             pressure_interface_matrix_active=pressure_interface_matrix_active,
+            report_requested=report_requested,
         )
         record_cg_stats()
         record_projection_physical_stats()
@@ -7339,7 +8755,10 @@ class CartesianFluidSolver:
         if pressure_outlet_zmin:
             self._accumulate_zmin_pressure_correction_flux_kernel()
         apply_velocity_boundary_conditions(preserve_projected_rows=True)
-        self.compute_divergence(pressure_outlet_zmin=pressure_outlet_zmin)
+        self.compute_divergence(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+        )
         if report_requested:
             projection_raw_stats = self.divergence_stats()
             projection_stats = self.divergence_residual_stats()
@@ -7358,7 +8777,10 @@ class CartesianFluidSolver:
         if pressure_outlet_zmin:
             self._copy_pressure_to_accum_kernel()
             apply_velocity_boundary_conditions(preserve_projected_rows=True)
-            self.compute_divergence(pressure_outlet_zmin=pressure_outlet_zmin)
+            self.compute_divergence(
+                pressure_outlet_zmin=pressure_outlet_zmin,
+                velocity_inlet_zmax=velocity_inlet_zmax,
+            )
             if report_requested:
                 post_boundary_raw_stats = self.divergence_stats()
                 post_boundary_stats = self.divergence_residual_stats()
@@ -7405,6 +8827,7 @@ class CartesianFluidSolver:
                     cg_preconditioner=cg_preconditioner_name,
                     remove_nullspace_mean=pressure_nullspace_zero_mean_projection_applied,
                     pressure_interface_matrix_active=pressure_interface_matrix_active,
+                    report_requested=report_requested,
                 )
                 record_cg_stats()
                 record_projection_physical_stats()
@@ -7423,7 +8846,10 @@ class CartesianFluidSolver:
                     self._accumulate_zmin_pressure_correction_flux_kernel()
                 self._accumulate_pressure_correction_kernel()
                 apply_velocity_boundary_conditions(preserve_projected_rows=True)
-                self.compute_divergence(pressure_outlet_zmin=pressure_outlet_zmin)
+                self.compute_divergence(
+                    pressure_outlet_zmin=pressure_outlet_zmin,
+                    velocity_inlet_zmax=velocity_inlet_zmax,
+                )
                 if report_requested:
                     post_boundary_raw_stats = self.divergence_stats()
                     post_boundary_stats = self.divergence_residual_stats()
@@ -7437,7 +8863,8 @@ class CartesianFluidSolver:
                             float(step_dt_s / self.rho),
                         )
                         self.compute_divergence(
-                            pressure_outlet_zmin=pressure_outlet_zmin
+                            pressure_outlet_zmin=pressure_outlet_zmin,
+                            velocity_inlet_zmax=velocity_inlet_zmax,
                         )
                         post_boundary_raw_stats = self.divergence_stats()
                         post_boundary_stats = self.divergence_residual_stats()
@@ -7459,7 +8886,10 @@ class CartesianFluidSolver:
         if final_closed_boundary_cleanup and int(divergence_cleanup_iterations) > 0:
             self._apply_closed_boundary_no_normal_flow_kernel(0)
         for _ in range(max(0, int(divergence_cleanup_iterations))):
-            self.compute_divergence(pressure_outlet_zmin=pressure_outlet_zmin)
+            self.compute_divergence(
+                pressure_outlet_zmin=pressure_outlet_zmin,
+                velocity_inlet_zmax=velocity_inlet_zmax,
+            )
             self._local_divergence_cleanup_kernel(
                 float(self.dx),
                 float(self.dy),
@@ -7475,13 +8905,17 @@ class CartesianFluidSolver:
             self._record_zmin_projection_post_boundary_velocity_flux_kernel()
         if not report_requested:
             return {}
+        pressure_interface_policy_report = self.pressure_interface_matrix_terms_report()
         velocity_dirichlet_boundary_mean_delta_mps = (
             velocity_dirichlet_boundary_delta_sum_mps
             / velocity_dirichlet_boundary_active_cells_total
             if velocity_dirichlet_boundary_active_cells_total > 0
             else 0.0
         )
-        self.compute_divergence(pressure_outlet_zmin=pressure_outlet_zmin)
+        self.compute_divergence(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+        )
         (
             final_raw_stats,
             final_stats,
@@ -7502,9 +8936,45 @@ class CartesianFluidSolver:
         ) = self.final_and_dirichlet_partition_report_stats(
             pressure_outlet_zmin=pressure_outlet_zmin,
         )
+        velocity_constraint_active_cells = (
+            int(self.report_velocity_constraint_cells[None])
+            if bool(preserve_velocity_constraints)
+            else 0
+        )
+        velocity_constraint_delta_sum_mps = (
+            float(self.report_velocity_constraint_delta_sum[None])
+            if bool(preserve_velocity_constraints)
+            else 0.0
+        )
+        velocity_constraint_mean_delta_mps = (
+            velocity_constraint_delta_sum_mps / velocity_constraint_active_cells
+            if velocity_constraint_active_cells > 0
+            else 0.0
+        )
+        velocity_constraint_momentum_delta_n_s = (
+            self._read_vector(self.report_velocity_constraint_momentum_delta_n_s)
+            if bool(preserve_velocity_constraints)
+            else (0.0, 0.0, 0.0)
+        )
+        velocity_constraint_primary_momentum_delta_n_s = (
+            self._read_vector(
+                self.report_velocity_constraint_primary_momentum_delta_n_s
+            )
+            if bool(preserve_velocity_constraints)
+            else (0.0, 0.0, 0.0)
+        )
+        velocity_constraint_secondary_momentum_delta_n_s = (
+            self._read_vector(
+                self.report_velocity_constraint_secondary_momentum_delta_n_s
+            )
+            if bool(preserve_velocity_constraints)
+            else (0.0, 0.0, 0.0)
+        )
         return {
             "pressure_solver_requested": pressure_solver_requested_name,
             "pressure_solver": pressure_solver_name,
+            "pressure_outlet_backflow_policy": pressure_outlet_backflow_policy_name,
+            "obstacle_normal_velocity_policy": obstacle_normal_velocity_policy_name,
             "pressure_solver_forced_to_fv_cg": bool(
                 pressure_solver_forced_to_fv_cg
             ),
@@ -7562,6 +9032,29 @@ class CartesianFluidSolver:
             ),
             "velocity_dirichlet_boundary_momentum_delta_n_s": (
                 velocity_dirichlet_boundary_momentum_delta_n_s
+            ),
+            "preserve_velocity_constraints": bool(preserve_velocity_constraints),
+            "velocity_constraint_blend": float(constraint_blend),
+            "velocity_constraint_solid_mobility_ratio": float(
+                constraint_solid_mobility_ratio
+            ),
+            "velocity_constraint_active_cells": velocity_constraint_active_cells,
+            "velocity_constraint_max_delta_mps": (
+                float(self.report_velocity_constraint_delta_max[None])
+                if bool(preserve_velocity_constraints)
+                else 0.0
+            ),
+            "velocity_constraint_mean_delta_mps": (
+                velocity_constraint_mean_delta_mps
+            ),
+            "velocity_constraint_momentum_delta_n_s": (
+                velocity_constraint_momentum_delta_n_s
+            ),
+            "velocity_constraint_primary_momentum_delta_n_s": (
+                velocity_constraint_primary_momentum_delta_n_s
+            ),
+            "velocity_constraint_secondary_momentum_delta_n_s": (
+                velocity_constraint_secondary_momentum_delta_n_s
             ),
             "pressure_correctable_l2": pressure_correctable_stats["l2"],
             "pressure_correctable_max_abs": pressure_correctable_stats["max_abs"],
@@ -7643,6 +9136,17 @@ class CartesianFluidSolver:
                     "row_diagonal_max_abs_density_mismatch"
                 ]
             ),
+            "pressure_interface_matrix_row_diagonal_max_rel_density_mismatch": (
+                float(
+                    pressure_interface_policy_report[
+                        "row_diagonal_max_abs_density_mismatch"
+                    ]
+                )
+                / max(
+                    float(pressure_interface_policy_report["max_abs_diagonal"]),
+                    1e-30,
+                )
+            ),
             "pressure_interface_matrix_row_max_transmissibility": float(
                 pressure_interface_policy_report["row_max_transmissibility"]
             ),
@@ -7696,7 +9200,13 @@ class CartesianFluidSolver:
             "cg_iterations_total": int(self.last_project_cg_iterations_total),
             "cg_iterations_max": int(self.last_project_cg_iterations_max),
             "cg_host_residual_checks": int(self.last_project_cg_host_residual_checks),
-            "cg_mean_host_reads": int(self.last_project_cg_mean_host_reads),
+            # CG mean removal is fully device-resident (see
+            # _weighted_mean_to_cg_field_kernel /
+            # _subtract_cg_weighted_mean_kernel): there is no host read left
+            # on this path, so the count is always 0. Kept as a report key
+            # because simulation_core.coupling.hibm_mpm.core sums it across
+            # substeps.
+            "cg_mean_host_reads": 0,
             "cg_mean_projection_count": int(
                 self.last_project_cg_mean_projection_count
             ),

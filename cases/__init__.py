@@ -5,6 +5,7 @@ CASE_MODULES = {
     "comsol-multibody-mechanism-fsi": "cases.comsol_multibody_mechanism_fsi",
     "comsol-water-balloon-fsi": "cases.comsol_water_balloon_fsi",
     "squid-soft-robot": "cases.squid_soft_robot",
+    "turek-hron-fsi": "cases.turek_hron_fsi",
 }
 AVAILABLE_CASES = tuple(CASE_MODULES)
 

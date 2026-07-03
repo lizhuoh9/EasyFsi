@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from simulation_core.pressure_interface import (
+from simulation_core.coupling.pressure_interface import (
     far_pressure_side_normal_sign_from_direction,
 )
 

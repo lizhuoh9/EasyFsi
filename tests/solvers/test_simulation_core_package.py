@@ -42,7 +42,7 @@ from simulation_core import (
     solve_and_apply_interface_reaction_step,
     solve_interface_reaction_fixed_point,
 )
-from simulation_core.geometry import make_uv_sphere, orient_faces_outward
+from simulation_core.geometry_tools import make_uv_sphere, orient_faces_outward
 
 
 HIBM_MPM_CORE_SOURCE = Path("simulation_core/coupling/hibm_mpm/core.py")
@@ -232,7 +232,9 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertNotIn("target damping", source.lower())
 
     def test_hibm_compat_module_does_not_export_cpu_numpy_solver_path(self) -> None:
-        hibm_source = Path("simulation_core/hibm.py").read_text(encoding="utf-8")
+        hibm_source = Path("simulation_core/coupling/hibm.py").read_text(
+            encoding="utf-8"
+        )
         init_source = Path("simulation_core/__init__.py").read_text(encoding="utf-8")
 
         self.assertNotIn("import numpy", hibm_source)
