@@ -24,6 +24,10 @@ from simulation_core.coupling.hibm_mpm import (
 from simulation_core.diagnostics.runtime import TaichiRuntimeConfig
 from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec
 from simulation_core.solids.neo_hookean_mpm import NeoHookeanMpmState
+from cases.turek_hron_kernels import (
+    outlet_zflux_sum_kernel,
+    th_channel_boundary_rows_kernel,
+)
 
 
 TUREK_HRON_CASE_ID = "turek-hron-fsi"
@@ -157,6 +161,24 @@ class TurekHronFsiConfig:
     flow_projection_iterations: int = 4000
     flow_pressure_solver: str = "fv_cg"
     flow_cg_tolerance: float = 1.0e-6
+    # CG preconditioner. Default "auto" -> Jacobi on a uniform grid. Set
+    # "fv_multigrid" to force the multigrid preconditioner (converges the
+    # near-obstacle deficient-stencil modes the plain CG leaves under-resolved).
+    flow_cg_preconditioner: str = "auto"
+    # Re-projection solve budget (perf, 2026-07): the dirichlet-consistency
+    # and post-solid re-projections correct a tiny (~1% of total) pressure
+    # increment left after the main solve, yet CG's relative tolerance is
+    # scale-invariant, so with inherited settings they burn the SAME
+    # iteration budget as the main solve for a physically negligible
+    # correction. Production values below are the measured A/B winner
+    # (th_perf_ab.py V1, 2026-07-05): 27.94 -> 16.20 s/step (1.72x) with
+    # accuracy guards passing (total drag delta 0.08%, tip_uy delta 0.2%,
+    # re-projection iters 4009->1229 / 2922->868). Tolerances are numerics,
+    # not physics: a 1e-4 relative solve of a ~1% increment perturbs the
+    # accumulated pressure by ~1e-6 relative. Set either to None to inherit
+    # flow_projection_iterations/flow_cg_tolerance (legacy behavior).
+    flow_reprojection_iterations: int | None = 1200
+    flow_reprojection_cg_tolerance: float | None = 1.0e-4
     fluid_advection_scheme: str = "rk2"
     velocity_damping: float = 1.0
     enforce_plane_strain_x: bool = True
@@ -387,6 +409,17 @@ def _build_fluid(
     fluid.pressure.from_numpy(np.zeros(grid_nodes, dtype=np.float32))
     fluid.obstacle.from_numpy(build_cylinder_obstacle_mask(config))
     fluid.clear_volume_source()
+    # NOTE (2026-07-05): mode 2 = static-rows-only face-symmetric stamping
+    # (fluid.velocity_dirichlet_face_symmetric, solver.py
+    # _apply_velocity_dirichlet_boundary_rows_kernel). Scoped to STATIC Dirichlet
+    # rows only (region_id == -1: channel walls + inlet), it fixes the top/bottom
+    # wall face-constraint asymmetry: the bottom wall's fluid-adjacent y-face was
+    # left unpinned while the top wall's was pinned, giving a net downward
+    # transport bias (wrong tip_uy sign). Mode 1 (all Dirichlet rows, including
+    # the thin beam marker rows) is known to over-seal the diffuse marker-IB band
+    # and blow the beam particles out of the grid within ~25 steps — do not use
+    # mode 1 here.
+    fluid.velocity_dirichlet_face_symmetric = 2
     return fluid
 
 
@@ -431,6 +464,9 @@ def _build_solid(
     masks = {
         "fixed": fixed,
         "tip": tip,
+        # rest positions never change; cache this one to_numpy so the per-step
+        # tip/displacement row does not re-fetch the whole rest array each step
+        "rest": rest,
     }
     return solid, masks
 
@@ -455,35 +491,29 @@ def _write_channel_boundary_rows(
 ) -> None:
     nx, ny, nz = (int(value) for value in config.grid_nodes)
     _, dy, _ = fluid_cell_spacing_m(config)
-    active = fluid.velocity_dirichlet_boundary_active.to_numpy()
-    values = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
-    weights = fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
-    region = fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
-    y_centers = (np.arange(ny, dtype=np.float64) + 0.5) * dy
-    inlet_speed_mps = np.array(
-        [inlet_profile_mps(y, t_s, config) for y in y_centers], dtype=np.float32
+    peak_scale = (
+        1.5
+        * float(config.mean_inlet_velocity_mps)
+        * inlet_ramp_factor(t_s, config)
     )
-    inlet_k = nz - 1
-    active[:, :, inlet_k] = 1
-    weights[:, :, inlet_k] = 1.0
-    region[:, :, inlet_k] = -1
-    values[:, :, inlet_k, :] = 0.0
-    values[:, :, inlet_k, 2] = -inlet_speed_mps[None, :]
-    for wall_j in (0, ny - 1):
-        active[:, wall_j, :] = 1
-        weights[:, wall_j, :] = 1.0
-        region[:, wall_j, :] = -1
-        values[:, wall_j, :, :] = 0.0
-    fluid.velocity_dirichlet_boundary_active.from_numpy(active)
-    fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
-    fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
-    fluid.velocity_dirichlet_boundary_marker_region_id.from_numpy(region)
+    th_channel_boundary_rows_kernel(
+        fluid.velocity_dirichlet_boundary_active,
+        fluid.velocity_dirichlet_boundary_value_mps,
+        fluid.velocity_dirichlet_boundary_projection_weight,
+        fluid.velocity_dirichlet_boundary_marker_region_id,
+        int(ny),
+        int(nz - 1),
+        float(dy),
+        float(config.channel_height_m),
+        float(peak_scale),
+    )
 
 
 def _outlet_flux_m3ps(fluid: CartesianFluidSolver, config: TurekHronFsiConfig) -> float:
     dx, dy, _ = fluid_cell_spacing_m(config)
-    velocity = fluid.velocity.to_numpy()
-    return float(-np.sum(velocity[:, :, 0, 2]) * dx * dy)
+    nx, ny, _ = (int(value) for value in config.grid_nodes)
+    z_sum = float(outlet_zflux_sum_kernel(fluid.velocity, int(nx), int(ny)))
+    return -z_sum * dx * dy
 
 
 def _tip_displacement_row(
@@ -491,7 +521,7 @@ def _tip_displacement_row(
 ) -> dict[str, float]:
     count = int(solid.particle_count)
     current = solid.x.to_numpy()[:count]
-    rest = solid.rest_x.to_numpy()[:count]
+    rest = masks["rest"]
     displacement = current - rest
     norm = np.linalg.norm(displacement, axis=1)
     tip_mean = displacement[masks["tip"]].mean(axis=0)
@@ -520,6 +550,12 @@ HISTORY_FIELDS = (
     "marker_force_z_n",
     "beam_drag_per_span_n_per_m",
     "beam_lift_per_span_n_per_m",
+    "cylinder_form_drag_per_span_n_per_m",
+    "cylinder_friction_drag_per_span_n_per_m",
+    "cylinder_drag_per_span_n_per_m",
+    "cylinder_lift_per_span_n_per_m",
+    "total_drag_per_span_n_per_m",
+    "total_lift_per_span_n_per_m",
     "fluid_speed_max_mps",
     "outlet_flux_m3ps",
     "inlet_flux_target_m3ps",
@@ -715,9 +751,17 @@ def run_turek_hron_fsi(
     search_radius_m = 1.5 * plane_spacing_m
     interior_probe_distance_m = 1.0 * plane_spacing_m
 
+    solid_substep_count = int(config.solid_substeps)
+
     def solid_step() -> Any:
         latest = None
-        for _ in range(int(config.solid_substeps)):
+        for substep_index in range(solid_substep_count):
+            # The per-substep report does a device->host snapshot (the
+            # out-of-bounds particle safety check) that the caller discards for
+            # every substep but the last; read it only on the final substep,
+            # turning 100 host round-trips per step into 1. A blow-up is still
+            # caught (at most one solid-step later), and correctness is
+            # unaffected because only the last report is consumed.
             latest = solid.step(
                 dt_s=solid_substep_dt_s,
                 mu_pa=mu_pa,
@@ -725,6 +769,7 @@ def run_turek_hron_fsi(
                 primary_region_id=PRIMARY_REGION_ID,
                 secondary_region_id=SECONDARY_UNUSED_REGION_ID,
                 velocity_damping=solid_damping,
+                read_report=(substep_index == solid_substep_count - 1),
             )
             if config.enforce_plane_strain_x:
                 solid.enforce_rest_x_plane()
@@ -847,6 +892,32 @@ def run_turek_hron_fsi(
             reset_pressure=False,
             pressure_solver=str(config.flow_pressure_solver),
             cg_tolerance=float(config.flow_cg_tolerance),
+            cg_preconditioner=str(config.flow_cg_preconditioner),
+            # Momentum-consistent step pressure (2026-07): the advance runs up
+            # to three projections per step (main + dirichlet-consistency +
+            # post-solid). The re-projections act on an already projected
+            # velocity, so without increment accumulation their tiny residual
+            # solve OVERWRITES the physical pressure (measured: 212 Pa ->
+            # 5.6 Pa every step), flattening the cylinder stagnation field and
+            # killing form drag (~0 instead of ~9 N/m; cylinder-only
+            # benchmark reproduces Schaefer-Turek Cd=5.79 vs ref 5.58). With
+            # accumulation the stored pressure is the sum of the step's
+            # increments -- the field that actually balances momentum.
+            accumulate_reprojection_pressure=True,
+            # Re-projection budget/tolerance passthrough (perf, 2026-07): both
+            # None by default, so every existing run of this case is
+            # byte-for-byte identical until an A/B (th_perf_ab.py) picks a
+            # production value for these two fields.
+            reprojection_projection_iterations=(
+                int(config.flow_reprojection_iterations)
+                if config.flow_reprojection_iterations is not None
+                else None
+            ),
+            reprojection_cg_tolerance=(
+                float(config.flow_reprojection_cg_tolerance)
+                if config.flow_reprojection_cg_tolerance is not None
+                else None
+            ),
             fluid_advection_scheme=str(config.fluid_advection_scheme),
             post_dirichlet_consistency_projection_iterations=1,
             update_surface_geometry_from_mpm=False,
@@ -855,8 +926,22 @@ def run_turek_hron_fsi(
         load = latest_report.fluid_to_mpm_loads
         force_n = tuple(float(v) for v in load.marker_forces.total_marker_force_n)
         projection = load.fluid_projection
-        velocity = fluid.velocity.to_numpy()
-        speed_max_mps = float(np.linalg.norm(velocity, axis=-1).max(initial=0.0))
+        # device reduction (returns the max speed magnitude) instead of pulling
+        # the whole nx*ny*nz*3 velocity field to host every step
+        speed_max_mps = float(fluid._max_fluid_speed_kernel())
+        # Cylinder (obstacle mask) surface force. The beam markers sample only the
+        # beam; the reference full-body drag/lift also needs the cylinder, which
+        # is a velocity mask with no marker force. Full traction = pressure/form
+        # + viscous/friction, integrated over the mask surface (viscous computed
+        # after projection so the field is ~divergence-free).
+        cyl_pressure_force_n = fluid.compute_obstacle_surface_pressure_force_n()
+        cyl_viscous_force_n = fluid.compute_obstacle_surface_viscous_force_n()
+        cyl_force_n = (
+            cyl_pressure_force_n[0] + cyl_viscous_force_n[0],
+            cyl_pressure_force_n[1] + cyl_viscous_force_n[1],
+            cyl_pressure_force_n[2] + cyl_viscous_force_n[2],
+        )
+        span_m = float(config.span_m)
         ramp = inlet_ramp_factor(t_s, config)
         row: dict[str, Any] = {
             "step": step_index + 1,
@@ -866,8 +951,14 @@ def run_turek_hron_fsi(
             "marker_force_x_n": force_n[0],
             "marker_force_y_n": force_n[1],
             "marker_force_z_n": force_n[2],
-            "beam_drag_per_span_n_per_m": -force_n[2] / float(config.span_m),
-            "beam_lift_per_span_n_per_m": force_n[1] / float(config.span_m),
+            "beam_drag_per_span_n_per_m": -force_n[2] / span_m,
+            "beam_lift_per_span_n_per_m": force_n[1] / span_m,
+            "cylinder_form_drag_per_span_n_per_m": -cyl_pressure_force_n[2] / span_m,
+            "cylinder_friction_drag_per_span_n_per_m": -cyl_viscous_force_n[2] / span_m,
+            "cylinder_drag_per_span_n_per_m": -cyl_force_n[2] / span_m,
+            "cylinder_lift_per_span_n_per_m": cyl_force_n[1] / span_m,
+            "total_drag_per_span_n_per_m": -(force_n[2] + cyl_force_n[2]) / span_m,
+            "total_lift_per_span_n_per_m": (force_n[1] + cyl_force_n[1]) / span_m,
             "fluid_speed_max_mps": speed_max_mps,
             "outlet_flux_m3ps": _outlet_flux_m3ps(fluid, config),
             "inlet_flux_target_m3ps": (

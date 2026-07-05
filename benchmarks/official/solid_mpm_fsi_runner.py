@@ -200,6 +200,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     )
     solid = _build_solid(config, runtime)
     fixed_mask, tip_mask = _solid_masks(solid, config)
+    # cache the constant rest positions once so the per-step displacement report
+    # does not re-fetch the whole rest array from the device every step
+    rest_positions_m = solid.rest_x.to_numpy()[: solid.particle_count]
     mu_pa, lambda_pa = _lame_parameters(config)
     solid_substep_cfl = solid_substep_cfl_report(config)
     solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])
@@ -316,6 +319,12 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 velocity_transfer_flip_blend=float(
                     getattr(config, "solid_velocity_transfer_flip_blend", 0.0)
                 ),
+                # Read the per-substep report (a device->host snapshot with the
+                # out-of-bounds safety check) only on the final substep. The
+                # caller keeps just the last report (used at the per-step history
+                # assembly), so this turns solid_substeps host round-trips per
+                # step into 1 with bit-for-bit identical results.
+                read_report=(_solid_substep == solid_substeps - 1),
             )
             if config.enforce_plane_strain_x:
                 solid.enforce_rest_x_plane()
@@ -337,7 +346,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             config,
         )
         feedback_available_for_projection = True
-        step_displacement = _solid_displacement_report(solid, fixed_mask, tip_mask)
+        step_displacement = _solid_displacement_report(
+            solid, fixed_mask, tip_mask, rest=rest_positions_m
+        )
         history.append(
             {
                 "step": step_index + 1,
@@ -4772,9 +4783,13 @@ def _solid_displacement_report(
     solid: NeoHookeanMpmState,
     fixed_mask: np.ndarray,
     tip_mask: np.ndarray,
+    rest: np.ndarray | None = None,
 ) -> dict[str, object]:
     positions = solid.x.to_numpy()[: solid.particle_count]
-    rest = solid.rest_x.to_numpy()[: solid.particle_count]
+    if rest is None:
+        # rest positions are constant; per-step callers pass a cached copy so
+        # the whole rest array is not re-fetched from the device every step
+        rest = solid.rest_x.to_numpy()[: solid.particle_count]
     displacement = positions - rest
     norms = np.linalg.norm(displacement, axis=1)
     tip_displacement = displacement[tip_mask]

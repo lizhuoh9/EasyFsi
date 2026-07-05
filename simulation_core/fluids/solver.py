@@ -130,6 +130,11 @@ class CartesianFluidSolver:
         self.fsi_pressure = ti.field(dtype=ti.f64, shape=shape)
         self.pressure_tmp = ti.field(dtype=ti.f64, shape=shape)
         self.pressure_accum = ti.field(dtype=ti.f64, shape=shape)
+        # Step-level pressure carry for increment-mode re-projections
+        # (project(accumulate_pressure_into_previous=True)): holds the
+        # step's accumulated pressure while a re-projection solves its own
+        # increment from a clean zero field.
+        self.pressure_step_carry = ti.field(dtype=ti.f64, shape=shape)
         self.divergence = ti.field(dtype=ti.f32, shape=shape)
         self.pressure_interface_projection_divergence_s = ti.field(
             dtype=ti.f64,
@@ -354,6 +359,18 @@ class CartesianFluidSolver:
         self.marker_feedback_region_min = ti.field(dtype=ti.i32, shape=shape)
         self.marker_feedback_region_max = ti.field(dtype=ti.i32, shape=shape)
         self.velocity_dirichlet_boundary_active = ti.field(dtype=ti.i32, shape=shape)
+        # Opt-in (default 0): derive the staggered velocity-Dirichlet FACE
+        # constraints symmetrically from the cell mask (a backward MAC face is
+        # constrained if EITHER adjacent cell is active) so a mirror-symmetric
+        # Dirichlet cell set yields a mirror-symmetric face constraint. Off by
+        # default to preserve the validated flap / production squid behaviour;
+        # y-symmetric cases (e.g. Turek-Hron) opt in. See
+        # _apply_velocity_dirichlet_boundary_rows_kernel.
+        # 0 = off (legacy); 1 = all Dirichlet rows (experimental — over-seals
+        # thin marker rows, unstable); 2 = static rows only (region_id == -1:
+        # channel walls + inlet) — restores the mirror symmetry of the
+        # face-constraint set without sealing thin marker geometry.
+        self.velocity_dirichlet_face_symmetric = 0
         self.velocity_dirichlet_boundary_value_mps = ti.Vector.field(
             3,
             dtype=ti.f32,
@@ -395,6 +412,17 @@ class CartesianFluidSolver:
         self.cleanup_required = ti.field(dtype=ti.i32, shape=())
         self.report_surface_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_grid_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
+        # total fluid force on the obstacle-mask surface (pressure/form part),
+        # integrated over every obstacle<->fluid face; see
+        # compute_obstacle_surface_pressure_force_n
+        self.report_obstacle_surface_pressure_force_n = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        # viscous/friction part of the obstacle-mask surface force; see
+        # compute_obstacle_surface_viscous_force_n
+        self.report_obstacle_surface_viscous_force_n = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
         self.report_force_spread_relative_error = ti.field(dtype=ti.f32, shape=())
         self.report_active_force_cells = ti.field(dtype=ti.i32, shape=())
         self.report_grid_impulse_n_s = ti.Vector.field(3, dtype=ti.f32, shape=())
@@ -3488,6 +3516,7 @@ class CartesianFluidSolver:
         self,
         read_report: ti.i32,
         preserve_projected_rows: ti.i32,
+        face_symmetric: ti.i32,
     ):
         self.report_velocity_dirichlet_boundary_cells[None] = 0
         self.report_velocity_dirichlet_boundary_delta_sum[None] = 0.0
@@ -3541,6 +3570,129 @@ class CartesianFluidSolver:
                         self.report_velocity_dirichlet_boundary_momentum_delta_n_s,
                         momentum_delta,
                     )
+            elif face_symmetric != 0 and self.obstacle[i, j, k] == 0:
+                # Mirror-symmetric velocity-Dirichlet on the backward-face MAC
+                # grid (opt-in). velocity[i,j,k].{x,y,z} live on the BACKWARD
+                # faces of cell (i,j,k) (x between i-1,i; y between j-1,j;
+                # z between k-1,k). A staggered face must be constrained if
+                # EITHER adjacent cell is a Dirichlet cell (face f Dirichlet iff
+                # cell[f] or cell[f-1] active). Stamping only the owning cell's
+                # backward face (the branch above) makes a mirror-symmetric CELL
+                # set produce an ASYMMETRIC face constraint (the mirror of face j
+                # is face ny-j, not ny-1-j), which breaks the y-symmetry of the
+                # projected flow and, via the consistency re-projection, of the
+                # pressure. This branch covers the "+side" faces whose backward-
+                # neighbour cell is a Dirichlet cell while their own cell is not;
+                # the "-side" faces are already stamped by the owning cell above.
+                # face_symmetric == 2 additionally scopes each neighbour check to
+                # STATIC Dirichlet rows only (marker_region_id < 0: channel walls +
+                # inlet, stamped by th_channel_boundary_rows_kernel with region -1).
+                # This fixes the wall face-constraint asymmetry without stamping
+                # both faces of thin marker/IB rows (region_id >= 0), which would
+                # over-seal the beam-adjacent fluid cells and starve the pressure
+                # projection of divergence to correct (the "walled cavity" failure
+                # mode). Only velocity[i,j,k] is written and only neighbour masks/
+                # values are read, so the pass is race-free.
+                new_velocity = self.velocity[i, j, k]
+                changed = 0
+                if (
+                    i > 0
+                    and self.velocity_dirichlet_boundary_active[i - 1, j, k] != 0
+                    and self.obstacle[i - 1, j, k] == 0
+                    and (
+                        face_symmetric == 1
+                        or self.velocity_dirichlet_boundary_marker_region_id[
+                            i - 1, j, k
+                        ]
+                        < 0
+                    )
+                ):
+                    w = ti.min(
+                        1.0,
+                        ti.max(
+                            0.0,
+                            self.velocity_dirichlet_boundary_projection_weight[
+                                i - 1, j, k
+                            ],
+                        ),
+                    )
+                    if (
+                        preserve_projected_rows != 0
+                        and self.velocity_dirichlet_boundary_marker_region_id[
+                            i - 1, j, k
+                        ]
+                        >= 0
+                    ):
+                        w = 1.0
+                    target = self.velocity_dirichlet_boundary_value_mps[i - 1, j, k].x
+                    new_velocity.x = new_velocity.x + w * (target - new_velocity.x)
+                    changed = 1
+                if (
+                    j > 0
+                    and self.velocity_dirichlet_boundary_active[i, j - 1, k] != 0
+                    and self.obstacle[i, j - 1, k] == 0
+                    and (
+                        face_symmetric == 1
+                        or self.velocity_dirichlet_boundary_marker_region_id[
+                            i, j - 1, k
+                        ]
+                        < 0
+                    )
+                ):
+                    w = ti.min(
+                        1.0,
+                        ti.max(
+                            0.0,
+                            self.velocity_dirichlet_boundary_projection_weight[
+                                i, j - 1, k
+                            ],
+                        ),
+                    )
+                    if (
+                        preserve_projected_rows != 0
+                        and self.velocity_dirichlet_boundary_marker_region_id[
+                            i, j - 1, k
+                        ]
+                        >= 0
+                    ):
+                        w = 1.0
+                    target = self.velocity_dirichlet_boundary_value_mps[i, j - 1, k].y
+                    new_velocity.y = new_velocity.y + w * (target - new_velocity.y)
+                    changed = 1
+                if (
+                    k > 0
+                    and self.velocity_dirichlet_boundary_active[i, j, k - 1] != 0
+                    and self.obstacle[i, j, k - 1] == 0
+                    and (
+                        face_symmetric == 1
+                        or self.velocity_dirichlet_boundary_marker_region_id[
+                            i, j, k - 1
+                        ]
+                        < 0
+                    )
+                ):
+                    w = ti.min(
+                        1.0,
+                        ti.max(
+                            0.0,
+                            self.velocity_dirichlet_boundary_projection_weight[
+                                i, j, k - 1
+                            ],
+                        ),
+                    )
+                    if (
+                        preserve_projected_rows != 0
+                        and self.velocity_dirichlet_boundary_marker_region_id[
+                            i, j, k - 1
+                        ]
+                        >= 0
+                    ):
+                        w = 1.0
+                    target = self.velocity_dirichlet_boundary_value_mps[i, j, k - 1].z
+                    new_velocity.z = new_velocity.z + w * (target - new_velocity.z)
+                    changed = 1
+                if changed != 0:
+                    self.velocity[i, j, k] = new_velocity
 
     def apply_velocity_dirichlet_boundary_rows(
         self,
@@ -3550,6 +3702,7 @@ class CartesianFluidSolver:
         self._apply_velocity_dirichlet_boundary_rows_kernel(
             1 if read_report else 0,
             0,
+            int(self.velocity_dirichlet_face_symmetric),
         )
         if not read_report:
             return None
@@ -4475,6 +4628,259 @@ class CartesianFluidSolver:
             impulse_relative_error=float(self.report_impulse_relative_error[None]),
             active_velocity_cells=int(self.report_active_velocity_cells[None]),
         )
+
+    @ti.kernel
+    def _compute_obstacle_surface_pressure_force_kernel(self):
+        self.report_obstacle_surface_pressure_force_n[None] = ti.Vector(
+            [0.0, 0.0, 0.0]
+        )
+        for i, j, k in self.obstacle:
+            if self.obstacle[i, j, k] == 1:
+                area_yz = ti.cast(
+                    self.cell_width_y_m[j] * self.cell_width_z_m[k], ti.f64
+                )
+                area_xz = ti.cast(
+                    self.cell_width_x_m[i] * self.cell_width_z_m[k], ti.f64
+                )
+                area_xy = ti.cast(
+                    self.cell_width_x_m[i] * self.cell_width_y_m[j], ti.f64
+                )
+                fx = ti.cast(0.0, ti.f64)
+                fy = ti.cast(0.0, ti.f64)
+                fz = ti.cast(0.0, ti.f64)
+                # Force the fluid exerts ON the obstacle across each face it shares
+                # with a fluid cell: F += -p_fluid * A * n_out, where n_out points
+                # from the obstacle into the fluid. High fluid pressure on the -x
+                # side (fluid at i-1) pushes the obstacle toward +x, etc. Summed
+                # over the closed obstacle surface this is gauge-invariant (a
+                # constant added to p cancels because sum of n_out*A is zero).
+                if i > 0 and self.obstacle[i - 1, j, k] == 0:
+                    fx += self.pressure[i - 1, j, k] * area_yz
+                if i < self.nx - 1 and self.obstacle[i + 1, j, k] == 0:
+                    fx += -self.pressure[i + 1, j, k] * area_yz
+                if j > 0 and self.obstacle[i, j - 1, k] == 0:
+                    fy += self.pressure[i, j - 1, k] * area_xz
+                if j < self.ny - 1 and self.obstacle[i, j + 1, k] == 0:
+                    fy += -self.pressure[i, j + 1, k] * area_xz
+                if k > 0 and self.obstacle[i, j, k - 1] == 0:
+                    fz += self.pressure[i, j, k - 1] * area_xy
+                if k < self.nz - 1 and self.obstacle[i, j, k + 1] == 0:
+                    fz += -self.pressure[i, j, k + 1] * area_xy
+                self._atomic_add_report_vector(
+                    self.report_obstacle_surface_pressure_force_n,
+                    ti.Vector([fx, fy, fz]),
+                )
+
+    def compute_obstacle_surface_pressure_force_n(self) -> tuple[float, float, float]:
+        """Integrate the fluid pressure/form force on the obstacle-mask surface.
+
+        Returns the total force (N) the fluid exerts on all obstacle cells,
+        summed over every obstacle<->fluid face as -p_fluid * A * n_out. This
+        recovers the pressure/form drag+lift of a masked bluff body (e.g. the
+        Turek-Hron cylinder, which is a velocity mask and otherwise contributes
+        no sampled force). The viscous/friction component is computed separately.
+        Gauge-invariant over the closed obstacle surface.
+        """
+        self._compute_obstacle_surface_pressure_force_kernel()
+        f = self.report_obstacle_surface_pressure_force_n[None]
+        return (float(f.x), float(f.y), float(f.z))
+
+    @ti.func
+    def _obstacle_wall_cell_velocity(self, a: ti.i32, b: ti.i32, c: ti.i32):
+        # Cell-centred velocity of a fluid cell (a,b,c): the average of its
+        # backward and forward MAC faces per axis. A face touching an obstacle
+        # cell or the domain edge carries no fluid data (no-slip wall -> 0).
+        # if-statements (like the divergence kernel) short-circuit, so the
+        # obstacle[a-1] etc. reads never go out of bounds.
+        uxb = ti.cast(0.0, ti.f64)
+        if a > 0 and self.obstacle[a - 1, b, c] == 0:
+            uxb = ti.cast(self.velocity[a, b, c].x, ti.f64)
+        uxf = ti.cast(0.0, ti.f64)
+        if a < self.nx - 1 and self.obstacle[a + 1, b, c] == 0:
+            uxf = ti.cast(self.velocity[a + 1, b, c].x, ti.f64)
+        uyb = ti.cast(0.0, ti.f64)
+        if b > 0 and self.obstacle[a, b - 1, c] == 0:
+            uyb = ti.cast(self.velocity[a, b, c].y, ti.f64)
+        uyf = ti.cast(0.0, ti.f64)
+        if b < self.ny - 1 and self.obstacle[a, b + 1, c] == 0:
+            uyf = ti.cast(self.velocity[a, b + 1, c].y, ti.f64)
+        uzb = ti.cast(0.0, ti.f64)
+        if c > 0 and self.obstacle[a, b, c - 1] == 0:
+            uzb = ti.cast(self.velocity[a, b, c].z, ti.f64)
+        uzf = ti.cast(0.0, ti.f64)
+        if c < self.nz - 1 and self.obstacle[a, b, c + 1] == 0:
+            uzf = ti.cast(self.velocity[a, b, c + 1].z, ti.f64)
+        return ti.Vector([0.5 * (uxb + uxf), 0.5 * (uyb + uyf), 0.5 * (uzb + uzf)])
+
+    @ti.func
+    def _obstacle_cell_dvel_dx(self, a: ti.i32, b: ti.i32, c: ti.i32):
+        # d(u_cell)/dx at fluid cell (a,b,c) as a 3-vector; central difference,
+        # degrading to one-sided (obstacle/edge neighbour -> 0) at a wall.
+        result = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        up = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        fp = 0
+        if a + 1 < self.nx and self.obstacle[a + 1, b, c] == 0:
+            up = self._obstacle_wall_cell_velocity(a + 1, b, c)
+            fp = 1
+        um = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        fm = 0
+        if a > 0 and self.obstacle[a - 1, b, c] == 0:
+            um = self._obstacle_wall_cell_velocity(a - 1, b, c)
+            fm = 1
+        uc = self._obstacle_wall_cell_velocity(a, b, c)
+        w = ti.cast(self.cell_width_x_m[a], ti.f64)
+        if fp == 1 and fm == 1:
+            span = (
+                0.5 * ti.cast(self.cell_width_x_m[a - 1], ti.f64)
+                + w
+                + 0.5 * ti.cast(self.cell_width_x_m[a + 1], ti.f64)
+            )
+            result = (up - um) / span
+        elif fp == 1:
+            result = (up - uc) / (0.5 * w + 0.5 * ti.cast(self.cell_width_x_m[a + 1], ti.f64))
+        elif fm == 1:
+            result = (uc - um) / (0.5 * ti.cast(self.cell_width_x_m[a - 1], ti.f64) + 0.5 * w)
+        return result
+
+    @ti.func
+    def _obstacle_cell_dvel_dy(self, a: ti.i32, b: ti.i32, c: ti.i32):
+        result = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        up = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        fp = 0
+        if b + 1 < self.ny and self.obstacle[a, b + 1, c] == 0:
+            up = self._obstacle_wall_cell_velocity(a, b + 1, c)
+            fp = 1
+        um = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        fm = 0
+        if b > 0 and self.obstacle[a, b - 1, c] == 0:
+            um = self._obstacle_wall_cell_velocity(a, b - 1, c)
+            fm = 1
+        uc = self._obstacle_wall_cell_velocity(a, b, c)
+        w = ti.cast(self.cell_width_y_m[b], ti.f64)
+        if fp == 1 and fm == 1:
+            span = (
+                0.5 * ti.cast(self.cell_width_y_m[b - 1], ti.f64)
+                + w
+                + 0.5 * ti.cast(self.cell_width_y_m[b + 1], ti.f64)
+            )
+            result = (up - um) / span
+        elif fp == 1:
+            result = (up - uc) / (0.5 * w + 0.5 * ti.cast(self.cell_width_y_m[b + 1], ti.f64))
+        elif fm == 1:
+            result = (uc - um) / (0.5 * ti.cast(self.cell_width_y_m[b - 1], ti.f64) + 0.5 * w)
+        return result
+
+    @ti.func
+    def _obstacle_cell_dvel_dz(self, a: ti.i32, b: ti.i32, c: ti.i32):
+        result = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        up = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        fp = 0
+        if c + 1 < self.nz and self.obstacle[a, b, c + 1] == 0:
+            up = self._obstacle_wall_cell_velocity(a, b, c + 1)
+            fp = 1
+        um = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        fm = 0
+        if c > 0 and self.obstacle[a, b, c - 1] == 0:
+            um = self._obstacle_wall_cell_velocity(a, b, c - 1)
+            fm = 1
+        uc = self._obstacle_wall_cell_velocity(a, b, c)
+        w = ti.cast(self.cell_width_z_m[c], ti.f64)
+        if fp == 1 and fm == 1:
+            span = (
+                0.5 * ti.cast(self.cell_width_z_m[c - 1], ti.f64)
+                + w
+                + 0.5 * ti.cast(self.cell_width_z_m[c + 1], ti.f64)
+            )
+            result = (up - um) / span
+        elif fp == 1:
+            result = (up - uc) / (0.5 * w + 0.5 * ti.cast(self.cell_width_z_m[c + 1], ti.f64))
+        elif fm == 1:
+            result = (uc - um) / (0.5 * ti.cast(self.cell_width_z_m[c - 1], ti.f64) + 0.5 * w)
+        return result
+
+    @ti.kernel
+    def _compute_obstacle_surface_viscous_force_kernel(self):
+        self.report_obstacle_surface_viscous_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
+        mu = ti.cast(self.mu, ti.f64)
+        for i, j, k in self.obstacle:
+            if self.obstacle[i, j, k] == 1:
+                area_yz = ti.cast(self.cell_width_y_m[j] * self.cell_width_z_m[k], ti.f64)
+                area_xz = ti.cast(self.cell_width_x_m[i] * self.cell_width_z_m[k], ti.f64)
+                area_xy = ti.cast(self.cell_width_x_m[i] * self.cell_width_y_m[j], ti.f64)
+                fx = ti.cast(0.0, ti.f64)
+                fy = ti.cast(0.0, ti.f64)
+                fz = ti.cast(0.0, ti.f64)
+                # Viscous traction tau.n_out on each obstacle<->fluid face, with
+                # the SAME sign as the pressure kernel (viscous carries +tau).
+                # tau = mu(grad u + grad u^T); the gradients are evaluated at the
+                # adjacent fluid cell. s = sign of the obstacle outward normal.
+                # -x face (fluid at i-1, s=-1)
+                if i > 0 and self.obstacle[i - 1, j, k] == 0:
+                    gx = self._obstacle_cell_dvel_dx(i - 1, j, k)
+                    gy = self._obstacle_cell_dvel_dy(i - 1, j, k)
+                    gz = self._obstacle_cell_dvel_dz(i - 1, j, k)
+                    fx += -mu * (2.0 * gx[0]) * area_yz
+                    fy += -mu * (gx[1] + gy[0]) * area_yz
+                    fz += -mu * (gx[2] + gz[0]) * area_yz
+                # +x face (fluid at i+1, s=+1)
+                if i < self.nx - 1 and self.obstacle[i + 1, j, k] == 0:
+                    gx = self._obstacle_cell_dvel_dx(i + 1, j, k)
+                    gy = self._obstacle_cell_dvel_dy(i + 1, j, k)
+                    gz = self._obstacle_cell_dvel_dz(i + 1, j, k)
+                    fx += mu * (2.0 * gx[0]) * area_yz
+                    fy += mu * (gx[1] + gy[0]) * area_yz
+                    fz += mu * (gx[2] + gz[0]) * area_yz
+                # -y face (fluid at j-1, s=-1)
+                if j > 0 and self.obstacle[i, j - 1, k] == 0:
+                    gx = self._obstacle_cell_dvel_dx(i, j - 1, k)
+                    gy = self._obstacle_cell_dvel_dy(i, j - 1, k)
+                    gz = self._obstacle_cell_dvel_dz(i, j - 1, k)
+                    fx += -mu * (gy[0] + gx[1]) * area_xz
+                    fy += -mu * (2.0 * gy[1]) * area_xz
+                    fz += -mu * (gy[2] + gz[1]) * area_xz
+                # +y face (fluid at j+1, s=+1)
+                if j < self.ny - 1 and self.obstacle[i, j + 1, k] == 0:
+                    gx = self._obstacle_cell_dvel_dx(i, j + 1, k)
+                    gy = self._obstacle_cell_dvel_dy(i, j + 1, k)
+                    gz = self._obstacle_cell_dvel_dz(i, j + 1, k)
+                    fx += mu * (gy[0] + gx[1]) * area_xz
+                    fy += mu * (2.0 * gy[1]) * area_xz
+                    fz += mu * (gy[2] + gz[1]) * area_xz
+                # -z face (fluid at k-1, s=-1)
+                if k > 0 and self.obstacle[i, j, k - 1] == 0:
+                    gx = self._obstacle_cell_dvel_dx(i, j, k - 1)
+                    gy = self._obstacle_cell_dvel_dy(i, j, k - 1)
+                    gz = self._obstacle_cell_dvel_dz(i, j, k - 1)
+                    fx += -mu * (gz[0] + gx[2]) * area_xy
+                    fy += -mu * (gz[1] + gy[2]) * area_xy
+                    fz += -mu * (2.0 * gz[2]) * area_xy
+                # +z face (fluid at k+1, s=+1)
+                if k < self.nz - 1 and self.obstacle[i, j, k + 1] == 0:
+                    gx = self._obstacle_cell_dvel_dx(i, j, k + 1)
+                    gy = self._obstacle_cell_dvel_dy(i, j, k + 1)
+                    gz = self._obstacle_cell_dvel_dz(i, j, k + 1)
+                    fx += mu * (gz[0] + gx[2]) * area_xy
+                    fy += mu * (gz[1] + gy[2]) * area_xy
+                    fz += mu * (2.0 * gz[2]) * area_xy
+                self._atomic_add_report_vector(
+                    self.report_obstacle_surface_viscous_force_n,
+                    ti.Vector([fx, fy, fz]),
+                )
+
+    def compute_obstacle_surface_viscous_force_n(self) -> tuple[float, float, float]:
+        """Integrate the fluid viscous/friction force on the obstacle-mask surface.
+
+        Complements compute_obstacle_surface_pressure_force_n: this adds the
+        mu*(grad u + grad u^T).n_out part of the surface traction (skin friction),
+        which the pressure/form integral omits. Call AFTER the pressure
+        projection so the velocity is ~divergence-free (the per-face normal-stress
+        terms then sum to ~0 over the closed surface, as physics requires). The
+        wall gradients are first-order; validate skin friction with a Couette /
+        shear-flow test before trusting absolute magnitudes.
+        """
+        self._compute_obstacle_surface_viscous_force_kernel()
+        f = self.report_obstacle_surface_viscous_force_n[None]
+        return (float(f.x), float(f.y), float(f.z))
 
     @ti.kernel
     def _compute_divergence_kernel(
@@ -6723,6 +7129,27 @@ class CartesianFluidSolver:
             self.pressure_accum[i, j, k] = self.pressure[i, j, k]
 
     @ti.kernel
+    def _save_pressure_step_carry_kernel(self):
+        # Increment-mode projection (accumulate_pressure_into_previous):
+        # stash the step's accumulated pressure before this re-projection
+        # solves its own increment from a clean zero field.
+        for i, j, k in self.pressure:
+            self.pressure_step_carry[i, j, k] = self.pressure[i, j, k]
+
+    @ti.kernel
+    def _add_pressure_step_carry_kernel(self):
+        # total = carry + increment. The momentum-consistent pressure for a
+        # step that runs several projections is the SUM of their increments
+        # (the velocity was corrected by -(dt/rho)*grad of each increment in
+        # sequence), not the last increment alone. Without this, a
+        # re-projection on an already divergence-free velocity solves a tiny
+        # residual system and OVERWRITES the physical pressure (measured on
+        # Turek-Hron FSI1: 212 Pa -> 5.6 Pa per step, killing the cylinder
+        # form drag).
+        for i, j, k in self.pressure:
+            self.pressure[i, j, k] += self.pressure_step_carry[i, j, k]
+
+    @ti.kernel
     def _accumulate_pressure_correction_kernel(self):
         for i, j, k in self.pressure:
             corrected = self.pressure_accum[i, j, k] + self.pressure[i, j, k]
@@ -8280,6 +8707,7 @@ class CartesianFluidSolver:
         divergence_cleanup_iterations: int = 0,
         divergence_cleanup_relaxation: float = 0.7,
         reset_pressure: bool = False,
+        accumulate_pressure_into_previous: bool = False,
         pressure_solver: str = "jacobi",
         multigrid_cycles: int | None = None,
         cg_tolerance: float = 1.0e-6,
@@ -8585,6 +9013,7 @@ class CartesianFluidSolver:
             self._apply_velocity_dirichlet_boundary_rows_kernel(
                 1 if report_requested else 0,
                 1 if preserve_projected_rows else 0,
+                int(self.velocity_dirichlet_face_symmetric),
             )
             if report_requested:
                 velocity_dirichlet_boundary_apply_calls += 1
@@ -8718,7 +9147,16 @@ class CartesianFluidSolver:
                     PRESSURE_OUTLET_AUTO_CLEANUP_MIN_L2
                     * PRESSURE_OUTLET_AUTO_CLEANUP_MIN_L2,
                 )
-        if reset_pressure:
+        if accumulate_pressure_into_previous:
+            # Fractional-step increment mode: this projection acts on an
+            # already-projected velocity, so its solution is a pressure
+            # INCREMENT relative to the step's accumulated pressure, not the
+            # step's full pressure. Save the incoming total and solve the
+            # increment from a clean zero field; the total is restored as
+            # carry + increment just before returning.
+            self._save_pressure_step_carry_kernel()
+            self._clear_pressure_kernel()
+        elif reset_pressure:
             self._clear_pressure_kernel()
         rhs_scale = self.rho / step_dt_s
         inv_dx2 = 1.0 / (self.dx * self.dx)
@@ -8970,6 +9408,12 @@ class CartesianFluidSolver:
             if bool(preserve_velocity_constraints)
             else (0.0, 0.0, 0.0)
         )
+        if accumulate_pressure_into_previous:
+            # Restore total = carry + increment (see the increment-mode note
+            # at the top of this method). All internal machinery above
+            # (cleanup passes, interface rows, reports) operated on the
+            # increment; only the externally visible pressure is the total.
+            self._add_pressure_step_carry_kernel()
         return {
             "pressure_solver_requested": pressure_solver_requested_name,
             "pressure_solver": pressure_solver_name,

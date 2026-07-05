@@ -12823,6 +12823,26 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     multigrid_cycles: int | None = None,
     cg_tolerance: float = 1.0e-6,
     cg_preconditioner: str = "auto",
+    # Momentum-consistent pressure across the step's re-projections: when
+    # True, the dirichlet-consistency and post-solid projections run in
+    # increment mode (accumulate_pressure_into_previous) so the stored
+    # pressure is the SUM of the step's increments instead of the last tiny
+    # residual solve overwriting the physical field. Default False preserves
+    # legacy behavior until each case is re-validated.
+    accumulate_reprojection_pressure: bool = False,
+    # Re-projection solve budget override (perf: the dirichlet-consistency and
+    # post-solid re-projections correct a tiny (~1% of total) pressure
+    # increment left over after the main solve, yet CG's relative tolerance
+    # is scale-invariant, so they burn the SAME 2000-4035 iterations as the
+    # main solve for a physically negligible correction. None preserves
+    # legacy behavior (re-projections inherit `iterations`/`cg_tolerance`
+    # verbatim); a caller may pass a cheaper iteration cap and/or looser
+    # tolerance for JUST the re-projection sites without touching the main
+    # projection's budget. Never applied to rhs_scale, dt/rho correction, or
+    # divergence stencils - those remain exactly as before regardless of
+    # these knobs.
+    reprojection_projection_iterations: int | None = None,
+    reprojection_cg_tolerance: float | None = None,
     divergence_cleanup_iterations: int = 0,
     divergence_cleanup_relaxation: float = 0.7,
     classify_far_internal_nodes: bool = False,
@@ -12845,6 +12865,26 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     iterations = int(projection_iterations)
     if iterations <= 0:
         raise ValueError("projection_iterations must be positive")
+    # Re-projection budget/tolerance resolve to the main values when the
+    # caller leaves the override kwargs at their None default, so every
+    # existing case (which never sets them) is byte-for-byte identical to
+    # before this knob existed. Only the consistency and post-solid project()
+    # sites read these resolved values - the main projection always uses
+    # `iterations`/`cg_tolerance` directly, untouched.
+    reprojection_iterations = (
+        int(reprojection_projection_iterations)
+        if reprojection_projection_iterations is not None
+        else iterations
+    )
+    if reprojection_iterations <= 0:
+        raise ValueError("reprojection_projection_iterations must be positive")
+    reprojection_tolerance = (
+        float(reprojection_cg_tolerance)
+        if reprojection_cg_tolerance is not None
+        else float(cg_tolerance)
+    )
+    if reprojection_tolerance <= 0.0:
+        raise ValueError("reprojection_cg_tolerance must be positive")
     substeps = int(fluid_substeps)
     if substeps <= 0:
         raise ValueError("fluid_substeps must be positive")
@@ -13461,6 +13501,14 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             requested_pressure_solver=requested_pressure_solver,
             active_pressure_neumann_rows=pressure_report.active_pressure_neumann_rows,
         )
+        # Perf instrumentation (measured facts, not a knob): capture the CG
+        # iteration count and wall-clock cost of THIS project() call so a
+        # probe can attribute the ~2000-4035 iteration budget across the
+        # main/consistency/post-solid sites instead of only seeing the
+        # per-step total. read_report=True above means project() already
+        # blocks on host reads before returning, so this perf_counter delta
+        # is a real device-inclusive wall time, not just host dispatch time.
+        _main_project_start_s = time.perf_counter()
         project_report = dict(
             fluid.project(
                 iterations=iterations,
@@ -13480,6 +13528,10 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 read_report=True,
             )
         )
+        project_report["cg_iterations"] = int(
+            getattr(fluid, "last_cg_iterations", -1)
+        )
+        project_report["wall_time_s"] = time.perf_counter() - _main_project_start_s
         project_report["hibm_projection_overflow_singleton_cleanup_cell_count"] = (
             int(project_report.get("hibm_projection_overflow_singleton_cleanup_cell_count", 0))
             + int(overflow_singleton_cleanup_cell_count)
@@ -13559,9 +13611,20 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             requested_pressure_solver=requested_pressure_solver,
             active_pressure_neumann_rows=pressure_report.active_pressure_neumann_rows,
         )
+        _consistency_project_start_s = time.perf_counter()
         consistency_project_report = dict(
             fluid.project(
-                iterations=iterations,
+                # Re-projection budget/tolerance: this solve corrects the
+                # tiny residual left by re-imposing velocity Dirichlet rows
+                # after the main solve (~1% of total pressure), not the
+                # physical field itself, so it is safe to cap its CG budget
+                # independently of the main projection's `iterations`. None
+                # (default) resolves to `iterations`/`cg_tolerance` above,
+                # i.e. identical to legacy behavior.
+                iterations=reprojection_iterations,
+                accumulate_pressure_into_previous=bool(
+                    accumulate_reprojection_pressure
+                ),
                 pressure_outlet_zmin=bool(pressure_outlet_zmin),
                 velocity_inlet_zmax=bool(velocity_inlet_zmax),
                 dt_s=fluid_substep_dt,
@@ -13569,7 +13632,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 reset_pressure=bool(reset_pressure),
                 pressure_solver=effective_pressure_solver,
                 multigrid_cycles=multigrid_cycles,
-                cg_tolerance=float(cg_tolerance),
+                cg_tolerance=reprojection_tolerance,
                 cg_preconditioner=str(cg_preconditioner),
                 pressure_solve_failure_policy=pressure_solve_failure_policy_name,
                 hibm_tiny_unreached_cleanup_component_cells=0,
@@ -13577,6 +13640,12 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
             )
+        )
+        consistency_project_report["cg_iterations"] = int(
+            getattr(fluid, "last_cg_iterations", -1)
+        )
+        consistency_project_report["wall_time_s"] = (
+            time.perf_counter() - _consistency_project_start_s
         )
         consistency_project_report[
             "hibm_projection_overflow_singleton_cleanup_cell_count"
@@ -14057,6 +14126,15 @@ def advance_hibm_mpm_sharp_mpm_step(
     multigrid_cycles: int | None = None,
     cg_tolerance: float = 1.0e-6,
     cg_preconditioner: str = "auto",
+    accumulate_reprojection_pressure: bool = False,
+    # Re-projection budget/tolerance override, mirrored verbatim from
+    # assemble_hibm_mpm_sharp_fluid_to_mpm_loads (see that function's kwarg
+    # comment for the perf rationale). None -> inherits `projection_iterations`
+    # / `cg_tolerance` at both the consistency site (forwarded into the
+    # worker below) and the post-solid site (applied directly in this
+    # function). The main projection is never affected.
+    reprojection_projection_iterations: int | None = None,
+    reprojection_cg_tolerance: float | None = None,
     surface_feedback_dt_s: float | None = None,
     divergence_cleanup_iterations: int = 0,
     divergence_cleanup_relaxation: float = 0.7,
@@ -14170,6 +14248,17 @@ def advance_hibm_mpm_sharp_mpm_step(
         multigrid_cycles=multigrid_cycles,
         cg_tolerance=float(cg_tolerance),
         cg_preconditioner=str(cg_preconditioner),
+        accumulate_reprojection_pressure=bool(accumulate_reprojection_pressure),
+        reprojection_projection_iterations=(
+            int(reprojection_projection_iterations)
+            if reprojection_projection_iterations is not None
+            else None
+        ),
+        reprojection_cg_tolerance=(
+            float(reprojection_cg_tolerance)
+            if reprojection_cg_tolerance is not None
+            else None
+        ),
         divergence_cleanup_iterations=int(divergence_cleanup_iterations),
         divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
         classify_far_internal_nodes=bool(classify_far_internal_nodes),
@@ -14732,9 +14821,30 @@ def advance_hibm_mpm_sharp_mpm_step(
             requested_pressure_solver=requested_pressure_solver,
             active_pressure_neumann_rows=next_pressure_report.active_pressure_neumann_rows,
         )
+        # Re-projection budget/tolerance resolve to the main values when the
+        # caller leaves the override kwargs at None, matching the identical
+        # resolution done inside assemble_hibm_mpm_sharp_fluid_to_mpm_loads
+        # for its own consistency-projection site - kept local here (rather
+        # than threaded through as extra return values) since this post-solid
+        # project() call lives entirely inside this function, one level
+        # above the worker.
+        post_solid_reprojection_iterations = (
+            int(reprojection_projection_iterations)
+            if reprojection_projection_iterations is not None
+            else int(projection_iterations)
+        )
+        post_solid_reprojection_tolerance = (
+            float(reprojection_cg_tolerance)
+            if reprojection_cg_tolerance is not None
+            else float(cg_tolerance)
+        )
+        _post_solid_project_start_s = time.perf_counter()
         post_solid_project_report = dict(
             fluid.project(
-                iterations=int(projection_iterations),
+                iterations=post_solid_reprojection_iterations,
+                accumulate_pressure_into_previous=bool(
+                    accumulate_reprojection_pressure
+                ),
                 pressure_outlet_zmin=bool(pressure_outlet_zmin),
                 velocity_inlet_zmax=bool(velocity_inlet_zmax),
                 dt_s=float(post_solid_project_dt),
@@ -14742,7 +14852,7 @@ def advance_hibm_mpm_sharp_mpm_step(
                 reset_pressure=False,
                 pressure_solver=effective_pressure_solver,
                 multigrid_cycles=multigrid_cycles,
-                cg_tolerance=float(cg_tolerance),
+                cg_tolerance=post_solid_reprojection_tolerance,
                 cg_preconditioner=str(cg_preconditioner),
                 pressure_solve_failure_policy=str(pressure_solve_failure_policy),
                 hibm_tiny_unreached_cleanup_component_cells=0,
@@ -14750,6 +14860,12 @@ def advance_hibm_mpm_sharp_mpm_step(
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
             )
+        )
+        post_solid_project_report["cg_iterations"] = int(
+            getattr(fluid, "last_cg_iterations", -1)
+        )
+        post_solid_project_report["wall_time_s"] = (
+            time.perf_counter() - _post_solid_project_start_s
         )
         post_solid_project_report[
             "hibm_projection_overflow_singleton_cleanup_cell_count"
