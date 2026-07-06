@@ -15,6 +15,19 @@ from benchmarks.official.solid_mpm_fsi_runner import (
     SECONDARY_UNUSED_REGION_ID,
     _lame_parameters,
 )
+# Strong-coupling (Picard + Aitken) marker-state helpers. These are generic
+# host-side numpy snapshot/relax/restore operations on HibmMpmSurfaceMarkers
+# fields, proven by the squid case's sharp marker fixed-point loop
+# (cases/squid_soft_robot/step_loop.py, advance_sharp_marker_fixed_point_step);
+# imported rather than duplicated. The pressure-Neumann-gradient snapshot/
+# restore pair is NOT imported because the squid versions are bound to that
+# case's coupling-state object — thin local equivalents live below.
+from cases.squid_soft_robot.checkpointing import (
+    relaxed_sharp_marker_state_arrays,
+    relaxed_sharp_pressure_neumann_gradient_state_array,
+    restore_sharp_marker_state_arrays,
+    sharp_marker_state_arrays,
+)
 from simulation_core.coupling.hibm_mpm import (
     HibmMpmIbBoundaryConditions,
     HibmMpmIbNodeSearch,
@@ -183,6 +196,22 @@ class TurekHronFsiConfig:
     velocity_damping: float = 1.0
     enforce_plane_strain_x: bool = True
     mpm_support_radius_m: float | None = None
+    # Strong coupling (Picard + Aitken) over the marker interface state
+    # (2026-07): the default single pass is explicit loose coupling, which is
+    # added-mass unstable at solid/fluid density ratio 1 (FSI3 diverges
+    # monotonically in ~30 ms at ~93% of the reference load). With
+    # fsi_coupling_iterations > 1, each time step re-runs the full advance
+    # from a saved fluid+solid+marker base state, Aitken-relaxing the marker
+    # surface state (positions/velocities/normals/areas + pressure-Neumann
+    # gradients) between trials until the relative interface-velocity
+    # residual drops below fsi_coupling_tolerance. 1 (default) preserves the
+    # legacy single pass byte-for-byte — the gated branch is never entered.
+    # Cost scales linearly with iterations used (each trial re-runs the full
+    # fluid solve); that is the price of density ratio 1, not a knob to tune
+    # away via looser solver tolerances.
+    fsi_coupling_iterations: int = 1
+    fsi_coupling_tolerance: float = 1.0e-3
+    fsi_aitken_initial_relaxation: float = 0.5
 
 
 def fsi1_config(**overrides: Any) -> TurekHronFsiConfig:
@@ -486,6 +515,91 @@ def _build_markers(
     return markers
 
 
+# Aitken relaxation clamp for the marker-state Picard loop. The spec'd
+# working range for a Dirichlet-Neumann velocity-residual fixed point at
+# density ratio ~1: never freeze the update (lower > 0), never extrapolate
+# (upper = 1.0 keeps every relaxed marker state a convex combination of
+# guess and candidate, which relaxed_sharp_marker_state_arrays' normal
+# renormalization and area clamping assume).
+FSI_AITKEN_RELAXATION_LOWER = 0.05
+FSI_AITKEN_RELAXATION_UPPER = 1.0
+
+
+def _aitken_relaxation_factor(
+    *,
+    previous_relaxation: float,
+    previous_residual: np.ndarray,
+    current_residual: np.ndarray,
+    lower: float = FSI_AITKEN_RELAXATION_LOWER,
+    upper: float = FSI_AITKEN_RELAXATION_UPPER,
+) -> float:
+    """Scalar Aitken Delta^2 update for an interface-velocity residual vector.
+
+    omega_k = -omega_{k-1} * <r_{k-1}, r_k - r_{k-1}> / ||r_k - r_{k-1}||^2,
+    clamped to [lower, upper]. Local, credited copy of the squid case's
+    private helper (cases/squid_soft_robot/checkpointing.py,
+    _sharp_marker_aitken_relaxation) — copied instead of imported so this
+    case does not depend on another case's underscore-private symbol; the
+    public fsi_coupling.aitken_relaxation_factor variant is equivalent but
+    converts per-component through Python floats, which is pointless overhead
+    on numpy residual vectors.
+    """
+    previous = np.asarray(previous_residual, dtype=np.float64).reshape(-1)
+    current = np.asarray(current_residual, dtype=np.float64).reshape(-1)
+    if previous.shape != current.shape:
+        raise ValueError("Aitken residual vectors must have the same shape")
+    delta = current - previous
+    denominator = float(np.dot(delta, delta))
+    if denominator <= 1.0e-30:
+        # Stalled residual: keep the previous relaxation instead of dividing
+        # by (numerically) zero — matches both precedent implementations.
+        return float(previous_relaxation)
+    raw = -float(previous_relaxation) * float(np.dot(previous, delta)) / denominator
+    if not math.isfinite(raw):
+        return float(previous_relaxation)
+    return max(float(lower), min(float(upper), raw))
+
+
+def _marker_pressure_neumann_gradient_state(
+    boundary: HibmMpmIbBoundaryConditions,
+    markers: HibmMpmSurfaceMarkers,
+) -> np.ndarray:
+    """Host snapshot of the marker pressure-Neumann gradients (Picard state).
+
+    The advance's fluid predictor rewrites these gradients every trial and
+    the NEXT trial's pressure-Neumann matrix rows are assembled from them, so
+    they are part of the interface fixed-point state alongside the marker
+    arrays. Mirrors the squid case's sharp_pressure_neumann_gradient_state_array,
+    which is bound to that case's coupling-state object and therefore not
+    directly importable here.
+    """
+    count = int(markers.marker_count)
+    field = boundary.marker_pressure_neumann_gradient_field
+    return np.asarray(field.to_numpy())[:count].copy()
+
+
+def _restore_marker_pressure_neumann_gradient_state(
+    boundary: HibmMpmIbBoundaryConditions,
+    markers: HibmMpmSurfaceMarkers,
+    state: np.ndarray,
+) -> None:
+    """Restore marker pressure-Neumann gradients exported above."""
+    count = int(markers.marker_count)
+    field = boundary.marker_pressure_neumann_gradient_field
+    full = field.to_numpy()
+    array = np.asarray(state, dtype=full.dtype)
+    expected_shape = tuple(full[:count].shape)
+    if tuple(array.shape) != expected_shape:
+        raise ValueError(
+            "marker pressure-Neumann gradient state shape mismatch: "
+            f"{tuple(array.shape)} != {expected_shape}"
+        )
+    if not bool(np.all(np.isfinite(array))):
+        raise ValueError("marker pressure-Neumann gradient state must be finite")
+    full[:count] = array
+    field.from_numpy(full)
+
+
 def _write_channel_boundary_rows(
     fluid: CartesianFluidSolver, config: TurekHronFsiConfig, t_s: float
 ) -> None:
@@ -563,6 +677,11 @@ HISTORY_FIELDS = (
     "projection_max_abs",
     "stress_valid_marker_count",
     "stress_invalid_marker_count",
+    # Strong-coupling diagnostics (legacy single pass reports the sentinels
+    # 1 / 0.0 / 1.0: one trial, no measured residual, no relaxation applied).
+    "fsi_coupling_iterations_used",
+    "fsi_coupling_residual",
+    "fsi_aitken_relaxation",
 )
 
 
@@ -753,6 +872,14 @@ def run_turek_hron_fsi(
 
     solid_substep_count = int(config.solid_substeps)
 
+    # Strong-coupling gate: with the default fsi_coupling_iterations=1 the
+    # gated Picard branch below is never entered, so the legacy explicit
+    # loose single pass is preserved byte-for-byte (no extra save_state, no
+    # marker snapshots, no residual math on the legacy path).
+    fsi_iterations = max(1, int(config.fsi_coupling_iterations))
+    strong_coupling_enabled = fsi_iterations > 1
+    fsi_tolerance = float(config.fsi_coupling_tolerance)
+
     def solid_step() -> Any:
         latest = None
         for substep_index in range(solid_substep_count):
@@ -791,7 +918,19 @@ def run_turek_hron_fsi(
         t_s = (step_index + 1) * float(config.dt_s)
         _write_channel_boundary_rows(fluid, config, t_s)
         fluid.apply_velocity_dirichlet_boundary_rows(read_report=False)
-        latest_report = advance_hibm_mpm_sharp_mpm_step(
+
+        def _advance_trial_once() -> Any:
+            # Single sharp HIBM-MPM advance with the case's canonical argument
+            # set. Both the legacy single pass and every strong-coupling trial
+            # run through this one closure so their advance arguments cannot
+            # drift apart — iteration 0 of the gated loop is EXACTLY the
+            # legacy pass. mpm_particle_position_m/velocity_mps stay solid.x /
+            # solid.v on purpose: the fluid never reads them for its Dirichlet
+            # or pressure rows (those come from the markers object); they feed
+            # the marker->particle force scatter and, after solid_step, the
+            # particle->marker surface feedback, both of which must see the
+            # TRUE re-integrated solid state each trial.
+            return advance_hibm_mpm_sharp_mpm_step(
             fluid=fluid,
             markers=markers,
             ib_search=search,
@@ -922,7 +1061,141 @@ def run_turek_hron_fsi(
             post_dirichlet_consistency_projection_iterations=1,
             update_surface_geometry_from_mpm=False,
             interpolate_velocity_dirichlet_with_interior=False,
-        )
+            )
+
+        if not strong_coupling_enabled:
+            # Legacy explicit loose coupling: one pass, no save/restore, no
+            # residual measurement. Sentinels 1 / 0.0 / 1.0 mirror the squid
+            # precedent's "unmeasured_single_pass" reporting convention.
+            latest_report = _advance_trial_once()
+            fsi_coupling_iterations_used = 1
+            fsi_coupling_residual = 0.0
+            fsi_aitken_relaxation = 1.0
+            fsi_residual_history = []
+            fsi_relaxation_history = []
+        else:
+            # --- Strong coupling: marker-state Picard + Aitken ------------
+            # WHY the marker state is the Picard variable (and NOT the solid
+            # kinematics args): the fluid's velocity-Dirichlet and pressure-
+            # Neumann rows are assembled from the HibmMpmSurfaceMarkers
+            # fields (x_gamma_m / v_gamma_mps / n_gamma / A_gamma_m2), which
+            # the advance mutates in place via the post-solid surface
+            # feedback. Iterating that state (plus the marker pressure-
+            # Neumann gradients written by the fluid predictor) closes the
+            # per-step loop fluid tractions -> solid end-of-step velocity ->
+            # marker Dirichlet rows -> fluid pressure. Precedent:
+            # cases/squid_soft_robot/step_loop.py,
+            # advance_sharp_marker_fixed_point_step.
+            #
+            # State handling per trial:
+            # - fluid.restore_state() restores velocity+pressure to the step
+            #   base and zeroes all marker-row scratch fields; the obstacle
+            #   mask needs NO explicit restore because every advance rebuilds
+            #   fluid.obstacle from the frozen hibm_base_obstacle plus a
+            #   fresh IB classification (solver.py,
+            #   _apply_hibm_internal_obstacles_kernel resets to base before
+            #   re-marking).
+            # - solid.restore_state() restores x/v/C/F, refreshes surface
+            #   geometry, and zeroes external_force_n, so solid_step()
+            #   re-integrates from the true step base.
+            # - accumulate_reprojection_pressure accumulates from the
+            #   restored base pressure each trial — no cross-trial leakage.
+            fluid.save_state()
+            solid.save_state()
+            marker_guess = sharp_marker_state_arrays(markers)
+            gradient_guess = _marker_pressure_neumann_gradient_state(
+                boundary, markers
+            )
+            relaxation = float(config.fsi_aitken_initial_relaxation)
+            previous_velocity_residual: np.ndarray | None = None
+            fsi_coupling_iterations_used = 0
+            fsi_coupling_residual = math.inf
+            fsi_residual_history: list[float] = []
+            fsi_relaxation_history: list[float] = []
+            latest_report = None
+            for coupling_iteration in range(fsi_iterations):
+                # Restore at the start of EVERY trial, iteration 0 included —
+                # exactly like the squid precedent (step_loop.py,
+                # advance_sharp_marker_fixed_point_step restores before each
+                # advance). WHY iteration 0 too: fluid.restore_state()
+                # collapses velocity_prev := velocity and re-zeroes all row
+                # scratch fields, so restoring every trial makes the Picard
+                # map IDENTICAL across iterations. Skipping it at iteration 0
+                # would let trial 0 sample a different map (true
+                # velocity_prev history) than trials 1+ (collapsed history),
+                # so the fixed point being iterated would not be the map the
+                # committed trial evaluates. At iteration 0 the marker and
+                # gradient restores are exact no-ops (the guess was
+                # snapshotted from this same state above). The legacy
+                # single-pass path never enters this branch, so its byte
+                # behavior is unaffected.
+                fluid.restore_state()
+                solid.restore_state()
+                restore_sharp_marker_state_arrays(markers, marker_guess)
+                _restore_marker_pressure_neumann_gradient_state(
+                    boundary, markers, gradient_guess
+                )
+                # restore_state cleared the case-written static wall / inlet
+                # Dirichlet rows; re-write and re-stamp them exactly as at
+                # the top of the step so every trial starts from the
+                # identical pre-advance fluid state (the stamped velocity
+                # itself was captured by save_state, so re-stamping the same
+                # t_s values is idempotent on the velocity field — this
+                # re-fills the row fields).
+                _write_channel_boundary_rows(fluid, config, t_s)
+                fluid.apply_velocity_dirichlet_boundary_rows(
+                    read_report=False
+                )
+                latest_report = _advance_trial_once()
+                fsi_coupling_iterations_used = coupling_iteration + 1
+                marker_candidate = sharp_marker_state_arrays(markers)
+                gradient_candidate = _marker_pressure_neumann_gradient_state(
+                    boundary, markers
+                )
+                # Relative interface-velocity residual: candidate marker
+                # velocities (what the solid returned) vs the guess the fluid
+                # rows were built from. float64 up-cast before the norms so
+                # the convergence test is not polluted by f32 storage noise.
+                new_velocity = np.asarray(
+                    marker_candidate["v_gamma_mps"], dtype=np.float64
+                )
+                guess_velocity = np.asarray(
+                    marker_guess["v_gamma_mps"], dtype=np.float64
+                )
+                velocity_residual = (new_velocity - guess_velocity).reshape(-1)
+                fsi_coupling_residual = float(
+                    np.linalg.norm(velocity_residual)
+                ) / max(1.0e-30, float(np.linalg.norm(new_velocity)))
+                fsi_residual_history.append(float(fsi_coupling_residual))
+                fsi_relaxation_history.append(float(relaxation))
+                if fsi_coupling_residual < fsi_tolerance:
+                    # Converged: keep the last advance's result (fluid and
+                    # solid are already stepped consistently with the marker
+                    # state the fluid saw).
+                    break
+                if coupling_iteration == fsi_iterations - 1:
+                    # Budget exhausted: keep the last (unrelaxed) trial. Not
+                    # an error — the residual column records how far the
+                    # fixed point got; blind tuning belongs to the caller.
+                    break
+                if previous_velocity_residual is not None:
+                    relaxation = _aitken_relaxation_factor(
+                        previous_relaxation=relaxation,
+                        previous_residual=previous_velocity_residual,
+                        current_residual=velocity_residual,
+                    )
+                previous_velocity_residual = velocity_residual.copy()
+                marker_guess = relaxed_sharp_marker_state_arrays(
+                    marker_guess, marker_candidate, relaxation=relaxation
+                )
+                gradient_guess = (
+                    relaxed_sharp_pressure_neumann_gradient_state_array(
+                        gradient_guess,
+                        gradient_candidate,
+                        relaxation=relaxation,
+                    )
+                )
+            fsi_aitken_relaxation = float(relaxation)
         load = latest_report.fluid_to_mpm_loads
         force_n = tuple(float(v) for v in load.marker_forces.total_marker_force_n)
         projection = load.fluid_projection
@@ -971,6 +1244,14 @@ def run_turek_hron_fsi(
             "projection_max_abs": float(projection.get("max_abs", 0.0)),
             "stress_valid_marker_count": int(load.fluid_stress.valid_marker_count),
             "stress_invalid_marker_count": int(load.fluid_stress.invalid_marker_count),
+            "fsi_coupling_iterations_used": int(fsi_coupling_iterations_used),
+            "fsi_coupling_residual": float(fsi_coupling_residual),
+            "fsi_aitken_relaxation": float(fsi_aitken_relaxation),
+            # Per-iteration diagnostics (JSON summary only — NOT in
+            # HISTORY_FIELDS, so the CSV schema stays at the three spec'd
+            # strong-coupling columns). Empty lists on the legacy path.
+            "fsi_coupling_residual_history": list(fsi_residual_history),
+            "fsi_aitken_relaxation_history": list(fsi_relaxation_history),
             # Discrete-state observability counters (2026-07): the T-H thin-beam
             # case suffered a discrete jump caused by EXTERNAL_IB row-set
             # membership flips (velocity-Dirichlet rows added/removed as
@@ -1078,6 +1359,27 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--projection-iterations", type=int, default=None)
     parser.add_argument(
+        "--fsi-coupling-iterations",
+        type=int,
+        default=None,
+        help=(
+            "Strong-coupling Picard iterations per time step "
+            "(1 = legacy explicit loose single pass, the default)."
+        ),
+    )
+    parser.add_argument(
+        "--fsi-coupling-tolerance",
+        type=float,
+        default=None,
+        help="Relative interface-velocity residual convergence tolerance.",
+    )
+    parser.add_argument(
+        "--fsi-aitken-initial-relaxation",
+        type=float,
+        default=None,
+        help="Initial Aitken relaxation factor for the strong-coupling loop.",
+    )
+    parser.add_argument(
         "--no-final-flow-snapshot",
         action="store_true",
         help="Disable the run-end turek_hron_final_fields.npz / .png export.",
@@ -1100,6 +1402,14 @@ def main(argv: list[str] | None = None) -> int:
         overrides["grid_nodes"] = args.grid_nodes
     if args.projection_iterations is not None:
         overrides["flow_projection_iterations"] = int(args.projection_iterations)
+    if args.fsi_coupling_iterations is not None:
+        overrides["fsi_coupling_iterations"] = int(args.fsi_coupling_iterations)
+    if args.fsi_coupling_tolerance is not None:
+        overrides["fsi_coupling_tolerance"] = float(args.fsi_coupling_tolerance)
+    if args.fsi_aitken_initial_relaxation is not None:
+        overrides["fsi_aitken_initial_relaxation"] = float(
+            args.fsi_aitken_initial_relaxation
+        )
     config = PRESET_BUILDERS[str(args.preset)](**overrides)
     summary = run_turek_hron_fsi(
         config,
