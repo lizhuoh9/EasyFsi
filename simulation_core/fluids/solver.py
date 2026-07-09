@@ -127,6 +127,14 @@ class CartesianFluidSolver:
         self.pressure = ti.field(dtype=ti.f64, shape=shape)
         self.saved_pressure = ti.field(dtype=ti.f64, shape=shape)
         self.saved_pressure_interface_matrix_rhs = ti.field(dtype=ti.f64, shape=shape)
+        # Cleanup snapshot must NOT share buffers with save_state/restore_state
+        # (FSI strong-coupling base state) — sharing clobbered the Picard base
+        # mid-trial when pressure-outlet auto-cleanup ran inside project().
+        self.cleanup_saved_velocity = ti.Vector.field(3, dtype=ti.f32, shape=shape)
+        self.cleanup_saved_pressure = ti.field(dtype=ti.f64, shape=shape)
+        self.cleanup_saved_pressure_interface_matrix_rhs = ti.field(
+            dtype=ti.f64, shape=shape
+        )
         self.fsi_pressure = ti.field(dtype=ti.f64, shape=shape)
         self.pressure_tmp = ti.field(dtype=ti.f64, shape=shape)
         self.pressure_accum = ti.field(dtype=ti.f64, shape=shape)
@@ -2551,21 +2559,21 @@ class CartesianFluidSolver:
     @ti.kernel
     def _snapshot_projection_cleanup_state_kernel(self):
         for i, j, k in self.velocity:
-            self.saved_velocity[i, j, k] = self.velocity[i, j, k]
-            self.saved_pressure[i, j, k] = self.pressure[i, j, k]
-            self.saved_pressure_interface_matrix_rhs[i, j, k] = (
+            self.cleanup_saved_velocity[i, j, k] = self.velocity[i, j, k]
+            self.cleanup_saved_pressure[i, j, k] = self.pressure[i, j, k]
+            self.cleanup_saved_pressure_interface_matrix_rhs[i, j, k] = (
                 self.pressure_interface_matrix_rhs[i, j, k]
             )
 
     @ti.kernel
     def _restore_projection_cleanup_state_kernel(self):
         for i, j, k in self.velocity:
-            self.velocity[i, j, k] = self.saved_velocity[i, j, k]
-            self.pressure[i, j, k] = self.saved_pressure[i, j, k]
-            self.pressure_tmp[i, j, k] = self.saved_pressure[i, j, k]
-            self.pressure_accum[i, j, k] = self.saved_pressure[i, j, k]
+            self.velocity[i, j, k] = self.cleanup_saved_velocity[i, j, k]
+            self.pressure[i, j, k] = self.cleanup_saved_pressure[i, j, k]
+            self.pressure_tmp[i, j, k] = self.cleanup_saved_pressure[i, j, k]
+            self.pressure_accum[i, j, k] = self.cleanup_saved_pressure[i, j, k]
             self.pressure_interface_matrix_rhs[i, j, k] = (
-                self.saved_pressure_interface_matrix_rhs[i, j, k]
+                self.cleanup_saved_pressure_interface_matrix_rhs[i, j, k]
             )
 
     @ti.kernel
