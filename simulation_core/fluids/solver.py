@@ -55,6 +55,12 @@ class CartesianFluidSolver:
 
     DEFAULT_MULTIGRID_CYCLES = 12
     DEFAULT_NONUNIFORM_MULTIGRID_CYCLES = 24
+    # project(warm_start_slot=...) stash slot count: enough for a caller with
+    # several distinct project() call sites per physical step (e.g. predictor
+    # substeps + dirichlet-consistency + post-solid) to each keep an
+    # independent CG initial-guess history instead of colliding on one
+    # shared buffer. See invalidate_pressure_warmstart() for scoping.
+    PRESSURE_WARMSTART_SLOT_COUNT = 5
 
     @staticmethod
     def _build_multigrid_shapes(shape: tuple[int, int, int]) -> tuple[tuple[int, int, int], ...]:
@@ -143,6 +149,31 @@ class CartesianFluidSolver:
         # step's accumulated pressure while a re-projection solves its own
         # increment from a clean zero field.
         self.pressure_step_carry = ti.field(dtype=ti.f64, shape=shape)
+        # project(warm_start_slot=...) CG initial-guess stash (opt-in; slot
+        # -1, the default everywhere, never touches these fields or adds a
+        # kernel launch). Each slot is a full pressure-shaped f64 buffer plus
+        # a Python-side validity flag so a caller with several logically
+        # distinct project() call sites per step can warm-start each one
+        # from its own history without cross-contamination. Warm-starting
+        # only changes the CG solve's INITIAL GUESS: with tolerance-based
+        # convergence exits the converged pressure field is unchanged: only
+        # the iteration count to reach it changes. A budget-CAPPED
+        # (non-converging) solve would instead become initial-guess
+        # dependent, so pair warm-starting with tolerance-based exits.
+        self.pressure_warmstart_slot0 = ti.field(dtype=ti.f64, shape=shape)
+        self.pressure_warmstart_slot1 = ti.field(dtype=ti.f64, shape=shape)
+        self.pressure_warmstart_slot2 = ti.field(dtype=ti.f64, shape=shape)
+        self.pressure_warmstart_slot3 = ti.field(dtype=ti.f64, shape=shape)
+        self.pressure_warmstart_slot4 = ti.field(dtype=ti.f64, shape=shape)
+        self._pressure_warmstart_slots = (
+            self.pressure_warmstart_slot0,
+            self.pressure_warmstart_slot1,
+            self.pressure_warmstart_slot2,
+            self.pressure_warmstart_slot3,
+            self.pressure_warmstart_slot4,
+        )
+        assert len(self._pressure_warmstart_slots) == self.PRESSURE_WARMSTART_SLOT_COUNT
+        self._pressure_warmstart_valid = [False] * len(self._pressure_warmstart_slots)
         self.divergence = ti.field(dtype=ti.f32, shape=shape)
         self.pressure_interface_projection_divergence_s = ti.field(
             dtype=ti.f64,
@@ -5498,6 +5529,31 @@ class CartesianFluidSolver:
     def clear_pressure(self) -> None:
         self._clear_pressure_kernel()
 
+    def invalidate_pressure_warmstart(self) -> None:
+        """Mark every project(warm_start_slot=...) stash slot invalid.
+
+        project(warm_start_slot=N) stashes that call's converged pressure
+        into slot N and reuses it as the NEXT call's CG initial guess for
+        the same slot, on every subsequent call, until this method is
+        invoked. Scoping is entirely the caller's responsibility:
+
+        - Call this once per physical time step for PER-STEP warm starting:
+          every project() call within a step still warm-starts from that
+          same step's own earlier calls (if any share a slot), but the
+          first call at each slot each step starts cold, never leaking a
+          guess in from a previous step.
+        - Never call this for CROSS-STEP warm starting: each slot's stash
+          then persists across steps too, so step 2+'s first call at slot N
+          starts from step 1's (or whichever step last wrote slot N)
+          converged result for that slot.
+
+        Either scoping only changes the CG solve's INITIAL GUESS. With
+        tolerance-based convergence exits the converged pressure field is
+        identical either way; only the iteration count to reach it changes.
+        """
+        for index in range(len(self._pressure_warmstart_valid)):
+            self._pressure_warmstart_valid[index] = False
+
     @ti.kernel
     def _pressure_field_finite_and_max_abs_kernel(self):
         self.reduction_max[None] = 0.0
@@ -8723,6 +8779,15 @@ class CartesianFluidSolver:
         pressure_solve_failure_policy: str = "report",
         hibm_tiny_unreached_cleanup_component_cells: int = 0,
         read_report: bool = True,
+        # Opt-in CG initial-guess warm start (perf only; see
+        # invalidate_pressure_warmstart() for the stash-lifetime contract).
+        # -1 (default) never touches the stash and adds zero kernel
+        # launches, so every existing caller is byte-for-byte unchanged.
+        # 0..PRESSURE_WARMSTART_SLOT_COUNT-1 copies that slot's stashed
+        # pressure into self.pressure before solving (if the slot has ever
+        # been written) and copies the solved pressure back into the slot
+        # afterward.
+        warm_start_slot: int = -1,
     ) -> dict[str, float]:
         if iterations <= 0:
             raise ValueError("iterations must be positive")
@@ -8780,6 +8845,15 @@ class CartesianFluidSolver:
                 )
         if multigrid_cycles is not None and int(multigrid_cycles) <= 0:
             raise ValueError("multigrid_cycles must be positive")
+        warm_start_slot_index = int(warm_start_slot)
+        if warm_start_slot_index != -1 and not (
+            0 <= warm_start_slot_index < len(self._pressure_warmstart_slots)
+        ):
+            raise ValueError(
+                "warm_start_slot must be -1 (disabled) or in "
+                f"[0, {len(self._pressure_warmstart_slots)}), "
+                f"got {warm_start_slot_index}"
+            )
         report_requested = bool(read_report)
         self.last_divergence_report_host_reads = 0
         empty_stats = {"max_abs": math.nan, "l2": math.nan}
@@ -9001,6 +9075,39 @@ class CartesianFluidSolver:
                 f"max_abs_rhs_mean={float(pressure_projection_unreached_rhs_mean_max_abs):.6g})"
             )
 
+        def warm_start_copy_in() -> None:
+            # Seeds self.pressure from the slot's stash (if the slot has
+            # ever been written) immediately before the CG solve so it
+            # starts from a warm initial guess instead of whatever
+            # clear/reset_pressure/accumulate-mode left behind. No-op (zero
+            # kernel launches) when warm-starting is disabled (slot -1) or
+            # the slot has never been populated.
+            if warm_start_slot_index < 0:
+                return
+            if not self._pressure_warmstart_valid[warm_start_slot_index]:
+                return
+            self._copy_scalar_field_kernel(
+                self.pressure,
+                self._pressure_warmstart_slots[warm_start_slot_index],
+            )
+
+        def warm_start_copy_out() -> None:
+            # Stashes self.pressure for next time. Called once, after all
+            # solving/cleanup for this project() call has finished mutating
+            # self.pressure (see call sites below): in accumulate mode that
+            # is the solved INCREMENT, captured before
+            # _add_pressure_step_carry_kernel folds the carry back in, so
+            # the next warm start seeds another increment-mode solve with
+            # an increment, not a stale total. No-op when warm-starting is
+            # disabled (slot -1).
+            if warm_start_slot_index < 0:
+                return
+            self._copy_scalar_field_kernel(
+                self._pressure_warmstart_slots[warm_start_slot_index],
+                self.pressure,
+            )
+            self._pressure_warmstart_valid[warm_start_slot_index] = True
+
         velocity_dirichlet_boundary_apply_calls = 0
         velocity_dirichlet_boundary_active_cells_total = 0
         velocity_dirichlet_boundary_active_cells_max = 0
@@ -9164,8 +9271,12 @@ class CartesianFluidSolver:
             # carry + increment just before returning.
             self._save_pressure_step_carry_kernel()
             self._clear_pressure_kernel()
+            warm_start_copy_in()
         elif reset_pressure:
             self._clear_pressure_kernel()
+            warm_start_copy_in()
+        else:
+            warm_start_copy_in()
         rhs_scale = self.rho / step_dt_s
         inv_dx2 = 1.0 / (self.dx * self.dx)
         inv_dy2 = 1.0 / (self.dy * self.dy)
@@ -9417,11 +9528,14 @@ class CartesianFluidSolver:
             else (0.0, 0.0, 0.0)
         )
         if accumulate_pressure_into_previous:
+            warm_start_copy_out()
             # Restore total = carry + increment (see the increment-mode note
             # at the top of this method). All internal machinery above
             # (cleanup passes, interface rows, reports) operated on the
             # increment; only the externally visible pressure is the total.
             self._add_pressure_step_carry_kernel()
+        else:
+            warm_start_copy_out()
         return {
             "pressure_solver_requested": pressure_solver_requested_name,
             "pressure_solver": pressure_solver_name,

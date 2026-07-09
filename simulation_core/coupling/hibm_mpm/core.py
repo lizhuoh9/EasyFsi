@@ -107,6 +107,12 @@ HIBM_PRESSURE_NEUMANN_FV_CG_REQUIRED_SOLVERS = frozenset(
     )
 )
 HIBM_PRESSURE_NEUMANN_FV_CG_FORCE_REASON = "hibm_pressure_neumann_requires_fv_solver"
+# Mirrors CartesianFluidSolver.PRESSURE_WARMSTART_SLOT_COUNT (simulation_core/
+# fluids/solver.py): project(warm_start_slot=...) stash slot count. Kept as an
+# independent literal here (rather than read off `fluid`, which is typed Any)
+# so slot arithmetic below stays valid even if a caller passes a fluid-like
+# object without that attribute and pressure_warm_start=False (the default).
+HIBM_PRESSURE_WARMSTART_SLOT_COUNT = 5
 
 
 def _debug_stage_progress(message: str) -> None:
@@ -13010,6 +13016,15 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     diagnostic_disable_pressure_neumann_matrix_rows: bool = False,
     diagnostic_capture_pressure_neumann_invalid_rows: bool = False,
     interpolate_velocity_dirichlet_with_interior: bool = True,
+    # Perf-only opt-in (default False => every project() call below passes
+    # warm_start_slot=-1, i.e. byte-for-byte identical to before this knob
+    # existed): warm-starts each of this function's fluid.project() CG
+    # solves from its own slot's previous result instead of solving cold
+    # every time. See CartesianFluidSolver.project's warm_start_slot kwarg
+    # and invalidate_pressure_warmstart() for the stash-lifetime contract -
+    # this function never invalidates the stash itself, so per-step vs.
+    # cross-step scoping is entirely the caller's choice.
+    pressure_warm_start: bool = False,
 ) -> HibmMpmSharpFluidToMpmLoadReport:
     """Run the sharp-interface fluid solve up to marker traction MPM loading.
 
@@ -13575,7 +13590,8 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             convert_row_cloud_orphans_until_saturated()
 
     _debug_stage_progress("fluid_substeps:start")
-    for _ in range(substeps):
+    pressure_warm_start_enabled = bool(pressure_warm_start)
+    for _substep_index in range(substeps):
         velocity_report = assemble_velocity_dirichlet_rows()
         pressure_disconnected_nonprojectable_cell_count = (
             fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
@@ -13670,6 +13686,17 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         # blocks on host reads before returning, so this perf_counter delta
         # is a real device-inclusive wall time, not just host dispatch time.
         _main_project_start_s = time.perf_counter()
+        # Warm-start slot mapping (perf only): each substep iteration gets
+        # its own sequential slot (predictor substep A -> 0, B -> 1, ...),
+        # capped at the stash size. If `substeps` ever exceeds the stash
+        # size, later substeps alias onto the last slot instead of raising -
+        # see assemble_hibm_mpm_sharp_fluid_to_mpm_loads's pressure_warm_start
+        # kwarg comment.
+        substep_warm_start_slot = (
+            min(_substep_index, HIBM_PRESSURE_WARMSTART_SLOT_COUNT - 1)
+            if pressure_warm_start_enabled
+            else -1
+        )
         project_report = dict(
             fluid.project(
                 iterations=iterations,
@@ -13687,6 +13714,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
+                warm_start_slot=substep_warm_start_slot,
             )
         )
         project_report["cg_iterations"] = int(
@@ -13773,6 +13801,19 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             active_pressure_neumann_rows=pressure_report.active_pressure_neumann_rows,
         )
         _consistency_project_start_s = time.perf_counter()
+        # Warm-start slot mapping (perf only): continues the sequential
+        # numbering right after the substep loop's slots (see that loop's
+        # comment above), so consistency iteration 0 does not alias a
+        # predictor-substep slot unless the stash is already exhausted -
+        # capped at the stash size either way.
+        consistency_warm_start_slot = (
+            min(
+                substeps + consistency_projection_index,
+                HIBM_PRESSURE_WARMSTART_SLOT_COUNT - 1,
+            )
+            if pressure_warm_start_enabled
+            else -1
+        )
         consistency_project_report = dict(
             fluid.project(
                 # Re-projection budget/tolerance: this solve corrects the
@@ -13800,6 +13841,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
+                warm_start_slot=consistency_warm_start_slot,
             )
         )
         consistency_project_report["cg_iterations"] = int(
@@ -14314,6 +14356,15 @@ def advance_hibm_mpm_sharp_mpm_step(
     diagnostic_capture_pressure_neumann_invalid_rows: bool = False,
     update_surface_geometry_from_mpm: bool = True,
     interpolate_velocity_dirichlet_with_interior: bool = True,
+    # Perf-only opt-in (default False => byte-for-byte legacy behavior).
+    # Forwarded to assemble_hibm_mpm_sharp_fluid_to_mpm_loads for the
+    # predictor-substep and dirichlet-consistency project() calls, and
+    # applied directly below for this function's own post-solid project()
+    # call. See that function's pressure_warm_start kwarg comment and
+    # CartesianFluidSolver.invalidate_pressure_warmstart() for the
+    # stash-lifetime contract - this function never invalidates the stash
+    # itself.
+    pressure_warm_start: bool = False,
 ) -> HibmMpmSharpMpmStepReport:
     if not callable(solid_step):
         raise ValueError("solid_step must be callable")
@@ -14446,6 +14497,7 @@ def advance_hibm_mpm_sharp_mpm_step(
         interpolate_velocity_dirichlet_with_interior=bool(
             interpolate_velocity_dirichlet_with_interior
         ),
+        pressure_warm_start=bool(pressure_warm_start),
     )
     if not hibm_mpm_external_force_fresh_for_solid_step(load_report):
         scatter = load_report.mpm_force_scatter
@@ -15010,6 +15062,24 @@ def advance_hibm_mpm_sharp_mpm_step(
             if reprojection_cg_tolerance is not None
             else float(cg_tolerance)
         )
+        # Warm-start slot mapping (perf only): continues the sequential
+        # numbering used inside assemble_hibm_mpm_sharp_fluid_to_mpm_loads
+        # (predictor substeps then dirichlet-consistency iterations), using
+        # the CONFIGURED iteration counts as a static upper bound on how many
+        # slots that call already consumed - this function has no visibility
+        # into whether the consistency loop broke early on convergence. If
+        # it did, this slot is simply unused by any earlier call this step
+        # (never a collision, just a possibly-cold post-solid stash on that
+        # step). Capped at the stash size either way.
+        post_solid_warm_start_slot = (
+            min(
+                int(fluid_substeps)
+                + int(post_dirichlet_consistency_projection_iterations),
+                HIBM_PRESSURE_WARMSTART_SLOT_COUNT - 1,
+            )
+            if bool(pressure_warm_start)
+            else -1
+        )
         _post_solid_project_start_s = time.perf_counter()
         post_solid_project_report = dict(
             fluid.project(
@@ -15031,6 +15101,7 @@ def advance_hibm_mpm_sharp_mpm_step(
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
                 read_report=True,
+                warm_start_slot=post_solid_warm_start_slot,
             )
         )
         post_solid_project_report["cg_iterations"] = int(
