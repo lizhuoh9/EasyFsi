@@ -4,6 +4,7 @@ import csv
 import io
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -475,73 +476,97 @@ class AnsysVerticalFlapRealFluentSourceExportImportTests(unittest.TestCase):
             self.assertEqual(_read_file_tree(official_destination), before)
 
     def test_cli_allows_temp_destination_commit_without_collection_validator(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "source"
-            destination = root / "destination"
-            current_contract = root / "fluent_reference_contract.json"
-            _write_complete_bundle(source)
-            _write_complete_current_contract(current_contract)
-
-            result = _run_importer_cli(
-                "--input-dir",
-                source,
-                "--destination-dir",
-                destination,
-                "--current-contract-json",
-                current_contract,
-                "--commit-import",
+        # Commit destinations must live inside validation_runs/ (containment
+        # guard), so the temporary destination is a scratch dir inside the
+        # case's validation_runs subtree instead of the OS tmp dir.
+        scratch = Path(
+            tempfile.mkdtemp(
+                prefix=".tmp_cli_import_dest-",
+                dir=REFERENCE_ROOT.parent,
             )
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "source"
+                destination = scratch / "destination"
+                current_contract = root / "fluent_reference_contract.json"
+                _write_complete_bundle(source)
+                _write_complete_current_contract(current_contract)
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            payload = json.loads(result.stdout)
-            self.assertEqual(payload["mode"], "commit_import")
-            self.assertTrue(payload["ready"])
-            self.assertEqual(payload["copied_file_count"], 5)
-            self.assertTrue(
-                (destination / "fluent_tip_displacement_history.csv").exists()
-            )
+                result = _run_importer_cli(
+                    "--input-dir",
+                    source,
+                    "--destination-dir",
+                    destination,
+                    "--current-contract-json",
+                    current_contract,
+                    "--commit-import",
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["mode"], "commit_import")
+                self.assertTrue(payload["ready"])
+                self.assertEqual(payload["copied_file_count"], 5)
+                self.assertTrue(
+                    (destination / "fluent_tip_displacement_history.csv").exists()
+                )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     def test_cli_commit_import_copies_after_staged_collection_ready(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "source"
-            destination = root / "destination"
-            output_dir = root / "diagnostics"
-            active_manifest = root / "active_fluent_reference_contract.json"
-            current_contract = root / "fluent_reference_contract.json"
-            _write_complete_bundle(source)
-            _write_complete_current_contract(current_contract)
-
-            result = _run_importer_cli(
-                "--input-dir",
-                source,
-                "--destination-dir",
-                destination,
-                "--current-contract-json",
-                current_contract,
-                "--output-dir",
-                output_dir,
-                "--active-manifest-json",
-                active_manifest,
-                "--run-collection-validator",
-                "--commit-import",
+        # Same containment constraint as above: the commit destination must
+        # resolve inside validation_runs/, so stage it in an in-repo scratch
+        # dir; diagnostics/manifest/contract inputs may stay in OS tmp.
+        scratch = Path(
+            tempfile.mkdtemp(
+                prefix=".tmp_cli_import_dest-",
+                dir=REFERENCE_ROOT.parent,
             )
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "source"
+                destination = scratch / "destination"
+                output_dir = root / "diagnostics"
+                active_manifest = root / "active_fluent_reference_contract.json"
+                current_contract = root / "fluent_reference_contract.json"
+                _write_complete_bundle(source)
+                _write_complete_current_contract(current_contract)
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            payload = json.loads(result.stdout)
-            self.assertLessEqual(COMMIT_IMPORT_JSON_KEYS, set(payload))
-            gate = payload["collection"]["real_fluent_import_gate"]
-            self.assertEqual(payload["mode"], "commit_import")
-            self.assertTrue(payload["ready"])
-            self.assertEqual(payload["copied_file_count"], 5)
-            self.assertTrue(
-                (destination / "fluent_tip_displacement_history.csv").exists()
-            )
-            self.assertEqual(gate["status"], "ready_for_real_fluent_import")
-            self.assertTrue(gate["can_import_real_fluent_reference"])
-            self.assertTrue(gate["can_run_solver_evaluation"])
-            self.assertFalse(gate["fluent_parity_claimed"])
+                result = _run_importer_cli(
+                    "--input-dir",
+                    source,
+                    "--destination-dir",
+                    destination,
+                    "--current-contract-json",
+                    current_contract,
+                    "--output-dir",
+                    output_dir,
+                    "--active-manifest-json",
+                    active_manifest,
+                    "--run-collection-validator",
+                    "--commit-import",
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertLessEqual(COMMIT_IMPORT_JSON_KEYS, set(payload))
+                gate = payload["collection"]["real_fluent_import_gate"]
+                self.assertEqual(payload["mode"], "commit_import")
+                self.assertTrue(payload["ready"])
+                self.assertEqual(payload["copied_file_count"], 5)
+                self.assertTrue(
+                    (destination / "fluent_tip_displacement_history.csv").exists()
+                )
+                self.assertEqual(gate["status"], "ready_for_real_fluent_import")
+                self.assertTrue(gate["can_import_real_fluent_reference"])
+                self.assertTrue(gate["can_run_solver_evaluation"])
+                self.assertFalse(gate["fluent_parity_claimed"])
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     def test_cli_schema_only_preflight_fails_without_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -591,6 +616,159 @@ class AnsysVerticalFlapRealFluentSourceExportImportTests(unittest.TestCase):
             )
             self.assertEqual(payload["copied_file_count"], 0)
             self.assertEqual(payload["copied_files"], [])
+            self.assertFalse(destination.exists())
+
+    def test_destination_containment_helper_bounds_validation_runs_subtree(self):
+        inside = IMPORTER.VALIDATION_RUNS_ROOT / "ansys_vertical_flap_fsi" / "x"
+        self.assertTrue(IMPORTER._destination_dir_inside_validation_runs(inside))
+        self.assertFalse(
+            IMPORTER._destination_dir_inside_validation_runs(
+                IMPORTER.VALIDATION_RUNS_ROOT
+            )
+        )
+        self.assertFalse(
+            IMPORTER._destination_dir_inside_validation_runs(
+                IMPORTER.VALIDATION_RUNS_ROOT.parent
+            )
+        )
+        self.assertFalse(
+            IMPORTER._destination_dir_inside_validation_runs(
+                Path(tempfile.gettempdir()) / "anywhere"
+            )
+        )
+        # Escape attempts via .. must be judged on the RESOLVED path.
+        self.assertFalse(
+            IMPORTER._destination_dir_inside_validation_runs(
+                IMPORTER.VALIDATION_RUNS_ROOT / ".." / "cases"
+            )
+        )
+
+    def test_cli_commit_import_refuses_destination_outside_validation_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "outside_destination"
+            current_contract = root / "fluent_reference_contract.json"
+            _write_complete_bundle(source)
+            _write_complete_current_contract(current_contract)
+
+            with mock.patch.object(
+                IMPORTER.sys, "stderr", io.StringIO()
+            ) as stderr:
+                return_code = IMPORTER.main(
+                    [
+                        "--input-dir",
+                        str(source),
+                        "--destination-dir",
+                        str(destination),
+                        "--current-contract-json",
+                        str(current_contract),
+                        "--commit-import",
+                    ]
+                )
+
+            self.assertNotEqual(return_code, 0)
+            payload = json.loads(stderr.getvalue())
+            self.assertLessEqual(FAILURE_JSON_KEYS, set(payload))
+            self.assertEqual(payload["mode"], "commit_import")
+            self.assertFalse(payload["ready"])
+            self.assertIn(
+                "destination_dir_outside_validation_runs",
+                payload["blockers"],
+            )
+            self.assertEqual(payload["copied_file_count"], 0)
+            self.assertEqual(payload["copied_files"], [])
+            self.assertFalse(destination.exists())
+
+    def test_cli_commit_import_refusal_never_touches_outside_destination(self):
+        # The commit path moves/recursively deletes the destination during
+        # its atomic install; refusal must therefore happen BEFORE the
+        # destination is read, moved, or deleted in any way.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "precious_data"
+            _write_complete_bundle(source)
+            _write_sentinel_destination(destination)
+            before = _read_file_tree(destination)
+
+            with mock.patch.object(
+                IMPORTER.sys, "stderr", io.StringIO()
+            ) as stderr:
+                return_code = IMPORTER.main(
+                    [
+                        "--input-dir",
+                        str(source),
+                        "--destination-dir",
+                        str(destination),
+                        "--commit-import",
+                        "--run-collection-validator",
+                    ]
+                )
+
+            self.assertNotEqual(return_code, 0)
+            payload = json.loads(stderr.getvalue())
+            self.assertIn(
+                "destination_dir_outside_validation_runs",
+                payload["blockers"],
+            )
+            self.assertEqual(_read_file_tree(destination), before)
+            self.assertEqual(
+                sorted(path.name for path in root.iterdir()),
+                ["precious_data", "source"],
+                "refusal must not create staging/backup siblings",
+            )
+
+    def test_cli_commit_import_refuses_validation_runs_root_itself(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            _write_complete_bundle(source)
+
+            with mock.patch.object(
+                IMPORTER.sys, "stderr", io.StringIO()
+            ) as stderr:
+                return_code = IMPORTER.main(
+                    [
+                        "--input-dir",
+                        str(source),
+                        "--destination-dir",
+                        str(IMPORTER.VALIDATION_RUNS_ROOT),
+                        "--commit-import",
+                    ]
+                )
+
+            self.assertNotEqual(return_code, 0)
+            payload = json.loads(stderr.getvalue())
+            self.assertIn(
+                "destination_dir_outside_validation_runs",
+                payload["blockers"],
+            )
+
+    def test_cli_preflight_still_accepts_outside_destination_without_touching_it(self):
+        # Preflight never writes to the destination, so containment applies
+        # only to --commit-import; this pins that boundary.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "outside_destination"
+            current_contract = root / "fluent_reference_contract.json"
+            _write_complete_bundle(source)
+            _write_complete_current_contract(current_contract)
+
+            result = _run_importer_cli(
+                "--input-dir",
+                source,
+                "--destination-dir",
+                destination,
+                "--current-contract-json",
+                current_contract,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["mode"], "preflight")
+            self.assertTrue(payload["ready"])
             self.assertFalse(destination.exists())
 
 

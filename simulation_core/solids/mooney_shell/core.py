@@ -1223,6 +1223,17 @@ class TriMooneyShellMpmState:
             float(body_acceleration[1]),
             float(body_acceleration[2]),
         )
+        # Mirrors the neo_hookean_mpm.py NeoHookeanMpmState.step() fix: the
+        # kernel above already tallied
+        # report_grid_out_of_bounds_particle_count[None] unconditionally on
+        # the GPU, so read back just that single i32 scalar (negligible next
+        # to the full report's host readback) and enforce the guard every
+        # substep, independent of read_report.
+        _raise_if_out_of_bounds_exceeds_tolerance(
+            int(self.particle_count),
+            int(self.report_grid_out_of_bounds_particle_count[None]),
+            self.out_of_bounds_particle_tolerance,
+        )
         if not read_report:
             self.last_report_host_reads = 0
             return None
@@ -1274,6 +1285,14 @@ class TriMooneyShellMpmState:
             float(body_acceleration[2]),
             0,
         )
+        # See step()'s equivalent comment: enforce the out-of-bounds guard
+        # every substep from the single already-tallied i32 scalar,
+        # independent of read_report.
+        _raise_if_out_of_bounds_exceeds_tolerance(
+            int(self.particle_count),
+            int(self.report_grid_out_of_bounds_particle_count[None]),
+            self.out_of_bounds_particle_tolerance,
+        )
         if not read_report:
             self.last_report_host_reads = 0
             return None
@@ -1312,6 +1331,14 @@ class TriMooneyShellMpmState:
             float(body_acceleration[1]),
             float(body_acceleration[2]),
             1,
+        )
+        # See step()'s equivalent comment: enforce the out-of-bounds guard
+        # every substep from the single already-tallied i32 scalar,
+        # independent of read_report.
+        _raise_if_out_of_bounds_exceeds_tolerance(
+            int(self.particle_count),
+            int(self.report_grid_out_of_bounds_particle_count[None]),
+            self.out_of_bounds_particle_tolerance,
         )
         if not read_report:
             self.last_report_host_reads = 0

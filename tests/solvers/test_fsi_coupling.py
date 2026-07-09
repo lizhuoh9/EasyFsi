@@ -8,8 +8,10 @@ from simulation_core.coupling.fsi_coupling import (
     InterfaceReactionStepUpdate,
     InterfaceReactionTargetEvaluation,
     RegionPairInterfaceReactionTarget,
+    _force_vector,
     _iqn_ils_interface_reaction_guess,
     _least_squares_coefficients,
+    _limit_force_update,
     action_reaction_balance,
     aitken_relaxation_factor,
     interface_reaction_force,
@@ -2262,6 +2264,117 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
                 ("apply", (0.0,)),
             ],
         )
+
+
+class NonFiniteForceGuardTests(unittest.TestCase):
+    """S2-audit FINDING 1: finite inputs must never silently become inf/nan
+    force_n that gets committed. Each producer identified by the audit
+    (Sequence-of-floats conversion, the relaxation update, passivity
+    limiting, and the trust-region rescale) must raise ValueError naming
+    itself instead of returning/committing a non-finite vector.
+    """
+
+    def test_force_vector_converts_overflow_error_to_value_error_for_huge_python_int(
+        self,
+    ) -> None:
+        # float(10**400) raises OverflowError, not ValueError; pre-fix this
+        # leaked past every caller's `except ValueError` as an unrelated,
+        # undocumented exception type.
+        with self.assertRaises(ValueError):
+            _force_vector((10**400,), name="huge_int_vector")
+
+    def test_relax_raises_naming_relaxation_update_when_it_overflows_to_infinite_force(
+        self,
+    ) -> None:
+        # previous=0, target=1e308, relaxation=10 -> relaxed = 10 * 1e308,
+        # which silently overflows to +inf under IEEE-754 float semantics
+        # (no exception raised by the multiplication itself). Probed as
+        # "relax force_n=(inf,)" in the audit.
+        with self.assertRaisesRegex(ValueError, "relaxation update"):
+            relax_interface_reaction_forces(
+                previous_force_n=(0.0,),
+                target_force_n=(1.0e308,),
+                velocity_mps=(0.0,),
+                relaxation=10.0,
+                passivity_limit=False,
+            )
+
+    def test_relax_raises_naming_passivity_limiting_when_it_produces_nan(self) -> None:
+        # relaxed=(0.0, 1e300) is finite. The passivity projection computes
+        # scale = total_power / velocity_norm_sq = 2e285 / 4e-30, which
+        # overflows to +inf; inf * velocity[0](=0.0) is nan, not 0.0.
+        # Probed as "passivity->(nan,)" in the audit.
+        with self.assertRaisesRegex(ValueError, "passivity limiting"):
+            relax_interface_reaction_forces(
+                previous_force_n=(0.0, 1.0e300),
+                target_force_n=(0.0, 1.0e300),
+                velocity_mps=(0.0, 2.0e-15),
+                relaxation=1.0,
+                passivity_limit=True,
+            )
+
+    def test_limit_force_update_raises_naming_itself_when_zero_times_infinite_delta_yields_nan(
+        self,
+    ) -> None:
+        # proposed - current = inf, so delta_norm = inf; scale =
+        # max_increment_n / inf rounds to 0.0, and 0.0 * inf is nan, not
+        # 0.0. Probed as "limit 0*inf->nan" in the audit.
+        with self.assertRaisesRegex(ValueError, "_limit_force_update"):
+            _limit_force_update(
+                current_force_n=(0.0,),
+                proposed_force_n=(math.inf,),
+                max_increment_n=1.0,
+            )
+
+    def test_normal_finite_path_outputs_are_unchanged_by_new_finiteness_guards(
+        self,
+    ) -> None:
+        # Same scenario as
+        # test_passivity_limit_projects_force_to_zero_power_boundary: an
+        # ACTIVE (non-trivial) passivity projection with pre-fix expected
+        # numbers, to pin that the new post-hoc finiteness checks are a
+        # no-op on every finite path.
+        relax_result = relax_interface_reaction_forces(
+            previous_force_n=(0.0, 0.0),
+            target_force_n=(4.0, 2.0),
+            velocity_mps=(1.0, 0.0),
+            relaxation=1.0,
+            passivity_limit=True,
+        )
+        self.assertEqual(relax_result.force_n, (0.0, 2.0))
+        self.assertEqual(relax_result.residual_n, (4.0, 0.0))
+
+        # Same scenario as
+        # test_trust_region_limits_next_force_update_without_rejecting_trial's
+        # first rescale: current=0, proposed=10 clipped to a step of 2.
+        limited_force_n, was_limited = _limit_force_update(
+            current_force_n=(0.0,),
+            proposed_force_n=(10.0,),
+            max_increment_n=2.0,
+        )
+        self.assertTrue(was_limited)
+        self.assertEqual(limited_force_n, (2.0,))
+
+        # Same scenario as
+        # test_iqn_ils_update_keeps_residual_component_outside_history_span.
+        proposed, used_least_squares = _iqn_ils_interface_reaction_guess(
+            trial_force_history=(
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (1.0, 1.0, 0.0),
+            ),
+            residual_history=(
+                (0.0, 0.0, 1.0),
+                (1.0, 0.0, 1.0),
+                (1.0, 1.0, 1.0),
+            ),
+            current_residual_n=(1.0, 1.0, 1.0),
+            current_target_force_n=(2.0, 2.0, 1.0),
+            current_velocity_mps=(0.0, 0.0, 0.0),
+            relaxation=0.5,
+        )
+        self.assertTrue(used_least_squares)
+        self.assertEqual(proposed, (0.0, 0.0, 1.0))
 
 
 if __name__ == "__main__":

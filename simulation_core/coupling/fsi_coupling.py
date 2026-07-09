@@ -125,6 +125,15 @@ class ForceBalanceReport:
 def _force_vector(values: Sequence[float], *, name: str) -> ForceVector:
     try:
         vector = tuple(float(value) for value in values)
+    except OverflowError as exc:
+        # float(huge_python_int) raises OverflowError (not ValueError) when
+        # the int has no finite float representation. Left uncaught this
+        # leaked past every caller's `except ValueError` guard as an
+        # unrelated exception type; fold it into the same finite-float
+        # contract as the other conversion failures below.
+        raise ValueError(
+            f"{name} must contain force components representable as a finite float"
+        ) from exc
     except TypeError as exc:
         raise ValueError(f"{name} must contain at least one force component") from exc
     except ValueError as exc:
@@ -249,6 +258,28 @@ def _force_linear_combination(
 
 def _force_is_finite(force_n: ForceVector) -> bool:
     return all(math.isfinite(component) for component in force_n)
+
+
+def _require_finite_force(force_n: ForceVector, *, stage: str) -> ForceVector:
+    """Validate a freshly produced force vector before it is committed.
+
+    Non-finite (inf/nan) output from an otherwise finite-input transform
+    means the transform's OWN arithmetic overflowed or cancelled -- e.g. a
+    large relaxation factor times a large residual (relax force_n -> inf),
+    a passivity power/velocity-norm rescale dividing by a near-zero norm,
+    or `0 * inf -> nan` inside a trust-region rescale of an already-infinite
+    proposal. That is a solver bug upstream, not a recoverable condition, so
+    per this project's physics-first principle (never silently
+    clamp/zero/fall back to paper over a broken value) it must fail loudly
+    here, naming the producing stage, instead of being committed or quietly
+    swapped for a fallback.
+    """
+    if not _force_is_finite(force_n):
+        raise ValueError(
+            f"{stage} produced a non-finite force component {force_n!r}; "
+            "this indicates a solver bug upstream, not a recoverable condition"
+        )
+    return force_n
 
 
 def _validate_interface_reaction_solver(solver: str) -> str:
@@ -385,6 +416,14 @@ def _limit_force_update(
         current_value + scale * delta_value
         for current_value, delta_value in zip(current_force_n, delta)
     )
+    # Probed failure mode: an already-infinite proposed_force_n makes
+    # delta/delta_norm infinite, so scale = max_increment_n / inf rounds to
+    # 0.0 -- and 0.0 * inf is nan, not 0.0. That nan would otherwise be
+    # committed as a "successfully limited" force.
+    _require_finite_force(
+        limited,
+        stage="_limit_force_update trust-region rescale",
+    )
     return limited, True
 
 
@@ -458,8 +497,16 @@ def _iqn_ils_interface_reaction_guess(
             output_delta_residual,
         )
     )
-    if not _force_is_finite(proposed):
-        return fallback, False
+    # A well-conditioned least-squares solve (coefficients is not None, and
+    # the single-column model check above already passed) producing a
+    # non-finite proposal is not a normal "couldn't run the algorithm"
+    # situation -- unlike the early insufficient-history/no-coefficients
+    # returns above, this means the update itself overflowed. Raise instead
+    # of silently degrading to `fallback` so the upstream bug is not masked.
+    _require_finite_force(
+        proposed,
+        stage="_iqn_ils_interface_reaction_guess least-squares update",
+    )
     return proposed, True
 
 
@@ -512,8 +559,19 @@ def _diagonal_secant_interface_reaction_guess_from_anchor(
         proposed_components.append(proposed_value)
 
     proposed = tuple(proposed_components)
-    if not used_secant or not _force_is_finite(proposed):
+    if not used_secant:
         return fallback, False
+    # Every component of `proposed` is either a per-component secant
+    # `candidate` that already passed a `math.isfinite` check, or
+    # `fallback[component_index]` (itself now guaranteed finite-or-raised by
+    # `_relaxed_interface_reaction_guess` -> `relax_interface_reaction_forces`).
+    # This is therefore a defense-in-depth check on the producer named in
+    # the audit, not a normally-reachable branch: raise rather than
+    # silently re-substituting `fallback` if it is ever violated.
+    _require_finite_force(
+        proposed,
+        stage="_diagonal_secant_interface_reaction_guess_from_anchor secant update",
+    )
     return proposed, True
 
 
@@ -609,6 +667,10 @@ def relax_interface_reaction_forces(
         previous_value + relaxation_value * residual_value
         for previous_value, residual_value in zip(previous, residual)
     )
+    _require_finite_force(
+        relaxed,
+        stage="relax_interface_reaction_forces: relaxation update",
+    )
     limited = [False for _ in relaxed]
     relaxed_list = list(relaxed)
     if passivity_limit:
@@ -621,6 +683,10 @@ def relax_interface_reaction_forces(
                 relaxed_list[index] -= correction
                 limited[index] = abs(correction) > 0.0
     committed_force = tuple(relaxed_list)
+    _require_finite_force(
+        committed_force,
+        stage="relax_interface_reaction_forces: passivity limiting",
+    )
     committed_residual = _force_residual(
         target_force_n=target,
         committed_force_n=committed_force,

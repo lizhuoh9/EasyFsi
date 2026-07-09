@@ -4769,88 +4769,141 @@ class CartesianFluidSolver:
 
     @ti.func
     def _obstacle_cell_dvel_dx(self, a: ti.i32, b: ti.i32, c: ti.i32):
-        # d(u_cell)/dx at fluid cell (a,b,c) as a 3-vector; central difference,
-        # degrading to one-sided (obstacle/edge neighbour -> 0) at a wall.
+        # d(u_cell)/dx at fluid cell (a,b,c) as a 3-vector: central
+        # difference in the fluid bulk, one-sided fluid-fluid difference at
+        # a domain edge, and a no-slip WALL difference (u_wall=0 at the
+        # wall face, 0.5*cell_width away) when a neighbour is an obstacle
+        # cell. The wall case is checked FIRST and takes priority over the
+        # fluid-fluid fallback: an obstacle neighbour is a known
+        # Dirichlet-zero velocity sample at a known distance, not merely
+        # "no data". Treating it as "no data" (the old behaviour) reached
+        # PAST the wall to the next fluid cell over and produced ~zero
+        # shear whenever the two nearest fluid cells happened to share the
+        # same tangential velocity -- exactly the case this function exists
+        # to resolve, since it is always called (from
+        # _compute_obstacle_surface_viscous_force_kernel) on the fluid cell
+        # immediately touching the obstacle face being integrated.
         result = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-        up = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-        fp = 0
-        if a + 1 < self.nx and self.obstacle[a + 1, b, c] == 0:
-            up = self._obstacle_wall_cell_velocity(a + 1, b, c)
-            fp = 1
-        um = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-        fm = 0
-        if a > 0 and self.obstacle[a - 1, b, c] == 0:
-            um = self._obstacle_wall_cell_velocity(a - 1, b, c)
-            fm = 1
-        uc = self._obstacle_wall_cell_velocity(a, b, c)
+        wall_p = 0
+        if a + 1 < self.nx and self.obstacle[a + 1, b, c] == 1:
+            wall_p = 1
+        wall_m = 0
+        if a > 0 and self.obstacle[a - 1, b, c] == 1:
+            wall_m = 1
         w = ti.cast(self.cell_width_x_m[a], ti.f64)
-        if fp == 1 and fm == 1:
-            span = (
-                0.5 * ti.cast(self.cell_width_x_m[a - 1], ti.f64)
-                + w
-                + 0.5 * ti.cast(self.cell_width_x_m[a + 1], ti.f64)
-            )
-            result = (up - um) / span
-        elif fp == 1:
-            result = (up - uc) / (0.5 * w + 0.5 * ti.cast(self.cell_width_x_m[a + 1], ti.f64))
-        elif fm == 1:
-            result = (uc - um) / (0.5 * ti.cast(self.cell_width_x_m[a - 1], ti.f64) + 0.5 * w)
+        if wall_p == 1:
+            uc = self._obstacle_wall_cell_velocity(a, b, c)
+            result = -uc / (0.5 * w)
+        elif wall_m == 1:
+            uc = self._obstacle_wall_cell_velocity(a, b, c)
+            result = uc / (0.5 * w)
+        else:
+            up = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+            fp = 0
+            if a + 1 < self.nx and self.obstacle[a + 1, b, c] == 0:
+                up = self._obstacle_wall_cell_velocity(a + 1, b, c)
+                fp = 1
+            um = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+            fm = 0
+            if a > 0 and self.obstacle[a - 1, b, c] == 0:
+                um = self._obstacle_wall_cell_velocity(a - 1, b, c)
+                fm = 1
+            uc = self._obstacle_wall_cell_velocity(a, b, c)
+            if fp == 1 and fm == 1:
+                span = (
+                    0.5 * ti.cast(self.cell_width_x_m[a - 1], ti.f64)
+                    + w
+                    + 0.5 * ti.cast(self.cell_width_x_m[a + 1], ti.f64)
+                )
+                result = (up - um) / span
+            elif fp == 1:
+                result = (up - uc) / (0.5 * w + 0.5 * ti.cast(self.cell_width_x_m[a + 1], ti.f64))
+            elif fm == 1:
+                result = (uc - um) / (0.5 * ti.cast(self.cell_width_x_m[a - 1], ti.f64) + 0.5 * w)
         return result
 
     @ti.func
     def _obstacle_cell_dvel_dy(self, a: ti.i32, b: ti.i32, c: ti.i32):
+        # See _obstacle_cell_dvel_dx for the wall-vs-fluid-fallback rationale.
         result = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-        up = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-        fp = 0
-        if b + 1 < self.ny and self.obstacle[a, b + 1, c] == 0:
-            up = self._obstacle_wall_cell_velocity(a, b + 1, c)
-            fp = 1
-        um = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-        fm = 0
-        if b > 0 and self.obstacle[a, b - 1, c] == 0:
-            um = self._obstacle_wall_cell_velocity(a, b - 1, c)
-            fm = 1
-        uc = self._obstacle_wall_cell_velocity(a, b, c)
+        wall_p = 0
+        if b + 1 < self.ny and self.obstacle[a, b + 1, c] == 1:
+            wall_p = 1
+        wall_m = 0
+        if b > 0 and self.obstacle[a, b - 1, c] == 1:
+            wall_m = 1
         w = ti.cast(self.cell_width_y_m[b], ti.f64)
-        if fp == 1 and fm == 1:
-            span = (
-                0.5 * ti.cast(self.cell_width_y_m[b - 1], ti.f64)
-                + w
-                + 0.5 * ti.cast(self.cell_width_y_m[b + 1], ti.f64)
-            )
-            result = (up - um) / span
-        elif fp == 1:
-            result = (up - uc) / (0.5 * w + 0.5 * ti.cast(self.cell_width_y_m[b + 1], ti.f64))
-        elif fm == 1:
-            result = (uc - um) / (0.5 * ti.cast(self.cell_width_y_m[b - 1], ti.f64) + 0.5 * w)
+        if wall_p == 1:
+            uc = self._obstacle_wall_cell_velocity(a, b, c)
+            result = -uc / (0.5 * w)
+        elif wall_m == 1:
+            uc = self._obstacle_wall_cell_velocity(a, b, c)
+            result = uc / (0.5 * w)
+        else:
+            up = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+            fp = 0
+            if b + 1 < self.ny and self.obstacle[a, b + 1, c] == 0:
+                up = self._obstacle_wall_cell_velocity(a, b + 1, c)
+                fp = 1
+            um = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+            fm = 0
+            if b > 0 and self.obstacle[a, b - 1, c] == 0:
+                um = self._obstacle_wall_cell_velocity(a, b - 1, c)
+                fm = 1
+            uc = self._obstacle_wall_cell_velocity(a, b, c)
+            if fp == 1 and fm == 1:
+                span = (
+                    0.5 * ti.cast(self.cell_width_y_m[b - 1], ti.f64)
+                    + w
+                    + 0.5 * ti.cast(self.cell_width_y_m[b + 1], ti.f64)
+                )
+                result = (up - um) / span
+            elif fp == 1:
+                result = (up - uc) / (0.5 * w + 0.5 * ti.cast(self.cell_width_y_m[b + 1], ti.f64))
+            elif fm == 1:
+                result = (uc - um) / (0.5 * ti.cast(self.cell_width_y_m[b - 1], ti.f64) + 0.5 * w)
         return result
 
     @ti.func
     def _obstacle_cell_dvel_dz(self, a: ti.i32, b: ti.i32, c: ti.i32):
+        # See _obstacle_cell_dvel_dx for the wall-vs-fluid-fallback rationale.
         result = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-        up = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-        fp = 0
-        if c + 1 < self.nz and self.obstacle[a, b, c + 1] == 0:
-            up = self._obstacle_wall_cell_velocity(a, b, c + 1)
-            fp = 1
-        um = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-        fm = 0
-        if c > 0 and self.obstacle[a, b, c - 1] == 0:
-            um = self._obstacle_wall_cell_velocity(a, b, c - 1)
-            fm = 1
-        uc = self._obstacle_wall_cell_velocity(a, b, c)
+        wall_p = 0
+        if c + 1 < self.nz and self.obstacle[a, b, c + 1] == 1:
+            wall_p = 1
+        wall_m = 0
+        if c > 0 and self.obstacle[a, b, c - 1] == 1:
+            wall_m = 1
         w = ti.cast(self.cell_width_z_m[c], ti.f64)
-        if fp == 1 and fm == 1:
-            span = (
-                0.5 * ti.cast(self.cell_width_z_m[c - 1], ti.f64)
-                + w
-                + 0.5 * ti.cast(self.cell_width_z_m[c + 1], ti.f64)
-            )
-            result = (up - um) / span
-        elif fp == 1:
-            result = (up - uc) / (0.5 * w + 0.5 * ti.cast(self.cell_width_z_m[c + 1], ti.f64))
-        elif fm == 1:
-            result = (uc - um) / (0.5 * ti.cast(self.cell_width_z_m[c - 1], ti.f64) + 0.5 * w)
+        if wall_p == 1:
+            uc = self._obstacle_wall_cell_velocity(a, b, c)
+            result = -uc / (0.5 * w)
+        elif wall_m == 1:
+            uc = self._obstacle_wall_cell_velocity(a, b, c)
+            result = uc / (0.5 * w)
+        else:
+            up = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+            fp = 0
+            if c + 1 < self.nz and self.obstacle[a, b, c + 1] == 0:
+                up = self._obstacle_wall_cell_velocity(a, b, c + 1)
+                fp = 1
+            um = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+            fm = 0
+            if c > 0 and self.obstacle[a, b, c - 1] == 0:
+                um = self._obstacle_wall_cell_velocity(a, b, c - 1)
+                fm = 1
+            uc = self._obstacle_wall_cell_velocity(a, b, c)
+            if fp == 1 and fm == 1:
+                span = (
+                    0.5 * ti.cast(self.cell_width_z_m[c - 1], ti.f64)
+                    + w
+                    + 0.5 * ti.cast(self.cell_width_z_m[c + 1], ti.f64)
+                )
+                result = (up - um) / span
+            elif fp == 1:
+                result = (up - uc) / (0.5 * w + 0.5 * ti.cast(self.cell_width_z_m[c + 1], ti.f64))
+            elif fm == 1:
+                result = (uc - um) / (0.5 * ti.cast(self.cell_width_z_m[c - 1], ti.f64) + 0.5 * w)
         return result
 
     @ti.kernel
@@ -4941,6 +4994,17 @@ class CartesianFluidSolver:
         terms then sum to ~0 over the closed surface, as physics requires). The
         wall gradients are first-order; validate skin friction with a Couette /
         shear-flow test before trusting absolute magnitudes.
+
+        S3-audit fix (see _obstacle_cell_dvel_dx/dy/dz): the wall-adjacent
+        tangential-velocity gradient now differences the near-wall fluid
+        cell against the no-slip wall (u_wall=0 at 0.5*cell_width), instead
+        of reaching past the wall to the next fluid cell over -- the old
+        formula returned ~zero shear whenever two fluid cells adjacent to
+        the wall happened to share the same tangential velocity. This
+        CHANGES the previously-validated Schafer-Turek cylinder Cd (5.79 vs
+        reference 5.58 was measured against the OLD, buggy gradient).
+        Re-validate Cd/Cl on GPU against the Schafer-Turek benchmark before
+        quoting any new drag/lift numbers from this kernel.
         """
         self._compute_obstacle_surface_viscous_force_kernel(
             1 if self._hibm_base_obstacle_initialized else 0

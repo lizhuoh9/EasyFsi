@@ -1128,6 +1128,28 @@ class NeoHookeanMpmState:
             int(CONSTITUTIVE_MODELS[constitutive_model]),
             flip_blend,
         )
+        # _step_kernel already advanced every particle (positions, velocities,
+        # F) and tallied report_grid_out_of_bounds_particle_count[None]
+        # unconditionally on the GPU -- that counter is not behind
+        # `read_report`. Historically the out-of-bounds guard only fired
+        # inside report(), so callers that pass read_report=False (e.g. the
+        # Turek-Hron case, for 99/100 substeps, to avoid the full report's
+        # large host readback) never observed a partially escaped solid
+        # until up to 100 substeps later. Read back ONLY this single i32
+        # scalar -- one 4-byte device readback, negligible next to the full
+        # report -- and enforce the guard every substep regardless of
+        # read_report. The state has UNAVOIDABLY already advanced by this
+        # point (positions only exist after integration); the guard's
+        # contract is "refuse to CONTINUE from a partially escaped state",
+        # not "prevent the escaping step from running".
+        out_of_bounds_particle_count = int(
+            self.report_grid_out_of_bounds_particle_count[None]
+        )
+        _raise_if_out_of_bounds_exceeds_tolerance(
+            int(self.particle_count),
+            out_of_bounds_particle_count,
+            self.out_of_bounds_particle_tolerance,
+        )
         if not read_report:
             self.last_report_host_reads = 0
             return None
