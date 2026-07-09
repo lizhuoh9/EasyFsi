@@ -4669,12 +4669,26 @@ class CartesianFluidSolver:
         )
 
     @ti.kernel
-    def _compute_obstacle_surface_pressure_force_kernel(self):
+    def _compute_obstacle_surface_pressure_force_kernel(self, restrict_to_base: ti.i32):
+        # restrict_to_base=1: integrate over the STATIC mask (hibm_base_obstacle)
+        # only. The dynamic obstacle field also contains HIBM-classified solid-
+        # interior cells (e.g. the T-H beam interior, fully marked once
+        # classify_far_internal_nodes is armed); including them double-counts
+        # the marker-sampled beam force and adds pseudo-interior surfaces
+        # (measured: total drag -11 N/m mid-ramp on the y-refined grid). The
+        # neighbour "is fluid" tests stay on the DYNAMIC mask so faces between
+        # the static body and classified solid-interior cells are excluded.
         self.report_obstacle_surface_pressure_force_n[None] = ti.Vector(
             [0.0, 0.0, 0.0]
         )
         for i, j, k in self.obstacle:
-            if self.obstacle[i, j, k] == 1:
+            cell_selected = 0
+            if restrict_to_base != 0:
+                if self.hibm_base_obstacle[i, j, k] == 1:
+                    cell_selected = 1
+            elif self.obstacle[i, j, k] == 1:
+                cell_selected = 1
+            if cell_selected == 1:
                 area_yz = ti.cast(
                     self.cell_width_y_m[j] * self.cell_width_z_m[k], ti.f64
                 )
@@ -4720,7 +4734,9 @@ class CartesianFluidSolver:
         no sampled force). The viscous/friction component is computed separately.
         Gauge-invariant over the closed obstacle surface.
         """
-        self._compute_obstacle_surface_pressure_force_kernel()
+        self._compute_obstacle_surface_pressure_force_kernel(
+            1 if self._hibm_base_obstacle_initialized else 0
+        )
         f = self.report_obstacle_surface_pressure_force_n[None]
         return (float(f.x), float(f.y), float(f.z))
 
@@ -4838,11 +4854,20 @@ class CartesianFluidSolver:
         return result
 
     @ti.kernel
-    def _compute_obstacle_surface_viscous_force_kernel(self):
+    def _compute_obstacle_surface_viscous_force_kernel(self, restrict_to_base: ti.i32):
+        # Same static-mask restriction as the pressure-force kernel (see the
+        # comment there): classified solid-interior cells must not contribute
+        # pseudo skin-friction faces.
         self.report_obstacle_surface_viscous_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
         mu = ti.cast(self.mu, ti.f64)
         for i, j, k in self.obstacle:
-            if self.obstacle[i, j, k] == 1:
+            cell_selected = 0
+            if restrict_to_base != 0:
+                if self.hibm_base_obstacle[i, j, k] == 1:
+                    cell_selected = 1
+            elif self.obstacle[i, j, k] == 1:
+                cell_selected = 1
+            if cell_selected == 1:
                 area_yz = ti.cast(self.cell_width_y_m[j] * self.cell_width_z_m[k], ti.f64)
                 area_xz = ti.cast(self.cell_width_x_m[i] * self.cell_width_z_m[k], ti.f64)
                 area_xy = ti.cast(self.cell_width_x_m[i] * self.cell_width_y_m[j], ti.f64)
@@ -4917,7 +4942,9 @@ class CartesianFluidSolver:
         wall gradients are first-order; validate skin friction with a Couette /
         shear-flow test before trusting absolute magnitudes.
         """
-        self._compute_obstacle_surface_viscous_force_kernel()
+        self._compute_obstacle_surface_viscous_force_kernel(
+            1 if self._hibm_base_obstacle_initialized else 0
+        )
         f = self.report_obstacle_surface_viscous_force_n[None]
         return (float(f.x), float(f.y), float(f.z))
 
