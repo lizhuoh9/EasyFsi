@@ -1224,12 +1224,32 @@ class HibmMpmSurfaceMarkers:
         nx: ti.i32,
         ny: ti.i32,
         nz: ti.i32,
+        # Anisotropic interior probe (gated, default off): when
+        # probe_anisotropic != 0, the isotropic `x + n*probe` sample point is
+        # replaced by a per-marker effective distance blended from the
+        # per-axis probe depths by the marker normal's direction cosines
+        # (px*|n_x| + py*|n_y| + pz*|n_z|), so a marker on a thin/refined
+        # axis samples close to the wall while one on a coarse axis still
+        # reaches past the near-wall cell. probe_anisotropic == 0 reproduces
+        # the scalar `probe_distance_m` path exactly (byte-for-byte).
+        probe_anisotropic: ti.i32,
+        probe_distance_x_m: ti.f32,
+        probe_distance_y_m: ti.f32,
+        probe_distance_z_m: ti.f32,
     ):
         self.report_pressure_neumann_gradient_marker_count[None] = 0
         self.report_pressure_neumann_gradient_max_abs[None] = 0.0
         for marker in range(marker_count):
+            normal = self.n_gamma[marker]
+            effective_probe_distance_m = probe_distance_m
+            if probe_anisotropic != 0:
+                effective_probe_distance_m = (
+                    probe_distance_x_m * ti.abs(normal.x)
+                    + probe_distance_y_m * ti.abs(normal.y)
+                    + probe_distance_z_m * ti.abs(normal.z)
+                )
             sample_position = (
-                self.x_gamma_m[marker] + self.n_gamma[marker] * probe_distance_m
+                self.x_gamma_m[marker] + normal * effective_probe_distance_m
             )
             grid_coordinate = self._grid_coordinate_from_fields(
                 sample_position,
@@ -1285,6 +1305,7 @@ class HibmMpmSurfaceMarkers:
         density_kgm3: float,
         dt_s: float,
         probe_distance_m: float,
+        probe_distance_xyz_m: tuple[float, float, float] | None = None,
     ) -> HibmMpmPressureNeumannGradientReport:
         density = float(density_kgm3)
         dt = float(dt_s)
@@ -1298,6 +1319,27 @@ class HibmMpmSurfaceMarkers:
         nodes = tuple(int(value) for value in grid_nodes)
         if len(nodes) != 3 or any(value < 2 for value in nodes):
             raise ValueError("grid_nodes must contain three values >= 2")
+        # Anisotropic interior probe (gated, default off via None) - see the
+        # matching comment on _update_pressure_neumann_gradient_from_fluid_
+        # predictor_kernel. None (default) leaves the scalar probe_distance_m
+        # path byte-for-byte unchanged.
+        anisotropic_probe = None
+        if probe_distance_xyz_m is not None:
+            probe_values = tuple(float(value) for value in probe_distance_xyz_m)
+            if len(probe_values) != 3:
+                raise ValueError(
+                    "probe_distance_xyz_m must contain exactly three values"
+                )
+            if any(not math.isfinite(value) or value <= 0.0 for value in probe_values):
+                raise ValueError(
+                    "probe_distance_xyz_m must contain finite positive numbers"
+                )
+            anisotropic_probe = probe_values
+        probe_x, probe_y, probe_z = anisotropic_probe or (
+            probe_distance,
+            probe_distance,
+            probe_distance,
+        )
         self._update_pressure_neumann_gradient_from_fluid_predictor_kernel(
             marker_pressure_neumann_gradient_pa_per_m_field,
             velocity_field,
@@ -1315,6 +1357,10 @@ class HibmMpmSurfaceMarkers:
             int(nodes[0]),
             int(nodes[1]),
             int(nodes[2]),
+            1 if anisotropic_probe is not None else 0,
+            float(probe_x),
+            float(probe_y),
+            float(probe_z),
         )
         return HibmMpmPressureNeumannGradientReport(
             active_marker_count=int(
@@ -7608,6 +7654,21 @@ class HibmMpmIbNodeSearch:
         spacing_x_m: ti.f32,
         spacing_y_m: ti.f32,
         spacing_z_m: ti.f32,
+        # Anisotropic classification envelope (gated, default off): when
+        # search_anisotropic != 0, the acceptance test below switches from the
+        # isotropic `distance < search_radius_m` sphere to a per-axis box
+        # `|offset_i| < search_radius_i_m`. Motivation: on a y-refined grid the
+        # scalar envelope 1.5*max(dy,dz) made the boundary band 3 cells deep in
+        # y while the beam interior was only 4.7 cells thick, so the bands grown
+        # from opposing faces overlapped and leaked (measured 880x spurious
+        # lift). A per-axis box gives each face a thin band along its own
+        # face-normal cell size while still bridging tangentially, for both
+        # y-faces and the z-normal tip simultaneously. search_anisotropic == 0
+        # reproduces the scalar branch exactly (byte-for-byte).
+        search_anisotropic: ti.i32,
+        search_radius_x_m: ti.f32,
+        search_radius_y_m: ti.f32,
+        search_radius_z_m: ti.f32,
     ):
         self.report_near_boundary_node_count[None] = 0
         self.report_external_ib_node_count[None] = 0
@@ -7700,7 +7761,14 @@ class HibmMpmIbNodeSearch:
                                 nearest_global_normal = normal
                                 nearest_global_projection_indices = projection_indices
                                 nearest_global_projection_weights = projection_weights
-                        if distance < search_radius_m:
+                        accept_search = distance < search_radius_m
+                        if search_anisotropic != 0:
+                            accept_search = (
+                                ti.abs(offset.x) < search_radius_x_m
+                                and ti.abs(offset.y) < search_radius_y_m
+                                and ti.abs(offset.z) < search_radius_z_m
+                            )
+                        if accept_search:
                             if signed_distance > sign_tolerance_m:
                                 external_seen = 1
                                 if distance < nearest_external_distance:
@@ -7743,7 +7811,14 @@ class HibmMpmIbNodeSearch:
                             nearest_global_projection_weights = ti.Vector(
                                 [1.0, 0.0, 0.0]
                             )
-                    if distance < search_radius_m:
+                    accept_search = distance < search_radius_m
+                    if search_anisotropic != 0:
+                        accept_search = (
+                            ti.abs(offset.x) < search_radius_x_m
+                            and ti.abs(offset.y) < search_radius_y_m
+                            and ti.abs(offset.z) < search_radius_z_m
+                        )
+                    if accept_search:
                         if signed_distance > sign_tolerance_m:
                             external_seen = 1
                             if distance < nearest_external_distance:
@@ -7862,6 +7937,14 @@ class HibmMpmIbNodeSearch:
         cell_center_x_m: ti.template(),
         cell_center_y_m: ti.template(),
         cell_center_z_m: ti.template(),
+        # Anisotropic classification envelope - see the matching comment on
+        # _search_and_classify_kernel. search_anisotropic == 0 reproduces the
+        # scalar branch exactly (byte-for-byte), including the marker AABB
+        # inflation below.
+        search_anisotropic: ti.i32,
+        search_radius_x_m: ti.f32,
+        search_radius_y_m: ti.f32,
+        search_radius_z_m: ti.f32,
     ):
         self.report_near_boundary_node_count[None] = 0
         self.report_external_ib_node_count[None] = 0
@@ -7874,12 +7957,19 @@ class HibmMpmIbNodeSearch:
         # internal" classification deliberately looks past search_radius_m
         # for the globally nearest marker, so nodes outside the inflated
         # AABB can still be classified and must keep running the full scan.
-        aabb_min_x = self.marker_bounds_min_x_m[None] - search_radius_m
-        aabb_min_y = self.marker_bounds_min_y_m[None] - search_radius_m
-        aabb_min_z = self.marker_bounds_min_z_m[None] - search_radius_m
-        aabb_max_x = self.marker_bounds_max_x_m[None] + search_radius_m
-        aabb_max_y = self.marker_bounds_max_y_m[None] + search_radius_m
-        aabb_max_z = self.marker_bounds_max_z_m[None] + search_radius_m
+        aabb_pad_x = search_radius_m
+        aabb_pad_y = search_radius_m
+        aabb_pad_z = search_radius_m
+        if search_anisotropic != 0:
+            aabb_pad_x = search_radius_x_m
+            aabb_pad_y = search_radius_y_m
+            aabb_pad_z = search_radius_z_m
+        aabb_min_x = self.marker_bounds_min_x_m[None] - aabb_pad_x
+        aabb_min_y = self.marker_bounds_min_y_m[None] - aabb_pad_y
+        aabb_min_z = self.marker_bounds_min_z_m[None] - aabb_pad_z
+        aabb_max_x = self.marker_bounds_max_x_m[None] + aabb_pad_x
+        aabb_max_y = self.marker_bounds_max_y_m[None] + aabb_pad_y
+        aabb_max_z = self.marker_bounds_max_z_m[None] + aabb_pad_z
         for node in ti.grouped(self.node_kind_code):
             position = ti.Vector(
                 [
@@ -7977,7 +8067,14 @@ class HibmMpmIbNodeSearch:
                                 nearest_global_normal = normal
                                 nearest_global_projection_indices = projection_indices
                                 nearest_global_projection_weights = projection_weights
-                        if distance < search_radius_m:
+                        accept_search = distance < search_radius_m
+                        if search_anisotropic != 0:
+                            accept_search = (
+                                ti.abs(offset.x) < search_radius_x_m
+                                and ti.abs(offset.y) < search_radius_y_m
+                                and ti.abs(offset.z) < search_radius_z_m
+                            )
+                        if accept_search:
                             if signed_distance > sign_tolerance_m:
                                 external_seen = 1
                                 if distance < nearest_external_distance:
@@ -8020,7 +8117,14 @@ class HibmMpmIbNodeSearch:
                             nearest_global_projection_weights = ti.Vector(
                                 [1.0, 0.0, 0.0]
                             )
-                    if distance < search_radius_m:
+                    accept_search = distance < search_radius_m
+                    if search_anisotropic != 0:
+                        accept_search = (
+                            ti.abs(offset.x) < search_radius_x_m
+                            and ti.abs(offset.y) < search_radius_y_m
+                            and ti.abs(offset.z) < search_radius_z_m
+                        )
+                    if accept_search:
                         if signed_distance > sign_tolerance_m:
                             external_seen = 1
                             if distance < nearest_external_distance:
@@ -8110,7 +8214,8 @@ class HibmMpmIbNodeSearch:
         search_radius_m: float,
         interior_probe_distance_m: float,
         sign_tolerance_m: float | None,
-    ) -> tuple[float, float, float]:
+        search_radius_xyz_m: tuple[float, float, float] | None = None,
+    ) -> tuple[float, float, float, tuple[float, float, float] | None]:
         if int(markers.marker_count) > self.marker_capacity:
             raise ValueError("markers.marker_count exceeds marker_capacity")
         search_radius = float(search_radius_m)
@@ -8128,7 +8233,27 @@ class HibmMpmIbNodeSearch:
         )
         if not math.isfinite(sign_tolerance) or sign_tolerance < 0.0:
             raise ValueError("sign_tolerance_m must be a finite non-negative number")
-        return search_radius, probe_distance, sign_tolerance
+        # Anisotropic classification envelope (gated, default off via None):
+        # a per-axis search radius so the boundary band scales with the
+        # face-normal cell size instead of max(dy, dz). See
+        # _search_and_classify_kernel's docstring comment for the motivating
+        # porous-interface bug. None (default) leaves the isotropic scalar
+        # search_radius_m path byte-for-byte unchanged.
+        resolved_search_radius_xyz = None
+        if search_radius_xyz_m is not None:
+            radius_values = tuple(float(value) for value in search_radius_xyz_m)
+            if len(radius_values) != 3:
+                raise ValueError(
+                    "search_radius_xyz_m must contain exactly three values"
+                )
+            if any(
+                not math.isfinite(value) or value <= 0.0 for value in radius_values
+            ):
+                raise ValueError(
+                    "search_radius_xyz_m must contain finite positive numbers"
+                )
+            resolved_search_radius_xyz = radius_values
+        return search_radius, probe_distance, sign_tolerance, resolved_search_radius_xyz
 
     def search_and_classify(
         self,
@@ -8138,12 +8263,21 @@ class HibmMpmIbNodeSearch:
         interior_probe_distance_m: float,
         sign_tolerance_m: float | None = None,
         classify_far_internal_nodes: bool = False,
+        search_radius_xyz_m: tuple[float, float, float] | None = None,
     ) -> HibmMpmIbNodeSearchReport:
-        search_radius, probe_distance, sign_tolerance = self._validate_search_inputs(
-            markers,
-            search_radius_m=search_radius_m,
-            interior_probe_distance_m=interior_probe_distance_m,
-            sign_tolerance_m=sign_tolerance_m,
+        search_radius, probe_distance, sign_tolerance, anisotropic_radius = (
+            self._validate_search_inputs(
+                markers,
+                search_radius_m=search_radius_m,
+                interior_probe_distance_m=interior_probe_distance_m,
+                sign_tolerance_m=sign_tolerance_m,
+                search_radius_xyz_m=search_radius_xyz_m,
+            )
+        )
+        radius_x, radius_y, radius_z = anisotropic_radius or (
+            search_radius,
+            search_radius,
+            search_radius,
         )
         self._search_and_classify_kernel(
             markers.x_gamma_m,
@@ -8161,6 +8295,10 @@ class HibmMpmIbNodeSearch:
             float(self.spacing_m[0]),
             float(self.spacing_m[1]),
             float(self.spacing_m[2]),
+            1 if anisotropic_radius is not None else 0,
+            float(radius_x),
+            float(radius_y),
+            float(radius_z),
         )
         return HibmMpmIbNodeSearchReport(
             near_boundary_node_count=int(self.report_near_boundary_node_count[None]),
@@ -8180,12 +8318,21 @@ class HibmMpmIbNodeSearch:
         interior_probe_distance_m: float,
         sign_tolerance_m: float | None = None,
         classify_far_internal_nodes: bool = False,
+        search_radius_xyz_m: tuple[float, float, float] | None = None,
     ) -> HibmMpmIbNodeSearchReport:
-        search_radius, probe_distance, sign_tolerance = self._validate_search_inputs(
-            markers,
-            search_radius_m=search_radius_m,
-            interior_probe_distance_m=interior_probe_distance_m,
-            sign_tolerance_m=sign_tolerance_m,
+        search_radius, probe_distance, sign_tolerance, anisotropic_radius = (
+            self._validate_search_inputs(
+                markers,
+                search_radius_m=search_radius_m,
+                interior_probe_distance_m=interior_probe_distance_m,
+                sign_tolerance_m=sign_tolerance_m,
+                search_radius_xyz_m=search_radius_xyz_m,
+            )
+        )
+        radius_x, radius_y, radius_z = anisotropic_radius or (
+            search_radius,
+            search_radius,
+            search_radius,
         )
         self._update_marker_bounds_kernel(
             markers.x_gamma_m,
@@ -8204,6 +8351,10 @@ class HibmMpmIbNodeSearch:
             cell_center_x_m,
             cell_center_y_m,
             cell_center_z_m,
+            1 if anisotropic_radius is not None else 0,
+            float(radius_x),
+            float(radius_y),
+            float(radius_z),
         )
         return HibmMpmIbNodeSearchReport(
             near_boundary_node_count=int(self.report_near_boundary_node_count[None]),
@@ -12777,6 +12928,14 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     search_radius_m: float,
     interior_probe_distance_m: float,
     mpm_support_radius_m: float,
+    # Anisotropic IB classification envelope + interior probe (gated,
+    # default off via None): forwarded to search_and_classify_grid_fields
+    # and to the marker pressure-Neumann-gradient probe respectively. See
+    # _search_and_classify_kernel's docstring comment for the motivating
+    # porous-thin-structure bug. None (default) leaves every scalar path
+    # byte-for-byte unchanged.
+    search_radius_xyz_m: tuple[float, float, float] | None = None,
+    interior_probe_distance_xyz_m: tuple[float, float, float] | None = None,
     primary_region_id: int = 0,
     secondary_region_id: int = 0,
     far_pressure_region_id: int = -1,
@@ -13122,6 +13281,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         search_radius_m=float(search_radius_m),
         interior_probe_distance_m=float(interior_probe_distance_m),
         classify_far_internal_nodes=bool(classify_far_internal_nodes),
+        search_radius_xyz_m=search_radius_xyz_m,
     )
     _debug_stage_progress("search_and_classify_grid_fields:done")
     _debug_stage_progress("apply_hibm_internal_obstacles:start")
@@ -13443,6 +13603,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 density_kgm3=pressure_neumann_density,
                 dt_s=pressure_neumann_dt,
                 probe_distance_m=float(interior_probe_distance_m),
+                probe_distance_xyz_m=interior_probe_distance_xyz_m,
             )
             boundary_report = ib_boundary.build_from_search_device_fields(
                 ib_search,
@@ -14091,6 +14252,14 @@ def advance_hibm_mpm_sharp_mpm_step(
     search_radius_m: float,
     interior_probe_distance_m: float,
     mpm_support_radius_m: float,
+    # Anisotropic IB classification envelope + interior probe (gated,
+    # default off via None): forwarded to assemble_hibm_mpm_sharp_fluid_to_
+    # mpm_loads and to the post-solid re-classification call below. See
+    # _search_and_classify_kernel's docstring comment for the motivating
+    # porous-thin-structure bug. None (default) leaves every scalar path
+    # byte-for-byte unchanged.
+    search_radius_xyz_m: tuple[float, float, float] | None = None,
+    interior_probe_distance_xyz_m: tuple[float, float, float] | None = None,
     primary_region_id: int = 0,
     secondary_region_id: int = 0,
     far_pressure_region_id: int = -1,
@@ -14195,6 +14364,8 @@ def advance_hibm_mpm_sharp_mpm_step(
         search_radius_m=float(search_radius_m),
         interior_probe_distance_m=float(interior_probe_distance_m),
         mpm_support_radius_m=float(mpm_support_radius_m),
+        search_radius_xyz_m=search_radius_xyz_m,
+        interior_probe_distance_xyz_m=interior_probe_distance_xyz_m,
         primary_region_id=int(primary_region_id),
         secondary_region_id=int(secondary_region_id),
         far_pressure_region_id=int(far_pressure_region_id),
@@ -14318,6 +14489,7 @@ def advance_hibm_mpm_sharp_mpm_step(
             search_radius_m=float(search_radius_m),
             interior_probe_distance_m=float(interior_probe_distance_m),
             classify_far_internal_nodes=bool(classify_far_internal_nodes),
+            search_radius_xyz_m=search_radius_xyz_m,
         )
     else:
         next_ib_report = load_report.ib_node_search
@@ -15853,6 +16025,13 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
     search_radius_m: float,
     interior_probe_distance_m: float,
     mpm_support_radius_m: float,
+    # Anisotropic IB classification envelope + interior probe (gated,
+    # default off via None): forwarded to advance_hibm_mpm_sharp_mpm_step.
+    # See _search_and_classify_kernel's docstring comment for the
+    # motivating porous-thin-structure bug. None (default) leaves every
+    # scalar path byte-for-byte unchanged.
+    search_radius_xyz_m: tuple[float, float, float] | None = None,
+    interior_probe_distance_xyz_m: tuple[float, float, float] | None = None,
     solid_dt_s: float,
     mu_pa: float,
     lambda_pa: float,
@@ -15924,6 +16103,8 @@ def advance_hibm_mpm_sharp_neo_hookean_step(
         search_radius_m=float(search_radius_m),
         interior_probe_distance_m=float(interior_probe_distance_m),
         mpm_support_radius_m=float(mpm_support_radius_m),
+        search_radius_xyz_m=search_radius_xyz_m,
+        interior_probe_distance_xyz_m=interior_probe_distance_xyz_m,
             primary_region_id=int(primary_region_id),
             secondary_region_id=int(secondary_region_id),
             far_pressure_region_id=int(far_pressure_region_id),
