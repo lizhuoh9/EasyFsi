@@ -249,6 +249,19 @@ class TurekHronFsiConfig:
     # spurious lift at rest on grid_nodes=(4, 96, 288) with the isotropic
     # envelope.
     ib_anisotropic_envelope: bool = False
+    # Global signed-distance interior classification (2026-07-09). The band
+    # classification only reaches search_radius from each face; on refined
+    # grids the beam interior extends beyond both faces' bands, leaving
+    # beam-center cells UNCLASSIFIED: sealed "fluid" pockets between the
+    # Dirichlet bands whose pressure blocks are near-singular (measured on
+    # (4,96,288)+aniso: only 36% of beam-interior cells obstacle-flagged and
+    # one CG solve per advance burning its full budget; with this flag the
+    # interior is 100% covered). False preserves the legacy base-grid
+    # behavior byte-for-byte (there the 2.3-cell interior is fully inside the
+    # bands, so far classification never fires). Geometrically sound for this
+    # case: the marker surface's only opening (beam root) is embedded in the
+    # cylinder obstacle mask.
+    classify_far_internal_nodes: bool = False
 
 
 def fsi1_config(**overrides: Any) -> TurekHronFsiConfig:
@@ -1362,6 +1375,7 @@ def run_turek_hron_fsi(
             post_dirichlet_consistency_projection_iterations=1,
             update_surface_geometry_from_mpm=False,
             interpolate_velocity_dirichlet_with_interior=False,
+            classify_far_internal_nodes=bool(config.classify_far_internal_nodes),
             search_radius_xyz_m=search_radius_xyz_m,
             interior_probe_distance_xyz_m=interior_probe_distance_xyz_m,
             )
