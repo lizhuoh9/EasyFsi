@@ -625,6 +625,91 @@ def _validate_marker_grid_consistency(config: TurekHronFsiConfig) -> None:
             )
 
 
+def _validate_fsi_coupling_controls(config: TurekHronFsiConfig) -> None:
+    """Reject malformed coupling/reseed controls before any solver state exists.
+
+    Sibling of _validate_marker_grid_consistency, called from
+    run_turek_hron_fsi before Taichi state is built. These fields gate
+    branches deep inside the step loop, where malformed values either
+    silently change the physics (fsi_coupling_iterations=0 used to be
+    clamped up to 1 by max(1, ...), masking a config typo) or crash mid-run
+    (marker_reseed_interval_steps=0 reaches ``step_index % 0`` at the first
+    gated reseed check -- a ZeroDivisionError at step 2 instead of a config
+    error at step 0).
+    """
+    iterations = config.fsi_coupling_iterations
+    if isinstance(iterations, bool) or not isinstance(iterations, int):
+        raise ValueError(
+            "fsi_coupling_iterations must be an int >= 1; got "
+            f"{iterations!r} ({type(iterations).__name__}). 1 = legacy loose "
+            "coupling; >1 enables the Picard strong-coupling loop."
+        )
+    if iterations < 1:
+        raise ValueError(
+            f"fsi_coupling_iterations must be an int >= 1; got {iterations}. "
+            "1 = legacy loose coupling; >1 enables the Picard "
+            "strong-coupling loop."
+        )
+
+    tolerance = config.fsi_coupling_tolerance
+    try:
+        tolerance_value = float(tolerance)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "fsi_coupling_tolerance must be a finite float > 0; got "
+            f"{tolerance!r}"
+        ) from exc
+    if not math.isfinite(tolerance_value) or tolerance_value <= 0.0:
+        raise ValueError(
+            "fsi_coupling_tolerance must be a finite float > 0; got "
+            f"{tolerance!r}. It is the relative interface-velocity residual "
+            "threshold for the strong-coupling loop."
+        )
+
+    relaxation = config.fsi_aitken_initial_relaxation
+    try:
+        relaxation_value = float(relaxation)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "fsi_aitken_initial_relaxation must be a finite float in "
+            f"[0, 1.5]; got {relaxation!r}"
+        ) from exc
+    if not math.isfinite(relaxation_value) or not 0.0 <= relaxation_value <= 1.5:
+        raise ValueError(
+            "fsi_aitken_initial_relaxation must be a finite float in "
+            f"[0, 1.5]; got {relaxation!r}. The Aitken update itself is "
+            "bounded to this range, so an initial value outside it is "
+            "always a config error."
+        )
+
+    accelerator = str(config.fsi_coupling_accelerator).strip().lower()
+    if accelerator not in {"aitken", "iqn_ils"}:
+        raise ValueError(
+            "fsi_coupling_accelerator must be one of {'aitken', 'iqn_ils'}; "
+            f"got {config.fsi_coupling_accelerator!r}. Refusing to fall back "
+            "silently: a typo here would run a different coupling algorithm "
+            "than the one requested."
+        )
+
+    reseed_interval = config.marker_reseed_interval_steps
+    if reseed_interval is not None:
+        if isinstance(reseed_interval, bool) or not isinstance(
+            reseed_interval, int
+        ):
+            raise ValueError(
+                "marker_reseed_interval_steps must be None or an int >= 1; "
+                f"got {reseed_interval!r} ({type(reseed_interval).__name__})"
+            )
+        if reseed_interval < 1:
+            raise ValueError(
+                "marker_reseed_interval_steps must be None or an int >= 1; "
+                f"got {reseed_interval}. 0 would evaluate "
+                "``step_index % 0`` at the first gated reseed check "
+                "(ZeroDivisionError at step 2); use None to disable "
+                "re-seeding."
+            )
+
+
 def _full_bounds(
     config: TurekHronFsiConfig,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -1289,6 +1374,7 @@ def run_turek_hron_fsi(
     history_flush_interval_steps: int = TUREK_HRON_HISTORY_FLUSH_INTERVAL_STEPS,
 ) -> dict[str, Any]:
     _validate_marker_grid_consistency(config)
+    _validate_fsi_coupling_controls(config)
     config = with_beam_surface_force_support(config)
     runtime = TaichiRuntimeConfig(arch="cuda")
     fluid = _build_fluid(config, runtime)

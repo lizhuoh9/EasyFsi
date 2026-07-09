@@ -219,7 +219,13 @@ def _reference_mesh_summary(reference_root: Path) -> dict[str, Any]:
         path = reference_root / name
         if not path.exists():
             continue
-        with np.load(path, allow_pickle=True) as data:
+        # allow_pickle stays False: the producer (_write_field_npz in
+        # src/refactored/validation/ansys_vertical_flap_fsi/
+        # official_fluent_reference.py) stores mesh_summary_json as a plain
+        # json.dumps() string, which numpy saves as a 0-d unicode array.
+        # Unpickling is never required, and the NPZ path is CLI-controlled,
+        # so object arrays must be rejected, not executed.
+        with np.load(path, allow_pickle=False) as data:
             if "mesh_summary_json" not in data.files:
                 if "x" in data.files and "y" in data.files:
                     x = np.asarray(data["x"], dtype=np.float64)
@@ -240,7 +246,10 @@ def _reference_mesh_summary(reference_root: Path) -> dict[str, Any]:
                         },
                     }
                 continue
-            return json.loads(str(data["mesh_summary_json"]))
+            # 0-d unicode array -> exact Python str via .item() (str() would
+            # also work for 0-d, but .item() is shape-explicit and fails
+            # loudly on anything that is not a single stored string).
+            return json.loads(data["mesh_summary_json"].item())
     raise FileNotFoundError(f"no official Fluent field NPZ with mesh summary under {reference_root}")
 
 

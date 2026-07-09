@@ -252,6 +252,31 @@ from .spec import (
 # still raises after the budget (5 s) - never hang, never silently drop.
 
 
+class SourceConfigNotFoundError(FileNotFoundError):
+    """--source-config does not exist: raised before ANY run side effects.
+
+    run() validates the source config as its very first step, before the
+    output directory is created and before run_process.json is written.
+    _run_process_failure_guard deliberately re-raises this error without
+    marking a failed run: a missing input config must leave the filesystem
+    untouched (no output dirs, no run_process.json).
+    """
+
+
+def _validate_source_config_exists(args: argparse.Namespace) -> Path:
+    source_config_path = Path(args.source_config).resolve()
+    if not source_config_path.is_file():
+        raise SourceConfigNotFoundError(
+            f"source config not found: {source_config_path}\n"
+            "Pass an existing GUI-exported simulation_config.json via "
+            "--source-config. The historical default path under "
+            "_diagnostic_runs/ is not checked into this repository, so the "
+            "flag is effectively required. No output directory or "
+            "run_process.json was created."
+        )
+    return source_config_path
+
+
 def _mark_existing_run_process_failed(args: argparse.Namespace, exc: Exception) -> None:
     try:
         process_path = Path(args.output_dir).resolve() / "run_process.json"
@@ -285,6 +310,10 @@ def _run_process_failure_guard(func):
     def wrapper(args: argparse.Namespace) -> dict[str, object]:
         try:
             return func(args)
+        except SourceConfigNotFoundError:
+            # Input-validation failure raised before any side effects: do not
+            # create the output directory just to record a failed status.
+            raise
         except Exception as exc:
             _mark_existing_run_process_failed(args, exc)
             raise
@@ -294,6 +323,10 @@ def _run_process_failure_guard(func):
 
 @_run_process_failure_guard
 def run(args: argparse.Namespace) -> dict[str, object]:
+    # Validate the input config FIRST: everything below (including the
+    # output-dir mkdir and the run_process.json write further down) must not
+    # happen when the source config does not exist.
+    _validate_source_config_exists(args)
     membrane_thickness_scale = _finite_positive_scale(
         args.membrane_thickness_scale,
         option_name="--membrane-thickness-scale",

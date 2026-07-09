@@ -28,6 +28,16 @@ BLOCKER_COLLECTION_VALIDATOR_REQUIRES_COMMIT_IMPORT = (
 BLOCKER_SOURCE_EXPORTS_COMMIT_REQUIRES_COLLECTION_VALIDATOR = (
     "source_exports_commit_requires_collection_validator"
 )
+BLOCKER_DESTINATION_DIR_OUTSIDE_VALIDATION_RUNS = (
+    "destination_dir_outside_validation_runs"
+)
+# The repo's validation_runs/ subtree, anchored on this script's own location
+# (<repo>/validation_runs/ansys_vertical_flap_fsi/scripts) so it does not
+# depend on the caller's working directory. Commit-import destinations are
+# moved/recursively deleted during the atomic install/rollback, so the CLI
+# refuses (without an override flag) any --destination-dir that resolves
+# outside this subtree, and refuses the subtree root itself.
+VALIDATION_RUNS_ROOT = SCRIPT_DIR.parents[1]
 REQUIRED_ARTIFACTS = tuple(str(spec["artifact"]) for spec in collection.METRIC_SPECS)
 REQUIRED_FILES = REQUIRED_ARTIFACTS + (REQUIRED_METADATA,)
 
@@ -387,6 +397,19 @@ def _same_resolved_path(left: Path, right: Path) -> bool:
     return Path(left).resolve() == Path(right).resolve()
 
 
+def _destination_dir_inside_validation_runs(destination_dir: Path) -> bool:
+    """True only if destination resolves STRICTLY inside validation_runs/.
+
+    The commit-import path replaces, backs up, and on failure recursively
+    deletes the destination tree (_remove_path_tree), so an unconstrained
+    --destination-dir is an arbitrary recursive delete. WindowsPath
+    comparisons are case-insensitive, so mixed-case paths cannot escape.
+    """
+    resolved = Path(destination_dir).resolve()
+    root = VALIDATION_RUNS_ROOT.resolve()
+    return resolved != root and root in resolved.parents
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -437,6 +460,17 @@ def main(argv: Iterable[str] | None = None) -> int:
             input_dir=args.input_dir,
             destination_dir=args.destination_dir,
             blockers=[BLOCKER_SOURCE_EXPORTS_COMMIT_REQUIRES_COLLECTION_VALIDATOR],
+        )
+        print(json.dumps(summary, indent=2, sort_keys=True), file=sys.stderr)
+        return 1
+
+    if args.commit_import and not _destination_dir_inside_validation_runs(
+        args.destination_dir
+    ):
+        summary = _cli_invalid_commit_import_option_summary(
+            input_dir=args.input_dir,
+            destination_dir=args.destination_dir,
+            blockers=[BLOCKER_DESTINATION_DIR_OUTSIDE_VALIDATION_RUNS],
         )
         print(json.dumps(summary, indent=2, sort_keys=True), file=sys.stderr)
         return 1

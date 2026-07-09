@@ -47,11 +47,19 @@
 
 ## 运行案例
 
-与原目录一致：
+squid 案例必须显式传 `--source-config`，指向一份**已存在**的 GUI 导出
+`simulation_config.json`。CLI 的历史默认路径（`_diagnostic_runs/.../simulation_config.json`）
+是被忽略的诊断输出，不在仓库内，因此不带该参数直接运行会立刻失败——
+runner 现在会在创建任何输出目录/写 `run_process.json` **之前**报
+`source config not found` 并保持文件系统不变：
 
 ```powershell
-& "D:/TOOL/Anaconda/python.exe" run_simulation.py squid-soft-robot --steps 8
+& "D:/TOOL/Anaconda/python.exe" run_simulation.py squid-soft-robot --steps 8 `
+    --source-config "D:\path\to\your\simulation_config.json"
 ```
+
+可运行案例清单以 `run_simulation.py --help` 输出为准（`comsol-*` 两个基准案例
+只提供 `run_*_fsi_smoke()` 编程入口，没有 CLI `main()`，不能从该分发器运行）。
 
 ## Repository layout
 

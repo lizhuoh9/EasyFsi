@@ -40,6 +40,50 @@ class GenericEntrypointTests(unittest.TestCase):
 
         self.assertIn("Unknown case", str(raised.exception))
 
+    def test_registered_module_without_main_raises_clear_error(self) -> None:
+        with patch.dict(
+            run_simulation.CASE_MODULES, {"mainless-case": "math"}, clear=False
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                run_simulation.dispatch(["mainless-case"])
+
+        message = str(raised.exception)
+        self.assertIn("mainless-case", message)
+        self.assertIn("has no main() entry point", message)
+        self.assertIn("Available cases:", message)
+
+    def test_comsol_spec_only_cases_report_missing_main_not_attribute_error(
+        self,
+    ) -> None:
+        for case_name in (
+            "comsol-water-balloon-fsi",
+            "comsol-multibody-mechanism-fsi",
+        ):
+            with self.subTest(case=case_name):
+                with self.assertRaises(SystemExit) as raised:
+                    run_simulation.dispatch([case_name])
+
+                message = str(raised.exception)
+                self.assertIn(case_name, message)
+                self.assertIn("has no main() entry point", message)
+
+    def test_public_registry_only_lists_cases_with_cli_main(self) -> None:
+        from cases import AVAILABLE_CASES, CASE_MODULES
+
+        self.assertNotIn("comsol-water-balloon-fsi", AVAILABLE_CASES)
+        self.assertNotIn("comsol-multibody-mechanism-fsi", AVAILABLE_CASES)
+        # The module registry keeps the spec-only benchmark cases registered.
+        self.assertIn("comsol-water-balloon-fsi", CASE_MODULES)
+        self.assertIn("comsol-multibody-mechanism-fsi", CASE_MODULES)
+        self.assertEqual(
+            tuple(sorted(AVAILABLE_CASES)),
+            ("ansys-vertical-flap-fsi", "squid-soft-robot", "turek-hron-fsi"),
+        )
+        usage = run_simulation._usage()
+        self.assertNotIn("comsol", usage)
+        for case_name in AVAILABLE_CASES:
+            self.assertIn(case_name, usage)
+
 
 if __name__ == "__main__":
     unittest.main()

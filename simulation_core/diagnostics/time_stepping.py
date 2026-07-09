@@ -32,7 +32,20 @@ class CflSubstepController:
         if previous_cfl is None:
             return self.base_substeps
         cfl = float(previous_cfl)
-        if not math.isfinite(cfl) or cfl <= 0.0:
+        if not math.isfinite(cfl):
+            # A NaN/Inf CFL diagnostic means the upstream velocity field has
+            # already diverged. The pre-2026-07 behavior lumped this with the
+            # "no load" branch below and fell back to the MINIMUM substep
+            # count -- the unsafe direction: it feeds a blown-up state
+            # forward with the least stabilization. Physics-first: refuse to
+            # guess a substep count from a non-physical diagnostic.
+            raise ValueError(
+                f"previous_cfl is non-finite ({cfl!r}): the upstream fluid "
+                "state has diverged; refusing to choose a substep count from "
+                "a non-physical CFL diagnostic (the old fallback silently "
+                "continued at minimum substeps)"
+            )
+        if cfl <= 0.0:
             return self.base_substeps
         reference_substeps = max(
             self.base_substeps,

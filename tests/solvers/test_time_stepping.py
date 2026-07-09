@@ -52,6 +52,34 @@ class CflSubstepControllerTests(unittest.TestCase):
             8,
         )
 
+    def test_non_finite_cfl_raises_instead_of_minimum_substep_fallback(self) -> None:
+        # Regression guard (2026-07 audit): NaN/Inf CFL used to be treated
+        # like "no load" and silently fell back to base (MINIMUM) substeps --
+        # the unsafe direction for a diverged fluid state.
+        controller = CflSubstepController(base_substeps=2, max_substeps=16)
+
+        for non_finite in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(previous_cfl=non_finite):
+                with self.assertRaisesRegex(ValueError, "non-finite") as raised:
+                    controller.substeps_for_next_step(
+                        previous_cfl=non_finite,
+                        previous_substeps=4,
+                    )
+                self.assertIn("diverged", str(raised.exception))
+
+    def test_zero_cfl_still_means_no_load_and_uses_base_substeps(self) -> None:
+        # A genuinely still fluid (finite CFL == 0) is a legitimate low-load
+        # state; only NON-FINITE diagnostics are refused.
+        controller = CflSubstepController(base_substeps=3, max_substeps=16)
+
+        self.assertEqual(
+            controller.substeps_for_next_step(
+                previous_cfl=0.0,
+                previous_substeps=8,
+            ),
+            3,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,8 +35,8 @@ jobs:
         shell: pwsh
         run: |
           python -m py_compile `
-            simulation_core\generic_fsi_solver.py `
-            simulation_core\pressure_sample_pairs.py `
+            simulation_core\drivers\generic_fsi_solver.py `
+            simulation_core\coupling\pressure_sample_pairs.py `
             cases\ansys_vertical_flap_fsi.py `
             benchmarks\official\solid_mpm_fsi_runner.py `
             tools\validation\print_ansys_vertical_flap_diagnostics.py `
@@ -66,6 +66,7 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\fluent_reference_contract_schema.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\fluent_source_export_schema.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\import_real_fluent_source_exports.py `
+            validation_runs\ansys_vertical_flap_fsi\scripts\run_official_fluent_2way_fsi50_snapshot.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_fluent_reference_collection_validation.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_fluent_parity.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py `
@@ -84,6 +85,7 @@ jobs:
             tests\integration\test_ansys_vertical_flap_fluent_source_export_schema.py `
             tests\integration\test_ansys_vertical_flap_real_fluent_source_export_import.py `
             tests\integration\test_ansys_vertical_flap_real_fluent_source_export_artifacts.py `
+            tests\integration\test_official_fluent_2way_snapshot_reference_loading.py `
             tests\integration\test_ansys_vertical_flap_real_solver_validation_status.py `
             tests\integration\test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic.py `
             tests\tools\test_validation_artifact_hygiene.py `
@@ -322,6 +324,7 @@ jobs:
           python -m unittest `
             tests.integration.test_ansys_vertical_flap_real_fluent_source_export_import `
             tests.integration.test_ansys_vertical_flap_real_fluent_source_export_artifacts `
+            tests.integration.test_official_fluent_2way_snapshot_reference_loading `
             -v
 
       - name: Run Fluent reference export protocol test
@@ -435,7 +438,7 @@ jobs:
         run: |
           python -m unittest -v `
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_case_metadata_matches_ansys_tutorial_boundaries_and_targets `
-            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_formal_runner_uses_official_full_span_flap_box `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_formal_runner_maps_official_streamwise_flap_box_to_solver_z `
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_formal_runner_places_both_streamwise_marker_faces `
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_solid_substep_cfl_report_preserves_explicit_higher_count `
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_preflow_controls_are_exposed_without_changing_default_smoke `
