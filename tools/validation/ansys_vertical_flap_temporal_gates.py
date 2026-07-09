@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -95,6 +96,7 @@ def classify_flow_temporal(
         }
 
     last_window = history[-profile.last_window_steps :]
+    window_covered, coverage_fail_reason = _last_window_coverage(last_window, profile)
     post_failures = flow_temporal_failures(
         post_warmup,
         profile=profile,
@@ -118,7 +120,9 @@ def classify_flow_temporal(
         )
         if value is not None
     ]
-    if len(post_failures) == 0 and len(last_failures) == 0:
+    if not window_covered:
+        status = FLOW_TEMPORAL_FAILED
+    elif len(post_failures) == 0 and len(last_failures) == 0:
         status = FLOW_TEMPORAL_STRICT
     elif (
         profile.allow_soft_flow
@@ -128,10 +132,13 @@ def classify_flow_temporal(
         status = FLOW_TEMPORAL_SOFT
     else:
         status = FLOW_TEMPORAL_FAILED
+    fail_reasons = _unique_reasons(post_failures + last_failures)
+    if not window_covered and coverage_fail_reason not in fail_reasons:
+        fail_reasons = [coverage_fail_reason, *fail_reasons]
     return {
         **base,
         "flow_temporal_status": status,
-        "flow_temporal_fail_reasons": _unique_reasons(post_failures + last_failures),
+        "flow_temporal_fail_reasons": fail_reasons,
         "flow_post_warmup_failed_step_count": len(post_failures),
         "flow_last_window_failed_step_count": len(last_failures),
         "flow_last_window_min_p999_mps": (
@@ -180,6 +187,7 @@ def classify_combined_temporal(
         return {**base, "temporal_fail_reasons": ["missing_post_warmup_history"]}
 
     last_window = history[-profile.last_window_steps :]
+    window_covered, coverage_fail_reason = _last_window_coverage(last_window, profile)
     post_failures = combined_temporal_failures(
         post_warmup,
         profile=profile,
@@ -207,7 +215,9 @@ def classify_combined_temporal(
         _negative_value(item.get("marker_force_z_N")) for item in last_window
     )
     last_tip_sign_ok = all(_negative_value(item.get("tip_dz_m")) for item in last_window)
-    if len(post_failures) == 0 and len(last_failures) == 0:
+    if not window_covered:
+        status = TEMPORAL_FAILED
+    elif len(post_failures) == 0 and len(last_failures) == 0:
         status = TEMPORAL_STRICT
     elif (
         len(post_failures) <= profile.allowed_post_warmup_failures
@@ -216,10 +226,13 @@ def classify_combined_temporal(
         status = TEMPORAL_SOFT
     else:
         status = TEMPORAL_FAILED
+    fail_reasons = _unique_reasons(post_failures + last_failures)
+    if not window_covered and coverage_fail_reason not in fail_reasons:
+        fail_reasons = [coverage_fail_reason, *fail_reasons]
     return {
         **base,
         "temporal_candidate_status": status,
-        "temporal_fail_reasons": _unique_reasons(post_failures + last_failures),
+        "temporal_fail_reasons": fail_reasons,
         "temporal_post_warmup_failed_step_count": len(post_failures),
         "temporal_last_window_failed_step_count": len(last_failures),
         "temporal_last_window_min_p999_mps": (
@@ -260,6 +273,7 @@ def classify_coupling_settling(
         return base
 
     last_window = history[-profile.last_window_steps :]
+    window_covered, _coverage_fail_reason = _last_window_coverage(last_window, profile)
     force_first = first_permanently_negative_step(history, "marker_force_z_N")
     tip_first = first_permanently_negative_step(history, "tip_dz_m")
     valid_first = first_permanently_valid_coupling_step(history)
@@ -269,7 +283,9 @@ def classify_coupling_settling(
     post_warmup = [
         item for item in history if int(item.get("step") or 0) >= evaluation_start_step
     ]
-    if post_warmup and all(coupling_step_passes(item) for item in post_warmup):
+    if not window_covered:
+        status = COUPLING_UNSETTLED
+    elif post_warmup and all(coupling_step_passes(item) for item in post_warmup):
         status = COUPLING_SETTLED
     elif valid_first != "" and last_force_ok and last_tip_ok:
         status = COUPLING_SETTLED_LATE
@@ -504,7 +520,61 @@ def _float_or_zero(value: Any) -> float:
 
 
 def _float_or_none(value: Any) -> float | None:
+    """Parse *value* as a float, rejecting NaN/Inf.
+
+    A validation gate must fail on missing or non-finite evidence, never
+    silently accept it. ``float("nan")`` compares False against every
+    ``<``/``>`` threshold check, so treating NaN as a "valid" float here
+    used to let a NaN metric skip every fail-reason check downstream
+    (see flow_temporal_step_fail_reasons). Rejecting non-finite values
+    turns them into "missing", which correctly trips the ``value is None``
+    branch of every caller.
+    """
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _optional_int(value: Any) -> int | None:
+    parsed = _float_or_none(value)
+    if parsed is None:
+        return None
+    return int(parsed)
+
+
+def _last_window_coverage(
+    window: list[dict[str, Any]],
+    profile: TemporalGateProfile,
+) -> tuple[bool, str]:
+    """Return whether *window* fully covers the configured last-window.
+
+    Full coverage requires both:
+      - minimum length: ``window`` must already contain
+        ``profile.last_window_steps`` rows (callers pass
+        ``history[-profile.last_window_steps:]``, so a short ``history``
+        yields a short ``window`` -- Python slicing never raises, so this
+        must be checked explicitly instead of trusting the slice length).
+      - contiguity: the "step" values inside the window must be strictly
+        increasing with a single constant positive stride (no missing,
+        duplicated, or reordered rows silently masquerading as a full
+        window).
+
+    Absence of coverage is reported with an explicit, actionable reason so
+    callers never mistake a truncated window for a "strict" pass.
+    """
+    if len(window) < profile.last_window_steps:
+        return False, (
+            f"last_window_insufficient_history_{len(window)}_of_"
+            f"{profile.last_window_steps}"
+        )
+    steps = [_optional_int(item.get("step")) for item in window]
+    if any(step is None for step in steps):
+        return False, "last_window_step_missing"
+    strides = {current - previous for previous, current in zip(steps, steps[1:])}
+    if strides and (len(strides) != 1 or next(iter(strides)) <= 0):
+        return False, "last_window_step_noncontiguous"
+    return True, ""

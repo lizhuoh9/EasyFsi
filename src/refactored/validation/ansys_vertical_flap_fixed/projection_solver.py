@@ -50,6 +50,10 @@ DEFAULT_SOLVER_CONFIG = {
     "initialization_mode": "structured_jet",
     "poisson_method": "jacobi",
     "outlet_flux_correction": False,
+    # Strict by default: a NaN/Inf field entry after a step means the
+    # solver blew up, and that must surface as an error rather than being
+    # silently zeroed. See `_finite_or_raise`.
+    "allow_non_finite_fields": False,
 }
 
 DEFAULT_STABILIZED_SOLVER_CONFIG = {
@@ -68,6 +72,7 @@ DEFAULT_STABILIZED_SOLVER_CONFIG = {
     "outlet_flux_correction": True,
     "history_interval": 10,
     "write_checkpoints": False,
+    "allow_non_finite_fields": False,
 }
 
 
@@ -581,10 +586,17 @@ def _projection_cleanup_step(
             ],
         }
     )
+    allow_non_finite = bool(solver_config.get("allow_non_finite_fields", False))
     return (
-        np.nan_to_num(u_next, nan=0.0, posinf=0.0, neginf=0.0),
-        np.nan_to_num(v_next, nan=0.0, posinf=0.0, neginf=0.0),
-        np.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0),
+        _finite_or_raise(
+            "u (projection cleanup step)", u_next, allow_non_finite=allow_non_finite
+        ),
+        _finite_or_raise(
+            "v (projection cleanup step)", v_next, allow_non_finite=allow_non_finite
+        ),
+        _finite_or_raise(
+            "p (projection cleanup step)", p, allow_non_finite=allow_non_finite
+        ),
         poisson_info,
     )
 
@@ -904,10 +916,11 @@ def _advance_one_step(
         u_next[masks["solid_mask"].astype(bool)] = 0.0
         v_next[masks["solid_mask"].astype(bool)] = 0.0
         poisson_info.update(flux_info)
+    allow_non_finite = bool(solver_config.get("allow_non_finite_fields", False))
     return (
-        np.nan_to_num(u_next, nan=0.0, posinf=0.0, neginf=0.0),
-        np.nan_to_num(v_next, nan=0.0, posinf=0.0, neginf=0.0),
-        np.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0),
+        _finite_or_raise("u (advance step)", u_next, allow_non_finite=allow_non_finite),
+        _finite_or_raise("v (advance step)", v_next, allow_non_finite=allow_non_finite),
+        _finite_or_raise("p (advance step)", p, allow_non_finite=allow_non_finite),
         poisson_info,
     )
 
@@ -1305,6 +1318,45 @@ def _velocity_change(
     delta = (u - previous_u)[fluid] ** 2 + (v - previous_v)[fluid] ** 2
     base = previous_u[fluid] ** 2 + previous_v[fluid] ** 2
     return float(np.sqrt(np.sum(delta)) / max(np.sqrt(np.sum(base)), 1.0e-12))
+
+
+def _finite_or_raise(
+    name: str,
+    array: np.ndarray,
+    *,
+    allow_non_finite: bool = False,
+) -> np.ndarray:
+    """Return a finite copy of *array*, or raise if it contains NaN/Inf.
+
+    Silently zeroing NaN/Inf entries after a step (the previous unconditional
+    ``np.nan_to_num(..., nan=0.0, posinf=0.0, neginf=0.0)`` behavior) hides
+    genuine blow-ups -- CFL violations, a divergent pressure solve, unstable
+    boundary coupling -- behind a field that looks perfectly finite on every
+    later step and in the final output. By default this raises immediately
+    so a blow-up is visible at the step and field where it actually
+    happened, with a count/location summary to make it debuggable.
+
+    Set ``allow_non_finite=True`` only when a caller has explicitly decided
+    tolerating non-finite values is acceptable (e.g. a diagnostic sweep that
+    intentionally explores unstable configurations and wants to keep
+    running); in that case the previous zeroing behavior is preserved.
+    """
+    finite_mask = np.isfinite(array)
+    non_finite_count = int(array.size - int(np.count_nonzero(finite_mask)))
+    if non_finite_count == 0:
+        return np.array(array, copy=True)
+    if not allow_non_finite:
+        nan_count = int(np.count_nonzero(np.isnan(array)))
+        posinf_count = int(np.count_nonzero(np.isposinf(array)))
+        neginf_count = int(np.count_nonzero(np.isneginf(array)))
+        sample_locations = np.argwhere(~finite_mask)[:5].tolist()
+        raise FloatingPointError(
+            f"non-finite values in {name}: {non_finite_count} of "
+            f"{int(array.size)} entries are non-finite "
+            f"(nan={nan_count}, +inf={posinf_count}, -inf={neginf_count}); "
+            f"first non-finite locations (row, col)={sample_locations}"
+        )
+    return np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def _merge_solver_config(config: dict[str, Any] | None) -> dict[str, Any]:

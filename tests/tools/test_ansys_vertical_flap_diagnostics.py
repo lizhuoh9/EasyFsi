@@ -9,6 +9,7 @@ from pathlib import Path
 
 from tools.validation.print_ansys_vertical_flap_diagnostics import (
     build_history_rows,
+    build_stage_check,
     build_summary_row,
     load_report,
     main,
@@ -252,6 +253,69 @@ class AnsysVerticalFlapDiagnosticsTests(unittest.TestCase):
         self.assertEqual(summary["first_tip_dz_violation_step"], "")
         self.assertEqual(summary["max_tip_dz_rebound_m"], "")
         self.assertEqual(summary["tip_dz_sign_violation_count"], 0)
+
+    def test_empty_run_report_never_classifies_as_pass_smoke(self) -> None:
+        # Audit probe: a report with steps=0, markers=0, history=[] carries
+        # no physical evidence at all, yet every per-gate field defaults to
+        # a value that happens to satisfy classify_status's checks (0 invalid
+        # markers, 0 residual, tip/monotonic violation counts default to 0
+        # when history is empty, etc). The classifier must require run
+        # evidence (steps > 0, markers > 0, non-empty history) before it is
+        # even allowed to consider PASS_SMOKE.
+        report = _empty_run_report()
+
+        summary = build_summary_row(report)
+
+        self.assertEqual(summary["steps"], 0)
+        self.assertEqual(summary["markers_actual"], 0)
+        self.assertNotEqual(summary["status"], "PASS_SMOKE")
+        self.assertEqual(summary["status"], "FAIL_INVALID")
+        self.assertIn("steps<=0", summary["missing_run_evidence"])
+        self.assertIn("markers_actual<=0", summary["missing_run_evidence"])
+        self.assertIn("history_empty", summary["missing_run_evidence"])
+
+    def test_stage_check_does_not_claim_gates_passed_for_invalid_run(self) -> None:
+        # A FAIL_INVALID report must not let the per-stage diagnosis helpers
+        # fall through to their default "gate passed" messages -- that would
+        # be exactly the kind of fake-green signal this gate exists to
+        # prevent, just relocated into the human-readable report instead of
+        # the status field.
+        report = _empty_run_report()
+        summary = build_summary_row(report)
+
+        stage_check = build_stage_check(report, summary, fluent_csv=None)
+
+        self.assertNotIn("gate passed", stage_check)
+        self.assertIn("missing_run_evidence = ", stage_check)
+        self.assertIn("steps<=0", stage_check)
+
+    def test_run_status_not_completed_forces_fail_invalid(self) -> None:
+        report = _fixture_report()
+        report["run_status"] = "blocked"
+
+        summary = build_summary_row(report)
+
+        self.assertEqual(summary["status"], "FAIL_INVALID")
+        self.assertTrue(
+            any(
+                item.startswith("run_status_not_completed")
+                for item in summary["missing_run_evidence"]
+            )
+        )
+
+    def test_legitimate_report_with_run_evidence_is_unaffected_by_invalid_gate(
+        self,
+    ) -> None:
+        # The fixture report legitimately has steps>0, markers>0, and
+        # non-empty history, so the new evidence gate must be a no-op for it
+        # -- it still falls through to the pre-existing FAIL_MAGNITUDE
+        # physics gate exactly as before.
+        report = _fixture_report()
+
+        summary = build_summary_row(report)
+
+        self.assertEqual(summary["missing_run_evidence"], [])
+        self.assertEqual(summary["status"], "FAIL_MAGNITUDE")
 
     def test_preflow_status_reports_not_requested_without_convergence_claim(self) -> None:
         report = _fixture_report()
@@ -529,6 +593,42 @@ def _fixture_report() -> dict:
                 "no_slip_projected_residual_after_projection_mps": 0.004,
             },
         ],
+    }
+
+
+def _empty_run_report() -> dict:
+    """A report that did nothing: 0 requested steps, 0 markers, no history.
+
+    Every individual field below is deliberately set to a value that would
+    satisfy classify_status's old per-gate physics checks in isolation
+    (0 invalid markers, in-tolerance relative errors, negative force/tip
+    signs, 0 residuals) so the only thing standing between this fixture and
+    a false PASS_SMOKE is an explicit run-evidence gate.
+    """
+
+    return {
+        "case": "empty-run",
+        "config": {
+            "step_count": 0,
+            "dt_s": 5.0e-4,
+        },
+        "marker_count_per_face": 0,
+        "marker_count_actual": 0,
+        "history": [],
+        "reference_results": {
+            "max_displacement_m": 5.0e-5,
+        },
+        "local_velocity_peak_mps": 24.0,
+        "local_velocity_peak_relative_error": 0.0,
+        "velocity_peak_tolerance": 0.05,
+        "stress_invalid_marker_count": 0,
+        "total_marker_force_n": [0.0, 0.0, -1.0],
+        "scatter_invalid_marker_count": 0,
+        "scatter_action_reaction_residual_n": 0.0,
+        "root_max_displacement_m": 0.0,
+        "tip_mean_displacement_m": [0.0, 0.0, -1.0e-5],
+        "max_displacement_relative_error": 0.0,
+        "displacement_tolerance": 0.05,
     }
 
 

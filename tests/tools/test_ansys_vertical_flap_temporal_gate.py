@@ -107,6 +107,101 @@ class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
             report["flow_temporal_fail_reasons"],
         )
 
+    def test_nan_flow_metrics_do_not_bypass_thresholds(self):
+        # Audit probe: float("nan") compares False against every "<"/">"
+        # threshold check, so the old `_float_or_none` (which accepted NaN as
+        # a valid float instead of rejecting it) let a NaN velocity metric
+        # silently skip every fail-reason check in
+        # flow_temporal_step_fail_reasons.
+        history = _history(step_count=10)
+        history[-1]["velocity_p999_mps"] = float("nan")
+        history[-1]["velocity_peak_mps"] = float("nan")
+        history[-1]["velocity_outlet_flux_ratio"] = float("nan")
+
+        report = gates.classify_flow_temporal(_row(), history)
+
+        self.assertNotEqual(report["flow_temporal_status"], "flow_temporal_strict")
+        self.assertIn("p999_below_20", report["flow_temporal_fail_reasons"])
+        self.assertIn("peak_above_40", report["flow_temporal_fail_reasons"])
+
+    def test_nan_metric_fails_combined_temporal_gate_too(self):
+        history = _history(step_count=10)
+        history[-1]["velocity_p999_mps"] = float("nan")
+
+        report = gates.classify_combined_temporal(_row(), history)
+
+        self.assertNotEqual(report["temporal_candidate_status"], "temporal_strict")
+        self.assertIn("p999_below_20", report["temporal_fail_reasons"])
+
+    def test_single_row_history_never_satisfies_last_window_strict(self):
+        # Audit probe: history[-profile.last_window_steps:] silently returns
+        # whatever is available when history is shorter than the configured
+        # window (Python slicing never raises), so a single "clean" row could
+        # satisfy the last-window checks even though the window (5 rows for
+        # the default step20 profile) is nowhere near fully covered.
+        row = _row()
+        history = _history(step_count=1)
+        history[0]["step"] = 6  # lands in the post-warmup evaluation range
+
+        report = gates.classify_flow_temporal(row, history)
+
+        self.assertNotEqual(report["flow_temporal_status"], "flow_temporal_strict")
+        self.assertIn(
+            "last_window_insufficient_history_1_of_5",
+            report["flow_temporal_fail_reasons"],
+        )
+
+    def test_single_row_history_with_nan_metrics_reproduces_audit_probe(self):
+        # Exact audit reproduction: single-row history with 3 NaN flow
+        # metrics must never classify as flow_temporal_strict.
+        row = _row()
+        history = _history(step_count=1)
+        history[0]["step"] = 6
+        history[0]["velocity_p999_mps"] = float("nan")
+        history[0]["velocity_peak_mps"] = float("nan")
+        history[0]["velocity_outlet_flux_ratio"] = float("nan")
+
+        report = gates.classify_flow_temporal(row, history)
+
+        self.assertNotEqual(report["flow_temporal_status"], "flow_temporal_strict")
+
+    def test_short_history_never_satisfies_combined_temporal_strict(self):
+        row = _row()
+        history = _history(step_count=1)
+        history[0]["step"] = 6
+
+        report = gates.classify_combined_temporal(row, history)
+
+        self.assertNotEqual(report["temporal_candidate_status"], "temporal_strict")
+        self.assertIn(
+            "last_window_insufficient_history_1_of_5",
+            report["temporal_fail_reasons"],
+        )
+
+    def test_short_history_never_satisfies_coupling_settled(self):
+        row = _row()
+        history = _history(step_count=1)
+        history[0]["step"] = 6
+
+        report = gates.classify_coupling_settling(row, history)
+
+        self.assertNotEqual(report["coupling_settling_status"], "coupling_settled")
+
+    def test_last_window_steps_with_step_gap_is_not_contiguous(self):
+        # A window with the right row *count* but a gap/duplicate in the step
+        # numbers is not truly "last N steps" coverage either.
+        row = _row()
+        history = _history(step_count=10)
+        history[-1]["step"] = history[-2]["step"]  # duplicate step -> gap
+
+        report = gates.classify_flow_temporal(row, history)
+
+        self.assertNotEqual(report["flow_temporal_status"], "flow_temporal_strict")
+        self.assertIn(
+            "last_window_step_noncontiguous",
+            report["flow_temporal_fail_reasons"],
+        )
+
     def test_missing_history_is_not_applicable(self):
         flow_report = gates.classify_flow_temporal(_row(), [])
         coupling_report = gates.classify_coupling_settling(_row(), [])

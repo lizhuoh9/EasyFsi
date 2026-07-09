@@ -134,6 +134,8 @@ SCATTER_RESIDUAL_TOLERANCE_N = 1.0e-9
 ROOT_DISPLACEMENT_TOLERANCE_M = 1.0e-8
 TIP_DZ_MONOTONIC_TOLERANCE_M = 1.0e-8
 
+STATUS_FAIL_INVALID = "FAIL_INVALID"
+
 
 def load_report(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="replace").strip()
@@ -279,14 +281,48 @@ def build_summary_row(report: dict[str, Any]) -> dict[str, Any]:
             "velocity_outlet_flux_ratio",
         ),
     }
+    row["missing_run_evidence"] = missing_run_evidence(report, row)
     row["status"] = classify_status(report, row)
     return row
+
+
+def missing_run_evidence(
+    report: dict[str, Any],
+    summary: dict[str, Any],
+) -> list[str]:
+    """Return the list of missing/insufficient run-evidence items.
+
+    Absence of evidence must never be treated as a pass: a report with no
+    completed steps, no markers, and no history carries no physical
+    information whatsoever, no matter what stale/default field values the
+    rest of the report happens to contain. Every downstream physics gate in
+    classify_status implicitly assumes a real run produced these fields, so
+    this check must run first.
+    """
+    missing: list[str] = []
+    run_status = report.get("run_status")
+    if run_status is not None and str(run_status) != "completed":
+        missing.append(f"run_status_not_completed:{run_status!r}")
+    if _int(summary.get("steps")) <= 0:
+        missing.append("steps<=0")
+    if _int(summary.get("markers_actual")) <= 0:
+        missing.append("markers_actual<=0")
+    if not _list(report.get("history")):
+        missing.append("history_empty")
+    return missing
 
 
 def classify_status(report: dict[str, Any], row: dict[str, Any] | None = None) -> str:
     if row is None:
         marker_force = _vector(report.get("total_marker_force_n"))
+        config = _dict(report.get("config"))
+        history = _list(report.get("history"))
+        markers_per_face = _int(
+            report.get("marker_count_per_face"), config.get("marker_count")
+        )
         summary = {
+            "steps": _int(config.get("step_count"), len(history)),
+            "markers_actual": _marker_count_actual(report, markers_per_face),
             "velocity_peak_mps": _number(report.get("local_velocity_peak_mps")),
             "velocity_peak_relerr": _number(
                 report.get("local_velocity_peak_relative_error")
@@ -303,6 +339,10 @@ def classify_status(report: dict[str, Any], row: dict[str, Any] | None = None) -
         summary.update(_tip_history_health(report))
     else:
         summary = row
+
+    if missing_run_evidence(report, summary):
+        return STATUS_FAIL_INVALID
+
     reference = _dict(report.get("reference_results"))
     velocity_peak = _finite_or_none(summary.get("velocity_peak_mps"))
     velocity_relerr = _finite_or_none(summary.get("velocity_peak_relerr"))
@@ -558,6 +598,10 @@ def build_stage_check(
             _setup_line("geometry", _geometry_ok(geometry), _geometry_text(geometry)),
             _setup_line("material", _material_ok(solid), _material_text(solid)),
             _setup_line("time", _time_ok(config, reference), _time_text(config)),
+            (
+                "missing_run_evidence = "
+                f"{', '.join(summary.get('missing_run_evidence', []) or []) or 'none'}"
+            ),
             "",
             "[PREFLOW]",
             f"steps_requested = {_format_value(report.get('preflow_steps_requested'))}",
@@ -1125,10 +1169,14 @@ def _time_text(config: dict[str, Any]) -> str:
 
 
 def _flow_diagnosis(status: str) -> str:
+    if status == STATUS_FAIL_INVALID:
+        return "run evidence missing; see [SETUP] missing_run_evidence"
     return "check fluid solver / BC / obstacle / outlet / projection" if status == "FAIL_FLOW" else "flow gate passed"
 
 
 def _interface_diagnosis(status: str) -> str:
+    if status == STATUS_FAIL_INVALID:
+        return "run evidence missing; see [SETUP] missing_run_evidence"
     return (
         "check HIBM pressure sampling / normal / marker area"
         if status == "FAIL_INTERFACE"
@@ -1137,6 +1185,8 @@ def _interface_diagnosis(status: str) -> str:
 
 
 def _solid_diagnosis(status: str) -> str:
+    if status == STATUS_FAIL_INVALID:
+        return "run evidence missing; see [SETUP] missing_run_evidence"
     if status == "FAIL_SOLID_ROOT":
         return "check fixed root constraint"
     if status == "FAIL_SOLID_SIGN":

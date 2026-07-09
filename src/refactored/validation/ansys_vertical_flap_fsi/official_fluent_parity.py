@@ -10,6 +10,7 @@ import numpy as np
 
 
 FIVE_PERCENT = 0.05
+DEFAULT_MIN_TEMPORAL_OVERLAP_FRACTION = 0.9
 
 
 def load_fluent_npz(path: str | Path) -> dict[str, np.ndarray]:
@@ -499,6 +500,7 @@ def compare_structure_monitor(
     solver_solid_max_key: str | None = None,
     fluent_solid_max_key: str = "solid_max_total_col0_col6_m",
     tolerance: float = FIVE_PERCENT,
+    min_temporal_overlap_fraction: float = DEFAULT_MIN_TEMPORAL_OVERLAP_FRACTION,
 ) -> dict[str, Any]:
     if not solver_rows:
         raise ValueError("solver structure rows are empty")
@@ -506,9 +508,32 @@ def compare_structure_monitor(
         raise ValueError("Fluent structure rows are empty")
     solver_series = np.array([float(row[solver_displacement_key]) for row in solver_rows])
     fluent_series = np.array([float(row[fluent_displacement_key]) for row in fluent_rows])
-    count = min(len(solver_series), len(fluent_series))
+    solver_length = int(solver_series.size)
+    fluent_length = int(fluent_series.size)
+    count = min(solver_length, fluent_length)
     if count <= 0:
         raise ValueError("structure series do not overlap")
+    # A shorter series silently truncated against a much longer one (e.g. 1
+    # solver sample vs 50 Fluent samples) discards nearly all of the
+    # reference data and can trivially "pass" on whatever the first row
+    # happens to be. Require the shorter series to cover most of the longer
+    # one before treating the truncated comparison as meaningful.
+    longer_length = max(solver_length, fluent_length)
+    overlap_fraction = count / longer_length if longer_length > 0 else 0.0
+    if overlap_fraction < float(min_temporal_overlap_fraction):
+        return {
+            "status": "failed",
+            "reason": (
+                f"insufficient temporal overlap: {solver_length} vs {fluent_length}"
+            ),
+            "solver_sample_count": solver_length,
+            "fluent_sample_count": fluent_length,
+            "overlap_fraction": overlap_fraction,
+            "min_temporal_overlap_fraction": float(min_temporal_overlap_fraction),
+            "metrics": {},
+            "gates": {},
+            "sample_count": count,
+        }
     solver_series = solver_series[:count]
     fluent_series = fluent_series[:count]
     solver_peak_index = int(np.argmax(solver_series))
