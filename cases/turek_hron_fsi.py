@@ -212,6 +212,26 @@ class TurekHronFsiConfig:
     fsi_coupling_iterations: int = 1
     fsi_coupling_tolerance: float = 1.0e-3
     fsi_aitken_initial_relaxation: float = 0.5
+    # Interface-velocity fixed-point accelerator (2026-07). "aitken" (default)
+    # is the scalar Aitken Delta^2 relaxation preserved byte-for-byte. On a
+    # refined grid the density-ratio-1 added-mass residual becomes multi-mode
+    # and oscillatory: scalar Aitken thrashes (measured relaxation swinging
+    # 0.05<->1.0, residual plateauing ~0.1, 0/30 steps converged, tip runaway).
+    # "iqn_ils" replaces the scalar update with the interface quasi-Newton
+    # inverse-least-squares multi-secant update (Degroote 2009), which converges
+    # the multi-mode residual a single scalar cannot. Only the guess-update rule
+    # changes; the relative interface-velocity residual and the convergence
+    # tolerance test are identical for both. Requires fsi_coupling_iterations>1.
+    fsi_coupling_accelerator: str = "aitken"
+    # Periodic flow-contour snapshot export (2026-07-09, observability parity
+    # with the run-end export_final_flow_snapshot output): None (default)
+    # preserves current behavior byte-for-byte -- nothing is written mid-run.
+    # Set to an integer N to additionally write
+    # output_dir/flow_snapshots/step_{step:06d}.npz every N physical steps,
+    # reusing the SAME build_turek_hron_final_fields_snapshot builder as the
+    # final export, so a velocity-contour animation can be rendered across the
+    # whole run instead of only its last frame.
+    flow_snapshot_interval_steps: int | None = None
 
 
 def fsi1_config(**overrides: Any) -> TurekHronFsiConfig:
@@ -407,6 +427,97 @@ def with_beam_surface_force_support(config: TurekHronFsiConfig) -> TurekHronFsiC
     )
 
 
+def _validate_marker_grid_consistency(config: TurekHronFsiConfig) -> None:
+    """Guard against the 2026-07-09 porous-beam failure mode.
+
+    Diagnosis: markers_per_side is grid-independent (default 48) and the HIBM
+    classification envelope is search_radius_m = 1.5 * max(dy, dz) (see the D1
+    comment in run_turek_hron_fsi and beam_box_solver_m). Refining ONLY ny
+    (wall-normal) while leaving markers_per_side and nz unscaled shrinks dy but
+    leaves max(dy, dz) pinned to the now-unchanged dz, so the search radius in
+    PHYSICAL units does not shrink even though the beam half-thickness measured
+    in dy-cells does. The classification bands grown from the beam's two
+    opposing faces then reach through the interior and overlap, so the sharp
+    fluid-solid interface leaks (measured: 880x spurious lift at rest on
+    grid_nodes=(4, 96, 288) with markers_per_side=48 -- a y-only refinement of
+    the (4, 48, 288)/48 base that left markers_per_side and nz untouched). The
+    isotropic fine grid (4, 96, 576)/96 -- which refines nz and
+    markers_per_side alongside ny -- does not exhibit this failure.
+
+    Two independent checks:
+      1. Marker long-spacing (beam_length_m / markers_per_side, the spacing of
+         the surface-marker rows along the beam's length) must not exceed the
+         streamwise cell size dz, else the marker rows develop gaps.
+      2. The classification search radius (1.5 * max(dy, dz)) must not reach
+         through the beam half-thickness as measured in wall-normal (dy)
+         cells: require search_radius_m <= 0.5 * beam_thickness_m + 0.5 * dy.
+         The 0.5 * dy slack lets the search band legitimately claim the
+         nearest interior cell layer without letting it meet the opposing
+         face's band. This must be a dy-weighted (cell-based) check, not a
+         plain physical bound like "1.5 * max(dy, dz) <= 0.75 * beam_thickness_m":
+         that naive form is blind to y-only refinement, because max(dy, dz) is
+         set by the UNCHANGED dz in both the working base grid and the broken
+         y-only-refined grid, so it cannot tell them apart. Folding in dy
+         explicitly (which DOES shrink under y-only refinement) is what makes
+         the check catch the regression.
+
+    Worked verification (2026-07-09, exact numbers via fluid_cell_spacing_m):
+      base    (4, 48, 288) grid, 48 markers/side:
+        dy=8.541667 mm, dz=8.680556 mm
+        long_spacing=7.291667 mm <= 1.05*dz=9.114583 mm -> OK
+        search_radius=1.5*max(dy,dz)=13.020833 mm
+        band_limit=0.5*20+0.5*dy=14.270833 mm -> 13.020833 <= 14.270833 -> PASS
+      fine-iso (4, 96, 576) grid, 96 markers/side:
+        dy=4.270833 mm, dz=4.340278 mm
+        long_spacing=3.645833 mm <= 1.05*dz=4.557292 mm -> OK
+        search_radius=1.5*max(dy,dz)=6.510417 mm
+        band_limit=0.5*20+0.5*dy=12.135417 mm -> 6.510417 <= 12.135417 -> PASS
+      broken  (4, 96, 288) grid, 48 markers/side (y-only refined, unscaled markers):
+        dy=4.270833 mm, dz=8.680556 mm (dz UNCHANGED from base)
+        long_spacing=7.291667 mm <= 1.05*dz=9.114583 mm -> OK (long-spacing
+          check alone does NOT catch this failure -- markers_per_side and dz
+          are both unchanged from the passing base grid)
+        search_radius=1.5*max(dy,dz)=13.020833 mm (SAME as base: dz still
+          dominates the max and dz did not change)
+        band_limit=0.5*20+0.5*dy=12.135417 mm -> 13.020833 > 12.135417 -> FAILS
+    """
+    _, dy, dz = fluid_cell_spacing_m(config)
+    beam_length_m = float(config.beam_length_m)
+    beam_thickness_m = float(config.beam_thickness_m)
+    markers_per_side = int(config.markers_per_side)
+
+    long_spacing_m = beam_length_m / float(markers_per_side)
+    long_spacing_limit_m = 1.05 * dz
+    if long_spacing_m > long_spacing_limit_m:
+        required_markers_per_side = math.ceil(beam_length_m / dz)
+        raise ValueError(
+            "Turek-Hron marker grid mismatch: beam-length marker spacing "
+            f"{long_spacing_m:.6e} m (beam_length_m={beam_length_m:.4f} / "
+            f"markers_per_side={markers_per_side}) exceeds 1.05x the "
+            f"streamwise cell size dz={dz:.6e} m (limit {long_spacing_limit_m:.6e} m), "
+            "which leaves gaps in the beam surface marker rows. Increase "
+            f"markers_per_side to at least {required_markers_per_side} "
+            "(ceil(beam_length_m / dz))."
+        )
+
+    search_radius_m = 1.5 * max(dy, dz)
+    band_limit_m = 0.5 * beam_thickness_m + 0.5 * dy
+    if search_radius_m > band_limit_m:
+        raise ValueError(
+            "Turek-Hron marker grid mismatch: the HIBM classification search "
+            f"radius {search_radius_m:.6e} m (= 1.5 * max(dy={dy:.6e} m, "
+            f"dz={dz:.6e} m)) exceeds the wall-normal band budget "
+            f"{band_limit_m:.6e} m (= 0.5*beam_thickness_m="
+            f"{beam_thickness_m:.4f} + 0.5*dy={dy:.6e} m). The classification "
+            "bands grown from the beam's opposing faces would overlap inside "
+            "the beam interior, leaking the sharp fluid-solid interface (a "
+            "porous beam -- see the 2026-07-09 diagnosis: y-only refinement "
+            "with unscaled markers measured 880x spurious lift at rest). "
+            "Refine y and z together (e.g. scale nz and markers_per_side "
+            "alongside ny) so that max(dy, dz) <= beam_thickness_m / 2."
+        )
+
+
 def _full_bounds(
     config: TurekHronFsiConfig,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -558,6 +669,85 @@ def _aitken_relaxation_factor(
     if not math.isfinite(raw):
         return float(previous_relaxation)
     return max(float(lower), min(float(upper), raw))
+
+
+# Retained secant columns for the IQN-ILS interface-velocity update; matches
+# simulation_core.coupling.fsi_coupling._IQN_ILS_HISTORY_LIMIT so both
+# accelerators cap the least-squares history identically.
+FSI_IQN_ILS_VELOCITY_HISTORY_LIMIT = 8
+
+
+def _iqn_ils_velocity_guess(
+    *,
+    velocity_guess_history: list[np.ndarray],
+    velocity_candidate_history: list[np.ndarray],
+    fallback_relaxation: float,
+) -> np.ndarray:
+    """Standard IQN-ILS next guess for the flat interface-velocity fixed point.
+
+    The per-step fixed-point map sends the interface-velocity guess v_guess to
+    the velocity v_candidate the solid returns when the fluid Dirichlet rows are
+    built from v_guess; the residual is r = v_candidate - v_guess. At solid/fluid
+    density ratio 1 on a refined grid this residual is multi-mode and
+    oscillatory, so scalar Aitken thrashes (measured: relaxation swinging
+    0.05<->1.0, residual plateauing ~0.1, tip runaway). The interface
+    quasi-Newton inverse-least-squares update below models the current residual
+    as a combination of past residual differences and applies the matching
+    combination of past map-output differences (Degroote 2009). It is the same
+    algebra as
+    simulation_core.coupling.fsi_coupling._iqn_ils_interface_reaction_guess but
+    kept local so this case iterates the marker interface velocity rather than
+    the reaction-force formulation, and cross-checked against that helper in the
+    unit test.
+
+    With fewer than two history entries there is no secant pair yet, so fall
+    back to a relaxed step guess + relax*(candidate - guess). NaN/Inf proposals
+    (rank collapse) also fall back. Nothing is clamped or scaled — the update is
+    a pure quasi-Newton step; only which velocity the next trial's fluid rows
+    are built from changes.
+    """
+    guesses = velocity_guess_history
+    candidates = velocity_candidate_history
+    count = len(candidates)
+    residual_last = candidates[-1] - guesses[-1]
+    if count < 2:
+        return guesses[-1] + float(fallback_relaxation) * residual_last
+    history_limit = min(FSI_IQN_ILS_VELOCITY_HISTORY_LIMIT, count - 1)
+    first_index = count - history_limit
+    residual_delta_columns: list[np.ndarray] = []
+    output_delta_columns: list[np.ndarray] = []
+    for index in range(first_index, count):
+        residual_delta = (candidates[index] - guesses[index]) - (
+            candidates[index - 1] - guesses[index - 1]
+        )
+        output_delta = candidates[index] - candidates[index - 1]
+        if (
+            float(np.linalg.norm(residual_delta)) <= 1.0e-30
+            or float(np.linalg.norm(output_delta)) <= 1.0e-30
+        ):
+            continue
+        residual_delta_columns.append(residual_delta)
+        output_delta_columns.append(output_delta)
+    if not residual_delta_columns:
+        return guesses[-1] + float(fallback_relaxation) * residual_last
+    residual_matrix = np.column_stack(residual_delta_columns)
+    output_matrix = np.column_stack(output_delta_columns)
+    # V c ~= r_current (least squares), next = x_tilde_current - W c.
+    coefficients, *_ = np.linalg.lstsq(residual_matrix, residual_last, rcond=None)
+    if residual_matrix.shape[1] == 1:
+        # A single secant spans only a 1-D subspace; if the current residual has
+        # a significant component outside it, the single-secant Newton step is
+        # unreliable, so fall back to a relaxed step. Matches the repo IQN-ILS
+        # safeguard (fsi_coupling._iqn_ils_interface_reaction_guess).
+        unmodeled_residual = residual_last - residual_matrix @ coefficients
+        if float(np.linalg.norm(unmodeled_residual)) > max(
+            1.0e-12, 1.0e-8 * float(np.linalg.norm(residual_last))
+        ):
+            return guesses[-1] + float(fallback_relaxation) * residual_last
+    proposed = candidates[-1] - output_matrix @ coefficients
+    if not bool(np.all(np.isfinite(proposed))):
+        return guesses[-1] + float(fallback_relaxation) * residual_last
+    return proposed
 
 
 def _marker_pressure_neumann_gradient_state(
@@ -831,6 +1021,7 @@ def run_turek_hron_fsi(
     export_final_flow_snapshot: bool = True,
     history_flush_interval_steps: int = TUREK_HRON_HISTORY_FLUSH_INTERVAL_STEPS,
 ) -> dict[str, Any]:
+    _validate_marker_grid_consistency(config)
     config = with_beam_surface_force_support(config)
     runtime = TaichiRuntimeConfig(arch="cuda")
     fluid = _build_fluid(config, runtime)
@@ -879,6 +1070,12 @@ def run_turek_hron_fsi(
     fsi_iterations = max(1, int(config.fsi_coupling_iterations))
     strong_coupling_enabled = fsi_iterations > 1
     fsi_tolerance = float(config.fsi_coupling_tolerance)
+    # Accelerator select: "aitken" (default) keeps the scalar Aitken update
+    # byte-for-byte; "iqn_ils" swaps only the guess-update rule for the
+    # interface quasi-Newton multi-secant update. Unknown values fall back to
+    # Aitken rather than silently mis-coupling.
+    fsi_accelerator = str(config.fsi_coupling_accelerator).strip().lower()
+    fsi_use_iqn_ils = strong_coupling_enabled and fsi_accelerator == "iqn_ils"
 
     def solid_step() -> Any:
         latest = None
@@ -914,6 +1111,24 @@ def run_turek_hron_fsi(
     if output_dir is not None and flush_interval > 0:
         incremental_history_path = Path(output_dir) / "turek_hron_fsi_history.csv"
         incremental_history_path.parent.mkdir(parents=True, exist_ok=True)
+    # Periodic flow-contour snapshot export (2026-07-09): off by default
+    # (config.flow_snapshot_interval_steps is None). When set, reuses the SAME
+    # snapshot builder as the run-end export_final_flow_snapshot output below,
+    # so the mid-run and final snapshots never drift apart -- only the
+    # destination path and the added time_s scalar differ.
+    flow_snapshots_dir: Path | None = None
+    flow_snapshot_interval = (
+        int(config.flow_snapshot_interval_steps)
+        if config.flow_snapshot_interval_steps is not None
+        else None
+    )
+    if (
+        output_dir is not None
+        and flow_snapshot_interval is not None
+        and flow_snapshot_interval > 0
+    ):
+        flow_snapshots_dir = Path(output_dir) / "flow_snapshots"
+        flow_snapshots_dir.mkdir(parents=True, exist_ok=True)
     for step_index in range(int(config.step_count)):
         t_s = (step_index + 1) * float(config.dt_s)
         _write_channel_boundary_rows(fluid, config, t_s)
@@ -1113,6 +1328,11 @@ def run_turek_hron_fsi(
             fsi_residual_history: list[float] = []
             fsi_relaxation_history: list[float] = []
             latest_report = None
+            # IQN-ILS secant history, reset every physical step (the quasi-Newton
+            # columns are per-timestep; carrying them across steps would model a
+            # stale map). Only appended to on the iqn_ils path.
+            iqn_velocity_guess_history: list[np.ndarray] = []
+            iqn_velocity_candidate_history: list[np.ndarray] = []
             for coupling_iteration in range(fsi_iterations):
                 # Restore at the start of EVERY trial, iteration 0 included —
                 # exactly like the squid precedent (step_loop.py,
@@ -1178,23 +1398,55 @@ def run_turek_hron_fsi(
                     # an error — the residual column records how far the
                     # fixed point got; blind tuning belongs to the caller.
                     break
-                if previous_velocity_residual is not None:
-                    relaxation = _aitken_relaxation_factor(
-                        previous_relaxation=relaxation,
-                        previous_residual=previous_velocity_residual,
-                        current_residual=velocity_residual,
+                if fsi_use_iqn_ils:
+                    # IQN-ILS accelerates ONLY the interface velocity — the mode
+                    # that goes added-mass unstable. The other marker fields
+                    # (position/normal/area) and the pressure-Neumann gradient
+                    # are slaved to the solid solve at this velocity and carry no
+                    # added-mass feedback, so they take the candidate directly (a
+                    # Gauss-Seidel pass); at the fixed point velocity guess ==
+                    # candidate and every field is mutually consistent. The
+                    # residual (above) and the convergence test (above) are
+                    # identical to the Aitken path — only the guess-update rule
+                    # differs. Nothing is clamped or scaled.
+                    iqn_velocity_guess_history.append(
+                        guess_velocity.reshape(-1).copy()
                     )
-                previous_velocity_residual = velocity_residual.copy()
-                marker_guess = relaxed_sharp_marker_state_arrays(
-                    marker_guess, marker_candidate, relaxation=relaxation
-                )
-                gradient_guess = (
-                    relaxed_sharp_pressure_neumann_gradient_state_array(
-                        gradient_guess,
-                        gradient_candidate,
-                        relaxation=relaxation,
+                    iqn_velocity_candidate_history.append(
+                        new_velocity.reshape(-1).copy()
                     )
-                )
+                    next_velocity_flat = _iqn_ils_velocity_guess(
+                        velocity_guess_history=iqn_velocity_guess_history,
+                        velocity_candidate_history=iqn_velocity_candidate_history,
+                        fallback_relaxation=relaxation,
+                    )
+                    velocity_field = np.asarray(marker_candidate["v_gamma_mps"])
+                    marker_guess = {
+                        key: (value.copy() if hasattr(value, "copy") else value)
+                        for key, value in marker_candidate.items()
+                    }
+                    marker_guess["v_gamma_mps"] = next_velocity_flat.reshape(
+                        velocity_field.shape
+                    ).astype(velocity_field.dtype, copy=False)
+                    gradient_guess = gradient_candidate
+                else:
+                    if previous_velocity_residual is not None:
+                        relaxation = _aitken_relaxation_factor(
+                            previous_relaxation=relaxation,
+                            previous_residual=previous_velocity_residual,
+                            current_residual=velocity_residual,
+                        )
+                    previous_velocity_residual = velocity_residual.copy()
+                    marker_guess = relaxed_sharp_marker_state_arrays(
+                        marker_guess, marker_candidate, relaxation=relaxation
+                    )
+                    gradient_guess = (
+                        relaxed_sharp_pressure_neumann_gradient_state_array(
+                            gradient_guess,
+                            gradient_candidate,
+                            relaxation=relaxation,
+                        )
+                    )
             fsi_aitken_relaxation = float(relaxation)
         load = latest_report.fluid_to_mpm_loads
         force_n = tuple(float(v) for v in load.marker_forces.total_marker_force_n)
@@ -1283,6 +1535,18 @@ def run_turek_hron_fsi(
             ),
         }
         history.append(row)
+        if (
+            flow_snapshots_dir is not None
+            and (step_index + 1) % flow_snapshot_interval == 0
+        ):
+            periodic_snapshot = build_turek_hron_final_fields_snapshot(
+                fluid, solid, config
+            )
+            periodic_snapshot["time_s"] = np.asarray(t_s, dtype=np.float64)
+            np.savez(
+                flow_snapshots_dir / f"step_{step_index + 1:06d}.npz",
+                **periodic_snapshot,
+            )
         if (
             incremental_history_path is not None
             and (step_index + 1) % flush_interval == 0
