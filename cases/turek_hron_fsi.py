@@ -164,8 +164,13 @@ class TurekHronFsiConfig:
     step_count: int = 200
     grid_nodes: tuple[int, int, int] = (4, 48, 288)
     solid_particle_counts: tuple[int, int, int] = (1, 8, 140)
-    markers_per_side: int = 48
-    markers_per_tip: int = 4
+    # int = explicit count (default 48/4, legacy byte-for-byte). "auto" =
+    # grid-adaptive: ceil(face_length / (0.75 * face-tangential cell size)),
+    # guaranteeing >= 1 marker per surface cell with 25% margin at ANY grid,
+    # so refining the grid can never reopen the porous-interface gap that the
+    # 2026-07-09 diagnosis traced to this grid-independent default.
+    markers_per_side: int | str = 48
+    markers_per_tip: int | str = 4
     solid_substeps: int = 100
     flow_predictor_substeps: int = 1
     # The 2.5 m channel spans 288 streamwise cells at the default grid; the
@@ -232,6 +237,18 @@ class TurekHronFsiConfig:
     # final export, so a velocity-contour animation can be rendered across the
     # whole run instead of only its last frame.
     flow_snapshot_interval_steps: int | None = None
+    # Anisotropic IB classification envelope (gated, 2026-07-09; see the
+    # _validate_marker_grid_consistency docstring for the full diagnosis).
+    # False (default) preserves the scalar search_radius_m = 1.5*max(dy,dz)
+    # envelope byte-for-byte. True switches run_turek_hron_fsi to a per-axis
+    # box acceptance |d_i| < 1.5*h_i, so the boundary band scales with each
+    # face's own normal cell size instead of the coarser of dy/dz. This is
+    # what lets a y-only-refined grid (dy shrunk, dz unchanged) keep a thin
+    # wall-normal band on the beam's long faces without the band reaching
+    # through the beam interior -- the failure mode that produced 880x
+    # spurious lift at rest on grid_nodes=(4, 96, 288) with the isotropic
+    # envelope.
+    ib_anisotropic_envelope: bool = False
 
 
 def fsi1_config(**overrides: Any) -> TurekHronFsiConfig:
@@ -338,6 +355,30 @@ def beam_fixed_particle_mask(
     return root_fixed | inside_cylinder
 
 
+def resolved_marker_counts(config: TurekHronFsiConfig) -> tuple[int, int]:
+    """Resolve markers_per_side / markers_per_tip, honoring "auto".
+
+    "auto" derives the counts from the CURRENT grid so marker long-spacing can
+    never exceed the face-tangential cell size (the porous-interface failure):
+    side markers span beam_length_m along z -> spacing target 0.75*dz; tip
+    markers span beam_thickness_m along y -> target 0.75*dy. Floored at the
+    legacy 48/4 so "auto" on the base grid is never sparser than the validated
+    default. Explicit ints pass through unchanged (legacy byte-for-byte).
+    """
+    _, dy, dz = fluid_cell_spacing_m(config)
+    side = config.markers_per_side
+    tip = config.markers_per_tip
+    if isinstance(side, str):
+        if side.strip().lower() != "auto":
+            raise ValueError("markers_per_side must be an int or 'auto'")
+        side = max(48, math.ceil(float(config.beam_length_m) / (0.75 * dz)))
+    if isinstance(tip, str):
+        if tip.strip().lower() != "auto":
+            raise ValueError("markers_per_tip must be an int or 'auto'")
+        tip = max(4, math.ceil(float(config.beam_thickness_m) / (0.75 * dy)))
+    return int(side), int(tip)
+
+
 def build_marker_layout(
     config: TurekHronFsiConfig,
 ) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]], list[float]]:
@@ -347,8 +388,7 @@ def build_marker_layout(
     y_high = box_max[1]
     z_tip = box_min[2]
     x_center = 0.5 * float(config.span_m)
-    markers_per_side = int(config.markers_per_side)
-    markers_per_tip = int(config.markers_per_tip)
+    markers_per_side, markers_per_tip = resolved_marker_counts(config)
     long_segment_m = float(config.beam_length_m) / float(markers_per_side)
     long_area_m2 = float(config.span_m) * long_segment_m
     positions: list[tuple[float, float, float]] = []
@@ -480,11 +520,22 @@ def _validate_marker_grid_consistency(config: TurekHronFsiConfig) -> None:
         search_radius=1.5*max(dy,dz)=13.020833 mm (SAME as base: dz still
           dominates the max and dz did not change)
         band_limit=0.5*20+0.5*dy=12.135417 mm -> 13.020833 > 12.135417 -> FAILS
+
+    Anisotropic escape valve (config.ib_anisotropic_envelope=True, 2026-07-09):
+    when the per-axis classification box is armed (see core.py's
+    _search_and_classify_kernel), the beam's long faces are y-normal, so their
+    band depth is governed by search_radius_y_m = 1.5*dy alone -- dz never
+    enters the wall-normal budget. Check 2 above becomes purely dy-based:
+    1.5*dy <= 0.5*beam_thickness_m + 0.5*dy (equivalently dy <=
+    0.5*beam_thickness_m), dropping the max(dy, dz) coupling that made the
+    isotropic check blind to y-only refinement. On the "broken" grid above
+    this recomputes to 1.5*4.270833=6.510417 mm <= 12.135417 mm -> PASSES.
     """
     _, dy, dz = fluid_cell_spacing_m(config)
     beam_length_m = float(config.beam_length_m)
     beam_thickness_m = float(config.beam_thickness_m)
-    markers_per_side = int(config.markers_per_side)
+    # Resolve "auto" first: the guard must validate the counts actually used.
+    markers_per_side, _ = resolved_marker_counts(config)
 
     long_spacing_m = beam_length_m / float(markers_per_side)
     long_spacing_limit_m = 1.05 * dz
@@ -500,22 +551,42 @@ def _validate_marker_grid_consistency(config: TurekHronFsiConfig) -> None:
             "(ceil(beam_length_m / dz))."
         )
 
-    search_radius_m = 1.5 * max(dy, dz)
     band_limit_m = 0.5 * beam_thickness_m + 0.5 * dy
-    if search_radius_m > band_limit_m:
-        raise ValueError(
-            "Turek-Hron marker grid mismatch: the HIBM classification search "
-            f"radius {search_radius_m:.6e} m (= 1.5 * max(dy={dy:.6e} m, "
-            f"dz={dz:.6e} m)) exceeds the wall-normal band budget "
-            f"{band_limit_m:.6e} m (= 0.5*beam_thickness_m="
-            f"{beam_thickness_m:.4f} + 0.5*dy={dy:.6e} m). The classification "
-            "bands grown from the beam's opposing faces would overlap inside "
-            "the beam interior, leaking the sharp fluid-solid interface (a "
-            "porous beam -- see the 2026-07-09 diagnosis: y-only refinement "
-            "with unscaled markers measured 880x spurious lift at rest). "
-            "Refine y and z together (e.g. scale nz and markers_per_side "
-            "alongside ny) so that max(dy, dz) <= beam_thickness_m / 2."
-        )
+    if bool(config.ib_anisotropic_envelope):
+        # Anisotropic path: the per-axis box uses search_radius_y_m = 1.5*dy
+        # for the beam's y-normal long faces, so dz cannot mask a y-only
+        # refinement the way the isotropic max(dy, dz) does above.
+        search_radius_y_m = 1.5 * dy
+        if search_radius_y_m > band_limit_m:
+            raise ValueError(
+                "Turek-Hron marker grid mismatch: the anisotropic HIBM "
+                f"classification y-normal search radius {search_radius_y_m:.6e} m "
+                f"(= 1.5 * dy={dy:.6e} m) exceeds the wall-normal band budget "
+                f"{band_limit_m:.6e} m (= 0.5*beam_thickness_m="
+                f"{beam_thickness_m:.4f} + 0.5*dy={dy:.6e} m). The classification "
+                "bands grown from the beam's opposing y-faces would overlap "
+                "inside the beam interior, leaking the sharp fluid-solid "
+                "interface (a porous beam). Refine ny further (or increase "
+                "beam_thickness_m) so that dy <= beam_thickness_m / 2."
+            )
+    else:
+        search_radius_m = 1.5 * max(dy, dz)
+        if search_radius_m > band_limit_m:
+            raise ValueError(
+                "Turek-Hron marker grid mismatch: the HIBM classification search "
+                f"radius {search_radius_m:.6e} m (= 1.5 * max(dy={dy:.6e} m, "
+                f"dz={dz:.6e} m)) exceeds the wall-normal band budget "
+                f"{band_limit_m:.6e} m (= 0.5*beam_thickness_m="
+                f"{beam_thickness_m:.4f} + 0.5*dy={dy:.6e} m). The classification "
+                "bands grown from the beam's opposing faces would overlap inside "
+                "the beam interior, leaking the sharp fluid-solid interface (a "
+                "porous beam -- see the 2026-07-09 diagnosis: y-only refinement "
+                "with unscaled markers measured 880x spurious lift at rest). "
+                "Refine y and z together (e.g. scale nz and markers_per_side "
+                "alongside ny) so that max(dy, dz) <= beam_thickness_m / 2. "
+                "Alternatively, set ib_anisotropic_envelope=True so the "
+                "classification band depth is governed by dy alone."
+            )
 
 
 def _full_bounds(
@@ -1056,10 +1127,25 @@ def run_turek_hron_fsi(
     #   search_radius  = 1.5 * plane_spacing < beam_thickness_m (0.02 m)
     #   interior_probe = 1.0 * plane_spacing < beam_thickness_m / 2 (0.01 m)
     # while both remain >= 1-1.5 plane cells for robust row formation.
-    _, plane_dy_m, plane_dz_m = fluid_cell_spacing_m(config)
+    plane_dx_m, plane_dy_m, plane_dz_m = fluid_cell_spacing_m(config)
     plane_spacing_m = max(plane_dy_m, plane_dz_m)
     search_radius_m = 1.5 * plane_spacing_m
     interior_probe_distance_m = 1.0 * plane_spacing_m
+    # Anisotropic envelope (gated, default off; see TurekHronFsiConfig's
+    # ib_anisotropic_envelope comment and _validate_marker_grid_consistency's
+    # docstring for the motivating porous-beam bug). None on the False path
+    # keeps advance_hibm_mpm_sharp_mpm_step's scalar search_radius_m /
+    # interior_probe_distance_m arguments byte-for-byte the sole envelope.
+    search_radius_xyz_m = (
+        (1.5 * plane_dx_m, 1.5 * plane_dy_m, 1.5 * plane_dz_m)
+        if config.ib_anisotropic_envelope
+        else None
+    )
+    interior_probe_distance_xyz_m = (
+        (1.0 * plane_dx_m, 1.0 * plane_dy_m, 1.0 * plane_dz_m)
+        if config.ib_anisotropic_envelope
+        else None
+    )
 
     solid_substep_count = int(config.solid_substeps)
 
@@ -1276,6 +1362,8 @@ def run_turek_hron_fsi(
             post_dirichlet_consistency_projection_iterations=1,
             update_surface_geometry_from_mpm=False,
             interpolate_velocity_dirichlet_with_interior=False,
+            search_radius_xyz_m=search_radius_xyz_m,
+            interior_probe_distance_xyz_m=interior_probe_distance_xyz_m,
             )
 
         if not strong_coupling_enabled:
