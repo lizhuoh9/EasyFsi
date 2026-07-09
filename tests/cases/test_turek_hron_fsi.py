@@ -30,10 +30,13 @@ from cases.turek_hron_fsi import (
     fsi3_config,
     inlet_profile_mps,
     inlet_ramp_factor,
+    resolved_marker_counts,
     run_turek_hron_fsi,
     solver_z_from_turek_hron_x_m,
     thin_beam_pressure_probe_max_multiplier,
     with_beam_surface_force_support,
+    _reseed_turek_hron_markers,
+    _resample_marker_group_arrays,
 )
 from benchmarks.official.solid_mpm_fsi_runner import SECONDARY_UNUSED_REGION_ID
 from simulation_core.coupling.hibm_mpm import advance_hibm_mpm_sharp_mpm_step
@@ -633,6 +636,190 @@ class TurekHronObservabilityExportTests(unittest.TestCase):
         self.assertIn("if not header_written:", source)
         self.assertIn("writer.writeheader()", source)
         self.assertIn("return True", source)
+
+
+class TurekHronMarkerReseedConfigTests(unittest.TestCase):
+    """Tier-2 marker re-seeding config gate (2026-07-09).
+
+    marker_reseed_interval_steps defaults to None so every existing run of
+    this case (including the three canonical presets) is byte-for-byte
+    unaffected until a caller opts in.
+    """
+
+    def test_marker_reseed_interval_steps_defaults_to_none(self):
+        self.assertIsNone(TurekHronFsiConfig().marker_reseed_interval_steps)
+        for config in (fsi1_config(), fsi2_config(), fsi3_config()):
+            self.assertIsNone(config.marker_reseed_interval_steps)
+
+    def test_field_is_settable_via_replace(self):
+        config = replace(TurekHronFsiConfig(), marker_reseed_interval_steps=50)
+        self.assertEqual(config.marker_reseed_interval_steps, 50)
+
+
+class TurekHronMarkerReseedRunLoopWiringTests(unittest.TestCase):
+    """Pins the run-loop gate and its position relative to the per-step
+    boundary-row write and the strong-coupling base snapshot (source
+    inspection only -- no GPU)."""
+
+    def test_run_loop_gates_reseed_call_on_interval(self):
+        source = inspect.getsource(run_turek_hron_fsi)
+        self.assertIn(
+            "config.marker_reseed_interval_steps is not None", source
+        )
+        self.assertIn("step_index > 0", source)
+        self.assertIn(
+            "step_index % int(config.marker_reseed_interval_steps) == 0",
+            source,
+        )
+        self.assertIn("_reseed_turek_hron_markers(markers, config)", source)
+
+    def test_reseed_call_precedes_boundary_rows_and_strong_coupling_base(self):
+        source = inspect.getsource(run_turek_hron_fsi)
+        reseed_index = source.index(
+            "_reseed_turek_hron_markers(markers, config)"
+        )
+        # First occurrence of each: the top-of-step boundary-row write and
+        # the strong-coupling per-step base snapshot (fluid.save_state()
+        # only appears on the gated strong-coupling path).
+        boundary_index = source.index(
+            "_write_channel_boundary_rows(fluid, config, t_s)"
+        )
+        save_state_index = source.index("fluid.save_state()")
+        self.assertLess(reseed_index, boundary_index)
+        self.assertLess(reseed_index, save_state_index)
+
+    def test_reseed_call_is_the_first_statement_in_the_step_loop(self):
+        source = inspect.getsource(run_turek_hron_fsi)
+        loop_index = source.index(
+            "for step_index in range(int(config.step_count)):"
+        )
+        reseed_index = source.index(
+            "_reseed_turek_hron_markers(markers, config)"
+        )
+        t_s_index = source.index("t_s = (step_index + 1) * float(config.dt_s)")
+        self.assertLess(loop_index, reseed_index)
+        self.assertLess(reseed_index, t_s_index)
+
+
+class TurekHronMarkerGroupResampleTests(unittest.TestCase):
+    """Direct numpy unit tests for _resample_marker_group_arrays."""
+
+    def test_straight_line_preserves_count_area_sum_and_monotonic_velocity(self):
+        count = 12
+        z = np.linspace(1.9, 2.25, count)
+        x = np.stack([np.full(count, 0.025), np.full(count, 0.19), z], axis=1)
+        n = np.tile(np.array([0.0, -1.0, 0.0]), (count, 1))
+        a = np.linspace(0.5e-4, 1.5e-4, count)
+        v = np.stack(
+            [np.zeros(count), np.linspace(0.0, 0.02, count), np.zeros(count)],
+            axis=1,
+        )
+
+        x2, n2, a2, v2 = _resample_marker_group_arrays(x, n, a, v, count)
+
+        self.assertEqual(x2.shape, (count, 3))
+        self.assertEqual(n2.shape, (count, 3))
+        self.assertEqual(a2.shape, (count,))
+        self.assertEqual(v2.shape, (count, 3))
+        self.assertAlmostEqual(float(np.sum(a2)), float(np.sum(a)), places=12)
+        np.testing.assert_allclose(x2[0], x[0], atol=1e-9)
+        np.testing.assert_allclose(x2[-1], x[-1], atol=1e-9)
+        # v's wall-normal component increases monotonically with arc length
+        # on the input curve, so the resampled stations must stay
+        # monotonically non-decreasing too.
+        self.assertTrue(bool(np.all(np.diff(v2[:, 1]) >= -1e-12)))
+
+    def test_bent_curve_preserves_count_area_sum_and_monotonic_velocity(self):
+        count = 20
+        theta = np.linspace(0.0, 0.6, count)
+        y = 0.19 + 0.01 * np.sin(theta)
+        z = 1.9 + 0.35 * theta / theta[-1]
+        x = np.stack([np.full(count, 0.025), y, z], axis=1)
+        n = np.tile(np.array([0.0, -1.0, 0.0]), (count, 1))
+        a = np.full(count, 2.0e-4)
+        v = np.stack(
+            [
+                np.zeros(count),
+                np.linspace(-0.01, 0.03, count),
+                np.linspace(0.0, -0.05, count),
+            ],
+            axis=1,
+        )
+
+        x2, n2, a2, v2 = _resample_marker_group_arrays(x, n, a, v, count)
+
+        self.assertEqual(x2.shape[0], count)
+        self.assertEqual(n2.shape[0], count)
+        self.assertEqual(a2.shape[0], count)
+        self.assertEqual(v2.shape[0], count)
+        self.assertAlmostEqual(float(np.sum(a2)), float(np.sum(a)), places=12)
+        # v[:, 1] increases and v[:, 2] decreases monotonically with marker
+        # index; since z (and hence arc length) is also strictly increasing
+        # with index (theta is monotonic and the sin() wobble in y is small
+        # relative to the z span), both remain monotonic in arc length too.
+        self.assertTrue(bool(np.all(np.diff(v2[:, 1]) >= -1e-9)))
+        self.assertTrue(bool(np.all(np.diff(v2[:, 2]) <= 1e-9)))
+
+    def test_rejects_count_below_two(self):
+        x = np.zeros((1, 3))
+        with self.assertRaises(ValueError):
+            _resample_marker_group_arrays(x, x, np.zeros(1), x, 1)
+
+    def test_rejects_shape_mismatch_between_x_and_count(self):
+        x = np.zeros((5, 3))
+        n = np.zeros((5, 3))
+        a = np.zeros(5)
+        v = np.zeros((5, 3))
+        with self.assertRaises(ValueError):
+            _resample_marker_group_arrays(x, n, a, v, 4)
+
+
+class TurekHronMarkerGroupOrderTests(unittest.TestCase):
+    """Pins the build_marker_layout ordering that _reseed_turek_hron_markers
+    assumes: lower-face side-count markers, then upper-face side-count
+    markers, then tip-count tip markers."""
+
+    def test_build_marker_layout_group_order_matches_reseed_assumption(self):
+        config = TurekHronFsiConfig()
+        side_count, tip_count = resolved_marker_counts(config)
+        positions, normals, areas = build_marker_layout(config)
+
+        self.assertEqual(len(positions), 2 * side_count + tip_count)
+        self.assertEqual(len(normals), 2 * side_count + tip_count)
+        self.assertEqual(len(areas), 2 * side_count + tip_count)
+
+        lower_normals = normals[:side_count]
+        upper_normals = normals[side_count : 2 * side_count]
+        tip_normals = normals[2 * side_count :]
+        for normal in lower_normals:
+            self.assertEqual(normal, (0.0, -1.0, 0.0))
+        for normal in upper_normals:
+            self.assertEqual(normal, (0.0, 1.0, 0.0))
+        for normal in tip_normals:
+            self.assertEqual(normal, (0.0, 0.0, -1.0))
+
+        # Each group is ordered (monotonic along its own natural axis), the
+        # precondition for treating it as an open polyline.
+        lower_z = [position[2] for position in positions[:side_count]]
+        upper_z = [
+            position[2] for position in positions[side_count : 2 * side_count]
+        ]
+        tip_y = [position[1] for position in positions[2 * side_count :]]
+        self.assertEqual(lower_z, sorted(lower_z))
+        self.assertEqual(upper_z, sorted(upper_z))
+        self.assertEqual(tip_y, sorted(tip_y))
+
+    def test_reseed_helper_signature_matches_module_layout_functions(self):
+        # Cheap sanity check that the helper is wired against the SAME
+        # resolved_marker_counts/build_marker_layout this test verifies,
+        # rather than a stale/private copy of the counts.
+        source = inspect.getsource(_reseed_turek_hron_markers)
+        self.assertIn("resolved_marker_counts(config)", source)
+        self.assertIn("slice(0, side_count)", source)
+        self.assertIn("slice(side_count, 2 * side_count)", source)
+        self.assertIn(
+            "slice(2 * side_count, 2 * side_count + tip_count)", source
+        )
 
 
 if __name__ == "__main__":

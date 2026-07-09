@@ -34,6 +34,12 @@ from simulation_core.coupling.hibm_mpm import (
     HibmMpmSurfaceMarkers,
     advance_hibm_mpm_sharp_mpm_step,
 )
+# Tier-2 marker re-seeding (2026-07-09): host-only, numpy-only arc-length
+# polyline resampler; see the module docstring for why it has no Taichi
+# dependency despite living in a Taichi-heavy module.
+from simulation_core.coupling.marker_seeding import (
+    resample_polyline_markers_by_arc_length,
+)
 from simulation_core.diagnostics.runtime import TaichiRuntimeConfig
 from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec
 from simulation_core.solids.neo_hookean_mpm import NeoHookeanMpmState
@@ -262,6 +268,23 @@ class TurekHronFsiConfig:
     # case: the marker surface's only opening (beam root) is embedded in the
     # cylinder obstacle mask.
     classify_far_internal_nodes: bool = False
+    # Tier-2 marker re-seeding (2026-07-09). build_marker_layout() builds the
+    # beam surface markers ONCE at rest and every step thereafter they just
+    # advect with the solid (position/velocity/normal/area written back from
+    # the MPM surface feedback) -- there is no re-parametrization. Under
+    # large deformation (FSI2 +/-80 mm tip displacement) that advection lets
+    # the markers' along-curve spacing drift far from uniform, clustering on
+    # the compressed side of a bend and thinning on the stretched side.
+    # None (default) preserves legacy advect-only marker tracking
+    # byte-for-byte -- the gated branch in run_turek_hron_fsi is never
+    # entered. Set to a positive integer N to additionally resample each of
+    # the three marker face-curves (lower face, upper face, tip cap) by arc
+    # length on their CURRENT deformed positions every N physical steps
+    # (see _reseed_turek_hron_markers), restoring near-uniform spacing
+    # without changing per-group or total marker count. Precedent: the squid
+    # case's marker_remap_interval_steps gate (this repo's top-level
+    # CLAUDE.md, "B2 marker 重建").
+    marker_reseed_interval_steps: int | None = None
 
 
 def fsi1_config(**overrides: Any) -> TurekHronFsiConfig:
@@ -874,6 +897,166 @@ def _restore_marker_pressure_neumann_gradient_state(
     field.from_numpy(full)
 
 
+def _resample_marker_group_arrays(
+    x: np.ndarray,
+    n: np.ndarray,
+    a: np.ndarray,
+    v: np.ndarray,
+    count: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Arc-length resample ONE ordered marker group's state (numpy only).
+
+    x/n/a (positions/normals/areas) are resampled via
+    resample_polyline_markers_by_arc_length on the group's CURRENT
+    (deformed) positions. v (velocity) has no analog in that helper, so it
+    is carried along by plain per-component numpy.interp over the SAME
+    cumulative arc-length stations the resampler placed x/n/a at -- see the
+    target_lengths computation below, which reproduces
+    resample_polyline_markers_by_arc_length's own open-polyline station
+    placement (np.linspace(0, total_length, count) evaluated against the
+    identical cumulative-arc-length array) so every returned array lines up
+    on the same m output markers.
+
+    target_spacing is chosen so the resampler's own open-polyline
+    station-count formula (station_count == ceil(total_length /
+    target_spacing) + 1) evaluates to exactly `count`. The analytically
+    exact spacing is total_length / (count - 1), but IEEE-754 rounding can
+    push the ratio total_length/target_spacing a hair past the (count - 1)
+    integer boundary and add a spurious extra station. Empirically
+    (verified against resample_polyline_markers_by_arc_length for count in
+    {3, 4, 5, 8, 48, 96, 140} on both straight and bent curves), SHRINKING
+    target_spacing pushes that ratio ABOVE (count - 1) and returns
+    count + 1 stations on every input tried; GROWING target_spacing by the
+    same tiny margin instead pulls the ratio back to (or below) count - 1
+    and reliably reproduces exactly `count` stations, so growing (not
+    shrinking) is the direction used below. The trailing assert is the
+    actionable backstop if some future input still disagrees.
+
+    The output count must exactly equal the input count: markers are a
+    FIXED-capacity Taichi field, and every downstream index
+    (resolved_marker_counts, HibmMpmIbNodeSearch's marker_capacity, the
+    lower/upper/tip slice boundaries in _reseed_turek_hron_markers) assumes
+    the per-group and total marker counts never change step to step.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    n = np.asarray(n, dtype=np.float64)
+    a = np.asarray(a, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    target_count = int(count)
+    if target_count < 2:
+        raise ValueError(
+            "_resample_marker_group_arrays requires count >= 2, got "
+            f"{target_count}"
+        )
+    if x.shape != (target_count, 3):
+        raise ValueError(
+            f"_resample_marker_group_arrays: x has shape {x.shape}, "
+            f"expected ({target_count}, 3)"
+        )
+
+    segment_lengths = np.linalg.norm(np.diff(x, axis=0), axis=1)
+    cumulative = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+    total_length = float(cumulative[-1])
+    if total_length <= 0.0:
+        raise ValueError(
+            "_resample_marker_group_arrays: marker group has zero arc length"
+        )
+    target_spacing = (total_length / float(target_count - 1)) * (1.0 + 1.0e-9)
+
+    x_out, n_out, a_out = resample_polyline_markers_by_arc_length(
+        x, n, a, target_spacing_m=target_spacing, closed=False
+    )
+    if x_out.shape[0] != target_count:
+        raise ValueError(
+            "_resample_marker_group_arrays: "
+            "resample_polyline_markers_by_arc_length returned "
+            f"{x_out.shape[0]} stations, expected count={target_count} "
+            f"(total_length={total_length:.9e} m, "
+            f"target_spacing={target_spacing:.9e} m); the station-count "
+            "safety margin needs widening for this input."
+        )
+
+    target_lengths = np.linspace(0.0, total_length, target_count)
+    v_out = np.empty((target_count, 3), dtype=np.float64)
+    for axis in range(3):
+        v_out[:, axis] = np.interp(target_lengths, cumulative, v[:, axis])
+
+    return (
+        x_out.astype(np.float64, copy=False),
+        n_out.astype(np.float64, copy=False),
+        a_out.astype(np.float64, copy=False),
+        v_out,
+    )
+
+
+def _reseed_turek_hron_markers(
+    markers: HibmMpmSurfaceMarkers, config: TurekHronFsiConfig
+) -> None:
+    """Tier-2 arc-length marker re-seeding (gated by marker_reseed_interval_steps).
+
+    Marker order verified directly from build_marker_layout's construction
+    loop (the two normal_sign passes followed by the tip pass):
+      1. LOWER face: the first markers_per_side markers, normal
+         (0, -1, 0), ordered by INCREASING solver z (beam tip -> beam root).
+      2. UPPER face: the next markers_per_side markers, normal (0, 1, 0),
+         same z-ordering as the lower face.
+      3. TIP cap: the last markers_per_tip markers, normal (0, 0, -1),
+         ordered by INCREASING solver y (lower face -> upper face).
+    Each group is already a naturally-ordered OPEN polyline (confirmed by
+    TurekHronMarkerGroupOrderTests), so resampling every group independently
+    with closed=False keeps group membership, per-group count, and total
+    marker count fixed while restoring near-uniform arc-length spacing on
+    the CURRENT deformed positions.
+    """
+    side_count, tip_count = resolved_marker_counts(config)
+    state = sharp_marker_state_arrays(markers)
+    x = np.asarray(state["x_gamma_m"], dtype=np.float64)
+    v = np.asarray(state["v_gamma_mps"], dtype=np.float64)
+    n = np.asarray(state["n_gamma"], dtype=np.float64)
+    a = np.asarray(state["A_gamma_m2"], dtype=np.float64)
+
+    groups = (
+        (slice(0, side_count), side_count),
+        (slice(side_count, 2 * side_count), side_count),
+        (slice(2 * side_count, 2 * side_count + tip_count), tip_count),
+    )
+
+    new_x = np.array(x, dtype=np.float64, copy=True)
+    new_v = np.array(v, dtype=np.float64, copy=True)
+    new_n = np.array(n, dtype=np.float64, copy=True)
+    new_a = np.array(a, dtype=np.float64, copy=True)
+    for group_slice, group_count in groups:
+        gx, gn, ga, gv = _resample_marker_group_arrays(
+            x[group_slice],
+            n[group_slice],
+            a[group_slice],
+            v[group_slice],
+            group_count,
+        )
+        new_x[group_slice] = gx
+        new_n[group_slice] = gn
+        new_a[group_slice] = ga
+        new_v[group_slice] = gv
+
+    # Preserve every OTHER state key untouched (currently none beyond the
+    # four resampled below, but this keeps the helper correct if
+    # CHECKPOINT_MARKER_STATE_FIELD_NAMES ever grows).
+    new_state = dict(state)
+    new_state["x_gamma_m"] = new_x.astype(
+        np.asarray(state["x_gamma_m"]).dtype, copy=False
+    )
+    new_state["v_gamma_mps"] = new_v.astype(
+        np.asarray(state["v_gamma_mps"]).dtype, copy=False
+    )
+    new_state["n_gamma"] = new_n.astype(
+        np.asarray(state["n_gamma"]).dtype, copy=False
+    )
+    new_state["A_gamma_m2"] = new_a.astype(
+        np.asarray(state["A_gamma_m2"]).dtype, copy=False
+    )
+    restore_sharp_marker_state_arrays(markers, new_state)
+
+
 def _write_channel_boundary_rows(
     fluid: CartesianFluidSolver, config: TurekHronFsiConfig, t_s: float
 ) -> None:
@@ -1229,6 +1412,24 @@ def run_turek_hron_fsi(
         flow_snapshots_dir = Path(output_dir) / "flow_snapshots"
         flow_snapshots_dir.mkdir(parents=True, exist_ok=True)
     for step_index in range(int(config.step_count)):
+        # Tier-2 marker re-seeding (2026-07-09, gated by
+        # marker_reseed_interval_steps -- see TurekHronFsiConfig's field
+        # comment; precedent: the squid case's marker_remap_interval_steps).
+        # Must run BEFORE _write_channel_boundary_rows and BEFORE the
+        # strong-coupling save_state/marker snapshot below: the reseeded
+        # marker state has to become THIS step's fixed-point base, not
+        # something computed after that base snapshot -- reseeding later
+        # would just be overwritten every trial by the Picard loop's
+        # restore_sharp_marker_state_arrays(marker_guess) restore-to-base
+        # calls, silently discarding the reseed. None (default) never
+        # enters this branch, preserving legacy advect-only marker tracking
+        # byte-for-byte.
+        if (
+            config.marker_reseed_interval_steps is not None
+            and step_index > 0
+            and step_index % int(config.marker_reseed_interval_steps) == 0
+        ):
+            _reseed_turek_hron_markers(markers, config)
         t_s = (step_index + 1) * float(config.dt_s)
         _write_channel_boundary_rows(fluid, config, t_s)
         fluid.apply_velocity_dirichlet_boundary_rows(read_report=False)
