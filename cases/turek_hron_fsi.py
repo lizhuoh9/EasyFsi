@@ -234,6 +234,17 @@ class TurekHronFsiConfig:
     # changes; the relative interface-velocity residual and the convergence
     # tolerance test are identical for both. Requires fsi_coupling_iterations>1.
     fsi_coupling_accelerator: str = "aitken"
+    # Absolute interface-velocity convergence floor (2026-07-10). The Picard
+    # residual is RELATIVE (||dv|| / ||v_new||); during the inlet ramp the
+    # interface velocities are ~0, so the relative residual is noise/noise and
+    # never reaches the tolerance -- every early step burns the full iteration
+    # budget on dynamically irrelevant mismatches (measured: 300 s/step at
+    # 10 iterations while ||dv|| ~ 2e-5 m/s). With this floor, a step also
+    # counts as converged when the ABSOLUTE mismatch ||dv|| (m/s, un-normalized)
+    # drops below the floor: interface velocity errors far below the physical
+    # velocity scale (mean inlet 0.2 m/s) cannot feed the added-mass loop.
+    # 0.0 (default) preserves the pure-relative legacy test byte-for-byte.
+    fsi_coupling_absolute_tolerance_mps: float = 0.0
     # Periodic flow-contour snapshot export (2026-07-09, observability parity
     # with the run-end export_final_flow_snapshot output): None (default)
     # preserves current behavior byte-for-byte -- nothing is written mid-run.
@@ -1438,6 +1449,7 @@ def run_turek_hron_fsi(
     fsi_iterations = max(1, int(config.fsi_coupling_iterations))
     strong_coupling_enabled = fsi_iterations > 1
     fsi_tolerance = float(config.fsi_coupling_tolerance)
+    fsi_absolute_tolerance_mps = float(config.fsi_coupling_absolute_tolerance_mps)
     # Accelerator select: "aitken" (default) keeps the scalar Aitken update
     # byte-for-byte; "iqn_ils" swaps only the guess-update rule for the
     # interface quasi-Newton multi-secant update. Unknown values fall back to
@@ -1772,12 +1784,19 @@ def run_turek_hron_fsi(
                     marker_guess["v_gamma_mps"], dtype=np.float64
                 )
                 velocity_residual = (new_velocity - guess_velocity).reshape(-1)
-                fsi_coupling_residual = float(
-                    np.linalg.norm(velocity_residual)
-                ) / max(1.0e-30, float(np.linalg.norm(new_velocity)))
+                absolute_residual_mps = float(np.linalg.norm(velocity_residual))
+                fsi_coupling_residual = absolute_residual_mps / max(
+                    1.0e-30, float(np.linalg.norm(new_velocity))
+                )
                 fsi_residual_history.append(float(fsi_coupling_residual))
                 fsi_relaxation_history.append(float(relaxation))
-                if fsi_coupling_residual < fsi_tolerance:
+                # Converged when the RELATIVE residual is below tolerance, OR
+                # (gated, default off) when the ABSOLUTE mismatch is below the
+                # physical floor -- see fsi_coupling_absolute_tolerance_mps.
+                if fsi_coupling_residual < fsi_tolerance or (
+                    fsi_absolute_tolerance_mps > 0.0
+                    and absolute_residual_mps < fsi_absolute_tolerance_mps
+                ):
                     # Converged: keep the last advance's result (fluid and
                     # solid are already stepped consistently with the marker
                     # state the fluid saw).
