@@ -19,7 +19,7 @@ class InterfaceReactionUpdate:
 
     @property
     def residual_norm_n(self) -> float:
-        return math.sqrt(sum(component * component for component in self.residual_n))
+        return _force_norm(self.residual_n)
 
 
 @dataclass(frozen=True)
@@ -181,7 +181,23 @@ def _force_residual(*, target_force_n: ForceVector, committed_force_n: ForceVect
 
 
 def _force_norm(force_n: ForceVector) -> float:
-    return math.sqrt(sum(component * component for component in force_n))
+    """Return the Euclidean norm of *force_n*, safe against squaring overflow.
+
+    ``sqrt(sum(c * c for c in force_n))`` overflows to +inf for finite but
+    large components (e.g. every component ~1e200: c*c already overflows to
+    inf, even though the true norm ~1.4e200 is finite and well within
+    float64 range). Scaling every component by the largest magnitude before
+    squaring keeps every intermediate term in [0, 1], so the sum and its
+    square root cannot overflow; multiplying back by the scale reconstructs
+    the true (finite) norm. For normal-magnitude vectors this reduces to the
+    same value as the naive formula (verified bit-for-bit for vectors whose
+    scaled components are exactly representable, e.g. 3-4-5 triangles).
+    """
+    scale = max((abs(component) for component in force_n), default=0.0)
+    if scale <= 0.0:
+        return 0.0
+    scaled_square_sum = sum((component / scale) ** 2 for component in force_n)
+    return scale * math.sqrt(scaled_square_sum)
 
 
 def _force_dot(lhs: ForceVector, rhs: ForceVector) -> float:
@@ -584,12 +600,8 @@ def action_reaction_balance(
     reaction = _force_vector(reaction_force_n, name="reaction_force_n")
     _same_length(action, reaction, lhs_name="action_force_n", rhs_name="reaction_force_n")
     residual = tuple(a + r for a, r in zip(action, reaction))
-    residual_norm = math.sqrt(sum(component * component for component in residual))
-    scale = max(
-        math.sqrt(sum(component * component for component in action))
-        + math.sqrt(sum(component * component for component in reaction)),
-        1.0e-30,
-    )
+    residual_norm = _force_norm(residual)
+    scale = max(_force_norm(action) + _force_norm(reaction), 1.0e-30)
     return ForceBalanceReport(
         residual_components_n=residual,
         residual_norm_n=residual_norm,
@@ -625,6 +637,42 @@ def aitken_relaxation_factor(
         return float(min(max(previous_relaxation_value, lower_value), upper_value))
     numerator = sum(previous_value * change for previous_value, change in zip(previous, delta))
     proposed = -previous_relaxation_value * numerator / denominator
+    if not math.isfinite(proposed):
+        # component*component (and the matching dot product) can overflow to
+        # +/-inf for extreme-but-finite residual magnitudes (e.g. every
+        # component ~1e200), turning a finite ratio into inf/inf = nan, even
+        # though the true Aitken factor is well-defined. Recompute in a
+        # scaled space: dividing every component by the largest magnitude
+        # first keeps every intermediate term bounded, and the resulting
+        # scale**2 factor cancels exactly out of the numerator/denominator
+        # ratio, so this reproduces the same mathematical value the unscaled
+        # computation above would have produced without overflowing. Only
+        # taken on this (otherwise-unreachable) overflow path, so it cannot
+        # perturb the exact values already-passing tests observe.
+        scale = max(
+            max((abs(value) for value in previous), default=0.0),
+            max((abs(value) for value in delta), default=0.0),
+        )
+        if scale > 0.0:
+            scaled_delta = [value / scale for value in delta]
+            scaled_denominator = sum(component * component for component in scaled_delta)
+            if scaled_denominator > 0.0:
+                scaled_numerator = sum(
+                    (previous_value / scale) * change
+                    for previous_value, change in zip(previous, scaled_delta)
+                )
+                proposed = (
+                    -previous_relaxation_value * scaled_numerator / scaled_denominator
+                )
+    if not math.isfinite(proposed):
+        # Mirrors cases/turek_hron_fsi.py::_aitken_relaxation_factor's guard
+        # (same formula, credited there as a local numpy-based copy of this
+        # function): even after the overflow-safe rescale above, a
+        # non-finite ratio means this residual pair is genuinely degenerate,
+        # not a recoverable numeric accident -- freeze relaxation at its
+        # previous value instead of propagating nan/inf into the next
+        # interface-force update.
+        return float(previous_relaxation_value)
     return float(min(max(proposed, lower_value), upper_value))
 
 
@@ -1057,7 +1105,7 @@ def solve_interface_reaction_fixed_point(
         physical_residual_history.append(physical_residual)
         diagnostic_target_force_history.append(diagnostic_target)
         diagnostic_residual_history.append(diagnostic_residual)
-        residual_norm_n = math.sqrt(sum(component * component for component in physical_residual))
+        residual_norm_n = _force_norm(physical_residual)
         iterations_used = iteration + 1
         trial_accepted_by_predicate = (
             True if accept_evaluation is None else bool(accept_evaluation(evaluation))

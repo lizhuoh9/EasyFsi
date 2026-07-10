@@ -46,6 +46,16 @@ class TriMooneyShellMpmReport:
     transfer_relative_error: float
     primary_particle_count: int = 0
     secondary_particle_count: int = 0
+    # Force-sanitization diagnostics (see mooney_shell/core.py's
+    # TriMooneyShellMpmState._check_force_sanitization /
+    # _raise_if_force_sanitization_detected). Default 0 keeps this schema
+    # compatible with reports built before these counters existed. Non-zero
+    # only when allow_force_sanitization=True was passed to step() /
+    # advance_region_loads() / advance_with_external_forces() -- the strict
+    # (default) path raises instead of returning a report with either count
+    # above 0.
+    sanitized_force_count: int = 0
+    constitutive_clamp_count: int = 0
 
 
 __all__ = [

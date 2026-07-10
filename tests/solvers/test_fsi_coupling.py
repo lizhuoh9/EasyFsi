@@ -7,7 +7,9 @@ from simulation_core.coupling.fsi_coupling import (
     InterfaceReactionRelaxationState,
     InterfaceReactionStepUpdate,
     InterfaceReactionTargetEvaluation,
+    InterfaceReactionUpdate,
     RegionPairInterfaceReactionTarget,
+    _force_norm,
     _force_vector,
     _iqn_ils_interface_reaction_guess,
     _least_squares_coefficients,
@@ -2375,6 +2377,104 @@ class NonFiniteForceGuardTests(unittest.TestCase):
         )
         self.assertTrue(used_least_squares)
         self.assertEqual(proposed, (0.0, 0.0, 1.0))
+
+
+class OverflowSafeNormAndAitkenTests(unittest.TestCase):
+    """S2-audit FINDING 2: sum-of-squares norms and the Aitken ratio must
+    stay finite for large-but-finite inputs instead of silently overflowing
+    to inf/nan (component*component overflows before the true, finite
+    magnitude can be computed), since these values feed convergence checks,
+    rejection thresholds, and the relaxation factor itself.
+    """
+
+    def test_force_norm_is_finite_for_components_whose_square_would_overflow(
+        self,
+    ) -> None:
+        # Probed pre-fix: _force_norm((1e200, 1e200)) == inf, even though
+        # the true norm (~1.414e200) is well within float64 range.
+        norm = _force_norm((1.0e200, 1.0e200))
+
+        self.assertTrue(math.isfinite(norm))
+        self.assertAlmostEqual(norm / (1.0e200 * math.sqrt(2.0)), 1.0, places=12)
+
+    def test_force_norm_matches_naive_formula_bit_for_bit_on_normal_vector(
+        self,
+    ) -> None:
+        # 3-4-5 is exact in binary floating point at every intermediate step
+        # (squares, sum, and square root all round to the same bits either
+        # way), so this pins that the overflow-safe rescale is a true no-op
+        # -- not just numerically close -- for ordinary-magnitude vectors.
+        vector = (3.0, 4.0, 0.0)
+        naive_norm = math.sqrt(sum(component * component for component in vector))
+
+        self.assertEqual(naive_norm, 5.0)
+        self.assertEqual(_force_norm(vector), naive_norm)
+
+    def test_force_norm_of_all_zero_vector_is_zero(self) -> None:
+        self.assertEqual(_force_norm((0.0, 0.0, 0.0)), 0.0)
+
+    def test_interface_reaction_update_residual_norm_delegates_to_force_norm(
+        self,
+    ) -> None:
+        update = InterfaceReactionUpdate(
+            force_n=(0.0,),
+            residual_n=(1.0e200, 1.0e200),
+            power_w=(0.0,),
+            passivity_limited=(False,),
+        )
+
+        self.assertEqual(update.residual_norm_n, _force_norm(update.residual_n))
+        self.assertTrue(math.isfinite(update.residual_norm_n))
+
+    def test_action_reaction_balance_relative_error_stays_finite_and_nonzero(
+        self,
+    ) -> None:
+        # Pre-fix, action/reaction's own inline sqrt(sum(c*c)) calls each
+        # overflowed to inf for the huge x-component, so `scale` became inf
+        # and a genuine 5 N residual silently reported relative_error==0.0
+        # instead of the true (tiny but nonzero) ~2.5e-200.
+        report = action_reaction_balance((1.0e200, 0.0), (-1.0e200, 5.0))
+
+        self.assertTrue(math.isfinite(report.residual_norm_n))
+        self.assertTrue(math.isfinite(report.scale_n))
+        self.assertTrue(math.isfinite(report.relative_error))
+        self.assertEqual(report.residual_norm_n, 5.0)
+        self.assertGreater(report.relative_error, 0.0)
+
+    def test_aitken_relaxation_factor_is_finite_for_residuals_whose_square_overflows(
+        self,
+    ) -> None:
+        # Probed pre-fix: aitken_relaxation_factor(0.5, (1e200,), (-1e200,))
+        # returned nan (denominator/numerator both overflowed to +/-inf,
+        # then inf/inf == nan), even though the true ratio is 0.25.
+        factor = aitken_relaxation_factor(0.5, (1.0e200,), (-1.0e200,))
+
+        self.assertTrue(math.isfinite(factor))
+        self.assertAlmostEqual(factor, 0.25)
+
+    def test_aitken_relaxation_factor_normal_path_parity_with_prefix_value(
+        self,
+    ) -> None:
+        # Same residual pair as
+        # test_interface_reaction_relaxation_state_updates_without_mutation's
+        # second call (previous_residual=(10.0, -8.0),
+        # current_residual=(2.5, -2.0), previous_relaxation=0.5): pins that
+        # the overflow-safe rescale path -- only entered when the direct
+        # computation is non-finite -- never runs for normal-magnitude
+        # inputs, so this hardcoded pre-fix expected value is unchanged.
+        factor = aitken_relaxation_factor(0.5, (10.0, -8.0), (2.5, -2.0))
+
+        self.assertAlmostEqual(factor, 2.0 / 3.0)
+
+    def test_aitken_relaxation_factor_stalled_residual_keeps_previous_relaxation(
+        self,
+    ) -> None:
+        # denominator <= 1e-30 (near-identical previous/current residual)
+        # must still short-circuit to previous_relaxation before any
+        # overflow-safe rescaling is attempted.
+        factor = aitken_relaxation_factor(0.7, (5.0, -3.0), (5.0, -3.0))
+
+        self.assertAlmostEqual(factor, 0.7)
 
 
 if __name__ == "__main__":

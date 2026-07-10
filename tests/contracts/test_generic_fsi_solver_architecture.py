@@ -294,3 +294,192 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
         for module_name in benchmark_modules:
             module = __import__(module_name, fromlist=["CASE_SPEC"])
             self.assertEqual(module.CASE_SPEC.acceptance_tolerance, 0.05)
+
+
+def _toy_fsi_problem(runtime_executor):
+    """Minimal FsiProblem for exercising solve_fsi()'s own bookkeeping.
+
+    Geometry/traction details are irrelevant here -- these tests are about
+    solve_fsi()'s completion honesty and FsiSolverConfig's input validation,
+    not about any particular fluid/solid model.
+    """
+    from simulation_core.drivers.generic_fsi_solver import (
+        FluidDomain,
+        FsiProblem,
+        InterfaceSurface,
+        OneSidedPressurePolicy,
+        PressureSamplePairProvider,
+        PressureSamplingConfig,
+        SolidBody,
+        SurfaceRegion,
+        TractionConfig,
+    )
+
+    provider = PressureSamplePairProvider(mode="runtime_anchored_cell_pair")
+    traction = TractionConfig(
+        pressure_sampling=PressureSamplingConfig(pair_provider=provider),
+        one_sided_pressure=OneSidedPressurePolicy(),
+    )
+    return FsiProblem(
+        problem_id="toy-completion",
+        fluid_domain=FluidDomain(
+            domain_id="toy-fluid",
+            coordinate_model="cartesian-3d",
+            grid_nodes=(2, 2, 2),
+            bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+        ),
+        solid_bodies=(SolidBody(body_id="toy-solid", material={}),),
+        interface_surfaces=(
+            InterfaceSurface(
+                surface_id="toy-interface",
+                regions=(SurfaceRegion(region_id="face-a"),),
+            ),
+        ),
+        traction_config=traction,
+        runtime_executor=runtime_executor,
+    )
+
+
+class FsiSolverConfigValidationTests(unittest.TestCase):
+    """FsiSolverConfig.__post_init__ must reject non-finite numeric fields.
+
+    ``nan <= 0.0`` and ``inf <= 0.0`` are both False under IEEE-754, so a
+    bare ``time_step_s <= 0.0`` check silently let NaN/inf time steps
+    through instead of rejecting them at config-construction time.
+    """
+
+    def test_step_count_must_be_positive(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FsiSolverConfig
+
+        with self.assertRaisesRegex(ValueError, "step_count"):
+            FsiSolverConfig(step_count=0, time_step_s=0.1)
+
+    def test_time_step_rejects_nan(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FsiSolverConfig
+
+        with self.assertRaisesRegex(ValueError, "time_step_s.*finite"):
+            FsiSolverConfig(step_count=5, time_step_s=float("nan"))
+
+    def test_time_step_rejects_infinite(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FsiSolverConfig
+
+        with self.assertRaisesRegex(ValueError, "time_step_s.*finite"):
+            FsiSolverConfig(step_count=5, time_step_s=float("inf"))
+        with self.assertRaisesRegex(ValueError, "time_step_s.*finite"):
+            FsiSolverConfig(step_count=5, time_step_s=float("-inf"))
+
+    def test_time_step_rejects_non_positive_finite_value(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FsiSolverConfig
+
+        with self.assertRaisesRegex(ValueError, "time_step_s.*finite"):
+            FsiSolverConfig(step_count=5, time_step_s=0.0)
+        with self.assertRaisesRegex(ValueError, "time_step_s.*finite"):
+            FsiSolverConfig(step_count=5, time_step_s=-0.1)
+
+    def test_finite_positive_time_step_is_accepted(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FsiSolverConfig
+
+        config = FsiSolverConfig(step_count=5, time_step_s=0.01)
+        self.assertEqual(config.step_count, 5)
+        self.assertEqual(config.time_step_s, 0.01)
+
+
+class SolveFsiRunStatusHonestyTests(unittest.TestCase):
+    """solve_fsi() must not report "completed" for a short/aborted run.
+
+    Previously run_status defaulted to "completed" whenever the executor
+    returned any non-empty history at all, even when completed_step_count
+    was far short of requested_step_count (e.g. 1 of 10 requested steps) --
+    a silent, dishonest success signal for a run that stopped early. See
+    ``_resolve_run_status`` in generic_fsi_solver.py for the fixed policy.
+    """
+
+    def _run(self, *, step_count, history, run_status=None):
+        from simulation_core.drivers.generic_fsi_solver import (
+            DiagnosticsConfig,
+            FsiSolverConfig,
+            solve_fsi,
+        )
+
+        def executor(problem, solver_config, diagnostics_config):
+            raw = {"history": history}
+            if run_status is not None:
+                raw["run_status"] = run_status
+            return raw
+
+        problem = _toy_fsi_problem(executor)
+        solver_config = FsiSolverConfig(step_count=step_count, time_step_s=0.1)
+        diagnostics_config = DiagnosticsConfig(output_root="outputs/toy-completion")
+        return solve_fsi(problem, solver_config, diagnostics_config)
+
+    def test_short_history_is_partial_when_executor_is_silent_on_status(self) -> None:
+        # Probe: 10 requested, 1 returned, no explicit run_status -- the
+        # pre-fix default fell back to "completed" here.
+        result = self._run(step_count=10, history=[{"step": 1}])
+
+        self.assertEqual(result.completed_step_count, 1)
+        self.assertEqual(result.requested_step_count, 10)
+        self.assertEqual(result.run_status, "partial")
+        self.assertNotIn("run_status_overridden_reason", result.diagnostics)
+
+    def test_short_history_is_downgraded_to_partial_when_executor_claims_completed(
+        self,
+    ) -> None:
+        # Same 10-requested/1-returned probe, but this time the executor
+        # itself (wrongly) claims "completed" -- must still be corrected.
+        result = self._run(
+            step_count=10, history=[{"step": 1}], run_status="completed"
+        )
+
+        self.assertEqual(result.run_status, "partial")
+        self.assertIn("run_status_overridden_reason", result.diagnostics)
+        reason = result.diagnostics["run_status_overridden_reason"]
+        self.assertIn("completed_step_count", reason)
+        self.assertIn("1", reason)
+        self.assertIn("10", reason)
+
+    def test_exact_step_count_is_completed(self) -> None:
+        history = [{"step": 1}, {"step": 2}]
+        result = self._run(step_count=2, history=history)
+
+        self.assertEqual(result.completed_step_count, 2)
+        self.assertEqual(result.run_status, "completed")
+        self.assertNotIn("run_status_overridden_reason", result.diagnostics)
+
+    def test_exact_step_count_stays_completed_when_executor_says_so_explicitly(
+        self,
+    ) -> None:
+        history = [{"step": 1}, {"step": 2}]
+        result = self._run(step_count=2, history=history, run_status="completed")
+
+        self.assertEqual(result.run_status, "completed")
+        self.assertNotIn("run_status_overridden_reason", result.diagnostics)
+
+    def test_explicit_failed_status_is_preserved_even_with_full_history(self) -> None:
+        history = [{"step": 1}, {"step": 2}]
+        result = self._run(step_count=2, history=history, run_status="failed")
+
+        self.assertEqual(result.run_status, "failed")
+        self.assertNotIn("run_status_overridden_reason", result.diagnostics)
+
+    def test_explicit_failed_status_is_preserved_with_empty_history(self) -> None:
+        result = self._run(step_count=5, history=[], run_status="failed")
+
+        self.assertEqual(result.completed_step_count, 0)
+        self.assertEqual(result.run_status, "failed")
+
+    def test_empty_history_with_silent_executor_is_unknown_not_completed(self) -> None:
+        result = self._run(step_count=5, history=[])
+
+        self.assertEqual(result.completed_step_count, 0)
+        self.assertEqual(result.run_status, "unknown")
+
+    def test_empty_history_with_executor_claiming_completed_is_not_trusted(
+        self,
+    ) -> None:
+        # Zero steps can never honestly be "completed"; the override lands
+        # on "unknown" rather than "partial" since no progress was made.
+        result = self._run(step_count=5, history=[], run_status="completed")
+
+        self.assertEqual(result.run_status, "unknown")
+        self.assertIn("run_status_overridden_reason", result.diagnostics)

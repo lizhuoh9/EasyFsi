@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -177,8 +178,14 @@ class FsiSolverConfig:
     def __post_init__(self) -> None:
         if int(self.step_count) <= 0:
             raise ValueError("step_count must be positive")
-        if float(self.time_step_s) <= 0.0:
-            raise ValueError("time_step_s must be positive")
+        # `nan <= 0.0` is False (every ordinary comparison against NaN is
+        # False under IEEE-754), so the previous `<= 0.0` check silently let
+        # a NaN time_step_s through instead of rejecting it. Require
+        # finiteness explicitly so NaN/inf are always caught here, not deep
+        # inside a solver loop.
+        time_step_value = float(self.time_step_s)
+        if not math.isfinite(time_step_value) or time_step_value <= 0.0:
+            raise ValueError("time_step_s must be a finite positive number")
         _require_non_empty(self.solver_name, name="solver_name")
 
 
@@ -249,6 +256,13 @@ def solve_fsi(
 ) -> FsiRunResult:
     raw = dict(problem.runtime_executor(problem, solver_config, diagnostics_config))
     history = tuple(dict(row) for row in raw.get("history", ()))
+    requested_step_count = int(solver_config.step_count)
+    completed_step_count = len(history)
+    run_status, run_status_overridden_reason = _resolve_run_status(
+        raw.get("run_status"),
+        requested_step_count=requested_step_count,
+        completed_step_count=completed_step_count,
+    )
     diagnostics = dict(raw.get("diagnostics", {}))
     diagnostics.setdefault("generic_api_invoked", True)
     diagnostics.setdefault("problem", problem.as_diagnostics())
@@ -260,11 +274,15 @@ def solve_fsi(
         "one_sided_pressure_policy",
         problem.traction_config.one_sided_pressure.as_diagnostics(),
     )
+    if run_status_overridden_reason is not None:
+        diagnostics.setdefault(
+            "run_status_overridden_reason", run_status_overridden_reason
+        )
     return FsiRunResult(
         problem_id=problem.problem_id,
-        run_status=str(raw.get("run_status", "completed" if history else "unknown")),
-        requested_step_count=int(solver_config.step_count),
-        completed_step_count=len(history),
+        run_status=run_status,
+        requested_step_count=requested_step_count,
+        completed_step_count=completed_step_count,
         history=history,
         diagnostics=diagnostics,
         artifacts={
@@ -273,6 +291,47 @@ def solve_fsi(
         },
         raw_report=dict(raw.get("report", raw)),
     )
+
+
+def _resolve_run_status(
+    executor_run_status: Any,
+    *,
+    requested_step_count: int,
+    completed_step_count: int,
+) -> tuple[str, str | None]:
+    """Return an honest ``run_status`` plus an optional override reason.
+
+    The executor's own ``run_status`` (if any) is trusted for every value
+    except "completed": a previous default of `"completed" if history else
+    "unknown"` reported "completed" whenever *any* history rows came back,
+    even when `completed_step_count` was far short of `requested_step_count`
+    (e.g. 1 of 10 requested steps). That silently hid partial/aborted runs
+    behind a status that reads as success. "completed" is now only trusted
+    when the executor did not claim it, or when the step counts actually
+    match; a short "completed" claim is downgraded to "partial" (or
+    "unknown" when literally zero steps ran) with the reason recorded in
+    diagnostics. Any other executor-provided status (e.g. "failed") is
+    passed through unchanged -- this function never invents a failure the
+    executor did not report.
+    """
+    if executor_run_status is None:
+        if completed_step_count == 0:
+            return "unknown", None
+        if completed_step_count == requested_step_count:
+            return "completed", None
+        return "partial", None
+
+    run_status = str(executor_run_status)
+    if run_status == "completed" and completed_step_count != requested_step_count:
+        corrected_status = "unknown" if completed_step_count == 0 else "partial"
+        reason = (
+            "executor reported run_status='completed' but completed_step_count "
+            f"({completed_step_count}) != requested_step_count "
+            f"({requested_step_count}); downgraded to "
+            f"{corrected_status!r}"
+        )
+        return corrected_status, reason
+    return run_status, None
 
 
 def _require_non_empty(value: str, *, name: str) -> None:

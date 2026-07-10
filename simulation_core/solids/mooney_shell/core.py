@@ -8,6 +8,12 @@ from simulation_core.solids.mooney_shell.reports import (
 from simulation_core.geometry_tools.surface_mesh import SurfaceMesh, UvSphereResolution
 from simulation_core.diagnostics.runtime import TaichiRuntimeConfig, init_taichi
 
+# Number of anomaly locations retained per counter (TriMooneyShellMpmState's
+# force-sanitization guard) so a strict-mode raise can name a few concrete
+# indices instead of only a bare count. Matches this codebase's other
+# small fixed history caps (e.g. fsi_coupling._IQN_ILS_HISTORY_LIMIT).
+_DIAG_INDEX_SAMPLE_CAPACITY = 8
+
 
 def _unique_undirected_edges(faces: np.ndarray) -> np.ndarray:
     edges: set[tuple[int, int]] = set()
@@ -81,6 +87,54 @@ def _raise_if_required_shell_region_empty(
         raise RuntimeError("primary shell region has no in-grid MPM particles")
     if secondary_count <= 0:
         raise RuntimeError("secondary shell region has no in-grid MPM particles")
+
+
+def _diag_first_indices(field: ti.Field, count: int) -> list[int]:
+    """Return up to len(field) recorded anomaly indices as a plain list."""
+    capacity = int(field.shape[0])
+    sample_count = max(0, min(int(count), capacity))
+    if sample_count <= 0:
+        return []
+    return [int(value) for value in field.to_numpy()[:sample_count]]
+
+
+def _raise_if_force_sanitization_detected(
+    *,
+    allow_force_sanitization: bool,
+    sanitized_force_count: int,
+    sanitized_force_first_indices: list[int],
+    constitutive_clamp_count: int,
+    constitutive_clamp_first_indices: list[int],
+) -> None:
+    """Refuse to silently mask a coupling instability behind sanitization.
+
+    TriMooneyShellMpmState's per-face force assembly used to silently drop
+    any non-finite/oversized force contribution (see
+    TriMooneyShellMpmState._atomic_add_particle_force /
+    _atomic_add_particle_external_force) and silently hard-clamp the
+    Cauchy-Green constitutive invariants and per-face force gradients (see
+    _accumulate_mooney_face's c_cap clamp and _limit_vector_norm) with no
+    visibility. Both are still counted and their clamp VALUES are
+    unchanged (see the callers above) -- this only decides whether an
+    activation this step is reported (default, strict) or tolerated
+    (``allow_force_sanitization=True``, restoring the pre-fix silent
+    behavior). Follows the same strict-by-default pattern as
+    src/refactored/validation/ansys_vertical_flap_fixed/projection_solver.py's
+    ``_finite_or_raise``.
+    """
+    if allow_force_sanitization:
+        return
+    if sanitized_force_count <= 0 and constitutive_clamp_count <= 0:
+        return
+    raise RuntimeError(
+        f"{sanitized_force_count} non-finite/oversized force sanitization "
+        f"event(s) (first particle indices={sanitized_force_first_indices}) "
+        f"and {constitutive_clamp_count} constitutive/force-cap clamp "
+        f"activation(s) (first indices={constitutive_clamp_first_indices}) "
+        "were detected this step; refusing to silently mask a possible "
+        "coupling instability. Pass allow_force_sanitization=True to this "
+        "call to restore the legacy silent-sanitization behavior."
+    )
 
 
 @ti.data_oriented
@@ -233,6 +287,19 @@ class TriMooneyShellMpmState:
         self.report_host_snapshot = ti.field(dtype=ti.f64, shape=37)
         self.primary_area_m2 = ti.field(dtype=ti.f32, shape=())
         self.secondary_area_m2 = ti.field(dtype=ti.f32, shape=())
+        # Force-sanitization diagnostics (see module-level
+        # _raise_if_force_sanitization_detected): counts + first few particle
+        # indices for non-finite/oversized forces that would otherwise be
+        # silently dropped, and for constitutive/force-cap clamp activations.
+        # Reset once per kernel invocation in _clear_reports().
+        self.diag_sanitized_force_count = ti.field(dtype=ti.i32, shape=())
+        self.diag_sanitized_force_first_indices = ti.field(
+            dtype=ti.i32, shape=_DIAG_INDEX_SAMPLE_CAPACITY
+        )
+        self.diag_constitutive_clamp_count = ti.field(dtype=ti.i32, shape=())
+        self.diag_constitutive_clamp_first_indices = ti.field(
+            dtype=ti.i32, shape=_DIAG_INDEX_SAMPLE_CAPACITY
+        )
         self.last_report_host_reads = 0
 
         self.x.from_numpy(vertices)
@@ -354,6 +421,13 @@ class TriMooneyShellMpmState:
             ]
         )
         self.report_count_snapshot[None] = ti.Vector([0, 0, 0, 0, 0])
+        # Anomaly counters are per-kernel-invocation (i.e. per step/advance
+        # call), reset here just like every report_* accumulator above. The
+        # first-index sample buffers are not cleared: readers only ever look
+        # at buffer[:count] (see _diag_first_indices), so a count of 0
+        # already masks any stale entries left over from a previous step.
+        self.diag_sanitized_force_count[None] = 0
+        self.diag_constitutive_clamp_count[None] = 0
 
     @ti.func
     def _pack_report_snapshot(self):
@@ -425,6 +499,22 @@ class TriMooneyShellMpmState:
         )
 
     @ti.func
+    def _record_sanitized_force(self, index):
+        # Anomaly is already committed (the caller is about to drop a
+        # non-finite/oversized force contribution); this only makes that
+        # drop visible to the post-hoc strict-mode check in
+        # step()/advance_region_loads()/advance_with_external_forces().
+        slot = ti.atomic_add(self.diag_sanitized_force_count[None], 1)
+        if slot < _DIAG_INDEX_SAMPLE_CAPACITY:
+            self.diag_sanitized_force_first_indices[slot] = index
+
+    @ti.func
+    def _record_constitutive_clamp(self, index):
+        slot = ti.atomic_add(self.diag_constitutive_clamp_count[None], 1)
+        if slot < _DIAG_INDEX_SAMPLE_CAPACITY:
+            self.diag_constitutive_clamp_first_indices[slot] = index
+
+    @ti.func
     def _atomic_add_vector(self, field, value):
         if self._vector_is_safe(value):
             ti.atomic_add(field[None].x, value.x)
@@ -437,6 +527,8 @@ class TriMooneyShellMpmState:
             ti.atomic_add(self.internal_force_n[index].x, value.x)
             ti.atomic_add(self.internal_force_n[index].y, value.y)
             ti.atomic_add(self.internal_force_n[index].z, value.z)
+        else:
+            self._record_sanitized_force(index)
 
     @ti.func
     def _atomic_add_particle_external_force(self, index, value):
@@ -444,6 +536,8 @@ class TriMooneyShellMpmState:
             ti.atomic_add(self.external_force_n[index].x, value.x)
             ti.atomic_add(self.external_force_n[index].y, value.y)
             ti.atomic_add(self.external_force_n[index].z, value.z)
+        else:
+            self._record_sanitized_force(index)
 
     @ti.func
     def _atomic_add_particle_surface_normal(self, index, value):
@@ -567,13 +661,22 @@ class TriMooneyShellMpmState:
             ti.atomic_max(self.report_max_edge_strain[None], ti.abs(stretch - 1.0))
 
     @ti.func
-    def _limit_vector_norm(self, value, max_norm):
+    def _limit_vector_norm(self, value, max_norm, index):
         limited = value
         norm = value.norm()
         if norm != norm or norm > 1.0e30:
+            # Not a recoverable magnitude (NaN, or beyond the same 1e30
+            # safety threshold _scalar_is_safe uses) -- same "sanitized
+            # force" category as _atomic_add_particle_force's own guard,
+            # just caught one step earlier so the caller never sees the
+            # broken vector at all.
             limited = ti.Vector([0.0, 0.0, 0.0])
+            self._record_sanitized_force(index)
         elif max_norm > 0.0 and norm > max_norm:
+            # Finite but oversized: this is a genuine clamp (scaled down,
+            # not zeroed), tracked separately from outright sanitization.
             limited = value * (max_norm / norm)
+            self._record_constitutive_clamp(index)
         return limited
 
     @ti.func
@@ -600,9 +703,14 @@ class TriMooneyShellMpmState:
                 c01 = f0.dot(f1)
                 c11 = f1.dot(f1)
                 c_cap = 1.0e6
+                c_clamp_active = (
+                    c00 > c_cap or c01 < -c_cap or c01 > c_cap or c11 > c_cap
+                )
                 c00 = ti.min(c00, c_cap)
                 c01 = ti.min(ti.max(c01, -c_cap), c_cap)
                 c11 = ti.min(c11, c_cap)
+                if c_clamp_active:
+                    self._record_constitutive_clamp(f)
                 det_c = ti.max(c00 * c11 - c01 * c01, 1.0e-6)
                 inv_det_c = 1.0 / det_c
                 inv_c00 = c11 * inv_det_c
@@ -632,15 +740,15 @@ class TriMooneyShellMpmState:
                 )
                 self._atomic_add_particle_force(
                     ia,
-                    self._limit_vector_norm(grad_edge0 + grad_edge1, force_cap_n),
+                    self._limit_vector_norm(grad_edge0 + grad_edge1, force_cap_n, ia),
                 )
                 self._atomic_add_particle_force(
                     ib,
-                    self._limit_vector_norm(-grad_edge0, force_cap_n),
+                    self._limit_vector_norm(-grad_edge0, force_cap_n, ib),
                 )
                 self._atomic_add_particle_force(
                     ic,
-                    self._limit_vector_norm(-grad_edge1, force_cap_n),
+                    self._limit_vector_norm(-grad_edge1, force_cap_n, ic),
                 )
             normal = rest_normal
             if area_vec_norm > 1.0e-12:
@@ -1203,6 +1311,33 @@ class TriMooneyShellMpmState:
         self._update_particle_surface_normals()
         self._pack_report_snapshot()
 
+    def _check_force_sanitization(self, *, allow_force_sanitization: bool) -> None:
+        """Raise (unless opted out) if this step silently sanitized a force.
+
+        Reads back just the two i32 anomaly counters -- negligible next to
+        the full report's host readback -- and only pulls the first-index
+        sample buffers (an extra host sync each) when actually about to
+        raise. See module-level _raise_if_force_sanitization_detected for
+        the policy this enforces.
+        """
+        if allow_force_sanitization:
+            return
+        sanitized_force_count = int(self.diag_sanitized_force_count[None])
+        constitutive_clamp_count = int(self.diag_constitutive_clamp_count[None])
+        if sanitized_force_count <= 0 and constitutive_clamp_count <= 0:
+            return
+        _raise_if_force_sanitization_detected(
+            allow_force_sanitization=False,
+            sanitized_force_count=sanitized_force_count,
+            sanitized_force_first_indices=_diag_first_indices(
+                self.diag_sanitized_force_first_indices, sanitized_force_count
+            ),
+            constitutive_clamp_count=constitutive_clamp_count,
+            constitutive_clamp_first_indices=_diag_first_indices(
+                self.diag_constitutive_clamp_first_indices, constitutive_clamp_count
+            ),
+        )
+
     def step(
         self,
         *,
@@ -1212,6 +1347,7 @@ class TriMooneyShellMpmState:
         flip_blend: float = 0.95,
         body_acceleration_mps2: tuple[float, float, float] = (0.0, 0.0, 0.0),
         read_report: bool = True,
+        allow_force_sanitization: bool = False,
     ) -> TriMooneyShellMpmReport | None:
         body_acceleration = _vector3(body_acceleration_mps2, "body_acceleration_mps2")
         self._step_kernel(
@@ -1234,6 +1370,9 @@ class TriMooneyShellMpmState:
             int(self.report_grid_out_of_bounds_particle_count[None]),
             self.out_of_bounds_particle_tolerance,
         )
+        self._check_force_sanitization(
+            allow_force_sanitization=allow_force_sanitization
+        )
         if not read_report:
             self.last_report_host_reads = 0
             return None
@@ -1253,6 +1392,7 @@ class TriMooneyShellMpmState:
         flip_blend: float = 0.95,
         body_acceleration_mps2: tuple[float, float, float] = (0.0, 0.0, 0.0),
         read_report: bool = True,
+        allow_force_sanitization: bool = False,
     ) -> TriMooneyShellMpmReport | None:
         """Advance two region-specific external loads without case-specific axes."""
         primary_area_load = _vector3(primary_area_load_npm2, "primary_area_load_npm2")
@@ -1293,6 +1433,9 @@ class TriMooneyShellMpmState:
             int(self.report_grid_out_of_bounds_particle_count[None]),
             self.out_of_bounds_particle_tolerance,
         )
+        self._check_force_sanitization(
+            allow_force_sanitization=allow_force_sanitization
+        )
         if not read_report:
             self.last_report_host_reads = 0
             return None
@@ -1308,6 +1451,7 @@ class TriMooneyShellMpmState:
         flip_blend: float = 0.95,
         body_acceleration_mps2: tuple[float, float, float] = (0.0, 0.0, 0.0),
         read_report: bool = True,
+        allow_force_sanitization: bool = False,
     ) -> TriMooneyShellMpmReport | None:
         """Advance shell dynamics using preloaded external_force_n as MPM load."""
         body_acceleration = _vector3(body_acceleration_mps2, "body_acceleration_mps2")
@@ -1339,6 +1483,9 @@ class TriMooneyShellMpmState:
             int(self.particle_count),
             int(self.report_grid_out_of_bounds_particle_count[None]),
             self.out_of_bounds_particle_tolerance,
+        )
+        self._check_force_sanitization(
+            allow_force_sanitization=allow_force_sanitization
         )
         if not read_report:
             self.last_report_host_reads = 0
@@ -1457,6 +1604,8 @@ class TriMooneyShellMpmState:
             transfer_relative_error=float(values[31]),
             primary_particle_count=primary_particle_count,
             secondary_particle_count=secondary_particle_count,
+            sanitized_force_count=int(self.diag_sanitized_force_count[None]),
+            constitutive_clamp_count=int(self.diag_constitutive_clamp_count[None]),
         )
 
 
