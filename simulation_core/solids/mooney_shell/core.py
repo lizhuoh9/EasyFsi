@@ -8,8 +8,8 @@ from simulation_core.solids.mooney_shell.reports import (
 from simulation_core.geometry_tools.surface_mesh import SurfaceMesh, UvSphereResolution
 from simulation_core.diagnostics.runtime import TaichiRuntimeConfig, init_taichi
 
-# Number of anomaly locations retained per counter (TriMooneyShellMpmState's
-# force-sanitization guard) so a strict-mode raise can name a few concrete
+# Number of anomaly locations retained per Mooney-shell counter so a
+# strict-mode raise can name a few concrete
 # indices instead of only a bare count. Matches this codebase's other
 # small fixed history caps (e.g. fsi_coupling._IQN_ILS_HISTORY_LIMIT).
 _DIAG_INDEX_SAMPLE_CAPACITY = 8
@@ -108,7 +108,7 @@ def _raise_if_force_sanitization_detected(
 ) -> None:
     """Refuse to silently mask a coupling instability behind sanitization.
 
-    TriMooneyShellMpmState's per-face force assembly used to silently drop
+    Mooney-shell per-face force assembly used to silently drop
     any non-finite/oversized force contribution (see
     TriMooneyShellMpmState._atomic_add_particle_force /
     _atomic_add_particle_external_force) and silently hard-clamp the
@@ -121,6 +121,11 @@ def _raise_if_force_sanitization_detected(
     behavior). Follows the same strict-by-default pattern as
     src/refactored/validation/ansys_vertical_flap_fixed/projection_solver.py's
     ``_finite_or_raise``.
+
+    This is a terminal, post-step guard: the stepping kernel may already have
+    advanced state before the host observes these counters. A caller that
+    catches the exception to retry must first restore its saved FSI trial
+    checkpoint; continuing from the rejected state is unsupported.
     """
     if allow_force_sanitization:
         return
@@ -1699,8 +1704,19 @@ class UvMooneyShellMpmState:
         self.report_force_impulse_square_sum = ti.field(dtype=ti.f32, shape=())
         self.report_transfer_relative_error = ti.field(dtype=ti.f32, shape=())
         self.report_float_snapshot = ti.Vector.field(10, dtype=ti.f32, shape=())
-        self.report_count_snapshot = ti.Vector.field(4, dtype=ti.i32, shape=())
-        self.report_host_snapshot = ti.field(dtype=ti.f32, shape=14)
+        self.report_count_snapshot = ti.Vector.field(6, dtype=ti.i32, shape=())
+        # One packed host read, with f64 slots so i32 diagnostics remain exact
+        # beyond the 2**24 integer limit of f32. This also keeps the all-OOB
+        # guard fail-closed for very large particle populations.
+        self.report_host_snapshot = ti.field(dtype=ti.f64, shape=16)
+        self.diag_sanitized_force_count = ti.field(dtype=ti.i32, shape=())
+        self.diag_sanitized_force_first_indices = ti.field(
+            dtype=ti.i32, shape=_DIAG_INDEX_SAMPLE_CAPACITY
+        )
+        self.diag_constitutive_clamp_count = ti.field(dtype=ti.i32, shape=())
+        self.diag_constitutive_clamp_first_indices = ti.field(
+            dtype=ti.i32, shape=_DIAG_INDEX_SAMPLE_CAPACITY
+        )
         self.last_report_host_reads = 0
 
         self._init_kernel(
@@ -1859,8 +1875,13 @@ class UvMooneyShellMpmState:
         self.report_momentum_square_sum[None] = 0.0
         self.report_force_impulse_square_sum[None] = 0.0
         self.report_transfer_relative_error[None] = 0.0
+        self.diag_sanitized_force_count[None] = 0
+        self.diag_constitutive_clamp_count[None] = 0
+        for index in ti.static(range(_DIAG_INDEX_SAMPLE_CAPACITY)):
+            self.diag_sanitized_force_first_indices[index] = -1
+            self.diag_constitutive_clamp_first_indices[index] = -1
         self.report_float_snapshot[None] = ti.Vector([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        self.report_count_snapshot[None] = ti.Vector([0, 0, 0, 0])
+        self.report_count_snapshot[None] = ti.Vector([0, 0, 0, 0, 0, 0])
 
     @ti.func
     def _pack_report_snapshot(self):
@@ -1884,16 +1905,18 @@ class UvMooneyShellMpmState:
                 self.report_active_grid_nodes[None],
                 self.report_grid_out_of_bounds_particle_count[None],
                 self.report_radial_stretch_count[None],
+                self.diag_sanitized_force_count[None],
+                self.diag_constitutive_clamp_count[None],
             ]
         )
         packed_values = self.report_float_snapshot[None]
         packed_counts = self.report_count_snapshot[None]
         for snapshot_index in ti.static(range(10)):
             self.report_host_snapshot[snapshot_index] = packed_values[snapshot_index]
-        for snapshot_index in ti.static(range(4)):
+        for snapshot_index in ti.static(range(6)):
             self.report_host_snapshot[10 + snapshot_index] = ti.cast(
                 packed_counts[snapshot_index],
-                ti.f32,
+                ti.f64,
             )
 
     @ti.func
@@ -1909,6 +1932,18 @@ class UvMooneyShellMpmState:
         )
 
     @ti.func
+    def _record_sanitized_force(self, index):
+        slot = ti.atomic_add(self.diag_sanitized_force_count[None], 1)
+        if slot < _DIAG_INDEX_SAMPLE_CAPACITY:
+            self.diag_sanitized_force_first_indices[slot] = index
+
+    @ti.func
+    def _record_constitutive_clamp(self, index):
+        slot = ti.atomic_add(self.diag_constitutive_clamp_count[None], 1)
+        if slot < _DIAG_INDEX_SAMPLE_CAPACITY:
+            self.diag_constitutive_clamp_first_indices[slot] = index
+
+    @ti.func
     def _atomic_add_vector(self, field, value):
         if self._vector_is_safe(value):
             ti.atomic_add(field[None].x, value.x)
@@ -1921,6 +1956,8 @@ class UvMooneyShellMpmState:
             ti.atomic_add(self.internal_force_n[index].x, value.x)
             ti.atomic_add(self.internal_force_n[index].y, value.y)
             ti.atomic_add(self.internal_force_n[index].z, value.z)
+        else:
+            self._record_sanitized_force(index)
 
     @ti.func
     def _atomic_add_particle_external_force(self, index, value):
@@ -1928,6 +1965,8 @@ class UvMooneyShellMpmState:
             ti.atomic_add(self.external_force_n[index].x, value.x)
             ti.atomic_add(self.external_force_n[index].y, value.y)
             ti.atomic_add(self.external_force_n[index].z, value.z)
+        else:
+            self._record_sanitized_force(index)
 
     @ti.func
     def _accumulate_edge_strain_stat(self, ia, ib):
@@ -1975,7 +2014,10 @@ class UvMooneyShellMpmState:
                     c00 = f0.dot(f0)
                     c01 = f0.dot(f1)
                     c11 = f1.dot(f1)
-                    det_c = ti.max(c00 * c11 - c01 * c01, 1.0e-12)
+                    raw_det_c = c00 * c11 - c01 * c01
+                    if raw_det_c != raw_det_c or raw_det_c < 1.0e-12:
+                        self._record_constitutive_clamp(ia)
+                    det_c = ti.max(raw_det_c, 1.0e-12)
                     inv_det_c = 1.0 / det_c
                     inv_c00 = c11 * inv_det_c
                     inv_c01 = -c01 * inv_det_c
@@ -2305,6 +2347,7 @@ class UvMooneyShellMpmState:
         velocity_damping: float = 1.0,
         flip_blend: float = 0.95,
         body_acceleration_mps2: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        allow_force_sanitization: bool = False,
     ) -> UvMooneyShellMpmReport:
         body_acceleration = _vector3(body_acceleration_mps2, "body_acceleration_mps2")
         self._step_kernel(
@@ -2316,14 +2359,34 @@ class UvMooneyShellMpmState:
             float(body_acceleration[1]),
             float(body_acceleration[2]),
         )
-        return self.report()
+        return self.report(allow_force_sanitization=allow_force_sanitization)
 
-    def report(self) -> UvMooneyShellMpmReport:
+    def report(
+        self, *, allow_force_sanitization: bool = False
+    ) -> UvMooneyShellMpmReport:
         snapshot = self.report_host_snapshot.to_numpy()
         values = snapshot[:10]
-        counts = snapshot[10:14]
+        counts = snapshot[10:16]
         self.last_report_host_reads = 1
         _raise_if_all_particles_out_of_bounds(int(self.particle_count), int(counts[2]))
+        sanitized_force_count = int(counts[4])
+        constitutive_clamp_count = int(counts[5])
+        if not allow_force_sanitization and (
+            sanitized_force_count > 0 or constitutive_clamp_count > 0
+        ):
+            _raise_if_force_sanitization_detected(
+                allow_force_sanitization=False,
+                sanitized_force_count=sanitized_force_count,
+                sanitized_force_first_indices=_diag_first_indices(
+                    self.diag_sanitized_force_first_indices,
+                    sanitized_force_count,
+                ),
+                constitutive_clamp_count=constitutive_clamp_count,
+                constitutive_clamp_first_indices=_diag_first_indices(
+                    self.diag_constitutive_clamp_first_indices,
+                    constitutive_clamp_count,
+                ),
+            )
         force_l2 = float(values[0]) ** 0.5
         return UvMooneyShellMpmReport(
             particle_count=self.particle_count,
@@ -2341,4 +2404,6 @@ class UvMooneyShellMpmState:
                 / max(force_l2, 1.0e-20)
             ),
             transfer_relative_error=float(values[9]),
+            sanitized_force_count=sanitized_force_count,
+            constitutive_clamp_count=constitutive_clamp_count,
         )

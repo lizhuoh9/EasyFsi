@@ -444,6 +444,15 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
             self.assertTrue(summary["exclude_velocity_dirichlet_rows"])
             self.assertFalse(bool(fields["fluid_mask"][0, 1]))
             self.assertTrue(bool(fields["boundary_surrogate_mask"][0, 1]))
+            # Rendering must show the solved boundary-row value instead of a
+            # white comparison-mask halo, while the strict parity mask above
+            # continues to exclude that row from numerical metrics.
+            self.assertTrue(bool(fields["display_fluid_mask"][0, 1]))
+            self.assertFalse(bool(fields["display_obstacle_mask"][0, 1]))
+            # The true obstacle in the fixture remains hidden/solid after the
+            # streamwise reversal (original k=2 -> display column 0).
+            self.assertFalse(bool(fields["display_fluid_mask"][1, 0]))
+            self.assertTrue(bool(fields["display_obstacle_mask"][1, 0]))
 
     def test_pressure_range_metric_is_diagnostic_not_acceptance_gate(self):
         solver = _structured_solver(scale=1.0)
@@ -458,6 +467,40 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
             "diagnostic",
         )
         self.assertEqual(result["status"], "passed")
+
+    def test_display_mask_does_not_change_parity_metrics_or_samples(self):
+        solver = _structured_solver(scale=1.0)
+        fluent = _fluent_points()
+        baseline_samples = sample_structured_solver_at_fluent_points(
+            solver,
+            fluent,
+        )
+        baseline_metrics = compare_solver_to_fluent_field(solver, fluent)
+
+        solver_with_display_override = dict(solver)
+        solver_with_display_override["display_fluid_mask"] = np.zeros_like(
+            solver["fluid_mask"],
+            dtype=bool,
+        )
+        overridden_samples = sample_structured_solver_at_fluent_points(
+            solver_with_display_override,
+            fluent,
+        )
+        overridden_metrics = compare_solver_to_fluent_field(
+            solver_with_display_override,
+            fluent,
+        )
+
+        for key in ("u", "v", "p"):
+            np.testing.assert_array_equal(
+                overridden_samples[key],
+                baseline_samples[key],
+            )
+        np.testing.assert_array_equal(
+            overridden_samples["valid"],
+            baseline_samples["valid"],
+        )
+        self.assertEqual(overridden_metrics, baseline_metrics)
 
     def test_flow_snapshot_export_rejects_nonfinite_candidate_fields(self):
         snapshot = _flow_snapshot_fixture()
@@ -646,6 +689,7 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
             flow_pressure_solver="fv_cg",
             flow_cg_tolerance=2.5e-7,
             flow_divergence_cleanup_iterations=3,
+            flow_hibm_tiny_unreached_cleanup_component_cells=128,
         )
 
         report = fsi_runner._project_current_flow(
@@ -658,6 +702,10 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
         self.assertEqual(fluid.project_kwargs["pressure_solver"], "fv_cg")
         self.assertEqual(fluid.project_kwargs["cg_tolerance"], 2.5e-7)
         self.assertEqual(fluid.project_kwargs["divergence_cleanup_iterations"], 3)
+        self.assertEqual(
+            fluid.project_kwargs["hibm_tiny_unreached_cleanup_component_cells"],
+            128,
+        )
         self.assertEqual(fluid.project_kwargs["pressure_outlet_backflow_policy"], "allow")
         self.assertEqual(
             fluid.project_kwargs["obstacle_normal_velocity_policy"],
@@ -866,8 +914,20 @@ class _FakePredictorFluid:
         self.velocity_dirichlet_boundary_projection_weight = _FakeField(
             np.zeros(shape, dtype=np.float32)
         )
+        self.velocity_dirichlet_boundary_enforcement_weight = _FakeField(
+            np.zeros(shape, dtype=np.float32)
+        )
         self.velocity_dirichlet_boundary_marker_region_id = _FakeField(
             -np.ones(shape, dtype=np.int32)
+        )
+        self.velocity_dirichlet_boundary_hard_fixed_component_mask = _FakeField(
+            np.zeros(shape, dtype=np.int32)
+        )
+        self.velocity_dirichlet_boundary_external_exact_component_mask = _FakeField(
+            np.zeros(shape, dtype=np.int32)
+        )
+        self.velocity_dirichlet_boundary_owned_row = _FakeField(
+            np.zeros(shape, dtype=np.int32)
         )
         self.velocity_constraint_sum = _FakeField(
             np.zeros((*shape, 3), dtype=np.float32)
@@ -955,7 +1015,10 @@ def _fake_project_current_flow(
     config: object,
     *,
     reset_pressure: bool,
+    pressure_solve_context: object | None = None,
+    **projection_options: object,
 ) -> dict[str, object]:
+    del config, reset_pressure, pressure_solve_context, projection_options
     fluid.calls.append("project")
     return {
         "local_velocity_peak_mps": 0.0,

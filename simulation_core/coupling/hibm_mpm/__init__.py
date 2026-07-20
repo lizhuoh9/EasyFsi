@@ -20,6 +20,7 @@ from .constants import (
 from .core import (
     HibmMpmIbBoundaryConditions,
     HibmMpmIbNodeSearch,
+    HibmMpmPreparedNoSlipSamplingIdentity,
     HibmMpmSharpCouplingState,
     HibmMpmSurfaceMarkers,
     advance_hibm_mpm_sharp_mpm_step,
@@ -35,6 +36,10 @@ from .modes import (
     FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
     fsi_coupling_mode_report,
     require_implemented_fsi_coupling_mode,
+)
+from .marker_mac_constraint import (
+    HibmMpmMarkerMacConstraintOperator,
+    HibmMpmMarkerMacConstraintReport,
 )
 from .paper_requirements import (
     HibmMpmPaperRequirement,
@@ -86,7 +91,10 @@ __all__ = [
     "HibmMpmIbNodeSearch",
     "HibmMpmIbNodeSearchReport",
     "HibmMpmMpmForceScatterReport",
+    "HibmMpmMarkerMacConstraintOperator",
+    "HibmMpmMarkerMacConstraintReport",
     "HibmMpmNoSlipResidualReport",
+    "HibmMpmPreparedNoSlipSamplingIdentity",
     "HibmMpmPaperRequirement",
     "HibmMpmPressureDisconnectedRegionReport",
     "HibmMpmPressureNeumannGradientReport",

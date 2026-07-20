@@ -16,6 +16,53 @@ from simulation_core.geometry_tools.cad_tessellation import (
 
 
 class CadTessellationTests(unittest.TestCase):
+    @staticmethod
+    def _single_surface_result() -> StepTessellationResult:
+        return StepTessellationResult(
+            mesh=trimesh.Trimesh(
+                vertices=np.asarray(
+                    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    dtype=float,
+                ),
+                faces=np.asarray([[0, 1, 2]], dtype=np.int64),
+                process=False,
+            ),
+            surface_entities=[
+                StepSurfaceEntity(
+                    entity_tag=1,
+                    face_ids=np.asarray([0]),
+                    centroid_m=np.zeros(3),
+                )
+            ],
+            part_entities=[],
+            curve_entities=[],
+        )
+
+    def test_remap_step_named_selection_rejects_partially_missing_surface_tags(
+        self,
+    ) -> None:
+        config = {
+            "named_selections": [
+                {
+                    "id": 8,
+                    "face_ids": [999],
+                    "selection_source": {
+                        "kind": "step_surface",
+                        "cad_tags": [1, 41, 42],
+                    },
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"selection 8.*missing.*41.*42",
+        ):
+            remap_step_named_selection_face_ids(
+                config,
+                self._single_surface_result(),
+            )
+
     def test_remap_step_named_selection_face_ids_uses_surface_part_and_curve_tags(
         self,
     ) -> None:

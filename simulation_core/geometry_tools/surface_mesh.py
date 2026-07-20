@@ -65,8 +65,25 @@ REPRODUCTION_UV_SPHERE_MESHES: tuple[UvSphereResolution, ...] = (
 
 def infer_uv_sphere_resolution(mesh: SurfaceMesh) -> UvSphereResolution:
     for resolution in REPRODUCTION_UV_SPHERE_MESHES:
-        if mesh.vertex_count == resolution.vertex_count and mesh.face_count == resolution.face_count:
-            return resolution
+        if (
+            mesh.vertex_count != resolution.vertex_count
+            or mesh.face_count != resolution.face_count
+        ):
+            continue
+        reference = make_uv_sphere(resolution, radius_m=1.0)
+        radius_m = float(np.linalg.norm(mesh.vertices[0]))
+        if radius_m <= 0.0:
+            continue
+        if not np.array_equal(mesh.faces, reference.faces):
+            continue
+        if not np.allclose(
+            mesh.vertices,
+            reference.vertices * radius_m,
+            rtol=1.0e-10,
+            atol=max(radius_m, 1.0) * 1.0e-12,
+        ):
+            continue
+        return resolution
     raise ValueError(
         "mesh does not match a known HIBM-MPM reproduction UV sphere resolution; "
         "device-side initialization avoids CPU vertex uploads and requires a known analytic sphere"

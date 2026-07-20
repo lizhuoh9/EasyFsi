@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -10,9 +11,18 @@ from typing import Any
 import numpy as np
 
 from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec
+from simulation_core.fluids.preflow_snapshot import (
+    PREFLOW_SNAPSHOT_FIELD_NAMES,
+    PreflowSnapshot,
+    PreflowSnapshotIdentity,
+    load_preflow_snapshot,
+    save_preflow_snapshot,
+    validate_preflow_snapshot_fields,
+)
 from simulation_core.coupling.hibm_mpm import (
     HibmMpmIbBoundaryConditions,
     HibmMpmIbNodeSearch,
+    HibmMpmMarkerMacConstraintOperator,
     HibmMpmSurfaceMarkers,
 )
 from simulation_core.solids.neo_hookean_mpm import NeoHookeanMpmState
@@ -23,9 +33,135 @@ from simulation_core.coupling.pressure_sample_pairs import (
 from simulation_core.diagnostics.runtime import TaichiRuntimeConfig
 
 
+class PreflowSnapshotValidationError(ValueError):
+    """Fail-closed preflow rejection with JSON-safe terminal diagnostics."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostics: Mapping[str, object],
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics)
+
+
+class HibmJointQpConvergenceError(RuntimeError):
+    """Fail-closed joint Q/P rejection with JSON-safe cycle diagnostics."""
+
+    def __init__(self, message: str, *, diagnostics: Mapping[str, object]) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics)
+
+
+_HIBM_SHARP_BOUNDARY_TIMING_STAGE_NAMES = (
+    "canonical_ledger_build",
+    "canonical_prepare_seal",
+    "pressure_reachability_flood",
+    "pressure_neumann_assembly",
+)
+
+
+def _empty_hibm_sharp_boundary_stage_wall_times() -> dict[str, float]:
+    return {
+        stage_name: 0.0
+        for stage_name in _HIBM_SHARP_BOUNDARY_TIMING_STAGE_NAMES
+    }
+
+
+def _synchronize_hibm_sharp_boundary_stage_timing() -> None:
+    # Keep Taichi optional at module import time.  An active sharp-boundary
+    # assembly has already initialized its runtime before any timed stage.
+    import taichi as ti
+
+    ti.sync()
+
+
+def _measure_hibm_sharp_boundary_stage(
+    stage_wall_times: dict[str, float],
+    stage_name: str,
+    operation: Callable[[], Any],
+    *,
+    clock: Callable[[], float] | None = None,
+    synchronize: Callable[[], None] | None = None,
+) -> Any:
+    if stage_name not in _HIBM_SHARP_BOUNDARY_TIMING_STAGE_NAMES:
+        raise ValueError(
+            "unsupported HIBM sharp-boundary timing stage: "
+            f"{stage_name!r}"
+        )
+    clock_fn = time.perf_counter if clock is None else clock
+    synchronize_fn = (
+        _synchronize_hibm_sharp_boundary_stage_timing
+        if synchronize is None
+        else synchronize
+    )
+    synchronize_fn()
+    started_s = float(clock_fn())
+    try:
+        return operation()
+    finally:
+        # The closing synchronization is deliberately inside ``finally`` so
+        # failed kernels cannot leak asynchronous work into the next stage.
+        synchronize_fn()
+        ended_s = float(clock_fn())
+        elapsed_s = ended_s - started_s
+        if not math.isfinite(elapsed_s) or elapsed_s < 0.0:
+            elapsed_s = 0.0
+        previous_s = float(stage_wall_times.get(stage_name, 0.0))
+        if not math.isfinite(previous_s) or previous_s < 0.0:
+            previous_s = 0.0
+        accumulated_s = previous_s + elapsed_s
+        stage_wall_times[stage_name] = (
+            accumulated_s if math.isfinite(accumulated_s) else previous_s
+        )
+
+
+def _hibm_sharp_boundary_timing_report_fields(
+    stage_wall_times: Mapping[str, object],
+) -> dict[str, object]:
+    normalized = _normalized_hibm_sharp_boundary_stage_wall_times(
+        stage_wall_times
+    )
+    return {
+        "hibm_sharp_marker_boundary_stage_wall_time_s": dict(normalized),
+        **{
+            f"hibm_sharp_marker_boundary_{stage_name}_wall_time_s": elapsed_s
+            for stage_name, elapsed_s in normalized.items()
+        },
+    }
+
+
+def _normalized_hibm_sharp_boundary_stage_wall_times(
+    stage_wall_times: object,
+) -> dict[str, float]:
+    source = stage_wall_times if isinstance(stage_wall_times, Mapping) else {}
+    normalized: dict[str, float] = {}
+    for stage_name in _HIBM_SHARP_BOUNDARY_TIMING_STAGE_NAMES:
+        try:
+            value = float(source.get(stage_name, 0.0))
+        except (TypeError, ValueError, OverflowError):
+            value = 0.0
+        normalized[stage_name] = (
+            value if math.isfinite(value) and value >= 0.0 else 0.0
+        )
+    return normalized
+
+
+def _hibm_sharp_boundary_stage_wall_times_from_report(
+    report: Mapping[str, object] | None,
+) -> dict[str, float]:
+    if report is None:
+        return _empty_hibm_sharp_boundary_stage_wall_times()
+    return _normalized_hibm_sharp_boundary_stage_wall_times(
+        report.get("hibm_sharp_marker_boundary_stage_wall_time_s", {})
+    )
+
+
 PRIMARY_REGION_ID = 101
 SECONDARY_REGION_ID = 202
 SECONDARY_UNUSED_REGION_ID = SECONDARY_REGION_ID
+TIP_CAP_BOUNDARY_REGION_ID = 303
 STREAMWISE_AXIS_INDEX = 2
 OUT_OF_PLANE_AXIS_INDEX = 0
 AXIS_NAMES = ("x", "y", "z")
@@ -53,6 +189,7 @@ FLOW_SOLID_BOUNDARY_MODES = {
 }
 FLOW_INLET_SOURCE_PROFILES = {"constant", "linear_ramp"}
 FLOW_INLET_SOURCE_SCHEDULE_SCOPES = {"global", "phase_local"}
+FLOW_TURBULENCE_MODELS = {"laminar", "sst_2003"}
 FLOW_OUTLET_BALANCE_POLICIES = {"report_only"}
 TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES = "dual_physical_faces"
 TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE = "single_mid_surface"
@@ -142,6 +279,32 @@ FLOW_PROJECTION_REPORT_KEYS = (
     "pressure_projection_physical_failure_reason",
     "pressure_projection_physical_failure_action",
     "pressure_nullspace_policy",
+    "pressure_marker_nullspace_enabled",
+    "pressure_marker_nullspace_prepared",
+    "pressure_marker_nullspace_active_constraint_count",
+    "pressure_marker_nullspace_active_constraint_count_min",
+    "pressure_marker_nullspace_active_constraint_count_max",
+    "pressure_marker_nullspace_independent_constraint_count",
+    "pressure_marker_nullspace_dependent_constraint_count",
+    "pressure_marker_nullspace_unactuated_constraint_count",
+    "pressure_marker_nullspace_apply_count",
+    "pressure_marker_nullspace_pressure_actuation_generation",
+    "pressure_marker_nullspace_min_factor_pivot",
+    "pressure_marker_nullspace_max_dependent_normalized_pivot",
+    "pressure_marker_nullspace_max_input_constraint_mps",
+    "pressure_marker_nullspace_max_unactuated_input_constraint_mps",
+    "pressure_marker_nullspace_max_constraint_residual_mps",
+    "pressure_marker_nullspace_solver_scratch_resource_bytes",
+    "pressure_marker_nullspace_marker_operator_resource_bytes",
+    "pressure_marker_nullspace_resource_bytes",
+    "pressure_marker_nullspace_actuation_invalid_count",
+    "pressure_marker_nullspace_correction_invalid_count",
+    "pressure_marker_nullspace_operator_apply_count",
+    "pressure_marker_nullspace_velocity_correction_apply_count",
+    "pressure_marker_nullspace_all_velocity_paths_projected",
+    "pressure_marker_nullspace_enabled_all",
+    "pressure_marker_nullspace_prepared_all",
+    "pressure_marker_nullspace_all_velocity_paths_projected_all",
     "l2",
     "max_abs",
     "pre_projection_l2",
@@ -157,10 +320,24 @@ FLOW_PROJECTION_REPORT_KEYS = (
     "cg_breakdown_count",
     "cg_breakdown_code",
     "cg_breakdown",
+    "pre_projection_velocity_projector_prepared_all",
+    "pre_projection_velocity_projector_converged_all",
+    "pre_projection_velocity_projector_committed_all",
+    "hibm_joint_qp_measured",
+    "hibm_joint_qp_converged",
+    "hibm_joint_qp_cycle_budget",
+    "hibm_joint_qp_cycles_used",
+    "hibm_joint_qp_terminal_no_slip_vector_max_residual_mps",
+    "hibm_joint_qp_terminal_divergence_l2_s_inv",
+    "hibm_joint_qp_terminal_divergence_max_abs_s_inv",
+    "hibm_joint_qp_pressure_exact_relative_residual",
+    "hibm_joint_qp_pressure_reintroduced_no_slip_mps",
+    "hibm_joint_qp_final_operation",
+    "hibm_joint_qp_cycle_trace",
     "flow_symmetry_domain_walls",
     "fsi_pressure_snapshot_updated",
 )
-FLOW_ADVECTION_SCHEMES = {"euler", "rk2"}
+FLOW_ADVECTION_SCHEMES = {"euler", "rk2", "muscl_tvd"}
 FLOW_PREDICTOR_NO_SLIP_WALL_INDEX = {
     "xmin": 0,
     "xmax": 1,
@@ -171,10 +348,78 @@ FLOW_PREDICTOR_NO_SLIP_WALL_INDEX = {
 }
 SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN = "3d_neo_hookean"
 SOLID_CONSTITUTIVE_MODEL_PLANE_STRESS_LINEAR = "plane_stress_linear_elastic"
+SOLID_CONSTITUTIVE_MODEL_SAINT_VENANT_KIRCHHOFF = "saint_venant_kirchhoff"
+SOLID_CONSTITUTIVE_MODEL_SVK = "svk"
 SOLID_CONSTITUTIVE_MODELS = {
     SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN,
     SOLID_CONSTITUTIVE_MODEL_PLANE_STRESS_LINEAR,
+    SOLID_CONSTITUTIVE_MODEL_SAINT_VENANT_KIRCHHOFF,
+    SOLID_CONSTITUTIVE_MODEL_SVK,
 }
+PREFLOW_TRACTION_READINESS_FLOW_ONLY = "flow_only"
+PREFLOW_TRACTION_READINESS_COUPLING_READY = "coupling_ready"
+PREFLOW_TRACTION_READINESS_MODES = {
+    PREFLOW_TRACTION_READINESS_FLOW_ONLY,
+    PREFLOW_TRACTION_READINESS_COUPLING_READY,
+}
+PREFLOW_TRACTION_EVALUATED = "evaluated"
+PREFLOW_TRACTION_NOT_EVALUATED = "not_evaluated"
+PREFLOW_TRACTION_INVALID = "invalid"
+
+
+def _advance_solid_substeps_batched(
+    solid: NeoHookeanMpmState,
+    config: Any,
+    *,
+    solid_substeps: int,
+    solid_substep_dt_s: float,
+    mu_pa: float,
+    lambda_pa: float,
+    solid_substep_velocity_damping: float,
+) -> Any:
+    """Advance one FSI solid step with one fail-closed host guard read.
+
+    The device-side guard retains the largest out-of-bounds particle count
+    observed across every substep.  Ending the batch performs the single final
+    packed-report read before marker feedback or any later coupling work can
+    consume the advanced solid state.
+    """
+
+    solid.begin_out_of_bounds_guard_batch()
+    try:
+        for _solid_substep in range(solid_substeps):
+            solid.step(
+                dt_s=solid_substep_dt_s,
+                mu_pa=mu_pa,
+                lambda_pa=lambda_pa,
+                primary_region_id=PRIMARY_REGION_ID,
+                secondary_region_id=SECONDARY_REGION_ID,
+                velocity_damping=solid_substep_velocity_damping,
+                fixed_node_lock_policy=str(
+                    getattr(config, "fixed_node_lock_policy", "any_fixed_particle")
+                ),
+                constitutive_model=str(
+                    getattr(
+                        config,
+                        "solid_constitutive_model",
+                        SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN,
+                    )
+                ),
+                velocity_transfer_flip_blend=float(
+                    getattr(config, "solid_velocity_transfer_flip_blend", 0.0)
+                ),
+                read_report=False,
+            )
+            if config.enforce_plane_strain_x:
+                solid.enforce_rest_x_plane()
+        return solid.end_out_of_bounds_guard_batch()
+    except BaseException:
+        # end_out_of_bounds_guard_batch() closes its host lifecycle before its
+        # fail-closed report check.  abort() is intentionally idempotent, so it
+        # also safely clears the lifecycle when either a substep or that final
+        # report raises.  State rollback remains the caller's responsibility.
+        solid.abort_out_of_bounds_guard_batch()
+        raise
 
 
 def run_rectangular_solid_marker_mpm_fsi_smoke(
@@ -184,6 +429,10 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     boundary_conditions: Mapping[str, Any],
     reference_results: Mapping[str, Any],
     config: Any,
+    step_observer: Callable[
+        [int, float, dict[str, object], dict[str, np.ndarray]], None
+    ]
+    | None = None,
 ) -> dict[str, object]:
     """Run a generic Cartesian fluid to rectangular solid MPM marker-FSI smoke."""
     _validate_rectangular_solid_config(config)
@@ -198,7 +447,43 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     pressure_pair_anchor_pair_map = dict(
         anchor_install_report.pop("pressure_pair_anchor_pair_map", {})
     )
+    pressure_pair_anchor_runtime_refresh_count = 0
+
+    def refresh_runtime_pressure_pair_anchors() -> None:
+        nonlocal anchor_install_report
+        nonlocal pressure_pair_anchor_pair_map
+        nonlocal pressure_pair_anchor_runtime_refresh_count
+        next_refresh_count = pressure_pair_anchor_runtime_refresh_count + 1
+        refreshed = _refresh_runtime_pressure_pair_anchor_markers(
+            markers,
+            fluid,
+            config,
+            refresh_count=next_refresh_count,
+        )
+        if refreshed is None:
+            return
+        anchor_install_report, pair_map = refreshed
+        pressure_pair_anchor_pair_map = dict(pair_map.as_diagnostics())
+        pressure_pair_anchor_runtime_refresh_count = next_refresh_count
+
     solid = _build_solid(config, runtime)
+    # Install the physical MPM volume before fixed-solid preflow.  In sharp
+    # mode it is stored in a dedicated layer; the first HIBM assembly then
+    # combines it with the static geometry and carves only external row owners.
+    if bool(
+        _use_hibm_sharp_marker_boundary(config)
+        and getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)
+    ):
+        latest_dynamic_obstacle_report = _update_fluid_obstacle_from_solid(
+            fluid,
+            solid,
+            config,
+        )
+    else:
+        # Preserve the legacy non-sharp ordering: its particle obstacle is
+        # first refreshed only after the first solid update, not before preflow.
+        latest_dynamic_obstacle_report = _fluid_obstacle_update_disabled_report()
+    refresh_runtime_pressure_pair_anchors()
     fixed_mask, tip_mask = _solid_masks(solid, config)
     # cache the constant rest positions once so the per-step displacement report
     # does not re-fetch the whole rest array from the device every step
@@ -207,15 +492,22 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     solid_substep_cfl = solid_substep_cfl_report(config)
     solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])
     solid_seeding = _enforce_solid_seeding_limit(config)
-    preflow_report = _run_fixed_solid_preflow(markers, fluid, solid, config)
+    preflow_report = _run_or_restore_fixed_solid_preflow(
+        markers=markers,
+        fluid=fluid,
+        solid=solid,
+        config=config,
+    )
     preflow_history = preflow_report["preflow_history"]
+    # A restored snapshot or the final fixed-solid HIBM assembly may replace
+    # the obstacle view.  Seal anchors against that actual pre-FSI state.
+    refresh_runtime_pressure_pair_anchors()
 
     latest_stress_report = None
     latest_force_report = None
     latest_scatter_report = None
     latest_solid_report = None
     latest_feedback_report = None
-    latest_dynamic_obstacle_report = _fluid_obstacle_update_disabled_report()
     latest_flow_report = None
     latest_feedback_constraint_report = None
     fluid_projection_count = 0
@@ -224,6 +516,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     feedback_available_for_projection = False
     feedback_constraint_cells: set[tuple[int, int, int]] = set()
     history: list[dict[str, object]] = []
+    final_flow_field_snapshot: dict[str, np.ndarray] = {}
     apply_feedback = bool(getattr(config, "apply_marker_feedback_to_fluid", True))
     flow_driver_mode = _effective_flow_driver_mode(config, flow_phase="fsi")
     sharp_boundary_cache: dict[str, object] = {}
@@ -257,17 +550,36 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 or (step_index == 0 and not preflow_history)
             ),
         )
+        observer_flow_snapshot = (
+            _synchronized_flow_boundary_snapshot(
+                _flow_parity_snapshot(fluid),
+                stage="pre_solid_projection",
+            )
+            if step_observer is not None
+            else None
+        )
+        if bool(getattr(config, "export_final_flow_snapshot", False)) and (
+            step_index + 1 == int(config.step_count)
+        ):
+            final_flow_field_snapshot = _synchronized_flow_boundary_snapshot(
+                _flow_field_snapshot(fluid),
+                stage="pre_solid_projection",
+            )
         latest_feedback_constraint_report[
             "no_slip_projected_residual_after_projection_mps"
-        ] = _measure_projected_no_slip_residual(
-            markers,
-            fluid,
-            config,
-            feedback_consumed=bool(
-                latest_feedback_constraint_report[
-                    "fluid_projection_consumed_feedback"
-                ]
-            ),
+        ] = (
+            float(latest_flow_report["hibm_no_slip_max_residual_mps"])
+            if _use_hibm_sharp_marker_boundary(config)
+            else _measure_projected_no_slip_residual(
+                markers,
+                fluid,
+                config,
+                feedback_consumed=bool(
+                    latest_feedback_constraint_report[
+                        "fluid_projection_consumed_feedback"
+                    ]
+                ),
+            )
         )
         fluid_projection_count += 1
         if feedback_available_before_projection:
@@ -298,36 +610,15 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             config,
             solid_substeps=solid_substeps,
         )
-        for _solid_substep in range(solid_substeps):
-            latest_solid_report = solid.step(
-                dt_s=solid_substep_dt_s,
-                mu_pa=mu_pa,
-                lambda_pa=lambda_pa,
-                primary_region_id=PRIMARY_REGION_ID,
-                secondary_region_id=SECONDARY_REGION_ID,
-                velocity_damping=solid_substep_velocity_damping,
-                fixed_node_lock_policy=str(
-                    getattr(config, "fixed_node_lock_policy", "any_fixed_particle")
-                ),
-                constitutive_model=str(
-                    getattr(
-                        config,
-                        "solid_constitutive_model",
-                        SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN,
-                    )
-                ),
-                velocity_transfer_flip_blend=float(
-                    getattr(config, "solid_velocity_transfer_flip_blend", 0.0)
-                ),
-                # Read the per-substep report (a device->host snapshot with the
-                # out-of-bounds safety check) only on the final substep. The
-                # caller keeps just the last report (used at the per-step history
-                # assembly), so this turns solid_substeps host round-trips per
-                # step into 1 with bit-for-bit identical results.
-                read_report=(_solid_substep == solid_substeps - 1),
-            )
-            if config.enforce_plane_strain_x:
-                solid.enforce_rest_x_plane()
+        latest_solid_report = _advance_solid_substeps_batched(
+            solid,
+            config,
+            solid_substeps=solid_substeps,
+            solid_substep_dt_s=solid_substep_dt_s,
+            mu_pa=mu_pa,
+            lambda_pa=lambda_pa,
+            solid_substep_velocity_damping=solid_substep_velocity_damping,
+        )
         latest_feedback_report = markers.update_surface_feedback_from_mpm_surface_particles(
             solid.x,
             solid.v,
@@ -345,9 +636,33 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             solid,
             config,
         )
+        latest_observer_topology_report = (
+            _apply_hibm_sharp_marker_boundary_to_fluid(
+                markers,
+                fluid,
+                config,
+                update_pressure_gradient=False,
+                boundary_cache=sharp_boundary_cache,
+                # Rebuild rows as well as topology so the per-step and final
+                # snapshots never combine the post-solid obstacle with the
+                # previous fluid stage's boundary mask.  The resulting cache
+                # also lets the next predictor reuse search and cleanup.
+                topology_only=False,
+            )
+        )
+        _require_hibm_velocity_dirichlet_health(
+            latest_observer_topology_report,
+            context=f"FSI step {step_index + 1} post-solid observer assembly",
+        )
+        refresh_runtime_pressure_pair_anchors()
         feedback_available_for_projection = True
+        step_solid_positions_m = solid.x.to_numpy()[: solid.particle_count]
         step_displacement = _solid_displacement_report(
-            solid, fixed_mask, tip_mask, rest=rest_positions_m
+            solid,
+            fixed_mask,
+            tip_mask,
+            rest=rest_positions_m,
+            positions=step_solid_positions_m,
         )
         history.append(
             {
@@ -424,6 +739,45 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "hibm_sharp_marker_boundary_search_reused": latest_flow_report[
                     "hibm_sharp_marker_boundary_search_reused"
                 ],
+                "hibm_sharp_marker_boundary_topology_reused": latest_flow_report[
+                    "hibm_sharp_marker_boundary_topology_reused"
+                ],
+                "hibm_preassembly_overflow_singleton_cleanup_cell_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_overflow_singleton_cleanup_cell_count"
+                    ]
+                ),
+                "hibm_preassembly_overflow_singleton_cleanup_component_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_overflow_singleton_cleanup_component_count"
+                    ]
+                ),
+                "hibm_preassembly_tiny_unreached_cleanup_cell_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_tiny_unreached_cleanup_cell_count"
+                    ]
+                ),
+                "hibm_preassembly_tiny_unreached_cleanup_component_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_tiny_unreached_cleanup_component_count"
+                    ]
+                ),
+                "hibm_preassembly_tiny_unreached_cleanup_pass_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_tiny_unreached_cleanup_pass_count"
+                    ]
+                ),
+                "hibm_preassembly_remaining_unreached_cell_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_remaining_unreached_cell_count"
+                    ]
+                ),
+                "hibm_preassembly_cleanup_reused": latest_flow_report[
+                    "hibm_preassembly_cleanup_reused"
+                ],
+                "hibm_preassembly_topology_mutated": latest_flow_report[
+                    "hibm_preassembly_topology_mutated"
+                ],
                 "hibm_sharp_marker_boundary_near_node_count": latest_flow_report[
                     "hibm_sharp_marker_boundary_near_node_count"
                 ],
@@ -441,6 +795,11 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "hibm_sharp_marker_boundary_no_slip_rows": latest_flow_report[
                     "hibm_sharp_marker_boundary_no_slip_rows"
                 ],
+                **_hibm_velocity_dirichlet_mapping_fields(latest_flow_report),
+                **_hibm_velocity_dirichlet_mapping_fields(
+                    latest_observer_topology_report,
+                    stage="observer",
+                ),
                 "hibm_sharp_marker_boundary_pressure_neumann_rows": (
                     latest_flow_report[
                         "hibm_sharp_marker_boundary_pressure_neumann_rows"
@@ -575,7 +934,41 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                         "fluid_marker_velocity_constraint_active_cell_count"
                     ]
                 ),
+                "fluid_marker_feedback_enforcement_mode": (
+                    latest_feedback_constraint_report[
+                        "fluid_marker_feedback_enforcement_mode"
+                    ]
+                ),
+                "legacy_constraint_active_cell_count": (
+                    latest_feedback_constraint_report[
+                        "legacy_constraint_active_cell_count"
+                    ]
+                ),
                 **latest_dynamic_obstacle_report,
+                "hibm_observer_topology_refreshed": bool(
+                    latest_observer_topology_report.get(
+                        "hibm_sharp_marker_boundary_enabled",
+                        False,
+                    )
+                ),
+                "hibm_observer_topology_near_node_count": int(
+                    latest_observer_topology_report.get(
+                        "hibm_sharp_marker_boundary_near_node_count",
+                        0,
+                    )
+                ),
+                "hibm_observer_topology_external_node_count": int(
+                    latest_observer_topology_report.get(
+                        "hibm_sharp_marker_boundary_external_node_count",
+                        0,
+                    )
+                ),
+                "hibm_observer_topology_internal_node_count": int(
+                    latest_observer_topology_report.get(
+                        "hibm_sharp_marker_boundary_internal_node_count",
+                        0,
+                    )
+                ),
                 "no_slip_residual_before_mps": latest_feedback_constraint_report[
                     "no_slip_residual_before_mps"
                 ],
@@ -592,6 +985,40 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                         "no_slip_projected_residual_after_projection_mps"
                     ]
                 ),
+                "hibm_no_slip_valid_marker_count": latest_flow_report[
+                    "hibm_no_slip_valid_marker_count"
+                ],
+                "hibm_no_slip_invalid_marker_count": latest_flow_report[
+                    "hibm_no_slip_invalid_marker_count"
+                ],
+                "hibm_no_slip_max_residual_mps": latest_flow_report[
+                    "hibm_no_slip_max_residual_mps"
+                ],
+                "hibm_no_slip_l2_residual_mps": latest_flow_report[
+                    "hibm_no_slip_l2_residual_mps"
+                ],
+                "hibm_no_slip_direct_sample_marker_count": latest_flow_report[
+                    "hibm_no_slip_direct_sample_marker_count"
+                ],
+                "hibm_no_slip_normal_walk_sample_marker_count": latest_flow_report[
+                    "hibm_no_slip_normal_walk_sample_marker_count"
+                ],
+                "hibm_no_slip_nearest_fluid_sample_marker_count": latest_flow_report[
+                    "hibm_no_slip_nearest_fluid_sample_marker_count"
+                ],
+                "hibm_no_slip_no_fluid_sample_marker_count": latest_flow_report[
+                    "hibm_no_slip_no_fluid_sample_marker_count"
+                ],
+                "hibm_post_dirichlet_consistency_projection_count": (
+                    latest_flow_report[
+                        "hibm_post_dirichlet_consistency_projection_count"
+                    ]
+                ),
+                "hibm_post_dirichlet_consistency_projection_applied": (
+                    latest_flow_report[
+                        "hibm_post_dirichlet_consistency_projection_applied"
+                    ]
+                ),
                 "local_velocity_peak_mps": latest_flow_report[
                     "local_velocity_peak_mps"
                 ],
@@ -602,6 +1029,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "flow_projection_report": latest_flow_report["projection_report"],
                 **_flow_projection_report_fields(latest_flow_report),
                 **_flow_source_report_fields(latest_flow_report),
+                **_flow_transport_report_fields(latest_flow_report),
                 "solid_substeps_selected": solid_substeps,
                 "solid_constitutive_model": str(
                     getattr(
@@ -620,6 +1048,12 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "stress_valid_marker_count": latest_stress_report.valid_marker_count,
                 "stress_invalid_marker_count": (
                     latest_stress_report.invalid_marker_count
+                ),
+                **_marker_projection_boundary_report_fields(
+                    markers,
+                    canonical_velocity_dirichlet_report=latest_flow_report.get(
+                        "canonical_velocity_dirichlet_report"
+                    ),
                 ),
                 "scatter_invalid_marker_count": (
                     latest_scatter_report.invalid_marker_count
@@ -678,6 +1112,23 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 ],
             }
         )
+        if step_observer is not None:
+            if observer_flow_snapshot is None:
+                raise RuntimeError("step observer flow snapshot was not captured")
+            step_observer(
+                step_index + 1,
+                float(config.dt_s) * float(step_index + 1),
+                dict(history[-1]),
+                _step_observer_snapshot(
+                    observer_flow_snapshot,
+                    solid,
+                    markers,
+                    solid_positions_m=step_solid_positions_m,
+                    solid_rest_positions_m=rest_positions_m,
+                    fixed_mask=fixed_mask,
+                    tip_mask=tip_mask,
+                ),
+            )
 
     if config.step_count == 0 and preflow_history:
         return _preflow_only_report(
@@ -790,6 +1241,16 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "marker_face_count": _traction_marker_face_count(config),
         "marker_count_per_face": int(config.marker_count),
         "marker_count_actual": int(markers.marker_count),
+        "marker_projection_mode": (
+            "segments" if int(markers.projection_segment_count) > 0 else "points"
+        ),
+        "marker_projection_segment_count": int(markers.projection_segment_count),
+        **_marker_projection_boundary_report_fields(
+            markers,
+            canonical_velocity_dirichlet_report=latest_flow_report.get(
+                "canonical_velocity_dirichlet_report"
+            ),
+        ),
         "flow_projection_iterations_actual": int(config.flow_projection_iterations),
         "solid_seeding_report": solid_seeding,
         "solid_substep_cfl_report": solid_substep_cfl,
@@ -824,6 +1285,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             "flow_source_ramp_restarted_after_preflow"
         ],
         **_flow_source_report_fields(latest_flow_report),
+        **_flow_transport_report_fields(latest_flow_report),
         "flow_obstacle_cell_count": latest_flow_report["obstacle_cell_count"],
         "flow_fluid_cell_count": latest_flow_report["fluid_cell_count"],
         "computed_pressure_min_pa": latest_flow_report["pressure_min_pa"],
@@ -948,7 +1410,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         "max_displacement_relative_error": displacement_relative_error,
         "displacement_tolerance": config.displacement_tolerance,
         "final_flow_field_snapshot": (
-            _flow_field_snapshot(fluid)
+            final_flow_field_snapshot
             if history and bool(getattr(config, "export_final_flow_snapshot", False))
             else {}
         ),
@@ -1048,6 +1510,16 @@ def _preflow_only_report(
         "marker_face_count": _traction_marker_face_count(config),
         "marker_count_per_face": int(config.marker_count),
         "marker_count_actual": int(markers.marker_count),
+        "marker_projection_mode": (
+            "segments" if int(markers.projection_segment_count) > 0 else "points"
+        ),
+        "marker_projection_segment_count": int(markers.projection_segment_count),
+        **_marker_projection_boundary_report_fields(
+            markers,
+            canonical_velocity_dirichlet_report=latest_preflow.get(
+                "canonical_velocity_dirichlet_report"
+            ),
+        ),
         "flow_projection_iterations_actual": int(config.flow_projection_iterations),
         "solid_substep_cfl_report": dict(solid_substep_cfl),
         "solid_substeps_requested": solid_substep_cfl["solid_substeps_requested"],
@@ -1081,6 +1553,7 @@ def _preflow_only_report(
             "flow_source_ramp_restarted_after_preflow"
         ],
         **_flow_source_report_fields(latest_preflow),
+        **_flow_transport_report_fields(latest_preflow),
         "computed_pressure_min_pa": latest_preflow["pressure_min_pa"],
         "computed_pressure_max_pa": latest_preflow["pressure_max_pa"],
         "pressure_sign_convention": "fluid.fsi_pressure feedback field is sampled for reports and traction",
@@ -1397,7 +1870,7 @@ def _is_selected_traction_formulation_coupled_smoke(config: Any) -> bool:
         and _traction_marker_layout(config)
         == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES
         and _traction_pressure_sampling_mode(config) == TRACTION_PRESSURE_ONE_SIDED
-        and math.isclose(_traction_marker_face_offset_cells(config), 0.51)
+        and math.isclose(_traction_marker_face_offset_cells(config), 0.0)
         and not _traction_include_viscous(config)
         and _traction_pressure_probe_origin_mode(config)
         == TRACTION_PRESSURE_PROBE_ORIGIN_PHYSICAL_FACE_OFFSET
@@ -1465,10 +1938,47 @@ def traction_formulation_supported(config: Any) -> tuple[bool, str]:
     return True, "supported"
 
 
+def _preflow_snapshot_paths(config: Any) -> tuple[object | None, object | None]:
+    input_path = getattr(config, "preflow_snapshot_input_path", None)
+    output_path = getattr(config, "preflow_snapshot_output_path", None)
+    if input_path is not None and output_path is not None:
+        raise ValueError(
+            "preflow_snapshot_input_path and preflow_snapshot_output_path "
+            "cannot both be set"
+        )
+    return input_path, output_path
+
+
 def _validate_rectangular_solid_config(config: Any) -> None:
+    _preflow_snapshot_paths(config)
+    _preflow_traction_readiness_mode(config)
     solid_boundary_mode = _flow_solid_boundary_mode(config)
     if solid_boundary_mode not in FLOW_SOLID_BOUNDARY_MODES:
         raise ValueError(f"unsupported flow_solid_boundary_mode: {solid_boundary_mode!r}")
+    dynamic_solid_volume_enabled = bool(
+        getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)
+    )
+    if dynamic_solid_volume_enabled:
+        if solid_boundary_mode != FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS:
+            raise ValueError(
+                "HIBM dynamic solid volume requires hibm_sharp_marker_rows"
+            )
+        if not bool(getattr(config, "update_fluid_obstacle_from_solid", False)):
+            raise ValueError(
+                "HIBM dynamic solid volume requires "
+                "update_fluid_obstacle_from_solid=True"
+            )
+    tiny_unreached_cleanup_cells = int(
+        getattr(
+            config,
+            "flow_hibm_tiny_unreached_cleanup_component_cells",
+            0,
+        )
+    )
+    if tiny_unreached_cleanup_cells < 0:
+        raise ValueError(
+            "flow_hibm_tiny_unreached_cleanup_component_cells must be non-negative"
+        )
     for mode_field_name in ("flow_driver_mode", "preflow_flow_driver_mode"):
         flow_driver_mode = getattr(config, mode_field_name, None)
         if flow_driver_mode is None and mode_field_name == "preflow_flow_driver_mode":
@@ -1544,6 +2054,38 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError(
             "flow_predictor_kinematic_viscosity_multiplier must be finite and non-negative"
         )
+    turbulence_model = str(getattr(config, "flow_turbulence_model", "laminar"))
+    if turbulence_model not in FLOW_TURBULENCE_MODELS:
+        raise ValueError(f"unsupported flow_turbulence_model: {turbulence_model!r}")
+    if turbulence_model == "sst_2003":
+        for field_name in (
+            "flow_turbulence_intensity",
+            "flow_backflow_turbulence_intensity",
+        ):
+            value = float(getattr(config, field_name, 0.05))
+            if not math.isfinite(value) or not 0.0 < value <= 1.0:
+                raise ValueError(f"{field_name} must be in (0, 1]")
+        for field_name in (
+            "flow_turbulent_viscosity_ratio",
+            "flow_backflow_turbulent_viscosity_ratio",
+        ):
+            value = float(getattr(config, field_name, 10.0))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{field_name} must be positive and finite")
+        if int(getattr(config, "flow_sst_max_automatic_substeps", 4096)) <= 0:
+            raise ValueError("flow_sst_max_automatic_substeps must be positive")
+        inlet_face = str(
+            getattr(config, "flow_turbulence_inlet_face", "zmax")
+        ).lower()
+        outlet_face = str(
+            getattr(config, "flow_turbulence_outlet_face", "zmin")
+        ).lower()
+        if inlet_face not in FLOW_PREDICTOR_NO_SLIP_WALL_INDEX:
+            raise ValueError("flow_turbulence_inlet_face must name a physical face")
+        if outlet_face not in FLOW_PREDICTOR_NO_SLIP_WALL_INDEX:
+            raise ValueError("flow_turbulence_outlet_face must name a physical face")
+        if inlet_face == outlet_face:
+            raise ValueError("flow_turbulence_inlet_face and outlet face must differ")
     _flow_predictor_no_slip_domain_walls(config)
     _flow_symmetry_domain_walls(config)
     constraint_blend = float(getattr(config, "marker_velocity_constraint_blend", 1.0))
@@ -1772,6 +2314,14 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError("solid_particle_counts must be positive")
     if config.marker_count <= 0:
         raise ValueError("marker_count must be positive")
+    if (
+        marker_layout == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES
+        and int(config.marker_count) < 2
+    ):
+        raise ValueError(
+            "dual physical-face tip-cap projection requires at least two "
+            "markers per face"
+        )
     if config.dt_s <= 0.0:
         raise ValueError("dt_s must be positive")
     if config.solid_substeps <= 0:
@@ -1785,6 +2335,30 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError("preflow_steps must be non-negative")
     if float(getattr(config, "preflow_convergence_tolerance", 0.0)) < 0.0:
         raise ValueError("preflow_convergence_tolerance must be non-negative")
+    preflow_convergence_mode = str(
+        getattr(config, "preflow_convergence_mode", "single_step_legacy")
+    )
+    if preflow_convergence_mode not in {
+        "single_step_legacy",
+        "windowed_stationary",
+    }:
+        raise ValueError(
+            f"unsupported preflow_convergence_mode: {preflow_convergence_mode!r}"
+        )
+    if int(getattr(config, "preflow_stationary_min_steps", 20)) < 0:
+        raise ValueError("preflow_stationary_min_steps must be non-negative")
+    if int(getattr(config, "preflow_stationary_window_steps", 10)) <= 0:
+        raise ValueError("preflow_stationary_window_steps must be positive")
+    if int(getattr(config, "preflow_stationary_consecutive_windows", 3)) <= 0:
+        raise ValueError("preflow_stationary_consecutive_windows must be positive")
+    for field_name in (
+        "preflow_stationary_tolerance",
+        "preflow_stationary_divergence_tolerance",
+        "preflow_stationary_no_slip_tolerance_fraction",
+    ):
+        field_value = float(getattr(config, field_name, 0.05))
+        if not 0.0 < field_value < 1.0:
+            raise ValueError(f"{field_name} must be in (0, 1)")
     if float(getattr(config, "solid_cfl_target", DEFAULT_SOLID_CFL_TARGET)) <= 0.0:
         raise ValueError("solid_cfl_target must be positive")
     flap_streamwise_min_m = getattr(config, "flap_streamwise_min_m", None)
@@ -1802,6 +2376,48 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError("flow_projection_iterations must be positive")
     if config.flow_cg_tolerance < 0.0:
         raise ValueError("flow_cg_tolerance must be non-negative")
+    consistency_projection_iterations = int(
+        getattr(
+            config,
+            "flow_post_dirichlet_consistency_projection_iterations",
+            0,
+        )
+    )
+    if consistency_projection_iterations < 0:
+        raise ValueError(
+            "flow_post_dirichlet_consistency_projection_iterations must be "
+            "non-negative"
+        )
+    reprojection_iterations = getattr(config, "flow_reprojection_iterations", None)
+    if reprojection_iterations is not None and int(reprojection_iterations) <= 0:
+        raise ValueError("flow_reprojection_iterations must be positive when set")
+    reprojection_tolerance = getattr(
+        config,
+        "flow_reprojection_cg_tolerance",
+        None,
+    )
+    if reprojection_tolerance is not None and float(reprojection_tolerance) <= 0.0:
+        raise ValueError(
+            "flow_reprojection_cg_tolerance must be positive when set"
+        )
+    flow_cg_preconditioner = str(getattr(config, "flow_cg_preconditioner", "auto"))
+    if flow_cg_preconditioner not in {
+        "auto",
+        "jacobi",
+        "fv_multigrid",
+        "fv_multigrid_light",
+    }:
+        raise ValueError(
+            f"unsupported flow_cg_preconditioner: {flow_cg_preconditioner!r}"
+        )
+    pressure_solve_failure_policy = str(
+        getattr(config, "flow_pressure_solve_failure_policy", "report")
+    )
+    if pressure_solve_failure_policy not in {"raise", "report"}:
+        raise ValueError(
+            "flow_pressure_solve_failure_policy must be 'raise' or 'report'; "
+            f"got {pressure_solve_failure_policy!r}"
+        )
     if config.flow_divergence_cleanup_iterations < 0:
         raise ValueError("flow_divergence_cleanup_iterations must be non-negative")
     if config.displacement_tolerance <= 0.0:
@@ -1982,7 +2598,7 @@ def solid_seeding_report(config: Any) -> dict[str, object]:
     Explicit MPM loses inter-particle grid connectivity when particle
     spacing exceeds roughly one background cell: the quadratic B-spline
     stencils of adjacent particle layers stop sharing well-supported nodes,
-    the body numerically fractures, and a fixed-root cantilever free-falls
+    the body numerically fractures, and a fixed-root structure free-falls
     instead of bending (observed on the 2026-07-02 fine flap campaign:
     grid 4x256x320 with solid_particle_counts (1, 64, 12) put ~2 cells
     between wall-normal particle layers and ejected particles by step 30,
@@ -2272,7 +2888,39 @@ def _build_fluid(config: Any, runtime: TaichiRuntimeConfig) -> CartesianFluidSol
         ),
         runtime=runtime,
     )
+    if _use_hibm_sharp_marker_boundary(config):
+        fluid.set_velocity_dirichlet_boundary_authority("canonical")
     fluid.obstacle.from_numpy(_initial_fluid_obstacle(config))
+    if _flow_turbulence_model(config) == "sst_2003":
+        fluid.configure_sst_2003(
+            inlet_velocity_mps=float(config.inlet_velocity_mps),
+            turbulence_intensity=float(
+                getattr(config, "flow_turbulence_intensity", 0.05)
+            ),
+            turbulent_viscosity_ratio=float(
+                getattr(config, "flow_turbulent_viscosity_ratio", 10.0)
+            ),
+            backflow_turbulence_intensity=float(
+                getattr(config, "flow_backflow_turbulence_intensity", 0.05)
+            ),
+            backflow_turbulent_viscosity_ratio=float(
+                getattr(
+                    config,
+                    "flow_backflow_turbulent_viscosity_ratio",
+                    10.0,
+                )
+            ),
+            inlet_face=str(
+                getattr(config, "flow_turbulence_inlet_face", "zmax")
+            ),
+            outlet_face=str(
+                getattr(config, "flow_turbulence_outlet_face", "zmin")
+            ),
+            no_slip_domain_walls=_flow_predictor_no_slip_domain_walls(config),
+            max_automatic_substeps=int(
+                getattr(config, "flow_sst_max_automatic_substeps", 4096)
+            ),
+        )
     return fluid
 
 
@@ -2322,6 +2970,7 @@ def _initial_fluid_obstacle(config: Any) -> np.ndarray:
 def _fluid_obstacle_update_disabled_report() -> dict[str, object]:
     return {
         "fluid_dynamic_obstacle_update_enabled": False,
+        "fluid_dynamic_obstacle_is_hibm_solid_volume": False,
         "fluid_dynamic_obstacle_cell_count": "",
         "fluid_dynamic_obstacle_added_cell_count": "",
         "fluid_dynamic_obstacle_removed_cell_count": "",
@@ -2333,33 +2982,46 @@ def _update_fluid_obstacle_from_solid(
     solid: NeoHookeanMpmState,
     config: Any,
 ) -> dict[str, object]:
-    if (
-        not bool(getattr(config, "update_fluid_obstacle_from_solid", False))
-        or _use_hibm_sharp_marker_boundary(config)
-    ):
+    sharp_dynamic_volume = bool(
+        _use_hibm_sharp_marker_boundary(config)
+        and getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)
+    )
+    if not bool(getattr(config, "update_fluid_obstacle_from_solid", False)):
+        return _fluid_obstacle_update_disabled_report()
+    if _use_hibm_sharp_marker_boundary(config) and not sharp_dynamic_volume:
         return _fluid_obstacle_update_disabled_report()
 
-    device_update = getattr(fluid, "update_dynamic_flap_obstacle_from_particles", None)
-    row_count = int(config.solid_particle_counts[1])
-    if device_update is not None and row_count <= int(config.grid_nodes[1]):
+    device_update = getattr(fluid, "update_dynamic_solid_obstacle_from_particles", None)
+    if device_update is not None:
         solid_min, solid_max = _solid_box(config)
+        particle_counts = tuple(int(value) for value in config.solid_particle_counts)
+        particle_support_size_m = tuple(
+            (float(solid_max[axis]) - float(solid_min[axis]))
+            / float(particle_counts[axis])
+            for axis in range(3)
+        )
         report = device_update(
             solid.x,
-            solid.rest_x,
             particle_count=solid.particle_count,
-            row_count=row_count,
-            solid_min_m=solid_min,
-            solid_max_m=solid_max,
-            flap_height_m=float(config.flap_height_m),
-            min_thickness_m=float(config.flap_thickness_m),
+            particle_support_size_m=particle_support_size_m,
+            particle_deformation_gradient=getattr(solid, "F", None),
+            store_as_hibm_dynamic_solid_volume=sharp_dynamic_volume,
         )
         return {
             "fluid_dynamic_obstacle_update_enabled": True,
+            "fluid_dynamic_obstacle_is_hibm_solid_volume": sharp_dynamic_volume,
             **report,
         }
 
     previous_obstacle = fluid.obstacle.to_numpy()
     obstacle = _solid_obstacle_from_mpm_particles(solid, config)
+    if sharp_dynamic_volume:
+        report = fluid.set_hibm_dynamic_solid_volume_obstacle_from_numpy(obstacle)
+        return {
+            "fluid_dynamic_obstacle_update_enabled": True,
+            "fluid_dynamic_obstacle_is_hibm_solid_volume": True,
+            **report,
+        }
     velocity = fluid.velocity.to_numpy()
     velocity_prev = fluid.velocity_prev.to_numpy()
     solid_cells = obstacle != 0
@@ -2370,6 +3032,7 @@ def _update_fluid_obstacle_from_solid(
     fluid.velocity_prev.from_numpy(velocity_prev)
     return {
         "fluid_dynamic_obstacle_update_enabled": True,
+        "fluid_dynamic_obstacle_is_hibm_solid_volume": False,
         "fluid_dynamic_obstacle_cell_count": int(np.count_nonzero(obstacle)),
         "fluid_dynamic_obstacle_added_cell_count": int(
             np.count_nonzero((obstacle != 0) & (previous_obstacle == 0))
@@ -2454,6 +3117,10 @@ def _initialize_inlet_flow(
     config: Any,
 ) -> np.ndarray:
     nx, ny, nz = config.grid_nodes
+    canonical_authority = (
+        str(getattr(fluid, "velocity_dirichlet_boundary_authority", "legacy"))
+        == "canonical"
+    )
     obstacle = fluid.obstacle.to_numpy()
     velocity = np.zeros((nx, ny, nz, 3), dtype=np.float32)
     velocity[:, :, :, STREAMWISE_AXIS_INDEX] = -float(config.inlet_velocity_mps)
@@ -2464,10 +3131,19 @@ def _initialize_inlet_flow(
     active = np.zeros((nx, ny, nz), dtype=np.int32)
     values = np.zeros((nx, ny, nz, 3), dtype=np.float32)
     weights = np.zeros((nx, ny, nz), dtype=np.float32)
+    enforcement_weights = np.zeros((nx, ny, nz), dtype=np.float32)
+    marker_regions = np.full((nx, ny, nz), -1, dtype=np.int32)
+    hard_masks = np.zeros((nx, ny, nz), dtype=np.int32)
+    external_exact_masks = np.zeros((nx, ny, nz), dtype=np.int32)
+    owned_rows = np.zeros((nx, ny, nz), dtype=np.int32)
     _apply_ymin_no_slip_rows(
         active,
         values,
         weights,
+        marker_regions,
+        hard_masks,
+        external_exact_masks,
+        owned_rows,
         obstacle,
         config,
     )
@@ -2479,15 +3155,99 @@ def _initialize_inlet_flow(
             obstacle,
             config,
         )
-    active[:, :, nz - 1] = 1
-    values[:, :, nz - 1, STREAMWISE_AXIS_INDEX] = -float(config.inlet_velocity_mps)
-    weights[:, :, nz - 1] = 1.0
+    if not canonical_authority:
+        # Legacy storage aliases the plus-side physical face onto the final
+        # compact row.  Canonical storage has a separate directed zmax face;
+        # its final compact row remains the backward internal MAC face.
+        active[:, :, nz - 1] = 1
+        values[:, :, nz - 1, STREAMWISE_AXIS_INDEX] = -float(
+            config.inlet_velocity_mps
+        )
+        weights[:, :, nz - 1] = 1.0
+        marker_regions[:, :, nz - 1] = -1
+        hard_masks[:, :, nz - 1] = 0b111
+        external_exact_masks[:, :, nz - 1] |= np.int32(0b100)
+        owned_rows[:, :, nz - 1] = 0
     active[obstacle != 0] = 0
     values[obstacle != 0] = 0.0
     weights[obstacle != 0] = 0.0
+    marker_regions[obstacle != 0] = -1
+    hard_masks[obstacle != 0] = 0
+    external_exact_masks[obstacle != 0] = 0
+    owned_rows[obstacle != 0] = 0
+    # Every row assembled here is direct/non-owned.  Later HIBM assembly
+    # replaces its owned rows with the split pressure-alpha/enforcement ledger.
+    enforcement_weights[...] = weights
+    if canonical_authority:
+        fluid._invalidate_velocity_dirichlet_component_ledger()
     fluid.velocity_dirichlet_boundary_active.from_numpy(active)
     fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
     fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+    fluid.velocity_dirichlet_boundary_enforcement_weight.from_numpy(
+        enforcement_weights
+    )
+    fluid.velocity_dirichlet_boundary_marker_region_id.from_numpy(marker_regions)
+    fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.from_numpy(hard_masks)
+    fluid.velocity_dirichlet_boundary_external_exact_component_mask.from_numpy(
+        external_exact_masks
+    )
+    fluid.velocity_dirichlet_boundary_owned_row.from_numpy(owned_rows)
+    if canonical_authority:
+        active_component_masks = np.where(active != 0, 0b111, 0).astype(np.int32)
+        pressure_mobility = np.ones((nx, ny, nz, 3), dtype=np.float32)
+        component_enforcement_weights = np.repeat(
+            enforcement_weights[:, :, :, None],
+            3,
+            axis=3,
+        ).astype(np.float32)
+        component_regions = np.repeat(
+            marker_regions[:, :, :, None],
+            3,
+            axis=3,
+        ).astype(np.int32)
+        owned_component_masks = np.where(
+            owned_rows != 0,
+            active_component_masks,
+            0,
+        ).astype(np.int32)
+        for axis in range(3):
+            axis_bit = np.int32(1 << axis)
+            axis_active = (active_component_masks & axis_bit) != 0
+            axis_hard = (hard_masks & axis_bit) != 0
+            pressure_mobility[:, :, :, axis] = np.where(
+                axis_active,
+                np.where(axis_hard, 0.0, weights),
+                1.0,
+            ).astype(np.float32)
+        fluid.velocity_dirichlet_boundary_active_component_mask.from_numpy(
+            active_component_masks
+        )
+        # The value/hard/external fields above are three of the canonical eight
+        # fields and intentionally remain the single shared storage authority.
+        fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
+        fluid.velocity_dirichlet_boundary_pressure_mobility.from_numpy(
+            pressure_mobility
+        )
+        fluid.velocity_dirichlet_boundary_component_enforcement_weight.from_numpy(
+            component_enforcement_weights
+        )
+        fluid.velocity_dirichlet_boundary_component_region_id.from_numpy(
+            component_regions
+        )
+        fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.from_numpy(
+            hard_masks
+        )
+        fluid.velocity_dirichlet_boundary_external_exact_component_mask.from_numpy(
+            external_exact_masks
+        )
+        fluid.velocity_dirichlet_boundary_owned_component_mask.from_numpy(
+            owned_component_masks
+        )
+        fluid.refresh_zmax_inlet_boundary_canonical(
+            inlet_velocity_mps=float(config.inlet_velocity_mps),
+            streamwise_axis_index=STREAMWISE_AXIS_INDEX,
+        )
+        _prepare_and_seal_canonical_velocity_dirichlet_component_ledger(fluid)
     zero_pressure = np.zeros((nx, ny, nz), dtype=np.float32)
     fluid.pressure.from_numpy(zero_pressure)
     fluid.fsi_pressure.from_numpy(zero_pressure)
@@ -2506,23 +3266,71 @@ def _project_current_flow(
     config: Any,
     *,
     reset_pressure: bool,
+    pressure_solve_context: Mapping[str, object] | None = None,
+    projection_iterations: int | None = None,
+    cg_tolerance: float | None = None,
+    accumulate_pressure_into_previous: bool = False,
+    homogenize_pressure_interface_rhs_for_increment: bool = False,
+    preserve_velocity_constraints: bool | None = None,
+    velocity_dirichlet_soft_rows_already_applied: bool = False,
+    pre_projection_velocity_projector: object | None = None,
+    pressure_velocity_nullspace_projector: object | None = None,
 ) -> dict[str, object]:
-    preserve_velocity_constraints = bool(
-        getattr(config, "preserve_marker_velocity_constraints", True)
+    configured_velocity_inlet_zmax = getattr(
+        config,
+        "flow_projection_velocity_inlet_zmax",
+        None,
     )
+    if configured_velocity_inlet_zmax is not None and not isinstance(
+        configured_velocity_inlet_zmax,
+        (bool, np.bool_),
+    ):
+        raise ValueError(
+            "flow_projection_velocity_inlet_zmax must be bool or None"
+        )
+    velocity_inlet_zmax = (
+        None
+        if configured_velocity_inlet_zmax is None
+        else bool(configured_velocity_inlet_zmax)
+    )
+    effective_preserve_velocity_constraints = (
+        bool(getattr(config, "preserve_marker_velocity_constraints", True))
+        if preserve_velocity_constraints is None
+        else bool(preserve_velocity_constraints)
+    )
+    project_tiny_unreached_cleanup_cells = int(
+        getattr(
+            config,
+            "flow_hibm_tiny_unreached_cleanup_component_cells",
+            0,
+        )
+    )
+    pressure_outlet_enabled = bool(
+        getattr(config, "flow_pressure_outlet_enabled", True)
+    )
+    sharp_reachability_prepared = bool(
+        _use_hibm_sharp_marker_boundary(config) and pressure_outlet_enabled
+    )
+    if sharp_reachability_prepared:
+        # The sharp path stabilizes topology before it assembles the current
+        # pressure-interface matrix.  Repeating cleanup inside project() would
+        # be both redundant and too late to rebuild those rows safely.
+        project_tiny_unreached_cleanup_cells = 0
     projection_report = dict(
         fluid.project(
-            iterations=config.flow_projection_iterations,
-            pressure_outlet_zmin=bool(
-                getattr(config, "flow_pressure_outlet_enabled", True)
+            iterations=(
+                int(config.flow_projection_iterations)
+                if projection_iterations is None
+                else int(projection_iterations)
             ),
+            pressure_outlet_zmin=pressure_outlet_enabled,
             pressure_outlet_backflow_policy=str(
                 getattr(config, "flow_pressure_outlet_backflow_policy", "clamp")
             ),
             obstacle_normal_velocity_policy=str(
                 getattr(config, "flow_obstacle_normal_velocity_policy", "face_clamp")
             ),
-            preserve_velocity_constraints=preserve_velocity_constraints,
+            preserve_velocity_constraints=effective_preserve_velocity_constraints,
             velocity_constraint_blend=float(
                 getattr(config, "marker_velocity_constraint_blend", 1.0)
             ),
@@ -2534,12 +3342,41 @@ def _project_current_flow(
                 )
             ),
             reset_pressure=reset_pressure,
-            pressure_solver=config.flow_pressure_solver,
-            cg_tolerance=config.flow_cg_tolerance,
-            divergence_cleanup_iterations=config.flow_divergence_cleanup_iterations,
-            velocity_inlet_zmax=bool(
-                getattr(config, "flow_projection_velocity_inlet_zmax", False)
+            accumulate_pressure_into_previous=bool(
+                accumulate_pressure_into_previous
             ),
+            homogenize_pressure_interface_rhs_for_increment=bool(
+                homogenize_pressure_interface_rhs_for_increment
+            ),
+            pressure_solver=config.flow_pressure_solver,
+            cg_tolerance=(
+                float(config.flow_cg_tolerance)
+                if cg_tolerance is None
+                else float(cg_tolerance)
+            ),
+            cg_preconditioner=str(
+                getattr(config, "flow_cg_preconditioner", "auto")
+            ),
+            pressure_solve_failure_policy=str(
+                getattr(config, "flow_pressure_solve_failure_policy", "report")
+            ),
+            pressure_solve_context=pressure_solve_context,
+            divergence_cleanup_iterations=config.flow_divergence_cleanup_iterations,
+            hibm_tiny_unreached_cleanup_component_cells=(
+                project_tiny_unreached_cleanup_cells
+            ),
+            hibm_pressure_reachability_prepared=sharp_reachability_prepared,
+            velocity_dirichlet_soft_rows_already_applied=bool(
+                velocity_dirichlet_soft_rows_already_applied
+            ),
+            pre_projection_velocity_projector=(
+                pre_projection_velocity_projector
+            ),
+            pressure_velocity_nullspace_projector=(
+                pressure_velocity_nullspace_projector
+            ),
+            velocity_inlet_zmax=velocity_inlet_zmax,
+            dt_s=float(config.dt_s),
         )
     )
     symmetry_domain_walls = _flow_symmetry_domain_walls(config)
@@ -2548,6 +3385,9 @@ def _project_current_flow(
     projection_report["flow_symmetry_domain_walls"] = [
         bool(flag) for flag in symmetry_domain_walls
     ]
+    projection_report["velocity_dirichlet_soft_rows_already_applied"] = bool(
+        velocity_dirichlet_soft_rows_already_applied
+    )
     projection_report.update(
         fluid.pressure_outlet_fv_flux_report(dt_s=float(config.dt_s))
     )
@@ -2561,18 +3401,2879 @@ def _project_current_flow(
     )
 
 
+def _combine_flow_projection_reports(
+    projection_reports: list[dict[str, object]],
+) -> dict[str, object]:
+    """Combine a main projection and its pressure-increment corrections."""
+
+    if not projection_reports:
+        return {}
+    combined = dict(projection_reports[-1])
+    sum_keys = (
+        "cg_project_calls",
+        "cg_iterations_total",
+        "cg_host_residual_checks",
+        "cg_mean_host_reads",
+        "cg_mean_projection_count",
+        "cg_componentwise_mean_projection_count",
+        "cg_unreached_set_mean_projection_count",
+        "cg_breakdown_count",
+        "cg_restart_count",
+        "cg_multigrid_apply_count",
+        "cg_multigrid_to_jacobi_fallback_count",
+        "cg_exact_residual_confirmation_count",
+        "velocity_dirichlet_boundary_apply_calls",
+        "velocity_dirichlet_boundary_active_cells_total",
+        "hibm_projection_overflow_singleton_cleanup_cell_count",
+        "hibm_projection_overflow_singleton_cleanup_component_count",
+        "hibm_projection_tiny_unreached_cleanup_cell_count",
+        "hibm_projection_tiny_unreached_cleanup_component_count",
+        "pressure_marker_nullspace_apply_count",
+        "pressure_marker_nullspace_actuation_invalid_count",
+        "pressure_marker_nullspace_correction_invalid_count",
+        "pressure_marker_nullspace_operator_apply_count",
+        "pressure_marker_nullspace_velocity_correction_apply_count",
+    )
+    for key in sum_keys:
+        if any(key in report for report in projection_reports):
+            combined[key] = sum(int(report.get(key, 0)) for report in projection_reports)
+    max_keys = (
+        "cg_iterations_max",
+        "cg_initial_relative_residual_max",
+        "cg_relative_residual_max",
+        "cg_exact_relative_residual_max",
+        "velocity_dirichlet_boundary_active_cells_max",
+        "velocity_dirichlet_boundary_max_delta_mps",
+        "hibm_unreached_component_rhs_mean_max_abs",
+        "hibm_unreached_component_rhs_integral_max_abs",
+        "pressure_nullspace_component_rhs_mean_max_abs",
+        "pressure_nullspace_component_rhs_integral_max_abs",
+        "pressure_marker_nullspace_max_input_constraint_mps",
+        "pressure_marker_nullspace_max_unactuated_input_constraint_mps",
+        "pressure_marker_nullspace_max_dependent_normalized_pivot",
+        "pressure_marker_nullspace_max_constraint_residual_mps",
+    )
+    for key in max_keys:
+        if any(key in report for report in projection_reports):
+            combined[key] = max(
+                float(report.get(key, 0.0)) for report in projection_reports
+            )
+    max_int_keys = (
+        "hibm_unreached_incompatible_component_count",
+        "cg_unreached_component_count",
+        "cg_unreached_component_raw_count",
+        "cg_unreached_component_largest_cell_count",
+        "cg_unreached_component_singleton_count",
+        "cg_unreached_component_small_count",
+        "cg_unreached_component_small_cell_count",
+        "pressure_nullspace_incompatible_component_count",
+        "pressure_marker_nullspace_active_constraint_count",
+        "pressure_marker_nullspace_independent_constraint_count",
+        "pressure_marker_nullspace_dependent_constraint_count",
+        "pressure_marker_nullspace_unactuated_constraint_count",
+        "pressure_marker_nullspace_pressure_actuation_generation",
+        "pressure_marker_nullspace_solver_scratch_resource_bytes",
+        "pressure_marker_nullspace_marker_operator_resource_bytes",
+        "pressure_marker_nullspace_resource_bytes",
+    )
+    for key in max_int_keys:
+        if any(key in report for report in projection_reports):
+            combined[key] = max(
+                int(report.get(key, 0)) for report in projection_reports
+            )
+    active_cells_key = "velocity_dirichlet_boundary_active_cells_total"
+    mean_delta_key = "velocity_dirichlet_boundary_mean_delta_mps"
+    if any(mean_delta_key in report for report in projection_reports):
+        active_cells_total = sum(
+            int(report.get(active_cells_key, 0)) for report in projection_reports
+        )
+        combined[mean_delta_key] = (
+            sum(
+                float(report.get(mean_delta_key, 0.0))
+                * int(report.get(active_cells_key, 0))
+                for report in projection_reports
+            )
+            / float(active_cells_total)
+            if active_cells_total > 0
+            else 0.0
+        )
+    momentum_key = "velocity_dirichlet_boundary_momentum_delta_n_s"
+    if any(momentum_key in report for report in projection_reports):
+        combined[momentum_key] = tuple(
+            sum(
+                float(report.get(momentum_key, (0.0, 0.0, 0.0))[axis])
+                for report in projection_reports
+            )
+            for axis in range(3)
+        )
+    if any("cg_converged_all" in report for report in projection_reports):
+        combined["cg_converged_all"] = all(
+            bool(report.get("cg_converged_all", True))
+            for report in projection_reports
+        )
+    for report_key, aggregate_key in (
+        (
+            "pre_projection_velocity_projector_prepared",
+            "pre_projection_velocity_projector_prepared_all",
+        ),
+        (
+            "pre_projection_velocity_projector_converged",
+            "pre_projection_velocity_projector_converged_all",
+        ),
+        (
+            "pre_projection_velocity_projector_committed",
+            "pre_projection_velocity_projector_committed_all",
+        ),
+        (
+            "pressure_marker_nullspace_enabled",
+            "pressure_marker_nullspace_enabled_all",
+        ),
+        (
+            "pressure_marker_nullspace_prepared",
+            "pressure_marker_nullspace_prepared_all",
+        ),
+        (
+            "pressure_marker_nullspace_all_velocity_paths_projected",
+            "pressure_marker_nullspace_all_velocity_paths_projected_all",
+        ),
+    ):
+        combined[aggregate_key] = all(
+            bool(report.get(report_key, False))
+            for report in projection_reports
+        )
+    pressure_marker_active_key = (
+        "pressure_marker_nullspace_active_constraint_count"
+    )
+    pressure_marker_independent_key = (
+        "pressure_marker_nullspace_independent_constraint_count"
+    )
+    pressure_marker_dependent_key = (
+        "pressure_marker_nullspace_dependent_constraint_count"
+    )
+    pressure_marker_unactuated_key = (
+        "pressure_marker_nullspace_unactuated_constraint_count"
+    )
+    pressure_marker_pivot_key = "pressure_marker_nullspace_min_factor_pivot"
+    pressure_marker_reports = [
+        report
+        for report in projection_reports
+        if pressure_marker_active_key in report or pressure_marker_pivot_key in report
+    ]
+    if pressure_marker_reports:
+        active_counts = [
+            int(report.get(pressure_marker_active_key, 0))
+            for report in pressure_marker_reports
+        ]
+        combined[f"{pressure_marker_active_key}_min"] = min(active_counts)
+        combined[f"{pressure_marker_active_key}_max"] = max(active_counts)
+        active_pivots: list[float] = []
+        rank_partitions: list[tuple[int, int, int, int]] = []
+        for report, active_count in zip(
+            pressure_marker_reports,
+            active_counts,
+            strict=True,
+        ):
+            pivot = float(report.get(pressure_marker_pivot_key, 0.0))
+            independent_count = int(
+                report.get(pressure_marker_independent_key, active_count)
+            )
+            dependent_count = int(
+                report.get(pressure_marker_dependent_key, 0)
+            )
+            unactuated_count = int(
+                report.get(pressure_marker_unactuated_key, 0)
+            )
+            if (
+                active_count < 0
+                or independent_count < 0
+                or dependent_count < 0
+                or unactuated_count < 0
+                or independent_count + dependent_count + unactuated_count
+                != active_count
+            ):
+                raise RuntimeError(
+                    "pressure marker-nullspace rank partition is inconsistent: "
+                    f"active={active_count}, independent={independent_count}, "
+                    f"dependent={dependent_count}, unactuated={unactuated_count}"
+                )
+            if (
+                independent_count + dependent_count > 0
+                and independent_count == 0
+            ):
+                raise RuntimeError(
+                    "pressure marker-nullspace has pressure-actuated rows but "
+                    "zero rank"
+                )
+            rank_partitions.append(
+                (
+                    active_count,
+                    independent_count,
+                    dependent_count,
+                    unactuated_count,
+                )
+            )
+            for diagnostic_key in (
+                "pressure_marker_nullspace_max_dependent_normalized_pivot",
+                "pressure_marker_nullspace_max_input_constraint_mps",
+                "pressure_marker_nullspace_max_unactuated_input_constraint_mps",
+                "pressure_marker_nullspace_max_constraint_residual_mps",
+            ):
+                if diagnostic_key in report:
+                    diagnostic = float(report[diagnostic_key])
+                    if not math.isfinite(diagnostic) or diagnostic < 0.0:
+                        raise RuntimeError(
+                            "pressure marker-nullspace diagnostic must be "
+                            "finite and non-negative: "
+                            f"{diagnostic_key}={diagnostic}"
+                        )
+            if independent_count > 0:
+                if not math.isfinite(pivot) or pivot <= 0.0:
+                    raise RuntimeError(
+                        "invalid active pressure marker-nullspace factor pivot: "
+                        f"{pivot}"
+                    )
+                active_pivots.append(pivot)
+        if any(
+            partition != rank_partitions[0]
+            for partition in rank_partitions[1:]
+        ):
+            raise RuntimeError(
+                "pressure marker-nullspace rank partition changed across "
+                f"projection cycles: {rank_partitions}"
+            )
+        combined[pressure_marker_pivot_key] = (
+            min(active_pivots) if active_pivots else 0.0
+        )
+    for failure_key, action_key in (
+        ("pressure_solve_failed", "pressure_solve_failure_action"),
+        (
+            "pressure_projection_physical_failure",
+            "pressure_projection_physical_failure_action",
+        ),
+    ):
+        if any(failure_key in report for report in projection_reports):
+            failed = any(bool(report.get(failure_key, False)) for report in projection_reports)
+            combined[failure_key] = failed
+            if failed:
+                actions = [
+                    str(report.get(action_key, "reported"))
+                    for report in projection_reports
+                    if bool(report.get(failure_key, False))
+                ]
+                combined[action_key] = ",".join(dict.fromkeys(actions))
+                reason_key = f"{failure_key}_reason"
+                reasons = [
+                    str(report.get(reason_key, ""))
+                    for report in projection_reports
+                    if bool(report.get(failure_key, False))
+                    and str(report.get(reason_key, ""))
+                ]
+                if reasons:
+                    combined[reason_key] = ",".join(dict.fromkeys(reasons))
+            else:
+                combined[action_key] = "none"
+                combined[f"{failure_key}_reason"] = ""
+    consistency_count = max(0, len(projection_reports) - 1)
+    combined["hibm_post_dirichlet_consistency_projection_count"] = consistency_count
+    combined["hibm_post_dirichlet_consistency_projection_applied"] = bool(
+        consistency_count
+    )
+    return combined
+
+
+def _finite_report_float(
+    report: Mapping[str, object],
+    key: str,
+) -> float | None:
+    try:
+        value = float(report[key])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _report_int(
+    report: Mapping[str, object],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    try:
+        return int(report.get(key, default))
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
+
+
+def _finite_report_float_vector(
+    report: Mapping[str, object],
+    key: str,
+) -> tuple[float | None, ...]:
+    raw_values = report.get(key, ())
+    if isinstance(raw_values, (str, bytes, Mapping)):
+        return ()
+    try:
+        values = tuple(raw_values)
+    except (TypeError, ValueError, OverflowError):
+        return ()
+    normalized: list[float | None] = []
+    for raw_value in values:
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            normalized.append(None)
+            continue
+        normalized.append(value if math.isfinite(value) else None)
+    return tuple(normalized)
+
+
+def _json_safe_diagnostic_value(value: object) -> object:
+    """Return a strict-JSON-safe copy without masking diagnostic failure."""
+
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        finite_value = float(value)
+        return finite_value if math.isfinite(finite_value) else None
+    if isinstance(value, Mapping):
+        normalized_mapping: dict[str, object] = {}
+        for raw_key, raw_value in value.items():
+            if isinstance(raw_key, str):
+                key = raw_key
+            elif isinstance(raw_key, (bool, int, float, np.integer, np.floating)):
+                key = str(_json_safe_diagnostic_value(raw_key))
+            else:
+                key = f"<non-json-key:{type(raw_key).__name__}>"
+            normalized_mapping[key] = _json_safe_diagnostic_value(raw_value)
+        return normalized_mapping
+    if isinstance(value, tuple):
+        return tuple(_json_safe_diagnostic_value(item) for item in value)
+    if isinstance(value, list):
+        return [_json_safe_diagnostic_value(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe_diagnostic_value(value.tolist())
+    return f"<non-json:{type(value).__name__}>"
+
+
+def _strict_report_bool(
+    report: Mapping[str, object],
+    key: str,
+) -> bool | None:
+    value = report.get(key)
+    if not isinstance(value, (bool, np.bool_)):
+        return None
+    return bool(value)
+
+
+def _hibm_joint_qp_no_slip_diagnostics(
+    *,
+    no_slip_report: Mapping[str, object],
+    no_slip_absolute_tolerance_mps: float,
+) -> dict[str, object]:
+    no_slip_tolerance = float(no_slip_absolute_tolerance_mps)
+    if not math.isfinite(no_slip_tolerance) or no_slip_tolerance <= 0.0:
+        raise ValueError("joint Q/P no-slip tolerance must be finite and positive")
+    try:
+        valid_marker_count = int(no_slip_report["hibm_no_slip_valid_marker_count"])
+        invalid_marker_count = int(
+            no_slip_report["hibm_no_slip_invalid_marker_count"]
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        valid_marker_count = -1
+        invalid_marker_count = -1
+    terminal_no_slip = _finite_report_float(
+        no_slip_report,
+        "hibm_no_slip_max_residual_mps",
+    )
+    no_slip_measured = bool(
+        valid_marker_count > 0
+        and invalid_marker_count == 0
+        and terminal_no_slip is not None
+    )
+    no_slip_converged = bool(
+        no_slip_measured and terminal_no_slip <= no_slip_tolerance
+    )
+    return {
+        "no_slip_measured": bool(no_slip_measured),
+        "no_slip_converged": bool(no_slip_converged),
+        "no_slip_valid_marker_count": int(valid_marker_count),
+        "no_slip_invalid_marker_count": int(invalid_marker_count),
+        "no_slip_vector_max_residual_mps": terminal_no_slip,
+        "no_slip_absolute_tolerance_mps": float(no_slip_tolerance),
+    }
+
+
+def _hibm_joint_qp_pressure_diagnostics(
+    *,
+    pressure_report: Mapping[str, object],
+    pressure_cg_tolerance: float,
+) -> dict[str, object]:
+    pressure_tolerance = float(pressure_cg_tolerance)
+    if not math.isfinite(pressure_tolerance) or pressure_tolerance < 0.0:
+        raise ValueError(
+            "joint Q/P pressure CG tolerance must be finite and non-negative"
+        )
+
+    cg_converged = _strict_report_bool(pressure_report, "cg_converged_all")
+    pressure_solve_failed = _strict_report_bool(
+        pressure_report,
+        "pressure_solve_failed",
+    )
+    physical_failure = _strict_report_bool(
+        pressure_report,
+        "pressure_projection_physical_failure",
+    )
+    divergence_l2 = _finite_report_float(pressure_report, "l2")
+    divergence_max_abs = _finite_report_float(pressure_report, "max_abs")
+    pressure_exact_residual = _finite_report_float(
+        pressure_report,
+        "cg_exact_relative_residual_max",
+    )
+    pressure_measured = bool(
+        cg_converged is not None
+        and pressure_solve_failed is not None
+        and physical_failure is not None
+        and divergence_l2 is not None
+        and divergence_max_abs is not None
+        and pressure_exact_residual is not None
+    )
+    pressure_converged = bool(
+        pressure_measured
+        and cg_converged
+        and not pressure_solve_failed
+        and not physical_failure
+        and pressure_exact_residual <= pressure_tolerance
+    )
+    return {
+        "pressure_measured": bool(pressure_measured),
+        "pressure_converged": bool(pressure_converged),
+        "pressure_cg_converged_all": cg_converged,
+        "pressure_solve_failed": pressure_solve_failed,
+        "pressure_projection_physical_failure": physical_failure,
+        "pressure_divergence_l2_s_inv": divergence_l2,
+        "pressure_divergence_max_abs_s_inv": divergence_max_abs,
+        "pressure_exact_relative_residual": pressure_exact_residual,
+        "pressure_effective_cg_tolerance": float(pressure_tolerance),
+    }
+
+
+def _hibm_joint_qp_cycle_diagnostics(
+    *,
+    cycle_index: int,
+    projection_stage: str,
+    no_slip_report: Mapping[str, object],
+    pressure_report: Mapping[str, object],
+    no_slip_absolute_tolerance_mps: float,
+    pressure_cg_tolerance: float,
+    sharp_boundary_report: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Evaluate one terminal P state against both shared Q and P contracts."""
+
+    if int(cycle_index) <= 0:
+        raise ValueError("joint Q/P cycle_index must be positive")
+    no_slip = _hibm_joint_qp_no_slip_diagnostics(
+        no_slip_report=no_slip_report,
+        no_slip_absolute_tolerance_mps=no_slip_absolute_tolerance_mps,
+    )
+    pressure = _hibm_joint_qp_pressure_diagnostics(
+        pressure_report=pressure_report,
+        pressure_cg_tolerance=pressure_cg_tolerance,
+    )
+
+    post_q_component_max = _finite_report_float(
+        pressure_report,
+        "max_residual_mps",
+    )
+    terminal_no_slip = no_slip["no_slip_vector_max_residual_mps"]
+    post_q_vector_upper_bound = (
+        math.sqrt(3.0) * post_q_component_max
+        if post_q_component_max is not None
+        else None
+    )
+    pressure_reintroduced_no_slip = (
+        max(0.0, terminal_no_slip - post_q_vector_upper_bound)
+        if isinstance(terminal_no_slip, float)
+        and post_q_vector_upper_bound is not None
+        else None
+    )
+    no_slip_sampling_fields = {
+        "no_slip_direct_sample_marker_count": _report_int(
+            no_slip_report,
+            "hibm_no_slip_direct_sample_marker_count",
+            default=-1,
+        ),
+        "no_slip_normal_walk_sample_marker_count": _report_int(
+            no_slip_report,
+            "hibm_no_slip_normal_walk_sample_marker_count",
+            default=-1,
+        ),
+        "no_slip_nearest_fluid_sample_marker_count": _report_int(
+            no_slip_report,
+            "hibm_no_slip_nearest_fluid_sample_marker_count",
+            default=-1,
+        ),
+        "no_slip_no_fluid_sample_marker_count": _report_int(
+            no_slip_report,
+            "hibm_no_slip_no_fluid_sample_marker_count",
+            default=-1,
+        ),
+        "no_slip_sampling_identity_generation": _report_int(
+            no_slip_report,
+            "hibm_no_slip_sampling_identity_generation",
+            default=0,
+        ),
+        "no_slip_topology_generation": _report_int(
+            no_slip_report,
+            "hibm_no_slip_topology_generation",
+            default=0,
+        ),
+        "no_slip_component_face_valid_mask_generation": _report_int(
+            no_slip_report,
+            "hibm_no_slip_component_face_valid_mask_generation",
+            default=0,
+        ),
+        "no_slip_argmax_marker_index": _report_int(
+            no_slip_report,
+            "hibm_no_slip_residual_argmax_marker_index",
+            default=-1,
+        ),
+        "no_slip_argmax_marker_region_id": _report_int(
+            no_slip_report,
+            "hibm_no_slip_residual_argmax_marker_region_id",
+            default=-1,
+        ),
+        "no_slip_argmax_residual_vector_mps": _finite_report_float_vector(
+            no_slip_report,
+            "hibm_no_slip_residual_argmax_residual_vector_mps",
+        ),
+        "no_slip_argmax_sample_source": str(
+            no_slip_report.get(
+                "hibm_no_slip_residual_argmax_sample_source",
+                "none",
+            )
+        ),
+        "no_slip_argmax_sample_position_m": _finite_report_float_vector(
+            no_slip_report,
+            "hibm_no_slip_residual_argmax_sample_position_m",
+        ),
+        "no_slip_argmax_fluid_velocity_mps": _finite_report_float_vector(
+            no_slip_report,
+            "hibm_no_slip_residual_argmax_fluid_velocity_mps",
+        ),
+    }
+    return {
+        "cycle_index": int(cycle_index),
+        "projection_stage": str(projection_stage),
+        **no_slip,
+        **no_slip_sampling_fields,
+        "post_q_component_max_residual_mps": post_q_component_max,
+        "post_q_vector_residual_upper_bound_mps": post_q_vector_upper_bound,
+        "pre_projection_velocity_iterations": _report_int(
+            pressure_report,
+            "iterations",
+            default=-1,
+        ),
+        "pre_projection_velocity_max_residual_mps": post_q_component_max,
+        **pressure,
+        "pressure_reintroduced_no_slip_mps": pressure_reintroduced_no_slip,
+        "pressure_reintroduced_no_slip_definition": (
+            "lower_bound_from_terminal_vector_minus_sqrt3_post_q_component_max"
+        ),
+        "hibm_sharp_marker_boundary_stage_wall_time_s": (
+            _hibm_sharp_boundary_stage_wall_times_from_report(
+                sharp_boundary_report
+            )
+        ),
+        "converged": bool(
+            no_slip["no_slip_converged"] and pressure["pressure_converged"]
+        ),
+        "final_operation": "pressure_projection",
+    }
+
+
+def _hibm_joint_qp_terminal_diagnostics(
+    *,
+    cycle_budget: int,
+    cycle_trace: list[dict[str, object]],
+) -> dict[str, object]:
+    budget = int(cycle_budget)
+    if budget <= 0:
+        raise ValueError("joint Q/P cycle budget must be positive")
+    if not cycle_trace or len(cycle_trace) > budget:
+        raise ValueError("joint Q/P cycle trace must be non-empty and within budget")
+    trace = []
+    for cycle in cycle_trace:
+        normalized_cycle = _json_safe_diagnostic_value(cycle)
+        trace.append(
+            dict(normalized_cycle)
+            if isinstance(normalized_cycle, Mapping)
+            else {}
+        )
+    terminal = trace[-1]
+    terminal_stage_wall_times = (
+        _normalized_hibm_sharp_boundary_stage_wall_times(
+            terminal.get("hibm_sharp_marker_boundary_stage_wall_time_s", {})
+        )
+    )
+    total_stage_wall_times = _empty_hibm_sharp_boundary_stage_wall_times()
+    for cycle in trace:
+        cycle_stage_wall_times = (
+            _normalized_hibm_sharp_boundary_stage_wall_times(
+                cycle.get("hibm_sharp_marker_boundary_stage_wall_time_s", {})
+            )
+        )
+        for stage_name in _HIBM_SHARP_BOUNDARY_TIMING_STAGE_NAMES:
+            accumulated = (
+                total_stage_wall_times[stage_name]
+                + cycle_stage_wall_times[stage_name]
+            )
+            if math.isfinite(accumulated):
+                total_stage_wall_times[stage_name] = accumulated
+    return {
+        "hibm_joint_qp_measured": bool(
+            terminal["no_slip_measured"] and terminal["pressure_measured"]
+        ),
+        "hibm_joint_qp_converged": bool(terminal["converged"]),
+        "hibm_joint_qp_cycle_budget": int(budget),
+        "hibm_joint_qp_cycles_used": int(len(trace)),
+        "hibm_joint_qp_terminal_no_slip_vector_max_residual_mps": terminal[
+            "no_slip_vector_max_residual_mps"
+        ],
+        "hibm_joint_qp_terminal_divergence_l2_s_inv": terminal[
+            "pressure_divergence_l2_s_inv"
+        ],
+        "hibm_joint_qp_terminal_divergence_max_abs_s_inv": terminal[
+            "pressure_divergence_max_abs_s_inv"
+        ],
+        "hibm_joint_qp_pressure_exact_relative_residual": terminal[
+            "pressure_exact_relative_residual"
+        ],
+        "hibm_joint_qp_pressure_reintroduced_no_slip_mps": terminal[
+            "pressure_reintroduced_no_slip_mps"
+        ],
+        "hibm_joint_qp_final_operation": str(terminal["final_operation"]),
+        "hibm_joint_qp_cycle_trace": trace,
+        "hibm_sharp_marker_boundary_terminal_stage_wall_time_s": (
+            terminal_stage_wall_times
+        ),
+        "hibm_sharp_marker_boundary_total_stage_wall_time_s": (
+            total_stage_wall_times
+        ),
+    }
+
+
+def _require_hibm_joint_qp_convergence(
+    diagnostics: Mapping[str, object],
+    *,
+    context: str,
+) -> None:
+    if bool(diagnostics.get("hibm_joint_qp_converged", False)):
+        return
+    normalized_diagnostics = _json_safe_diagnostic_value(diagnostics)
+    safe_diagnostics = (
+        dict(normalized_diagnostics)
+        if isinstance(normalized_diagnostics, Mapping)
+        else {}
+    )
+    serialized = json.dumps(
+        safe_diagnostics,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    raise HibmJointQpConvergenceError(
+        f"HIBM joint Q/P terminal convergence budget exhausted ({context}): "
+        f"{serialized}",
+        diagnostics=safe_diagnostics,
+    )
+
+
+def _sample_hibm_no_slip_report(
+    markers: HibmMpmSurfaceMarkers,
+    fluid: CartesianFluidSolver,
+    *,
+    pre_projection_velocity_projector: (
+        _HibmPreProjectionVelocityProjector | None
+    ) = None,
+) -> dict[str, object]:
+    prepared_sampling_identity = None
+    topology_generation = None
+    component_face_valid_mask_generation = None
+    obstacle_field = fluid.obstacle
+    if pre_projection_velocity_projector is None:
+        component_face_valid_mask = (
+            fluid.build_hibm_no_slip_component_face_valid_mask()
+        )
+    else:
+        if pre_projection_velocity_projector.markers_owner is not markers:
+            raise RuntimeError(
+                "terminal no-slip sampler marker owner does not match Q"
+            )
+        prepared_sampling_identity = (
+            pre_projection_velocity_projector.last_prepared_sampling_identity
+        )
+        component_face_valid_mask = (
+            pre_projection_velocity_projector.last_component_face_valid_mask
+        )
+        obstacle_field = pre_projection_velocity_projector.last_sampling_obstacle
+        if (
+            prepared_sampling_identity is None
+            or component_face_valid_mask is None
+            or obstacle_field is None
+        ):
+            raise RuntimeError(
+                "terminal no-slip sampler has no committed shared Q identity"
+            )
+        topology_generation = int(fluid.hibm_reachability_revision)
+        component_face_valid_mask_generation = int(
+            fluid.velocity_dirichlet_component_ledger_generation
+        )
+    report = markers.sample_no_slip_residual(
+        fluid.velocity,
+        obstacle_field,
+        component_face_valid_mask,
+        fluid.cell_face_x_m,
+        fluid.cell_face_y_m,
+        fluid.cell_face_z_m,
+        fluid.cell_center_x_m,
+        fluid.cell_center_y_m,
+        fluid.cell_center_z_m,
+        fluid.grid.grid_nodes,
+        primary_region_id=PRIMARY_REGION_ID,
+        secondary_region_id=SECONDARY_REGION_ID,
+        prepared_sampling_identity=prepared_sampling_identity,
+        topology_generation=topology_generation,
+        component_face_valid_mask_generation=(
+            component_face_valid_mask_generation
+        ),
+    )
+    return {
+        "hibm_no_slip_report": asdict(report),
+        "hibm_no_slip_valid_marker_count": int(report.valid_marker_count),
+        "hibm_no_slip_invalid_marker_count": int(report.invalid_marker_count),
+        "hibm_no_slip_max_residual_mps": float(report.max_no_slip_residual_mps),
+        "hibm_no_slip_l2_residual_mps": float(report.l2_no_slip_residual_mps),
+        "hibm_no_slip_residual_argmax_marker_index": int(
+            report.argmax_marker_index
+        ),
+        "hibm_no_slip_residual_argmax_marker_region_id": int(
+            report.argmax_marker_region_id
+        ),
+        "hibm_no_slip_residual_argmax_residual_vector_mps": tuple(
+            float(value) for value in report.argmax_residual_vector_mps
+        ),
+        "hibm_no_slip_residual_argmax_sample_source": str(
+            report.argmax_sample_source
+        ),
+        "hibm_no_slip_residual_argmax_sample_position_m": tuple(
+            float(value) for value in report.argmax_sample_position_m
+        ),
+        "hibm_no_slip_residual_argmax_fluid_velocity_mps": tuple(
+            float(value) for value in report.argmax_fluid_velocity_mps
+        ),
+        "hibm_no_slip_direct_sample_marker_count": int(
+            report.direct_sample_marker_count
+        ),
+        "hibm_no_slip_normal_walk_sample_marker_count": int(
+            report.normal_walk_sample_marker_count
+        ),
+        "hibm_no_slip_nearest_fluid_sample_marker_count": int(
+            report.nearest_fluid_sample_marker_count
+        ),
+        "hibm_no_slip_no_fluid_sample_marker_count": int(
+            report.no_fluid_sample_marker_count
+        ),
+        "hibm_no_slip_sampling_identity_generation": int(
+            prepared_sampling_identity.generation
+            if prepared_sampling_identity is not None
+            else 0
+        ),
+        "hibm_no_slip_topology_generation": int(
+            topology_generation if topology_generation is not None else 0
+        ),
+        "hibm_no_slip_component_face_valid_mask_generation": int(
+            component_face_valid_mask_generation
+            if component_face_valid_mask_generation is not None
+            else 0
+        ),
+    }
+
+
+HIBM_VELOCITY_DIRICHLET_REPORT_KEYS = (
+    "hibm_velocity_dirichlet_active_rows",
+    "hibm_velocity_dirichlet_primary_region_active_rows",
+    "hibm_velocity_dirichlet_secondary_region_active_rows",
+    "hibm_velocity_dirichlet_other_region_active_rows",
+    "hibm_velocity_dirichlet_unassigned_region_active_rows",
+    "hibm_velocity_dirichlet_max_abs_velocity_mps",
+    "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps",
+    "hibm_velocity_dirichlet_boundary_velocity_only_rows",
+    "hibm_velocity_dirichlet_invalid_reconstruction_count",
+    "hibm_velocity_dirichlet_invalid_no_fluid_sample_count",
+    "hibm_velocity_dirichlet_invalid_nonpositive_gap_count",
+    "hibm_velocity_dirichlet_invalid_node_behind_boundary_count",
+    "hibm_velocity_dirichlet_invalid_node_beyond_interior_count",
+    "hibm_velocity_dirichlet_narrow_gap_count",
+    "hibm_velocity_dirichlet_relocated_rows",
+    "hibm_velocity_dirichlet_relocation_merged_rows",
+    "hibm_velocity_dirichlet_relocation_blocked_rows",
+    "hibm_velocity_dirichlet_min_projection_weight",
+    "hibm_velocity_dirichlet_max_projection_weight",
+)
+
+CANONICAL_HIBM_VELOCITY_DIRICHLET_SCHEMA_THREE_DEVICE_REPORT_KEYS = (
+    "schema_version",
+    "authority",
+    "new_owned_claim_component_count",
+    "duplicate_claim_component_count",
+    "direct_geometry_reconstructed_component_count",
+    "direct_geometry_one_sided_component_count",
+    "max_compatible_direct_target_spread_mps",
+    "final_active_component_count",
+    "final_owned_component_count",
+    "final_external_exact_component_count",
+    "final_hard_component_count",
+    "final_soft_component_count",
+    "final_active_storage_row_count",
+    "final_active_x_component_count",
+    "final_active_y_component_count",
+    "final_active_z_component_count",
+    "primary_region_active_component_count",
+    "secondary_region_active_component_count",
+    "other_region_active_component_count",
+    "unassigned_region_active_component_count",
+    "mixed_region_storage_row_count",
+    "active_on_obstacle_storage_component_count",
+    "legal_obstacle_interface_storage_component_count",
+    "illegal_active_on_obstacle_storage_component_count",
+    "max_abs_claim_target_mps",
+    "max_abs_committed_target_mps",
+    "min_active_pressure_mobility",
+    "max_active_pressure_mobility",
+    "min_active_enforcement_weight",
+    "max_active_enforcement_weight",
+    "invalid_mask_bits_count",
+    "mask_subset_violation_count",
+    "external_owned_overlap_count",
+    "external_not_hard_count",
+    "active_provenance_missing_count",
+    "inactive_neutral_violation_count",
+    "nonfinite_active_value_count",
+    "nonfinite_active_mobility_count",
+    "nonfinite_active_enforcement_count",
+    "active_mobility_range_violation_count",
+    "active_enforcement_range_violation_count",
+    "hard_mobility_contract_violation_count",
+    "hard_enforcement_contract_violation_count",
+    "claim_conflict_count",
+    "target_conflict_count",
+    "region_conflict_count",
+    "alpha_conflict_count",
+    "nonfinite_claim_target_count",
+    "nonfinite_geometry_count",
+    "degenerate_geometry_count",
+    "external_claim_collision_count",
+    "missing_actual_sample_count",
+    "actual_sample_evaluation_count",
+    "actual_geometry_claim_count",
+    "nominal_direct_claim_count",
+    "relocated_claim_count",
+    "relocation_merged_count",
+    "relocation_blocked_count",
+    "relocation_unavailable_count",
+)
+CANONICAL_HIBM_VELOCITY_DIRICHLET_MARKER_TARGET_CLOSURE_REPORT_KEYS = (
+    "enabled",
+    "constraint_count",
+    "adjustable_constraint_count",
+    "immutable_constraint_count",
+    "iterations",
+    "initial_max_residual_mps",
+    "final_max_residual_mps",
+    "final_max_adjustable_residual_mps",
+    "final_max_immutable_residual_mps",
+    "absolute_tolerance_mps",
+    "closure_tolerance_mps",
+    "density_kgm3",
+    "projection_only_marker_count",
+    "projection_only_evaluated_axis_count",
+    "projection_only_invalid_axis_count",
+    "projection_only_constraint_count",
+    "projection_only_max_residual_mps",
+)
+CANONICAL_HIBM_VELOCITY_DIRICHLET_DEVICE_REPORT_KEYS = (
+    *CANONICAL_HIBM_VELOCITY_DIRICHLET_SCHEMA_THREE_DEVICE_REPORT_KEYS,
+    "projection_only_region_seam_merged_count",
+    "marker_target_closure",
+)
+CANONICAL_HIBM_VELOCITY_DIRICHLET_DIRECT_GEOMETRY_REPORT_KEYS = (
+    "direct_geometry_reconstructed_component_count",
+    "direct_geometry_one_sided_component_count",
+    "max_compatible_direct_target_spread_mps",
+)
+CANONICAL_HIBM_VELOCITY_DIRICHLET_LEGACY_SCHEMA_TWO_DEVICE_REPORT_KEYS = tuple(
+    key
+    for key in CANONICAL_HIBM_VELOCITY_DIRICHLET_SCHEMA_THREE_DEVICE_REPORT_KEYS
+    if key not in CANONICAL_HIBM_VELOCITY_DIRICHLET_DIRECT_GEOMETRY_REPORT_KEYS
+)
+
+CANONICAL_HIBM_VELOCITY_DIRICHLET_SEGMENT_RUNNER_REPORT_KEYS = (
+    "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count",
+    "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count",
+    "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio",
+)
+CANONICAL_HIBM_VELOCITY_DIRICHLET_RUNNER_REPORT_KEYS = (
+    "hibm_velocity_dirichlet_authority",
+    "hibm_velocity_dirichlet_ledger_generation",
+    "hibm_velocity_dirichlet_authority_registered",
+    "hibm_velocity_dirichlet_authority_sealed",
+    *CANONICAL_HIBM_VELOCITY_DIRICHLET_SEGMENT_RUNNER_REPORT_KEYS,
+    "canonical_velocity_dirichlet_report",
+)
+
+CANONICAL_HIBM_VELOCITY_DIRICHLET_ZERO_INVARIANT_KEYS = (
+    "illegal_active_on_obstacle_storage_component_count",
+    "invalid_mask_bits_count",
+    "mask_subset_violation_count",
+    "external_owned_overlap_count",
+    "external_not_hard_count",
+    "active_provenance_missing_count",
+    "inactive_neutral_violation_count",
+    "nonfinite_active_value_count",
+    "nonfinite_active_mobility_count",
+    "nonfinite_active_enforcement_count",
+    "active_mobility_range_violation_count",
+    "active_enforcement_range_violation_count",
+    "hard_mobility_contract_violation_count",
+    "hard_enforcement_contract_violation_count",
+    "claim_conflict_count",
+    "target_conflict_count",
+    "region_conflict_count",
+    "alpha_conflict_count",
+    "nonfinite_claim_target_count",
+    "nonfinite_geometry_count",
+    "degenerate_geometry_count",
+    "external_claim_collision_count",
+    "missing_actual_sample_count",
+    "relocation_blocked_count",
+    "relocation_unavailable_count",
+    "direct_geometry_one_sided_component_count",
+)
+
+
+def _empty_hibm_velocity_dirichlet_report_fields() -> dict[str, object]:
+    return {
+        key: 0.0
+        if key.endswith("_mps") or key.endswith("_projection_weight")
+        else 0
+        for key in HIBM_VELOCITY_DIRICHLET_REPORT_KEYS
+    }
+
+
+def _hibm_velocity_dirichlet_report_fields(report: Any) -> dict[str, object]:
+    return {
+        "hibm_velocity_dirichlet_active_rows": int(
+            report.active_velocity_dirichlet_rows
+        ),
+        "hibm_velocity_dirichlet_primary_region_active_rows": int(
+            report.primary_region_active_rows
+        ),
+        "hibm_velocity_dirichlet_secondary_region_active_rows": int(
+            report.secondary_region_active_rows
+        ),
+        "hibm_velocity_dirichlet_other_region_active_rows": int(
+            report.other_region_active_rows
+        ),
+        "hibm_velocity_dirichlet_unassigned_region_active_rows": int(
+            report.unassigned_region_active_rows
+        ),
+        "hibm_velocity_dirichlet_max_abs_velocity_mps": float(
+            report.max_abs_velocity_mps
+        ),
+        "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": float(
+            report.raw_reconstructed_max_abs_velocity_mps
+        ),
+        "hibm_velocity_dirichlet_boundary_velocity_only_rows": int(
+            report.boundary_velocity_only_row_count
+        ),
+        "hibm_velocity_dirichlet_invalid_reconstruction_count": int(
+            report.invalid_reconstruction_row_count
+        ),
+        "hibm_velocity_dirichlet_invalid_no_fluid_sample_count": int(
+            report.invalid_no_fluid_sample_row_count
+        ),
+        "hibm_velocity_dirichlet_invalid_nonpositive_gap_count": int(
+            report.invalid_nonpositive_gap_row_count
+        ),
+        "hibm_velocity_dirichlet_invalid_node_behind_boundary_count": int(
+            report.invalid_node_behind_boundary_row_count
+        ),
+        "hibm_velocity_dirichlet_invalid_node_beyond_interior_count": int(
+            report.invalid_node_beyond_interior_row_count
+        ),
+        "hibm_velocity_dirichlet_narrow_gap_count": int(
+            report.narrow_gap_boundary_velocity_row_count
+        ),
+        "hibm_velocity_dirichlet_relocated_rows": int(report.relocated_row_count),
+        "hibm_velocity_dirichlet_relocation_merged_rows": int(
+            report.relocation_merged_row_count
+        ),
+        "hibm_velocity_dirichlet_relocation_blocked_rows": int(
+            report.relocation_blocked_row_count
+        ),
+        "hibm_velocity_dirichlet_min_projection_weight": float(
+            report.min_projection_weight
+        ),
+        "hibm_velocity_dirichlet_max_projection_weight": float(
+            report.max_projection_weight
+        ),
+    }
+
+
+def _canonical_hibm_velocity_dirichlet_report_fields(
+    builder_result: Mapping[str, object],
+    *,
+    fluid: CartesianFluidSolver,
+) -> dict[str, object]:
+    """Attach the real fluid lifecycle to the device-measured report.
+
+    The boundary builder owns only the device field reduction.  Generation,
+    consumer registration and sealing are fluid-solver state and are sampled
+    only after the full prepare/seal sequence has completed.
+    """
+
+    device_report = builder_result.get("canonical_velocity_dirichlet_report")
+    if not isinstance(device_report, Mapping):
+        raise RuntimeError(
+            "canonical velocity Dirichlet builder omitted its device report"
+        )
+    generation_error_groups = (
+        fluid._velocity_dirichlet_component_ledger_generation_errors()
+    )
+    authority_registered = not any(
+        bool(group) for group in generation_error_groups
+    )
+    return {
+        "hibm_velocity_dirichlet_authority": str(
+            fluid.velocity_dirichlet_boundary_authority
+        ),
+        "hibm_velocity_dirichlet_ledger_generation": int(
+            fluid.velocity_dirichlet_component_ledger_generation
+        ),
+        "hibm_velocity_dirichlet_authority_registered": bool(
+            authority_registered
+        ),
+        "hibm_velocity_dirichlet_authority_sealed": bool(
+            fluid.velocity_dirichlet_component_ledger_sealed
+        ),
+        "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count": (
+            builder_result[
+                "segment_identical_provenance_merged_component_count"
+            ]
+        ),
+        "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count": (
+            builder_result["segment_endpoint_clamped_component_count"]
+        ),
+        "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio": (
+            builder_result[
+                "max_segment_endpoint_clamp_overrun_support_ratio"
+            ]
+        ),
+        "canonical_velocity_dirichlet_report": dict(device_report),
+    }
+
+
+def _hibm_velocity_dirichlet_mapping_fields(
+    report: Mapping[str, object],
+    *,
+    stage: str | None = None,
+) -> dict[str, object]:
+    canonical_candidate = bool(
+        report.get("hibm_velocity_dirichlet_authority") == "canonical"
+        or "canonical_velocity_dirichlet_report" in report
+        or "hibm_velocity_dirichlet_ledger_generation" in report
+        or "hibm_velocity_dirichlet_authority_sealed" in report
+    )
+    keys = (
+        CANONICAL_HIBM_VELOCITY_DIRICHLET_RUNNER_REPORT_KEYS
+        if canonical_candidate
+        else HIBM_VELOCITY_DIRICHLET_REPORT_KEYS
+    )
+    legacy_segment_defaults: dict[str, object] = {}
+    if canonical_candidate:
+        device_report = report.get("canonical_velocity_dirichlet_report")
+        schema_version = (
+            device_report.get("schema_version")
+            if isinstance(device_report, Mapping)
+            else None
+        )
+        if schema_version in (2, 3, 4):
+            legacy_segment_defaults = {
+                "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count": 0,
+                "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count": 0,
+                "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio": 0.0,
+            }
+    fields = {
+        key: (
+            report[key]
+            if key in report
+            else legacy_segment_defaults[key]
+        )
+        for key in keys
+    }
+    if stage is None:
+        return fields
+    stage_name = str(stage).strip()
+    if not stage_name or not stage_name.replace("_", "").isalnum():
+        raise ValueError("velocity Dirichlet diagnostic stage must be an identifier")
+    staged_fields: dict[str, object] = {}
+    for key, value in fields.items():
+        if key == "canonical_velocity_dirichlet_report":
+            staged_key = f"hibm_{stage_name}_{key}"
+        else:
+            staged_key = key.replace(
+                "hibm_velocity_dirichlet_",
+                f"hibm_{stage_name}_velocity_dirichlet_",
+                1,
+            )
+        staged_fields[staged_key] = value
+    return staged_fields
+
+
+def _legacy_hibm_velocity_dirichlet_health_failure(
+    report: Mapping[str, object],
+) -> str | None:
+    if not bool(report.get("hibm_sharp_marker_boundary_enabled", True)):
+        return None
+
+    missing_keys = tuple(
+        key for key in HIBM_VELOCITY_DIRICHLET_REPORT_KEYS if key not in report
+    )
+    if missing_keys:
+        return (
+            "velocity Dirichlet diagnostic is missing required key: "
+            f"{missing_keys[0]}"
+        )
+
+    count_keys = (
+        "hibm_velocity_dirichlet_active_rows",
+        "hibm_velocity_dirichlet_primary_region_active_rows",
+        "hibm_velocity_dirichlet_secondary_region_active_rows",
+        "hibm_velocity_dirichlet_other_region_active_rows",
+        "hibm_velocity_dirichlet_unassigned_region_active_rows",
+        "hibm_velocity_dirichlet_boundary_velocity_only_rows",
+        "hibm_velocity_dirichlet_invalid_reconstruction_count",
+        "hibm_velocity_dirichlet_invalid_no_fluid_sample_count",
+        "hibm_velocity_dirichlet_invalid_nonpositive_gap_count",
+        "hibm_velocity_dirichlet_invalid_node_behind_boundary_count",
+        "hibm_velocity_dirichlet_invalid_node_beyond_interior_count",
+        "hibm_velocity_dirichlet_narrow_gap_count",
+        "hibm_velocity_dirichlet_relocated_rows",
+        "hibm_velocity_dirichlet_relocation_merged_rows",
+        "hibm_velocity_dirichlet_relocation_blocked_rows",
+    )
+    try:
+        counts = {key: int(report[key]) for key in count_keys}
+    except (KeyError, TypeError, ValueError) as exc:
+        return f"velocity Dirichlet row count diagnostic is missing or invalid: {exc}"
+    negative_count_keys = tuple(
+        key for key, value in counts.items() if value < 0
+    )
+    if negative_count_keys:
+        category = (
+            "relocation"
+            if any("relocat" in key for key in negative_count_keys)
+            else "row"
+        )
+        return (
+            f"velocity Dirichlet {category} count diagnostic is negative: "
+            f"{negative_count_keys[0]}"
+        )
+    active_rows = counts["hibm_velocity_dirichlet_active_rows"]
+    region_rows = sum(
+        counts[key]
+        for key in (
+            "hibm_velocity_dirichlet_primary_region_active_rows",
+            "hibm_velocity_dirichlet_secondary_region_active_rows",
+            "hibm_velocity_dirichlet_other_region_active_rows",
+            "hibm_velocity_dirichlet_unassigned_region_active_rows",
+        )
+    )
+    if region_rows != active_rows:
+        return (
+            "velocity Dirichlet region row count is inconsistent: "
+            f"regions={region_rows}, active_rows={active_rows}"
+        )
+    boundary_only_rows = counts[
+        "hibm_velocity_dirichlet_boundary_velocity_only_rows"
+    ]
+    if boundary_only_rows > active_rows:
+        return (
+            "velocity Dirichlet row count is inconsistent: boundary-only rows "
+            f"{boundary_only_rows} exceed active rows {active_rows}"
+        )
+    invalid_counts = {
+        key: value
+        for key, value in counts.items()
+        if key.startswith("hibm_velocity_dirichlet_invalid_")
+    }
+    if any(value != 0 for value in invalid_counts.values()):
+        return f"invalid velocity Dirichlet reconstruction rows: {invalid_counts}"
+    narrow_rows = counts["hibm_velocity_dirichlet_narrow_gap_count"]
+    if narrow_rows != 0:
+        return (
+            "narrow-gap velocity Dirichlet rows have zero projection weight: "
+            f"{narrow_rows}"
+        )
+    merged_rows = counts["hibm_velocity_dirichlet_relocation_merged_rows"]
+    blocked_rows = counts["hibm_velocity_dirichlet_relocation_blocked_rows"]
+    if merged_rows != 0 or blocked_rows != 0:
+        return (
+            "velocity Dirichlet relocation is ambiguous or blocked: "
+            f"merged={merged_rows}, blocked={blocked_rows}"
+        )
+    try:
+        max_abs_velocity_mps = float(
+            report["hibm_velocity_dirichlet_max_abs_velocity_mps"]
+        )
+        raw_max_abs_velocity_mps = float(
+            report[
+                "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps"
+            ]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return f"velocity Dirichlet velocity diagnostic is invalid: {exc}"
+    if not (
+        math.isfinite(max_abs_velocity_mps)
+        and math.isfinite(raw_max_abs_velocity_mps)
+        and max_abs_velocity_mps >= 0.0
+        and raw_max_abs_velocity_mps >= 0.0
+    ):
+        return (
+            "velocity Dirichlet velocity extrema are invalid: "
+            f"max={max_abs_velocity_mps}, raw_max={raw_max_abs_velocity_mps}"
+        )
+    try:
+        min_weight = float(report["hibm_velocity_dirichlet_min_projection_weight"])
+        max_weight = float(report["hibm_velocity_dirichlet_max_projection_weight"])
+    except (KeyError, TypeError, ValueError) as exc:
+        return f"velocity Dirichlet projection weight diagnostic is invalid: {exc}"
+    if active_rows == 0:
+        weights_valid = min_weight == 0.0 and max_weight == 0.0
+    else:
+        weights_valid = (
+            math.isfinite(min_weight)
+            and math.isfinite(max_weight)
+            and 0.0 < min_weight <= max_weight <= 1.0
+        )
+    if not weights_valid:
+        return (
+            "velocity Dirichlet projection weight range is invalid: "
+            f"active_rows={active_rows}, min={min_weight}, max={max_weight}"
+        )
+    return None
+
+
+def _canonical_marker_target_closure_health_failure(
+    closure_report: object,
+) -> str | None:
+    if not isinstance(closure_report, Mapping):
+        return "canonical marker-target closure report is missing or invalid"
+    expected_keys = set(
+        CANONICAL_HIBM_VELOCITY_DIRICHLET_MARKER_TARGET_CLOSURE_REPORT_KEYS
+    )
+    actual_keys = set(closure_report)
+    missing_keys = tuple(sorted(expected_keys - actual_keys))
+    if missing_keys:
+        return (
+            "canonical marker-target closure report is missing required key: "
+            f"{missing_keys[0]}"
+        )
+    unexpected_keys = tuple(sorted(actual_keys - expected_keys))
+    if unexpected_keys:
+        return (
+            "canonical marker-target closure report has an unexpected key: "
+            f"{unexpected_keys[0]}"
+        )
+    if closure_report.get("enabled") is not True:
+        return "canonical marker-target closure is not enabled"
+
+    count_keys = (
+        "constraint_count",
+        "adjustable_constraint_count",
+        "immutable_constraint_count",
+        "iterations",
+        "projection_only_marker_count",
+        "projection_only_evaluated_axis_count",
+        "projection_only_invalid_axis_count",
+        "projection_only_constraint_count",
+    )
+    counts: dict[str, int] = {}
+    for key in count_keys:
+        value = closure_report[key]
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value,
+            (int, np.integer),
+        ):
+            return (
+                "canonical marker-target closure count must be an integral "
+                f"non-bool value: {key}={value!r}"
+            )
+        counts[key] = int(value)
+    negative_counts = tuple(key for key, value in counts.items() if value < 0)
+    if negative_counts:
+        return (
+            "canonical marker-target closure count is negative: "
+            f"{negative_counts[0]}"
+        )
+    if (
+        counts["adjustable_constraint_count"]
+        + counts["immutable_constraint_count"]
+        != counts["constraint_count"]
+    ):
+        return (
+            "canonical marker-target closure constraint partition is inconsistent: "
+            f"constraints={counts['constraint_count']}, "
+            f"adjustable={counts['adjustable_constraint_count']}, "
+            f"immutable={counts['immutable_constraint_count']}"
+        )
+    expected_projection_axis_count = 3 * counts["projection_only_marker_count"]
+    if (
+        counts["projection_only_evaluated_axis_count"]
+        != expected_projection_axis_count
+    ):
+        return (
+            "canonical marker-target closure projection-only evaluation is "
+            "incomplete: "
+            f"evaluated={counts['projection_only_evaluated_axis_count']}, "
+            f"expected={expected_projection_axis_count}"
+        )
+    if counts["projection_only_invalid_axis_count"] != 0:
+        return (
+            "canonical marker-target closure projection-only axis is invalid: "
+            f"count={counts['projection_only_invalid_axis_count']}"
+        )
+    if (
+        counts["projection_only_constraint_count"]
+        > counts["projection_only_evaluated_axis_count"]
+    ):
+        return (
+            "canonical marker-target closure projection-only constraint count "
+            "exceeds evaluated axes"
+        )
+
+    scalar_keys = (
+        "initial_max_residual_mps",
+        "final_max_residual_mps",
+        "final_max_adjustable_residual_mps",
+        "final_max_immutable_residual_mps",
+        "absolute_tolerance_mps",
+        "closure_tolerance_mps",
+        "density_kgm3",
+        "projection_only_max_residual_mps",
+    )
+    scalars: dict[str, float] = {}
+    for key in scalar_keys:
+        value = closure_report[key]
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value,
+            (int, float, np.integer, np.floating),
+        ):
+            return (
+                "canonical marker-target closure scalar must be numeric and "
+                f"non-bool: {key}={value!r}"
+            )
+        scalars[key] = float(value)
+    if any(not math.isfinite(value) for value in scalars.values()):
+        return f"canonical marker-target closure scalars are non-finite: {scalars}"
+    residual_keys = (*scalar_keys[:4], "projection_only_max_residual_mps")
+    if any(scalars[key] < 0.0 for key in residual_keys):
+        return f"canonical marker-target closure residual is negative: {scalars}"
+    absolute_tolerance = scalars["absolute_tolerance_mps"]
+    closure_tolerance = scalars["closure_tolerance_mps"]
+    if not 0.0 < closure_tolerance < absolute_tolerance:
+        return (
+            "canonical marker-target closure tolerance ordering is invalid: "
+            f"closure={closure_tolerance}, absolute={absolute_tolerance}"
+        )
+    if scalars["density_kgm3"] <= 0.0:
+        return (
+            "canonical marker-target closure density is not positive: "
+            f"{scalars['density_kgm3']}"
+        )
+    if scalars["final_max_adjustable_residual_mps"] > closure_tolerance:
+        return (
+            "canonical marker-target closure adjustable residual exceeds its "
+            "tolerance: "
+            f"residual={scalars['final_max_adjustable_residual_mps']}, "
+            f"tolerance={closure_tolerance}"
+        )
+    if scalars["final_max_immutable_residual_mps"] > absolute_tolerance:
+        return (
+            "canonical marker-target closure immutable residual exceeds its "
+            "tolerance: "
+            f"residual={scalars['final_max_immutable_residual_mps']}, "
+            f"tolerance={absolute_tolerance}"
+        )
+    if scalars["projection_only_max_residual_mps"] > absolute_tolerance:
+        return (
+            "canonical marker-target closure projection-only residual exceeds "
+            "the absolute tolerance: "
+            f"residual={scalars['projection_only_max_residual_mps']}, "
+            f"tolerance={absolute_tolerance}"
+        )
+    return None
+
+
+def _canonical_hibm_velocity_dirichlet_health_failure(
+    report: Mapping[str, object],
+) -> str | None:
+    missing_runner_keys = tuple(
+        key
+        for key in CANONICAL_HIBM_VELOCITY_DIRICHLET_RUNNER_REPORT_KEYS
+        if (
+            key
+            not in CANONICAL_HIBM_VELOCITY_DIRICHLET_SEGMENT_RUNNER_REPORT_KEYS
+            and key not in report
+        )
+    )
+    if missing_runner_keys:
+        return (
+            "canonical velocity Dirichlet diagnostic is missing required key: "
+            f"{missing_runner_keys[0]}"
+        )
+    if report.get("hibm_velocity_dirichlet_authority") != "canonical":
+        return (
+            "canonical velocity Dirichlet authority is invalid: "
+            f"{report.get('hibm_velocity_dirichlet_authority')!r}"
+        )
+    generation_value = report["hibm_velocity_dirichlet_ledger_generation"]
+    if isinstance(generation_value, (bool, np.bool_)) or not isinstance(
+        generation_value,
+        (int, np.integer),
+    ):
+        return (
+            "canonical velocity Dirichlet generation must be an integral "
+            f"non-bool value: {generation_value!r}"
+        )
+    generation = int(generation_value)
+    if generation <= 0:
+        return (
+            "canonical velocity Dirichlet generation is not positive: "
+            f"{generation}"
+        )
+    if report.get("hibm_velocity_dirichlet_authority_registered") is not True:
+        return "canonical velocity Dirichlet consumers are not all registered"
+    if report.get("hibm_velocity_dirichlet_authority_sealed") is not True:
+        return "canonical velocity Dirichlet ledger is not sealed"
+
+    device_report = report.get("canonical_velocity_dirichlet_report")
+    if not isinstance(device_report, Mapping):
+        return "canonical velocity Dirichlet device report is missing or invalid"
+    schema_version = device_report.get("schema_version")
+    if type(schema_version) is not int or schema_version not in (2, 3, 4):
+        return (
+            "canonical velocity Dirichlet schema version is invalid: "
+            f"{schema_version!r}"
+        )
+    identical_provenance_value = report.get(
+        "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count",
+        0,
+    )
+    if isinstance(identical_provenance_value, (bool, np.bool_)) or not isinstance(
+        identical_provenance_value,
+        (int, np.integer),
+    ):
+        return (
+            "canonical velocity Dirichlet identical segment-provenance merged "
+            "count must be an integral non-bool value: "
+            f"{identical_provenance_value!r}"
+        )
+    identical_provenance_count = int(identical_provenance_value)
+    if identical_provenance_count < 0:
+        return (
+            "canonical velocity Dirichlet identical segment-provenance merged "
+            f"count is negative: {identical_provenance_count}"
+        )
+    endpoint_clamped_value = report.get(
+        "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count",
+        0,
+    )
+    if isinstance(endpoint_clamped_value, (bool, np.bool_)) or not isinstance(
+        endpoint_clamped_value,
+        (int, np.integer),
+    ):
+        return (
+            "canonical velocity Dirichlet segment endpoint-clamped count must "
+            "be an integral non-bool value: "
+            f"{endpoint_clamped_value!r}"
+        )
+    endpoint_clamped_count = int(endpoint_clamped_value)
+    if endpoint_clamped_count < 0:
+        return (
+            "canonical velocity Dirichlet segment endpoint-clamped count is "
+            f"negative: {endpoint_clamped_count}"
+        )
+    clamp_ratio_value = report.get(
+        "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio",
+        0.0,
+    )
+    if isinstance(clamp_ratio_value, (bool, np.bool_)) or not isinstance(
+        clamp_ratio_value,
+        (int, float, np.integer, np.floating),
+    ):
+        return (
+            "canonical velocity Dirichlet segment endpoint-clamp ratio must be "
+            f"numeric and non-bool: {clamp_ratio_value!r}"
+        )
+    max_endpoint_clamp_ratio = float(clamp_ratio_value)
+    if (
+        not math.isfinite(max_endpoint_clamp_ratio)
+        or max_endpoint_clamp_ratio < 0.0
+        or max_endpoint_clamp_ratio > 1.00002
+    ):
+        return (
+            "canonical velocity Dirichlet segment endpoint-clamp ratio is "
+            f"outside accepted MAC support: {max_endpoint_clamp_ratio}"
+        )
+    if (endpoint_clamped_count == 0) != (max_endpoint_clamp_ratio == 0.0):
+        return (
+            "canonical velocity Dirichlet segment endpoint-clamp count/ratio "
+            "relation is inconsistent: "
+            f"count={endpoint_clamped_count}, ratio={max_endpoint_clamp_ratio}"
+        )
+
+    if schema_version == 2:
+        expected_report_keys = (
+            CANONICAL_HIBM_VELOCITY_DIRICHLET_LEGACY_SCHEMA_TWO_DEVICE_REPORT_KEYS
+        )
+    elif schema_version == 3:
+        expected_report_keys = (
+            CANONICAL_HIBM_VELOCITY_DIRICHLET_SCHEMA_THREE_DEVICE_REPORT_KEYS
+        )
+    else:
+        expected_report_keys = CANONICAL_HIBM_VELOCITY_DIRICHLET_DEVICE_REPORT_KEYS
+    expected_keys = set(expected_report_keys)
+    actual_keys = set(device_report)
+    missing_device_keys = tuple(sorted(expected_keys - actual_keys))
+    if missing_device_keys:
+        return (
+            "canonical velocity Dirichlet device report is missing required key: "
+            f"{missing_device_keys[0]}"
+        )
+    unexpected_device_keys = tuple(sorted(actual_keys - expected_keys))
+    if unexpected_device_keys:
+        return (
+            "canonical velocity Dirichlet device report has an unexpected key: "
+            f"{unexpected_device_keys[0]}"
+        )
+    if device_report.get("authority") != "canonical_component_face":
+        return (
+            "canonical velocity Dirichlet device authority is invalid: "
+            f"{device_report.get('authority')!r}"
+        )
+    if schema_version == 4:
+        closure_failure = _canonical_marker_target_closure_health_failure(
+            device_report["marker_target_closure"]
+        )
+        if closure_failure is not None:
+            return closure_failure
+    normalized_device_report = dict(device_report)
+    if schema_version == 2:
+        normalized_device_report.update(
+            {
+                "direct_geometry_reconstructed_component_count": 0,
+                "direct_geometry_one_sided_component_count": 0,
+                "max_compatible_direct_target_spread_mps": 0.0,
+            }
+        )
+    device_report = normalized_device_report
+
+    extrema_keys = {
+        "max_abs_claim_target_mps",
+        "max_abs_committed_target_mps",
+        "max_compatible_direct_target_spread_mps",
+        "min_active_pressure_mobility",
+        "max_active_pressure_mobility",
+        "min_active_enforcement_weight",
+        "max_active_enforcement_weight",
+    }
+    count_keys = tuple(
+        key
+        for key in CANONICAL_HIBM_VELOCITY_DIRICHLET_SCHEMA_THREE_DEVICE_REPORT_KEYS
+        if key not in {"schema_version", "authority", *extrema_keys}
+    )
+    if schema_version == 4:
+        count_keys = (
+            *count_keys,
+            "projection_only_region_seam_merged_count",
+        )
+    counts: dict[str, int] = {}
+    for key in count_keys:
+        value = device_report[key]
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value,
+            (int, np.integer),
+        ):
+            return (
+                "canonical velocity Dirichlet count must be an integral "
+                f"non-bool value: {key}={value!r}"
+            )
+        counts[key] = int(value)
+    negative_keys = tuple(key for key, value in counts.items() if value < 0)
+    if negative_keys:
+        return (
+            "canonical velocity Dirichlet count is negative: "
+            f"{negative_keys[0]}"
+        )
+    nonzero_invariants = {
+        key: counts[key]
+        for key in CANONICAL_HIBM_VELOCITY_DIRICHLET_ZERO_INVARIANT_KEYS
+        if counts[key] != 0
+    }
+    if nonzero_invariants:
+        return (
+            "canonical velocity Dirichlet invariant counters are nonzero: "
+            f"{nonzero_invariants}"
+        )
+
+    active = counts["final_active_component_count"]
+    owned = counts["final_owned_component_count"]
+    external = counts["final_external_exact_component_count"]
+    hard = counts["final_hard_component_count"]
+    soft = counts["final_soft_component_count"]
+    active_rows = counts["final_active_storage_row_count"]
+    if owned > active or external > active:
+        return (
+            "canonical velocity Dirichlet provenance subset is inconsistent: "
+            f"owned={owned}, external={external}, active={active}"
+        )
+    if hard + soft != active:
+        return (
+            "canonical velocity Dirichlet hard/soft partition is inconsistent: "
+            f"hard={hard}, soft={soft}, active={active}"
+        )
+    axis_total = sum(
+        counts[key]
+        for key in (
+            "final_active_x_component_count",
+            "final_active_y_component_count",
+            "final_active_z_component_count",
+        )
+    )
+    if axis_total != active:
+        return (
+            "canonical velocity Dirichlet axis partition is inconsistent: "
+            f"axes={axis_total}, active={active}"
+        )
+    region_total = sum(
+        counts[key]
+        for key in (
+            "primary_region_active_component_count",
+            "secondary_region_active_component_count",
+            "other_region_active_component_count",
+            "unassigned_region_active_component_count",
+        )
+    )
+    if region_total != active:
+        return (
+            "canonical velocity Dirichlet region partition is inconsistent: "
+            f"regions={region_total}, active={active}"
+        )
+    if not (
+        (active == 0 and active_rows == 0)
+        or (active > 0 and active_rows <= active <= 3 * active_rows)
+    ):
+        return (
+            "canonical velocity Dirichlet storage-row count is inconsistent: "
+            f"rows={active_rows}, active={active}"
+        )
+    if counts["new_owned_claim_component_count"] > owned:
+        return (
+            "canonical velocity Dirichlet new-owned count exceeds final owned "
+            f"components: new={counts['new_owned_claim_component_count']}, "
+            f"owned={owned}"
+        )
+    reconstructed = counts["direct_geometry_reconstructed_component_count"]
+    one_sided = counts["direct_geometry_one_sided_component_count"]
+    duplicates = counts["duplicate_claim_component_count"]
+    if identical_provenance_count + reconstructed > duplicates:
+        return (
+            "canonical velocity Dirichlet segment provenance/reconstruction "
+            "counts exceed duplicate components: "
+            f"identical={identical_provenance_count}, "
+            f"reconstructed={reconstructed}, duplicates={duplicates}"
+        )
+    if endpoint_clamped_count > reconstructed:
+        return (
+            "canonical velocity Dirichlet segment endpoint-clamped count "
+            "exceeds reconstructed components: "
+            f"clamped={endpoint_clamped_count}, reconstructed={reconstructed}"
+        )
+    if one_sided > reconstructed or reconstructed > duplicates:
+        return (
+            "canonical velocity Dirichlet direct-geometry reconstruction counts "
+            "are inconsistent: "
+            f"one_sided={one_sided}, reconstructed={reconstructed}, "
+            f"duplicates={duplicates}"
+        )
+    nominal_direct_claims = counts["nominal_direct_claim_count"]
+    provenance_resolved_duplicates = identical_provenance_count + reconstructed
+    if 2 * provenance_resolved_duplicates > nominal_direct_claims:
+        return (
+            "canonical velocity Dirichlet segment provenance/reconstruction "
+            "lacks two nominal direct claims per resolved component: "
+            f"identical={identical_provenance_count}, "
+            f"reconstructed={reconstructed}, "
+            f"nominal_direct_claims={nominal_direct_claims}"
+        )
+
+    extrema: dict[str, float] = {}
+    for key in extrema_keys:
+        value = device_report[key]
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value,
+            (int, float, np.integer, np.floating),
+        ):
+            return (
+                "canonical velocity Dirichlet extrema must be numeric non-bool "
+                f"values: {key}={value!r}"
+            )
+        extrema[key] = float(value)
+    if any(not math.isfinite(value) for value in extrema.values()):
+        return f"canonical velocity Dirichlet extrema are non-finite: {extrema}"
+    if (
+        extrema["max_abs_claim_target_mps"] < 0.0
+        or extrema["max_abs_committed_target_mps"] < 0.0
+        or extrema["max_compatible_direct_target_spread_mps"] < 0.0
+    ):
+        return f"canonical velocity Dirichlet target extrema are negative: {extrema}"
+    compatible_spread = extrema["max_compatible_direct_target_spread_mps"]
+    if provenance_resolved_duplicates == 0 and compatible_spread > 0.0:
+        return (
+            "canonical velocity Dirichlet segment provenance/reconstruction "
+            "spread "
+            "relation is inconsistent: "
+            f"identical={identical_provenance_count}, "
+            f"reconstructed={reconstructed}, spread={compatible_spread}"
+        )
+    for prefix in ("pressure_mobility", "enforcement_weight"):
+        minimum = extrema[f"min_active_{prefix}"]
+        maximum = extrema[f"max_active_{prefix}"]
+        if not 0.0 <= minimum <= maximum <= 1.0:
+            return (
+                "canonical velocity Dirichlet active range is invalid: "
+                f"{prefix}=({minimum}, {maximum})"
+            )
+    return None
+
+
+def _hibm_velocity_dirichlet_health_failure(
+    report: Mapping[str, object],
+) -> str | None:
+    if not bool(report.get("hibm_sharp_marker_boundary_enabled", True)):
+        return None
+    canonical_candidate = bool(
+        report.get("hibm_velocity_dirichlet_authority") == "canonical"
+        or "canonical_velocity_dirichlet_report" in report
+        or "hibm_velocity_dirichlet_ledger_generation" in report
+        or "hibm_velocity_dirichlet_authority_sealed" in report
+    )
+    if canonical_candidate:
+        return _canonical_hibm_velocity_dirichlet_health_failure(report)
+    return _legacy_hibm_velocity_dirichlet_health_failure(report)
+
+
+def _require_hibm_velocity_dirichlet_health(
+    report: Mapping[str, object],
+    *,
+    context: str,
+) -> None:
+    failure = _hibm_velocity_dirichlet_health_failure(report)
+    if failure is not None:
+        raise RuntimeError(
+            "HIBM velocity Dirichlet reconstruction health failure "
+            f"({context}): {failure}"
+        )
+
+
+def _capture_velocity_dirichlet_row_ledger_reference(
+    fluid: CartesianFluidSolver,
+    *,
+    context: str,
+) -> int:
+    capture = getattr(
+        fluid,
+        "capture_velocity_dirichlet_boundary_ledger_reference",
+        None,
+    )
+    if not callable(capture):
+        raise RuntimeError(
+            "velocity Dirichlet row ledger capture is unavailable "
+            f"({context})"
+        )
+    try:
+        generation = int(capture())
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "velocity Dirichlet row ledger snapshot generation is invalid "
+            f"({context}): {exc}"
+        ) from exc
+    if generation <= 0:
+        raise RuntimeError(
+            "velocity Dirichlet row ledger snapshot generation must be positive "
+            f"({context}): generation={generation}"
+        )
+    return generation
+
+
+def _require_velocity_only_topology_reuse(
+    report: Mapping[str, object],
+    *,
+    context: str,
+) -> None:
+    """Require an explicit, unchanged topology before reusing a soft map."""
+
+    try:
+        topology_reused = report["hibm_sharp_marker_boundary_topology_reused"]
+        topology_mutated = report["hibm_preassembly_topology_mutated"]
+    except KeyError as exc:
+        raise RuntimeError(
+            "velocity-only row topology diagnostic is incomplete "
+            f"({context}): missing={exc.args[0]}"
+        ) from exc
+    if not isinstance(topology_reused, (bool, np.bool_)) or not isinstance(
+        topology_mutated,
+        (bool, np.bool_),
+    ):
+        raise RuntimeError(
+            "velocity-only row topology diagnostic is not boolean "
+            f"({context}): reused={topology_reused!r}, "
+            f"mutated={topology_mutated!r}"
+        )
+    if not bool(topology_reused):
+        raise RuntimeError(
+            f"velocity-only row topology was not reused ({context})"
+        )
+    if bool(topology_mutated):
+        raise RuntimeError(
+            f"velocity-only row topology mutated ({context})"
+        )
+
+
+def _velocity_ledger_detail_integer(
+    details: Mapping[str, object],
+    key: str,
+    *,
+    context: str,
+) -> int:
+    value = details[key]
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value,
+        (int, np.integer),
+    ):
+        raise TypeError(f"{key} is not an exact integer: {value!r}")
+    result = int(value)
+    if result < 0:
+        raise ValueError(f"{key} is negative ({context}): {result}")
+    return result
+
+
+def _velocity_ledger_detail_boolean(
+    details: Mapping[str, object],
+    key: str,
+) -> bool:
+    value = details[key]
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{key} is not boolean: {value!r}")
+    return bool(value)
+
+
+def _validated_velocity_ledger_details(
+    details: Mapping[str, object],
+    *,
+    reference_generation: int,
+    context: str,
+) -> dict[str, object]:
+    schema_version = _velocity_ledger_detail_integer(
+        details,
+        "schema_version",
+        context=context,
+    )
+    if schema_version != 1:
+        raise ValueError(
+            f"unsupported ledger comparison schema ({context}): {schema_version}"
+        )
+    normalized: dict[str, object] = {
+        "schema_version": schema_version,
+    }
+    integer_keys = (
+        "reference_generation",
+        "device_content_mismatch_rows",
+        "content_equivalence_mismatch_rows",
+        "identity_mismatch_rows",
+        "reference_component_generation",
+        "current_component_generation",
+        "reference_face_symmetric",
+        "current_face_symmetric",
+    )
+    for key in integer_keys:
+        normalized[key] = _velocity_ledger_detail_integer(
+            details,
+            key,
+            context=context,
+        )
+    if int(normalized["reference_generation"]) != int(reference_generation):
+        raise ValueError(
+            "ledger comparison reference generation changed "
+            f"({context}): expected={int(reference_generation)}, "
+            f"actual={normalized['reference_generation']}"
+        )
+
+    boolean_keys = (
+        "authority_changed",
+        "component_generation_changed",
+        "face_symmetric_changed",
+    )
+    for key in boolean_keys:
+        normalized[key] = _velocity_ledger_detail_boolean(details, key)
+    for key in ("reference_authority", "current_authority"):
+        value = details[key]
+        if not isinstance(value, str) or value not in {"legacy", "canonical"}:
+            raise TypeError(f"{key} is not a valid authority: {value!r}")
+        normalized[key] = value
+    for key in (
+        "first_identity_mismatch_field",
+        "first_content_mismatch_field",
+    ):
+        value = details[key]
+        if value is not None and (not isinstance(value, str) or not value):
+            raise TypeError(f"{key} is not a nonempty string or null: {value!r}")
+        normalized[key] = value
+
+    authority_changed = bool(normalized["authority_changed"])
+    generation_changed = bool(normalized["component_generation_changed"])
+    face_changed = bool(normalized["face_symmetric_changed"])
+    device_rows = int(normalized["device_content_mismatch_rows"])
+    content_rows = int(normalized["content_equivalence_mismatch_rows"])
+    identity_rows = int(normalized["identity_mismatch_rows"])
+    if authority_changed != (
+        normalized["reference_authority"] != normalized["current_authority"]
+    ):
+        raise ValueError(f"authority change flag is inconsistent ({context})")
+    if generation_changed != (
+        normalized["reference_component_generation"]
+        != normalized["current_component_generation"]
+    ):
+        raise ValueError(
+            f"component generation change flag is inconsistent ({context})"
+        )
+    if face_changed != (
+        normalized["reference_face_symmetric"]
+        != normalized["current_face_symmetric"]
+    ):
+        raise ValueError(f"face-symmetric change flag is inconsistent ({context})")
+    if content_rows != device_rows + int(authority_changed) + int(face_changed):
+        raise ValueError(f"content mismatch count is inconsistent ({context})")
+    if identity_rows != content_rows + int(generation_changed):
+        raise ValueError(f"identity mismatch count is inconsistent ({context})")
+    if (content_rows == 0) != (
+        normalized["first_content_mismatch_field"] is None
+    ):
+        raise ValueError(f"first content mismatch field is inconsistent ({context})")
+    if (identity_rows == 0) != (
+        normalized["first_identity_mismatch_field"] is None
+    ):
+        raise ValueError(f"first identity mismatch field is inconsistent ({context})")
+    return normalized
+
+
+def _velocity_dirichlet_row_ledger_comparison(
+    fluid: CartesianFluidSolver,
+    *,
+    reference_generation: int,
+    comparison_mode: str = "strict_identity",
+    context: str,
+) -> dict[str, object]:
+    if isinstance(reference_generation, (bool, np.bool_)) or not isinstance(
+        reference_generation,
+        (int, np.integer),
+    ):
+        raise TypeError(
+            "velocity Dirichlet row ledger reference generation must be an "
+            f"exact integer ({context}): {reference_generation!r}"
+        )
+    reference_generation_value = int(reference_generation)
+    if reference_generation_value <= 0:
+        raise ValueError(
+            "velocity Dirichlet row ledger reference generation must be "
+            f"positive ({context}): {reference_generation_value}"
+        )
+    if comparison_mode not in {"strict_identity", "content_equivalence"}:
+        raise ValueError(
+            "velocity Dirichlet row ledger comparison mode is invalid "
+            f"({context}): {comparison_mode!r}"
+        )
+    detailed_compare = getattr(
+        fluid,
+        "velocity_dirichlet_boundary_ledger_comparison",
+        None,
+    )
+    if callable(detailed_compare):
+        try:
+            details = detailed_compare(
+                expected_generation=reference_generation_value
+            )
+            if not isinstance(details, Mapping):
+                raise TypeError("comparison result is not a mapping")
+            details = _validated_velocity_ledger_details(
+                details,
+                reference_generation=reference_generation_value,
+                context=context,
+            )
+            identity_mismatch_rows = int(details["identity_mismatch_rows"])
+            content_mismatch_rows = int(
+                details["content_equivalence_mismatch_rows"]
+            )
+            device_content_mismatch_rows = int(
+                details["device_content_mismatch_rows"]
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "velocity Dirichlet row ledger detailed comparison failed "
+                f"({context}): {exc}"
+            ) from exc
+        mismatch_rows = (
+            identity_mismatch_rows
+            if comparison_mode == "strict_identity"
+            else content_mismatch_rows
+        )
+        first_mismatch_field = details.get(
+            (
+                "first_identity_mismatch_field"
+                if comparison_mode == "strict_identity"
+                else "first_content_mismatch_field"
+            )
+        )
+        if mismatch_rows > 0 and first_mismatch_field is None:
+            first_mismatch_field = "unknown"
+        return {
+            "hibm_velocity_dirichlet_row_ledger_snapshot_generation": int(
+                reference_generation_value
+            ),
+            "hibm_velocity_dirichlet_row_ledger_comparison_mode": (
+                comparison_mode
+            ),
+            "hibm_velocity_dirichlet_row_ledger_matches_reference": (
+                mismatch_rows == 0
+            ),
+            "hibm_velocity_dirichlet_row_ledger_mismatch_rows": mismatch_rows,
+            "hibm_velocity_dirichlet_row_ledger_device_content_mismatch_rows": (
+                device_content_mismatch_rows
+            ),
+            "hibm_velocity_dirichlet_row_ledger_content_equivalence_mismatch_rows": (
+                content_mismatch_rows
+            ),
+            "hibm_velocity_dirichlet_row_ledger_identity_mismatch_rows": (
+                identity_mismatch_rows
+            ),
+            "hibm_velocity_dirichlet_row_ledger_authority_changed": bool(
+                details["authority_changed"]
+            ),
+            "hibm_velocity_dirichlet_row_ledger_component_generation_changed": bool(
+                details["component_generation_changed"]
+            ),
+            "hibm_velocity_dirichlet_row_ledger_face_symmetric_changed": bool(
+                details["face_symmetric_changed"]
+            ),
+            "hibm_velocity_dirichlet_row_ledger_reference_authority": str(
+                details["reference_authority"]
+            ),
+            "hibm_velocity_dirichlet_row_ledger_current_authority": str(
+                details["current_authority"]
+            ),
+            "hibm_velocity_dirichlet_row_ledger_reference_component_generation": int(
+                details["reference_component_generation"]
+            ),
+            "hibm_velocity_dirichlet_row_ledger_current_component_generation": int(
+                details["current_component_generation"]
+            ),
+            "hibm_velocity_dirichlet_row_ledger_reference_face_symmetric": int(
+                details["reference_face_symmetric"]
+            ),
+            "hibm_velocity_dirichlet_row_ledger_current_face_symmetric": int(
+                details["current_face_symmetric"]
+            ),
+            "hibm_velocity_dirichlet_row_ledger_first_mismatch_field": (
+                first_mismatch_field
+            ),
+        }
+
+    if comparison_mode == "content_equivalence":
+        raise RuntimeError(
+            "velocity Dirichlet row ledger content-equivalence comparison is "
+            f"unavailable ({context})"
+        )
+    compare = getattr(
+        fluid,
+        "velocity_dirichlet_boundary_ledger_mismatch_rows",
+        None,
+    )
+    if not callable(compare):
+        raise RuntimeError(
+            "velocity Dirichlet row ledger comparison is unavailable "
+            f"({context})"
+        )
+    try:
+        raw_mismatch_rows = compare(
+            expected_generation=reference_generation_value
+        )
+        if isinstance(raw_mismatch_rows, (bool, np.bool_)) or not isinstance(
+            raw_mismatch_rows,
+            (int, np.integer),
+        ):
+            raise TypeError(
+                "mismatch count is not an exact integer: "
+                f"{raw_mismatch_rows!r}"
+            )
+        mismatch_rows = int(raw_mismatch_rows)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "velocity Dirichlet row ledger comparison failed "
+            f"({context}): {exc}"
+        ) from exc
+    if mismatch_rows < 0:
+        raise RuntimeError(
+            "velocity Dirichlet row ledger mismatch count is invalid "
+            f"({context}): mismatch_rows={mismatch_rows}"
+        )
+    return {
+        "hibm_velocity_dirichlet_row_ledger_snapshot_generation": int(
+            reference_generation_value
+        ),
+        "hibm_velocity_dirichlet_row_ledger_matches_reference": mismatch_rows == 0,
+        "hibm_velocity_dirichlet_row_ledger_mismatch_rows": mismatch_rows,
+    }
+
+
+def _velocity_dirichlet_row_ledger_reference_diagnostics(
+    *,
+    reference_generation: int,
+) -> dict[str, object]:
+    if int(reference_generation) <= 0:
+        raise RuntimeError(
+            "velocity Dirichlet row ledger snapshot generation must be positive: "
+            f"generation={int(reference_generation)}"
+        )
+    return {
+        "hibm_velocity_dirichlet_row_ledger_snapshot_generation": int(
+            reference_generation
+        ),
+        "hibm_velocity_dirichlet_row_ledger_matches_reference": True,
+        "hibm_velocity_dirichlet_row_ledger_mismatch_rows": 0,
+    }
+
+
+def _require_velocity_only_consistency_row_reuse(
+    reference_report: Mapping[str, object],
+    consistency_report: Mapping[str, object],
+    *,
+    context: str,
+) -> None:
+    _require_velocity_only_topology_reuse(
+        consistency_report,
+        context=context,
+    )
+
+    try:
+        reference_generation = int(
+            reference_report[
+                "hibm_velocity_dirichlet_row_ledger_snapshot_generation"
+            ]
+        )
+        consistency_generation = int(
+            consistency_report[
+                "hibm_velocity_dirichlet_row_ledger_snapshot_generation"
+            ]
+        )
+        reference_matches = bool(
+            reference_report[
+                "hibm_velocity_dirichlet_row_ledger_matches_reference"
+            ]
+        )
+        consistency_matches = bool(
+            consistency_report[
+                "hibm_velocity_dirichlet_row_ledger_matches_reference"
+            ]
+        )
+        reference_mismatch_rows = int(
+            reference_report[
+                "hibm_velocity_dirichlet_row_ledger_mismatch_rows"
+            ]
+        )
+        consistency_mismatch_rows = int(
+            consistency_report[
+                "hibm_velocity_dirichlet_row_ledger_mismatch_rows"
+            ]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "velocity-only consistency row ledger diagnostic is invalid "
+            f"({context}): {exc}"
+        ) from exc
+    if (
+        reference_generation <= 0
+        or consistency_generation != reference_generation
+    ):
+        raise RuntimeError(
+            "velocity-only consistency row ledger snapshot generation changed "
+            f"({context}): reference={reference_generation}, "
+            f"consistency={consistency_generation}"
+        )
+    if (
+        not reference_matches
+        or reference_mismatch_rows != 0
+        or not consistency_matches
+        or consistency_mismatch_rows != 0
+    ):
+        mismatch_field = consistency_report.get(
+            "hibm_velocity_dirichlet_row_ledger_first_mismatch_field",
+            "unknown",
+        )
+        raise RuntimeError(
+            "velocity-only consistency row ledger changed "
+            f"({context}): reference_matches={reference_matches}, "
+            f"reference_mismatch_rows={reference_mismatch_rows}, "
+            f"consistency_matches={consistency_matches}, "
+            f"consistency_mismatch_rows={consistency_mismatch_rows}, "
+            f"first_mismatch_field={mismatch_field}"
+        )
+
+    reference_is_canonical = bool(
+        reference_report.get("hibm_velocity_dirichlet_authority") == "canonical"
+        or "canonical_velocity_dirichlet_report" in reference_report
+    )
+    consistency_is_canonical = bool(
+        consistency_report.get("hibm_velocity_dirichlet_authority") == "canonical"
+        or "canonical_velocity_dirichlet_report" in consistency_report
+    )
+    if reference_is_canonical or consistency_is_canonical:
+        if not (reference_is_canonical and consistency_is_canonical):
+            raise RuntimeError(
+                "canonical velocity-only consistency authority changed "
+                f"({context})"
+            )
+        for label, report in (
+            ("reference", reference_report),
+            ("consistency", consistency_report),
+        ):
+            failure = _canonical_hibm_velocity_dirichlet_health_failure(report)
+            if failure is not None:
+                raise RuntimeError(
+                    "canonical velocity-only consistency report is unhealthy "
+                    f"({context}, {label}): {failure}"
+                )
+        reference_device_report = reference_report[
+            "canonical_velocity_dirichlet_report"
+        ]
+        consistency_device_report = consistency_report[
+            "canonical_velocity_dirichlet_report"
+        ]
+        reference_schema = int(reference_device_report["schema_version"])
+        consistency_schema = int(consistency_device_report["schema_version"])
+        if consistency_schema != reference_schema:
+            raise RuntimeError(
+                "canonical velocity-only consistency schema changed "
+                f"({context}): reference={reference_schema}, "
+                f"consistency={consistency_schema}"
+            )
+        if reference_schema == 2:
+            comparison_keys = (
+                CANONICAL_HIBM_VELOCITY_DIRICHLET_LEGACY_SCHEMA_TWO_DEVICE_REPORT_KEYS
+            )
+        elif reference_schema == 3:
+            comparison_keys = (
+                CANONICAL_HIBM_VELOCITY_DIRICHLET_SCHEMA_THREE_DEVICE_REPORT_KEYS
+            )
+        else:
+            comparison_keys = CANONICAL_HIBM_VELOCITY_DIRICHLET_DEVICE_REPORT_KEYS
+        for key in (
+            CANONICAL_HIBM_VELOCITY_DIRICHLET_SEGMENT_RUNNER_REPORT_KEYS
+        ):
+            reference_value = reference_report.get(key, 0)
+            consistency_value = consistency_report.get(key, 0)
+            if key.endswith("_ratio"):
+                unchanged = bool(
+                    math.isfinite(float(reference_value))
+                    and math.isfinite(float(consistency_value))
+                    and abs(float(consistency_value) - float(reference_value))
+                    <= 2.0e-6
+                )
+            else:
+                unchanged = consistency_value == reference_value
+            if not unchanged:
+                raise RuntimeError(
+                    "canonical velocity-only consistency segment diagnostic "
+                    f"changed ({context}): key={key}, "
+                    f"reference={reference_value!r}, "
+                    f"consistency={consistency_value!r}"
+                )
+        float_keys = {
+            "max_abs_claim_target_mps",
+            "max_abs_committed_target_mps",
+            "min_active_pressure_mobility",
+            "max_active_pressure_mobility",
+            "min_active_enforcement_weight",
+            "max_active_enforcement_weight",
+        }
+        for key in comparison_keys:
+            reference_value = reference_device_report[key]
+            consistency_value = consistency_device_report[key]
+            if key == "marker_target_closure":
+                unchanged = True
+                for closure_key in (
+                    CANONICAL_HIBM_VELOCITY_DIRICHLET_MARKER_TARGET_CLOSURE_REPORT_KEYS
+                ):
+                    reference_closure_value = reference_value[closure_key]
+                    consistency_closure_value = consistency_value[closure_key]
+                    if closure_key.endswith("_mps") or closure_key == "density_kgm3":
+                        item_unchanged = bool(
+                            math.isfinite(float(reference_closure_value))
+                            and math.isfinite(float(consistency_closure_value))
+                            and abs(
+                                float(consistency_closure_value)
+                                - float(reference_closure_value)
+                            )
+                            <= 2.0e-6
+                        )
+                    else:
+                        item_unchanged = (
+                            consistency_closure_value == reference_closure_value
+                        )
+                    unchanged = bool(unchanged and item_unchanged)
+            elif key in float_keys:
+                unchanged = bool(
+                    math.isfinite(float(reference_value))
+                    and math.isfinite(float(consistency_value))
+                    and abs(float(consistency_value) - float(reference_value))
+                    <= 2.0e-6
+                )
+            else:
+                unchanged = consistency_value == reference_value
+            if not unchanged:
+                raise RuntimeError(
+                    "canonical velocity-only consistency component diagnostic "
+                    f"changed ({context}): key={key}, "
+                    f"reference={reference_value!r}, "
+                    f"consistency={consistency_value!r}"
+                )
+        return
+
+    exact_keys = (
+        "hibm_velocity_dirichlet_active_rows",
+        "hibm_velocity_dirichlet_primary_region_active_rows",
+        "hibm_velocity_dirichlet_secondary_region_active_rows",
+        "hibm_velocity_dirichlet_other_region_active_rows",
+        "hibm_velocity_dirichlet_unassigned_region_active_rows",
+        "hibm_velocity_dirichlet_boundary_velocity_only_rows",
+        "hibm_velocity_dirichlet_relocated_rows",
+    )
+    for key in exact_keys:
+        try:
+            reference_value = int(reference_report[key])
+            consistency_value = int(consistency_report[key])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"velocity-only consistency row diagnostic {key} is invalid "
+                f"({context}): {exc}"
+            ) from exc
+        if consistency_value != reference_value:
+            raise RuntimeError(
+                f"velocity-only consistency row {key} changed ({context}): "
+                f"reference={reference_value}, consistency={consistency_value}"
+            )
+
+    for key in (
+        "hibm_velocity_dirichlet_min_projection_weight",
+        "hibm_velocity_dirichlet_max_projection_weight",
+    ):
+        try:
+            reference_value = float(reference_report[key])
+            consistency_value = float(consistency_report[key])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"velocity-only consistency row diagnostic {key} is invalid "
+                f"({context}): {exc}"
+            ) from exc
+        if not (
+            math.isfinite(reference_value)
+            and math.isfinite(consistency_value)
+            and abs(consistency_value - reference_value) <= 2.0e-6
+        ):
+            raise RuntimeError(
+                f"velocity-only consistency row {key} changed ({context}): "
+                f"reference={reference_value}, consistency={consistency_value}"
+            )
+
+
+def _hibm_marker_mac_constraint_iterations(config: Any) -> int:
+    raw_value = getattr(config, "flow_hibm_marker_mac_constraint_iterations", 64)
+    if isinstance(raw_value, (bool, np.bool_)):
+        raise ValueError(
+            "flow_hibm_marker_mac_constraint_iterations must be a positive integer"
+        )
+    try:
+        value = int(raw_value)
+        exact_value = float(raw_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "flow_hibm_marker_mac_constraint_iterations must be a positive integer"
+        ) from exc
+    if value <= 0 or not math.isfinite(exact_value) or exact_value != float(value):
+        raise ValueError(
+            "flow_hibm_marker_mac_constraint_iterations must be a positive integer"
+        )
+    return value
+
+
+def _hibm_marker_mac_constraint_absolute_tolerance_mps(config: Any) -> float:
+    raw_value = getattr(
+        config,
+        "flow_hibm_marker_mac_constraint_absolute_tolerance_mps",
+        1.0e-4,
+    )
+    if isinstance(raw_value, (bool, np.bool_)):
+        raise ValueError(
+            "flow_hibm_marker_mac_constraint_absolute_tolerance_mps must be "
+            "finite and positive"
+        )
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "flow_hibm_marker_mac_constraint_absolute_tolerance_mps must be "
+            "finite and positive"
+        ) from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            "flow_hibm_marker_mac_constraint_absolute_tolerance_mps must be "
+            "finite and positive"
+        )
+    return value
+
+
+class _HibmPreProjectionVelocityProjector:
+    """Bind the generic fluid projection protocol to marker-space HIBM Q."""
+
+    def __init__(
+        self,
+        *,
+        markers: HibmMpmSurfaceMarkers,
+        operator: HibmMpmMarkerMacConstraintOperator,
+        max_iterations: int,
+        absolute_tolerance_mps: float,
+    ) -> None:
+        self.markers_owner = markers
+        self.operator = operator
+        self.max_iterations = int(max_iterations)
+        self.absolute_tolerance_mps = float(absolute_tolerance_mps)
+        self._prepared_fluid: CartesianFluidSolver | None = None
+        self._prepared_sampling_identity = None
+        self._prepared_component_face_valid_mask = None
+        self._prepared_sampling_obstacle = None
+        self._prepared_topology_generation = -1
+        self._prepared_component_face_valid_mask_generation = -1
+        self._pressure_solve_context: dict[str, object] = {}
+        self._pressure_nullspace_fluid: CartesianFluidSolver | None = None
+        self._pressure_actuated_component_mobility = None
+        self._pressure_nullspace_component_face_valid_mask = None
+        self._pressure_actuation_generation = -1
+        self._pressure_nullspace_topology_generation = -1
+        self._pressure_nullspace_component_face_valid_mask_generation = -1
+
+    @property
+    def last_prepared_sampling_identity(self):
+        return self._prepared_sampling_identity
+
+    @property
+    def last_component_face_valid_mask(self):
+        return self._prepared_component_face_valid_mask
+
+    @property
+    def last_sampling_obstacle(self):
+        return self._prepared_sampling_obstacle
+
+    def _current_generations(
+        self,
+        fluid: CartesianFluidSolver,
+    ) -> tuple[int, int]:
+        return (
+            int(fluid.hibm_reachability_revision),
+            int(fluid.velocity_dirichlet_component_ledger_generation),
+        )
+
+    def _require_prepared_fluid(self) -> CartesianFluidSolver:
+        if self._prepared_fluid is None or self._prepared_sampling_identity is None:
+            raise RuntimeError(
+                "pre-projection velocity transaction has not been prepared"
+            )
+        return self._prepared_fluid
+
+    def _clear_pressure_nullspace_transaction_state(self) -> None:
+        self._pressure_nullspace_fluid = None
+        self._pressure_actuated_component_mobility = None
+        self._pressure_nullspace_component_face_valid_mask = None
+        self._pressure_actuation_generation = -1
+        self._pressure_nullspace_topology_generation = -1
+        self._pressure_nullspace_component_face_valid_mask_generation = -1
+
+    def prepare_projection_transaction(
+        self,
+        *,
+        fluid: CartesianFluidSolver,
+        pressure_solve_context: Mapping[str, object],
+    ) -> None:
+        # A new affine Q transaction invalidates every pressure-nullspace
+        # identity retained by the preceding Q/P cycle.  Clear the runner-side
+        # references before any operation that can fail so stale A/mask fields
+        # can never be reused after a partial prepare.
+        self._clear_pressure_nullspace_transaction_state()
+        if not isinstance(pressure_solve_context, Mapping):
+            raise TypeError("pressure_solve_context must be a mapping")
+        component_face_valid_mask = (
+            fluid.prepare_hibm_no_slip_component_face_valid_mask()
+        )
+        sampling_obstacle = fluid.hibm_no_slip_sampling_obstacle
+        topology_generation, valid_mask_generation = self._current_generations(fluid)
+        sampling_identity = self.markers_owner.prepare_no_slip_sampling_identity(
+            obstacle_field=sampling_obstacle,
+            component_face_valid_mask=component_face_valid_mask,
+            cell_face_x_m=fluid.cell_face_x_m,
+            cell_face_y_m=fluid.cell_face_y_m,
+            cell_face_z_m=fluid.cell_face_z_m,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            grid_nodes=fluid.grid.grid_nodes,
+            topology_generation=topology_generation,
+            component_face_valid_mask_generation=valid_mask_generation,
+        )
+        self.operator.prepare(
+            markers=self.markers_owner,
+            fluid=fluid,
+            component_face_valid_mask=component_face_valid_mask,
+            primary_region_id=PRIMARY_REGION_ID,
+            secondary_region_id=SECONDARY_REGION_ID,
+            prepared_sampling_identity=sampling_identity,
+            topology_generation=topology_generation,
+            component_face_valid_mask_generation=valid_mask_generation,
+        )
+        self._prepared_fluid = fluid
+        self._prepared_sampling_identity = sampling_identity
+        self._prepared_component_face_valid_mask = component_face_valid_mask
+        self._prepared_sampling_obstacle = sampling_obstacle
+        self._prepared_topology_generation = topology_generation
+        self._prepared_component_face_valid_mask_generation = valid_mask_generation
+        self._pressure_solve_context = {
+            str(key): value for key, value in pressure_solve_context.items()
+        }
+
+    def solve_projection_transaction(self) -> None:
+        fluid = self._require_prepared_fluid()
+        topology_generation, valid_mask_generation = self._current_generations(fluid)
+        self.operator.solve_device(
+            max_iterations=self.max_iterations,
+            absolute_tolerance_mps=self.absolute_tolerance_mps,
+            component_face_valid_mask=(
+                fluid.hibm_no_slip_component_face_valid_mask
+            ),
+            topology_generation=topology_generation,
+            component_face_valid_mask_generation=valid_mask_generation,
+            obstacle_field=fluid.hibm_no_slip_sampling_obstacle,
+        )
+
+    def commit_projection_transaction(self) -> Mapping[str, object]:
+        fluid = self._require_prepared_fluid()
+        topology_generation, valid_mask_generation = self._current_generations(fluid)
+        self.operator.commit_if_converged(
+            fluid,
+            component_face_valid_mask=(
+                fluid.hibm_no_slip_component_face_valid_mask
+            ),
+            topology_generation=topology_generation,
+            component_face_valid_mask_generation=valid_mask_generation,
+            obstacle_field=fluid.hibm_no_slip_sampling_obstacle,
+        )
+        report = asdict(self.operator.report())
+        return {
+            **report,
+            "prepared": bool(report["prepared"]),
+            "converged": bool(report["converged"]),
+            "committed": bool(report["committed"]),
+            "pressure_solve_context": dict(self._pressure_solve_context),
+            "topology_generation": int(self._prepared_topology_generation),
+            "component_face_valid_mask_generation": int(
+                self._prepared_component_face_valid_mask_generation
+            ),
+        }
+
+    def prepare_pressure_nullspace_transaction(
+        self,
+        *,
+        fluid: CartesianFluidSolver,
+        pressure_actuated_component_mobility,
+        component_face_valid_mask,
+        pressure_actuation_generation: int,
+        topology_generation: int,
+        component_face_valid_mask_generation: int,
+    ) -> None:
+        """Bind the pressure projector to the just-committed affine Q state."""
+
+        self._clear_pressure_nullspace_transaction_state()
+        prepared_fluid = self._require_prepared_fluid()
+        if self.operator._phase != "committed":
+            raise RuntimeError(
+                "pressure nullspace prepare requires a committed marker Q transaction"
+            )
+        if fluid is not prepared_fluid:
+            raise RuntimeError("pressure nullspace fluid owner changed")
+        if (
+            component_face_valid_mask
+            is not self._prepared_component_face_valid_mask
+        ):
+            raise RuntimeError(
+                "pressure nullspace component-face valid-mask owner changed"
+            )
+        if (
+            pressure_actuated_component_mobility
+            is not fluid.pressure_velocity_actuation_weight
+        ):
+            raise RuntimeError("pressure actuation weight owner changed")
+
+        current_topology_generation, current_valid_mask_generation = (
+            self._current_generations(fluid)
+        )
+        supplied_generations = (
+            pressure_actuation_generation,
+            topology_generation,
+            component_face_valid_mask_generation,
+        )
+        if any(
+            isinstance(value, (bool, np.bool_))
+            or int(value) != value
+            or int(value) < 0
+            for value in supplied_generations
+        ):
+            raise ValueError(
+                "pressure nullspace generations must be non-negative integers"
+            )
+        if int(pressure_actuation_generation) != int(
+            fluid.pressure_velocity_actuation_generation
+        ):
+            raise RuntimeError("pressure actuation generation changed")
+        if int(topology_generation) != current_topology_generation or int(
+            topology_generation
+        ) != int(self._prepared_topology_generation):
+            raise RuntimeError("pressure nullspace topology generation changed")
+        if int(component_face_valid_mask_generation) != (
+            current_valid_mask_generation
+        ) or int(component_face_valid_mask_generation) != int(
+            self._prepared_component_face_valid_mask_generation
+        ):
+            raise RuntimeError(
+                "pressure nullspace component-face valid-mask generation changed"
+            )
+
+        self.operator.prepare_pressure_nullspace_transaction(
+            fluid=fluid,
+            pressure_actuated_component_mobility=(
+                pressure_actuated_component_mobility
+            ),
+            component_face_valid_mask=component_face_valid_mask,
+            pressure_actuation_generation=int(pressure_actuation_generation),
+            topology_generation=int(topology_generation),
+            component_face_valid_mask_generation=int(
+                component_face_valid_mask_generation
+            ),
+        )
+        # Publish the identities only after the device-side factorization has
+        # completed.  A failed prepare therefore leaves the wrapper unusable.
+        self._pressure_nullspace_fluid = fluid
+        self._pressure_actuated_component_mobility = (
+            pressure_actuated_component_mobility
+        )
+        self._pressure_nullspace_component_face_valid_mask = (
+            component_face_valid_mask
+        )
+        self._pressure_actuation_generation = int(pressure_actuation_generation)
+        self._pressure_nullspace_topology_generation = int(topology_generation)
+        self._pressure_nullspace_component_face_valid_mask_generation = int(
+            component_face_valid_mask_generation
+        )
+
+    def _require_current_pressure_nullspace_transaction(
+        self,
+        *,
+        component_face_valid_mask=None,
+    ) -> tuple[CartesianFluidSolver, object, object]:
+        """Validate immutable pressure/Q identities without device reads."""
+
+        fluid = self._require_prepared_fluid()
+        pressure_fluid = self._pressure_nullspace_fluid
+        pressure_actuation_weight = self._pressure_actuated_component_mobility
+        prepared_valid_mask = self._pressure_nullspace_component_face_valid_mask
+        if (
+            pressure_fluid is None
+            or pressure_actuation_weight is None
+            or prepared_valid_mask is None
+        ):
+            raise RuntimeError(
+                "pressure constraint nullspace transaction is not prepared"
+            )
+        if self.operator._phase != "committed":
+            raise RuntimeError(
+                "pressure nullspace apply requires a committed marker Q transaction"
+            )
+        if fluid is not pressure_fluid:
+            raise RuntimeError("pressure nullspace fluid owner changed")
+        if prepared_valid_mask is not self._prepared_component_face_valid_mask:
+            raise RuntimeError(
+                "pressure nullspace component-face valid-mask owner changed"
+            )
+        if (
+            component_face_valid_mask is not None
+            and component_face_valid_mask is not prepared_valid_mask
+        ):
+            raise RuntimeError(
+                "pressure nullspace component-face valid-mask owner changed"
+            )
+        if pressure_actuation_weight is not fluid.pressure_velocity_actuation_weight:
+            raise RuntimeError("pressure actuation weight owner changed")
+
+        topology_generation, valid_mask_generation = self._current_generations(fluid)
+        if int(fluid.pressure_velocity_actuation_generation) != int(
+            self._pressure_actuation_generation
+        ):
+            raise RuntimeError("pressure actuation generation changed")
+        if topology_generation != int(
+            self._pressure_nullspace_topology_generation
+        ):
+            raise RuntimeError("pressure nullspace topology generation changed")
+        if valid_mask_generation != int(
+            self._pressure_nullspace_component_face_valid_mask_generation
+        ):
+            raise RuntimeError(
+                "pressure nullspace component-face valid-mask generation changed"
+            )
+        return fluid, pressure_actuation_weight, prepared_valid_mask
+
+    def project_pressure_actuated_grid_vector_to_marker_nullspace(
+        self,
+        *,
+        input_velocity_mps,
+        output_velocity_mps,
+        max_iterations: int,
+        absolute_tolerance_mps: float,
+        component_face_valid_mask,
+    ) -> None:
+        """Apply one device-only matvec projection with immutable identities."""
+
+        if isinstance(max_iterations, (bool, np.bool_)) or int(max_iterations) <= 0:
+            raise ValueError("max_iterations must be a positive integer")
+        if int(max_iterations) != max_iterations:
+            raise ValueError("max_iterations must be a positive integer")
+        if isinstance(absolute_tolerance_mps, (bool, np.bool_)):
+            raise ValueError(
+                "absolute_tolerance_mps must be finite and positive"
+            )
+        tolerance = float(absolute_tolerance_mps)
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError(
+                "absolute_tolerance_mps must be finite and positive"
+            )
+        fluid, pressure_actuation_weight, prepared_valid_mask = (
+            self._require_current_pressure_nullspace_transaction(
+                component_face_valid_mask=component_face_valid_mask
+            )
+        )
+
+        self.operator.apply_pressure_nullspace_transaction_device_only(
+            input_face_correction=input_velocity_mps,
+            output_face_correction=output_velocity_mps,
+            fluid=fluid,
+            pressure_actuated_component_mobility=pressure_actuation_weight,
+            component_face_valid_mask=prepared_valid_mask,
+            pressure_actuation_generation=int(self._pressure_actuation_generation),
+            topology_generation=int(self._pressure_nullspace_topology_generation),
+            component_face_valid_mask_generation=int(
+                self._pressure_nullspace_component_face_valid_mask_generation
+            ),
+        )
+
+    def finalize_pressure_nullspace_transaction(self) -> Mapping[str, object]:
+        """Read and validate accumulated device audits exactly once per solve."""
+
+        fluid, pressure_actuation_weight, prepared_valid_mask = (
+            self._require_current_pressure_nullspace_transaction()
+        )
+        report = self.operator.finalize_pressure_nullspace_transaction(
+            fluid=fluid,
+            pressure_actuated_component_mobility=pressure_actuation_weight,
+            component_face_valid_mask=prepared_valid_mask,
+            pressure_actuation_generation=int(self._pressure_actuation_generation),
+            topology_generation=int(self._pressure_nullspace_topology_generation),
+            component_face_valid_mask_generation=int(
+                self._pressure_nullspace_component_face_valid_mask_generation
+            ),
+            absolute_tolerance_mps=float(self.absolute_tolerance_mps),
+        )
+        scalar_report = asdict(report)
+        if int(scalar_report["pressure_actuation_generation"]) != int(
+            self._pressure_actuation_generation
+        ):
+            raise RuntimeError(
+                "pressure nullspace report actuation generation changed"
+            )
+        return {
+            **scalar_report,
+            "topology_generation": int(
+                self._pressure_nullspace_topology_generation
+            ),
+            "component_face_valid_mask_generation": int(
+                self._pressure_nullspace_component_face_valid_mask_generation
+            ),
+        }
+
+
 def _empty_hibm_sharp_marker_boundary_report() -> dict[str, object]:
     return {
         "flow_solid_boundary_mode": FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS,
         "hibm_sharp_marker_boundary_enabled": False,
+        "hibm_sharp_marker_boundary_search_radius_xyz_m": "",
+        "hibm_dynamic_solid_volume_enabled": False,
         "hibm_sharp_marker_boundary_search_reused": False,
+        "hibm_sharp_marker_boundary_topology_reused": False,
+        "hibm_sharp_marker_boundary_topology_only": False,
         "hibm_sharp_marker_boundary_near_node_count": 0,
         "hibm_sharp_marker_boundary_external_node_count": 0,
         "hibm_sharp_marker_boundary_internal_node_count": 0,
         "hibm_sharp_marker_boundary_internal_obstacle_cell_count": 0,
         "hibm_sharp_marker_boundary_no_slip_rows": 0,
+        **_empty_hibm_velocity_dirichlet_report_fields(),
         "hibm_sharp_marker_boundary_pressure_neumann_rows": 0,
         "hibm_sharp_marker_boundary_pressure_gradient_updated": False,
+        **_hibm_sharp_boundary_timing_report_fields(
+            _empty_hibm_sharp_boundary_stage_wall_times()
+        ),
+        "hibm_preassembly_overflow_singleton_cleanup_cell_count": 0,
+        "hibm_preassembly_overflow_singleton_cleanup_component_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_cell_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_component_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_pass_count": 0,
+        "hibm_preassembly_remaining_unreached_cell_count": 0,
+        "hibm_preassembly_cleanup_reused": False,
+        "hibm_preassembly_topology_mutated": False,
         "hibm_pressure_neumann_skipped_velocity_dirichlet_count": 0,
         "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count": 0,
         "hibm_pressure_neumann_skipped_obstacle_owner_count": 0,
@@ -2592,6 +6293,24 @@ def _hibm_sharp_search_radius_m(config: Any) -> float:
     return 2.5 * max(_grid_spacing_m(config))
 
 
+def _hibm_sharp_search_radius_xyz_m(
+    config: Any,
+) -> tuple[float, float, float] | None:
+    configured = getattr(config, "flow_hibm_sharp_search_radius_xyz_m", None)
+    if configured is None:
+        return None
+    values = tuple(float(value) for value in configured)
+    if len(values) != 3:
+        raise ValueError(
+            "flow_hibm_sharp_search_radius_xyz_m must contain exactly three values"
+        )
+    if any(not math.isfinite(value) or value <= 0.0 for value in values):
+        raise ValueError(
+            "flow_hibm_sharp_search_radius_xyz_m must contain finite positive values"
+        )
+    return values
+
+
 def _hibm_sharp_interior_probe_distance_m(config: Any) -> float:
     configured = getattr(config, "flow_hibm_sharp_interior_probe_distance_m", None)
     if configured is not None:
@@ -2606,11 +6325,14 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
     *,
     update_pressure_gradient: bool,
     boundary_cache: dict[str, object] | None = None,
+    reuse_topology_from_previous_assembly: bool = False,
+    topology_only: bool = False,
 ) -> dict[str, object]:
     if not _use_hibm_sharp_marker_boundary(config):
         return _empty_hibm_sharp_marker_boundary_report()
     if markers is None:
         raise ValueError("hibm_sharp_marker_rows requires surface markers")
+    stage_wall_times = _empty_hibm_sharp_boundary_stage_wall_times()
 
     bounds_min, bounds_max = _domain_bounds(config)
     marker_capacity = max(
@@ -2619,14 +6341,69 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
         1,
     )
     search_radius_m = _hibm_sharp_search_radius_m(config)
+    search_radius_xyz_m = _hibm_sharp_search_radius_xyz_m(config)
     interior_probe_distance_m = _hibm_sharp_interior_probe_distance_m(config)
-    cache_key = (
+    dynamic_solid_volume_enabled = bool(
+        getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)
+    )
+    marker_mac_constraint_iterations = _hibm_marker_mac_constraint_iterations(
+        config
+    )
+    marker_mac_constraint_absolute_tolerance_mps = (
+        _hibm_marker_mac_constraint_absolute_tolerance_mps(config)
+    )
+    # Resource identity is deliberately independent from the current marker
+    # geometry and from search parameters.  Those values change frequently in
+    # FSI but do not change the Taichi field shapes, so the allocated search,
+    # boundary, and projection objects remain reusable.
+    resource_cache_key = (
         tuple(config.grid_nodes),
         tuple(float(value) for value in bounds_min),
         tuple(float(value) for value in bounds_max),
         int(marker_capacity),
+        int(marker_mac_constraint_iterations),
+        float(marker_mac_constraint_absolute_tolerance_mps),
+    )
+    # Classified topology has a stricter identity.  In particular, marker
+    # count alone cannot detect an in-place moving surface, so the marker-owned
+    # geometry revision participates in every topology reuse decision.  The
+    # fluid-owned external obstacle epoch closes the complementary case where
+    # an obstacle changes without a marker write.  Cleanup-policy inputs are
+    # included because the cached cleanup report is part of this identity.
+    classified_topology_key = (
+        int(getattr(markers, "marker_geometry_revision", 0)),
+        int(getattr(fluid, "hibm_external_obstacle_topology_revision", 0)),
+        str(getattr(fluid, "velocity_dirichlet_boundary_authority", "legacy")),
+        int(getattr(fluid, "velocity_dirichlet_face_symmetric", 0)),
+        int(getattr(markers, "marker_count", 0)),
+        int(getattr(markers, "projection_vertex_count", 0)),
+        int(getattr(markers, "projection_triangle_count", 0)),
+        int(getattr(markers, "projection_segment_count", 0)),
         float(search_radius_m),
+        (
+            None
+            if search_radius_xyz_m is None
+            else tuple(float(value) for value in search_radius_xyz_m)
+        ),
         float(interior_probe_distance_m),
+        False,  # classify_far_internal_nodes
+        OUT_OF_PLANE_AXIS_INDEX,
+        bool(dynamic_solid_volume_enabled),
+        bool(
+            getattr(
+                config,
+                "flow_hibm_sharp_interpolate_velocity_rows",
+                True,
+            )
+        ),
+        bool(getattr(config, "flow_pressure_outlet_enabled", True)),
+        int(
+            getattr(
+                config,
+                "flow_hibm_tiny_unreached_cleanup_component_cells",
+                0,
+            )
+        ),
     )
     cache_entry = (
         boundary_cache.get("hibm_sharp_marker_boundary")
@@ -2634,11 +6411,24 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
         else None
     )
     search_reused = bool(
-        isinstance(cache_entry, dict) and cache_entry.get("cache_key") == cache_key
+        isinstance(cache_entry, dict)
+        and cache_entry.get("cache_key") == resource_cache_key
+        and cache_entry.get("markers_owner") is markers
+        and isinstance(
+            cache_entry.get("pre_projection_velocity_projector"),
+            _HibmPreProjectionVelocityProjector,
+        )
     )
     if search_reused:
         ib_search = cache_entry["ib_search"]
         ib_boundary = cache_entry["ib_boundary"]
+        pre_projection_velocity_projector = cache_entry[
+            "pre_projection_velocity_projector"
+        ]
+        if pre_projection_velocity_projector.markers_owner is not markers:
+            raise RuntimeError(
+                "cached HIBM pre-projection velocity projector marker owner changed"
+            )
     else:
         runtime = TaichiRuntimeConfig(arch="cuda")
         ib_search = HibmMpmIbNodeSearch(
@@ -2653,26 +6443,112 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             marker_capacity=marker_capacity,
             runtime=runtime,
         )
+        pre_projection_velocity_projector = _HibmPreProjectionVelocityProjector(
+            markers=markers,
+            operator=HibmMpmMarkerMacConstraintOperator(
+                grid_nodes=tuple(config.grid_nodes),
+                marker_capacity=marker_capacity,
+            ),
+            max_iterations=marker_mac_constraint_iterations,
+            absolute_tolerance_mps=(
+                marker_mac_constraint_absolute_tolerance_mps
+            ),
+        )
+        cache_entry = {
+            "cache_key": resource_cache_key,
+            "markers_owner": markers,
+            "ib_search": ib_search,
+            "ib_boundary": ib_boundary,
+            "pre_projection_velocity_projector": (
+                pre_projection_velocity_projector
+            ),
+        }
         if boundary_cache is not None:
-            boundary_cache["hibm_sharp_marker_boundary"] = {
-                "cache_key": cache_key,
-                "ib_search": ib_search,
-                "ib_boundary": ib_boundary,
+            boundary_cache["hibm_sharp_marker_boundary"] = cache_entry
+    topology_reused = bool(
+        reuse_topology_from_previous_assembly
+        and isinstance(cache_entry, dict)
+        and cache_entry.get("cache_key") == resource_cache_key
+        and cache_entry.get("markers_owner") is markers
+        and cache_entry.get("classified_topology_key")
+        == classified_topology_key
+        and "search_report" in cache_entry
+        and "internal_obstacle_cell_count" in cache_entry
+    )
+    if topology_reused:
+        search_report = cache_entry["search_report"]
+        internal_obstacle_cell_count = int(
+            cache_entry["internal_obstacle_cell_count"]
+        )
+    else:
+        if isinstance(cache_entry, dict):
+            # Invalidate host metadata before search overwrites its device
+            # fields.  If search or obstacle publication raises, a later call
+            # must reclassify instead of accepting the previous report for a
+            # partially replaced topology.
+            cache_entry.pop("classified_topology_key", None)
+            cache_entry.pop("search_report", None)
+            cache_entry.pop("internal_obstacle_cell_count", None)
+            cache_entry.pop("cleanup_report", None)
+        search_report = ib_search.search_and_classify_grid_fields(
+            markers,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            cell_width_x_m=fluid.cell_width_x_m,
+            cell_width_y_m=fluid.cell_width_y_m,
+            cell_width_z_m=fluid.cell_width_z_m,
+            search_radius_m=search_radius_m,
+            interior_probe_distance_m=interior_probe_distance_m,
+            classify_far_internal_nodes=False,
+            search_radius_xyz_m=search_radius_xyz_m,
+            search_inactive_axis=OUT_OF_PLANE_AXIS_INDEX,
+        )
+        internal_obstacle_cell_count = fluid.apply_hibm_internal_obstacles(
+            ib_search.node_kind_code,
+            internal_node_code=HibmMpmIbNodeSearch._NODE_INTERNAL,
+            external_node_code=HibmMpmIbNodeSearch._NODE_EXTERNAL_IB,
+            carve_external_nodes_from_dynamic_volume=dynamic_solid_volume_enabled,
+            convert_internal_nodes=not dynamic_solid_volume_enabled,
+        )
+        if isinstance(cache_entry, dict):
+            cache_entry["classified_topology_key"] = classified_topology_key
+            cache_entry["search_report"] = search_report
+            cache_entry["internal_obstacle_cell_count"] = int(
+                internal_obstacle_cell_count
+            )
+    if bool(topology_only):
+        if isinstance(cache_entry, dict):
+            # A topology-only observer does not execute reachability cleanup.
+            # Never carry an earlier full-assembly cleanup claim through this
+            # path, even when the classified search topology itself was reused.
+            cache_entry.pop("cleanup_report", None)
+        topology_report = _empty_hibm_sharp_marker_boundary_report()
+        topology_report.update(
+            {
+                "flow_solid_boundary_mode": _flow_solid_boundary_mode(config),
+                "hibm_sharp_marker_boundary_enabled": True,
+                "hibm_dynamic_solid_volume_enabled": dynamic_solid_volume_enabled,
+                "hibm_sharp_marker_boundary_search_reused": bool(search_reused),
+                "hibm_sharp_marker_boundary_topology_reused": bool(
+                    topology_reused
+                ),
+                "hibm_sharp_marker_boundary_near_node_count": (
+                    search_report.near_boundary_node_count
+                ),
+                "hibm_sharp_marker_boundary_external_node_count": (
+                    search_report.external_ib_node_count
+                ),
+                "hibm_sharp_marker_boundary_internal_node_count": (
+                    search_report.internal_node_count
+                ),
+                "hibm_sharp_marker_boundary_internal_obstacle_cell_count": int(
+                    internal_obstacle_cell_count
+                ),
+                "hibm_sharp_marker_boundary_topology_only": True,
             }
-    search_report = ib_search.search_and_classify_grid_fields(
-        markers,
-        cell_center_x_m=fluid.cell_center_x_m,
-        cell_center_y_m=fluid.cell_center_y_m,
-        cell_center_z_m=fluid.cell_center_z_m,
-        search_radius_m=search_radius_m,
-        interior_probe_distance_m=interior_probe_distance_m,
-        classify_far_internal_nodes=False,
-    )
-    internal_obstacle_cell_count = fluid.apply_hibm_internal_obstacles(
-        ib_search.node_kind_code,
-        internal_node_code=HibmMpmIbNodeSearch._NODE_INTERNAL,
-        convert_internal_nodes=True,
-    )
+        )
+        return topology_report
     if update_pressure_gradient:
         markers.update_pressure_neumann_gradient_from_fluid_predictor(
             ib_boundary.marker_pressure_neumann_gradient_field,
@@ -2696,32 +6572,246 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             ib_boundary.marker_pressure_neumann_gradient_field
         ),
     )
-    velocity_report = ib_boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-        fluid.velocity_dirichlet_boundary_active,
-        fluid.velocity_dirichlet_boundary_value_mps,
-        fluid.velocity_dirichlet_boundary_projection_weight,
-        fluid.obstacle,
-        fluid.velocity,
-        ib_search,
-        cell_face_x_m=fluid.cell_face_x_m,
-        cell_face_y_m=fluid.cell_face_y_m,
-        cell_face_z_m=fluid.cell_face_z_m,
-        cell_center_x_m=fluid.cell_center_x_m,
-        cell_center_y_m=fluid.cell_center_y_m,
-        cell_center_z_m=fluid.cell_center_z_m,
-        grid_nodes=fluid.grid.grid_nodes,
-        velocity_dirichlet_marker_region_id=(
-            fluid.velocity_dirichlet_boundary_marker_region_id
-        ),
-        marker_region_id=markers.region_id,
-        primary_region_id=PRIMARY_REGION_ID,
-        secondary_region_id=SECONDARY_REGION_ID,
-        interpolate_interior_velocity=bool(
+    def assemble_velocity_rows() -> dict[str, object]:
+        authority = str(fluid.velocity_dirichlet_boundary_authority)
+        interpolate_interior_velocity = bool(
             getattr(config, "flow_hibm_sharp_interpolate_velocity_rows", True)
-        ),
-    )
+        )
+        if authority == "legacy":
+            legacy_report = (
+                ib_boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
+                    fluid.velocity_dirichlet_boundary_active,
+                    fluid.velocity_dirichlet_boundary_value_mps,
+                    fluid.velocity_dirichlet_boundary_projection_weight,
+                    fluid.obstacle,
+                    fluid.velocity,
+                    ib_search,
+                    cell_face_x_m=fluid.cell_face_x_m,
+                    cell_face_y_m=fluid.cell_face_y_m,
+                    cell_face_z_m=fluid.cell_face_z_m,
+                    cell_center_x_m=fluid.cell_center_x_m,
+                    cell_center_y_m=fluid.cell_center_y_m,
+                    cell_center_z_m=fluid.cell_center_z_m,
+                    grid_nodes=fluid.grid.grid_nodes,
+                    velocity_dirichlet_marker_region_id=(
+                        fluid.velocity_dirichlet_boundary_marker_region_id
+                    ),
+                    velocity_dirichlet_hard_fixed_component_mask=(
+                        fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
+                    ),
+                    velocity_dirichlet_owned_row=(
+                        fluid.velocity_dirichlet_boundary_owned_row
+                    ),
+                    velocity_dirichlet_enforcement_weight=(
+                        fluid.velocity_dirichlet_boundary_enforcement_weight
+                    ),
+                    velocity_dirichlet_external_exact_component_mask=(
+                        fluid.velocity_dirichlet_boundary_external_exact_component_mask
+                    ),
+                    marker_region_id=markers.region_id,
+                    primary_region_id=PRIMARY_REGION_ID,
+                    secondary_region_id=SECONDARY_REGION_ID,
+                    interpolate_interior_velocity=interpolate_interior_velocity,
+                )
+            )
+            return {
+                "hibm_velocity_dirichlet_authority": "legacy",
+                **_hibm_velocity_dirichlet_report_fields(legacy_report),
+            }
+        if authority != "canonical":
+            raise RuntimeError(
+                "unsupported velocity Dirichlet boundary authority for HIBM "
+                f"assembly: {authority!r}"
+            )
+
+        fluid._invalidate_velocity_dirichlet_component_ledger()
+        builder_result = _measure_hibm_sharp_boundary_stage(
+            stage_wall_times,
+            "canonical_ledger_build",
+            lambda: ib_boundary.assemble_velocity_dirichlet_component_face_ledger(
+            velocity_dirichlet_active_component_mask=(
+                fluid.velocity_dirichlet_boundary_active_component_mask
+            ),
+            velocity_dirichlet_value_mps=(
+                fluid.velocity_dirichlet_boundary_value_mps
+            ),
+            velocity_dirichlet_pressure_mobility=(
+                fluid.velocity_dirichlet_boundary_pressure_mobility
+            ),
+            velocity_dirichlet_component_enforcement_weight=(
+                fluid.velocity_dirichlet_boundary_component_enforcement_weight
+            ),
+            velocity_dirichlet_component_region_id=(
+                fluid.velocity_dirichlet_boundary_component_region_id
+            ),
+            velocity_dirichlet_hard_fixed_component_mask=(
+                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
+            ),
+            velocity_dirichlet_external_exact_component_mask=(
+                fluid.velocity_dirichlet_boundary_external_exact_component_mask
+            ),
+            velocity_dirichlet_owned_component_mask=(
+                fluid.velocity_dirichlet_boundary_owned_component_mask
+            ),
+            obstacle_field=fluid.obstacle,
+            velocity_field=fluid.velocity,
+            search=ib_search,
+            cell_face_x_m=fluid.cell_face_x_m,
+            cell_face_y_m=fluid.cell_face_y_m,
+            cell_face_z_m=fluid.cell_face_z_m,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            grid_nodes=fluid.grid.grid_nodes,
+            marker_region_id=markers.region_id,
+            surface_projection_inactive_axis=OUT_OF_PLANE_AXIS_INDEX,
+            markers=markers,
+            marker_compatibility_max_iterations=(
+                marker_mac_constraint_iterations
+            ),
+            marker_compatibility_absolute_tolerance_mps=(
+                marker_mac_constraint_absolute_tolerance_mps
+            ),
+            marker_compatibility_closure_tolerance_mps=min(
+                1.0e-6,
+                0.1 * marker_mac_constraint_absolute_tolerance_mps,
+            ),
+            marker_compatibility_density_kgm3=float(fluid.rho),
+            primary_region_id=PRIMARY_REGION_ID,
+            secondary_region_id=SECONDARY_REGION_ID,
+            interpolate_interior_velocity=interpolate_interior_velocity,
+            ),
+        )
+        _measure_hibm_sharp_boundary_stage(
+            stage_wall_times,
+            "canonical_prepare_seal",
+            lambda: _prepare_and_seal_canonical_velocity_dirichlet_component_ledger(
+                fluid
+            ),
+        )
+        return _canonical_hibm_velocity_dirichlet_report_fields(
+            builder_result,
+            fluid=fluid,
+        )
+
+    velocity_report = assemble_velocity_rows()
     fluid.clear_pressure_interface_matrix_terms()
-    pressure_report = ib_boundary.assemble_pressure_neumann_matrix_rows(
+    cleanup_report = {
+        "hibm_preassembly_overflow_singleton_cleanup_cell_count": 0,
+        "hibm_preassembly_overflow_singleton_cleanup_component_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_cell_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_component_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_pass_count": 0,
+        "hibm_preassembly_remaining_unreached_cell_count": 0,
+        "hibm_preassembly_cleanup_reused": False,
+        "hibm_preassembly_topology_mutated": False,
+    }
+
+    def refresh_pressure_reachability() -> None:
+        _measure_hibm_sharp_boundary_stage(
+            stage_wall_times,
+            "pressure_reachability_flood",
+            lambda: fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=True,
+            ),
+        )
+
+
+    cleanup_reused = bool(
+        topology_reused
+        and isinstance(cache_entry, dict)
+        and "cleanup_report" in cache_entry
+    )
+    if cleanup_reused:
+        cleanup_report.update(dict(cache_entry.get("cleanup_report", {})))
+        # The cached report records work performed by the assembly that
+        # established this topology.  Reusing that saturated result performs
+        # no obstacle conversion in the current assembly, so do not replay its
+        # historical mutation bit as a new mutation.  The explicit reuse bit
+        # keeps the cached provenance auditable while the current-call flag
+        # remains safe for predictor/projection topology guards.
+        cleanup_report["hibm_preassembly_cleanup_reused"] = True
+        cleanup_report["hibm_preassembly_topology_mutated"] = False
+        # Reusing the topology-cleanup result only proves that no obstacle or
+        # row-cloud conversion has to be repeated.  Clearing the pressure
+        # interface terms above deliberately invalidates the reachability
+        # state, so refresh the flood before projection advertises it as
+        # prepared.  This is independent of the particular solid geometry.
+        if bool(getattr(config, "flow_pressure_outlet_enabled", True)):
+            refresh_pressure_reachability()
+            cleanup_report[
+                "hibm_preassembly_remaining_unreached_cell_count"
+            ] = int(fluid.last_hibm_pressure_unreached_cell_count)
+    elif bool(getattr(config, "flow_pressure_outlet_enabled", True)):
+        tiny_cleanup_threshold = int(
+            getattr(
+                config,
+                "flow_hibm_tiny_unreached_cleanup_component_cells",
+                0,
+            )
+        )
+        topology_stable = False
+        for _topology_cleanup_pass in range(8):
+            refresh_pressure_reachability()
+            converted_overflow_singletons = (
+                fluid.convert_hibm_row_cloud_orphan_components(
+                    max_component_cells=1,
+                    overflow_singletons_only=True,
+                    protect_velocity_dirichlet_radius_cells=2,
+                )
+            )
+            overflow_component_count = 0
+            if int(converted_overflow_singletons) > 0:
+                overflow_component_count = int(
+                    fluid.last_hibm_row_cloud_orphan_component_count
+                )
+                refresh_pressure_reachability()
+            tiny_cleanup_report = (
+                fluid.cleanup_hibm_pressure_outlet_tiny_unreached_components(
+                    max_component_cells=tiny_cleanup_threshold,
+                    reachability_is_current=True,
+                )
+            )
+            cleanup_report[
+                "hibm_preassembly_overflow_singleton_cleanup_cell_count"
+            ] += int(converted_overflow_singletons)
+            cleanup_report[
+                "hibm_preassembly_overflow_singleton_cleanup_component_count"
+            ] += int(overflow_component_count)
+            for key in (
+                "hibm_preassembly_tiny_unreached_cleanup_cell_count",
+                "hibm_preassembly_tiny_unreached_cleanup_component_count",
+                "hibm_preassembly_tiny_unreached_cleanup_pass_count",
+            ):
+                cleanup_report[key] += int(tiny_cleanup_report[key])
+            topology_mutated_this_pass = bool(
+                int(converted_overflow_singletons) > 0
+                or int(
+                    tiny_cleanup_report[
+                        "hibm_preassembly_tiny_unreached_cleanup_cell_count"
+                    ]
+                )
+                > 0
+            )
+            if not topology_mutated_this_pass:
+                topology_stable = True
+                break
+            cleanup_report["hibm_preassembly_topology_mutated"] = True
+            velocity_report = assemble_velocity_rows()
+        if not topology_stable:
+            refresh_pressure_reachability()
+            raise RuntimeError(
+                "HIBM preassembly topology cleanup did not saturate after 8 passes"
+            )
+        cleanup_report[
+            "hibm_preassembly_remaining_unreached_cell_count"
+        ] = int(fluid.last_hibm_pressure_unreached_cell_count)
+        if isinstance(cache_entry, dict):
+            cache_entry["cleanup_report"] = dict(cleanup_report)
+    pressure_report = _measure_hibm_sharp_boundary_stage(
+        stage_wall_times,
+        "pressure_neumann_assembly",
+        lambda: ib_boundary.assemble_pressure_neumann_matrix_rows(
         fluid.pressure_interface_matrix_diagonal,
         fluid.pressure_interface_matrix_rhs,
         fluid.pressure_interface_coupling_active,
@@ -2754,11 +6844,18 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
         cell_center_y_m=fluid.cell_center_y_m,
         cell_center_z_m=fluid.cell_center_z_m,
         grid_nodes=fluid.grid.grid_nodes,
+        ),
     )
     return {
         "flow_solid_boundary_mode": _flow_solid_boundary_mode(config),
         "hibm_sharp_marker_boundary_enabled": True,
+        "hibm_sharp_marker_boundary_search_radius_xyz_m": (
+            list(search_radius_xyz_m) if search_radius_xyz_m is not None else ""
+        ),
+        "hibm_dynamic_solid_volume_enabled": dynamic_solid_volume_enabled,
         "hibm_sharp_marker_boundary_search_reused": bool(search_reused),
+        "hibm_sharp_marker_boundary_topology_reused": bool(topology_reused),
+        "hibm_sharp_marker_boundary_topology_only": False,
         "hibm_sharp_marker_boundary_near_node_count": (
             search_report.near_boundary_node_count
         ),
@@ -2771,15 +6868,23 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
         "hibm_sharp_marker_boundary_internal_obstacle_cell_count": (
             int(internal_obstacle_cell_count)
         ),
-        "hibm_sharp_marker_boundary_no_slip_rows": (
-            velocity_report.active_velocity_dirichlet_rows
+        "hibm_sharp_marker_boundary_no_slip_rows": int(
+            velocity_report["canonical_velocity_dirichlet_report"][
+                "final_active_storage_row_count"
+            ]
+            if velocity_report.get("hibm_velocity_dirichlet_authority")
+            == "canonical"
+            else velocity_report["hibm_velocity_dirichlet_active_rows"]
         ),
+        **_hibm_velocity_dirichlet_mapping_fields(velocity_report),
         "hibm_sharp_marker_boundary_pressure_neumann_rows": (
             pressure_report.active_pressure_neumann_rows
         ),
         "hibm_sharp_marker_boundary_pressure_gradient_updated": bool(
             update_pressure_gradient
         ),
+        **_hibm_sharp_boundary_timing_report_fields(stage_wall_times),
+        **cleanup_report,
         "hibm_pressure_neumann_skipped_velocity_dirichlet_count": (
             pressure_report.skipped_velocity_dirichlet_row_count
         ),
@@ -2808,6 +6913,39 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             pressure_report.invalid_nonpositive_volume_row_count
         ),
     }
+
+
+def _hibm_pre_projection_velocity_projector_from_cache(
+    boundary_cache: dict[str, object] | None,
+    *,
+    markers: HibmMpmSurfaceMarkers,
+) -> _HibmPreProjectionVelocityProjector:
+    if boundary_cache is None:
+        raise RuntimeError(
+            "sharp HIBM pre-projection velocity projector cache is unavailable"
+        )
+    cache_entry = boundary_cache.get("hibm_sharp_marker_boundary")
+    if not isinstance(cache_entry, dict):
+        raise RuntimeError(
+            "sharp HIBM pre-projection velocity projector cache entry is unavailable"
+        )
+    projector = cache_entry.get("pre_projection_velocity_projector")
+    if not isinstance(projector, _HibmPreProjectionVelocityProjector):
+        raise RuntimeError(
+            "sharp HIBM pre-projection velocity projector is unavailable"
+        )
+    if projector.markers_owner is not markers:
+        raise RuntimeError(
+            "sharp HIBM pre-projection velocity projector marker owner changed"
+        )
+    return projector
+
+
+def _flow_turbulence_model(config: Any) -> str:
+    model = str(getattr(config, "flow_turbulence_model", "laminar")).lower()
+    if model not in FLOW_TURBULENCE_MODELS:
+        raise ValueError(f"unsupported flow_turbulence_model: {model!r}")
+    return model
 
 
 def _flow_predictor_kinematic_viscosity_m2_s(config: Any) -> float:
@@ -2872,6 +7010,10 @@ def _apply_ymin_no_slip_rows(
     active: np.ndarray,
     values: np.ndarray,
     weights: np.ndarray,
+    marker_regions: np.ndarray,
+    hard_masks: np.ndarray,
+    external_exact_masks: np.ndarray,
+    owned_rows: np.ndarray,
     obstacle: np.ndarray,
     config: Any,
 ) -> None:
@@ -2883,6 +7025,10 @@ def _apply_ymin_no_slip_rows(
     active_rows = active[:, :row_count, :]
     values_rows = values[:, :row_count, :, :]
     weights_rows = weights[:, :row_count, :]
+    marker_region_rows = marker_regions[:, :row_count, :]
+    hard_mask_rows = hard_masks[:, :row_count, :]
+    external_exact_mask_rows = external_exact_masks[:, :row_count, :]
+    owned_row_rows = owned_rows[:, :row_count, :]
     preserved_rows = active_rows != 0
     apply_rows = np.logical_and(fluid_rows, ~preserved_rows)
     clear_rows = np.logical_and(~fluid_rows, ~preserved_rows)
@@ -2890,10 +7036,20 @@ def _apply_ymin_no_slip_rows(
     active_rows[apply_rows] = 1
     values_rows[apply_rows, :] = 0.0
     weights_rows[apply_rows] = 1.0
+    marker_region_rows[apply_rows] = -1
+    hard_mask_rows[apply_rows] = 0b111
+    external_exact_mask_rows[apply_rows] = 0
+    ymin_external_mask = external_exact_mask_rows[:, 0, :]
+    ymin_external_mask[apply_rows[:, 0, :]] = 0b010
+    owned_row_rows[apply_rows] = 0
 
     active_rows[clear_rows] = 0
     values_rows[clear_rows, :] = 0.0
     weights_rows[clear_rows] = 0.0
+    marker_region_rows[clear_rows] = -1
+    hard_mask_rows[clear_rows] = 0
+    external_exact_mask_rows[clear_rows] = 0
+    owned_row_rows[clear_rows] = 0
 
 
 def _apply_obstacle_no_slip_rows(
@@ -2977,6 +7133,68 @@ def _flow_advance_current_step(
         inlet_boundary_report={},
         volume_source_applied=False,
     )
+    predictor_applied = False
+    velocity_only_soft_rows = (
+        _use_hibm_sharp_marker_boundary(config)
+        and not bool(
+            getattr(
+                config,
+                "flow_hibm_sharp_interpolate_velocity_rows",
+                True,
+            )
+        )
+    )
+
+    # Geometry and the physical solid-volume mask can change after the prior
+    # MPM step.  Refresh the carve and velocity rows before any predictor
+    # substep consumes them.  The second assembly below runs after prediction
+    # so the pressure-Neumann gradient is sampled from the current predictor.
+    pre_predictor_sharp_boundary_report = (
+        _apply_hibm_sharp_marker_boundary_to_fluid(
+            markers,
+            fluid,
+            config,
+            update_pressure_gradient=False,
+            boundary_cache=sharp_boundary_cache,
+            reuse_topology_from_previous_assembly=True,
+        )
+    )
+    _require_hibm_velocity_dirichlet_health(
+        pre_predictor_sharp_boundary_report,
+        context=(
+            f"{flow_phase} step {step_index_local} pre-predictor assembly"
+        ),
+    )
+    pre_predictor_ledger_generation = None
+    if velocity_only_soft_rows:
+        pre_predictor_ledger_generation = (
+            _capture_velocity_dirichlet_row_ledger_reference(
+                fluid,
+                context=(
+                    f"{flow_phase} step {step_index_local} pre-predictor assembly"
+                ),
+            )
+        )
+
+    turbulence_model = _flow_turbulence_model(config)
+    sst_transport_report: dict[str, object] = {}
+    sst_transport_substeps_total = 0
+    sst_transport_rejected_trial_count_total = 0
+    sst_transport_diffusion_cfl_max = 0.0
+    momentum_advection_scheme = "none"
+    momentum_advection_substeps_total = 0
+    momentum_advection_rejected_trial_count_total = 0
+    momentum_advection_cfl_max = 0.0
+    momentum_advection_max_substep_cfl = 0.0
+    if turbulence_model == "sst_2003" and markers is not None:
+        fluid.prepare_sst_wall_distance(
+            no_slip_domain_walls=_flow_predictor_no_slip_domain_walls(config),
+            marker_position_m=markers.x_gamma_m,
+            marker_count=int(markers.marker_count),
+            projection_segment_indices=markers.projection_triangle_indices,
+            projection_segment_count=int(markers.projection_segment_count),
+            inactive_axis=OUT_OF_PLANE_AXIS_INDEX,
+        )
 
     if mode == FLOW_DRIVER_PROJECTION_ONLY:
         pass
@@ -3032,17 +7250,74 @@ def _flow_advance_current_step(
             )
             for _predictor_substep in range(predictor_substeps):
                 fluid.apply_velocity_dirichlet_boundary_rows(read_report=False)
+                if turbulence_model == "sst_2003":
+                    current_sst_report = fluid.advance_sst_transport(
+                        dt_s=predictor_dt_s,
+                        kinematic_viscosity_m2_s=(
+                            predictor_kinematic_viscosity_m2_s
+                        ),
+                        no_slip_domain_walls=(
+                            predictor_no_slip_domain_walls
+                        ),
+                        advection_scheme=advection_scheme,
+                    )
+                    sst_transport_report = dict(current_sst_report)
+                    sst_transport_substeps_total += int(
+                        current_sst_report["diffusion_substeps"]
+                    )
+                    sst_transport_rejected_trial_count_total += int(
+                        current_sst_report.get("rejected_transport_trial_count", 0)
+                    )
+                    sst_transport_diffusion_cfl_max = max(
+                        sst_transport_diffusion_cfl_max,
+                        float(
+                            current_sst_report[
+                                "diffusion_cfl_before_substeps"
+                            ]
+                        ),
+                    )
                 fluid.predict(
                     dt_s=predictor_dt_s,
                     advection_scheme=advection_scheme,
                     kinematic_viscosity_m2_s=predictor_kinematic_viscosity_m2_s,
                     no_slip_domain_walls=predictor_no_slip_domain_walls,
                 )
+                momentum_advection_scheme = str(
+                    getattr(fluid, "_last_momentum_advection_scheme", advection_scheme)
+                )
+                momentum_advection_substeps_total += int(
+                    getattr(fluid, "_last_momentum_advection_substeps", 1)
+                )
+                momentum_advection_rejected_trial_count_total += int(
+                    getattr(
+                        fluid,
+                        "_last_momentum_advection_rejected_trial_count",
+                        0,
+                    )
+                )
+                momentum_advection_cfl_max = max(
+                    momentum_advection_cfl_max,
+                    float(getattr(fluid, "_last_momentum_advection_cfl", 0.0)),
+                )
+                momentum_advection_max_substep_cfl = max(
+                    momentum_advection_max_substep_cfl,
+                    float(
+                        getattr(
+                            fluid,
+                            "_last_momentum_advection_max_substep_cfl",
+                            0.0,
+                        )
+                    ),
+                )
             fluid.apply_velocity_dirichlet_boundary_rows(read_report=False)
             predictor_note = (
                 "core fluid predictor applied before pressure projection "
                 f"(advection_scheme={advection_scheme}, "
-                f"substeps={predictor_substeps}, "
+                f"outer_substeps={predictor_substeps}, "
+                f"core_adaptive_substeps={momentum_advection_substeps_total}, "
+                "core_rejected_trials="
+                f"{momentum_advection_rejected_trial_count_total}, "
+                f"core_initial_cfl_max={momentum_advection_cfl_max:g}, "
                 f"nu={predictor_kinematic_viscosity_m2_s:g} m^2/s, "
                 f"no_slip_domain_walls={predictor_no_slip_domain_walls})"
             )
@@ -3065,19 +7340,419 @@ def _flow_advance_current_step(
     else:  # pragma: no cover - protected by config validation.
         raise RuntimeError(f"unsupported flow_driver_mode: {mode!r}")
 
+    driver_report.update(
+        {
+            "flow_turbulence_model": turbulence_model,
+            "flow_sst_transport_applied": bool(sst_transport_report),
+            "flow_sst_transport_substeps_total": int(
+                sst_transport_substeps_total
+            ),
+            "flow_sst_transport_rejected_trial_count_total": int(
+                sst_transport_rejected_trial_count_total
+            ),
+            "flow_sst_transport_diffusion_cfl_max": float(
+                sst_transport_diffusion_cfl_max
+            ),
+            "flow_sst_momentum_diffusion_substeps_last": int(
+                getattr(fluid, "_sst_last_momentum_diffusion_substeps", 0)
+            ),
+            "flow_sst_momentum_diffusion_integrator": str(
+                getattr(fluid, "_sst_last_momentum_diffusion_integrator", "none")
+            ),
+            "flow_sst_momentum_diffusion_cfl_last": float(
+                getattr(fluid, "_sst_last_momentum_diffusion_cfl", 0.0)
+            ),
+            "flow_sst_momentum_helmholtz_converged": bool(
+                getattr(fluid, "_sst_last_momentum_helmholtz_converged", True)
+            ),
+            "flow_sst_momentum_helmholtz_iterations_last": int(
+                getattr(fluid, "_sst_last_momentum_helmholtz_iterations", 0)
+            ),
+            "flow_sst_momentum_helmholtz_iterations_total_last": int(
+                getattr(
+                    fluid,
+                    "_sst_last_momentum_helmholtz_iterations_total",
+                    0,
+                )
+            ),
+            "flow_sst_momentum_helmholtz_relative_residual_last": float(
+                getattr(
+                    fluid,
+                    "_sst_last_momentum_helmholtz_relative_residual",
+                    0.0,
+                )
+            ),
+            "flow_sst_momentum_helmholtz_rejected_trial_count_last": int(
+                getattr(
+                    fluid,
+                    "_sst_last_momentum_helmholtz_rejected_trial_count",
+                    0,
+                )
+            ),
+            "flow_momentum_advection_scheme": momentum_advection_scheme,
+            "flow_momentum_advection_substeps_total": int(
+                momentum_advection_substeps_total
+            ),
+            "flow_momentum_advection_rejected_trial_count_total": int(
+                momentum_advection_rejected_trial_count_total
+            ),
+            "flow_momentum_advection_cfl_max": float(
+                momentum_advection_cfl_max
+            ),
+            "flow_momentum_advection_max_substep_cfl": float(
+                momentum_advection_max_substep_cfl
+            ),
+            **{
+                f"flow_sst_{key}": value
+                for key, value in sst_transport_report.items()
+                if key != "turbulence_model"
+            },
+        }
+    )
+
     sharp_boundary_report = _apply_hibm_sharp_marker_boundary_to_fluid(
         markers,
         fluid,
         config,
         update_pressure_gradient=True,
         boundary_cache=sharp_boundary_cache,
+        reuse_topology_from_previous_assembly=True,
     )
-    flow_report = _project_current_flow(
+    sharp_boundary_report = dict(sharp_boundary_report)
+    _require_hibm_velocity_dirichlet_health(
+        sharp_boundary_report,
+        context=f"{flow_phase} step {step_index_local} projection assembly",
+    )
+    pre_projection_velocity_projector = None
+    if _use_hibm_sharp_marker_boundary(config):
+        if markers is None:
+            raise RuntimeError(
+                "sharp HIBM pre-projection velocity projector requires markers"
+            )
+        pre_projection_velocity_projector = (
+            _hibm_pre_projection_velocity_projector_from_cache(
+                sharp_boundary_cache,
+                markers=markers,
+            )
+        )
+    main_soft_rows_already_applied = False
+    if velocity_only_soft_rows and predictor_applied:
+        if pre_predictor_ledger_generation is None:
+            raise RuntimeError(
+                "velocity-only predictor row ledger reference is unavailable "
+                f"({flow_phase} step {step_index_local})"
+            )
+        pre_predictor_comparison = _velocity_dirichlet_row_ledger_comparison(
+            fluid,
+            reference_generation=int(pre_predictor_ledger_generation),
+            comparison_mode="content_equivalence",
+            context=(
+                f"{flow_phase} step {step_index_local} post-predictor assembly"
+            ),
+        )
+        pre_predictor_mismatch_rows = int(
+            pre_predictor_comparison[
+                "hibm_velocity_dirichlet_row_ledger_mismatch_rows"
+            ]
+        )
+        if pre_predictor_mismatch_rows == 0:
+            _require_velocity_only_topology_reuse(
+                sharp_boundary_report,
+                context=(
+                    f"{flow_phase} step {step_index_local} projection assembly"
+                ),
+            )
+            main_soft_rows_already_applied = True
+        sharp_boundary_report.update(
+            {
+                "hibm_velocity_dirichlet_pre_predictor_ledger_snapshot_generation": int(
+                    pre_predictor_ledger_generation
+                ),
+                "hibm_velocity_dirichlet_pre_predictor_ledger_matches_projection_assembly": bool(
+                    main_soft_rows_already_applied
+                ),
+                "hibm_velocity_dirichlet_pre_predictor_ledger_mismatch_rows": int(
+                    pre_predictor_mismatch_rows
+                ),
+            }
+        )
+
+    consistency_ledger_generation = None
+    if velocity_only_soft_rows:
+        consistency_ledger_generation = (
+            _capture_velocity_dirichlet_row_ledger_reference(
+                fluid,
+                context=f"{flow_phase} step {step_index_local} projection assembly",
+            )
+        )
+        sharp_boundary_report.update(
+            _velocity_dirichlet_row_ledger_reference_diagnostics(
+                reference_generation=int(consistency_ledger_generation),
+            )
+        )
+    terminal_sharp_boundary_report = sharp_boundary_report
+    sharp_joint_qp_enabled = _use_hibm_sharp_marker_boundary(config)
+    consistency_projection_count = (
+        max(
+            0,
+            int(
+                getattr(
+                    config,
+                    "flow_post_dirichlet_consistency_projection_iterations",
+                    0,
+                )
+            ),
+        )
+        if sharp_joint_qp_enabled
+        else 0
+    )
+    joint_qp_cycle_budget = 1 + consistency_projection_count
+    reprojection_iterations = getattr(config, "flow_reprojection_iterations", None)
+    reprojection_cg_tolerance = getattr(
+        config,
+        "flow_reprojection_cg_tolerance",
+        None,
+    )
+    joint_qp_no_slip_tolerance = (
+        _hibm_marker_mac_constraint_absolute_tolerance_mps(config)
+        if sharp_joint_qp_enabled
+        else 0.0
+    )
+    joint_qp_cycle_trace: list[dict[str, object]] = []
+    terminal_no_slip_report: dict[str, object] | None = None
+
+    main_flow_report = _project_current_flow(
         fluid,
         config,
         reset_pressure=reset_pressure,
+        pressure_solve_context={
+            "phase": str(flow_phase),
+            "step_index_local": int(step_index_local),
+            "step_index_global": int(step_index_global),
+            "hibm_sharp_marker_boundary_stage_wall_time_s": (
+                _hibm_sharp_boundary_stage_wall_times_from_report(
+                    sharp_boundary_report
+                )
+            ),
+        },
+        preserve_velocity_constraints=(
+            False if _use_hibm_sharp_marker_boundary(config) else None
+        ),
+        velocity_dirichlet_soft_rows_already_applied=(
+            main_soft_rows_already_applied
+        ),
+        pre_projection_velocity_projector=pre_projection_velocity_projector,
+        pressure_velocity_nullspace_projector=(
+            pre_projection_velocity_projector
+        ),
     )
-    flow_report.update(sharp_boundary_report)
+    flow_report = main_flow_report
+    main_projection_report = dict(main_flow_report["projection_report"])
+    projection_reports = [main_projection_report]
+    joint_qp_converged = False
+    if sharp_joint_qp_enabled:
+        terminal_no_slip_report = _sample_hibm_no_slip_report(
+            markers,
+            fluid,
+            pre_projection_velocity_projector=pre_projection_velocity_projector,
+        )
+        main_cycle_diagnostics = _hibm_joint_qp_cycle_diagnostics(
+            cycle_index=1,
+            projection_stage="main",
+            no_slip_report=terminal_no_slip_report,
+            pressure_report=main_projection_report,
+            no_slip_absolute_tolerance_mps=joint_qp_no_slip_tolerance,
+            pressure_cg_tolerance=float(config.flow_cg_tolerance),
+            sharp_boundary_report=sharp_boundary_report,
+        )
+        joint_qp_cycle_trace.append(main_cycle_diagnostics)
+        joint_qp_converged = bool(main_cycle_diagnostics["converged"])
+
+    for consistency_projection_index in range(consistency_projection_count):
+        if joint_qp_converged:
+            break
+        consistency_boundary_report = _apply_hibm_sharp_marker_boundary_to_fluid(
+            markers,
+            fluid,
+            config,
+            update_pressure_gradient=False,
+            boundary_cache=sharp_boundary_cache,
+            reuse_topology_from_previous_assembly=True,
+        )
+        consistency_boundary_report = dict(consistency_boundary_report)
+        _require_hibm_velocity_dirichlet_health(
+            consistency_boundary_report,
+            context=(
+                f"{flow_phase} step {step_index_local} consistency projection "
+                f"{consistency_projection_index + 1} assembly"
+            ),
+        )
+        soft_rows_already_applied = not bool(
+            getattr(
+                config,
+                "flow_hibm_sharp_interpolate_velocity_rows",
+                True,
+            )
+        )
+        if soft_rows_already_applied:
+            if consistency_ledger_generation is None:
+                raise RuntimeError(
+                    "velocity-only consistency row ledger reference is unavailable "
+                    f"({flow_phase} step {step_index_local} consistency projection "
+                    f"{consistency_projection_index + 1})"
+                )
+            consistency_boundary_report.update(
+                _velocity_dirichlet_row_ledger_comparison(
+                    fluid,
+                    reference_generation=int(consistency_ledger_generation),
+                    comparison_mode="content_equivalence",
+                    context=(
+                        f"{flow_phase} step {step_index_local} consistency projection "
+                        f"{consistency_projection_index + 1}"
+                    ),
+                )
+            )
+            _require_velocity_only_consistency_row_reuse(
+                sharp_boundary_report,
+                consistency_boundary_report,
+                context=(
+                    f"{flow_phase} step {step_index_local} consistency projection "
+                    f"{consistency_projection_index + 1}"
+                ),
+            )
+        terminal_sharp_boundary_report = consistency_boundary_report
+        consistency_flow_report = _project_current_flow(
+            fluid,
+            config,
+            reset_pressure=False,
+            pressure_solve_context={
+                "phase": str(flow_phase),
+                "step_index_local": int(step_index_local),
+                "step_index_global": int(step_index_global),
+                "projection_stage": "post_dirichlet_consistency",
+                "consistency_projection_index": int(consistency_projection_index + 1),
+                "hibm_sharp_marker_boundary_stage_wall_time_s": (
+                    _hibm_sharp_boundary_stage_wall_times_from_report(
+                        consistency_boundary_report
+                    )
+                ),
+            },
+            projection_iterations=(
+                int(reprojection_iterations)
+                if reprojection_iterations is not None
+                else int(config.flow_projection_iterations)
+            ),
+            cg_tolerance=(
+                float(reprojection_cg_tolerance)
+                if reprojection_cg_tolerance is not None
+                else float(config.flow_cg_tolerance)
+            ),
+            accumulate_pressure_into_previous=True,
+            homogenize_pressure_interface_rhs_for_increment=True,
+            preserve_velocity_constraints=False,
+            velocity_dirichlet_soft_rows_already_applied=soft_rows_already_applied,
+            pre_projection_velocity_projector=pre_projection_velocity_projector,
+            pressure_velocity_nullspace_projector=(
+                pre_projection_velocity_projector
+            ),
+        )
+        consistency_projection_report = dict(
+            consistency_flow_report["projection_report"]
+        )
+        consistency_projection_report.update(
+            {
+                "hibm_projection_stage": (
+                    "post_dirichlet_reconstruction_consistency"
+                ),
+                "hibm_post_dirichlet_consistency_projection_index": int(
+                    consistency_projection_index + 1
+                ),
+                "hibm_post_dirichlet_consistency_projection_applied": True,
+                "hibm_post_dirichlet_consistency_projection_count": 1,
+            }
+        )
+        projection_reports.append(consistency_projection_report)
+        flow_report = consistency_flow_report
+        terminal_no_slip_report = _sample_hibm_no_slip_report(
+            markers,
+            fluid,
+            pre_projection_velocity_projector=pre_projection_velocity_projector,
+        )
+        consistency_cycle_diagnostics = _hibm_joint_qp_cycle_diagnostics(
+            cycle_index=len(projection_reports),
+            projection_stage="post_dirichlet_consistency",
+            no_slip_report=terminal_no_slip_report,
+            pressure_report=consistency_projection_report,
+            no_slip_absolute_tolerance_mps=joint_qp_no_slip_tolerance,
+            pressure_cg_tolerance=(
+                float(reprojection_cg_tolerance)
+                if reprojection_cg_tolerance is not None
+                else float(config.flow_cg_tolerance)
+            ),
+            sharp_boundary_report=consistency_boundary_report,
+        )
+        joint_qp_cycle_trace.append(consistency_cycle_diagnostics)
+        joint_qp_converged = bool(consistency_cycle_diagnostics["converged"])
+
+    combined_projection_report = _combine_flow_projection_reports(projection_reports)
+    actual_consistency_projection_count = max(0, len(projection_reports) - 1)
+    if sharp_joint_qp_enabled:
+        joint_qp_diagnostics = _hibm_joint_qp_terminal_diagnostics(
+            cycle_budget=joint_qp_cycle_budget,
+            cycle_trace=joint_qp_cycle_trace,
+        )
+        combined_projection_report.update(joint_qp_diagnostics)
+        _require_hibm_joint_qp_convergence(
+            joint_qp_diagnostics,
+            context=f"{flow_phase} step {step_index_local}",
+        )
+    flow_report["projection_report"] = combined_projection_report
+    flow_report["hibm_post_dirichlet_consistency_projection_count"] = int(
+        actual_consistency_projection_count
+    )
+    flow_report["hibm_post_dirichlet_consistency_projection_applied"] = bool(
+        actual_consistency_projection_count
+    )
+    if sharp_joint_qp_enabled:
+        if terminal_no_slip_report is None:
+            raise RuntimeError("joint Q/P terminal no-slip report is unavailable")
+        flow_report.update(terminal_no_slip_report)
+    else:
+        flow_report.update(
+            {
+                "hibm_no_slip_report": {},
+                "hibm_no_slip_valid_marker_count": 0,
+                "hibm_no_slip_invalid_marker_count": 0,
+                "hibm_no_slip_max_residual_mps": 0.0,
+                "hibm_no_slip_l2_residual_mps": 0.0,
+                "hibm_no_slip_direct_sample_marker_count": 0,
+                "hibm_no_slip_normal_walk_sample_marker_count": 0,
+                "hibm_no_slip_nearest_fluid_sample_marker_count": 0,
+                "hibm_no_slip_no_fluid_sample_marker_count": 0,
+            }
+        )
+    flow_report.update(terminal_sharp_boundary_report)
+    if sharp_joint_qp_enabled:
+        flow_report.update(
+            {
+                "hibm_sharp_marker_boundary_terminal_stage_wall_time_s": (
+                    joint_qp_diagnostics[
+                        "hibm_sharp_marker_boundary_terminal_stage_wall_time_s"
+                    ]
+                ),
+                "hibm_sharp_marker_boundary_total_stage_wall_time_s": (
+                    joint_qp_diagnostics[
+                        "hibm_sharp_marker_boundary_total_stage_wall_time_s"
+                    ]
+                ),
+            }
+        )
+    flow_report["hibm_sharp_marker_boundary_pre_predictor_refreshed"] = bool(
+        pre_predictor_sharp_boundary_report.get(
+            "hibm_sharp_marker_boundary_enabled",
+            False,
+        )
+    )
     flow_report.update(driver_report)
     flow_report["flow_phase"] = str(flow_phase)
     flow_report["flow_step_index_local"] = int(step_index_local)
@@ -3118,8 +7793,15 @@ def _flow_advance_current_step(
     flow_report["flow_pressure_outlet_backflow_policy"] = (
         _flow_pressure_outlet_backflow_policy(config)
     )
-    flow_report["flow_projection_velocity_inlet_zmax"] = bool(
-        getattr(config, "flow_projection_velocity_inlet_zmax", False)
+    configured_velocity_inlet_zmax = getattr(
+        config,
+        "flow_projection_velocity_inlet_zmax",
+        None,
+    )
+    flow_report["flow_projection_velocity_inlet_zmax"] = (
+        None
+        if configured_velocity_inlet_zmax is None
+        else bool(configured_velocity_inlet_zmax)
     )
     return flow_report
 
@@ -3252,6 +7934,28 @@ def _refresh_zmax_inlet_boundary(
     fluid: CartesianFluidSolver,
     config: Any,
 ) -> dict[str, object]:
+    authority = str(
+        getattr(fluid, "velocity_dirichlet_boundary_authority", "legacy")
+    )
+    if authority == "canonical":
+        canonical_refresh = getattr(
+            fluid,
+            "refresh_zmax_inlet_boundary_canonical",
+            None,
+        )
+        if not callable(canonical_refresh):
+            raise RuntimeError(
+                "canonical zmax refresh requires the canonical device writer; "
+                "legacy host row fallback is forbidden"
+            )
+        report = dict(
+            canonical_refresh(
+                inlet_velocity_mps=float(config.inlet_velocity_mps),
+                streamwise_axis_index=STREAMWISE_AXIS_INDEX,
+            )
+        )
+        _prepare_and_seal_canonical_velocity_dirichlet_component_ledger(fluid)
+        return report
     device_refresh = getattr(fluid, "refresh_zmax_inlet_boundary", None)
     if (
         device_refresh is not None
@@ -3267,12 +7971,27 @@ def _refresh_zmax_inlet_boundary(
     active = fluid.velocity_dirichlet_boundary_active.to_numpy()
     values = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
     weights = fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+    enforcement_weights = (
+        fluid.velocity_dirichlet_boundary_enforcement_weight.to_numpy()
+    )
+    marker_regions = fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
+    hard_masks = (
+        fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.to_numpy()
+    )
+    external_exact_masks = (
+        fluid.velocity_dirichlet_boundary_external_exact_component_mask.to_numpy()
+    )
+    owned_rows = fluid.velocity_dirichlet_boundary_owned_row.to_numpy()
     obstacle = fluid.obstacle.to_numpy()
     k = int(config.grid_nodes[2]) - 1
     _apply_ymin_no_slip_rows(
         active,
         values,
         weights,
+        marker_regions,
+        hard_masks,
+        external_exact_masks,
+        owned_rows,
         obstacle,
         config,
     )
@@ -3284,6 +8003,9 @@ def _refresh_zmax_inlet_boundary(
             obstacle,
             config,
         )
+    direct_rows = owned_rows == 0
+    enforcement_weights[direct_rows] = weights[direct_rows]
+    enforcement_weights[active == 0] = 0.0
     fluid_mask = obstacle[:, :, k] == 0
 
     active[:, :, k] = fluid_mask.astype(np.int32)
@@ -3292,10 +8014,28 @@ def _refresh_zmax_inlet_boundary(
         -float(config.inlet_velocity_mps) * fluid_mask.astype(np.float32)
     )
     weights[:, :, k] = fluid_mask.astype(np.float32)
+    enforcement_weights[:, :, k] = fluid_mask.astype(np.float32)
+    marker_regions[:, :, k] = -1
+    hard_masks[:, :, k] = np.where(fluid_mask, 0b111, 0).astype(np.int32)
+    external_exact_masks[:, :, k] = np.where(
+        fluid_mask,
+        external_exact_masks[:, :, k] | np.int32(0b100),
+        0,
+    ).astype(np.int32)
+    owned_rows[:, :, k] = 0
 
     fluid.velocity_dirichlet_boundary_active.from_numpy(active)
     fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
     fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+    fluid.velocity_dirichlet_boundary_enforcement_weight.from_numpy(
+        enforcement_weights
+    )
+    fluid.velocity_dirichlet_boundary_marker_region_id.from_numpy(marker_regions)
+    fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.from_numpy(hard_masks)
+    fluid.velocity_dirichlet_boundary_external_exact_component_mask.from_numpy(
+        external_exact_masks
+    )
+    fluid.velocity_dirichlet_boundary_owned_row.from_numpy(owned_rows)
     return _zmax_inlet_boundary_report(fluid)
 
 
@@ -3318,6 +8058,1178 @@ def _zmax_inlet_boundary_report(
     }
 
 
+_PREFLOW_SNAPSHOT_FSI_ONLY_CONFIG_FIELDS = frozenset(
+    {
+        "step_count",
+        "young_modulus_pa",
+        "poisson_ratio",
+        "solid_density_kgm3",
+        "solid_constitutive_model",
+        "solid_substeps",
+        "solid_cfl_target",
+        "solid_velocity_transfer_flip_blend",
+        "velocity_damping",
+        "fixed_node_lock_policy",
+        "displacement_tolerance",
+        "velocity_peak_tolerance",
+        "export_final_flow_snapshot",
+        "preflow_snapshot_input_path",
+        "preflow_snapshot_output_path",
+    }
+)
+
+
+def _preflow_snapshot_config_payload(config: Any) -> dict[str, object]:
+    if hasattr(config, "__dataclass_fields__"):
+        payload = asdict(config)
+    elif isinstance(config, Mapping):
+        payload = dict(config)
+    elif hasattr(config, "__dict__"):
+        payload = dict(vars(config))
+    else:
+        raise TypeError("preflow snapshot config must be a dataclass or mapping")
+    return {
+        str(key): value
+        for key, value in payload.items()
+        if str(key) not in _PREFLOW_SNAPSHOT_FSI_ONLY_CONFIG_FIELDS
+    }
+
+
+def _capture_preflow_snapshot_fields(fluid: Any) -> dict[str, np.ndarray]:
+    fluid._require_velocity_dirichlet_component_ledger_sealed()
+    return {
+        name: np.asarray(getattr(fluid, name).to_numpy()).copy()
+        for name in PREFLOW_SNAPSHOT_FIELD_NAMES
+    }
+
+
+_CANONICAL_SNAPSHOT_RESTORE_PREPARE_METHODS = (
+    ("apply", "prepare_velocity_dirichlet_component_ledger_apply"),
+    ("divergence", "prepare_velocity_dirichlet_component_ledger_divergence"),
+    ("reachability", "prepare_velocity_dirichlet_component_ledger_reachability"),
+    ("fv_operator", "prepare_velocity_dirichlet_component_ledger_fv_operator"),
+    ("gradient", "prepare_velocity_dirichlet_component_ledger_gradient"),
+    ("multigrid", "prepare_velocity_dirichlet_component_ledger_multigrid"),
+    ("projection", "prepare_velocity_dirichlet_component_ledger_projection"),
+    ("no_slip", "prepare_hibm_no_slip_component_face_valid_mask"),
+    ("reference", "prepare_velocity_dirichlet_component_ledger_reference"),
+    ("snapshot", "prepare_velocity_dirichlet_component_ledger_snapshot"),
+)
+
+
+def _canonical_snapshot_restore_prepare_plan(
+    fluid: Any,
+) -> tuple[tuple[str, str, Callable[[], object]], ...]:
+    """Resolve every required canonical prepare path without mutating state.
+
+    This preflight deliberately runs before the first ``from_numpy`` commit.
+    During a phased migration, an incomplete physical-consumer set therefore
+    rejects a canonical snapshot with zero runtime writes instead of entering
+    a prepare/seal deadlock and relying on a second failing rebuild to unwind.
+    """
+
+    required_value = getattr(
+        fluid,
+        "_VELOCITY_DIRICHLET_COMPONENT_LEDGER_CONSUMERS",
+        None,
+    )
+    if required_value is None:
+        raise RuntimeError(
+            "canonical snapshot restore is not ready before commit; missing "
+            "the required physical-consumer registry"
+        )
+    try:
+        required_consumers = frozenset(str(item) for item in required_value)
+    except TypeError as exc:
+        raise RuntimeError(
+            "canonical snapshot restore is not ready before commit; invalid "
+            "physical-consumer registry"
+        ) from exc
+    if not required_consumers:
+        raise RuntimeError(
+            "canonical snapshot restore is not ready before commit; missing "
+            "required physical consumers"
+        )
+
+    prepare_plan: list[tuple[str, str, Callable[[], object]]] = []
+    planned_consumers: set[str] = set()
+    missing_prepare_consumers: list[str] = []
+    for consumer, method_name in _CANONICAL_SNAPSHOT_RESTORE_PREPARE_METHODS:
+        if consumer not in required_consumers:
+            continue
+        planned_consumers.add(consumer)
+        prepare = getattr(fluid, method_name, None)
+        if not callable(prepare):
+            missing_prepare_consumers.append(consumer)
+            continue
+        prepare_plan.append((consumer, method_name, prepare))
+    missing_prepare_consumers.extend(
+        sorted(required_consumers - planned_consumers)
+    )
+
+    lifecycle_methods = (
+        "_velocity_dirichlet_component_ledger_generation_errors",
+        "seal_velocity_dirichlet_component_ledger",
+        "_require_velocity_dirichlet_component_ledger_sealed",
+    )
+    missing_lifecycle_methods = [
+        name for name in lifecycle_methods if not callable(getattr(fluid, name, None))
+    ]
+    if missing_prepare_consumers or missing_lifecycle_methods:
+        details: list[str] = []
+        if missing_prepare_consumers:
+            details.append(
+                "missing migrated consumer prepare APIs="
+                f"{sorted(set(missing_prepare_consumers))}"
+            )
+        if missing_lifecycle_methods:
+            details.append(
+                "missing lifecycle APIs=" f"{sorted(missing_lifecycle_methods)}"
+            )
+        raise RuntimeError(
+            "canonical snapshot restore is not ready before commit; "
+            + ", ".join(details)
+        )
+    return tuple(prepare_plan)
+
+
+def _prepare_canonical_preflow_snapshot_restore(
+    fluid: Any,
+    prepare_plan: tuple[tuple[str, str, Callable[[], object]], ...],
+) -> None:
+    """Prepare all migrated consumers, then seal, then permit sealed reads."""
+
+    invalidate_reachability = getattr(
+        fluid,
+        "_invalidate_hibm_pressure_reachability",
+        None,
+    )
+    if callable(invalidate_reachability):
+        invalidate_reachability()
+
+    no_slip_prepare_name = "prepare_hibm_no_slip_component_face_valid_mask"
+    method_names = {method_name for _consumer, method_name, _prepare in prepare_plan}
+    if no_slip_prepare_name not in method_names:
+        raise RuntimeError(
+            "canonical snapshot restore is missing the no-slip prepare API"
+        )
+    for _consumer, _method_name, prepare in prepare_plan:
+        prepare()
+
+    missing, unexpected, mismatched, invalid_capabilities = (
+        fluid._velocity_dirichlet_component_ledger_generation_errors()
+    )
+    if missing or unexpected or mismatched or invalid_capabilities:
+        raise RuntimeError(
+            "canonical snapshot restore consumer preparation is incomplete "
+            "before seal: "
+            f"missing={missing}, unexpected={unexpected}, "
+            f"mismatched={mismatched}, "
+            f"invalid_capabilities={invalid_capabilities}"
+        )
+    fluid.seal_velocity_dirichlet_component_ledger()
+    # No sealed-only reader or diagnostic is permitted above this point.
+    fluid._require_velocity_dirichlet_component_ledger_sealed()
+
+
+def _prepare_and_seal_canonical_velocity_dirichlet_component_ledger(
+    fluid: Any,
+) -> None:
+    """Prepare every physical consumer before any canonical ledger read."""
+
+    authority = str(getattr(fluid, "velocity_dirichlet_boundary_authority", ""))
+    if authority != "canonical":
+        raise RuntimeError(
+            "canonical velocity Dirichlet prepare/seal requires canonical authority"
+        )
+    prepare_plan = _canonical_snapshot_restore_prepare_plan(fluid)
+    _prepare_canonical_preflow_snapshot_restore(fluid, prepare_plan)
+
+
+def _rebuild_legacy_preflow_snapshot_derived_state(fluid: Any) -> None:
+    """Preserve the established legacy restore ordering exactly."""
+
+    invalidate_reachability = getattr(
+        fluid,
+        "_invalidate_hibm_pressure_reachability",
+        None,
+    )
+    if callable(invalidate_reachability):
+        invalidate_reachability()
+    rebuild_no_slip_obstacle = getattr(
+        fluid,
+        "build_hibm_no_slip_sampling_obstacle",
+        None,
+    )
+    if callable(rebuild_no_slip_obstacle):
+        rebuild_no_slip_obstacle()
+    rebuild_no_slip_component_mask = getattr(
+        fluid,
+        "build_hibm_no_slip_component_face_valid_mask",
+        None,
+    )
+    if callable(rebuild_no_slip_component_mask):
+        rebuild_no_slip_component_mask()
+
+
+def _rollback_preflow_snapshot_restore(
+    *,
+    runtime_fields: Mapping[str, Any],
+    runtime_backups: Mapping[str, np.ndarray],
+    mirror_fields: Mapping[str, Any],
+    mirror_backups: Mapping[str, np.ndarray],
+    derived_fields: Mapping[str, Any],
+    derived_backups: Mapping[str, np.ndarray],
+    fluid: Any,
+    metadata_backup: Mapping[str, object],
+    missing_metadata: object,
+) -> None:
+    """Restore direct backups without re-entering prepare/seal failure paths."""
+
+    rollback_errors: list[str] = []
+    for name in PREFLOW_SNAPSHOT_FIELD_NAMES:
+        try:
+            runtime_fields[name].from_numpy(runtime_backups[name])
+        except BaseException as exc:  # pragma: no cover - catastrophic backend loss.
+            rollback_errors.append(f"field {name!r}: {exc!r}")
+    for name, runtime_field in mirror_fields.items():
+        try:
+            runtime_field.from_numpy(mirror_backups[name])
+        except BaseException as exc:  # pragma: no cover - catastrophic backend loss.
+            rollback_errors.append(f"mirror {name!r}: {exc!r}")
+    for name, runtime_field in derived_fields.items():
+        try:
+            runtime_field.from_numpy(derived_backups[name])
+        except BaseException as exc:  # pragma: no cover - catastrophic backend loss.
+            rollback_errors.append(f"derived {name!r}: {exc!r}")
+    for name, previous in metadata_backup.items():
+        try:
+            if previous is missing_metadata:
+                if hasattr(fluid, name):
+                    delattr(fluid, name)
+            else:
+                setattr(fluid, name, previous)
+        except BaseException as exc:  # pragma: no cover - exotic host proxy.
+            rollback_errors.append(f"metadata {name!r}: {exc!r}")
+    if rollback_errors:
+        raise RuntimeError(
+            "preflow snapshot restore rollback failed: " + "; ".join(rollback_errors)
+        )
+
+
+def _restore_preflow_snapshot_fields(
+    fluid: Any,
+    fields: Mapping[str, np.ndarray],
+    *,
+    velocity_dirichlet_boundary_authority: str | None = None,
+    velocity_dirichlet_component_ledger_generation: int | None = None,
+) -> None:
+    if set(fields) != set(PREFLOW_SNAPSHOT_FIELD_NAMES):
+        raise ValueError("preflow snapshot fields do not match the runtime contract")
+    current_authority = str(fluid.velocity_dirichlet_boundary_authority)
+    if velocity_dirichlet_boundary_authority is None:
+        velocity_dirichlet_boundary_authority = current_authority
+    if velocity_dirichlet_component_ledger_generation is None:
+        velocity_dirichlet_component_ledger_generation = int(
+            fluid.velocity_dirichlet_component_ledger_generation
+        )
+    if velocity_dirichlet_boundary_authority != current_authority:
+        raise ValueError(
+            "preflow snapshot velocity boundary authority changed after load: "
+            f"snapshot={velocity_dirichlet_boundary_authority!r}, "
+            f"solver={current_authority!r}"
+        )
+    if (
+        not isinstance(velocity_dirichlet_component_ledger_generation, int)
+        or isinstance(velocity_dirichlet_component_ledger_generation, bool)
+        or velocity_dirichlet_component_ledger_generation < 0
+    ):
+        raise ValueError(
+            "preflow snapshot velocity boundary generation must be a "
+            "non-negative integer"
+        )
+    # Validate the complete host payload and every destination shape/dtype
+    # before the first runtime mutation.  A direct helper caller therefore has
+    # the same fail-closed schema contract as a disk-loaded PreflowSnapshot.
+    validated_fields = validate_preflow_snapshot_fields(
+        fields,
+        velocity_dirichlet_boundary_authority=current_authority,
+    )
+    runtime_fields: dict[str, Any] = {}
+    runtime_backups: dict[str, np.ndarray] = {}
+    for name in PREFLOW_SNAPSHOT_FIELD_NAMES:
+        runtime_field = getattr(fluid, name, None)
+        if runtime_field is None or not callable(
+            getattr(runtime_field, "to_numpy", None)
+        ) or not callable(getattr(runtime_field, "from_numpy", None)):
+            raise ValueError(
+                f"preflow snapshot runtime field {name!r} is unavailable"
+            )
+        current = np.asarray(runtime_field.to_numpy()).copy()
+        proposed = validated_fields[name]
+        if current.shape != proposed.shape or current.dtype != proposed.dtype:
+            raise ValueError(
+                f"preflow snapshot runtime field {name!r} shape/dtype mismatch"
+            )
+        runtime_fields[name] = runtime_field
+        runtime_backups[name] = current
+
+    mirror_fields: dict[str, Any] = {}
+    mirror_backups: dict[str, np.ndarray] = {}
+    for name in ("pressure_accum", "pressure_tmp"):
+        runtime_field = getattr(fluid, name, None)
+        if runtime_field is None:
+            continue
+        current = np.asarray(runtime_field.to_numpy()).copy()
+        proposed = validated_fields["pressure"]
+        if current.shape != proposed.shape or current.dtype != proposed.dtype:
+            raise ValueError(
+                f"preflow snapshot runtime field {name!r} shape/dtype mismatch"
+            )
+        mirror_fields[name] = runtime_field
+        mirror_backups[name] = current
+
+    metadata_names = (
+        "velocity_dirichlet_component_ledger_generation",
+        "velocity_dirichlet_component_ledger_sealed",
+        "_velocity_dirichlet_component_ledger_consumer_generations",
+        "_velocity_dirichlet_component_ledger_consumer_capabilities",
+        "_hibm_base_obstacle_initialized",
+        "hibm_dynamic_solid_volume_enabled",
+        "_sst_wall_distance_valid",
+    )
+    missing = object()
+    metadata_backup = {
+        name: getattr(fluid, name, missing) for name in metadata_names
+    }
+
+    derived_fields: dict[str, Any] = {}
+    derived_backups: dict[str, np.ndarray] = {}
+    for name in (
+        "hibm_no_slip_sampling_obstacle",
+        "hibm_no_slip_component_face_valid_mask",
+    ):
+        runtime_field = getattr(fluid, name, None)
+        if runtime_field is None:
+            continue
+        to_numpy = getattr(runtime_field, "to_numpy", None)
+        from_numpy = getattr(runtime_field, "from_numpy", None)
+        if not callable(to_numpy) or not callable(from_numpy):
+            raise ValueError(
+                f"preflow snapshot derived runtime field {name!r} is incomplete"
+            )
+        derived_fields[name] = runtime_field
+        derived_backups[name] = np.asarray(to_numpy()).copy()
+
+    canonical_prepare_plan = (
+        _canonical_snapshot_restore_prepare_plan(fluid)
+        if current_authority == "canonical"
+        else ()
+    )
+
+    try:
+        for name in PREFLOW_SNAPSHOT_FIELD_NAMES:
+            runtime_fields[name].from_numpy(validated_fields[name])
+        for runtime_field in mirror_fields.values():
+            runtime_field.from_numpy(validated_fields["pressure"])
+        if (
+            getattr(fluid, "turbulence_model", "laminar") == "sst_2003"
+            and hasattr(fluid, "_sst_wall_distance_valid")
+        ):
+            # Schema v8 restores the physical wall-distance field itself, so
+            # do not discard it and rebuild a different field before FSI.
+            fluid._sst_wall_distance_valid = True
+        fluid.velocity_dirichlet_component_ledger_generation = int(
+            velocity_dirichlet_component_ledger_generation
+        )
+        fluid.velocity_dirichlet_component_ledger_sealed = False
+        fluid._velocity_dirichlet_component_ledger_consumer_generations = {}
+        fluid._velocity_dirichlet_component_ledger_consumer_capabilities = {}
+        if hasattr(fluid, "_hibm_base_obstacle_initialized"):
+            fluid._hibm_base_obstacle_initialized = True
+        if hasattr(fluid, "hibm_dynamic_solid_volume_enabled"):
+            fluid.hibm_dynamic_solid_volume_enabled = bool(
+                np.any(
+                    validated_fields[
+                        "hibm_dynamic_solid_volume_obstacle"
+                    ]
+                )
+            )
+        if current_authority == "canonical":
+            _prepare_canonical_preflow_snapshot_restore(
+                fluid,
+                canonical_prepare_plan,
+            )
+        else:
+            _rebuild_legacy_preflow_snapshot_derived_state(fluid)
+            fluid._require_velocity_dirichlet_component_ledger_sealed()
+    except BaseException as restore_error:
+        # Rollback restores direct backups only.  Re-entering prepare/seal here
+        # can reproduce the same failure and obscure the original exception.
+        try:
+            _rollback_preflow_snapshot_restore(
+                runtime_fields=runtime_fields,
+                runtime_backups=runtime_backups,
+                mirror_fields=mirror_fields,
+                mirror_backups=mirror_backups,
+                derived_fields=derived_fields,
+                derived_backups=derived_backups,
+                fluid=fluid,
+                metadata_backup=metadata_backup,
+                missing_metadata=missing,
+            )
+        except BaseException as rollback_error:
+            raise RuntimeError(
+                "preflow snapshot restore failed and rollback was incomplete: "
+                f"{rollback_error}"
+            ) from restore_error
+        raise
+
+
+def _preflow_snapshot_source_payload() -> dict[str, bytes]:
+    repo_root = Path(__file__).resolve().parents[2]
+    # Snapshot compatibility follows the executable solver dependency surface,
+    # not every case and benchmark that happens to share the repository.  The
+    # canonical config and geometry hashes already identify the active case.
+    # Include this runner explicitly plus all reusable solver modules; future
+    # runtime callbacks must opt in through an explicit dependency manifest.
+    runner_path = Path(__file__).resolve()
+    paths: set[Path] = {runner_path} if runner_path.is_file() else set()
+    solver_root = repo_root / "simulation_core"
+    if solver_root.is_dir():
+        paths.update(
+            path for path in solver_root.rglob("*.py") if path.is_file()
+        )
+    return {
+        path.relative_to(repo_root).as_posix(): path.read_bytes()
+        for path in sorted(paths)
+    }
+
+
+def _preflow_snapshot_geometry_payload(
+    *,
+    fluid: Any,
+    markers: Any,
+    solid: Any,
+) -> dict[str, np.ndarray]:
+    marker_count = int(markers.marker_count)
+    projection_vertex_count = int(markers.projection_vertex_count)
+    projection_triangle_count = int(markers.projection_triangle_count)
+    projection_segment_count = int(markers.projection_segment_count)
+    projection_indices = markers.projection_triangle_indices.to_numpy()
+    solid_count = int(solid.particle_count)
+    geometry = {
+        "cell_face_x_m": fluid.cell_face_x_m.to_numpy(),
+        "cell_face_y_m": fluid.cell_face_y_m.to_numpy(),
+        "cell_face_z_m": fluid.cell_face_z_m.to_numpy(),
+        "cell_center_x_m": fluid.cell_center_x_m.to_numpy(),
+        "cell_center_y_m": fluid.cell_center_y_m.to_numpy(),
+        "cell_center_z_m": fluid.cell_center_z_m.to_numpy(),
+        "cell_width_x_m": fluid.cell_width_x_m.to_numpy(),
+        "cell_width_y_m": fluid.cell_width_y_m.to_numpy(),
+        "cell_width_z_m": fluid.cell_width_z_m.to_numpy(),
+        "initial_obstacle": fluid.obstacle.to_numpy(),
+        "initial_hibm_base_obstacle": fluid.hibm_base_obstacle.to_numpy(),
+        "initial_hibm_dynamic_solid_volume_obstacle": (
+            fluid.hibm_dynamic_solid_volume_obstacle.to_numpy()
+        ),
+        "marker_population_count": np.asarray(
+            (marker_count, projection_vertex_count),
+            dtype=np.int32,
+        ),
+        "external_velocity_boundary_x_face_active_component_mask": (
+            fluid.external_velocity_boundary_x_face_active_component_mask.to_numpy()
+        ),
+        "external_velocity_boundary_x_face_value_mps": (
+            fluid.external_velocity_boundary_x_face_value_mps.to_numpy()
+        ),
+        "external_velocity_boundary_y_face_active_component_mask": (
+            fluid.external_velocity_boundary_y_face_active_component_mask.to_numpy()
+        ),
+        "external_velocity_boundary_y_face_value_mps": (
+            fluid.external_velocity_boundary_y_face_value_mps.to_numpy()
+        ),
+        "external_velocity_boundary_z_face_active_component_mask": (
+            fluid.external_velocity_boundary_z_face_active_component_mask.to_numpy()
+        ),
+        "external_velocity_boundary_z_face_value_mps": (
+            fluid.external_velocity_boundary_z_face_value_mps.to_numpy()
+        ),
+        "marker_position_m": markers.x_gamma_m.to_numpy()[:marker_count],
+        "marker_normal": markers.n_gamma.to_numpy()[:marker_count],
+        "marker_area_m2": markers.A_gamma_m2.to_numpy()[:marker_count],
+        "marker_region_id": markers.region_id.to_numpy()[:marker_count],
+        "marker_projection_position_m": markers.x_gamma_m.to_numpy()[
+            :projection_vertex_count
+        ],
+        "marker_projection_velocity_mps": markers.v_gamma_mps.to_numpy()[
+            :projection_vertex_count
+        ],
+        "marker_projection_normal": markers.n_gamma.to_numpy()[
+            :projection_vertex_count
+        ],
+        "marker_projection_area_m2": markers.A_gamma_m2.to_numpy()[
+            :projection_vertex_count
+        ],
+        "marker_projection_region_id": markers.region_id.to_numpy()[
+            :projection_vertex_count
+        ],
+        "marker_projection_pressure_owner_index": (
+            markers.projection_vertex_pressure_owner_index.to_numpy()[
+                :projection_vertex_count
+            ]
+        ),
+        "marker_projection_topology_count": np.asarray(
+            (projection_triangle_count, projection_segment_count),
+            dtype=np.int32,
+        ),
+        "marker_projection_triangle_indices": projection_indices[
+            :projection_triangle_count
+        ],
+        "marker_projection_segment_indices": projection_indices[
+            :projection_segment_count, :2
+        ],
+        "marker_pressure_probe_origin_m": (
+            markers.pressure_probe_origin_m.to_numpy()[:marker_count]
+        ),
+        "marker_pressure_probe_origin_explicit": (
+            markers.pressure_probe_origin_explicit.to_numpy()[:marker_count]
+        ),
+        "solid_rest_position_m": solid.rest_x.to_numpy()[:solid_count],
+        "solid_fixed_particle": solid.fixed_particle.to_numpy()[:solid_count],
+    }
+    return {name: np.asarray(value) for name, value in geometry.items()}
+
+
+def _preflow_snapshot_identity(
+    *,
+    markers: Any,
+    fluid: Any,
+    solid: Any,
+    config: Any,
+) -> PreflowSnapshotIdentity:
+    return PreflowSnapshotIdentity.from_inputs(
+        config=_preflow_snapshot_config_payload(config),
+        sources=_preflow_snapshot_source_payload(),
+        geometry=_preflow_snapshot_geometry_payload(
+            fluid=fluid,
+            markers=markers,
+            solid=solid,
+        ),
+    )
+
+
+_PREFLOW_OPTIONAL_NAN_PROJECTION_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "zmin_unreached_source_centroid_x_m",
+        "zmin_unreached_source_centroid_y_m",
+        "zmin_unreached_source_centroid_z_m",
+        "zmin_unreached_source_min_x_m",
+        "zmin_unreached_source_min_y_m",
+        "zmin_unreached_source_min_z_m",
+        "zmin_unreached_source_max_x_m",
+        "zmin_unreached_source_max_y_m",
+        "zmin_unreached_source_max_z_m",
+    }
+)
+
+
+def _mutable_preflow_report_value(
+    value: object,
+    *,
+    path: tuple[object, ...] = (),
+) -> object:
+    """Copy a report into mutable, strict-JSON-safe snapshot metadata.
+
+    Projection diagnostics use NaN as an explicit "unavailable"
+    sentinel when, for example, no unreached-source centroid exists.  Those
+    optional diagnostics are metadata rather than solver state, so persist the
+    sentinel as JSON ``null`` while leaving the live report untouched.  The
+    generic :class:`PreflowSnapshot` validator remains strict and continues to
+    reject non-finite history supplied directly by other callers.  Infinite
+    diagnostics are not valid sentinels and remain fail-closed.
+    """
+
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and math.isnan(value):
+        if (
+            len(path) >= 2
+            and path[-2] == "flow_projection_report"
+            and path[-1] in _PREFLOW_OPTIONAL_NAN_PROJECTION_DIAGNOSTIC_FIELDS
+        ):
+            return None
+        return value
+    if isinstance(value, Mapping):
+        return {
+            key: _mutable_preflow_report_value(item, path=(*path, key))
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _mutable_preflow_report_value(item, path=(*path, index))
+            for index, item in enumerate(value)
+        ]
+    return value
+
+
+def _preflow_expected_no_slip_marker_count(config: Any) -> int:
+    if not _use_hibm_sharp_marker_boundary(config):
+        return 0
+    expected_marker_count = int(getattr(config, "marker_count", 0))
+    if _traction_marker_layout(config) == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES:
+        expected_marker_count *= 2
+    return expected_marker_count
+
+
+def _preflow_traction_readiness_mode(config: Any) -> str:
+    mode = str(
+        getattr(
+            config,
+            "preflow_traction_readiness_mode",
+            PREFLOW_TRACTION_READINESS_FLOW_ONLY,
+        )
+    )
+    if mode not in PREFLOW_TRACTION_READINESS_MODES:
+        raise ValueError(f"unsupported preflow_traction_readiness_mode: {mode!r}")
+    return mode
+
+
+def _preflow_traction_readiness(
+    rows: list[Mapping[str, object]],
+    config: Any,
+) -> str:
+    expected_marker_count = _preflow_expected_no_slip_marker_count(config)
+    if not rows:
+        return PREFLOW_TRACTION_NOT_EVALUATED
+    if expected_marker_count <= 0:
+        for row in rows:
+            valid_count = int(row.get("stress_valid_marker_count", -1))
+            invalid_count = int(row.get("stress_invalid_marker_count", -1))
+            if valid_count != 0 or invalid_count != 0:
+                return PREFLOW_TRACTION_INVALID
+        return PREFLOW_TRACTION_NOT_EVALUATED
+    readiness_states: list[str] = []
+    for row in rows:
+        valid_count = int(row.get("stress_valid_marker_count", -1))
+        invalid_count = int(row.get("stress_invalid_marker_count", -1))
+        if valid_count == expected_marker_count and invalid_count == 0:
+            readiness_states.append(PREFLOW_TRACTION_EVALUATED)
+        elif valid_count == 0 and invalid_count == expected_marker_count:
+            readiness_states.append(PREFLOW_TRACTION_NOT_EVALUATED)
+        else:
+            return PREFLOW_TRACTION_INVALID
+    first_state = readiness_states[0]
+    if any(state != first_state for state in readiness_states[1:]):
+        return PREFLOW_TRACTION_INVALID
+    return first_state
+
+
+def _preflow_no_slip_limit_mps(config: Any) -> float:
+    return float(
+        abs(float(getattr(config, "inlet_velocity_mps", 0.0)))
+        * float(
+            getattr(
+                config,
+                "preflow_stationary_no_slip_tolerance_fraction",
+                0.05,
+            )
+        )
+    )
+
+
+def _preflow_snapshot_rejection_error(
+    *,
+    payload: Mapping[str, object],
+    gate: str,
+    message: str,
+) -> PreflowSnapshotValidationError:
+    history_value = _mutable_preflow_report_value(payload.get("preflow_history", []))
+    history = history_value if isinstance(history_value, list) else []
+    terminal_value = history[-1] if history else {}
+    terminal = terminal_value if isinstance(terminal_value, dict) else {}
+    return PreflowSnapshotValidationError(
+        message,
+        diagnostics={
+            "preflow_snapshot_rejection": {
+                "status": "rejected",
+                "gate": str(gate),
+                "preflow_steps_completed": int(
+                    payload.get("preflow_steps_completed", len(history))
+                ),
+                "preflow_history": history,
+                "terminal_preflow_diagnostics": dict(terminal),
+            }
+        },
+    )
+
+
+def _strict_pressure_health_report_int(
+    report: Mapping[str, object],
+    key: str,
+) -> int | None:
+    value = report.get(key)
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value,
+        (int, np.integer),
+    ):
+        return None
+    return int(value)
+
+
+def _preflow_pressure_operator_health_failure(
+    row: Mapping[str, object],
+) -> str | None:
+    """Validate final pressure topology using the operator that was solved.
+
+    The preassembly Cartesian flood deliberately runs before HIBM pressure
+    interface rows exist.  Its remaining-cell count is therefore diagnostic,
+    not the final nullspace authority.  A nonzero count is acceptable only
+    when the later exact operator graph was actually prepared from a valid
+    interface matrix.  All paths still fail closed on missing or inconsistent
+    exact-graph diagnostics.
+    """
+
+    projection_value = row.get("flow_projection_report")
+    if not isinstance(projection_value, Mapping):
+        return "final pressure projection report is missing"
+    projection_report = projection_value
+
+    if projection_report.get("pressure_nullspace_compatibility_measured") is not True:
+        return "final pressure nullspace compatibility was not measured"
+    if projection_report.get("pressure_nullspace_component_labels_converged") is not True:
+        return "final pressure operator component labels did not converge"
+    if projection_report.get("pressure_nullspace_component_overflow") is not False:
+        return "final pressure operator component graph overflowed"
+
+    component_count = _strict_pressure_health_report_int(
+        projection_report,
+        "pressure_nullspace_component_count",
+    )
+    incompatible_count = _strict_pressure_health_report_int(
+        projection_report,
+        "pressure_nullspace_incompatible_component_count",
+    )
+    if component_count is None or component_count < 0:
+        return "final pressure operator component count is unavailable"
+    if incompatible_count is None or incompatible_count != 0:
+        return "final pressure operator has incompatible nullspace components"
+    if component_count > 0 and not (
+        projection_report.get(
+            "pressure_nullspace_componentwise_projection_applied"
+        )
+        is True
+        or projection_report.get("pressure_nullspace_zero_mean_projection_applied")
+        is True
+    ):
+        return "final pressure nullspace components were not projected"
+
+    remaining_unreached_cells = _strict_pressure_health_report_int(
+        row,
+        "hibm_preassembly_remaining_unreached_cell_count",
+    )
+    if remaining_unreached_cells is None or remaining_unreached_cells < 0:
+        return "preassembly pressure reachability count is unavailable"
+    if remaining_unreached_cells == 0:
+        return None
+
+    if projection_report.get("pressure_outlet_operator_graph_prepared") is not True:
+        return "nonzero Cartesian pockets lack a prepared exact operator graph"
+    if projection_report.get("pressure_interface_matrix_active") is not True:
+        return "nonzero Cartesian pockets lack an active pressure interface matrix"
+    invalid_interface_row_count = _strict_pressure_health_report_int(
+        projection_report,
+        "pressure_interface_matrix_row_invalid_count",
+    )
+    if invalid_interface_row_count is None or invalid_interface_row_count != 0:
+        return "pressure interface matrix contains invalid rows"
+    overflowed_interface_row_count = _strict_pressure_health_report_int(
+        projection_report,
+        "pressure_interface_matrix_row_overflow_count",
+    )
+    if (
+        overflowed_interface_row_count is None
+        or overflowed_interface_row_count != 0
+    ):
+        return "pressure interface matrix row storage overflowed"
+
+    interface_diagonal_cell_count = _strict_pressure_health_report_int(
+        projection_report,
+        "unreached_cells_with_interface_diagonal",
+    )
+    interface_coupling_cell_count = _strict_pressure_health_report_int(
+        projection_report,
+        "unreached_cells_with_interface_coupling",
+    )
+    raw_component_count = _strict_pressure_health_report_int(
+        projection_report,
+        "cg_unreached_component_raw_count",
+    )
+    compact_component_count = _strict_pressure_health_report_int(
+        projection_report,
+        "cg_unreached_component_count",
+    )
+    interface_hit_component_count = _strict_pressure_health_report_int(
+        projection_report,
+        "unreached_components_with_interface_hits",
+    )
+    if (
+        interface_diagonal_cell_count is None
+        or interface_diagonal_cell_count < 0
+        or interface_diagonal_cell_count != remaining_unreached_cells
+    ):
+        return "Cartesian pressure pockets lack complete interface diagonal coverage"
+    if (
+        interface_coupling_cell_count is None
+        or interface_coupling_cell_count < 0
+        or interface_coupling_cell_count != remaining_unreached_cells
+    ):
+        return "Cartesian pressure pockets lack complete interface coupling coverage"
+    if (
+        raw_component_count is None
+        or raw_component_count <= 0
+        or raw_component_count > remaining_unreached_cells
+    ):
+        return "Cartesian pressure pocket component count is inconsistent"
+    if (
+        compact_component_count is None
+        or compact_component_count <= 0
+        or compact_component_count > raw_component_count
+    ):
+        return "Cartesian pressure pocket compact component count is inconsistent"
+    if (
+        interface_hit_component_count is None
+        or interface_hit_component_count < 0
+        or interface_hit_component_count != compact_component_count
+    ):
+        return "Cartesian pressure pocket components lack complete interface coverage"
+    if component_count > 0 and (
+        projection_report.get(
+            "pressure_nullspace_componentwise_projection_applied"
+        )
+        is not True
+        or projection_report.get("pressure_nullspace_policy")
+        != "outlet_disconnected_fv_cg_operator_componentwise_zero_mean"
+    ):
+        return "outlet pressure nullspace components lack exact componentwise projection"
+    return None
+
+
+def _preflow_report_snapshot_payload(
+    report: Mapping[str, object],
+    config: Any,
+) -> dict[str, object]:
+    payload = _mutable_preflow_report_value(
+        {
+            key: value
+            for key, value in report.items()
+            if key != "final_flow_field_snapshot"
+        }
+    )
+    if not isinstance(payload, dict):  # pragma: no cover - mapping above is a dict.
+        raise TypeError("preflow snapshot report root must be a mapping")
+    payload["final_flow_field_snapshot"] = {}
+    history = payload.get("preflow_history")
+    completed = int(payload.get("preflow_steps_completed", -1))
+    if not isinstance(history, list) or not history or completed != len(history):
+        raise ValueError("preflow snapshot requires a complete non-empty history")
+    if not all(isinstance(row, Mapping) for row in history):
+        raise ValueError("preflow snapshot history rows must be mappings")
+    final_row = history[-1]
+    if not isinstance(final_row, Mapping):
+        raise ValueError("preflow snapshot final history row must be a mapping")
+    traction_mode = _preflow_traction_readiness_mode(config)
+    traction_readiness = _preflow_traction_readiness([final_row], config)
+    traction_ready = traction_readiness == PREFLOW_TRACTION_EVALUATED
+    flow_only_not_evaluated = (
+        traction_mode == PREFLOW_TRACTION_READINESS_FLOW_ONLY
+        and traction_readiness == PREFLOW_TRACTION_NOT_EVALUATED
+    )
+    if not (traction_ready or flow_only_not_evaluated):
+        raise _preflow_snapshot_rejection_error(
+            payload=payload,
+            gate="final_traction_readiness",
+            message=(
+                "preflow snapshot final traction readiness failed: "
+                f"mode={traction_mode!r}, readiness={traction_readiness!r}"
+            ),
+        )
+    payload["preflow_traction_readiness_mode"] = traction_mode
+    payload["preflow_traction_readiness"] = traction_readiness
+    convergence_mode = str(
+        getattr(config, "preflow_convergence_mode", "single_step_legacy")
+    )
+    if convergence_mode == "windowed_stationary":
+        if payload.get("preflow_convergence_mode") != "windowed_stationary":
+            raise _preflow_snapshot_rejection_error(
+                payload=payload,
+                gate="windowed_convergence_mode",
+                message=(
+                    "windowed preflow snapshot report must record "
+                    "preflow_convergence_mode='windowed_stationary'"
+                ),
+            )
+        if payload.get("preflow_converged") is not True:
+            raise _preflow_snapshot_rejection_error(
+                payload=payload,
+                gate="windowed_converged",
+                message="windowed preflow snapshot requires preflow_converged=True",
+            )
+        if payload.get("preflow_stop_reason") != "windowed_stationary":
+            raise _preflow_snapshot_rejection_error(
+                payload=payload,
+                gate="windowed_stop_reason",
+                message=(
+                    "windowed preflow snapshot requires "
+                    "preflow_stop_reason='windowed_stationary'"
+                ),
+            )
+        try:
+            stationary_report = _preflow_windowed_stationary_report(
+                history,
+                config,
+            )
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            raise _preflow_snapshot_rejection_error(
+                payload=payload,
+                gate="windowed_stationary_certificate_unverifiable",
+                message=(
+                    "windowed preflow snapshot terminal stationary window "
+                    "certificate could not be verified"
+                ),
+            ) from exc
+        if not bool(stationary_report.get("stationary", False)):
+            raise _preflow_snapshot_rejection_error(
+                payload=payload,
+                gate="windowed_stationary_certificate",
+                message=(
+                    "windowed preflow snapshot terminal stationary window "
+                    "certificate failed: "
+                    f"{stationary_report.get('reason', 'unknown')}"
+                ),
+            )
+        payload["preflow_stationary_certificate"] = (
+            _mutable_preflow_report_value(stationary_report)
+        )
+    expected_valid_markers = _preflow_expected_no_slip_marker_count(config)
+    valid_markers = int(final_row.get("hibm_no_slip_valid_marker_count", -1))
+    if valid_markers != expected_valid_markers:
+        raise _preflow_snapshot_rejection_error(
+            payload=payload,
+            gate="final_valid_marker_count",
+            message=(
+                "preflow snapshot final valid marker count does not match the "
+                f"configured interface: {valid_markers} != {expected_valid_markers}"
+            ),
+        )
+    no_slip_residual_mps = float(
+        final_row.get("hibm_no_slip_max_residual_mps", math.inf)
+    )
+    no_slip_limit_mps = _preflow_no_slip_limit_mps(config)
+    velocity_dirichlet_health_failure = (
+        _hibm_velocity_dirichlet_health_failure(final_row)
+    )
+    pressure_operator_health_failure = (
+        _preflow_pressure_operator_health_failure(final_row)
+    )
+    q_health_ok = not _use_hibm_sharp_marker_boundary(config) or (
+        bool(
+            final_row.get(
+                "flow_projection_pre_projection_velocity_projector_prepared_all",
+                False,
+            )
+        )
+        and bool(
+            final_row.get(
+                "flow_projection_pre_projection_velocity_projector_converged_all",
+                False,
+            )
+        )
+        and bool(
+            final_row.get(
+                "flow_projection_pre_projection_velocity_projector_committed_all",
+                False,
+            )
+        )
+    )
+    if (
+        not math.isfinite(no_slip_residual_mps)
+        or no_slip_residual_mps > no_slip_limit_mps
+    ):
+        raise _preflow_snapshot_rejection_error(
+            payload=payload,
+            gate="final_no_slip_residual",
+            message=(
+                "preflow snapshot final no-slip residual exceeds the configured "
+                f"limit: {no_slip_residual_mps} > {no_slip_limit_mps} m/s"
+            ),
+        )
+    if (
+        not q_health_ok
+        or not bool(final_row.get("flow_projection_cg_converged_all", False))
+        or int(final_row.get("flow_projection_cg_breakdown_count", -1)) != 0
+        or bool(final_row.get("flow_projection_pressure_solve_failed", True))
+        or bool(
+            final_row.get(
+                "flow_projection_pressure_projection_physical_failure",
+                True,
+            )
+        )
+        or int(final_row.get("hibm_no_slip_invalid_marker_count", -1)) != 0
+        or bool(final_row.get("hibm_preassembly_topology_mutated", True))
+        or pressure_operator_health_failure is not None
+        or velocity_dirichlet_health_failure is not None
+    ):
+        health_failures = tuple(
+            failure
+            for failure in (
+                pressure_operator_health_failure,
+                velocity_dirichlet_health_failure,
+            )
+            if failure is not None
+        )
+        detail = f": {'; '.join(health_failures)}" if health_failures else ""
+        raise _preflow_snapshot_rejection_error(
+            payload=payload,
+            gate="final_numerical_health",
+            message=(
+                "preflow snapshot final state failed a numerical health gate" + detail
+            ),
+        )
+    return payload
+
+
+def _write_fixed_solid_preflow_snapshot(
+    *,
+    path: str | Path,
+    report: Mapping[str, object],
+    markers: Any,
+    fluid: Any,
+    solid: Any,
+    config: Any,
+    identity: PreflowSnapshotIdentity | None = None,
+) -> None:
+    if identity is None:
+        identity = _preflow_snapshot_identity(
+            markers=markers,
+            fluid=fluid,
+            solid=solid,
+            config=config,
+        )
+    snapshot_fields = _capture_preflow_snapshot_fields(fluid)
+    snapshot = PreflowSnapshot(
+        fields=snapshot_fields,
+        identity=identity,
+        history=_preflow_report_snapshot_payload(report, config),
+        velocity_dirichlet_boundary_authority=str(
+            fluid.velocity_dirichlet_boundary_authority
+        ),
+        velocity_dirichlet_component_ledger_generation=int(
+            fluid.velocity_dirichlet_component_ledger_generation
+        ),
+    )
+    files = save_preflow_snapshot(path, snapshot)
+    if isinstance(report, dict):
+        report["preflow_snapshot_loaded"] = False
+        report["preflow_snapshot_npz_path"] = str(files.npz_path)
+        report["preflow_snapshot_metadata_path"] = str(files.metadata_path)
+        report["preflow_snapshot_identity"] = {
+            "config_sha256": identity.config_sha256,
+            "source_sha256": identity.source_sha256,
+            "geometry_sha256": identity.geometry_sha256,
+        }
+
+
+def _restore_fixed_solid_preflow_snapshot(
+    *,
+    path: str | Path,
+    markers: Any,
+    fluid: Any,
+    solid: Any,
+    config: Any,
+    expected_identity: PreflowSnapshotIdentity | None = None,
+) -> dict[str, object]:
+    if expected_identity is None:
+        expected_identity = _preflow_snapshot_identity(
+            markers=markers,
+            fluid=fluid,
+            solid=solid,
+            config=config,
+        )
+    snapshot = load_preflow_snapshot(
+        path,
+        expected_identity=expected_identity,
+        expected_velocity_dirichlet_boundary_authority=str(
+            fluid.velocity_dirichlet_boundary_authority
+        ),
+    )
+    if not isinstance(snapshot.history, Mapping):
+        raise ValueError("preflow snapshot history root must be a mapping")
+    report = _preflow_report_snapshot_payload(snapshot.history, config)
+    _restore_preflow_snapshot_fields(
+        fluid,
+        snapshot.fields,
+        velocity_dirichlet_boundary_authority=(
+            snapshot.velocity_dirichlet_boundary_authority
+        ),
+        velocity_dirichlet_component_ledger_generation=(
+            snapshot.velocity_dirichlet_component_ledger_generation
+        ),
+    )
+    report["preflow_status"] = "snapshot_loaded"
+    report["preflow_stop_reason"] = "snapshot_loaded"
+    report["preflow_snapshot_loaded"] = True
+    report["preflow_snapshot_input_path"] = str(path)
+    report["preflow_snapshot_identity"] = {
+        "config_sha256": expected_identity.config_sha256,
+        "source_sha256": expected_identity.source_sha256,
+        "geometry_sha256": expected_identity.geometry_sha256,
+    }
+    return report
+
+
+def _run_or_restore_fixed_solid_preflow(
+    *,
+    markers: Any,
+    fluid: Any,
+    solid: Any,
+    config: Any,
+) -> dict[str, object]:
+    input_path, output_path = _preflow_snapshot_paths(config)
+    identity = (
+        _preflow_snapshot_identity(
+            markers=markers,
+            fluid=fluid,
+            solid=solid,
+            config=config,
+        )
+        if input_path or output_path
+        else None
+    )
+    if input_path is not None:
+        return _restore_fixed_solid_preflow_snapshot(
+            path=input_path,
+            markers=markers,
+            fluid=fluid,
+            solid=solid,
+            config=config,
+            expected_identity=identity,
+        )
+    report = _run_fixed_solid_preflow(markers, fluid, solid, config)
+    report["preflow_snapshot_loaded"] = False
+    if output_path is not None:
+        _write_fixed_solid_preflow_snapshot(
+            path=output_path,
+            report=report,
+            markers=markers,
+            fluid=fluid,
+            solid=solid,
+            config=config,
+            identity=identity,
+        )
+    return report
+
+
 def _run_fixed_solid_preflow(
     markers: HibmMpmSurfaceMarkers,
     fluid: CartesianFluidSolver,
@@ -3326,6 +9238,11 @@ def _run_fixed_solid_preflow(
 ) -> dict[str, object]:
     requested_steps = int(getattr(config, "preflow_steps", 0))
     tolerance = float(getattr(config, "preflow_convergence_tolerance", 0.0))
+    convergence_mode = str(
+        getattr(config, "preflow_convergence_mode", "single_step_legacy")
+    )
+    if convergence_mode not in {"single_step_legacy", "windowed_stationary"}:
+        raise ValueError(f"unsupported preflow_convergence_mode: {convergence_mode!r}")
     history: list[dict[str, object]] = []
     previous_row: dict[str, object] | None = None
     previous_feedback_constraint_cells: set[tuple[int, int, int]] = set()
@@ -3348,31 +9265,56 @@ def _run_fixed_solid_preflow(
         previous_feedback_constraint_cells = set(
             feedback_constraint_report.get("_feedback_constraint_cells", set())
         )
-        flow_report = _flow_advance_current_step(
-            fluid,
-            config,
-            markers=markers,
-            sharp_boundary_cache=sharp_boundary_cache,
-            flow_phase="preflow",
-            step_index_local=preflow_index,
-            step_index_global=preflow_index,
-            preflow_history=history,
-            reset_pressure=(
-                bool(getattr(config, "flow_reset_pressure_each_step", False))
-                or preflow_index == 0
-            ),
-        )
+        try:
+            flow_report = _flow_advance_current_step(
+                fluid,
+                config,
+                markers=markers,
+                sharp_boundary_cache=sharp_boundary_cache,
+                flow_phase="preflow",
+                step_index_local=preflow_index,
+                step_index_global=preflow_index,
+                preflow_history=history,
+                reset_pressure=(
+                    bool(getattr(config, "flow_reset_pressure_each_step", False))
+                    or preflow_index == 0
+                ),
+            )
+        except (FloatingPointError, ValueError) as exc:
+            previous = history[-1] if history else {}
+            previous_summary = {
+                key: previous.get(key, "unavailable")
+                for key in (
+                    "preflow_step",
+                    "local_velocity_peak_mps",
+                    "computed_pressure_min_pa",
+                    "computed_pressure_max_pa",
+                    "flow_sst_turbulent_kinetic_energy_max_m2_s2",
+                    "flow_sst_specific_dissipation_rate_max_s",
+                    "flow_sst_eddy_viscosity_max_pa_s",
+                )
+            }
+            raise type(exc)(
+                "fixed-solid preflow advance failed at "
+                f"step={preflow_index + 1}/{requested_steps}, "
+                f"completed_steps={len(history)}, "
+                f"previous_step={previous_summary}: {exc}"
+            ) from exc
         feedback_constraint_report[
             "no_slip_projected_residual_after_projection_mps"
-        ] = _measure_projected_no_slip_residual(
-            markers,
-            fluid,
-            config,
-            feedback_consumed=bool(
-                feedback_constraint_report[
-                    "fluid_marker_velocity_constraints_enabled"
-                ]
-            ),
+        ] = (
+            float(flow_report["hibm_no_slip_max_residual_mps"])
+            if _use_hibm_sharp_marker_boundary(config)
+            else _measure_projected_no_slip_residual(
+                markers,
+                fluid,
+                config,
+                feedback_consumed=bool(
+                    feedback_constraint_report[
+                        "fluid_marker_velocity_constraints_enabled"
+                    ]
+                ),
+            )
         )
         stress_report = _sample_stress_to_marker_forces(markers, fluid, config)
         force_report = markers.aggregate_region_forces(
@@ -3449,6 +9391,35 @@ def _run_fixed_solid_preflow(
             "hibm_sharp_marker_boundary_search_reused": flow_report[
                 "hibm_sharp_marker_boundary_search_reused"
             ],
+            "hibm_sharp_marker_boundary_topology_reused": flow_report[
+                "hibm_sharp_marker_boundary_topology_reused"
+            ],
+            "hibm_preassembly_overflow_singleton_cleanup_cell_count": flow_report[
+                "hibm_preassembly_overflow_singleton_cleanup_cell_count"
+            ],
+            "hibm_preassembly_overflow_singleton_cleanup_component_count": (
+                flow_report[
+                    "hibm_preassembly_overflow_singleton_cleanup_component_count"
+                ]
+            ),
+            "hibm_preassembly_tiny_unreached_cleanup_cell_count": flow_report[
+                "hibm_preassembly_tiny_unreached_cleanup_cell_count"
+            ],
+            "hibm_preassembly_tiny_unreached_cleanup_component_count": flow_report[
+                "hibm_preassembly_tiny_unreached_cleanup_component_count"
+            ],
+            "hibm_preassembly_tiny_unreached_cleanup_pass_count": flow_report[
+                "hibm_preassembly_tiny_unreached_cleanup_pass_count"
+            ],
+            "hibm_preassembly_remaining_unreached_cell_count": flow_report[
+                "hibm_preassembly_remaining_unreached_cell_count"
+            ],
+            "hibm_preassembly_cleanup_reused": flow_report[
+                "hibm_preassembly_cleanup_reused"
+            ],
+            "hibm_preassembly_topology_mutated": flow_report[
+                "hibm_preassembly_topology_mutated"
+            ],
             "hibm_sharp_marker_boundary_near_node_count": flow_report[
                 "hibm_sharp_marker_boundary_near_node_count"
             ],
@@ -3464,6 +9435,7 @@ def _run_fixed_solid_preflow(
             "hibm_sharp_marker_boundary_no_slip_rows": flow_report[
                 "hibm_sharp_marker_boundary_no_slip_rows"
             ],
+            **_hibm_velocity_dirichlet_mapping_fields(flow_report),
             "hibm_sharp_marker_boundary_pressure_neumann_rows": flow_report[
                 "hibm_sharp_marker_boundary_pressure_neumann_rows"
             ],
@@ -3516,6 +9488,12 @@ def _run_fixed_solid_preflow(
                     "fluid_marker_velocity_constraint_active_cell_count"
                 ]
             ),
+            "fluid_marker_feedback_enforcement_mode": feedback_constraint_report[
+                "fluid_marker_feedback_enforcement_mode"
+            ],
+            "legacy_constraint_active_cell_count": feedback_constraint_report[
+                "legacy_constraint_active_cell_count"
+            ],
             "fluid_feedback_constraint_marker_count": (
                 feedback_constraint_report["fluid_feedback_constraint_marker_count"]
             ),
@@ -3552,6 +9530,24 @@ def _run_fixed_solid_preflow(
                     "no_slip_projected_residual_after_projection_mps"
                 ]
             ),
+            "hibm_no_slip_valid_marker_count": flow_report[
+                "hibm_no_slip_valid_marker_count"
+            ],
+            "hibm_no_slip_invalid_marker_count": flow_report[
+                "hibm_no_slip_invalid_marker_count"
+            ],
+            "hibm_no_slip_max_residual_mps": flow_report[
+                "hibm_no_slip_max_residual_mps"
+            ],
+            "hibm_no_slip_l2_residual_mps": flow_report[
+                "hibm_no_slip_l2_residual_mps"
+            ],
+            "hibm_post_dirichlet_consistency_projection_count": flow_report[
+                "hibm_post_dirichlet_consistency_projection_count"
+            ],
+            "hibm_post_dirichlet_consistency_projection_applied": flow_report[
+                "hibm_post_dirichlet_consistency_projection_applied"
+            ],
             "flow_phase": flow_report["flow_phase"],
             "flow_step_index_local": flow_report["flow_step_index_local"],
             "flow_step_index_global": flow_report["flow_step_index_global"],
@@ -3573,11 +9569,19 @@ def _run_fixed_solid_preflow(
             "flow_projection_report": flow_report["projection_report"],
             **_flow_projection_report_fields(flow_report),
             **_flow_source_report_fields(flow_report),
+            **_flow_transport_report_fields(flow_report),
             "stress_valid_marker_count": stress_report.valid_marker_count,
             "stress_invalid_marker_count": stress_report.invalid_marker_count,
+            **_marker_projection_boundary_report_fields(
+                markers,
+                canonical_velocity_dirichlet_report=flow_report.get(
+                    "canonical_velocity_dirichlet_report"
+                ),
+            ),
             "two_sided_pressure_marker_count": (
                 stress_report.two_sided_pressure_marker_count
             ),
+            "marker_total_area_m2": _marker_total_area_m2(markers),
             "total_marker_force_n": force_report.total_marker_force_n,
             "mpm_external_force_n": scatter_report.total_mpm_external_force_n,
             "scatter_invalid_marker_count": scatter_report.invalid_marker_count,
@@ -3590,6 +9594,10 @@ def _run_fixed_solid_preflow(
             ),
             **_scatter_report_fields(scatter_report),
         }
+        row["preflow_traction_readiness"] = _preflow_traction_readiness(
+            [row],
+            config,
+        )
         if previous_row is not None:
             row["velocity_peak_relative_delta"] = _relative_delta(
                 row["local_velocity_peak_mps"],
@@ -3599,7 +9607,7 @@ def _run_fixed_solid_preflow(
                 _pressure_range(row),
                 _pressure_range(previous_row),
             )
-            if tolerance > 0.0 and (
+            if convergence_mode == "single_step_legacy" and tolerance > 0.0 and (
                 float(row["velocity_peak_relative_delta"]) <= tolerance
                 and float(row["pressure_range_relative_delta"]) <= tolerance
             ):
@@ -3611,15 +9619,42 @@ def _run_fixed_solid_preflow(
             row["velocity_peak_relative_delta"] = ""
             row["pressure_range_relative_delta"] = ""
         history.append(row)
+        if convergence_mode == "windowed_stationary":
+            stationary_report = _preflow_windowed_stationary_report(history, config)
+            row["preflow_stationary_gate_passed"] = bool(
+                stationary_report["stationary"]
+            )
+            row["preflow_stationary_gate_reason"] = str(
+                stationary_report["reason"]
+            )
+            row["preflow_stationary_consecutive_windows_passed"] = int(
+                stationary_report["consecutive_windows_passed"]
+            )
+            row["preflow_stationary_window_metrics"] = dict(
+                stationary_report["window_metrics"]
+            )
+            if bool(stationary_report["stationary"]):
+                converged = True
+                stop_reason = "windowed_stationary"
+                break
         previous_row = row
 
     return {
         "preflow_steps_requested": requested_steps,
         "preflow_steps_completed": len(history),
         "preflow_convergence_tolerance": tolerance,
+        "preflow_convergence_mode": convergence_mode,
         "preflow_converged": converged,
         "preflow_status": stop_reason,
         "preflow_stop_reason": stop_reason,
+        "preflow_traction_readiness_mode": _preflow_traction_readiness_mode(
+            config
+        ),
+        "preflow_traction_readiness": (
+            _preflow_traction_readiness([history[-1]], config)
+            if history
+            else PREFLOW_TRACTION_NOT_EVALUATED
+        ),
         "preflow_history": history,
         "final_stress_marker_diagnostics": (
             markers.stress_marker_diagnostics() if history else []
@@ -3634,7 +9669,10 @@ def _run_fixed_solid_preflow(
             else {}
         ),
         "final_flow_field_snapshot": (
-            _flow_field_snapshot(fluid)
+            _synchronized_flow_boundary_snapshot(
+                _flow_field_snapshot(fluid),
+                stage="fixed_solid_preflow_terminal_projection",
+            )
             if history and bool(getattr(config, "export_final_flow_snapshot", False))
             else {}
         ),
@@ -3643,6 +9681,421 @@ def _run_fixed_solid_preflow(
 
 def _pressure_range(row: Mapping[str, object]) -> float:
     return float(row["pressure_max_pa"]) - float(row["pressure_min_pa"])
+
+
+def _preflow_windowed_stationary_report(
+    history: list[Mapping[str, object]],
+    config: Any,
+) -> dict[str, object]:
+    """Evaluate a conservative post-burn-in stationary-flow window gate."""
+
+    min_steps = int(getattr(config, "preflow_stationary_min_steps", 20))
+    window_steps = int(getattr(config, "preflow_stationary_window_steps", 10))
+    consecutive_windows = int(
+        getattr(config, "preflow_stationary_consecutive_windows", 3)
+    )
+    tolerance = float(getattr(config, "preflow_stationary_tolerance", 0.05))
+    divergence_tolerance = float(
+        getattr(config, "preflow_stationary_divergence_tolerance", 0.05)
+    )
+    no_slip_fraction = float(
+        getattr(config, "preflow_stationary_no_slip_tolerance_fraction", 0.05)
+    )
+    if min_steps < 0 or window_steps <= 0 or consecutive_windows <= 0:
+        raise ValueError("preflow stationary window sizes must be positive")
+    if not (0.0 < tolerance < 1.0):
+        raise ValueError("preflow_stationary_tolerance must be in (0, 1)")
+    if not (0.0 < divergence_tolerance < 1.0):
+        raise ValueError(
+            "preflow_stationary_divergence_tolerance must be in (0, 1)"
+        )
+    if not (0.0 < no_slip_fraction < 1.0):
+        raise ValueError(
+            "preflow_stationary_no_slip_tolerance_fraction must be in (0, 1)"
+        )
+
+    required_steps = min_steps + window_steps + consecutive_windows - 1
+    base_report: dict[str, object] = {
+        "stationary": False,
+        "reason": "insufficient_post_burn_in_windows",
+        "required_steps": required_steps,
+        "completed_steps": len(history),
+        "first_evaluated_window_start_step": min_steps + 1,
+        "consecutive_windows_passed": 0,
+        "window_metrics": {},
+        "consecutive_window_union_metrics": {},
+        "traction_readiness": PREFLOW_TRACTION_NOT_EVALUATED,
+        "marker_force_metric_evaluated": False,
+        "marker_force_reference_area_m2": None,
+        "sst_transport_stationarity_evaluated": False,
+        "excluded_window_metrics": ["marker_force_relative_span"],
+    }
+    if len(history) < required_steps:
+        return base_report
+
+    inlet_speed = abs(float(getattr(config, "inlet_velocity_mps", 0.0)))
+    if not math.isfinite(inlet_speed) or inlet_speed <= 0.0:
+        raise ValueError("windowed preflow convergence requires positive inlet speed")
+    density = float(getattr(config, "air_density_kgm3", 1.0))
+    dynamic_pressure = 0.5 * density * inlet_speed * inlet_speed
+    expected_marker_count = _preflow_expected_no_slip_marker_count(config)
+    min_grid_spacing = min(_grid_spacing_m(config))
+    convective_rate_s_inv = inlet_speed / min_grid_spacing
+
+    def marker_force_reference_area_m2(
+        rows: list[Mapping[str, object]],
+    ) -> float:
+        areas: list[float] = []
+        for row in rows:
+            try:
+                area = float(row["marker_total_area_m2"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "preflow history marker_total_area_m2 must be present, "
+                    "finite, and positive when marker force is evaluated"
+                ) from exc
+            if not math.isfinite(area) or area <= 0.0:
+                raise ValueError(
+                    "preflow history marker_total_area_m2 must be finite and "
+                    "positive when marker force is evaluated"
+                )
+            areas.append(area)
+        if not areas:
+            raise ValueError(
+                "preflow history marker_total_area_m2 requires at least one row"
+            )
+        reference_area = areas[0]
+        if any(
+            not math.isclose(
+                area,
+                reference_area,
+                rel_tol=1.0e-12,
+                abs_tol=1.0e-18,
+            )
+            for area in areas[1:]
+        ):
+            raise ValueError(
+                "preflow history marker_total_area_m2 must remain consistent "
+                "throughout each evaluated stationary window"
+            )
+        return reference_area
+
+    def projection_l2(row: Mapping[str, object]) -> float:
+        if "flow_projection_l2" in row:
+            return float(row["flow_projection_l2"])
+        projection_report = row.get("flow_projection_report", {})
+        if isinstance(projection_report, Mapping):
+            return float(projection_report.get("projection_l2", math.nan))
+        return math.nan
+
+    def relative_span(values: list[float], physical_floor: float = 0.0) -> float:
+        if not values or not all(math.isfinite(value) for value in values):
+            return math.inf
+        scale = max(max(abs(value) for value in values), physical_floor, 1.0e-30)
+        return (max(values) - min(values)) / scale
+
+    sst_stationary_metric_specs = (
+        (
+            "flow_sst_turbulent_kinetic_energy_max_m2_s2",
+            "flow_sst_turbulent_kinetic_energy_max_relative_span",
+            False,
+        ),
+        (
+            "flow_sst_turbulent_kinetic_energy_volume_mean_m2_s2",
+            "flow_sst_turbulent_kinetic_energy_volume_mean_relative_span",
+            False,
+        ),
+        (
+            "flow_sst_turbulent_kinetic_energy_volume_rms_m2_s2",
+            "flow_sst_turbulent_kinetic_energy_volume_rms_relative_span",
+            False,
+        ),
+        (
+            "flow_sst_specific_dissipation_rate_max_s",
+            "flow_sst_specific_dissipation_rate_max_relative_span",
+            True,
+        ),
+        (
+            "flow_sst_specific_dissipation_rate_volume_mean_s",
+            "flow_sst_specific_dissipation_rate_volume_mean_relative_span",
+            True,
+        ),
+        (
+            "flow_sst_specific_dissipation_rate_volume_rms_s",
+            "flow_sst_specific_dissipation_rate_volume_rms_relative_span",
+            True,
+        ),
+        (
+            "flow_sst_eddy_viscosity_max_pa_s",
+            "flow_sst_eddy_viscosity_max_relative_span",
+            False,
+        ),
+        (
+            "flow_sst_eddy_viscosity_volume_mean_pa_s",
+            "flow_sst_eddy_viscosity_volume_mean_relative_span",
+            False,
+        ),
+        (
+            "flow_sst_eddy_viscosity_volume_rms_pa_s",
+            "flow_sst_eddy_viscosity_volume_rms_relative_span",
+            False,
+        ),
+    )
+
+    def physical_sst_value(
+        row: Mapping[str, object],
+        field: str,
+        *,
+        strictly_positive: bool,
+    ) -> float:
+        try:
+            value = float(row[field])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"preflow SST history field {field} must be present and finite"
+            ) from exc
+        lower_bound_ok = value > 0.0 if strictly_positive else value >= 0.0
+        if not math.isfinite(value) or not lower_bound_ok:
+            constraint = "positive" if strictly_positive else "nonnegative"
+            raise ValueError(
+                f"preflow SST history field {field} must be finite and {constraint}"
+            )
+        return value
+
+    def vector_relative_span(
+        values: list[np.ndarray],
+        physical_floor: float = 0.0,
+    ) -> float:
+        if not values:
+            return math.inf
+        vectors = np.asarray(values, dtype=float)
+        if vectors.ndim != 2 or vectors.shape[1] != 3:
+            return math.inf
+        if not bool(np.all(np.isfinite(vectors))):
+            return math.inf
+        magnitudes = np.linalg.norm(vectors, axis=1)
+        scale = max(float(np.max(magnitudes)), physical_floor, 1.0e-30)
+        component_span = np.max(vectors, axis=0) - np.min(vectors, axis=0)
+        return float(np.linalg.norm(component_span)) / scale
+
+    def window_metrics(
+        rows: list[Mapping[str, object]],
+        *,
+        include_marker_force: bool,
+        include_sst_transport: bool,
+    ) -> dict[str, float]:
+        velocity = [float(row["local_velocity_peak_mps"]) for row in rows]
+        pressure = [_pressure_range(row) for row in rows]
+        divergence = [projection_l2(row) for row in rows]
+        metrics = {
+            "velocity_peak_relative_span": relative_span(velocity, inlet_speed),
+            "pressure_range_relative_span": relative_span(
+                pressure, dynamic_pressure
+            ),
+            # projection_l2 has units of 1/s.  Near zero, scale its window
+            # variation by the physical convective rate U/h instead of by
+            # numerical residual jitter itself.  The absolute |L2|h/U guard
+            # below remains the authority for excessive divergence.
+            "projection_l2_relative_span": relative_span(
+                divergence,
+                convective_rate_s_inv,
+            ),
+        }
+        if include_marker_force:
+            force = [
+                np.asarray(row["total_marker_force_n"], dtype=float)
+                for row in rows
+            ]
+            metrics["marker_force_relative_span"] = vector_relative_span(
+                force,
+                force_floor,
+            )
+        if include_sst_transport:
+            for field, metric_name, strictly_positive in sst_stationary_metric_specs:
+                values = [
+                    physical_sst_value(
+                        row,
+                        field,
+                        strictly_positive=strictly_positive,
+                    )
+                    for row in rows
+                ]
+                metrics[metric_name] = relative_span(values)
+        return metrics
+
+    union_start = len(history) - (window_steps + consecutive_windows - 1)
+    guarded_rows = history[union_start:]
+    sst_transport_flags = [
+        bool(row.get("flow_sst_transport_applied", False)) for row in guarded_rows
+    ]
+    sst_transport_stationarity_evaluated = any(sst_transport_flags)
+    if sst_transport_stationarity_evaluated and not all(sst_transport_flags):
+        raise ValueError(
+            "flow_sst_transport_applied must remain true throughout each "
+            "evaluated stationary window"
+        )
+    if sst_transport_stationarity_evaluated:
+        for row in guarded_rows:
+            for field, _, strictly_positive in sst_stationary_metric_specs:
+                physical_sst_value(
+                    row,
+                    field,
+                    strictly_positive=strictly_positive,
+                )
+    traction_mode = _preflow_traction_readiness_mode(config)
+    traction_readiness = _preflow_traction_readiness(guarded_rows, config)
+    marker_force_metric_evaluated = (
+        traction_readiness == PREFLOW_TRACTION_EVALUATED
+    )
+    marker_force_reference_area = None
+    force_floor = 0.0
+    if marker_force_metric_evaluated:
+        marker_force_reference_area = marker_force_reference_area_m2(guarded_rows)
+        force_floor = dynamic_pressure * marker_force_reference_area
+    traction_guard_ok = marker_force_metric_evaluated or (
+        traction_mode == PREFLOW_TRACTION_READINESS_FLOW_ONLY
+        and traction_readiness == PREFLOW_TRACTION_NOT_EVALUATED
+    )
+    base_report.update(
+        {
+            "traction_readiness": traction_readiness,
+            "marker_force_metric_evaluated": marker_force_metric_evaluated,
+            "marker_force_reference_area_m2": marker_force_reference_area,
+            "sst_transport_stationarity_evaluated": (
+                sst_transport_stationarity_evaluated
+            ),
+            "excluded_window_metrics": (
+                []
+                if marker_force_metric_evaluated
+                else ["marker_force_relative_span"]
+            ),
+        }
+    )
+    no_slip_limit = _preflow_no_slip_limit_mps(config)
+    for row in guarded_rows:
+        row_projection_l2 = projection_l2(row)
+        nondimensional_divergence = (
+            abs(row_projection_l2) * min_grid_spacing / inlet_speed
+        )
+        volume_source_applied = bool(row.get("flow_volume_source_applied", False))
+        inlet_ready = (
+            math.isclose(
+                float(row.get("flow_inlet_source_factor", math.nan)),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+            if volume_source_applied
+            else bool(row.get("flow_inlet_boundary_reapplied", False))
+        )
+        valid_markers = int(row.get("hibm_no_slip_valid_marker_count", -1))
+        invalid_markers = int(row.get("hibm_no_slip_invalid_marker_count", -1))
+        velocity_dirichlet_health_failure = (
+            _hibm_velocity_dirichlet_health_failure(row)
+        )
+        pressure_operator_health_failure = (
+            _preflow_pressure_operator_health_failure(row)
+        )
+        q_health_ok = not _use_hibm_sharp_marker_boundary(config) or (
+            bool(
+                row.get(
+                    "flow_projection_pre_projection_velocity_projector_prepared_all",
+                    False,
+                )
+            )
+            and bool(
+                row.get(
+                    "flow_projection_pre_projection_velocity_projector_converged_all",
+                    False,
+                )
+            )
+            and bool(
+                row.get(
+                    "flow_projection_pre_projection_velocity_projector_committed_all",
+                    False,
+                )
+            )
+        )
+        guards_ok = (
+            math.isfinite(row_projection_l2)
+            and nondimensional_divergence <= divergence_tolerance
+            and float(row.get("hibm_no_slip_max_residual_mps", math.inf))
+            <= no_slip_limit
+            and valid_markers == expected_marker_count
+            and invalid_markers == 0
+            and bool(row.get("flow_projection_cg_converged_all", False))
+            and int(row.get("flow_projection_cg_breakdown_count", -1)) == 0
+            and not bool(row.get("flow_projection_pressure_solve_failed", True))
+            and not bool(
+                row.get(
+                    "flow_projection_pressure_projection_physical_failure",
+                    True,
+                )
+            )
+            and not bool(row.get("hibm_preassembly_topology_mutated", True))
+            and pressure_operator_health_failure is None
+            and velocity_dirichlet_health_failure is None
+            and q_health_ok
+            and inlet_ready
+            and traction_guard_ok
+        )
+        if not guards_ok:
+            return {
+                **base_report,
+                "reason": "physical_guard_failed",
+                "guard_failure_step": int(row.get("preflow_step", -1)),
+                "velocity_dirichlet_health_failure": (
+                    velocity_dirichlet_health_failure or ""
+                ),
+                "pressure_operator_health_failure": (
+                    pressure_operator_health_failure or ""
+                ),
+            }
+
+    reports: list[dict[str, float]] = []
+    for window_offset in range(consecutive_windows):
+        end = len(history) - consecutive_windows + window_offset + 1
+        start = end - window_steps
+        reports.append(
+            window_metrics(
+                history[start:end],
+                include_marker_force=marker_force_metric_evaluated,
+                include_sst_transport=sst_transport_stationarity_evaluated,
+            )
+        )
+    latest_metrics = reports[-1]
+    union_metrics = window_metrics(
+        guarded_rows,
+        include_marker_force=marker_force_metric_evaluated,
+        include_sst_transport=sst_transport_stationarity_evaluated,
+    )
+    passes = [
+        all(metric <= tolerance for metric in report.values()) for report in reports
+    ]
+    consecutive_passed = 0
+    for passed in reversed(passes):
+        if not passed:
+            break
+        consecutive_passed += 1
+    union_passed = all(metric <= tolerance for metric in union_metrics.values())
+    stationary = (
+        consecutive_passed == consecutive_windows and union_passed
+    )
+    if stationary:
+        reason = "stationary"
+    elif consecutive_passed == consecutive_windows and not union_passed:
+        reason = "consecutive_window_union_span_exceeded"
+    else:
+        reason = "window_span_exceeded"
+    return {
+        **base_report,
+        "stationary": stationary,
+        "reason": reason,
+        "consecutive_windows_passed": consecutive_passed,
+        "window_metrics": latest_metrics,
+        "consecutive_window_union_metrics": union_metrics,
+        "window_reports": reports,
+    }
 
 
 def _relative_delta(current: object, previous: object) -> float:
@@ -3657,11 +10110,33 @@ def _flow_field_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
         "pressure": _fluid_feedback_pressure_numpy(fluid),
         "velocity": fluid.velocity.to_numpy(),
         "obstacle": fluid.obstacle.to_numpy(),
+        "hibm_base_obstacle": fluid.hibm_base_obstacle.to_numpy(),
+        "hibm_dynamic_solid_volume_obstacle": (
+            fluid.hibm_dynamic_solid_volume_obstacle.to_numpy()
+        ),
+        "hibm_dynamic_solid_volume_external_carve": (
+            fluid.hibm_dynamic_solid_volume_external_carve.to_numpy()
+        ),
         "velocity_dirichlet_boundary_active": (
             fluid.velocity_dirichlet_boundary_active.to_numpy()
         ),
         "velocity_dirichlet_boundary_projection_weight": (
             fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_enforcement_weight": (
+            fluid.velocity_dirichlet_boundary_enforcement_weight.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_hard_fixed_component_mask": (
+            fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_external_exact_component_mask": (
+            fluid.velocity_dirichlet_boundary_external_exact_component_mask.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_owned_row": (
+            fluid.velocity_dirichlet_boundary_owned_row.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_marker_region_id": (
+            fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
         ),
         "cell_face_x_m": fluid.cell_face_x_m.to_numpy(),
         "cell_face_y_m": fluid.cell_face_y_m.to_numpy(),
@@ -3676,6 +10151,107 @@ def _flow_field_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
     sampling_obstacle = getattr(fluid, "sampling_obstacle", None)
     if sampling_obstacle is not None:
         snapshot["sampling_obstacle"] = sampling_obstacle.to_numpy()
+    return snapshot
+
+
+def _flow_parity_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
+    """Return only the arrays needed for per-step Fluent-parity frames."""
+
+    return {
+        "pressure": _fluid_feedback_pressure_numpy(fluid),
+        "velocity": fluid.velocity.to_numpy(),
+        "obstacle": fluid.obstacle.to_numpy(),
+        "hibm_base_obstacle": fluid.hibm_base_obstacle.to_numpy(),
+        "hibm_dynamic_solid_volume_obstacle": (
+            fluid.hibm_dynamic_solid_volume_obstacle.to_numpy()
+        ),
+        "hibm_dynamic_solid_volume_external_carve": (
+            fluid.hibm_dynamic_solid_volume_external_carve.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_active": (
+            fluid.velocity_dirichlet_boundary_active.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_projection_weight": (
+            fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_enforcement_weight": (
+            fluid.velocity_dirichlet_boundary_enforcement_weight.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_hard_fixed_component_mask": (
+            fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_external_exact_component_mask": (
+            fluid.velocity_dirichlet_boundary_external_exact_component_mask.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_owned_row": (
+            fluid.velocity_dirichlet_boundary_owned_row.to_numpy()
+        ),
+        "velocity_dirichlet_boundary_marker_region_id": (
+            fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
+        ),
+        "cell_center_y_m": fluid.cell_center_y_m.to_numpy(),
+        "cell_center_z_m": fluid.cell_center_z_m.to_numpy(),
+    }
+
+
+def _synchronized_flow_boundary_snapshot(
+    snapshot: Mapping[str, np.ndarray],
+    *,
+    stage: str,
+) -> dict[str, np.ndarray]:
+    """Tag a flow field and its boundary ledger as one synchronized stage."""
+
+    normalized_stage = str(stage).strip()
+    if not normalized_stage:
+        raise ValueError("synchronized flow snapshot stage must be non-empty")
+    return {
+        **dict(snapshot),
+        "flow_solution_stage": np.asarray(normalized_stage),
+        "boundary_topology_stage": np.asarray(normalized_stage),
+        "flow_boundary_state_synchronized": np.asarray(True),
+    }
+
+
+def _step_observer_snapshot(
+    flow_snapshot: Mapping[str, np.ndarray],
+    solid: NeoHookeanMpmState,
+    markers: HibmMpmSurfaceMarkers,
+    *,
+    solid_positions_m: np.ndarray,
+    solid_rest_positions_m: np.ndarray,
+    fixed_mask: np.ndarray,
+    tip_mask: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Combine one projected flow stage with the later structure geometry."""
+
+    snapshot = _synchronized_flow_boundary_snapshot(
+        flow_snapshot,
+        stage="pre_solid_projection",
+    )
+    solid_count = int(solid.particle_count)
+    marker_count = int(markers.marker_count)
+    snapshot.update(
+        {
+            # The flow snapshot, obstacle, and boundary ledger were captured
+            # together before the partitioned solid update.  Structure and
+            # marker geometry below are the post-solid observer state.
+            "structure_geometry_stage": np.asarray("post_solid_observer"),
+            "solid_position_m": np.asarray(solid_positions_m)[:solid_count].copy(),
+            "solid_velocity_mps": solid.v.to_numpy()[:solid_count],
+            "solid_rest_position_m": np.asarray(solid_rest_positions_m)[
+                :solid_count
+            ].copy(),
+            "solid_fixed_mask": np.asarray(fixed_mask, dtype=bool)[
+                :solid_count
+            ].copy(),
+            "solid_tip_mask": np.asarray(tip_mask, dtype=bool)[:solid_count].copy(),
+            "marker_position_m": markers.x_gamma_m.to_numpy()[:marker_count],
+            "marker_velocity_mps": markers.v_gamma_mps.to_numpy()[:marker_count],
+            "marker_normal": markers.n_gamma.to_numpy()[:marker_count],
+            "marker_area_m2": markers.A_gamma_m2.to_numpy()[:marker_count],
+            "marker_region_id": markers.region_id.to_numpy()[:marker_count],
+        }
+    )
     return snapshot
 
 
@@ -3695,6 +10271,43 @@ def _apply_marker_feedback_to_fluid(
     feedback_available: bool,
     previous_feedback_constraint_cells: set[tuple[int, int, int]],
 ) -> dict[str, object]:
+    sharp_reconstructed_rows = _use_hibm_sharp_marker_boundary(config)
+    authority = str(
+        getattr(fluid, "velocity_dirichlet_boundary_authority", "legacy")
+    )
+    if authority == "canonical":
+        if not sharp_reconstructed_rows:
+            raise RuntimeError(
+                "canonical marker feedback requires component-face HIBM; "
+                "legacy collocated feedback is forbidden"
+            )
+        report = _empty_feedback_constraint_report()
+        report.update(
+            {
+                "fluid_projection_consumed_feedback": bool(
+                    feedback_available and int(markers.marker_count) > 0
+                ),
+                "fluid_feedback_constraint_marker_count": (
+                    int(markers.marker_count) if feedback_available else 0
+                ),
+                "fluid_marker_feedback_collocated_writer_used": False,
+                "fluid_marker_feedback_enforcement_mode": (
+                    "hibm_sharp_reconstructed_rows"
+                ),
+                "legacy_constraint_active_cell_count": 0,
+            }
+        )
+        return report
+    # The sharp HIBM path already consumes marker velocity through its
+    # reconstructed interface rows.  Stamping the same velocity into the
+    # marker's containing cell creates a second, geometrically inconsistent
+    # constraint which is subsequently overwritten by the sharp row.  Keep the
+    # device clear operation, but never assemble the legacy collocated rows in
+    # sharp mode.
+    legacy_feedback_available = bool(feedback_available) and not sharp_reconstructed_rows
+    preserve_legacy_constraints = bool(
+        getattr(config, "preserve_marker_velocity_constraints", True)
+    ) and not sharp_reconstructed_rows
     apply_device = getattr(fluid, "apply_marker_feedback_constraints", None)
     marker_region_field = getattr(markers, "region_id", None)
     if apply_device is not None and marker_region_field is not None:
@@ -3703,23 +10316,54 @@ def _apply_marker_feedback_to_fluid(
             markers.v_gamma_mps,
             marker_region_field,
             int(markers.marker_count),
-            feedback_available=feedback_available,
-            preserve_velocity_constraints=bool(
-                getattr(config, "preserve_marker_velocity_constraints", True)
-            ),
+            feedback_available=legacy_feedback_available,
+            preserve_velocity_constraints=preserve_legacy_constraints,
             primary_region_id=PRIMARY_REGION_ID,
             secondary_region_id=SECONDARY_REGION_ID,
         )
         report["_feedback_constraint_cells"] = set()
-        return report
-
-    return _apply_marker_feedback_to_fluid_host_fallback(
-        markers,
-        fluid,
-        config,
-        feedback_available=feedback_available,
-        previous_feedback_constraint_cells=previous_feedback_constraint_cells,
-    )
+    else:
+        report = _apply_marker_feedback_to_fluid_host_fallback(
+            markers,
+            fluid,
+            config,
+            feedback_available=legacy_feedback_available,
+            previous_feedback_constraint_cells=previous_feedback_constraint_cells,
+        )
+    report["fluid_marker_feedback_collocated_writer_used"] = True
+    if sharp_reconstructed_rows:
+        report.update(
+            {
+                "fluid_projection_consumed_feedback": bool(
+                    feedback_available and int(markers.marker_count) > 0
+                ),
+                "fluid_feedback_constraint_marker_count": (
+                    int(markers.marker_count) if feedback_available else 0
+                ),
+                "fluid_feedback_constraint_active_cell_count": 0,
+                "fluid_feedback_constraint_obstacle_cell_count": 0,
+                "fluid_feedback_constraint_non_obstacle_cell_count": 0,
+                "fluid_feedback_constraint_projection_participating_cell_count": 0,
+                "fluid_marker_velocity_constraints_enabled": False,
+                "fluid_marker_velocity_constraint_active_cell_count": 0,
+                "fluid_marker_feedback_enforcement_mode": (
+                    "hibm_sharp_reconstructed_rows"
+                ),
+                "legacy_constraint_active_cell_count": 0,
+                "no_slip_residual_before_mps": "",
+                "no_slip_residual_after_mps": "",
+                "no_slip_target_residual_after_assembly_mps": "",
+                "no_slip_projected_residual_after_projection_mps": 0.0,
+            }
+        )
+    else:
+        report["fluid_marker_feedback_enforcement_mode"] = (
+            "legacy_collocated_marker_cells"
+        )
+        report["legacy_constraint_active_cell_count"] = int(
+            report.get("fluid_feedback_constraint_active_cell_count", 0)
+        )
+    return report
 
 
 def _apply_marker_feedback_to_fluid_host_fallback(
@@ -3730,49 +10374,102 @@ def _apply_marker_feedback_to_fluid_host_fallback(
     feedback_available: bool,
     previous_feedback_constraint_cells: set[tuple[int, int, int]],
 ) -> dict[str, object]:
+    authority = str(
+        getattr(fluid, "velocity_dirichlet_boundary_authority", "legacy")
+    )
+    if authority == "canonical":
+        raise RuntimeError(
+            "canonical marker feedback forbids the legacy host row fallback"
+        )
     preserve_velocity_constraints = bool(
         getattr(config, "preserve_marker_velocity_constraints", True)
     )
+    ledger_field_names = (
+        "velocity_dirichlet_boundary_active",
+        "velocity_dirichlet_boundary_value_mps",
+        "velocity_dirichlet_boundary_projection_weight",
+        "velocity_dirichlet_boundary_enforcement_weight",
+        "velocity_dirichlet_boundary_marker_region_id",
+        "velocity_dirichlet_boundary_hard_fixed_component_mask",
+        "velocity_dirichlet_boundary_external_exact_component_mask",
+        "velocity_dirichlet_boundary_owned_row",
+    )
+    ledger_fields: dict[str, object] = {}
+    invalid_fields: list[str] = []
+    for field_name in ledger_field_names:
+        field = getattr(fluid, field_name, None)
+        if (
+            field is None
+            or not callable(getattr(field, "to_numpy", None))
+            or not callable(getattr(field, "from_numpy", None))
+        ):
+            invalid_fields.append(field_name)
+        else:
+            ledger_fields[field_name] = field
+    if invalid_fields:
+        raise RuntimeError(
+            "host marker-feedback fallback requires a complete velocity "
+            "Dirichlet boundary ledger before clearing state: "
+            + ", ".join(invalid_fields)
+        )
     _clear_fluid_velocity_constraints(fluid)
 
-    active = fluid.velocity_dirichlet_boundary_active.to_numpy()
-    values = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
-    weights = fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
-    row_region_field = getattr(
-        fluid,
-        "velocity_dirichlet_boundary_marker_region_id",
-        None,
-    )
-    row_regions = (
-        row_region_field.to_numpy()
-        if row_region_field is not None
-        else None
-    )
+    active_field = ledger_fields["velocity_dirichlet_boundary_active"]
+    value_field = ledger_fields["velocity_dirichlet_boundary_value_mps"]
+    projection_weight_field = ledger_fields[
+        "velocity_dirichlet_boundary_projection_weight"
+    ]
+    enforcement_field = ledger_fields[
+        "velocity_dirichlet_boundary_enforcement_weight"
+    ]
+    row_region_field = ledger_fields[
+        "velocity_dirichlet_boundary_marker_region_id"
+    ]
+    hard_mask_field = ledger_fields[
+        "velocity_dirichlet_boundary_hard_fixed_component_mask"
+    ]
+    external_exact_mask_field = ledger_fields[
+        "velocity_dirichlet_boundary_external_exact_component_mask"
+    ]
+    owned_row_field = ledger_fields["velocity_dirichlet_boundary_owned_row"]
+    active = active_field.to_numpy()
+    values = value_field.to_numpy()
+    weights = projection_weight_field.to_numpy()
+    enforcement_weights = enforcement_field.to_numpy()
+    row_regions = row_region_field.to_numpy()
+    hard_masks = hard_mask_field.to_numpy()
+    external_exact_masks = external_exact_mask_field.to_numpy()
+    owned_rows = owned_row_field.to_numpy()
+
+    def _commit_boundary_ledger() -> None:
+        active_field.from_numpy(active)
+        value_field.from_numpy(values)
+        projection_weight_field.from_numpy(weights)
+        enforcement_field.from_numpy(enforcement_weights)
+        row_region_field.from_numpy(row_regions)
+        hard_mask_field.from_numpy(hard_masks)
+        external_exact_mask_field.from_numpy(external_exact_masks)
+        owned_row_field.from_numpy(owned_rows)
 
     cleared_cell_count = 0
     for i, j, k in previous_feedback_constraint_cells:
         active[i, j, k] = 0
         values[i, j, k] = 0.0
         weights[i, j, k] = 0.0
-        if row_regions is not None:
-            row_regions[i, j, k] = -1
+        enforcement_weights[i, j, k] = 0.0
+        row_regions[i, j, k] = -1
+        hard_masks[i, j, k] = 0
+        external_exact_masks[i, j, k] = 0
+        owned_rows[i, j, k] = 0
         cleared_cell_count += 1
 
     if not feedback_available:
-        fluid.velocity_dirichlet_boundary_active.from_numpy(active)
-        fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
-        fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
-        if row_region_field is not None and row_regions is not None:
-            row_region_field.from_numpy(row_regions)
+        _commit_boundary_ledger()
         return _empty_feedback_constraint_report(cleared_cell_count)
 
     marker_count = int(markers.marker_count)
     if marker_count <= 0:
-        fluid.velocity_dirichlet_boundary_active.from_numpy(active)
-        fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
-        fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
-        if row_region_field is not None and row_regions is not None:
-            row_region_field.from_numpy(row_regions)
+        _commit_boundary_ledger()
         return _empty_feedback_constraint_report(cleared_cell_count)
 
     marker_positions = markers.x_gamma_m.to_numpy()[:marker_count]
@@ -3820,9 +10517,12 @@ def _apply_marker_feedback_to_fluid_host_fallback(
         active[i, j, k] = 1
         values[i, j, k] = summed_velocity / float(target_count[(i, j, k)])
         weights[i, j, k] = 1.0
-        if row_regions is not None:
-            regions = target_regions[(i, j, k)]
-            row_regions[i, j, k] = next(iter(regions)) if len(regions) == 1 else -1
+        enforcement_weights[i, j, k] = 1.0
+        regions = target_regions[(i, j, k)]
+        row_regions[i, j, k] = next(iter(regions)) if len(regions) == 1 else -1
+        hard_masks[i, j, k] = 0b111
+        external_exact_masks[i, j, k] = 0
+        owned_rows[i, j, k] = 0
 
     constraint_active_cell_count = 0
     if preserve_velocity_constraints:
@@ -3841,11 +10541,7 @@ def _apply_marker_feedback_to_fluid_host_fallback(
         i, j, k = (int(cell[0]), int(cell[1]), int(cell[2]))
         after_residuals.append(float(np.linalg.norm(values[i, j, k] - marker_velocity)))
 
-    fluid.velocity_dirichlet_boundary_active.from_numpy(active)
-    fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
-    fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
-    if row_region_field is not None and row_regions is not None:
-        row_region_field.from_numpy(row_regions)
+    _commit_boundary_ledger()
 
     obstacle = fluid.obstacle.to_numpy()
     active_cell_count = len(target_sum)
@@ -4091,6 +10787,20 @@ def _flow_source_report_fields(report: Any) -> dict[str, object]:
     return fields
 
 
+def _flow_transport_report_fields(report: Any) -> dict[str, object]:
+    """Persist core transport identity and CFL evidence in every artifact row."""
+
+    if not isinstance(report, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in report.items()
+        if key == "flow_turbulence_model"
+        or key.startswith("flow_sst_")
+        or key.startswith("flow_momentum_advection_")
+    }
+
+
 def _flow_projection_report_fields(report: Any) -> dict[str, object]:
     if not isinstance(report, Mapping):
         return {f"flow_projection_{key}": "" for key in FLOW_PROJECTION_REPORT_KEYS}
@@ -4199,6 +10909,93 @@ def _marker_traction_report_fields(
     )
 
 
+def _marker_projection_boundary_report_fields(
+    markers: HibmMpmSurfaceMarkers,
+    *,
+    canonical_velocity_dirichlet_report: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    physical_count = int(markers.marker_count)
+    projection_count = int(markers.projection_vertex_count)
+    boundary_only_count = projection_count - physical_count
+    tip_cap_enabled = boundary_only_count == 4
+    closure_report = (
+        canonical_velocity_dirichlet_report.get("marker_target_closure")
+        if isinstance(canonical_velocity_dirichlet_report, Mapping)
+        else None
+    )
+    closure_healthy = (
+        _canonical_marker_target_closure_health_failure(closure_report) is None
+    )
+    closure_projection_count = (
+        int(closure_report["projection_only_marker_count"])
+        if closure_healthy and isinstance(closure_report, Mapping)
+        else 0
+    )
+    closure_evaluated_axis_count = (
+        int(closure_report["projection_only_evaluated_axis_count"])
+        if closure_healthy and isinstance(closure_report, Mapping)
+        else 0
+    )
+    closure_invalid_axis_count = (
+        int(closure_report["projection_only_invalid_axis_count"])
+        if closure_healthy and isinstance(closure_report, Mapping)
+        else 0
+    )
+    closure_constraint_count = (
+        int(closure_report["projection_only_constraint_count"])
+        if closure_healthy and isinstance(closure_report, Mapping)
+        else 0
+    )
+    closure_max_residual_mps = (
+        float(closure_report["projection_only_max_residual_mps"])
+        if closure_healthy and isinstance(closure_report, Mapping)
+        else None
+    )
+    tip_cap_closure_included = bool(
+        tip_cap_enabled
+        and closure_healthy
+        and closure_projection_count == boundary_only_count
+        and closure_evaluated_axis_count == 3 * boundary_only_count
+        and closure_invalid_axis_count == 0
+    )
+    return {
+        "marker_physical_traction_count": physical_count,
+        "marker_projection_vertex_count": projection_count,
+        "marker_boundary_only_vertex_count": boundary_only_count,
+        "tip_cap_boundary_enabled": tip_cap_enabled,
+        "tip_cap_boundary_region_id": (
+            TIP_CAP_BOUNDARY_REGION_ID if tip_cap_enabled else None
+        ),
+        "tip_cap_force_included": False,
+        "tip_cap_traction_policy": (
+            "excluded_boundary_only" if tip_cap_enabled else "not_applicable"
+        ),
+        "tip_cap_no_slip_closure_included": tip_cap_closure_included,
+        "tip_cap_no_slip_health_policy": (
+            "canonical_marker_target_closure_kernel_evidence"
+            if tip_cap_closure_included
+            else "missing_kernel_evidence"
+            if tip_cap_enabled
+            else "not_applicable"
+        ),
+        "tip_cap_marker_target_closure_projection_vertex_count": (
+            closure_projection_count
+        ),
+        "tip_cap_marker_target_closure_evaluated_axis_count": (
+            closure_evaluated_axis_count
+        ),
+        "tip_cap_marker_target_closure_invalid_axis_count": (
+            closure_invalid_axis_count
+        ),
+        "tip_cap_marker_target_closure_constraint_count": (
+            closure_constraint_count
+        ),
+        "tip_cap_marker_target_closure_max_residual_mps": (
+            closure_max_residual_mps
+        ),
+    }
+
+
 def _scatter_report_fields(report: Any) -> dict[str, object]:
     return {
         "scatter_action_reaction_residual_n": float(
@@ -4216,10 +11013,21 @@ def _build_markers(
 ) -> HibmMpmSurfaceMarkers:
     markers_per_face = int(config.marker_count)
     marker_layout = _traction_marker_layout(config)
-    marker_capacity = (
+    physical_marker_capacity = (
         markers_per_face
         if marker_layout == TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE
         else 2 * markers_per_face
+    )
+    open_ribbon_tip_cap_enabled = (
+        marker_layout == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES
+    )
+    if open_ribbon_tip_cap_enabled and markers_per_face < 2:
+        raise ValueError(
+            "dual physical-face tip-cap projection requires at least two "
+            "markers per face"
+        )
+    marker_capacity = physical_marker_capacity + (
+        4 if open_ribbon_tip_cap_enabled else 0
     )
     markers = HibmMpmSurfaceMarkers(
         marker_capacity=marker_capacity,
@@ -4292,6 +11100,31 @@ def _build_markers(
             else None
         ),
     )
+    projection_segments = tuple(
+        (
+            face_index * markers_per_face + marker_index,
+            face_index * markers_per_face + marker_index + 1,
+        )
+        for face_index in range(len(face_specs))
+        for marker_index in range(markers_per_face - 1)
+    )
+    if open_ribbon_tip_cap_enabled:
+        markers.configure_open_ribbon_tip_cap(
+            primary_previous_marker_index=markers_per_face - 2,
+            primary_tip_marker_index=markers_per_face - 1,
+            secondary_previous_marker_index=2 * markers_per_face - 2,
+            secondary_tip_marker_index=2 * markers_per_face - 1,
+            cap_region_id=TIP_CAP_BOUNDARY_REGION_ID,
+            cap_area_m2=(solid_max[0] - solid_min[0])
+            * (solid_max[2] - solid_min[2]),
+            inactive_axis=OUT_OF_PLANE_AXIS_INDEX,
+        )
+        projection_segments += (
+            (markers_per_face - 1, physical_marker_capacity),
+            (2 * markers_per_face - 1, physical_marker_capacity + 1),
+            (physical_marker_capacity + 2, physical_marker_capacity + 3),
+        )
+    markers.set_projection_segments(projection_segments)
     return markers
 
 
@@ -4307,9 +11140,16 @@ def _install_selected_pressure_pair_anchor_markers(
             == TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDER_ANCHORED_CELL_PAIR
         ):
             runtime_pair_map = _runtime_pressure_pair_anchor_map(markers, config)
+            runtime_pair_map.require_current_marker_geometry(markers)
             markers.set_pressure_pair_anchor_cells(
                 inside_cells=runtime_pair_map.inside_cells,
                 outside_cells=runtime_pair_map.outside_cells,
+                source_marker_geometry_revision=(
+                    runtime_pair_map.marker_geometry_revision
+                ),
+                source_marker_geometry_sha256=(
+                    runtime_pair_map.marker_geometry_sha256
+                ),
             )
             return _pressure_pair_anchor_install_report(
                 status="installed",
@@ -4319,6 +11159,15 @@ def _install_selected_pressure_pair_anchor_markers(
                 anchor_map_sha256=runtime_pair_map.pair_map_sha256,
                 source_marker_geometry_sha256=(
                     runtime_pair_map.marker_geometry_sha256
+                ),
+                source_marker_geometry_revision=(
+                    runtime_pair_map.marker_geometry_revision
+                ),
+                current_marker_geometry_sha256=(
+                    runtime_pair_map.marker_geometry_sha256
+                ),
+                current_marker_geometry_revision=(
+                    runtime_pair_map.marker_geometry_revision
                 ),
                 pair_map_diagnostics=runtime_pair_map.as_diagnostics(),
                 fixed_solid_snapshot_policy="runtime_marker_geometry",
@@ -4388,6 +11237,7 @@ def _install_selected_pressure_pair_anchor_markers(
 def _runtime_pressure_pair_anchor_map(
     markers: HibmMpmSurfaceMarkers,
     config: Any,
+    fluid_state: Any = None,
 ) -> PressureSamplePairMap:
     solid_min, solid_max = _solid_box(config)
     inside_axis_position_m = 0.5 * (
@@ -4401,7 +11251,54 @@ def _runtime_pressure_pair_anchor_map(
         inside_axis_position_m=inside_axis_position_m,
         outside_axis_offset_cells=1,
     )
-    return provider.compute_pairs(markers)
+    return provider.compute_pairs(markers, fluid_state=fluid_state)
+
+
+def _refresh_runtime_pressure_pair_anchor_markers(
+    markers: HibmMpmSurfaceMarkers,
+    fluid: CartesianFluidSolver,
+    config: Any,
+    *,
+    refresh_count: int,
+) -> tuple[dict[str, object], PressureSamplePairMap] | None:
+    if not (
+        _is_selected_traction_formulation_coupled_smoke(config)
+        and _traction_pressure_pair_runtime_provider_mode(config)
+        == TRACTION_PRESSURE_PAIR_RUNTIME_PROVIDER_ANCHORED_CELL_PAIR
+    ):
+        return None
+
+    # Retire the previous device map before reading or validating the new
+    # geometry.  Any failure below therefore leaves anchors inactive instead
+    # of silently sampling cells owned by an older interface revision.
+    markers.reset_pressure_pair_anchor_cells()
+    runtime_pair_map = _runtime_pressure_pair_anchor_map(
+        markers,
+        config,
+        fluid_state=fluid,
+    )
+    runtime_pair_map.require_current_marker_geometry(markers)
+    markers.set_pressure_pair_anchor_cells(
+        inside_cells=runtime_pair_map.inside_cells,
+        outside_cells=runtime_pair_map.outside_cells,
+        source_marker_geometry_revision=runtime_pair_map.marker_geometry_revision,
+        source_marker_geometry_sha256=runtime_pair_map.marker_geometry_sha256,
+    )
+    report = _pressure_pair_anchor_install_report(
+        status="installed",
+        source="runtime_generated",
+        marker_count=int(markers.marker_count),
+        active_marker_count=runtime_pair_map.selected_count,
+        anchor_map_sha256=runtime_pair_map.pair_map_sha256,
+        source_marker_geometry_sha256=runtime_pair_map.marker_geometry_sha256,
+        source_marker_geometry_revision=runtime_pair_map.marker_geometry_revision,
+        current_marker_geometry_sha256=runtime_pair_map.marker_geometry_sha256,
+        current_marker_geometry_revision=runtime_pair_map.marker_geometry_revision,
+        pair_map_diagnostics=runtime_pair_map.as_diagnostics(),
+        fixed_solid_snapshot_policy="runtime_current_marker_geometry",
+        runtime_refresh_count=int(refresh_count),
+    )
+    return report, runtime_pair_map
 
 
 def _load_pressure_pair_anchor_marker_payload(
@@ -4581,9 +11478,20 @@ def _pressure_pair_anchor_install_report(
     anchor_map_sha256: str = "",
     source_flow_snapshot_sha256: str = "",
     source_marker_geometry_sha256: str = "",
+    source_marker_geometry_revision: int | None = None,
+    current_marker_geometry_sha256: str = "",
+    current_marker_geometry_revision: int | None = None,
     pair_map_diagnostics: Mapping[str, Any] | None = None,
     fixed_solid_snapshot_policy: str = "",
+    runtime_refresh_count: int = 0,
 ) -> dict[str, object]:
+    full_map_installed = active_marker_count == marker_count
+    current_sha256 = str(current_marker_geometry_sha256)
+    if not current_sha256 and full_map_installed:
+        current_sha256 = str(source_marker_geometry_sha256)
+    current_revision = current_marker_geometry_revision
+    if current_revision is None and full_map_installed:
+        current_revision = source_marker_geometry_revision
     return {
         "pressure_pair_anchor_install_status": status,
         "pressure_pair_anchor_source": source,
@@ -4600,9 +11508,12 @@ def _pressure_pair_anchor_install_report(
         "pressure_pair_anchor_source_marker_geometry_sha256": (
             source_marker_geometry_sha256
         ),
-        "pressure_pair_anchor_current_marker_geometry_sha256": (
-            source_marker_geometry_sha256 if active_marker_count == marker_count else ""
+        "pressure_pair_anchor_source_marker_geometry_revision": (
+            source_marker_geometry_revision
         ),
+        "pressure_pair_anchor_current_marker_geometry_sha256": current_sha256,
+        "pressure_pair_anchor_current_marker_geometry_revision": current_revision,
+        "pressure_pair_anchor_runtime_refresh_count": int(runtime_refresh_count),
         "pressure_pair_anchor_pair_map": dict(pair_map_diagnostics or {}),
         "pressure_pair_anchor_fixed_solid_snapshot_policy": (
             fixed_solid_snapshot_policy
@@ -4784,8 +11695,10 @@ def _solid_displacement_report(
     fixed_mask: np.ndarray,
     tip_mask: np.ndarray,
     rest: np.ndarray | None = None,
+    positions: np.ndarray | None = None,
 ) -> dict[str, object]:
-    positions = solid.x.to_numpy()[: solid.particle_count]
+    if positions is None:
+        positions = solid.x.to_numpy()[: solid.particle_count]
     if rest is None:
         # rest positions are constant; per-step callers pass a cached copy so
         # the whole rest array is not re-fetched from the device every step

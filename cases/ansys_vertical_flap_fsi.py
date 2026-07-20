@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -164,14 +165,35 @@ class VerticalFlapFsiConfig:
     flow_projection_iterations: int = 1080
     flow_pressure_solver: str = "fv_jacobi"
     flow_cg_tolerance: float = 1.0e-6
+    flow_cg_preconditioner: str = "fv_multigrid_light"
+    # Re-imposing reconstructed sharp-interface Dirichlet rows after a
+    # pressure solve reintroduces a small divergence.  Reassemble the rows and
+    # solve that residual as a pressure *increment* before sampling tractions.
+    flow_post_dirichlet_consistency_projection_iterations: int = 1
+    flow_reprojection_iterations: int | None = None
+    flow_reprojection_cg_tolerance: float | None = None
+    flow_pressure_solve_failure_policy: str = "raise"
     flow_divergence_cleanup_iterations: int = 0
-    flow_projection_velocity_inlet_zmax: bool = False
+    # None delegates external-face topology to the exact velocity-boundary
+    # ledger. True/False remain explicit legacy assertions for callers that
+    # deliberately need them.
+    flow_projection_velocity_inlet_zmax: bool | None = None
     velocity_damping: float = 0.995
     solid_velocity_transfer_flip_blend: float = 0.0
     solid_substeps: int = 1600
     solid_cfl_target: float = 0.5
     preflow_steps: int = 0
     preflow_convergence_tolerance: float = 0.0
+    preflow_convergence_mode: str = "single_step_legacy"
+    preflow_stationary_min_steps: int = 20
+    preflow_stationary_window_steps: int = 10
+    preflow_stationary_consecutive_windows: int = 3
+    preflow_stationary_tolerance: float = 0.05
+    preflow_stationary_divergence_tolerance: float = 0.05
+    preflow_stationary_no_slip_tolerance_fraction: float = 0.05
+    preflow_traction_readiness_mode: str = "flow_only"
+    preflow_snapshot_input_path: str | None = None
+    preflow_snapshot_output_path: str | None = None
     apply_marker_feedback_to_fluid: bool = True
     flow_reset_pressure_each_step: bool = False
     flow_reinitialize_inlet_each_step: bool = False
@@ -184,6 +206,20 @@ class VerticalFlapFsiConfig:
     flow_advection_scheme: str = "euler"
     flow_predictor_substeps: int = 8
     flow_predictor_kinematic_viscosity_multiplier: float = 1.0
+    # The native Fluent reference solves SST k-omega throughout preflow and
+    # transient FSI.  These are physical inlet/backflow declarations, not
+    # pressure or displacement calibration factors.
+    # Base smoke configurations remain laminar for backward-compatible unit
+    # fixtures.  selected_formulation_solver_config() explicitly enables SST
+    # for the official Fluent-comparison production path.
+    flow_turbulence_model: str = "laminar"
+    flow_turbulence_intensity: float = 0.05
+    flow_turbulent_viscosity_ratio: float = 10.0
+    flow_backflow_turbulence_intensity: float = 0.05
+    flow_backflow_turbulent_viscosity_ratio: float = 10.0
+    flow_turbulence_inlet_face: str = "zmax"
+    flow_turbulence_outlet_face: str = "zmin"
+    flow_sst_max_automatic_substeps: int = 4096
     flow_predictor_no_slip_domain_walls: tuple[str, ...] = ("ymin",)
     flow_symmetry_domain_walls: tuple[str, ...] = ("ymax",)
     flow_ymin_no_slip_rows: int = 0
@@ -195,8 +231,14 @@ class VerticalFlapFsiConfig:
     flow_obstacle_normal_velocity_policy: str = "face_clamp"
     flow_solid_boundary_mode: str = "hibm_sharp_marker_rows"
     flow_hibm_sharp_search_radius_m: float | None = None
+    flow_hibm_sharp_search_radius_xyz_m: tuple[float, float, float] | None = None
     flow_hibm_sharp_interior_probe_distance_m: float | None = None
     flow_hibm_sharp_interpolate_velocity_rows: bool = True
+    # Keep the moving physical flap volume independent of the narrow HIBM
+    # interface-row search.  Validation launchers enable this together with
+    # update_fluid_obstacle_from_solid after selecting a mesh-scaled envelope.
+    flow_hibm_dynamic_solid_volume_enabled: bool = False
+    flow_hibm_tiny_unreached_cleanup_component_cells: int = 0
     flow_pressure_outlet_enabled: bool = True
     flow_pressure_outlet_backflow_policy: str = "allow"
     flow_outlet_balance_policy: str = "report_only"
@@ -494,7 +536,21 @@ def selected_formulation_solver_config(
         )
     config = VerticalFlapFsiConfig(
         step_count=step_count,
+        flow_turbulence_model="sst_2003",
+        flow_turbulence_intensity=0.05,
+        flow_turbulent_viscosity_ratio=10.0,
+        flow_backflow_turbulence_intensity=0.05,
+        flow_backflow_turbulent_viscosity_ratio=10.0,
+        # Production uses one physical outer step; the core conservative
+        # transport owns its CFL-sized SSP-RK2 slices.  Repeating a fixed
+        # semi-Lagrangian remap here was the dominant long-run diffusion source.
+        flow_advection_scheme="muscl_tvd",
+        flow_predictor_substeps=1,
         traction_pressure_sampling_mode="one_sided_surface_pressure",
+        # Sharp HIBM velocity rows represent the physical no-slip surface.
+        # Keep their markers synchronized with the dynamic MPM volume; only
+        # the pressure sampling origin belongs outside the physical face.
+        traction_marker_face_offset_cells=0.0,
         traction_pressure_probe_origin_mode="physical_face_offset",
         traction_pressure_probe_origin_offset_cells=0.51,
         traction_pressure_pair_policy=str(
@@ -568,8 +624,20 @@ def _run_ansys_vertical_flap_generic_runtime(
     }
 
 
-def run_vertical_flap_fsi_smoke(config: VerticalFlapFsiConfig | None = None) -> dict[str, object]:
+def run_vertical_flap_fsi_smoke(
+    config: VerticalFlapFsiConfig | None = None,
+    *,
+    step_observer: Callable[..., None] | None = None,
+) -> dict[str, object]:
     cfg = with_local_surface_force_support(config or VerticalFlapFsiConfig())
+    runner = (
+        _run_vertical_flap_fsi_core
+        if step_observer is None
+        else lambda active_config: _run_vertical_flap_fsi_core(
+            active_config,
+            step_observer=step_observer,
+        )
+    )
     return run_official_fsi_benchmark(
         OfficialBenchmarkRunSpec(
             case_spec=CASE_SPEC,
@@ -577,18 +645,23 @@ def run_vertical_flap_fsi_smoke(config: VerticalFlapFsiConfig | None = None) -> 
             case_metadata=ANSYS_VERTICAL_FLAP_CASE_METADATA,
             boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
             config=cfg,
-            runner=_run_vertical_flap_fsi_core,
+            runner=runner,
         )
     )
 
 
-def _run_vertical_flap_fsi_core(config: VerticalFlapFsiConfig) -> dict[str, object]:
+def _run_vertical_flap_fsi_core(
+    config: VerticalFlapFsiConfig,
+    *,
+    step_observer: Callable[..., None] | None = None,
+) -> dict[str, object]:
     return run_rectangular_solid_marker_mpm_fsi_smoke(
         case_id=CASE_SPEC.case_id,
         case_metadata=ANSYS_VERTICAL_FLAP_CASE_METADATA,
         boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
         reference_results=ANSYS_VERTICAL_FLAP_REFERENCE_RESULTS,
         config=config,
+        step_observer=step_observer,
     )
 
 
@@ -679,7 +752,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--flow-advection-scheme",
         default=VerticalFlapFsiConfig.flow_advection_scheme,
-        choices=("euler", "rk2"),
+        choices=("euler", "rk2", "muscl_tvd"),
         help="Advection scheme used by predictor-style flow drivers.",
     )
     parser.add_argument(
@@ -693,6 +766,54 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=VerticalFlapFsiConfig.flow_predictor_kinematic_viscosity_multiplier,
         help="Multiplier on material nu used by predictor-style flow drivers.",
+    )
+    parser.add_argument(
+        "--flow-turbulence-model",
+        default="sst_2003",
+        choices=("laminar", "sst_2003"),
+        help="Core momentum/turbulence closure used by predictor-style flow drivers.",
+    )
+    parser.add_argument(
+        "--flow-turbulence-intensity",
+        type=float,
+        default=VerticalFlapFsiConfig.flow_turbulence_intensity,
+        help="Velocity-inlet turbulence intensity fraction for SST-2003.",
+    )
+    parser.add_argument(
+        "--flow-turbulent-viscosity-ratio",
+        type=float,
+        default=VerticalFlapFsiConfig.flow_turbulent_viscosity_ratio,
+        help="Velocity-inlet turbulent-to-molecular viscosity ratio for SST-2003.",
+    )
+    parser.add_argument(
+        "--flow-backflow-turbulence-intensity",
+        type=float,
+        default=VerticalFlapFsiConfig.flow_backflow_turbulence_intensity,
+        help="Pressure-outlet reverse-flow turbulence intensity fraction.",
+    )
+    parser.add_argument(
+        "--flow-backflow-turbulent-viscosity-ratio",
+        type=float,
+        default=VerticalFlapFsiConfig.flow_backflow_turbulent_viscosity_ratio,
+        help="Pressure-outlet reverse-flow turbulent viscosity ratio.",
+    )
+    parser.add_argument(
+        "--flow-turbulence-inlet-face",
+        default=VerticalFlapFsiConfig.flow_turbulence_inlet_face,
+        choices=("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"),
+        help="Physical velocity-inlet face supplying SST k/omega.",
+    )
+    parser.add_argument(
+        "--flow-turbulence-outlet-face",
+        default=VerticalFlapFsiConfig.flow_turbulence_outlet_face,
+        choices=("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"),
+        help="Physical pressure-outlet face supplying SST reverse-flow state.",
+    )
+    parser.add_argument(
+        "--flow-sst-max-automatic-substeps",
+        type=int,
+        default=VerticalFlapFsiConfig.flow_sst_max_automatic_substeps,
+        help="Fail-closed ceiling for automatically required SST stability substeps.",
     )
     parser.add_argument(
         "--flow-predictor-no-slip-domain-walls",
@@ -828,6 +949,22 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
             flow_predictor_substeps=args.flow_predictor_substeps,
             flow_predictor_kinematic_viscosity_multiplier=(
                 args.flow_predictor_kinematic_viscosity_multiplier
+            ),
+            flow_turbulence_model=args.flow_turbulence_model,
+            flow_turbulence_intensity=args.flow_turbulence_intensity,
+            flow_turbulent_viscosity_ratio=(
+                args.flow_turbulent_viscosity_ratio
+            ),
+            flow_backflow_turbulence_intensity=(
+                args.flow_backflow_turbulence_intensity
+            ),
+            flow_backflow_turbulent_viscosity_ratio=(
+                args.flow_backflow_turbulent_viscosity_ratio
+            ),
+            flow_turbulence_inlet_face=args.flow_turbulence_inlet_face,
+            flow_turbulence_outlet_face=args.flow_turbulence_outlet_face,
+            flow_sst_max_automatic_substeps=(
+                args.flow_sst_max_automatic_substeps
             ),
             flow_predictor_no_slip_domain_walls=_parse_wall_names(
                 args.flow_predictor_no_slip_domain_walls

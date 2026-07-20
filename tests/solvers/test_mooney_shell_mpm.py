@@ -262,6 +262,29 @@ class UvMooneyShellMpmStateTests(unittest.TestCase):
         self.assertEqual(state.last_report_host_reads, 1)
         self.assertAlmostEqual(report.total_mass_kg, 123.0)
 
+    def test_uv_report_preserves_large_i32_counts_and_all_oob_guard(self) -> None:
+        resolution = UvSphereResolution(latitude_bands=4, longitude_segments=8)
+        state = UvMooneyShellMpmState(
+            resolution,
+            radius_m=1.0,
+            thickness_m=0.05,
+            density_kgm3=1.0,
+            c1_pa=20.0,
+            c2_pa=10.0,
+            grid_nodes=(16, 16, 16),
+        )
+        large_count = 16_777_217
+        state.report_host_snapshot[10] = float(large_count)
+
+        report = state.report()
+
+        self.assertEqual(report.edge_count, large_count)
+
+        state.particle_count = large_count
+        state.report_host_snapshot[12] = float(large_count)
+        with self.assertRaisesRegex(RuntimeError, rf"all {large_count} MPM particles"):
+            state.report()
+
     def test_internal_pressure_expands_mooney_shell(self) -> None:
         resolution = UvSphereResolution(latitude_bands=8, longitude_segments=25)
         state = UvMooneyShellMpmState(
@@ -326,22 +349,39 @@ class UvMooneyShellMpmStateTests(unittest.TestCase):
 
     def test_uv_nan_particle_is_rejected_without_nan_report_values(self) -> None:
         resolution = UvSphereResolution(latitude_bands=4, longitude_segments=8)
-        state = UvMooneyShellMpmState(
-            resolution,
-            radius_m=1.0,
-            thickness_m=0.05,
-            density_kgm3=1.0,
-            c1_pa=20.0,
-            c2_pa=10.0,
-            grid_nodes=(16, 16, 16),
-        )
-        positions = state.x.to_numpy()
-        positions[0, 0] = np.nan
-        state.x.from_numpy(positions.astype(np.float32))
+        def nan_state() -> UvMooneyShellMpmState:
+            state = UvMooneyShellMpmState(
+                resolution,
+                radius_m=1.0,
+                thickness_m=0.05,
+                density_kgm3=1.0,
+                c1_pa=20.0,
+                c2_pa=10.0,
+                grid_nodes=(16, 16, 16),
+            )
+            positions = state.x.to_numpy()
+            positions[0, 0] = np.nan
+            state.x.from_numpy(positions.astype(np.float32))
+            return state
 
-        report = state.step(dt_s=0.0, pressure_pa=0.0, velocity_damping=1.0)
+        with self.assertRaisesRegex(
+            RuntimeError, r"non-finite/oversized force sanitization"
+        ):
+            nan_state().step(
+                dt_s=0.0,
+                pressure_pa=0.0,
+                velocity_damping=1.0,
+            )
+
+        report = nan_state().step(
+            dt_s=0.0,
+            pressure_pa=0.0,
+            velocity_damping=1.0,
+            allow_force_sanitization=True,
+        )
 
         self.assertGreaterEqual(report.grid_out_of_bounds_particle_count, 1)
+        self.assertGreater(report.sanitized_force_count, 0)
         self.assertTrue(np.isfinite(report.internal_force_rms_n))
         self.assertTrue(np.isfinite(report.mean_radial_stretch))
         self.assertTrue(np.isfinite(report.max_radial_stretch_error))

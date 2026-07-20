@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 
@@ -38,8 +39,15 @@ class CartesianGrid:
             raise ValueError("bounds_min_m must have three coordinates")
         if not widths_x or not widths_y or not widths_z:
             raise ValueError("CartesianGrid axes must contain at least one cell")
-        if any(width <= 0.0 for width in widths_x + widths_y + widths_z):
-            raise ValueError("CartesianGrid cell widths must be positive")
+        if any(
+            not math.isfinite(width) or width <= 0.0
+            for width in widths_x + widths_y + widths_z
+        ):
+            raise ValueError(
+                "CartesianGrid cell widths must be finite and positive"
+            )
+        if any(not math.isfinite(coordinate) for coordinate in bounds_min):
+            raise ValueError("CartesianGrid bounds_min_m must be finite")
         object.__setattr__(self, "bounds_min_m", bounds_min)
         object.__setattr__(self, "cell_widths_x_m", widths_x)
         object.__setattr__(self, "cell_widths_y_m", widths_y)

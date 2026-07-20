@@ -3,6 +3,20 @@ from dataclasses import dataclass
 from simulation_core.fluids.grid import CartesianGrid, GradedGridSpec, build_graded_grid
 
 
+class _GradedCartesianGrid(CartesianGrid):
+    """Materialized grid tagged so dataclasses.replace preserves provenance."""
+
+
+def _materialize_graded_grid(spec: GradedGridSpec) -> _GradedCartesianGrid:
+    grid = build_graded_grid(spec)
+    return _GradedCartesianGrid(
+        bounds_min_m=grid.bounds_min_m,
+        cell_widths_x_m=grid.cell_widths_x_m,
+        cell_widths_y_m=grid.cell_widths_y_m,
+        cell_widths_z_m=grid.cell_widths_z_m,
+    )
+
+
 @dataclass(frozen=True)
 class FluidDomainSpec:
     bounds_min_m: tuple[float, float, float]
@@ -40,11 +54,16 @@ class FluidDomainSpec:
             raise ValueError("viscosity_pa_s must be non-negative")
         if self.dt_s <= 0.0:
             raise ValueError("dt_s must be positive")
-        if self.cartesian_grid is not None and self.graded_grid is not None:
-            raise ValueError("cartesian_grid and graded_grid are mutually exclusive")
-
         if self.graded_grid is not None:
-            grid = build_graded_grid(self.graded_grid)
+            grid = _materialize_graded_grid(self.graded_grid)
+            # dataclasses.replace() copies the materialized public
+            # cartesian_grid from an existing graded spec. Accept exactly
+            # that derived grid, but reject a genuinely distinct pair.
+            if self.cartesian_grid is not None and (
+                not isinstance(self.cartesian_grid, _GradedCartesianGrid)
+                or self.cartesian_grid != grid
+            ):
+                raise ValueError("cartesian_grid and graded_grid are mutually exclusive")
         elif self.cartesian_grid is not None:
             grid = self.cartesian_grid
         else:

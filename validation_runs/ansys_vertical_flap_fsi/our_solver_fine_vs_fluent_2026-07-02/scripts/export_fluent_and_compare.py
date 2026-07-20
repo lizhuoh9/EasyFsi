@@ -82,6 +82,17 @@ def _masked_2d(field: np.ndarray, mask: np.ndarray) -> np.ma.MaskedArray:
     return np.ma.array(field, mask=~mask.astype(bool))
 
 
+def _solver_display_mask(solver: dict[str, np.ndarray]) -> np.ndarray:
+    strict = np.asarray(solver["fluid_mask"], dtype=bool)
+    if "display_fluid_mask" in solver:
+        return np.asarray(solver["display_fluid_mask"], dtype=bool)
+    surrogate = np.asarray(
+        solver.get("boundary_surrogate_mask", np.zeros_like(strict)),
+        dtype=bool,
+    )
+    return strict | surrogate
+
+
 def _plot_fluent_velocity(fluent: dict[str, np.ndarray], path: Path) -> None:
     fig, ax = plt.subplots(figsize=(11, 4.2), constrained_layout=True)
     sc = ax.scatter(
@@ -113,7 +124,7 @@ def _plot_solver_velocity(
     fig, ax = plt.subplots(figsize=(11, 4.2), constrained_layout=True)
     y_display = _solver_display_y(solver, fluent)
     image = ax.imshow(
-        _masked_2d(solver["speed"], solver["fluid_mask"]),
+        _masked_2d(solver["speed"], _solver_display_mask(solver)),
         origin="lower",
         extent=[
             float(np.min(solver["s"])),
@@ -207,7 +218,7 @@ def _plot_pressure_comparison(
     )
     axes[0].set_title("Fluent pressure")
     solver_plot = axes[1].imshow(
-        _masked_2d(solver["p"], solver["fluid_mask"]),
+        _masked_2d(solver["p"], _solver_display_mask(solver)),
         origin="lower",
         extent=[
             float(np.min(solver["s"])),

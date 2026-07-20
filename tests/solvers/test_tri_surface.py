@@ -17,6 +17,32 @@ from simulation_core import (
 
 
 class TriSurfaceRegionDiagnosticsTests(unittest.TestCase):
+    def test_spacing_m_is_documented_as_graded_grid_compatibility_hint(self) -> None:
+        documentation = inspect.getdoc(TriSurfaceRegionDiagnostics)
+
+        self.assertIn("spacing_m", documentation)
+        self.assertIn("compatibility", documentation)
+        self.assertIn("grid_fields", documentation)
+        self.assertIn("authoritative for graded grids", documentation)
+
+    def test_force_pair_report_preserves_i32_counts_above_f32_exact_range(self) -> None:
+        runtime = TaichiRuntimeConfig(arch="cuda")
+        diagnostics = TriSurfaceRegionDiagnostics(face_capacity=1, runtime=runtime)
+        expected_sample_count = 16_777_217
+        expected_invalid_count = 16_777_219
+        packed_snapshot = np.zeros(10, dtype=np.float32)
+        packed_snapshot[6:8] = np.asarray(
+            [expected_sample_count, expected_invalid_count],
+            dtype=np.int32,
+        ).view(np.float32)
+        diagnostics.report_force_pair_snapshot.from_numpy(packed_snapshot)
+
+        report = diagnostics.force_pair_report()
+
+        self.assertEqual(report.force_sample_count, expected_sample_count)
+        self.assertEqual(report.force_invalid_probe_count, expected_invalid_count)
+        self.assertEqual(diagnostics.last_report_host_reads, 1)
+
     def test_public_fsi_api_requires_generic_3d_velocity_names(self) -> None:
         for method_name in (
             "spread_fsi_forces",

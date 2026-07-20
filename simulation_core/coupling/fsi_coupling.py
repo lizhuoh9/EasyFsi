@@ -8,6 +8,7 @@ from dataclasses import dataclass
 ForceVector = tuple[float, ...]
 INTERFACE_REACTION_SOLVER_CHOICES = ("aitken", "iqn_ils")
 _IQN_ILS_HISTORY_LIMIT = 8
+_MAX_FINITE_FLOAT = float.fromhex("0x1.fffffffffffffp+1023")
 
 
 @dataclass(frozen=True)
@@ -601,11 +602,49 @@ def action_reaction_balance(
     _same_length(action, reaction, lhs_name="action_force_n", rhs_name="reaction_force_n")
     residual = tuple(a + r for a, r in zip(action, reaction))
     residual_norm = _force_norm(residual)
-    scale = max(_force_norm(action) + _force_norm(reaction), 1.0e-30)
+    action_norm = _force_norm(action)
+    reaction_norm = _force_norm(reaction)
+    scale = action_norm + reaction_norm
+    if math.isfinite(scale):
+        scale = max(scale, 1.0e-30)
+        relative_error = residual_norm / scale
+    else:
+        # The individual finite force norms can have an unrepresentable sum
+        # near float64 max. Compute the homogeneous balance ratio in a shared
+        # component scale, then saturate dimensional report values whose true
+        # magnitude cannot be represented instead of emitting inf or a false
+        # relative_error of zero.
+        component_scale = max(
+            max(abs(component) for component in action),
+            max(abs(component) for component in reaction),
+        )
+        scaled_action = tuple(component / component_scale for component in action)
+        scaled_reaction = tuple(component / component_scale for component in reaction)
+        scaled_residual = tuple(
+            action_component + reaction_component
+            for action_component, reaction_component in zip(
+                scaled_action, scaled_reaction
+            )
+        )
+        residual = tuple(
+            component
+            if math.isfinite(component)
+            else math.copysign(_MAX_FINITE_FLOAT, scaled_component)
+            for component, scaled_component in zip(residual, scaled_residual)
+        )
+        scaled_residual_norm = _force_norm(scaled_residual)
+        scaled_scale = _force_norm(scaled_action) + _force_norm(scaled_reaction)
+        relative_error = scaled_residual_norm / max(scaled_scale, 1.0e-30)
+        residual_norm = (
+            _MAX_FINITE_FLOAT
+            if scaled_residual_norm > _MAX_FINITE_FLOAT / component_scale
+            else component_scale * scaled_residual_norm
+        )
+        scale = _MAX_FINITE_FLOAT
     return ForceBalanceReport(
         residual_components_n=residual,
         residual_norm_n=residual_norm,
-        relative_error=residual_norm / scale,
+        relative_error=relative_error,
         scale_n=scale,
     )
 
@@ -672,7 +711,7 @@ def aitken_relaxation_factor(
         # not a recoverable numeric accident -- freeze relaxation at its
         # previous value instead of propagating nan/inf into the next
         # interface-force update.
-        return float(previous_relaxation_value)
+        return float(min(max(previous_relaxation_value, lower_value), upper_value))
     return float(min(max(proposed, lower_value), upper_value))
 
 
@@ -1335,6 +1374,26 @@ def solve_interface_reaction_fixed_point(
         )
         if trust_region_limited:
             trust_region_limited_update_count += 1
+            if use_aitken and solver_name == "aitken":
+                proposed_increment = tuple(
+                    proposed - current
+                    for proposed, current in zip(
+                        proposed_reaction_guess,
+                        trial_force_history[-1],
+                    )
+                )
+                applied_increment = tuple(
+                    applied - current
+                    for applied, current in zip(
+                        reaction_guess,
+                        trial_force_history[-1],
+                    )
+                )
+                proposed_increment_norm = _force_norm(proposed_increment)
+                if proposed_increment_norm > 0.0:
+                    relaxation *= (
+                        _force_norm(applied_increment) / proposed_increment_norm
+                    )
         iteration += 1
 
     all_trials_rejected = accepted_trial_index is None and rejected_trial_count > 0

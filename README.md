@@ -36,11 +36,12 @@
 在本目录（`refactored/`）下运行：
 
 ```powershell
-& "D:/TOOL/Anaconda/python.exe" -m unittest discover -s tests/contracts -p "test_*.py" -v
-& "D:/TOOL/Anaconda/python.exe" -m unittest discover -s tests/integration -p "test_*.py" -v
-& "D:/TOOL/Anaconda/python.exe" -m unittest discover -s tests/tools -p "test_*.py" -v
+$python = if ($env:EASYFSI_PYTHON) { $env:EASYFSI_PYTHON } else { 'python' }
+& $python -m unittest discover -s tests/contracts -p "test_*.py" -v
+& $python -m unittest discover -s tests/integration -p "test_*.py" -v
+& $python -m unittest discover -s tests/tools -p "test_*.py" -v
 # 需要 CUDA GPU：
-& "D:/TOOL/Anaconda/python.exe" -m unittest discover -s tests -p "test_*.py" -v
+& $python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 测试目录是随副本一起拷贝的，`test_source_static_contracts.py` 的源码契约检查在本目录内自洽。
@@ -54,8 +55,8 @@ runner 现在会在创建任何输出目录/写 `run_process.json` **之前**报
 `source config not found` 并保持文件系统不变：
 
 ```powershell
-& "D:/TOOL/Anaconda/python.exe" run_simulation.py squid-soft-robot --steps 8 `
-    --source-config "D:\path\to\your\simulation_config.json"
+& $python run_simulation.py squid-soft-robot --steps 8 `
+    --source-config ".\config\simulation_config.json"
 ```
 
 可运行案例清单以 `run_simulation.py --help` 输出为准（`comsol-*` 两个基准案例

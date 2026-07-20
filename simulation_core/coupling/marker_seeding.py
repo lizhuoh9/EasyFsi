@@ -333,19 +333,23 @@ class TriSurfaceMarkerSeedFields:
         self._reseed_flag[None] = 0
         threshold = spacing_safety * min_cell_m * growth_margin
         for t in range(triangle_count):
-            ids = self.tri_vertex_ids[t]
-            v0 = ti.cast(self.vertices_m[ids[0]], ti.f64)
-            v1 = ti.cast(self.vertices_m[ids[1]], ti.f64)
-            v2 = ti.cast(self.vertices_m[ids[2]], ti.f64)
-            e0 = (v1 - v0).norm()
-            e1 = (v2 - v1).norm()
-            e2 = (v0 - v2).norm()
-            longest_edge = ti.max(e0, ti.max(e1, e2))
-            level = self.subdivision_level[t]
-            s_f = ti.cast(1 << level, ti.f64)
-            sub_edge = longest_edge / s_f
-            if sub_edge > threshold:
-                ti.atomic_max(self._reseed_flag[None], 1)
+            # Rest-degenerate triangles always retain one zero-area marker;
+            # reseeding cannot refine them, so they must not create a
+            # permanent cold-path trigger merely because they are collinear.
+            if self.tri_degenerate[t] == 0:
+                ids = self.tri_vertex_ids[t]
+                v0 = ti.cast(self.vertices_m[ids[0]], ti.f64)
+                v1 = ti.cast(self.vertices_m[ids[1]], ti.f64)
+                v2 = ti.cast(self.vertices_m[ids[2]], ti.f64)
+                e0 = (v1 - v0).norm()
+                e1 = (v2 - v1).norm()
+                e2 = (v0 - v2).norm()
+                longest_edge = ti.max(e0, ti.max(e1, e2))
+                level = self.subdivision_level[t]
+                s_f = ti.cast(1 << level, ti.f64)
+                sub_edge = longest_edge / s_f
+                if sub_edge > threshold:
+                    ti.atomic_max(self._reseed_flag[None], 1)
 
 
 def _validate_cell_size_xyz_m(cell_size_xyz_m) -> np.ndarray:

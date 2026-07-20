@@ -78,6 +78,7 @@ class SourceStaticContractTests(unittest.TestCase):
                 _read(FLUID_SOLVER_SOURCE),
             )
         )
+        normalized_source = " ".join(source.split())
 
         self.assertIn(
             ") / self.cell_width_x_m[i]",
@@ -85,10 +86,17 @@ class SourceStaticContractTests(unittest.TestCase):
         )
         self.assertIn("def compute_divergence(", source)
         self.assertIn("pressure_outlet_zmin: bool = False,", source)
-        self.assertIn("velocity_inlet_zmax: bool = False,", source)
+        self.assertIn("velocity_inlet_zmax: bool | None = None,", source)
         self.assertIn("if pressure_outlet_zmin == 1 and k == 0:", source)
         self.assertIn("bottom_velocity_z = self.velocity[i, j, k].z", source)
-        self.assertIn("if velocity_inlet_zmax == 1 and k == self.nz - 1:", source)
+        self.assertIn("velocity_inlet_zmax_mode == 1", source)
+        self.assertIn("velocity_inlet_zmax_mode == 2", source)
+        self.assertIn(
+            "velocity_inlet_zmax_mode == 2 and ( "
+            "self.external_velocity_boundary_z_face_active_component_mask[ "
+            "1, i, j ] & 4 ) != 0",
+            normalized_source,
+        )
         self.assertIn("top_velocity_z = self.velocity[i, j, k].z", source)
         self.assertIn("(right_velocity_x - left_velocity_x) / self.cell_width_x_m[i]", source)
         self.assertIn("self.obstacle[i + 1, j, k] == 0", source)
@@ -96,7 +104,10 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertIn("ti.cast(cell_width_x_m[i], ti.f64)", source)
         self.assertIn("ti.cast(center_distance_x_m[i + 1], ti.f64)", source)
         self.assertIn("fine_cell_width_x_m[fi]", source)
-        self.assertIn("weighted_residual_sum += fine_residual[fi, fj, fk] * volume_m3", source)
+        self.assertIn(
+            "ti.cast(fine_residual[fi, fj, fk], ti.f64) * volume_m3",
+            source,
+        )
         self.assertIn("def _cell_volume_m3(self, i, j, k):", source)
         self.assertIn("self._cell_volume_m3(ii, jj, kk)", source)
         self.assertIn("cell_volume_m3 = self._cell_volume_m3(i, j, k)", source)
@@ -107,13 +118,19 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertNotIn("non-uniform CartesianGrid requires non-uniform advection/diffusion", source)
         self.assertIn("grad.z = 2.0 * center / self.cell_width_z_m[k]", source)
         self.assertIn("def _apply_closed_boundary_no_normal_flow_kernel", source)
-        self.assertIn("neighbor_sum += inv_dx2 * self.pressure[i - 1, j, k]", source)
-        self.assertIn("neighbor_sum += inv_dx2 * self.pressure[i + 1, j, k]", source)
-        self.assertIn("denominator += 2.0 * inv_dz2", source)
-        self.assertIn("denominator += inv_dx2", source)
-        self.assertIn("denominator += inv_dy2", source)
-        self.assertIn("denominator += inv_dz2", source)
-        self.assertIn("denominator += ti.cast(2.0, ti.f64) / (", source)
+        self.assertIn(
+            "neighbor_sum += coeff * face_weight * pressure[i - 1, j, k]",
+            source,
+        )
+        self.assertIn(
+            "neighbor_sum += coeff * face_weight * pressure[i + 1, j, k]",
+            source,
+        )
+        self.assertIn("denominator += coeff * face_weight", source)
+        self.assertIn(
+            "denominator += outlet_face_weight * ti.cast(2.0, ti.f64) / (",
+            source,
+        )
         self.assertIn("* ti.cast(cell_width_z_m[k], ti.f64)", source)
         self.assertIn("max_cells: int | None = None", source)
         self.assertIn("graded grid cell count", source)
@@ -122,11 +139,14 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertIn("self.velocity[0, j, k].x = 0.0", source)
         self.assertIn("self.velocity[i, 0, k].y = 0.0", source)
         self.assertIn("self.velocity[i, j, 0].z = 0.0", source)
-        # self.velocity[self.nx - 1, j, k].x = 0.0 lives in
-        # _apply_symmetry_domain_walls_kernel's xmax branch (mirror-plane
-        # symmetry BCs), NOT in _apply_closed_boundary_no_normal_flow_kernel:
-        # that predictor no-slip-wall kernel is min-side only, pinned below.
-        self.assertIn("self.velocity[self.nx - 1, j, k].x = 0.0", source)
+        # The max-side storage row is an interior backward face, so symmetry
+        # copies tangential components without clamping that row's normal
+        # component. The missing-neighbor projection stencil supplies no flux.
+        self.assertNotIn("self.velocity[self.nx - 1, j, k].x = 0.0", source)
+        self.assertIn(
+            "self.velocity[self.nx - 1, j, k].y = self.velocity[self.nx - 2, j, k].y",
+            source,
+        )
         # _apply_closed_boundary_no_normal_flow_kernel must stay min-side
         # only: in this backward-face (MAC) velocity layout, index 0 is the
         # only real outward wall face per axis; nx-1/ny-1/nz-1 are interior

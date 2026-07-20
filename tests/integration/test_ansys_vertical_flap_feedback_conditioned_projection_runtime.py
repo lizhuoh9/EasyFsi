@@ -14,7 +14,7 @@ class AnsysVerticalFlapFeedbackConditionedProjectionRuntimeTests(unittest.TestCa
         report = run_vertical_flap_fsi_smoke(
             VerticalFlapFsiConfig(
                 step_count=2,
-                flow_projection_iterations=2,
+                flow_projection_iterations=64,
                 solid_substeps=1,
             )
         )
@@ -30,10 +30,11 @@ class AnsysVerticalFlapFeedbackConditionedProjectionRuntimeTests(unittest.TestCa
             report["config"]["step_count"] - 1,
         )
         self.assertGreater(history[1]["fluid_feedback_constraint_marker_count"], 0)
-        self.assertGreater(history[1]["fluid_feedback_constraint_active_cell_count"], 0)
-        self.assertGreaterEqual(
-            history[1]["fluid_feedback_constraint_cleared_cell_count"],
-            0,
+        self.assertEqual(history[1]["fluid_feedback_constraint_active_cell_count"], 0)
+        self.assertEqual(history[1]["legacy_constraint_active_cell_count"], 0)
+        self.assertEqual(
+            history[1]["fluid_marker_feedback_enforcement_mode"],
+            "hibm_sharp_reconstructed_rows",
         )
         self.assertGreaterEqual(
             history[1]["fluid_feedback_constraint_non_obstacle_cell_count"],
@@ -44,17 +45,15 @@ class AnsysVerticalFlapFeedbackConditionedProjectionRuntimeTests(unittest.TestCa
             0,
         )
         self.assertTrue(
-            math.isfinite(history[1]["no_slip_target_residual_after_assembly_mps"])
-        )
-        self.assertTrue(
             math.isfinite(history[1]["no_slip_projected_residual_after_projection_mps"])
         )
+        self.assertTrue(math.isfinite(history[1]["hibm_no_slip_max_residual_mps"]))
 
     def test_three_step_runtime_clears_previous_feedback_constraints(self) -> None:
         report = run_vertical_flap_fsi_smoke(
             VerticalFlapFsiConfig(
                 step_count=3,
-                flow_projection_iterations=2,
+                flow_projection_iterations=64,
                 solid_substeps=1,
             )
         )
@@ -73,22 +72,17 @@ class AnsysVerticalFlapFeedbackConditionedProjectionRuntimeTests(unittest.TestCa
             report["fluid_projection_consumed_feedback_count"],
             report["config"]["step_count"] - 1,
         )
-        self.assertGreater(step_2["fluid_feedback_constraint_active_cell_count"], 0)
-        self.assertGreater(step_3["fluid_feedback_constraint_cleared_cell_count"], 0)
-        self.assertLessEqual(
-            step_3["fluid_feedback_constraint_cleared_cell_count"],
-            step_2["fluid_feedback_constraint_active_cell_count"],
-        )
+        self.assertEqual(step_2["fluid_feedback_constraint_active_cell_count"], 0)
+        self.assertEqual(step_3["fluid_feedback_constraint_cleared_cell_count"], 0)
+        self.assertEqual(step_3["legacy_constraint_active_cell_count"], 0)
         self.assertGreaterEqual(
             step_3["fluid_feedback_constraint_projection_participating_cell_count"],
             0,
         )
         self.assertTrue(
-            math.isfinite(step_3["no_slip_target_residual_after_assembly_mps"])
-        )
-        self.assertTrue(
             math.isfinite(step_3["no_slip_projected_residual_after_projection_mps"])
         )
+        self.assertTrue(math.isfinite(step_3["hibm_no_slip_max_residual_mps"]))
 
 
 if __name__ == "__main__":

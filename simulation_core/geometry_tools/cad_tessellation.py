@@ -525,6 +525,35 @@ def remap_step_named_selection_face_ids(
         if not tags:
             continue
         if kind == "step_surface":
+            available_tags = {
+                int(entity.entity_tag) for entity in result.surface_entities
+            }
+        elif kind == "step_curve_loop":
+            available_tags = {
+                int(entity.entity_tag) for entity in result.curve_entities
+            }
+        elif kind == "step_part":
+            available_tags = {
+                int(entity.entity_tag) for entity in result.part_entities
+            }
+            available_tags.update(
+                int(tag)
+                for entity in result.part_entities
+                for tag in entity.surface_tags
+            )
+            available_tags.update(
+                int(entity.entity_tag) for entity in result.surface_entities
+            )
+        else:
+            available_tags = set()
+        missing_tags = tuple(tag for tag in tags if tag not in available_tags)
+        if missing_tags:
+            raise ValueError(
+                "STEP named selection "
+                f"{selection.get('id')} with kind {kind!r} references missing "
+                f"CAD tags {missing_tags}."
+            )
+        if kind == "step_surface":
             face_ids = face_ids_for_step_surface_tags(result, tags)
         elif kind == "step_curve_loop":
             face_ids = face_ids_for_step_curve_tags(result, tags)

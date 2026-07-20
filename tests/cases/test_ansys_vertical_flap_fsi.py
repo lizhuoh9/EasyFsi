@@ -4,6 +4,7 @@ import unittest
 import importlib.util
 from dataclasses import replace
 from pathlib import Path
+from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -171,6 +172,9 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         run_source = inspect.getsource(
             solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
         )
+        run_source += inspect.getsource(
+            solid_mpm_fsi_runner._advance_solid_substeps_batched
+        )
         self.assertIn("preserve_marker_area_during_surface_feedback", run_source)
         self.assertIn("preserve_marker_area=", run_source)
         self.assertIn("solid_constitutive_model", run_source)
@@ -256,6 +260,10 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         active = np.zeros((1, 3, 4), dtype=np.int32)
         values = np.ones((1, 3, 4, 3), dtype=np.float32)
         weights = np.zeros((1, 3, 4), dtype=np.float32)
+        marker_regions = np.full((1, 3, 4), -1, dtype=np.int32)
+        hard_masks = np.zeros((1, 3, 4), dtype=np.int32)
+        external_exact_masks = np.zeros((1, 3, 4), dtype=np.int32)
+        owned_rows = np.zeros((1, 3, 4), dtype=np.int32)
         obstacle = np.zeros((1, 3, 4), dtype=np.int32)
         obstacle[0, 0, 2] = 1
         config = SimpleNamespace(flow_ymin_no_slip_rows=1)
@@ -264,6 +272,10 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             active,
             values,
             weights,
+            marker_regions,
+            hard_masks,
+            external_exact_masks,
+            owned_rows,
             obstacle,
             config,
         )
@@ -273,22 +285,38 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         np.testing.assert_allclose(values[0, 0, 0], [0.0, 0.0, 0.0])
         self.assertEqual(float(weights[0, 0, 0]), 1.0)
         self.assertEqual(float(weights[0, 0, 2]), 0.0)
+        self.assertEqual(int(marker_regions[0, 0, 0]), -1)
+        self.assertEqual(int(hard_masks[0, 0, 0]), 0b111)
+        self.assertEqual(int(external_exact_masks[0, 0, 0]), 0b010)
+        self.assertEqual(int(external_exact_masks[0, 0, 2]), 0)
+        self.assertEqual(int(owned_rows[0, 0, 0]), 0)
         self.assertEqual(active[0, 1, 0], 0)
 
     def test_ymin_no_slip_rows_preserve_active_marker_feedback_targets(self):
         active = np.zeros((1, 3, 4), dtype=np.int32)
         values = np.ones((1, 3, 4, 3), dtype=np.float32)
         weights = np.zeros((1, 3, 4), dtype=np.float32)
+        marker_regions = np.full((1, 3, 4), -1, dtype=np.int32)
+        hard_masks = np.zeros((1, 3, 4), dtype=np.int32)
+        external_exact_masks = np.zeros((1, 3, 4), dtype=np.int32)
+        owned_rows = np.zeros((1, 3, 4), dtype=np.int32)
         obstacle = np.zeros((1, 3, 4), dtype=np.int32)
         active[0, 0, 1] = 1
         values[0, 0, 1] = (2.5, -0.5, 0.25)
         weights[0, 0, 1] = 1.0
+        marker_regions[0, 0, 1] = 7
+        hard_masks[0, 0, 1] = 0b111
+        owned_rows[0, 0, 1] = 1
         config = SimpleNamespace(flow_ymin_no_slip_rows=1)
 
         solid_mpm_fsi_runner._apply_ymin_no_slip_rows(
             active,
             values,
             weights,
+            marker_regions,
+            hard_masks,
+            external_exact_masks,
+            owned_rows,
             obstacle,
             config,
         )
@@ -296,8 +324,13 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(active[0, 0, 1], 1)
         np.testing.assert_allclose(values[0, 0, 1], (2.5, -0.5, 0.25))
         self.assertEqual(float(weights[0, 0, 1]), 1.0)
+        self.assertEqual(int(marker_regions[0, 0, 1]), 7)
+        self.assertEqual(int(hard_masks[0, 0, 1]), 0b111)
+        self.assertEqual(int(external_exact_masks[0, 0, 1]), 0)
+        self.assertEqual(int(owned_rows[0, 0, 1]), 1)
         self.assertEqual(active[0, 0, 0], 1)
         np.testing.assert_allclose(values[0, 0, 0], (0.0, 0.0, 0.0))
+        self.assertEqual(int(external_exact_masks[0, 0, 0]), 0b010)
 
     def test_obstacle_no_slip_layers_constrain_only_adjacent_fluid_cells(self):
         active = np.zeros((1, 4, 5), dtype=np.int32)
@@ -366,6 +399,349 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
         self.assertLess(config.mpm_support_radius_m, 0.5 * config.flap_height_m)
 
+    def test_selected_official_config_keeps_boundary_markers_on_physical_faces(self):
+        class FakeMarkers:
+            def __init__(self, marker_capacity, runtime):
+                self.marker_capacity = marker_capacity
+                self.marker_count = 0
+                self.projection_vertex_count = 0
+
+            def load_markers(self, **kwargs):
+                self.positions_m = list(kwargs["positions_m"])
+                self.pressure_probe_origins_m = list(
+                    kwargs["pressure_probe_origins_m"]
+                )
+                self.marker_count = len(self.positions_m)
+                self.projection_vertex_count = self.marker_count
+
+            def configure_open_ribbon_tip_cap(self, **kwargs):
+                self.tip_cap = dict(kwargs)
+                self.projection_vertex_count = self.marker_count + 4
+                return self.projection_vertex_count
+
+            def set_projection_segments(self, segment_indices):
+                self.projection_segments = tuple(segment_indices)
+                return len(self.projection_segments)
+
+        config = replace(
+            selected_formulation_solver_config(step_count=5),
+            marker_count=2,
+        )
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(config)
+        solid_min, solid_max = solid_mpm_fsi_runner._solid_box(config)
+        dz = config.duct_length_m / float(config.grid_nodes[2])
+
+        with patch.object(solid_mpm_fsi_runner, "HibmMpmSurfaceMarkers", FakeMarkers):
+            markers = solid_mpm_fsi_runner._build_markers(config, runtime=None)
+
+        self.assertEqual(config.flow_solid_boundary_mode, "hibm_sharp_marker_rows")
+        self.assertAlmostEqual(config.traction_marker_face_offset_cells, 0.0)
+        self.assertEqual(
+            config.traction_pressure_probe_origin_mode,
+            "physical_face_offset",
+        )
+        self.assertAlmostEqual(
+            config.traction_pressure_probe_origin_offset_cells,
+            0.51,
+        )
+        self.assertTrue(
+            all(
+                math.isclose(position[2], solid_max[2])
+                for position in markers.positions_m[:2]
+            )
+        )
+        self.assertTrue(
+            all(
+                math.isclose(position[2], solid_min[2])
+                for position in markers.positions_m[2:]
+            )
+        )
+        self.assertTrue(
+            all(
+                math.isclose(origin[2], solid_max[2] + 0.51 * dz)
+                for origin in markers.pressure_probe_origins_m[:2]
+            )
+        )
+        self.assertTrue(
+            all(
+                math.isclose(origin[2], solid_min[2] - 0.51 * dz)
+                for origin in markers.pressure_probe_origins_m[2:]
+            )
+        )
+
+    def test_production_geometry_reports_all_128_marker_constraint_semantics(self):
+        test_started = perf_counter()
+        stage_started = test_started
+
+        def report_stage(stage_name: str) -> None:
+            nonlocal stage_started
+            now = perf_counter()
+            print(
+                "production marker gate timing:",
+                {
+                    "stage": stage_name,
+                    "stage_elapsed_s": now - stage_started,
+                    "total_elapsed_s": now - test_started,
+                },
+                flush=True,
+            )
+            stage_started = now
+
+        grid_nodes = (4, 256, 320)
+        base_config = selected_formulation_solver_config(step_count=0)
+        config = replace(
+            base_config,
+            grid_nodes=grid_nodes,
+            solid_particle_counts=(1, 256, 20),
+            marker_count=64,
+            # Retain the v4 launch identity, but do not invoke the preflow
+            # loop: this fixture stops after one initial sharp assembly.
+            preflow_steps=40,
+            preflow_convergence_mode="single_step_legacy",
+            flow_post_dirichlet_consistency_projection_iterations=3,
+            flow_cg_preconditioner="fv_multigrid",
+            flow_predictor_substeps=64,
+            flow_hibm_sharp_search_radius_m=1.7e-3,
+            flow_hibm_sharp_search_radius_xyz_m=(
+                0.5 * float(base_config.span_m)
+                - 0.4 * (float(base_config.span_m) / float(grid_nodes[0])),
+                5.0
+                * (
+                    0.5
+                    * float(base_config.duct_height_m)
+                    / float(grid_nodes[1])
+                ),
+                1.5
+                * (float(base_config.duct_length_m) / float(grid_nodes[2])),
+            ),
+            flow_hibm_sharp_interior_probe_distance_m=(
+                1.5
+                * max(
+                    float(base_config.span_m) / float(grid_nodes[0]),
+                    0.5
+                    * float(base_config.duct_height_m)
+                    / float(grid_nodes[1]),
+                    float(base_config.duct_length_m) / float(grid_nodes[2]),
+                )
+            ),
+            flow_hibm_sharp_interpolate_velocity_rows=False,
+            flow_hibm_dynamic_solid_volume_enabled=True,
+            flow_hibm_tiny_unreached_cleanup_component_cells=128,
+            update_fluid_obstacle_from_solid=True,
+            enforce_solid_seeding_limit=True,
+        )
+        config = vertical_flap_case.with_local_surface_force_support(config)
+        runtime = TaichiRuntimeConfig(arch="cuda")
+        fluid = None
+        markers = None
+        solid = None
+        sampling_identity = None
+        sharp_boundary_cache: dict[str, object] = {}
+
+        try:
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(config)
+            report_stage("validate_config")
+            fluid = solid_mpm_fsi_runner._build_fluid(config, runtime)
+            report_stage("build_fluid")
+            solid_mpm_fsi_runner._initialize_computed_flow(fluid, config)
+            report_stage("initialize_flow")
+            markers = solid_mpm_fsi_runner._build_markers(config, runtime)
+            report_stage("build_markers")
+            self.assertEqual(int(markers.marker_count), 128)
+            self.assertEqual(int(markers.projection_vertex_count), 132)
+            self.assertEqual(int(markers.projection_segment_count), 129)
+            solid = solid_mpm_fsi_runner._build_solid(config, runtime)
+            report_stage("build_solid")
+            dynamic_obstacle_report = (
+                solid_mpm_fsi_runner._update_fluid_obstacle_from_solid(
+                    fluid,
+                    solid,
+                    config,
+                )
+            )
+            report_stage("update_dynamic_obstacle")
+            self.assertTrue(
+                dynamic_obstacle_report[
+                    "fluid_dynamic_obstacle_is_hibm_solid_volume"
+                ]
+            )
+            boundary_report = (
+                solid_mpm_fsi_runner._apply_hibm_sharp_marker_boundary_to_fluid(
+                markers,
+                fluid,
+                config,
+                update_pressure_gradient=False,
+                boundary_cache=sharp_boundary_cache,
+                )
+            )
+            report_stage("apply_sharp_boundary")
+            canonical_report = boundary_report[
+                "canonical_velocity_dirichlet_report"
+            ]
+            self.assertEqual(canonical_report["region_conflict_count"], 0)
+            self.assertGreater(
+                canonical_report[
+                    "projection_only_region_seam_merged_count"
+                ],
+                0,
+            )
+            closure_report = canonical_report["marker_target_closure"]
+            self.assertTrue(closure_report["enabled"])
+            self.assertEqual(
+                closure_report["projection_only_marker_count"],
+                4,
+            )
+            self.assertEqual(
+                closure_report["projection_only_evaluated_axis_count"],
+                12,
+            )
+            self.assertEqual(
+                closure_report["projection_only_invalid_axis_count"],
+                0,
+            )
+            self.assertTrue(
+                np.isfinite(
+                    closure_report["projection_only_max_residual_mps"]
+                )
+            )
+            self.assertLessEqual(
+                closure_report["projection_only_max_residual_mps"],
+                closure_report["absolute_tolerance_mps"],
+            )
+
+            component_face_valid_mask = (
+                fluid.prepare_hibm_no_slip_component_face_valid_mask()
+            )
+            report_stage("prepare_component_face_valid_mask")
+            sampling_identity = markers.prepare_no_slip_sampling_identity(
+                obstacle_field=fluid.hibm_no_slip_sampling_obstacle,
+                component_face_valid_mask=component_face_valid_mask,
+                cell_face_x_m=fluid.cell_face_x_m,
+                cell_face_y_m=fluid.cell_face_y_m,
+                cell_face_z_m=fluid.cell_face_z_m,
+                cell_center_x_m=fluid.cell_center_x_m,
+                cell_center_y_m=fluid.cell_center_y_m,
+                cell_center_z_m=fluid.cell_center_z_m,
+                grid_nodes=fluid.grid.grid_nodes,
+                topology_generation=int(fluid.hibm_reachability_revision),
+                component_face_valid_mask_generation=int(
+                    fluid.velocity_dirichlet_component_ledger_generation
+                ),
+            )
+            report_stage("prepare_no_slip_sampling_identity")
+
+            marker_count = int(sampling_identity.marker_count)
+            sample_valid = sampling_identity.sample_valid.to_numpy()[
+                :marker_count
+            ].astype(bool)
+            sample_source = sampling_identity.sample_source_code.to_numpy()[
+                :marker_count
+            ]
+            sample_position_m = sampling_identity.sample_position_m.to_numpy()[
+                :marker_count
+            ].astype(np.float64)
+            marker_position_m = (
+                sampling_identity.marker_position_snapshot_m.to_numpy()[
+                    :marker_count
+                ].astype(np.float64)
+            )
+            marker_normal = (
+                sampling_identity.marker_normal_snapshot.to_numpy()[
+                    :marker_count
+                ].astype(np.float64)
+            )
+
+            self.assertTrue(np.all(np.isfinite(sample_position_m)))
+            self.assertTrue(np.all(np.isfinite(marker_position_m)))
+            self.assertTrue(np.all(np.isfinite(marker_normal)))
+            sample_offset_m = sample_position_m - marker_position_m
+            total_offset_m = np.linalg.norm(sample_offset_m, axis=1)
+            normal_norm = np.linalg.norm(marker_normal, axis=1)
+            unit_normal = marker_normal / np.where(
+                normal_norm > 0.0,
+                normal_norm,
+                1.0,
+            )[:, None]
+            signed_normal_offset_m = np.einsum(
+                "ij,ij->i",
+                sample_offset_m,
+                unit_normal,
+            )
+            normal_offset_m = np.abs(signed_normal_offset_m)
+            tangential_offset_m = np.linalg.norm(
+                sample_offset_m - signed_normal_offset_m[:, None] * unit_normal,
+                axis=1,
+            )
+
+            valid_count = int(np.count_nonzero(sample_valid))
+            invalid_count = int(marker_count - valid_count)
+            direct_count = int(
+                np.count_nonzero(sample_valid & (sample_source == 1))
+            )
+            normal_walk_count = int(
+                np.count_nonzero(sample_valid & (sample_source == 2))
+            )
+            nearest_count = int(
+                np.count_nonzero(sample_valid & (sample_source == 3))
+            )
+            moved_constraint_count = int(
+                np.count_nonzero(
+                    sample_valid
+                    & (sample_source != 1)
+                    & (total_offset_m > 0.0)
+                )
+            )
+            max_total_offset_m = (
+                float(np.max(total_offset_m[sample_valid]))
+                if valid_count
+                else 0.0
+            )
+            max_normal_offset_m = (
+                float(np.max(normal_offset_m[sample_valid]))
+                if valid_count
+                else 0.0
+            )
+            max_tangential_offset_m = (
+                float(np.max(tangential_offset_m[sample_valid]))
+                if valid_count
+                else 0.0
+            )
+            diagnostics = {
+                "marker_count": marker_count,
+                "valid_count": valid_count,
+                "invalid_count": invalid_count,
+                "direct_count": direct_count,
+                "normal_walk_count": normal_walk_count,
+                "nearest_count": nearest_count,
+                "moved_constraint_count": moved_constraint_count,
+                "max_total_offset_m": max_total_offset_m,
+                "max_normal_offset_m": max_normal_offset_m,
+                "max_tangential_offset_m": max_tangential_offset_m,
+            }
+            print("production marker constraint semantics:", diagnostics)
+
+            self.assertEqual(marker_count, 128, diagnostics)
+            self.assertEqual(valid_count + invalid_count, 128, diagnostics)
+            self.assertEqual(
+                direct_count
+                + normal_walk_count
+                + nearest_count
+                + invalid_count,
+                128,
+                diagnostics,
+            )
+            self.assertEqual(invalid_count, 0, diagnostics)
+            self.assertEqual(direct_count, 128, diagnostics)
+            self.assertEqual(normal_walk_count, 0, diagnostics)
+            self.assertEqual(nearest_count, 0, diagnostics)
+            self.assertEqual(moved_constraint_count, 0, diagnostics)
+        finally:
+            sharp_boundary_cache.clear()
+            sampling_identity = None
+            solid = None
+            markers = None
+            fluid = None
+
     def test_refined_solid_mpm_bounds_pad_root_particle_stencil(self):
         config = VerticalFlapFsiConfig(
             grid_nodes=(4, 128, 256),
@@ -433,7 +809,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def update_dynamic_flap_obstacle_from_particles(self, *args, **kwargs):
+            def update_dynamic_solid_obstacle_from_particles(self, *args, **kwargs):
                 self.calls.append((args, kwargs))
                 return {
                     "fluid_dynamic_obstacle_cell_count": 3,
@@ -461,6 +837,17 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(len(fake_fluid.calls), 1)
+        self.assertEqual(len(fake_fluid.calls[0][0]), 1)
+        solid_min, solid_max = solid_mpm_fsi_runner._solid_box(config)
+        expected_support = tuple(
+            (solid_max[axis] - solid_min[axis])
+            / config.solid_particle_counts[axis]
+            for axis in range(3)
+        )
+        np.testing.assert_allclose(
+            fake_fluid.calls[0][1]["particle_support_size_m"],
+            expected_support,
+        )
         self.assertTrue(report["fluid_dynamic_obstacle_update_enabled"])
         self.assertEqual(report["fluid_dynamic_obstacle_cell_count"], 3)
         self.assertEqual(report["fluid_dynamic_obstacle_added_cell_count"], 2)
@@ -479,28 +866,151 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertNotIn("for j in range(ny)", source)
         self.assertNotIn("for k in range(nz)", source)
 
-    def test_hibm_sharp_mode_disables_particle_obstacle_rasterization(self):
+    def test_hibm_sharp_mode_can_store_particle_obstacle_as_dynamic_volume(self):
         class FailingField:
             def to_numpy(self):
-                raise AssertionError("HIBM sharp mode must not rasterize particles")
+                raise AssertionError("sharp dynamic volume must stay on device")
 
-        fake_fluid = SimpleNamespace(
-            obstacle=FailingField(),
-            velocity=FailingField(),
-            velocity_prev=FailingField(),
-        )
+        class FakeFluid:
+            def __init__(self):
+                self.calls = []
+
+            def update_dynamic_solid_obstacle_from_particles(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return {
+                    "fluid_dynamic_obstacle_cell_count": 7,
+                    "fluid_dynamic_obstacle_added_cell_count": 7,
+                    "fluid_dynamic_obstacle_removed_cell_count": 0,
+                }
+
+        fake_fluid = FakeFluid()
         config = VerticalFlapFsiConfig(
+            grid_nodes=(1, 8, 40),
+            solid_particle_counts=(1, 4, 2),
             flow_solid_boundary_mode="hibm_sharp_marker_rows",
             update_fluid_obstacle_from_solid=True,
+            flow_hibm_dynamic_solid_volume_enabled=True,
+        )
+        fake_solid = SimpleNamespace(
+            particle_count=8,
+            x=FailingField(),
+            rest_x=FailingField(),
         )
 
         report = solid_mpm_fsi_runner._update_fluid_obstacle_from_solid(
             fake_fluid,
-            object(),
+            fake_solid,
             config,
         )
 
-        self.assertFalse(report["fluid_dynamic_obstacle_update_enabled"])
+        self.assertEqual(len(fake_fluid.calls), 1)
+        self.assertTrue(
+            fake_fluid.calls[0][1]["store_as_hibm_dynamic_solid_volume"]
+        )
+        self.assertTrue(report["fluid_dynamic_obstacle_update_enabled"])
+        self.assertTrue(report["fluid_dynamic_obstacle_is_hibm_solid_volume"])
+
+    def test_hibm_dynamic_solid_volume_requires_device_update(self):
+        config = VerticalFlapFsiConfig(
+            flow_solid_boundary_mode="hibm_sharp_marker_rows",
+            flow_hibm_dynamic_solid_volume_enabled=True,
+            update_fluid_obstacle_from_solid=False,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "dynamic solid volume requires update_fluid_obstacle_from_solid",
+        ):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(config)
+
+    def test_hibm_tiny_unreached_cleanup_threshold_must_be_non_negative(self):
+        config = VerticalFlapFsiConfig(
+            flow_hibm_tiny_unreached_cleanup_component_cells=-1,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "flow_hibm_tiny_unreached_cleanup_component_cells must be non-negative",
+        ):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(config)
+
+    def test_sharp_boundary_is_refreshed_before_predictor_and_after_predictor(self):
+        source = inspect.getsource(solid_mpm_fsi_runner._flow_advance_current_step)
+
+        pre_refresh = source.index("pre_predictor_sharp_boundary_report")
+        predictor = source.index("fluid.predict(")
+        post_refresh = source.index(
+            "_apply_hibm_sharp_marker_boundary_to_fluid(",
+            predictor,
+        )
+        projection = source.index("main_flow_report = _project_current_flow(")
+        consistency_refresh = source.index(
+            "_apply_hibm_sharp_marker_boundary_to_fluid(",
+            projection,
+        )
+        consistency_projection = source.index(
+            "consistency_flow_report = _project_current_flow(",
+            consistency_refresh,
+        )
+
+        self.assertLess(pre_refresh, predictor)
+        self.assertLess(predictor, post_refresh)
+        self.assertLess(post_refresh, projection)
+        self.assertLess(projection, consistency_refresh)
+        self.assertLess(consistency_refresh, consistency_projection)
+
+    def test_observer_boundary_rows_refresh_after_solid_volume_commit(self):
+        source = inspect.getsource(
+            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+        )
+
+        volume_commit = source.index("_update_fluid_obstacle_from_solid(")
+        observer_refresh = source.index(
+            "latest_observer_topology_report =", volume_commit
+        )
+        full_row_rebuild = source.index("topology_only=False", observer_refresh)
+        observer = source.index("if step_observer is not None:", full_row_rebuild)
+
+        self.assertLess(volume_commit, observer_refresh)
+        self.assertLess(observer_refresh, full_row_rebuild)
+        self.assertLess(full_row_rebuild, observer)
+
+    def test_sharp_topology_cleanup_runs_before_pressure_rows_and_is_not_repeated(self):
+        boundary_source = inspect.getsource(
+            solid_mpm_fsi_runner._apply_hibm_sharp_marker_boundary_to_fluid
+        )
+        advance_source = inspect.getsource(
+            solid_mpm_fsi_runner._flow_advance_current_step
+        )
+
+        first_velocity_rows = boundary_source.index(
+            "velocity_report = assemble_velocity_rows()"
+        )
+        cleanup_loop = boundary_source.index(
+            "for _topology_cleanup_pass in range(8):"
+        )
+        reachability = boundary_source.index(
+            "mark_hibm_pressure_outlet_disconnected_nonprojectable_cells",
+            cleanup_loop,
+        )
+        cleanup = boundary_source.index(
+            "cleanup_hibm_pressure_outlet_tiny_unreached_components",
+            reachability,
+        )
+        rebuilt_velocity_rows = boundary_source.index(
+            "velocity_report = assemble_velocity_rows()",
+            cleanup,
+        )
+        pressure_rows = boundary_source.index(
+            "assemble_pressure_neumann_matrix_rows"
+        )
+
+        self.assertLess(first_velocity_rows, cleanup_loop)
+        self.assertLess(cleanup_loop, reachability)
+        self.assertLess(reachability, cleanup)
+        self.assertLess(cleanup, rebuilt_velocity_rows)
+        self.assertLess(rebuilt_velocity_rows, pressure_rows)
+        self.assertIn("reuse_topology_from_previous_assembly=True", advance_source)
 
     def test_formal_runner_maps_official_streamwise_flap_box_to_solver_z(self):
         config = VerticalFlapFsiConfig()
@@ -535,6 +1045,9 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 self.normals = []
                 self.areas_m2 = []
                 self.region_ids = []
+                self.projection_segments = ()
+                self.projection_vertex_count = 0
+                self.tip_cap = None
 
             def load_markers(
                 self,
@@ -552,6 +1065,16 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 self.region_ids = list(region_ids)
                 self.pressure_probe_origins_m = pressure_probe_origins_m
                 self.marker_count = len(self.positions_m)
+                self.projection_vertex_count = self.marker_count
+
+            def configure_open_ribbon_tip_cap(self, **kwargs):
+                self.tip_cap = dict(kwargs)
+                self.projection_vertex_count = self.marker_count + 4
+                return self.projection_vertex_count
+
+            def set_projection_segments(self, segment_indices):
+                self.projection_segments = tuple(tuple(row) for row in segment_indices)
+                return len(self.projection_segments)
 
         config = VerticalFlapFsiConfig(marker_count=3)
         solid_min, solid_max = solid_mpm_fsi_runner._solid_box(config)
@@ -559,8 +1082,78 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         with patch.object(solid_mpm_fsi_runner, "HibmMpmSurfaceMarkers", FakeMarkers):
             markers = solid_mpm_fsi_runner._build_markers(config, runtime=None)
 
-        self.assertEqual(markers.marker_capacity, 6)
+        self.assertEqual(markers.marker_capacity, 10)
         self.assertEqual(markers.marker_count, 6)
+        self.assertEqual(markers.projection_vertex_count, 10)
+        self.assertEqual(
+            markers.projection_segments,
+            ((0, 1), (1, 2), (3, 4), (4, 5), (2, 6), (5, 7), (8, 9)),
+        )
+        self.assertEqual(
+            markers.tip_cap["cap_region_id"],
+            solid_mpm_fsi_runner.TIP_CAP_BOUNDARY_REGION_ID,
+        )
+        self.assertEqual(markers.tip_cap["inactive_axis"], 0)
+        self.assertAlmostEqual(
+            markers.tip_cap["cap_area_m2"],
+            (solid_max[0] - solid_min[0]) * (solid_max[2] - solid_min[2]),
+        )
+        boundary_report = (
+            solid_mpm_fsi_runner._marker_projection_boundary_report_fields(markers)
+        )
+        self.assertEqual(boundary_report["marker_physical_traction_count"], 6)
+        self.assertEqual(boundary_report["marker_projection_vertex_count"], 10)
+        self.assertEqual(boundary_report["marker_boundary_only_vertex_count"], 4)
+        self.assertTrue(boundary_report["tip_cap_boundary_enabled"])
+        self.assertFalse(boundary_report["tip_cap_force_included"])
+        self.assertFalse(boundary_report["tip_cap_no_slip_closure_included"])
+        self.assertEqual(
+            boundary_report["tip_cap_no_slip_health_policy"],
+            "missing_kernel_evidence",
+        )
+        measured_boundary_report = (
+            solid_mpm_fsi_runner._marker_projection_boundary_report_fields(
+                markers,
+                canonical_velocity_dirichlet_report={
+                    "marker_target_closure": {
+                        "enabled": True,
+                        "constraint_count": 0,
+                        "adjustable_constraint_count": 0,
+                        "immutable_constraint_count": 0,
+                        "iterations": 0,
+                        "initial_max_residual_mps": 0.0,
+                        "final_max_residual_mps": 0.0,
+                        "final_max_adjustable_residual_mps": 0.0,
+                        "final_max_immutable_residual_mps": 0.0,
+                        "absolute_tolerance_mps": 1.0e-4,
+                        "closure_tolerance_mps": 1.0e-6,
+                        "density_kgm3": 1.2,
+                        "projection_only_marker_count": 4,
+                        "projection_only_evaluated_axis_count": 12,
+                        "projection_only_invalid_axis_count": 0,
+                        "projection_only_constraint_count": 0,
+                        "projection_only_max_residual_mps": 0.0,
+                    }
+                },
+            )
+        )
+        self.assertTrue(
+            measured_boundary_report["tip_cap_no_slip_closure_included"]
+        )
+        self.assertEqual(
+            measured_boundary_report["tip_cap_no_slip_health_policy"],
+            "canonical_marker_target_closure_kernel_evidence",
+        )
+        self.assertEqual(
+            measured_boundary_report[
+                "tip_cap_marker_target_closure_evaluated_axis_count"
+            ],
+            12,
+        )
+        self.assertEqual(
+            boundary_report["tip_cap_traction_policy"],
+            "excluded_boundary_only",
+        )
         self.assertEqual(markers.normals[:3], [(0.0, 0.0, 1.0)] * 3)
         self.assertEqual(markers.normals[3:], [(0.0, 0.0, -1.0)] * 3)
         self.assertEqual(
@@ -597,7 +1190,13 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 runtime=None,
             )
 
-        self.assertEqual(offset_markers.marker_capacity, 4)
+        self.assertEqual(offset_markers.marker_capacity, 8)
+        self.assertEqual(offset_markers.marker_count, 4)
+        self.assertEqual(offset_markers.projection_vertex_count, 8)
+        self.assertEqual(
+            offset_markers.projection_segments,
+            ((0, 1), (2, 3), (1, 4), (3, 5), (6, 7)),
+        )
         self.assertTrue(
             all(
                 math.isclose(
@@ -637,6 +1236,24 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
         self.assertEqual(single_markers.marker_capacity, 3)
         self.assertEqual(single_markers.marker_count, 3)
+        self.assertEqual(single_markers.projection_vertex_count, 3)
+        self.assertIsNone(single_markers.tip_cap)
+        self.assertEqual(single_markers.projection_segments, ((0, 1), (1, 2)))
+        single_boundary_report = (
+            solid_mpm_fsi_runner._marker_projection_boundary_report_fields(
+                single_markers
+            )
+        )
+        self.assertEqual(single_boundary_report["marker_boundary_only_vertex_count"], 0)
+        self.assertFalse(single_boundary_report["tip_cap_boundary_enabled"])
+        self.assertIsNone(single_boundary_report["tip_cap_boundary_region_id"])
+        self.assertFalse(
+            single_boundary_report["tip_cap_no_slip_closure_included"]
+        )
+        self.assertEqual(
+            single_boundary_report["tip_cap_traction_policy"],
+            "not_applicable",
+        )
         self.assertEqual(single_markers.normals, [(0.0, 0.0, 1.0)] * 3)
         self.assertEqual(
             single_markers.region_ids,
@@ -653,6 +1270,12 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             solid_mpm_fsi_runner._traction_marker_face_count(single_config),
             1,
         )
+
+    def test_dual_face_tip_cap_requires_two_markers_per_face(self):
+        with self.assertRaisesRegex(ValueError, "at least two markers per face"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                VerticalFlapFsiConfig(marker_count=1)
+            )
 
     def test_generic_problem_defaults_to_runtime_pressure_pairs_without_json(self):
         problem = build_ansys_vertical_flap_generic_problem(step_count=50)
@@ -1247,6 +1870,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             step_count=5,
             traction_marker_layout="dual_physical_faces",
             traction_pressure_sampling_mode="one_sided_surface_pressure",
+            traction_marker_face_offset_cells=0.0,
             traction_pressure_probe_origin_mode="physical_face_offset",
             traction_pressure_probe_origin_offset_cells=0.51,
             traction_pressure_pair_policy="baseline_anchored_cell_pair",
@@ -1608,6 +2232,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         config = VerticalFlapFsiConfig(
             grid_nodes=(2, 2, 2),
             flow_symmetry_domain_walls=("ymax",),
+            flow_projection_velocity_inlet_zmax=None,
         )
         fake_fluid = FakeFluid()
 
@@ -1615,6 +2240,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             fake_fluid,
             config,
             reset_pressure=True,
+            velocity_dirichlet_soft_rows_already_applied=True,
         )
 
         expected_flags = (False, False, False, True, False, False)
@@ -1622,6 +2248,19 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(
             report["projection_report"]["flow_symmetry_domain_walls"],
             [False, False, False, True, False, False],
+        )
+        self.assertIsNone(
+            report["projection_report"]["project_kwargs"]["velocity_inlet_zmax"]
+        )
+        self.assertTrue(
+            report["projection_report"]["project_kwargs"][
+                "velocity_dirichlet_soft_rows_already_applied"
+            ]
+        )
+        self.assertTrue(
+            report["projection_report"][
+                "velocity_dirichlet_soft_rows_already_applied"
+            ]
         )
 
     def test_hibm_sharp_marker_boundary_mode_is_generic_and_not_reserved(self):
@@ -1645,13 +2284,21 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         source = inspect.getsource(
             solid_mpm_fsi_runner._apply_hibm_sharp_marker_boundary_to_fluid
         )
+        advance_source = inspect.getsource(
+            solid_mpm_fsi_runner._flow_advance_current_step
+        )
 
-        self.assertNotIn('search_report = cache_entry["search_report"]', source)
-        self.assertNotIn('"search_report": search_report', source)
+        self.assertIn("reuse_topology_from_previous_assembly", source)
+        self.assertIn('search_report = cache_entry["search_report"]', source)
+        self.assertIn('cache_entry["search_report"] = search_report', source)
         self.assertIn("search_report = ib_search.search_and_classify_grid_fields", source)
-        self.assertGreater(
-            source.rindex("search_report = ib_search.search_and_classify_grid_fields"),
-            source.index("if search_reused:"),
+        self.assertIn(
+            "reuse_topology_from_previous_assembly=True",
+            advance_source,
+        )
+        self.assertEqual(
+            advance_source.count("reuse_topology_from_previous_assembly=True"),
+            3,
         )
 
     def test_flow_reporting_uses_fsi_feedback_pressure_not_projection_work_field(self):
@@ -1675,6 +2322,16 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         np.testing.assert_allclose(snapshot["pressure"], feedback_pressure)
         self.assertIn("velocity_dirichlet_boundary_active", snapshot)
         self.assertIn("velocity_dirichlet_boundary_projection_weight", snapshot)
+        self.assertIn(
+            "velocity_dirichlet_boundary_hard_fixed_component_mask",
+            snapshot,
+        )
+        self.assertIn(
+            "velocity_dirichlet_boundary_external_exact_component_mask",
+            snapshot,
+        )
+        self.assertIn("velocity_dirichlet_boundary_owned_row", snapshot)
+        self.assertIn("velocity_dirichlet_boundary_marker_region_id", snapshot)
 
     def test_flow_reporting_default_path_uses_solver_scalar_report(self):
         class _NoDownloadField:
@@ -1839,10 +2496,19 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         values[0, 0, 2] = (0.25, 0.5, 0.75)
         weights = np.zeros((4, 4, 4), dtype=np.float32)
         weights[0, 0, 2] = 0.5
+        enforcement_weights = np.full((4, 4, 4), 0.375, dtype=np.float32)
+        external_exact_masks = np.zeros((4, 4, 4), dtype=np.int32)
+        external_exact_masks[0, 0, 3] = 0b010
         fluid.obstacle.from_numpy(obstacle)
         fluid.velocity_dirichlet_boundary_active.from_numpy(active)
         fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
         fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
+        fluid.velocity_dirichlet_boundary_enforcement_weight.from_numpy(
+            enforcement_weights
+        )
+        fluid.velocity_dirichlet_boundary_external_exact_component_mask.from_numpy(
+            external_exact_masks
+        )
 
         report = fluid.refresh_zmax_inlet_boundary(
             inlet_velocity_mps=4.5,
@@ -1853,6 +2519,12 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         refreshed_values = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
         refreshed_weights = (
             fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+        )
+        refreshed_enforcement_weights = (
+            fluid.velocity_dirichlet_boundary_enforcement_weight.to_numpy()
+        )
+        refreshed_external_exact_masks = (
+            fluid.velocity_dirichlet_boundary_external_exact_component_mask.to_numpy()
         )
         self.assertEqual(report["flow_inlet_boundary_active_cell_count"], 15)
         self.assertEqual(report["flow_inlet_boundary_obstacle_cell_count"], 0)
@@ -1865,6 +2537,149 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(float(refreshed_weights[0, 0, 3]), 1.0)
         self.assertEqual(float(refreshed_weights[1, 1, 3]), 0.0)
         self.assertEqual(float(refreshed_weights[0, 0, 2]), 0.5)
+        self.assertEqual(float(refreshed_enforcement_weights[0, 0, 3]), 1.0)
+        self.assertEqual(float(refreshed_enforcement_weights[1, 1, 3]), 0.0)
+        self.assertEqual(float(refreshed_enforcement_weights[0, 0, 2]), 0.375)
+        self.assertEqual(
+            int(refreshed_external_exact_masks[0, 0, 3]),
+            0b010 | 0b100,
+        )
+        self.assertEqual(int(refreshed_external_exact_masks[1, 1, 3]), 0)
+        self.assertEqual(int(refreshed_external_exact_masks[0, 0, 2]), 0)
+
+    def test_initial_inlet_flow_registers_external_pressure_face_provenance(self):
+        config = replace(VerticalFlapFsiConfig(), grid_nodes=(4, 4, 8))
+        fluid = solid_mpm_fsi_runner._build_fluid(
+            config,
+            TaichiRuntimeConfig(arch="cuda"),
+        )
+        fluid.velocity_dirichlet_boundary_enforcement_weight.fill(0.375)
+
+        solid_mpm_fsi_runner._initialize_inlet_flow(fluid, config)
+
+        hard_masks = (
+            fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.to_numpy()
+        )
+        external_exact_masks = (
+            fluid.velocity_dirichlet_boundary_external_exact_component_mask.to_numpy()
+        )
+        enforcement_weights = (
+            fluid.velocity_dirichlet_boundary_enforcement_weight.to_numpy()
+        )
+        projection_weights = (
+            fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+        )
+        directed_masks = (
+            fluid.external_velocity_boundary_z_face_active_component_mask.to_numpy()
+        )
+        directed_values = (
+            fluid.external_velocity_boundary_z_face_value_mps.to_numpy()
+        )
+        np.testing.assert_array_equal(
+            hard_masks[:, :, -1],
+            np.zeros(config.grid_nodes[:2], dtype=np.int32),
+            err_msg=(
+                "the physical zmax face must not alias the final cell's "
+                "backward internal MAC row"
+            ),
+        )
+        np.testing.assert_array_equal(
+            external_exact_masks[:, :, -1],
+            np.zeros(config.grid_nodes[:2], dtype=np.int32),
+        )
+        self.assertEqual(
+            int(np.count_nonzero(external_exact_masks)),
+            0,
+        )
+        np.testing.assert_array_equal(
+            directed_masks[1],
+            np.full(config.grid_nodes[:2], 0b111, dtype=np.int32),
+        )
+        expected_directed_values = np.zeros((*config.grid_nodes[:2], 3))
+        expected_directed_values[:, :, 2] = -float(config.inlet_velocity_mps)
+        np.testing.assert_allclose(directed_values[1], expected_directed_values)
+        np.testing.assert_array_equal(enforcement_weights, projection_weights)
+        self.assertEqual(
+            fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                pressure_outlet_zmin=True,
+            ),
+            0,
+            msg=(
+                "a directed physical inlet face may not split the final "
+                "internal pressure-cell plane into singleton components"
+            ),
+        )
+        self.assertEqual(
+            fluid._prepare_pressure_outlet_nullspace_component_graph(),
+            (0, 0),
+            msg=(
+                "the empty inlet-to-outlet channel must have no unanchored "
+                "physical or exact-operator pressure components"
+            ),
+        )
+        self.assertEqual(
+            int(fluid.pressure_outlet_operator_raw_component_count[None]),
+            1,
+            msg="the exact operator must see one outlet-anchored channel root",
+        )
+        self.assertEqual(int(fluid._pressure_outlet_operator_component_count), 0)
+
+    def test_initial_inlet_flow_preserves_intersecting_external_face_normals(self):
+        config = replace(
+            VerticalFlapFsiConfig(),
+            grid_nodes=(4, 4, 8),
+            flow_ymin_no_slip_rows=1,
+        )
+        fluid = solid_mpm_fsi_runner._build_fluid(
+            config,
+            TaichiRuntimeConfig(arch="cuda"),
+        )
+
+        solid_mpm_fsi_runner._initialize_inlet_flow(fluid, config)
+
+        hard_masks = (
+            fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.to_numpy()
+        )
+        external_exact_masks = (
+            fluid.velocity_dirichlet_boundary_external_exact_component_mask.to_numpy()
+        )
+        obstacle = fluid.obstacle.to_numpy()
+        corner_fluid_mask = obstacle[:, 0, -1] == 0
+        np.testing.assert_array_equal(
+            hard_masks[:, 0, -1],
+            np.where(corner_fluid_mask, 0b111, 0).astype(np.int32),
+        )
+        np.testing.assert_array_equal(
+            external_exact_masks[:, 0, -1],
+            np.where(corner_fluid_mask, 0b010, 0).astype(np.int32),
+            err_msg=(
+                "the compact corner row owns only the physical ymin normal; "
+                "zmax remains a separate directed external face"
+            ),
+        )
+        directed_masks = (
+            fluid.external_velocity_boundary_z_face_active_component_mask.to_numpy()
+        )
+        np.testing.assert_array_equal(
+            directed_masks[1],
+            np.full(config.grid_nodes[:2], 0b111, dtype=np.int32),
+        )
+
+        solid_mpm_fsi_runner._refresh_zmax_inlet_boundary(fluid, config)
+        refreshed_hard_masks = (
+            fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.to_numpy()
+        )
+        refreshed_external_exact_masks = (
+            fluid.velocity_dirichlet_boundary_external_exact_component_mask.to_numpy()
+        )
+        np.testing.assert_array_equal(
+            refreshed_hard_masks[:, 0, -1],
+            np.where(corner_fluid_mask, 0b111, 0).astype(np.int32),
+        )
+        np.testing.assert_array_equal(
+            refreshed_external_exact_masks[:, 0, -1],
+            np.where(corner_fluid_mask, 0b010, 0).astype(np.int32),
+        )
 
     def test_flow_reporting_pressure_extrema_do_not_clamp_to_zero(self):
         positive = _fake_flow_report_fluid(
@@ -2090,6 +2905,21 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 self.velocity_dirichlet_boundary_projection_weight = Field(
                     np.zeros(shape, dtype=np.float32)
                 )
+                self.velocity_dirichlet_boundary_enforcement_weight = Field(
+                    np.zeros(shape, dtype=np.float32)
+                )
+                self.velocity_dirichlet_boundary_marker_region_id = Field(
+                    np.full(shape, -1, dtype=np.int32)
+                )
+                self.velocity_dirichlet_boundary_hard_fixed_component_mask = Field(
+                    np.zeros(shape, dtype=np.int32)
+                )
+                self.velocity_dirichlet_boundary_external_exact_component_mask = Field(
+                    np.zeros(shape, dtype=np.int32)
+                )
+                self.velocity_dirichlet_boundary_owned_row = Field(
+                    np.zeros(shape, dtype=np.int32)
+                )
                 self.source_calls: list[float] = []
                 self.predict_viscosities: list[float | None] = []
                 self.predict_walls: list[object] = []
@@ -2184,6 +3014,21 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 )
                 self.velocity_dirichlet_boundary_projection_weight = Field(
                     np.zeros(shape, dtype=np.float32)
+                )
+                self.velocity_dirichlet_boundary_enforcement_weight = Field(
+                    np.zeros(shape, dtype=np.float32)
+                )
+                self.velocity_dirichlet_boundary_marker_region_id = Field(
+                    np.full(shape, -1, dtype=np.int32)
+                )
+                self.velocity_dirichlet_boundary_hard_fixed_component_mask = Field(
+                    np.zeros(shape, dtype=np.int32)
+                )
+                self.velocity_dirichlet_boundary_external_exact_component_mask = Field(
+                    np.zeros(shape, dtype=np.int32)
+                )
+                self.velocity_dirichlet_boundary_owned_row = Field(
+                    np.zeros(shape, dtype=np.int32)
                 )
                 self.source_calls: list[float] = []
                 self.predict_viscosities: list[float | None] = []

@@ -1,8 +1,8 @@
 # Turek–Hron FSI Validation Report
 
 Status as of 2026-07-07. Solver: HIBM-MPM (sharp immersed boundary + Material
-Point Method), Python + Taichi, CUDA. Interpreter for all commands:
-`"D:/TOOL/Anaconda/python.exe"`. Case: `cases/turek_hron_fsi.py`.
+Point Method), Python + Taichi, CUDA. Commands use `python` from the active
+environment. Case: `cases/turek_hron_fsi.py`.
 
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It
@@ -90,8 +90,8 @@ Cheap levers **ruled out by direct measurement** (not argued away):
 ## 5. Reproduction
 
 ```bash
-cd "D:/working/squid robot/simulation/src/reference/papers/HIBM-MPM/refactored"
-PY="D:/TOOL/Anaconda/python.exe"
+cd /path/to/EasyFsi
+PY=python
 
 # FSI1 steady (700 steps, ~2.5 h): total drag → ~13.1 vs ref 14.295
 $PY -c "from dataclasses import replace; import cases.turek_hron_fsi as t; \

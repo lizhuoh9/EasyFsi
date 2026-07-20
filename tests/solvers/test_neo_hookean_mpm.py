@@ -38,7 +38,83 @@ def _tri_surface_from_mesh(mesh, region_id: int = 1) -> TriSurfaceRegionDiagnost
     return tri_surface
 
 
+def _single_particle_constitutive_stress_map(
+    deformation_gradient: np.ndarray,
+    *,
+    constitutive_model: str,
+    mu_pa: float,
+    lambda_pa: float,
+) -> np.ndarray:
+    """Recover the constitutive ``P @ F.T`` map from one MPM P2G step.
+
+    The particle is placed at the center of a uniform grid.  At the three
+    positive axial stencil nodes, the normalized grid velocity is
+
+        v_i = -(4 * dt / (rho * dx_i)) * (P @ F.T)[:, i].
+
+    This keeps the test on the public ``step`` behavior while making the
+    expected Saint-Venant--Kirchhoff response independently computable from
+    the Green--Lagrange strain.
+    """
+
+    density_kgm3 = 1000.0
+    dt_s = 1.0e-6
+    state = NeoHookeanMpmState(
+        particle_capacity=1,
+        bounds_min_m=(-0.02, -0.02, -0.02),
+        bounds_max_m=(0.02, 0.02, 0.02),
+        grid_nodes=(8, 8, 8),
+    )
+    state.initialize_box(
+        particle_counts=(1, 1, 1),
+        box_min_m=(-0.001, -0.001, -0.001),
+        box_max_m=(0.001, 0.001, 0.001),
+        density_kgm3=density_kgm3,
+    )
+    state.F.from_numpy(
+        np.asarray(deformation_gradient, dtype=np.float32).reshape(1, 3, 3)
+    )
+
+    state.step(
+        dt_s=dt_s,
+        mu_pa=float(mu_pa),
+        lambda_pa=float(lambda_pa),
+        primary_region_id=0,
+        secondary_region_id=-1,
+        constitutive_model=constitutive_model,
+    )
+
+    grid_velocity = state.grid_velocity_mps.to_numpy()
+    stress_map = np.empty((3, 3), dtype=np.float64)
+    for axis, node in enumerate(((5, 4, 4), (4, 5, 4), (4, 4, 5))):
+        stress_map[:, axis] = (
+            -np.asarray(grid_velocity[node], dtype=np.float64)
+            * density_kgm3
+            * float(state.dx[axis])
+            / (4.0 * dt_s)
+        )
+    return stress_map
+
+
 class NeoHookeanMpmStateTests(unittest.TestCase):
+    def test_svk_dispatch_does_not_precompute_neo_inverse_or_log(self) -> None:
+        source = NEO_HOOKEAN_MPM_SOURCE.read_text(encoding="utf-8")
+        kernel_start = source.index("    def _step_kernel(")
+        dispatch_start = source.index(
+            "if constitutive_model == CONSTITUTIVE_SAINT_VENANT_KIRCHHOFF",
+            kernel_start,
+        )
+        pre_dispatch = source[kernel_start:dispatch_start]
+        dispatch_end = source.index("                inv_dx2 = ti.Matrix(", dispatch_start)
+        dispatch = source[dispatch_start:dispatch_end]
+
+        self.assertNotIn("Fp.inverse().transpose()", pre_dispatch)
+        self.assertNotIn("ti.log(J)", pre_dispatch)
+        self.assertIn("elif constitutive_model == CONSTITUTIVE_LINEAR_ELASTIC", dispatch)
+        self.assertIn("else:", dispatch)
+        self.assertEqual(dispatch.count("Fp.inverse().transpose()"), 1)
+        self.assertEqual(dispatch.count("ti.log(J)"), 1)
+
     def test_layered_surface_updates_area_and_normal_from_deformation_gradient(
         self,
     ) -> None:
@@ -163,6 +239,53 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
         displacement_z = float(state.x.to_numpy()[0, 2] - initial[0, 2])
         self.assertAlmostEqual(displacement_z, 2.0e-7, delta=5.0e-8)
 
+    def test_position_accumulator_does_not_create_multi_ulp_jumps(self) -> None:
+        """Sub-ULP motion must be compensated, not released in 5-8 ULP bursts."""
+
+        state = NeoHookeanMpmState(
+            particle_capacity=1,
+            bounds_min_m=(0.0, 0.0, 1.9),
+            bounds_max_m=(0.1, 0.1, 2.1),
+            grid_nodes=(8, 8, 8),
+        )
+        state.initialize_box(
+            particle_counts=(1, 1, 1),
+            box_min_m=(0.049, 0.049, 1.999),
+            box_max_m=(0.051, 0.051, 2.001),
+            density_kgm3=1000.0,
+        )
+        velocity_mps = 1.0e-2
+        dt_s = 1.0e-5
+        state.set_uniform_velocity((0.0, 0.0, velocity_mps))
+        initial_z = np.float32(state.x.to_numpy()[0, 2])
+        ulp_m = float(np.spacing(initial_z))
+        visible_positions_m = [float(initial_z)]
+
+        for _ in range(12):
+            state.step(
+                dt_s=dt_s,
+                mu_pa=0.0,
+                lambda_pa=0.0,
+                primary_region_id=0,
+                secondary_region_id=-1,
+                read_report=False,
+            )
+            visible_positions_m.append(float(state.x.to_numpy()[0, 2]))
+
+        expected_six_step_z_m = float(initial_z) + 6.0 * dt_s * velocity_mps
+        self.assertLessEqual(
+            abs(visible_positions_m[6] - expected_six_step_z_m),
+            0.55 * ulp_m,
+        )
+        self.assertLessEqual(
+            max(abs(value) for value in np.diff(visible_positions_m)),
+            1.01 * ulp_m,
+        )
+        final_residual_m = abs(
+            float(state.position_increment_residual_m.to_numpy()[0, 2])
+        )
+        self.assertLessEqual(final_residual_m, 0.55 * ulp_m)
+
     def test_non_cubic_grid_uses_axis_spacing_for_particle_mapping(self) -> None:
         material = ecoflex_0010_material()
         state = NeoHookeanMpmState(
@@ -264,6 +387,89 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
                 secondary_region_id=-1,
                 constitutive_model="unknown_model",
             )
+
+    def test_saint_venant_kirchhoff_constitutive_model_is_explicitly_selectable(
+        self,
+    ) -> None:
+        state = NeoHookeanMpmState(
+            particle_capacity=1,
+            bounds_min_m=(-0.02, -0.02, -0.02),
+            bounds_max_m=(0.02, 0.02, 0.02),
+            grid_nodes=(8, 8, 8),
+        )
+        state.initialize_box(
+            particle_counts=(1, 1, 1),
+            box_min_m=(-0.001, -0.001, -0.001),
+            box_max_m=(0.001, 0.001, 0.001),
+            density_kgm3=1000.0,
+        )
+
+        report = state.step(
+            dt_s=1.0e-6,
+            mu_pa=5.0e5,
+            lambda_pa=2.0e6,
+            primary_region_id=0,
+            secondary_region_id=-1,
+            constitutive_model="saint_venant_kirchhoff",
+        )
+
+        self.assertEqual(report.particle_count, 1)
+
+    def test_saint_venant_kirchhoff_non_small_strain_matches_green_lagrange(
+        self,
+    ) -> None:
+        deformation_gradient = np.diag([1.4, 0.8, 1.1]).astype(np.float64)
+        mu_pa = 5.0e5
+        lambda_pa = 2.0e6
+        identity = np.eye(3, dtype=np.float64)
+        green_lagrange = 0.5 * (
+            deformation_gradient.T @ deformation_gradient - identity
+        )
+        second_piola = (
+            lambda_pa * np.trace(green_lagrange) * identity
+            + 2.0 * mu_pa * green_lagrange
+        )
+        expected_svk_stress_map = (
+            deformation_gradient @ second_piola @ deformation_gradient.T
+        )
+
+        neo_hookean_stress_map = _single_particle_constitutive_stress_map(
+            deformation_gradient,
+            constitutive_model="neo_hookean",
+            mu_pa=mu_pa,
+            lambda_pa=lambda_pa,
+        )
+        expected_neo_hookean_stress_map = (
+            mu_pa
+            * (deformation_gradient @ deformation_gradient.T - identity)
+            + lambda_pa
+            * math.log(float(np.linalg.det(deformation_gradient)))
+            * identity
+        )
+        np.testing.assert_allclose(
+            neo_hookean_stress_map,
+            expected_neo_hookean_stress_map,
+            rtol=5.0e-4,
+            atol=5.0,
+        )
+
+        actual_svk_stress_map = _single_particle_constitutive_stress_map(
+            deformation_gradient,
+            constitutive_model="saint_venant_kirchhoff",
+            mu_pa=mu_pa,
+            lambda_pa=lambda_pa,
+        )
+
+        np.testing.assert_allclose(
+            actual_svk_stress_map,
+            expected_svk_stress_map,
+            rtol=5.0e-4,
+            atol=5.0,
+        )
+        self.assertGreater(
+            float(np.linalg.norm(actual_svk_stress_map - neo_hookean_stress_map)),
+            0.05 * float(np.linalg.norm(expected_svk_stress_map)),
+        )
 
     def test_flip_baseline_excludes_elastic_stress_impulse(self) -> None:
         state = NeoHookeanMpmState(
@@ -478,12 +684,24 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
             density_kgm3=material.density_kgm3,
         )
         initial_x = state.x.to_numpy()
+        initial_position_residual = np.linspace(
+            -1.0e-8,
+            1.0e-8,
+            num=state.position_increment_residual_m.to_numpy().size,
+            dtype=np.float32,
+        ).reshape(state.position_increment_residual_m.to_numpy().shape)
+        state.position_increment_residual_m.from_numpy(
+            initial_position_residual
+        )
         initial_v = state.v.to_numpy()
         initial_c = state.C.to_numpy()
         initial_f = state.F.to_numpy()
         state.save_state()
 
         state.x.from_numpy(initial_x + np.array([0.001, -0.002, 0.003], dtype=np.float32))
+        state.position_increment_residual_m.from_numpy(
+            np.zeros_like(initial_position_residual)
+        )
         state.v.from_numpy(np.ones_like(initial_v, dtype=np.float32))
         state.C.from_numpy(np.ones_like(initial_c, dtype=np.float32))
         state.F.from_numpy(np.full_like(initial_f, 2.0, dtype=np.float32))
@@ -491,6 +709,10 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
         state.restore_state()
 
         np.testing.assert_allclose(state.x.to_numpy(), initial_x, atol=1.0e-8)
+        np.testing.assert_array_equal(
+            state.position_increment_residual_m.to_numpy(),
+            initial_position_residual,
+        )
         np.testing.assert_allclose(state.v.to_numpy(), initial_v, atol=1.0e-8)
         np.testing.assert_allclose(state.C.to_numpy(), initial_c, atol=1.0e-8)
         np.testing.assert_allclose(state.F.to_numpy(), initial_f, atol=1.0e-8)

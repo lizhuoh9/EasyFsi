@@ -66,6 +66,10 @@ class TriSurfaceRegionDiagnostics:
     This class intentionally handles only reusable region-level diagnostics:
     pressure traction, projected no-slip residual, and probe validity. Case
     selection, mesh loading, and monitor interpretation stay outside the core.
+
+    Public ``spacing_m`` arguments are retained as uniform-grid compatibility
+    hints. Device kernels take coordinates and cell widths from ``grid_fields``;
+    those fields remain authoritative for graded grids.
     """
 
     def __init__(self, face_capacity: int, runtime: TaichiRuntimeConfig | None = None):
@@ -605,8 +609,10 @@ class TriSurfaceRegionDiagnostics:
                 self.report_secondary_fluid_force_n[None].x,
                 self.report_secondary_fluid_force_n[None].y,
                 self.report_secondary_fluid_force_n[None].z,
-                ti.cast(self.report_sample_count[None], ti.f32),
-                ti.cast(self.report_invalid_probe_count[None], ti.f32),
+                # Preserve the i32 bit patterns while retaining a single
+                # mixed-purpose f32 snapshot and one device-to-host read.
+                ti.bit_cast(self.report_sample_count[None], ti.f32),
+                ti.bit_cast(self.report_invalid_probe_count[None], ti.f32),
                 self.report_invalid_probe_area_m2[None],
                 self.report_invalid_probe_volume_source_m3s[None],
             ]
@@ -1801,6 +1807,9 @@ class TriSurfaceRegionDiagnostics:
                             cell_face_x_m,
                             cell_face_y_m,
                             cell_face_z_m,
+                            cell_center_x_m,
+                            cell_center_y_m,
+                            cell_center_z_m,
                             nx,
                             ny,
                             nz,
@@ -2396,10 +2405,11 @@ class TriSurfaceRegionDiagnostics:
         return self.report(stress_fields_computed=True, force_fields_computed=False)
 
     def force_pair_report(self) -> TriSurfaceForcePairReport:
-        values = self.report_force_pair_snapshot[None]
+        values = self.report_force_pair_snapshot.to_numpy()
         self.last_report_host_reads = 1
-        sample_count = int(float(values[6]))
-        invalid_count = int(float(values[7]))
+        packed_counts = np.asarray(values[6:8], dtype=np.float32).view(np.int32)
+        sample_count = int(packed_counts[0])
+        invalid_count = int(packed_counts[1])
         total_probe_count = sample_count + invalid_count
         valid_fraction = sample_count / max(total_probe_count, 1)
         return TriSurfaceForcePairReport(

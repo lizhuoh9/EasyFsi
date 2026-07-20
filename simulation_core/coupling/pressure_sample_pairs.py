@@ -7,6 +7,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import numpy as np
+
 
 CellIndex = tuple[int, int, int]
 Point3 = tuple[float, float, float]
@@ -52,6 +54,7 @@ class PressureSamplePairMap:
     fallback_count: int
     selected_count: int
     marker_geometry_sha256: str = ""
+    marker_geometry_revision: int | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.provider_mode, name="provider_mode")
@@ -59,6 +62,11 @@ class PressureSamplePairMap:
             raise ValueError("fallback_count must be non-negative")
         if int(self.selected_count) < 0:
             raise ValueError("selected_count must be non-negative")
+        if (
+            self.marker_geometry_revision is not None
+            and int(self.marker_geometry_revision) < 0
+        ):
+            raise ValueError("marker_geometry_revision must be non-negative")
         expected_sha = pressure_sample_pair_map_sha256(self.pairs)
         if self.pair_map_sha256 != expected_sha:
             raise ValueError("pair_map_sha256 does not match pairs")
@@ -76,10 +84,37 @@ class PressureSamplePairMap:
             "provider_mode": self.provider_mode,
             "pair_map_sha256": self.pair_map_sha256,
             "marker_geometry_sha256": self.marker_geometry_sha256,
+            "marker_geometry_revision": self.marker_geometry_revision,
             "fallback_count": int(self.fallback_count),
             "selected_count": int(self.selected_count),
             "pairs": [pair.as_dict() for pair in self.pairs],
         }
+
+    def require_current_marker_geometry(self, markers: Any) -> None:
+        """Reject a pair map once its marker geometry identity is stale."""
+
+        current_revision = marker_geometry_revision(markers)
+        if self.marker_geometry_revision is not None:
+            if current_revision is None:
+                raise ValueError(
+                    "current marker geometry revision is unavailable for anchored pairs"
+                )
+            if int(current_revision) != int(self.marker_geometry_revision):
+                raise ValueError(
+                    "pressure sample pair marker geometry revision mismatch: "
+                    f"map={self.marker_geometry_revision}, current={current_revision}"
+                )
+        positions, normals, region_ids = marker_geometry_rows(markers)
+        current_sha256 = pressure_sample_marker_geometry_sha256(
+            marker_positions_m=positions,
+            marker_normals=normals,
+            marker_region_ids=region_ids,
+        )
+        if self.marker_geometry_sha256 != current_sha256:
+            raise ValueError(
+                "pressure sample pair marker geometry hash mismatch: "
+                f"map={self.marker_geometry_sha256}, current={current_sha256}"
+            )
 
 
 class PressureSamplePairProviderProtocol(Protocol):
@@ -106,7 +141,7 @@ class RuntimeAnchoredCellPairProvider:
         fluid_state: Any = None,
         interface_surface: Any = None,
     ) -> PressureSamplePairMap:
-        del fluid_state, interface_surface
+        del interface_surface
         positions, normals, region_ids = marker_geometry_rows(markers)
         return compute_runtime_anchored_cell_pair_map(
             marker_positions_m=positions,
@@ -117,6 +152,8 @@ class RuntimeAnchoredCellPairProvider:
             anchor_axis=self.anchor_axis,
             inside_axis_position_m=self.inside_axis_position_m,
             outside_axis_offset_cells=self.outside_axis_offset_cells,
+            obstacle_cells=_fluid_obstacle_cells(fluid_state),
+            marker_geometry_revision=marker_geometry_revision(markers),
         )
 
 
@@ -135,6 +172,7 @@ def pressure_sample_pair_map_from_pairs(
     *,
     provider_mode: str,
     marker_geometry_sha256: str = "",
+    marker_geometry_revision: int | None = None,
 ) -> PressureSamplePairMap:
     pair_tuple = tuple(pairs)
     fallback_count = sum(
@@ -150,6 +188,7 @@ def pressure_sample_pair_map_from_pairs(
         fallback_count=fallback_count,
         selected_count=selected_count,
         marker_geometry_sha256=marker_geometry_sha256,
+        marker_geometry_revision=marker_geometry_revision,
     )
 
 
@@ -211,6 +250,19 @@ def marker_geometry_rows(
     return positions, normals, region_ids
 
 
+def marker_geometry_revision(markers: Any) -> int | None:
+    if isinstance(markers, Mapping):
+        value = markers.get("marker_geometry_revision")
+    else:
+        value = getattr(markers, "marker_geometry_revision", None)
+    if value is None:
+        return None
+    revision = int(value)
+    if revision < 0:
+        raise ValueError("marker_geometry_revision must be non-negative")
+    return revision
+
+
 def compute_runtime_anchored_cell_pair_map(
     *,
     marker_positions_m: Sequence[Sequence[float]],
@@ -221,6 +273,8 @@ def compute_runtime_anchored_cell_pair_map(
     anchor_axis: int,
     inside_axis_position_m: float,
     outside_axis_offset_cells: int = 1,
+    obstacle_cells: Any = None,
+    marker_geometry_revision: int | None = None,
 ) -> PressureSamplePairMap:
     marker_count = len(marker_positions_m)
     if marker_count == 0:
@@ -248,6 +302,7 @@ def compute_runtime_anchored_cell_pair_map(
     offset = int(outside_axis_offset_cells)
     if offset <= 0:
         raise ValueError("outside_axis_offset_cells must be positive")
+    obstacle = _validated_obstacle_cells(obstacle_cells, grid=grid)
 
     pairs: list[PressureSamplePair] = []
     for marker_index, (position_value, normal_value, region_id) in enumerate(
@@ -268,13 +323,41 @@ def compute_runtime_anchored_cell_pair_map(
             for index in range(3)
         )
         direction = 1 if normal_axis_value > 0.0 else -1
-        inside_cell = list(base_cell)
-        outside_cell = list(base_cell)
-        inside_cell[axis] = inside_axis_cell
-        outside_cell[axis] = _clamp_cell(
-            base_cell[axis] + direction * offset,
-            grid[axis],
-        )
+        diagnostic_reason = "runtime_anchored_cell_pair"
+        if obstacle is None:
+            inside_cell = list(base_cell)
+            outside_cell = list(base_cell)
+            inside_cell[axis] = inside_axis_cell
+            outside_cell[axis] = _clamp_cell(
+                base_cell[axis] + direction * offset,
+                grid[axis],
+            )
+        else:
+            inside_cell = list(
+                _first_fluid_cell_on_axis_side(
+                    base_cell,
+                    axis=axis,
+                    side_direction=-direction,
+                    start_offset=offset,
+                    grid=grid,
+                    obstacle=obstacle,
+                    marker_index=marker_index,
+                    side_name="inside",
+                )
+            )
+            outside_cell = list(
+                _first_fluid_cell_on_axis_side(
+                    base_cell,
+                    axis=axis,
+                    side_direction=direction,
+                    start_offset=offset,
+                    grid=grid,
+                    obstacle=obstacle,
+                    marker_index=marker_index,
+                    side_name="outside",
+                )
+            )
+            diagnostic_reason = "runtime_dynamic_fluid_side_cell_pair"
         if tuple(inside_cell) == tuple(outside_cell):
             raise ValueError("inside_cell and outside_cell must differ")
         pairs.append(
@@ -285,7 +368,7 @@ def compute_runtime_anchored_cell_pair_map(
                 outside_cell=tuple(outside_cell),  # type: ignore[arg-type]
                 sample_status="runtime_generated",
                 fallback_status="no_fallback",
-                diagnostic_reason="runtime_anchored_cell_pair",
+                diagnostic_reason=diagnostic_reason,
             )
         )
     return pressure_sample_pair_map_from_pairs(
@@ -296,6 +379,72 @@ def compute_runtime_anchored_cell_pair_map(
             marker_normals=marker_normals,
             marker_region_ids=marker_region_ids,
         ),
+        marker_geometry_revision=marker_geometry_revision,
+    )
+
+
+def _fluid_obstacle_cells(fluid_state: Any) -> Any:
+    if fluid_state is None:
+        return None
+    if isinstance(fluid_state, Mapping):
+        for name in ("obstacle", "obstacle_field", "fluid_obstacle"):
+            if name in fluid_state:
+                return fluid_state[name]
+    else:
+        for name in ("obstacle", "obstacle_field", "fluid_obstacle"):
+            if hasattr(fluid_state, name):
+                return getattr(fluid_state, name)
+    raise ValueError("fluid_state must expose an obstacle field")
+
+
+def _validated_obstacle_cells(
+    obstacle_cells: Any,
+    *,
+    grid: tuple[int, int, int],
+) -> np.ndarray | None:
+    if obstacle_cells is None:
+        return None
+    values = (
+        obstacle_cells.to_numpy()
+        if hasattr(obstacle_cells, "to_numpy")
+        else obstacle_cells
+    )
+    obstacle = np.asarray(values)
+    if tuple(int(value) for value in obstacle.shape) != grid:
+        raise ValueError(
+            "obstacle field shape must match grid_nodes: "
+            f"shape={tuple(obstacle.shape)}, grid_nodes={grid}"
+        )
+    if np.issubdtype(obstacle.dtype, np.floating) and not np.all(
+        np.isfinite(obstacle)
+    ):
+        raise ValueError("obstacle field must contain finite values")
+    return obstacle != 0
+
+
+def _first_fluid_cell_on_axis_side(
+    base_cell: CellIndex,
+    *,
+    axis: int,
+    side_direction: int,
+    start_offset: int,
+    grid: tuple[int, int, int],
+    obstacle: np.ndarray,
+    marker_index: int,
+    side_name: str,
+) -> CellIndex:
+    for distance in range(int(start_offset), int(grid[axis]) + 1):
+        axis_cell = int(base_cell[axis]) + int(side_direction) * distance
+        if axis_cell < 0 or axis_cell >= int(grid[axis]):
+            break
+        candidate = list(base_cell)
+        candidate[axis] = axis_cell
+        cell = (int(candidate[0]), int(candidate[1]), int(candidate[2]))
+        if not bool(obstacle[cell]):
+            return cell
+    raise ValueError(
+        "no non-obstacle fluid cell on declared "
+        f"{side_name} side for marker {marker_index}"
     )
 
 

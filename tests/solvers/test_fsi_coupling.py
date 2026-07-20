@@ -1005,6 +1005,29 @@ class InterfaceReactionFixedPointTests(unittest.TestCase):
         self.assertEqual(result.trust_region_limited_update_count, 3)
         self.assertEqual(result.force_n, (4.0,))
 
+    def test_trust_region_limit_updates_effective_aitken_relaxation(self) -> None:
+        def evaluate_target(_force_n: tuple[float, ...]) -> InterfaceReactionTargetEvaluation:
+            return InterfaceReactionTargetEvaluation(
+                target_force_n=(10.0,),
+                velocity_mps=(0.0,),
+            )
+
+        result = solve_interface_reaction_fixed_point(
+            initial_force_n=(0.0,),
+            evaluate_target=evaluate_target,
+            restore_state=lambda: None,
+            max_iterations=2,
+            tolerance_n=0.0,
+            initial_relaxation=1.0,
+            use_aitken=True,
+            passivity_limit=False,
+            trust_region_force_increment_n=2.0,
+        )
+
+        self.assertEqual(result.trial_force_history_n, ((0.0,), (2.0,)))
+        self.assertEqual(result.trust_region_limited_update_count, 2)
+        self.assertAlmostEqual(result.relaxation, 0.25)
+
     def test_adaptive_trust_region_shrinks_after_residual_growth(self) -> None:
         def restore_state() -> None:
             return None
@@ -2441,6 +2464,47 @@ class OverflowSafeNormAndAitkenTests(unittest.TestCase):
         self.assertEqual(report.residual_norm_n, 5.0)
         self.assertGreater(report.relative_error, 0.0)
 
+    def test_action_reaction_balance_remains_finite_when_norm_sum_overflows(
+        self,
+    ) -> None:
+        # Each input norm is finite, but their physical sum is 1.9e308 and
+        # therefore exceeds float64 max. The diagnostic must still preserve
+        # the scale-free relative error instead of reporting a false zero.
+        report = action_reaction_balance((1.0e308,), (-9.0e307,))
+
+        self.assertTrue(math.isfinite(report.residual_norm_n))
+        self.assertTrue(math.isfinite(report.scale_n))
+        self.assertTrue(math.isfinite(report.relative_error))
+        self.assertEqual(
+            report.residual_components_n,
+            (1.0e308 + (-9.0e307),),
+        )
+        self.assertGreater(report.relative_error, 0.0)
+        self.assertAlmostEqual(report.relative_error, 1.0 / 19.0, places=12)
+
+    def test_action_reaction_balance_saturates_unrepresentable_residual_components(
+        self,
+    ) -> None:
+        max_finite = float.fromhex("0x1.fffffffffffffp+1023")
+        for component, expected in (
+            (1.0e308, max_finite),
+            (-1.0e308, -max_finite),
+        ):
+            with self.subTest(component=component):
+                report = action_reaction_balance((component,), (component,))
+
+                self.assertEqual(report.residual_components_n, (expected,))
+                self.assertTrue(
+                    all(
+                        math.isfinite(value)
+                        for value in report.residual_components_n
+                    )
+                )
+                self.assertTrue(math.isfinite(report.residual_norm_n))
+                self.assertTrue(math.isfinite(report.scale_n))
+                self.assertTrue(math.isfinite(report.relative_error))
+                self.assertEqual(report.relative_error, 1.0)
+
     def test_aitken_relaxation_factor_is_finite_for_residuals_whose_square_overflows(
         self,
     ) -> None:
@@ -2451,6 +2515,22 @@ class OverflowSafeNormAndAitkenTests(unittest.TestCase):
 
         self.assertTrue(math.isfinite(factor))
         self.assertAlmostEqual(factor, 0.25)
+
+    def test_aitken_overflow_fallback_is_clipped_to_configured_bounds(self) -> None:
+        # current - previous overflows for this finite residual pair, so the
+        # Aitken ratio cannot be recovered even in scaled space. The fallback
+        # must obey the same lower/upper contract as every other return path.
+        for previous_relaxation, expected in ((2.0, 1.5), (-0.5, 0.01)):
+            with self.subTest(previous_relaxation=previous_relaxation):
+                factor = aitken_relaxation_factor(
+                    previous_relaxation,
+                    (1.0e308,),
+                    (-1.0e308,),
+                    lower=0.01,
+                    upper=1.5,
+                )
+
+                self.assertEqual(factor, expected)
 
     def test_aitken_relaxation_factor_normal_path_parity_with_prefix_value(
         self,

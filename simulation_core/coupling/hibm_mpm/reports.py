@@ -62,6 +62,13 @@ class HibmMpmNoSlipResidualReport:
     secondary_region_invalid_marker_count: int = 0
     other_region_valid_marker_count: int = 0
     other_region_invalid_marker_count: int = 0
+    argmax_marker_index: int = -1
+    argmax_marker_region_id: int = -1
+    argmax_residual_vector_mps: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    argmax_sample_source: str = "none"
+    argmax_sample_position_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    argmax_fluid_velocity_mps: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    sample_identity_generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -72,6 +79,7 @@ class HibmMpmMpmForceScatterReport:
     total_marker_force_n: tuple[float, float, float]
     total_mpm_external_force_n: tuple[float, float, float]
     action_reaction_residual_n: float
+    candidate_pair_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -90,6 +98,7 @@ class HibmMpmSurfaceUpdateReport:
     geometry_invalid_marker_count: int = 0
     max_marker_normal_change: float = 0.0
     max_marker_area_change_m2: float = 0.0
+    candidate_pair_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -165,6 +174,7 @@ class HibmMpmPressureNeumannMatrixReport:
     max_abs_rhs: float
     skipped_velocity_dirichlet_row_count: int = 0
     skipped_pressure_boundary_adjacent_row_count: int = 0
+    skipped_nonpositive_transmissibility_row_count: int = 0
     skipped_obstacle_owner_row_count: int = 0
     relocated_obstacle_owner_row_count: int = 0
     duplicate_owner_row_count: int = 0
@@ -189,8 +199,14 @@ class HibmMpmPressureNeumannMatrixReport:
 
 @dataclass(frozen=True)
 class HibmMpmPressureNeumannGradientReport:
+    # Kept as the stored field for constructor/serialization compatibility.
+    # The update kernel actually counts active IB grid nodes.
     active_marker_count: int
     max_abs_gradient_pa_per_m: float
+
+    @property
+    def active_node_count(self) -> int:
+        return self.active_marker_count
 
 
 @dataclass(frozen=True)

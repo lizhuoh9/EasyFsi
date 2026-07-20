@@ -22,6 +22,22 @@ RUNTIME = TaichiRuntimeConfig(arch="cuda")
     "simulation_core is GPU-only; set HIBM_RUN_CUDA_TRACTION_PROBE_TESTS=1 on a CUDA runner",
 )
 class HibmMpmTractionProbeDiagnosticsTests(unittest.TestCase):
+    def test_viscous_inactive_axis_rejects_non_integer_values(self):
+        markers, fluid = _single_marker_fixture()
+
+        for invalid_axis in (True, np.bool_(True), 0.0, "0"):
+            with self.subTest(invalid_axis=invalid_axis):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "viscous_inactive_axis must be None or one of",
+                ):
+                    _sample(
+                        markers,
+                        fluid,
+                        viscosity_pa_s=0.0,
+                        viscous_inactive_axis=invalid_axis,
+                    )
+
     def test_uniform_two_sided_pressure_reports_zero_jump_and_probe_evidence(self):
         markers, fluid = _single_marker_fixture()
         fluid.pressure.fill(7.0)
@@ -136,7 +152,7 @@ class HibmMpmTractionProbeDiagnosticsTests(unittest.TestCase):
         markers = HibmMpmSurfaceMarkers(marker_capacity=1, runtime=RUNTIME)
         markers.load_markers(
             positions_m=((0.625, 0.625, 0.5),),
-            velocities_mps=((0.0, 0.0, 0.0),),
+            velocities_mps=((1.875, 0.0, 0.0),),
             normals=((0.0, 1.0, 0.0),),
             areas_m2=(1.0,),
             region_ids=(101,),
@@ -158,6 +174,222 @@ class HibmMpmTractionProbeDiagnosticsTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostic["pressure_traction_pa"][0], 0.0)
         self.assertAlmostEqual(diagnostic["viscous_traction_pa"][0], 6.0)
         self.assertAlmostEqual(diagnostic["total_traction_pa"][0], 6.0)
+        self.assertAlmostEqual(diagnostic["traction_decomposition_residual_pa"], 0.0)
+
+    def test_per_face_one_sided_pressure_preserves_physical_viscous_traction(self):
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1, runtime=RUNTIME)
+        markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((1.875, 0.0, 0.0),),
+            normals=((0.0, 1.0, 0.0),),
+            areas_m2=(1.0,),
+            region_ids=(101,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(8, 8, 8),
+                viscosity_pa_s=2.0,
+                dt_s=1.0e-3,
+            ),
+            runtime=RUNTIME,
+        )
+        fluid.pressure.fill(7.0)
+        fluid.set_simple_shear_velocity(shear_rate_s=3.0, center_y_m=0.0)
+
+        report = _sample(
+            markers,
+            fluid,
+            viscosity_pa_s=fluid.mu,
+            two_sided_pressure=True,
+            one_sided_pressure_primary_region_id=101,
+            one_sided_primary_reference_pressure_pa=1.0,
+            one_sided_primary_fluid_side_normal_sign=1.0,
+        )
+        diagnostic = markers.stress_marker_diagnostics()[0]
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.one_sided_pressure_marker_count, 1)
+        self.assertAlmostEqual(diagnostic["pressure_traction_pa"][1], -6.0)
+        self.assertAlmostEqual(diagnostic["viscous_traction_pa"][0], 6.0)
+        self.assertAlmostEqual(diagnostic["total_traction_pa"][0], 6.0)
+        self.assertAlmostEqual(diagnostic["total_traction_pa"][1], -6.0)
+        self.assertAlmostEqual(diagnostic["traction_decomposition_residual_pa"], 0.0)
+
+    def test_negative_fluid_side_uses_the_physical_outward_normal_for_viscosity(self):
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1, runtime=RUNTIME)
+        markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((1.875, 0.0, 0.0),),
+            normals=((0.0, 1.0, 0.0),),
+            areas_m2=(1.0,),
+            region_ids=(101,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(8, 8, 8),
+                viscosity_pa_s=2.0,
+                dt_s=1.0e-3,
+            ),
+            runtime=RUNTIME,
+        )
+        fluid.pressure.fill(7.0)
+        fluid.set_simple_shear_velocity(shear_rate_s=3.0, center_y_m=0.0)
+
+        report = _sample(
+            markers,
+            fluid,
+            viscosity_pa_s=fluid.mu,
+            two_sided_pressure=True,
+            one_sided_pressure_primary_region_id=101,
+            one_sided_primary_reference_pressure_pa=1.0,
+            one_sided_primary_fluid_side_normal_sign=-1.0,
+        )
+        diagnostic = markers.stress_marker_diagnostics()[0]
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertAlmostEqual(diagnostic["pressure_traction_pa"][1], 6.0)
+        self.assertAlmostEqual(diagnostic["viscous_traction_pa"][0], -6.0)
+        self.assertAlmostEqual(diagnostic["total_traction_pa"][0], -6.0)
+        self.assertAlmostEqual(diagnostic["total_traction_pa"][1], 6.0)
+        self.assertAlmostEqual(diagnostic["traction_decomposition_residual_pa"], 0.0)
+
+    def test_one_sided_wall_shear_varies_continuously_across_probe_cell_boundary(self):
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(8, 8, 8),
+                viscosity_pa_s=2.0,
+                dt_s=1.0e-3,
+            ),
+            runtime=RUNTIME,
+        )
+        fluid.pressure.fill(7.0)
+        centers_y = fluid.cell_center_y_m.to_numpy()
+        velocity = np.zeros((8, 8, 8, 3), dtype=np.float32)
+        for j, center_y in enumerate(centers_y):
+            velocity[:, j, :, 0] = float(center_y) ** 2
+        fluid.velocity.from_numpy(velocity)
+
+        viscous_x: list[float] = []
+        for marker_y in (0.624, 0.626):
+            markers = HibmMpmSurfaceMarkers(marker_capacity=1, runtime=RUNTIME)
+            markers.load_markers(
+                positions_m=((0.625, marker_y, 0.5),),
+                velocities_mps=((marker_y**2, 0.0, 0.0),),
+                normals=((0.0, 1.0, 0.0),),
+                areas_m2=(1.0,),
+                region_ids=(101,),
+            )
+            report = _sample(
+                markers,
+                fluid,
+                viscosity_pa_s=fluid.mu,
+                two_sided_pressure=True,
+                one_sided_pressure_primary_region_id=101,
+                one_sided_primary_reference_pressure_pa=1.0,
+                one_sided_primary_fluid_side_normal_sign=1.0,
+            )
+            self.assertEqual(report.valid_marker_count, 1)
+            viscous_x.append(
+                float(markers.stress_marker_diagnostics()[0]["viscous_traction_pa"][0])
+            )
+
+        # A 2 mm marker movement cannot produce a nearest-cell step in wall
+        # shear. The probe interpolation and its physical centroid must vary
+        # continuously as the pressure probe crosses the half-cell boundary.
+        self.assertLess(abs(viscous_x[1] - viscous_x[0]), 0.03)
+
+    def test_per_face_viscous_sampling_supports_plane_strain_and_no_slip_view(self):
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1, runtime=RUNTIME)
+        markers.load_markers(
+            positions_m=((0.625, 0.625, 0.5),),
+            velocities_mps=((1.875, 0.0, 0.0),),
+            normals=((0.0, 1.0, 0.0),),
+            areas_m2=(1.0,),
+            region_ids=(101,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(8, 8, 8),
+                viscosity_pa_s=2.0,
+                dt_s=1.0e-3,
+            ),
+            runtime=RUNTIME,
+        )
+        fluid.pressure.fill(7.0)
+        fluid.set_simple_shear_velocity(shear_rate_s=3.0, center_y_m=0.0)
+        # Hide the marker-centred 2x2x2 stencil while leaving the +normal
+        # pressure ladder's fluid-side probe samplable. Viscous stress must use
+        # that selected fluid-side probe too; evaluating at the marker centre
+        # would fail even after the exact plane-strain d()/dx=0 reduction.
+        local_solid_band = np.zeros((8, 8, 8), dtype=np.int32)
+        local_solid_band[4:6, 4:6, 3:5] = 1
+        fluid.obstacle.from_numpy(local_solid_band)
+        fluid.hibm_no_slip_sampling_obstacle.from_numpy(local_solid_band)
+
+        report = _sample(
+            markers,
+            fluid,
+            viscosity_pa_s=fluid.mu,
+            two_sided_pressure=True,
+            one_sided_pressure_primary_region_id=101,
+            one_sided_primary_reference_pressure_pa=1.0,
+            one_sided_primary_fluid_side_normal_sign=1.0,
+            viscous_sampling_obstacle_field=(
+                fluid.hibm_no_slip_sampling_obstacle
+            ),
+            viscous_inactive_axis=0,
+        )
+        diagnostic = markers.stress_marker_diagnostics()[0]
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.invalid_marker_count, 0)
+        self.assertAlmostEqual(diagnostic["pressure_traction_pa"][1], -6.0)
+        self.assertAlmostEqual(diagnostic["viscous_traction_pa"][0], 6.0)
+        self.assertAlmostEqual(diagnostic["total_traction_pa"][0], 6.0)
+        self.assertAlmostEqual(diagnostic["total_traction_pa"][1], -6.0)
+        self.assertAlmostEqual(diagnostic["traction_decomposition_residual_pa"], 0.0)
+
+    def test_two_sided_split_viscous_sampling_honors_inactive_axis(self):
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1, runtime=RUNTIME)
+        markers.load_markers(
+            positions_m=((0.5, 0.5, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(101,),
+        )
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(8, 8, 8),
+                viscosity_pa_s=2.0,
+                dt_s=1.0e-3,
+            ),
+            runtime=RUNTIME,
+        )
+        fluid.pressure.fill(7.0)
+        velocity = np.zeros((8, 8, 8, 3), dtype=np.float32)
+        for k, center_z_m in enumerate(fluid.cell_center_z_m.to_numpy()):
+            if float(center_z_m) > 0.5:
+                velocity[:, :, k, 0] = 3.0 * (float(center_z_m) - 0.5)
+        fluid.velocity.from_numpy(velocity)
+        sampling_obstacle = np.zeros((8, 8, 8), dtype=np.int32)
+        sampling_obstacle[3, :, :] = 1
+        fluid.hibm_no_slip_sampling_obstacle.from_numpy(sampling_obstacle)
+
+        report = _sample(
+            markers,
+            fluid,
+            viscosity_pa_s=fluid.mu,
+            two_sided_pressure=True,
+            sampling_obstacle_field=fluid.hibm_no_slip_sampling_obstacle,
+            viscous_inactive_axis=0,
+        )
+        diagnostic = markers.stress_marker_diagnostics()[0]
+
+        self.assertEqual(report.valid_marker_count, 1)
+        self.assertEqual(report.two_sided_pressure_marker_count, 1)
+        self.assertAlmostEqual(diagnostic["viscous_traction_pa"][0], 6.0, places=4)
+        self.assertAlmostEqual(diagnostic["total_traction_pa"][0], 6.0, places=4)
         self.assertAlmostEqual(diagnostic["traction_decomposition_residual_pa"], 0.0)
 
     def test_external_total_traction_keeps_public_decomposition_consistent(self):
@@ -205,6 +437,7 @@ def _sample(
     two_sided_pressure: bool = False,
     viscosity_pa_s: float,
     sampling_obstacle_field=None,
+    **controls,
 ):
     return markers.sample_fluid_stress_to_marker_tractions(
         fluid.velocity,
@@ -223,6 +456,7 @@ def _sample(
         viscosity_pa_s=viscosity_pa_s,
         two_sided_pressure=two_sided_pressure,
         sampling_obstacle_field=sampling_obstacle_field,
+        **controls,
     )
 
 

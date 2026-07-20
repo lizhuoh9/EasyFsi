@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import inspect
 import unittest
+from unittest.mock import patch
+
+import numpy as np
 
 from simulation_core.coupling.pressure_sample_pairs import (
     PressureSamplePair,
@@ -89,6 +92,145 @@ class PressureSamplePairProviderContractTests(unittest.TestCase):
         self.assertTrue(pair_map.marker_geometry_sha256)
         self.assertEqual(pair_map.inside_cells, ((2, 2, 2),))
         self.assertEqual(pair_map.outside_cells, ((2, 2, 3),))
+
+    def test_pair_map_rejects_stale_geometry_revision_and_hash(self) -> None:
+        provider = _moving_interface_provider()
+        obstacle = np.zeros((8, 8, 8), dtype=np.int32)
+        original = _moving_marker_geometry(z_m=0.5, revision=7)
+        pair_map = provider.compute_pairs(
+            original,
+            fluid_state={"obstacle": obstacle},
+        )
+
+        pair_map.require_current_marker_geometry(original)
+        self.assertEqual(pair_map.marker_geometry_revision, 7)
+
+        with self.assertRaisesRegex(ValueError, "revision"):
+            pair_map.require_current_marker_geometry(
+                _moving_marker_geometry(z_m=0.625, revision=8)
+            )
+        with self.assertRaisesRegex(ValueError, "hash"):
+            pair_map.require_current_marker_geometry(
+                _moving_marker_geometry(z_m=0.625, revision=7)
+            )
+
+    def test_dynamic_pairs_are_on_declared_fluid_sides_and_not_obstacles(self) -> None:
+        provider = _moving_interface_provider()
+        obstacle = np.zeros((8, 8, 8), dtype=np.int32)
+        obstacle[4, 4, 3:7] = 1
+        geometry = _moving_marker_geometry(z_m=0.5, revision=11)
+
+        pair_map = provider.compute_pairs(
+            geometry,
+            fluid_state={"obstacle": obstacle},
+        )
+
+        inside = pair_map.inside_cells[0]
+        outside = pair_map.outside_cells[0]
+        marker_cell_z = 4
+        self.assertLess(inside[2], marker_cell_z)
+        self.assertGreater(outside[2], marker_cell_z)
+        self.assertEqual(int(obstacle[inside]), 0)
+        self.assertEqual(int(obstacle[outside]), 0)
+        self.assertEqual(pair_map.pairs[0].diagnostic_reason, "runtime_dynamic_fluid_side_cell_pair")
+
+    def test_linear_pressure_field_load_is_translation_invariant_after_refresh(self) -> None:
+        provider = _moving_interface_provider()
+        obstacle = np.zeros((8, 8, 8), dtype=np.int32)
+        first = provider.compute_pairs(
+            _moving_marker_geometry(z_m=0.4375, revision=3),
+            fluid_state={"obstacle": obstacle},
+        )
+        translated = provider.compute_pairs(
+            _moving_marker_geometry(z_m=0.5625, revision=4),
+            fluid_state={"obstacle": obstacle},
+        )
+
+        def pressure_pa(cell: tuple[int, int, int]) -> float:
+            z_center_m = (float(cell[2]) + 0.5) / 8.0
+            return 13.0 + 24.0 * z_center_m
+
+        def marker_load_z_n(pair_map: PressureSamplePairMap) -> float:
+            pair = pair_map.pairs[0]
+            pressure_jump_pa = pressure_pa(pair.inside_cell) - pressure_pa(
+                pair.outside_cell
+            )
+            return pressure_jump_pa * 1.0 * 0.25
+
+        self.assertEqual(first.inside_cells, ((4, 4, 2),))
+        self.assertEqual(first.outside_cells, ((4, 4, 4),))
+        self.assertEqual(translated.inside_cells, ((4, 4, 3),))
+        self.assertEqual(translated.outside_cells, ((4, 4, 5),))
+        self.assertAlmostEqual(marker_load_z_n(first), -1.5)
+        self.assertAlmostEqual(marker_load_z_n(translated), -1.5)
+
+    def test_runner_refresh_retires_old_map_before_transactional_install(self) -> None:
+        from benchmarks.official import solid_mpm_fsi_runner
+
+        markers = _RecordingAnchorMarkers()
+        pair_map = _RecordingPairMap(markers.events)
+        with (
+            patch.object(
+                solid_mpm_fsi_runner,
+                "_is_selected_traction_formulation_coupled_smoke",
+                return_value=True,
+            ),
+            patch.object(
+                solid_mpm_fsi_runner,
+                "_traction_pressure_pair_runtime_provider_mode",
+                return_value="runtime_anchored_cell_pair",
+            ),
+            patch.object(
+                solid_mpm_fsi_runner,
+                "_runtime_pressure_pair_anchor_map",
+                return_value=pair_map,
+            ),
+        ):
+            refreshed = solid_mpm_fsi_runner._refresh_runtime_pressure_pair_anchor_markers(
+                markers,
+                object(),
+                object(),
+                refresh_count=6,
+            )
+
+        self.assertIsNotNone(refreshed)
+        report, installed_map = refreshed
+        self.assertIs(installed_map, pair_map)
+        self.assertEqual(markers.events, ["reset", "require-current", "set"])
+        self.assertEqual(report["pressure_pair_anchor_current_marker_geometry_sha256"], "current-geometry")
+        self.assertEqual(report["pressure_pair_anchor_current_marker_geometry_revision"], 12)
+        self.assertEqual(report["pressure_pair_anchor_runtime_refresh_count"], 6)
+
+    def test_runner_refresh_failure_leaves_old_anchor_retired(self) -> None:
+        from benchmarks.official import solid_mpm_fsi_runner
+
+        markers = _RecordingAnchorMarkers()
+        with (
+            patch.object(
+                solid_mpm_fsi_runner,
+                "_is_selected_traction_formulation_coupled_smoke",
+                return_value=True,
+            ),
+            patch.object(
+                solid_mpm_fsi_runner,
+                "_traction_pressure_pair_runtime_provider_mode",
+                return_value="runtime_anchored_cell_pair",
+            ),
+            patch.object(
+                solid_mpm_fsi_runner,
+                "_runtime_pressure_pair_anchor_map",
+                side_effect=ValueError("synthetic stale geometry"),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "stale geometry"):
+                solid_mpm_fsi_runner._refresh_runtime_pressure_pair_anchor_markers(
+                    markers,
+                    object(),
+                    object(),
+                    refresh_count=1,
+                )
+
+        self.assertEqual(markers.events, ["reset"])
 
     def test_anchor_axes_are_explicitly_supported(self) -> None:
         for axis in (0, 1, 2):
@@ -230,6 +372,64 @@ def _runtime_pair_map() -> PressureSamplePairMap:
         inside_axis_position_m=0.0515,
         outside_axis_offset_cells=1,
     )
+
+
+def _moving_interface_provider() -> RuntimeAnchoredCellPairProvider:
+    return RuntimeAnchoredCellPairProvider(
+        domain_bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+        grid_nodes=(8, 8, 8),
+        anchor_axis=2,
+        inside_axis_position_m=0.5,
+        outside_axis_offset_cells=1,
+    )
+
+
+def _moving_marker_geometry(*, z_m: float, revision: int) -> dict[str, object]:
+    return {
+        "marker_positions_m": ((0.5, 0.5, float(z_m)),),
+        "marker_normals": ((0.0, 0.0, 1.0),),
+        "marker_region_ids": (101,),
+        "marker_geometry_revision": int(revision),
+    }
+
+
+class _RecordingAnchorMarkers:
+    marker_count = 1
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def reset_pressure_pair_anchor_cells(self) -> None:
+        self.events.append("reset")
+
+    def set_pressure_pair_anchor_cells(self, **kwargs) -> None:
+        self.events.append("set")
+        assert kwargs["inside_cells"] == ((1, 1, 1),)
+        assert kwargs["outside_cells"] == ((1, 1, 3),)
+        assert kwargs["source_marker_geometry_revision"] == 12
+        assert kwargs["source_marker_geometry_sha256"] == "current-geometry"
+
+
+class _RecordingPairMap:
+    inside_cells = ((1, 1, 1),)
+    outside_cells = ((1, 1, 3),)
+    selected_count = 1
+    pair_map_sha256 = "pair-map"
+    marker_geometry_sha256 = "current-geometry"
+    marker_geometry_revision = 12
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    def require_current_marker_geometry(self, _markers) -> None:
+        self._events.append("require-current")
+
+    def as_diagnostics(self) -> dict[str, object]:
+        return {
+            "pair_map_sha256": self.pair_map_sha256,
+            "marker_geometry_sha256": self.marker_geometry_sha256,
+            "marker_geometry_revision": self.marker_geometry_revision,
+        }
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,11 +11,21 @@ from typing import Any
 
 import numpy as np
 
+from .official_fluent_parity import PRESSURE_QUANTITY, PRESSURE_REFERENCE
 
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_OFFICIAL_SOURCE_ROOT = Path(
-    r"D:\working\squid robot\LBM\MPM-LBM\benchmarks\private"
-    r"\ansys_fsi_2way_public_tutorial\fsi_2way"
-)
+    os.environ.get(
+        "EASYFSI_OFFICIAL_FLUENT_REFERENCE_ROOT",
+        str(
+            _REPOSITORY_ROOT
+            / "validation_runs"
+            / "ansys_vertical_flap_fsi"
+            / "official_fluent_reference_input"
+        ),
+    )
+).expanduser()
 
 STEADY_CASE_NAME = "steady_fluid_flow_export.cas.h5"
 STEADY_DATA_NAME = "steady_fluid_flow_export.dat.h5"
@@ -488,6 +499,8 @@ def _write_field_npz(path: Path, bundle: FluentFieldBundle) -> None:
         v=bundle.v,
         p=bundle.p,
         speed=bundle.speed,
+        pressure_quantity=np.asarray(PRESSURE_QUANTITY),
+        pressure_reference=np.asarray(PRESSURE_REFERENCE),
         field_summary_json=json.dumps(bundle.field_summary, sort_keys=True),
         mesh_summary_json=json.dumps(bundle.mesh_summary, sort_keys=True),
         case_path=str(bundle.case_path),

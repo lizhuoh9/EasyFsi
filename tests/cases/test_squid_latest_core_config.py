@@ -720,6 +720,8 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             grid_nodes=(4, 4, 4),
             marker_capacity=1,
         )
+        for i in range(4):
+            boundary.velocity_dirichlet_owned_row[i, 0, 0] = 1
         counts = boundary._velocity_dirichlet_region_row_counts(
             fluid.velocity_dirichlet_boundary_active,
             fluid.velocity_dirichlet_boundary_marker_region_id,
@@ -767,6 +769,7 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             fluid,
             primary_region_id=3,
             secondary_region_id=4,
+            include_field_diagnostics=True,
         )
 
         self.assertEqual(report.cell_count, 2)

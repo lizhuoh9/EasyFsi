@@ -15,11 +15,14 @@ FIXED_NODE_LOCK_POLICIES = {
 }
 CONSTITUTIVE_NEO_HOOKEAN = 0
 CONSTITUTIVE_LINEAR_ELASTIC = 1
+CONSTITUTIVE_SAINT_VENANT_KIRCHHOFF = 2
 CONSTITUTIVE_MODELS = {
     "3d_neo_hookean": CONSTITUTIVE_NEO_HOOKEAN,
     "neo_hookean": CONSTITUTIVE_NEO_HOOKEAN,
     "linear_elastic": CONSTITUTIVE_LINEAR_ELASTIC,
     "plane_stress_linear_elastic": CONSTITUTIVE_LINEAR_ELASTIC,
+    "saint_venant_kirchhoff": CONSTITUTIVE_SAINT_VENANT_KIRCHHOFF,
+    "svk": CONSTITUTIVE_SAINT_VENANT_KIRCHHOFF,
 }
 
 
@@ -34,9 +37,15 @@ def _raise_if_out_of_bounds_exceeds_tolerance(
     grid_out_of_bounds_particle_count: int,
     tolerance: int,
 ) -> None:
-    if grid_out_of_bounds_particle_count > int(tolerance):
+    particles = int(particle_count)
+    out_of_bounds = int(grid_out_of_bounds_particle_count)
+    # A tolerance may permit a small, explicitly accepted partial boundary
+    # excursion. It must never permit a zombie step with no in-grid solid at
+    # all, even when a caller accidentally configures an excessive tolerance.
+    all_particles_out_of_bounds = particles > 0 and out_of_bounds >= particles
+    if all_particles_out_of_bounds or out_of_bounds > int(tolerance):
         raise RuntimeError(
-            f"{grid_out_of_bounds_particle_count} of {particle_count} MPM particles "
+            f"{out_of_bounds} of {particles} MPM particles "
             "are outside the background grid; refusing to advance a partial solid"
         )
 
@@ -175,6 +184,15 @@ class NeoHookeanMpmState:
         self.report_max_radial_stretch_error = ti.field(dtype=ti.f32, shape=())
         self.report_active_grid_nodes = ti.field(dtype=ti.i32, shape=())
         self.report_grid_out_of_bounds_particle_count = ti.field(dtype=ti.i32, shape=())
+        # Device-resident maximum over a caller-defined substep batch. The
+        # current-step counter above is reset by _clear_report_func() every
+        # step; this field is reset only at the start of a guard batch (or an
+        # ordinary non-batched step), so a particle that briefly escapes and
+        # later re-enters cannot disappear from the final safety decision.
+        self.out_of_bounds_guard_batch_max_particle_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self.report_primary_displacement_sum_m = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_primary_velocity_sum_mps = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_secondary_displacement_sum_m = ti.Vector.field(3, dtype=ti.f32, shape=())
@@ -187,6 +205,9 @@ class NeoHookeanMpmState:
         self.primary_mass_kg = ti.field(dtype=ti.f32, shape=())
         self.secondary_mass_kg = ti.field(dtype=ti.f32, shape=())
         self.last_report_host_reads = 0
+        self.last_out_of_bounds_guard_host_reads = 0
+        self._out_of_bounds_guard_batch_active = False
+        self._out_of_bounds_guard_batch_step_count = 0
 
     @ti.func
     def _identity(self):
@@ -692,6 +713,10 @@ class NeoHookeanMpmState:
         )
         self.report_count_snapshot[None] = ti.Vector([0, 0, 0, 0, 0, 0])
 
+    @ti.kernel
+    def _reset_out_of_bounds_guard_batch_kernel(self):
+        self.out_of_bounds_guard_batch_max_particle_count[None] = 0
+
     @ti.func
     def _atomic_add_vector(self, field, value):
         ti.atomic_add(field[None].x, value.x)
@@ -805,16 +830,28 @@ class NeoHookeanMpmState:
                     ti.atomic_add(self.report_deformation_clamp_count[None], 1)
                     self.F[p] = Fp
                 J = Fp.determinant()
-                FinvT = Fp.inverse().transpose()
-                P = mu_pa * (Fp - FinvT) + lambda_pa * ti.log(J) * FinvT
-                stress_map = P @ Fp.transpose()
-                if constitutive_model == CONSTITUTIVE_LINEAR_ELASTIC:
+                stress_map = ti.Matrix.zero(ti.f32, 3, 3)
+                if constitutive_model == CONSTITUTIVE_SAINT_VENANT_KIRCHHOFF:
+                    green_lagrange = 0.5 * (
+                        Fp.transpose() @ Fp - self._identity()
+                    )
+                    second_piola = (
+                        lambda_pa * green_lagrange.trace() * self._identity()
+                        + 2.0 * mu_pa * green_lagrange
+                    )
+                    P = Fp @ second_piola
+                    stress_map = P @ Fp.transpose()
+                elif constitutive_model == CONSTITUTIVE_LINEAR_ELASTIC:
                     displacement_gradient = Fp - self._identity()
                     strain = 0.5 * (
                         displacement_gradient + displacement_gradient.transpose()
                     )
                     P = 2.0 * mu_pa * strain + lambda_pa * strain.trace() * self._identity()
                     stress_map = P
+                else:
+                    FinvT = Fp.inverse().transpose()
+                    P = mu_pa * (Fp - FinvT) + lambda_pa * ti.log(J) * FinvT
+                    stress_map = P @ Fp.transpose()
                 inv_dx2 = ti.Matrix(
                     [
                         [4.0 / (self.dx[0] * self.dx[0]), 0.0, 0.0],
@@ -926,6 +963,15 @@ class NeoHookeanMpmState:
                 ti.atomic_add(self.report_active_grid_nodes[None], 1)
                 ti.atomic_max(self.report_max_speed_mps[None], velocity.norm())
 
+        # Preserve entry-position OOB state before reusing the current counter
+        # for post-integration positions. This first max protects a particle
+        # that can re-enter during the same substep; the final max below
+        # separately protects a particle that leaves during integration.
+        self.out_of_bounds_guard_batch_max_particle_count[None] = ti.max(
+            self.out_of_bounds_guard_batch_max_particle_count[None],
+            self.report_grid_out_of_bounds_particle_count[None],
+        )
+        self.report_grid_out_of_bounds_particle_count[None] = 0
         for p in range(self.particle_capacity):
             if p < particle_count:
                 Xp = self._particle_grid_coordinate(p)
@@ -970,20 +1016,45 @@ class NeoHookeanMpmState:
                         )
                         self.v[p] = new_v
                         self.C[p] = new_C
-                        position_increment = (
-                            self.position_increment_residual_m[p] + dt_s * new_v
-                        )
                         new_x = self.x[p]
+                        next_position_residual = (
+                            self.position_increment_residual_m[p]
+                        )
                         for axis in ti.static(range(3)):
-                            min_resolvable_increment = ti.max(
-                                ti.cast(1.0e-9, ti.f32),
-                                ti.abs(new_x[axis]) * ti.cast(5.0e-7, ti.f32),
+                            # Compensated position accumulation.  The
+                            # former magnitude-scaled gate released motion in
+                            # artificial 5-8 ULP bursts at O(1 m) coordinates,
+                            # making particle stencils discontinuous across
+                            # otherwise tiny FSI trial changes.  Keep x and its
+                            # checkpoint-compatible residual fields in f32,
+                            # but form the sum and rounding error in f64: the
+                            # CUDA fast-math compiler may legally reassociate a
+                            # same-precision Kahan/Neumaier expression and erase
+                            # its compensation.  This explicit wider
+                            # intermediate keeps the unavoidable f32 rounding
+                            # remainder while allowing x to advance at its
+                            # natural one-ULP resolution.
+                            old_position = new_x[axis]
+                            exact_position = (
+                                ti.cast(old_position, ti.f64)
+                                + ti.cast(
+                                    self.position_increment_residual_m[p][axis],
+                                    ti.f64,
+                                )
+                                + ti.cast(dt_s * new_v[axis], ti.f64)
                             )
-                            if ti.abs(position_increment[axis]) >= min_resolvable_increment:
-                                new_x[axis] += position_increment[axis]
-                                position_increment[axis] = 0.0
+                            rounded_position = ti.cast(exact_position, ti.f32)
+                            rounding_residual = ti.cast(
+                                exact_position
+                                - ti.cast(rounded_position, ti.f64),
+                                ti.f32,
+                            )
+                            new_x[axis] = rounded_position
+                            next_position_residual[axis] = rounding_residual
                         self.x[p] = new_x
-                        self.position_increment_residual_m[p] = position_increment
+                        self.position_increment_residual_m[p] = (
+                            next_position_residual
+                        )
                         self.F[p] = (self._identity() + dt_s * new_C) @ self.F[p]
                 if self.fixed_particle[p] != 0:
                     # Fixed particles stay frozen: zero velocity, frozen
@@ -1006,6 +1077,11 @@ class NeoHookeanMpmState:
                     self._atomic_add_vector(self.report_current_center_sum_m, self.x[p])
                     self._atomic_add_vector(self.report_radial_rest_center_sum_m, self.rest_x[p])
                     ti.atomic_add(self.report_radial_center_count[None], 1)
+                else:
+                    ti.atomic_add(
+                        self.report_grid_out_of_bounds_particle_count[None],
+                        1,
+                    )
 
         radial_center_count = ti.max(ti.cast(self.report_radial_center_count[None], ti.f32), 1.0)
         current_center = self.report_current_center_sum_m[None] / radial_center_count
@@ -1065,10 +1141,17 @@ class NeoHookeanMpmState:
                 self.report_secondary_velocity_sum_mps[None].z,
             ]
         )
+        # Preserve the maximum simultaneous OOB count across every deferred
+        # substep. Using max (rather than a sum) keeps the existing tolerance
+        # semantics: one persistent escaped particle still counts as one.
+        self.out_of_bounds_guard_batch_max_particle_count[None] = ti.max(
+            self.out_of_bounds_guard_batch_max_particle_count[None],
+            self.report_grid_out_of_bounds_particle_count[None],
+        )
         self.report_count_snapshot[None] = ti.Vector(
             [
                 self.report_active_grid_nodes[None],
-                self.report_grid_out_of_bounds_particle_count[None],
+                self.out_of_bounds_guard_batch_max_particle_count[None],
                 self.report_deformation_clamp_count[None],
                 self.report_radial_stretch_count[None],
                 self.report_primary_count[None],
@@ -1116,6 +1199,17 @@ class NeoHookeanMpmState:
         flip_blend = float(velocity_transfer_flip_blend)
         if not 0.0 <= flip_blend <= 1.0:
             raise ValueError("velocity_transfer_flip_blend must be in [0, 1]")
+        if self._out_of_bounds_guard_batch_active and read_report:
+            raise ValueError(
+                "read_report must be False inside an out-of-bounds guard batch; "
+                "call end_out_of_bounds_guard_batch() for the single final report"
+            )
+        if not self._out_of_bounds_guard_batch_active:
+            # Ordinary calls retain the fail-closed per-step contract. Resetting
+            # a scalar field launches no device->host transfer and therefore
+            # does not reintroduce the synchronization regression.
+            self._reset_out_of_bounds_guard_batch_kernel()
+            self.last_out_of_bounds_guard_host_reads = 0
         self._step_kernel(
             int(self.particle_count),
             float(dt_s),
@@ -1128,31 +1222,77 @@ class NeoHookeanMpmState:
             int(CONSTITUTIVE_MODELS[constitutive_model]),
             flip_blend,
         )
-        # _step_kernel already advanced every particle (positions, velocities,
-        # F) and tallied report_grid_out_of_bounds_particle_count[None]
-        # unconditionally on the GPU -- that counter is not behind
-        # `read_report`. Historically the out-of-bounds guard only fired
-        # inside report(), so callers that pass read_report=False (e.g. the
-        # Turek-Hron case, for 99/100 substeps, to avoid the full report's
-        # large host readback) never observed a partially escaped solid
-        # until up to 100 substeps later. Read back ONLY this single i32
-        # scalar -- one 4-byte device readback, negligible next to the full
-        # report -- and enforce the guard every substep regardless of
-        # read_report. The state has UNAVOIDABLY already advanced by this
-        # point (positions only exist after integration); the guard's
-        # contract is "refuse to CONTINUE from a partially escaped state",
-        # not "prevent the escaping step from running".
+        if self._out_of_bounds_guard_batch_active:
+            # The kernel has accumulated the current OOB count into the
+            # device-side sticky maximum. Do not read any device scalar here:
+            # end_out_of_bounds_guard_batch() performs the one fail-closed host
+            # read before the caller may continue into coupling/fluid work.
+            self._out_of_bounds_guard_batch_step_count += 1
+            self.last_report_host_reads = 0
+            self.last_out_of_bounds_guard_host_reads = 0
+            return None
+
+        # Non-batched read_report=False calls keep the audit fix's immediate
+        # fail-closed behavior. This is deliberately the only scalar guard
+        # read outside report(); batched production substeps return above.
+        if read_report:
+            # The packed report already contains the device-side guard maximum,
+            # so a separate scalar read would be a redundant second sync.
+            return self.report()
         out_of_bounds_particle_count = int(
-            self.report_grid_out_of_bounds_particle_count[None]
+            self.out_of_bounds_guard_batch_max_particle_count[None]
         )
+        self.last_out_of_bounds_guard_host_reads = 1
         _raise_if_out_of_bounds_exceeds_tolerance(
             int(self.particle_count),
             out_of_bounds_particle_count,
             self.out_of_bounds_particle_tolerance,
         )
-        if not read_report:
-            self.last_report_host_reads = 0
-            return None
+        self.last_report_host_reads = 0
+        return None
+
+    def begin_out_of_bounds_guard_batch(self) -> None:
+        """Start device-only OOB accumulation across several MPM substeps.
+
+        Every step in the batch must use ``read_report=False``. Finish with
+        :meth:`end_out_of_bounds_guard_batch`, which performs one packed report
+        read and raises on the maximum simultaneous OOB count seen anywhere in
+        the batch.
+        """
+
+        if self.particle_count <= 0:
+            raise ValueError("initialize particles before starting a guard batch")
+        if self._out_of_bounds_guard_batch_active:
+            raise RuntimeError("an out-of-bounds guard batch is already active")
+        self._reset_out_of_bounds_guard_batch_kernel()
+        self._out_of_bounds_guard_batch_active = True
+        self._out_of_bounds_guard_batch_step_count = 0
+        self.last_report_host_reads = 0
+        self.last_out_of_bounds_guard_host_reads = 0
+
+    def abort_out_of_bounds_guard_batch(self) -> None:
+        """Idempotently abandon only the host-side guard-batch lifecycle.
+
+        This does not roll back particle fields or any other device state. A
+        caller that catches a failed batch and intends to reuse this object
+        must first call ``restore_state()`` from a known-valid saved state.
+        """
+
+        self._out_of_bounds_guard_batch_active = False
+        self._out_of_bounds_guard_batch_step_count = 0
+
+    def end_out_of_bounds_guard_batch(self) -> NeoHookeanMpmReport:
+        """Finish a guard batch with exactly one fail-closed host report read."""
+
+        if not self._out_of_bounds_guard_batch_active:
+            raise RuntimeError("no out-of-bounds guard batch is active")
+        if self._out_of_bounds_guard_batch_step_count <= 0:
+            raise RuntimeError("out-of-bounds guard batch contains no completed steps")
+        # Close the batch before report() so an OOB exception cannot strand the
+        # state in a permanently-active host control state. The device sticky
+        # maximum remains packed in report_host_snapshot by the final step.
+        self._out_of_bounds_guard_batch_active = False
+        self._out_of_bounds_guard_batch_step_count = 0
         return self.report()
 
     @ti.kernel
@@ -1194,6 +1334,7 @@ class NeoHookeanMpmState:
         values = snapshot[:28]
         counts = snapshot[28:34]
         self.last_report_host_reads = 1
+        self.last_out_of_bounds_guard_host_reads = 1
         _raise_if_out_of_bounds_exceeds_tolerance(
             int(self.particle_count),
             int(counts[1]),

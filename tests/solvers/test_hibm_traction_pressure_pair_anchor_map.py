@@ -141,6 +141,26 @@ class HibmMpmTractionPressurePairAnchorMapTests(unittest.TestCase):
         self.assertEqual(diagnostic["pressure_pair_anchor_source"], "unset")
         self.assertFalse(diagnostic["pressure_pair_anchor_fallback_used"])
 
+    def test_geometry_revision_change_retires_old_anchor_before_sampling(self):
+        markers, fluid = _single_marker_fixture()
+        _set_step_pressure(fluid)
+        markers.set_pressure_pair_anchor_cells(
+            inside_cells=((2, 2, 2),),
+            outside_cells=((2, 2, 5),),
+        )
+        installed_revision = markers.pressure_pair_anchor_geometry_revision
+        markers.marker_geometry_revision += 1
+
+        _sample(markers, fluid, pressure_pair_policy="baseline_anchored_cell_pair")
+
+        diagnostic = markers.stress_marker_diagnostics()[0]
+        self.assertIsNotNone(installed_revision)
+        self.assertNotEqual(installed_revision, markers.marker_geometry_revision)
+        self.assertFalse(diagnostic["valid"])
+        self.assertFalse(diagnostic["pressure_pair_anchor_active"])
+        self.assertFalse(diagnostic["pressure_pair_selected"])
+        self.assertEqual(diagnostic["invalid_reason"], "two_sided_pressure_missing")
+
     def test_invalid_anchor_cells_fail_fast(self):
         markers, _fluid = _single_marker_fixture()
 

@@ -1,7 +1,6 @@
 # Direct dependencies of the refactored HIBM-MPM solver tree.
-# Versions mirror the validated local environment
-# ("D:/TOOL/Anaconda/python.exe", pip show, 2026-07-10) that the
-# validation runs and test suite were executed with. Only direct deps are
+# Versions mirror the validated Python 3.10 environment (`pip show`,
+# 2026-07-10) that the validation runs and test suite used. Only direct deps are
 # pinned; transitive packages resolve from these.
 #
 # Core solver (imported at top level by simulation_core/ and cases/):
@@ -11,5 +10,7 @@ trimesh==4.11.5
 # Numerics / diagnostics and rendering helpers (tools/, validation scripts):
 scipy==1.16.1
 matplotlib==3.10.0
+# Official Fluent HDF5 case/data readers and fine-FSI validation contracts:
+h5py==3.16.0
 # Test runner:
 pytest==9.0.3

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import time
 import traceback
@@ -21,9 +22,8 @@ from matplotlib.collections import PolyCollection
 RUN_DIR = Path(__file__).resolve().parents[1]
 FIGURE_DIR = RUN_DIR / "figures"
 MESH = Path(
-    r"D:\working\squid robot\LBM\MPM-LBM\benchmarks\private"
-    r"\ansys_fsi_2way_public_tutorial\fsi_2way\flap.msh"
-)
+    os.environ.get("EASYFSI_FLUENT_MESH", str(RUN_DIR / "flap.msh"))
+).expanduser()
 
 COARSE_CASE = RUN_DIR / "coarse_before_adapt.cas.h5"
 COARSE_DATA = RUN_DIR / "coarse_before_adapt.dat.h5"
@@ -320,6 +320,11 @@ def write_run_log(summary: dict[str, object]) -> None:
 
 
 def main() -> int:
+    if not MESH.is_file():
+        raise FileNotFoundError(
+            "Fluent mesh not found; set EASYFSI_FLUENT_MESH to the public "
+            f"fsi_2way flap.msh path (resolved={MESH})"
+        )
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
     EVENT_LOG.write_text("", encoding="utf-8")

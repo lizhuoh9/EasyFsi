@@ -354,6 +354,28 @@ class FsiSolverConfigValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "step_count"):
             FsiSolverConfig(step_count=0, time_step_s=0.1)
 
+    def test_step_count_rejects_bool(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FsiSolverConfig
+
+        for value in (False, True):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "step_count.*integer"):
+                    FsiSolverConfig(step_count=value, time_step_s=0.1)
+
+    def test_step_count_rejects_fractional_float(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FsiSolverConfig
+
+        with self.assertRaisesRegex(ValueError, "step_count.*integer"):
+            FsiSolverConfig(step_count=1.5, time_step_s=0.1)
+
+    def test_time_step_rejects_bool(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FsiSolverConfig
+
+        for value in (False, True):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "time_step_s"):
+                    FsiSolverConfig(step_count=5, time_step_s=value)
+
     def test_time_step_rejects_nan(self) -> None:
         from simulation_core.drivers.generic_fsi_solver import FsiSolverConfig
 
@@ -382,6 +404,235 @@ class FsiSolverConfigValidationTests(unittest.TestCase):
         config = FsiSolverConfig(step_count=5, time_step_s=0.01)
         self.assertEqual(config.step_count, 5)
         self.assertEqual(config.time_step_s, 0.01)
+
+
+class GenericFsiGeometryAndPressureValidationTests(unittest.TestCase):
+    def test_required_names_reject_none_and_blank_text(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import (
+            FluidDomain,
+            FsiSolverConfig,
+        )
+
+        for value in (None, "", "   "):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "domain_id.*non-empty"):
+                    FluidDomain(
+                        domain_id=value,
+                        coordinate_model="cartesian-3d",
+                        grid_nodes=(2, 2, 2),
+                        bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+                    )
+                with self.assertRaisesRegex(ValueError, "solver_name.*non-empty"):
+                    FsiSolverConfig(
+                        step_count=1,
+                        time_step_s=0.01,
+                        solver_name=value,
+                    )
+
+    def test_grid_nodes_require_exactly_three_entries(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FluidDomain
+
+        for grid_nodes in ((2, 2), (2, 2, 2, 2)):
+            with self.subTest(grid_nodes=grid_nodes):
+                with self.assertRaisesRegex(ValueError, "grid_nodes"):
+                    FluidDomain(
+                        domain_id="toy-fluid",
+                        coordinate_model="cartesian-3d",
+                        grid_nodes=grid_nodes,
+                        bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+                    )
+
+    def test_grid_nodes_reject_bool_float_and_string_entries(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FluidDomain
+
+        for value in (False, True, 2.0, "2"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "grid_nodes.*integer"):
+                    FluidDomain(
+                        domain_id="toy-fluid",
+                        coordinate_model="cartesian-3d",
+                        grid_nodes=(2, value, 2),
+                        bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+                    )
+
+    def test_grid_nodes_reject_nonpositive_integers(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FluidDomain
+
+        for value in (0, -1):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "grid_nodes.*positive"):
+                    FluidDomain(
+                        domain_id="toy-fluid",
+                        coordinate_model="cartesian-3d",
+                        grid_nodes=(2, value, 2),
+                        bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+                    )
+
+    def test_grid_nodes_accept_three_positive_integers(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FluidDomain
+
+        domain = FluidDomain(
+            domain_id="toy-fluid",
+            coordinate_model="cartesian-3d",
+            grid_nodes=(2, 3, 4),
+            bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+        )
+
+        self.assertEqual(domain.grid_nodes, (2, 3, 4))
+
+    def test_fluid_bounds_reject_nonfinite_components(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FluidDomain
+
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "bounds_m.*finite"):
+                    FluidDomain(
+                        domain_id="toy-fluid",
+                        coordinate_model="cartesian-3d",
+                        grid_nodes=(2, 2, 2),
+                        bounds_m=((value, 0.0, 0.0), (1.0, 1.0, 1.0)),
+                    )
+
+    def test_fluid_bounds_require_strictly_positive_extent_on_every_axis(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FluidDomain
+
+        invalid_bounds = (
+            ((0.0, 0.0, 0.0), (0.0, 1.0, 1.0)),
+            ((0.0, 0.0, 0.0), (-1.0, 1.0, 1.0)),
+        )
+        for bounds_m in invalid_bounds:
+            with self.subTest(bounds_m=bounds_m):
+                with self.assertRaisesRegex(ValueError, "bounds_m.*min.*max"):
+                    FluidDomain(
+                        domain_id="toy-fluid",
+                        coordinate_model="cartesian-3d",
+                        grid_nodes=(2, 2, 2),
+                        bounds_m=bounds_m,
+                    )
+
+    def test_fluid_bounds_accept_finite_strict_extents(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FluidDomain
+
+        domain = FluidDomain(
+            domain_id="toy-fluid",
+            coordinate_model="cartesian-3d",
+            grid_nodes=(2, 2, 2),
+            bounds_m=((-1.0, -2.0, -3.0), (1.0, 2.0, 3.0)),
+        )
+
+        self.assertEqual(domain.bounds_m[0], (-1.0, -2.0, -3.0))
+        self.assertEqual(domain.bounds_m[1], (1.0, 2.0, 3.0))
+
+    def test_surface_region_reference_pressure_rejects_nonfinite_values(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import SurfaceRegion
+
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "reference_pressure_pa.*finite"):
+                    SurfaceRegion(region_id="face-a", reference_pressure_pa=value)
+
+    def test_surface_region_policy_reference_pressure_rejects_nonfinite_values(
+        self,
+    ) -> None:
+        from simulation_core.drivers.generic_fsi_solver import SurfaceRegionPolicy
+
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "reference_pressure_pa.*finite"):
+                    SurfaceRegionPolicy(
+                        region_id="face-a",
+                        fluid_side_normal_sign=1.0,
+                        reference_pressure_pa=value,
+                    )
+
+    def test_finite_reference_pressures_are_accepted(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import (
+            SurfaceRegion,
+            SurfaceRegionPolicy,
+        )
+
+        region = SurfaceRegion(region_id="face-a", reference_pressure_pa=-12.5)
+        policy = SurfaceRegionPolicy(
+            region_id="face-a",
+            fluid_side_normal_sign=-1.0,
+            reference_pressure_pa=42.0,
+        )
+
+        self.assertEqual(region.reference_pressure_pa, -12.5)
+        self.assertEqual(policy.reference_pressure_pa, 42.0)
+
+
+class GenericFsiDiscreteCountValidationTests(unittest.TestCase):
+    def test_surface_region_marker_count_rejects_bool_float_and_string(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import SurfaceRegion
+
+        for value in (False, True, 1.0, "1"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "marker_count.*integer"):
+                    SurfaceRegion(region_id="face-a", marker_count=value)
+
+    def test_surface_region_marker_count_rejects_negative_integer(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import SurfaceRegion
+
+        with self.assertRaisesRegex(ValueError, "marker_count.*non-negative"):
+            SurfaceRegion(region_id="face-a", marker_count=-1)
+
+    def test_surface_region_marker_count_accepts_nonnegative_integers(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import SurfaceRegion
+
+        self.assertEqual(SurfaceRegion(region_id="empty", marker_count=0).marker_count, 0)
+        self.assertEqual(SurfaceRegion(region_id="seeded", marker_count=7).marker_count, 7)
+
+    def test_pressure_fallback_count_rejects_bool_float_and_string(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import (
+            PressureSamplePairProvider,
+            PressureSamplingConfig,
+        )
+
+        provider = PressureSamplePairProvider(mode="runtime_anchored_cell_pair")
+        for value in (False, True, 1.0, "1"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError, "sample_pair_fallback_count_max.*integer"
+                ):
+                    PressureSamplingConfig(
+                        pair_provider=provider,
+                        sample_pair_fallback_count_max=value,
+                    )
+
+    def test_pressure_fallback_count_rejects_negative_integer(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import (
+            PressureSamplePairProvider,
+            PressureSamplingConfig,
+        )
+
+        provider = PressureSamplePairProvider(mode="runtime_anchored_cell_pair")
+        with self.assertRaisesRegex(
+            ValueError, "sample_pair_fallback_count_max.*non-negative"
+        ):
+            PressureSamplingConfig(
+                pair_provider=provider,
+                sample_pair_fallback_count_max=-1,
+            )
+
+    def test_pressure_fallback_count_accepts_nonnegative_integers(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import (
+            PressureSamplePairProvider,
+            PressureSamplingConfig,
+        )
+
+        provider = PressureSamplePairProvider(mode="runtime_anchored_cell_pair")
+        zero = PressureSamplingConfig(
+            pair_provider=provider,
+            sample_pair_fallback_count_max=0,
+        )
+        positive = PressureSamplingConfig(
+            pair_provider=provider,
+            sample_pair_fallback_count_max=3,
+        )
+
+        self.assertEqual(zero.sample_pair_fallback_count_max, 0)
+        self.assertEqual(positive.sample_pair_fallback_count_max, 3)
 
 
 class SolveFsiRunStatusHonestyTests(unittest.TestCase):
@@ -483,3 +734,45 @@ class SolveFsiRunStatusHonestyTests(unittest.TestCase):
 
         self.assertEqual(result.run_status, "unknown")
         self.assertIn("run_status_overridden_reason", result.diagnostics)
+
+    def test_duplicate_step_history_cannot_complete_requested_run(self) -> None:
+        result = self._run(
+            step_count=2,
+            history=[{"step": 1}, {"step": 1}],
+            run_status="completed",
+        )
+
+        self.assertEqual(result.completed_step_count, 1)
+        self.assertEqual(result.run_status, "partial")
+        self.assertIn("run_status_overridden_reason", result.diagnostics)
+
+    def test_gapped_step_history_counts_only_the_contiguous_prefix(self) -> None:
+        result = self._run(
+            step_count=3,
+            history=[{"step": 1}, {"step": 3}, {"step": 2}],
+        )
+
+        self.assertEqual(result.completed_step_count, 1)
+        self.assertEqual(result.run_status, "partial")
+
+    def test_history_starting_at_wrong_step_is_unknown(self) -> None:
+        result = self._run(step_count=2, history=[{"step": 2}, {"step": 1}])
+
+        self.assertEqual(result.completed_step_count, 0)
+        self.assertEqual(result.run_status, "unknown")
+
+    def test_non_integer_history_step_does_not_count_as_completed(self) -> None:
+        for value in (True, 1.0, "1"):
+            with self.subTest(value=value):
+                result = self._run(step_count=1, history=[{"step": value}])
+                self.assertEqual(result.completed_step_count, 0)
+                self.assertEqual(result.run_status, "unknown")
+
+    def test_legacy_history_without_step_fields_remains_count_compatible(self) -> None:
+        result = self._run(
+            step_count=2,
+            history=[{"residual": 1.0}, {"residual": 0.5}],
+        )
+
+        self.assertEqual(result.completed_step_count, 2)
+        self.assertEqual(result.run_status, "completed")

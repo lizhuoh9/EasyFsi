@@ -11,6 +11,7 @@ from simulation_core import (
     HibmMpmSurfaceMarkers,
     TaichiRuntimeConfig,
 )
+from simulation_core.solids.neo_hookean_mpm import NeoHookeanMpmState
 
 
 RUNTIME = TaichiRuntimeConfig(arch="cuda")
@@ -66,6 +67,55 @@ class HibmMpmTractionProbeOriginDecouplingTests(unittest.TestCase):
         )
         self.assertLess(abs(explicit["pressure_jump_pa"]), abs(default["pressure_jump_pa"]))
         self.assertLess(abs(explicit["total_traction_pa"][2]), abs(default["total_traction_pa"][2]))
+
+    def test_surface_feedback_preserves_probe_normal_offset_on_current_geometry(self):
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1, runtime=RUNTIME)
+        markers.load_markers(
+            positions_m=((0.5, 0.5, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(0.25,),
+            region_ids=(101,),
+            pressure_probe_origins_m=((0.5, 0.5, 0.4),),
+        )
+        solid = NeoHookeanMpmState(
+            particle_capacity=1,
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            grid_nodes=(4, 4, 4),
+            runtime=RUNTIME,
+        )
+        solid.initialize_box(
+            particle_counts=(1, 1, 1),
+            box_min_m=(0.45, 0.45, 0.45),
+            box_max_m=(0.55, 0.55, 0.55),
+            density_kgm3=1000.0,
+        )
+        solid.v[0] = (0.1, 0.0, 0.0)
+        solid.surface_normal[0] = (0.0, 1.0, 0.0)
+        solid.area_weight_m2[0] = 0.25
+
+        markers.update_surface_feedback_from_mpm_surface_particles(
+            solid.x,
+            solid.v,
+            solid.surface_normal,
+            solid.area_weight_m2,
+            particle_count=1,
+            support_radius_m=0.5,
+            dt_s=0.1,
+        )
+
+        position = markers.x_gamma_m.to_numpy()[0].astype(np.float64)
+        normal = markers.n_gamma.to_numpy()[0].astype(np.float64)
+        origin = markers.pressure_probe_origin_m.to_numpy()[0].astype(np.float64)
+        offset = origin - position
+        self.assertAlmostEqual(float(np.dot(offset, normal)), -0.1, delta=1.0e-6)
+        np.testing.assert_allclose(
+            offset - float(np.dot(offset, normal)) * normal,
+            np.zeros(3),
+            atol=1.0e-6,
+        )
+        np.testing.assert_allclose(origin, (0.51, 0.4, 0.5), atol=1.0e-6)
 
     def test_invalid_probe_origins_fail_fast(self):
         markers, _ = _single_marker_fixture()

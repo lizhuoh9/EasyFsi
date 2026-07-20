@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import operator
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,12 +24,21 @@ class FluidDomain:
     def __post_init__(self) -> None:
         _require_non_empty(self.domain_id, name="domain_id")
         _require_non_empty(self.coordinate_model, name="coordinate_model")
-        if len(self.grid_nodes) != 3 or any(int(value) <= 0 for value in self.grid_nodes):
+        if len(self.grid_nodes) != 3:
             raise ValueError("grid_nodes must contain three positive integers")
+        for value in self.grid_nodes:
+            _strict_positive_integer(value, name="grid_nodes")
         if len(self.bounds_m) != 2:
             raise ValueError("bounds_m must contain min and max points")
-        for point in self.bounds_m:
-            _vector3(point, name="bounds_m")
+        bounds_min = _vector3(self.bounds_m[0], name="bounds_m")
+        bounds_max = _vector3(self.bounds_m[1], name="bounds_m")
+        if any(
+            min_value >= max_value
+            for min_value, max_value in zip(bounds_min, bounds_max, strict=True)
+        ):
+            raise ValueError(
+                "bounds_m min point must be strictly less than max point on every axis"
+            )
 
 
 @dataclass(frozen=True)
@@ -50,12 +60,12 @@ class SurfaceRegion:
 
     def __post_init__(self) -> None:
         _require_non_empty(self.region_id, name="region_id")
-        if int(self.marker_count) < 0:
-            raise ValueError("marker_count must be non-negative")
+        _strict_non_negative_integer(self.marker_count, name="marker_count")
         if self.fluid_side_normal_sign is not None:
             sign = float(self.fluid_side_normal_sign)
             if sign not in (-1.0, 1.0):
                 raise ValueError("fluid_side_normal_sign must be -1.0 or 1.0")
+        _finite_float(self.reference_pressure_pa, name="reference_pressure_pa")
 
 
 @dataclass(frozen=True)
@@ -80,6 +90,7 @@ class SurfaceRegionPolicy:
         sign = float(self.fluid_side_normal_sign)
         if sign not in (-1.0, 1.0):
             raise ValueError("fluid_side_normal_sign must be -1.0 or 1.0")
+        _finite_float(self.reference_pressure_pa, name="reference_pressure_pa")
 
 
 @dataclass(frozen=True)
@@ -142,8 +153,10 @@ class PressureSamplingConfig:
     sample_pair_fallback_count_max: int = 0
 
     def __post_init__(self) -> None:
-        if int(self.sample_pair_fallback_count_max) < 0:
-            raise ValueError("sample_pair_fallback_count_max must be non-negative")
+        _strict_non_negative_integer(
+            self.sample_pair_fallback_count_max,
+            name="sample_pair_fallback_count_max",
+        )
 
     def as_diagnostics(self) -> dict[str, Any]:
         payload = self.pair_provider.as_diagnostics()
@@ -176,16 +189,13 @@ class FsiSolverConfig:
     solver_name: str = "generic-fsi-solver"
 
     def __post_init__(self) -> None:
-        if int(self.step_count) <= 0:
-            raise ValueError("step_count must be positive")
+        _strict_positive_integer(self.step_count, name="step_count")
         # `nan <= 0.0` is False (every ordinary comparison against NaN is
         # False under IEEE-754), so the previous `<= 0.0` check silently let
         # a NaN time_step_s through instead of rejecting it. Require
         # finiteness explicitly so NaN/inf are always caught here, not deep
         # inside a solver loop.
-        time_step_value = float(self.time_step_s)
-        if not math.isfinite(time_step_value) or time_step_value <= 0.0:
-            raise ValueError("time_step_s must be a finite positive number")
+        _finite_positive_float(self.time_step_s, name="time_step_s")
         _require_non_empty(self.solver_name, name="solver_name")
 
 
@@ -257,7 +267,7 @@ def solve_fsi(
     raw = dict(problem.runtime_executor(problem, solver_config, diagnostics_config))
     history = tuple(dict(row) for row in raw.get("history", ()))
     requested_step_count = int(solver_config.step_count)
-    completed_step_count = len(history)
+    completed_step_count = _completed_history_step_count(history)
     run_status, run_status_overridden_reason = _resolve_run_status(
         raw.get("run_status"),
         requested_step_count=requested_step_count,
@@ -335,12 +345,82 @@ def _resolve_run_status(
 
 
 def _require_non_empty(value: str, *, name: str) -> None:
-    if not str(value):
+    if value is None or not str(value).strip():
         raise ValueError(f"{name} must be non-empty")
 
 
+def _strict_integer(value: Any, *, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer, not bool")
+    try:
+        return int(operator.index(value))
+    except TypeError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _strict_positive_integer(value: Any, *, name: str) -> int:
+    integer = _strict_integer(value, name=name)
+    if integer <= 0:
+        raise ValueError(f"{name} must be a strictly positive integer")
+    return integer
+
+
+def _strict_non_negative_integer(value: Any, *, name: str) -> int:
+    integer = _strict_integer(value, name=name)
+    if integer < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return integer
+
+
+def _finite_float(value: Any, *, name: str) -> float:
+    try:
+        finite_value = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be finite") from exc
+    if not math.isfinite(finite_value):
+        raise ValueError(f"{name} must be finite")
+    return finite_value
+
+
+def _finite_positive_float(value: Any, *, name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite positive number, not bool")
+    finite_value = _finite_float(value, name=name)
+    if finite_value <= 0.0:
+        raise ValueError(f"{name} must be a finite positive number")
+    return finite_value
+
+
+def _completed_history_step_count(history: Sequence[Mapping[str, Any]]) -> int:
+    """Count a contiguous 1-based step prefix when rows expose step metadata.
+
+    Older runtime executors may return metric-only history rows. Preserve their
+    historical row-count contract when no row exposes ``step``. Once an
+    executor does expose ``step``, however, only the strict sequence ``1..N``
+    is completion evidence; duplicate, missing, fractional, or reordered step
+    values stop the completed prefix at the last trustworthy row.
+    """
+    if not history:
+        return 0
+    if not any("step" in row for row in history):
+        return len(history)
+    completed_step_count = 0
+    for expected_step, row in enumerate(history, start=1):
+        if "step" not in row:
+            break
+        try:
+            actual_step = _strict_integer(row["step"], name="history step")
+        except ValueError:
+            break
+        if actual_step != expected_step:
+            break
+        completed_step_count = expected_step
+    return completed_step_count
+
+
 def _vector3(values: Sequence[float], *, name: str) -> tuple[float, float, float]:
-    vector = tuple(float(value) for value in values)
-    if len(vector) != 3:
+    raw_values = tuple(values)
+    if len(raw_values) != 3:
         raise ValueError(f"{name} must contain exactly three values")
+    vector = tuple(_finite_float(value, name=name) for value in raw_values)
     return (vector[0], vector[1], vector[2])

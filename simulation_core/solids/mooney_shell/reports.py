@@ -17,6 +17,8 @@ class UvMooneyShellMpmReport:
     internal_force_rms_n: float
     net_internal_force_relative_error: float
     transfer_relative_error: float
+    sanitized_force_count: int = 0
+    constitutive_clamp_count: int = 0
 
 
 @dataclass(frozen=True)

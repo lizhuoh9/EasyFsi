@@ -11,6 +11,33 @@ import numpy as np
 
 FIVE_PERCENT = 0.05
 DEFAULT_MIN_TEMPORAL_OVERLAP_FRACTION = 0.9
+PRESSURE_QUANTITY = "static_gauge_pressure_pa"
+PRESSURE_REFERENCE = "outlet_0_pa"
+PRESSURE_SEMANTIC_KEYS = ("pressure_quantity", "pressure_reference")
+
+
+def load_pressure_semantics(path: str | Path) -> dict[str, str | None]:
+    """Load optional pressure semantics without weakening NPZ type checks."""
+
+    path = Path(path)
+    semantics: dict[str, str | None] = {}
+    with np.load(path, allow_pickle=False) as data:
+        for key in PRESSURE_SEMANTIC_KEYS:
+            if key not in data.files:
+                semantics[key] = None
+                continue
+            value = np.asarray(data[key])
+            if value.shape != () or value.dtype.kind != "U":
+                raise ValueError(
+                    f"{path}: pressure semantics {key!r} must be a scalar Unicode string"
+                )
+            item = value.item()
+            if not isinstance(item, str):
+                raise ValueError(
+                    f"{path}: pressure semantics {key!r} must be a scalar Unicode string"
+                )
+            semantics[key] = item
+    return semantics
 
 
 def load_fluent_npz(path: str | Path) -> dict[str, np.ndarray]:
@@ -39,6 +66,16 @@ def load_solver_npz(path: str | Path) -> dict[str, np.ndarray]:
             if "boundary_surrogate_mask" in data.files
             else np.zeros_like(fluid_mask, dtype=bool)
         )
+        display_fluid_mask = (
+            data["display_fluid_mask"].astype(bool)
+            if "display_fluid_mask" in data.files
+            else fluid_mask | boundary_surrogate_mask
+        )
+        display_obstacle_mask = (
+            data["display_obstacle_mask"].astype(bool)
+            if "display_obstacle_mask" in data.files
+            else ~display_fluid_mask
+        )
         return {
             "s": data["s"].astype(np.float64),
             "y": data["y"].astype(np.float64),
@@ -49,6 +86,8 @@ def load_solver_npz(path: str | Path) -> dict[str, np.ndarray]:
             "fluid_mask": fluid_mask,
             "solid_mask": solid_mask,
             "boundary_surrogate_mask": boundary_surrogate_mask,
+            "display_fluid_mask": display_fluid_mask,
+            "display_obstacle_mask": display_obstacle_mask,
         }
 
 
@@ -100,6 +139,7 @@ def save_solver_npz_from_flow_snapshot(
         v = _masked_span_mean(v_3d, fluid_3d)
         p = _masked_span_mean(pressure, fluid_3d)
         fluid_mask = np.any(comparison_3d, axis=0)
+        display_fluid_mask = np.any(fluid_3d, axis=0)
         boundary_surrogate_mask = np.any(boundary_surrogate_3d, axis=0)
     elif span_reduction == "center":
         center = velocity.shape[0] // 2
@@ -107,6 +147,7 @@ def save_solver_npz_from_flow_snapshot(
         v = v_3d[center, :, :]
         p = pressure[center, :, :]
         fluid_mask = comparison_3d[center, :, :]
+        display_fluid_mask = fluid_3d[center, :, :]
         boundary_surrogate_mask = boundary_surrogate_3d[center, :, :]
     else:
         raise ValueError(f"unsupported span_reduction: {span_reduction!r}")
@@ -120,11 +161,13 @@ def save_solver_npz_from_flow_snapshot(
         v = v[:, ::-1]
         p = p[:, ::-1]
         fluid_mask = fluid_mask[:, ::-1]
+        display_fluid_mask = display_fluid_mask[:, ::-1]
         boundary_surrogate_mask = boundary_surrogate_mask[:, ::-1]
+    display_obstacle_mask = ~display_fluid_mask
     solid_mask = (
         physical_solid_mask_from_bounds(s, y, physical_solid_bounds)
         if physical_solid_bounds is not None
-        else ~fluid_mask
+        else display_obstacle_mask
     )
     speed = np.sqrt(u * u + v * v)
     if not (
@@ -149,6 +192,10 @@ def save_solver_npz_from_flow_snapshot(
         fluid_mask=fluid_mask.astype(bool),
         solid_mask=solid_mask.astype(bool),
         boundary_surrogate_mask=boundary_surrogate_mask.astype(bool),
+        display_fluid_mask=display_fluid_mask.astype(bool),
+        display_obstacle_mask=display_obstacle_mask.astype(bool),
+        pressure_quantity=np.asarray(PRESSURE_QUANTITY),
+        pressure_reference=np.asarray(PRESSURE_REFERENCE),
     )
     return {
         "path": str(path),
@@ -161,6 +208,8 @@ def save_solver_npz_from_flow_snapshot(
         "fluid_cell_count": int(np.count_nonzero(fluid_mask)),
         "solid_cell_count": int(np.count_nonzero(solid_mask)),
         "boundary_surrogate_cell_count": int(np.count_nonzero(boundary_surrogate_mask)),
+        "display_fluid_cell_count": int(np.count_nonzero(display_fluid_mask)),
+        "display_obstacle_cell_count": int(np.count_nonzero(display_obstacle_mask)),
         "exclude_velocity_dirichlet_rows": bool(exclude_velocity_dirichlet_rows),
         "span_reduction": span_reduction,
         "streamwise_velocity_sign": float(streamwise_velocity_sign),

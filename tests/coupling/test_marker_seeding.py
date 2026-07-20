@@ -306,6 +306,20 @@ def test_large_stretch_triggers_reseed():
     assert tri_surface_needs_reseed(seed, cell) is True
 
 
+def test_long_collinear_degenerate_triangle_does_not_permanently_trigger_reseed():
+    vertices = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    triangles = np.array([[0, 1, 2]], dtype=np.int64)
+    cell = (0.75, 0.75, 0.75)
+
+    seed = seed_markers_from_tri_surface(vertices, triangles, cell)
+
+    assert seed.marker_count == 1
+    assert tri_surface_needs_reseed(seed, cell) is False
+
+
 # ---------------------------------------------------------------------
 # Polyline resample (host-only utility)
 # ---------------------------------------------------------------------

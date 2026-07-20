@@ -24,4 +24,3 @@ boundary_conditions:
 
 output:
   root: validation_runs/ansys_vertical_flap_fixed_flow/official_fluent_preflow
-

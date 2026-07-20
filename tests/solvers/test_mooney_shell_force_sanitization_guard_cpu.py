@@ -25,8 +25,11 @@ sim_runtime._INITIALIZED = True
 sim_runtime._INITIALIZED_ARCH = "cpu"
 sim_runtime._INITIALIZED_FP = "f32"
 
-from simulation_core.geometry_tools import SurfaceMesh
-from simulation_core.solids.mooney_shell import TriMooneyShellMpmState
+from simulation_core.geometry_tools import SurfaceMesh, UvSphereResolution
+from simulation_core.solids.mooney_shell import (
+    TriMooneyShellMpmState,
+    UvMooneyShellMpmState,
+)
 
 
 # ---------------------------------------------------------------------
@@ -91,6 +94,23 @@ def _stretch_triangle_past_constitutive_cap(
     positions[1] = [stretch, 0.0, 0.0]
     positions[2] = [0.0, stretch, 0.0]
     state.x.from_numpy(positions.astype(np.float32))
+
+
+def _small_uv_state() -> UvMooneyShellMpmState:
+    return UvMooneyShellMpmState(
+        UvSphereResolution(latitude_bands=4, longitude_segments=8),
+        radius_m=1.0,
+        thickness_m=0.05,
+        density_kgm3=1.0,
+        c1_pa=20.0,
+        c2_pa=10.0,
+        grid_nodes=(12, 12, 12),
+        bounds_scale=2.0,
+    )
+
+
+def _collapse_uv_shell(state: UvMooneyShellMpmState) -> None:
+    state.x.from_numpy(np.zeros((state.particle_count, 3), dtype=np.float32))
 
 
 class TriMooneyShellSanitizedForceGuardTests(unittest.TestCase):
@@ -262,6 +282,92 @@ class TriMooneyShellConstitutiveClampGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(report.constitutive_clamp_count, 4)
+
+
+class UvMooneyShellSanitizationGuardTests(unittest.TestCase):
+    def test_step_strict_default_raises_on_infinite_pressure_force(self) -> None:
+        state = _small_uv_state()
+
+        with self.assertRaisesRegex(
+            RuntimeError, r"non-finite/oversized force sanitization"
+        ):
+            state.step(dt_s=0.0, pressure_pa=float("inf"), velocity_damping=1.0)
+
+    def test_step_legacy_flag_reports_sanitized_force_count(self) -> None:
+        state = _small_uv_state()
+
+        report = state.step(
+            dt_s=0.0,
+            pressure_pa=float("inf"),
+            velocity_damping=1.0,
+            allow_force_sanitization=True,
+        )
+
+        self.assertEqual(report.sanitized_force_count, 144)
+        self.assertEqual(report.constitutive_clamp_count, 0)
+        recorded = state.diag_sanitized_force_first_indices.to_numpy()
+        self.assertTrue(
+            np.all((recorded >= 0) & (recorded < state.particle_count))
+        )
+
+    def test_step_strict_default_raises_on_degenerate_constitutive_state(self) -> None:
+        state = _small_uv_state()
+        _collapse_uv_shell(state)
+
+        with self.assertRaisesRegex(
+            RuntimeError, r"constitutive/force-cap clamp activation"
+        ):
+            state.step(dt_s=0.0, pressure_pa=0.0, velocity_damping=1.0)
+
+    def test_step_legacy_flag_reports_constitutive_clamp_count(self) -> None:
+        state = _small_uv_state()
+        _collapse_uv_shell(state)
+
+        report = state.step(
+            dt_s=0.0,
+            pressure_pa=0.0,
+            velocity_damping=1.0,
+            allow_force_sanitization=True,
+        )
+
+        self.assertEqual(report.sanitized_force_count, 0)
+        self.assertEqual(report.constitutive_clamp_count, 48)
+        recorded = state.diag_constitutive_clamp_first_indices.to_numpy()
+        self.assertTrue(
+            np.all((recorded >= 0) & (recorded < state.particle_count))
+        )
+
+    def test_anomaly_counters_are_cleared_between_steps(self) -> None:
+        state = _small_uv_state()
+
+        pressure_report = state.step(
+            dt_s=0.0,
+            pressure_pa=float("inf"),
+            velocity_damping=1.0,
+            allow_force_sanitization=True,
+        )
+        self.assertEqual(pressure_report.sanitized_force_count, 144)
+        self.assertEqual(pressure_report.constitutive_clamp_count, 0)
+
+        _collapse_uv_shell(state)
+        collapsed_report = state.step(
+            dt_s=0.0,
+            pressure_pa=0.0,
+            velocity_damping=1.0,
+            allow_force_sanitization=True,
+        )
+        self.assertEqual(collapsed_report.sanitized_force_count, 0)
+        self.assertEqual(collapsed_report.constitutive_clamp_count, 48)
+
+        state.x.from_numpy(state.rest_x.to_numpy())
+        recovered_report = state.step(
+            dt_s=0.0,
+            pressure_pa=0.0,
+            velocity_damping=1.0,
+            allow_force_sanitization=True,
+        )
+        self.assertEqual(recovered_report.sanitized_force_count, 0)
+        self.assertEqual(recovered_report.constitutive_clamp_count, 0)
 
 
 if __name__ == "__main__":

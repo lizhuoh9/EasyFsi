@@ -42,7 +42,11 @@ from simulation_core import (
     solve_and_apply_interface_reaction_step,
     solve_interface_reaction_fixed_point,
 )
-from simulation_core.geometry_tools import make_uv_sphere, orient_faces_outward
+from simulation_core.geometry_tools import (
+    infer_uv_sphere_resolution,
+    make_uv_sphere,
+    orient_faces_outward,
+)
 
 
 HIBM_MPM_CORE_SOURCE = Path("simulation_core/coupling/hibm_mpm/core.py")
@@ -54,6 +58,18 @@ MOONEY_SHELL_CORE_SOURCE = Path("simulation_core/solids/mooney_shell/core.py")
 
 
 class SimulationCorePackageTests(unittest.TestCase):
+    def test_uv_sphere_resolution_inference_rejects_count_only_collision(self) -> None:
+        known = UvSphereResolution(latitude_bands=8, longitude_segments=25)
+        count_collision = UvSphereResolution(latitude_bands=6, longitude_segments=35)
+        known_mesh = make_uv_sphere(known, radius_m=1.0)
+        colliding_mesh = make_uv_sphere(count_collision, radius_m=1.0)
+
+        self.assertEqual(colliding_mesh.vertex_count, known_mesh.vertex_count)
+        self.assertEqual(colliding_mesh.face_count, known_mesh.face_count)
+        self.assertEqual(infer_uv_sphere_resolution(known_mesh), known)
+        with self.assertRaisesRegex(ValueError, "known HIBM-MPM reproduction"):
+            infer_uv_sphere_resolution(colliding_mesh)
+
     def test_core_package_exports_basic_primitives(self) -> None:
         runtime = TaichiRuntimeConfig(arch="cuda")
         self.assertEqual(runtime.arch, "cuda")
