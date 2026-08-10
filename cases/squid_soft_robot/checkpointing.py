@@ -1,18 +1,32 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import taichi as ti
 
 from simulation_core import InterfaceReactionRelaxationState
 
+from .source_config import (
+    _selection_ids_as_int_tuple,
+    source_config_requests_fluid_active_mask,
+    source_config_volume_particle_cache_path,
+)
 
-RUN_CHECKPOINT_VERSION = 3
+if TYPE_CHECKING:
+    import argparse
+
+    from .runtime_state import ReducedSquidFSI
+    from .spec import SquidReducedSpec
+
+
+RUN_CHECKPOINT_VERSION = 4
 
 RUN_CHECKPOINT_FILENAME = "run_checkpoint.npz"
 
@@ -23,10 +37,41 @@ CHECKPOINT_MARKER_STATE_FIELD_NAMES = (
     "A_gamma_m2",
 )
 
+CHECKPOINT_SIM_SCALAR_FIELD_NAMES = (
+    "time_s",
+    "pressure_load_pa",
+    "hydraulic_pressure_pa",
+    "main_w_m",
+    "main_v_mps",
+    "tail_w_m",
+    "tail_v_mps",
+    "volume_flux_m3s",
+    "nozzle_velocity_z_mps",
+    "max_speed_mps",
+    "lip_flow_z_m3s",
+    "outlet_flow_z_m3s",
+    "downstream_flow_z_m3s",
+)
+CHECKPOINT_SIM_COUNT_FIELD_NAMES = (
+    "lip_sample_count",
+    "outlet_sample_count",
+    "downstream_sample_count",
+)
+CHECKPOINT_SIM_VECTOR_FIELD_NAMES = (
+    "primary_interface_reaction_force_n",
+    "secondary_interface_reaction_force_n",
+)
+CHECKPOINT_FLUID_FIELD_NAMES = ("velocity", "velocity_prev", "pressure")
+CHECKPOINT_SOLID_FIELD_NAMES = {
+    "tri_mooney_shell_mpm": ("x", "u", "v"),
+    "neo_hookean_mpm": ("x", "v", "C", "F"),
+}
+
 CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "source_config",
     "steps_explicit",
     "projection_iterations",
+    "hibm_post_dirichlet_consistency_projections",
     "fluid_advection_scheme",
     "pressure_solver",
     "pressure_solve_failure_policy",
@@ -214,6 +259,71 @@ def _checkpoint_normalized_value(value: object) -> object:
         }
     return value
 
+def _checkpoint_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.resolve().open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def _checkpoint_source_inputs(
+    source_config_path: str | Path,
+    *,
+    reduced_obstacles_enabled: bool,
+) -> dict[str, object]:
+    config_path = Path(source_config_path).resolve()
+    result: dict[str, object] = {
+        "source_config_path": str(config_path),
+        "source_config_sha256": None,
+        "geometry_files": {},
+    }
+    if not config_path.is_file():
+        return result
+
+    raw_config = config_path.read_bytes()
+    result["source_config_sha256"] = hashlib.sha256(raw_config).hexdigest()
+    try:
+        config = json.loads(raw_config.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"source config is not valid UTF-8 JSON: {config_path}") from exc
+    if not isinstance(config, Mapping):
+        raise ValueError(f"source config must contain a JSON object: {config_path}")
+
+    geometry_files: dict[str, dict[str, str]] = {}
+    for field_name in ("mesh_path", "surface_mesh_cache_path"):
+        raw_path = config.get(field_name)
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        path = Path(raw_path).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"checkpoint fingerprint input {field_name} not found: {path}"
+            )
+        geometry_files[field_name] = {
+            "path": str(path),
+            "sha256": _checkpoint_file_sha256(path),
+        }
+    analysis = config.get("analysis_settings", {})
+    surface_only_region_ids = (
+        _selection_ids_as_int_tuple(
+            analysis.get("solid_obstacle_surface_only_region_ids", ())
+        )
+        if isinstance(analysis, Mapping)
+        else ()
+    )
+    if (
+        reduced_obstacles_enabled
+        and source_config_requests_fluid_active_mask(config)
+        and not surface_only_region_ids
+    ):
+        volume_cache = source_config_volume_particle_cache_path(config_path)
+        geometry_files["volume_particle_cache_path"] = {
+            "path": str(volume_cache.resolve()),
+            "sha256": _checkpoint_file_sha256(volume_cache),
+        }
+    result["geometry_files"] = geometry_files
+    return result
+
 def checkpoint_run_fingerprint(
     *,
     args: argparse.Namespace,
@@ -241,6 +351,12 @@ def checkpoint_run_fingerprint(
         "full_pressure_waveform_steps": int(full_pressure_waveform_steps),
         "spec": spec_payload,
         "args": arg_payload,
+        "source_inputs": _checkpoint_source_inputs(
+            spec.source_config_path,
+            reduced_obstacles_enabled=not bool(
+                arg_payload.get("disable_reduced_obstacles")
+            ),
+        ),
     }
     return _checkpoint_normalized_value(payload)  # type: ignore[return-value]
 
@@ -258,13 +374,18 @@ def validate_checkpoint_run_fingerprint(
     spec: SquidReducedSpec,
     step_count: int,
     full_pressure_waveform_steps: int,
+    frozen_run_fingerprint: Mapping[str, object] | None = None,
 ) -> None:
     actual = metadata.get("run_fingerprint")
-    expected = checkpoint_run_fingerprint(
-        args=args,
-        spec=spec,
-        step_count=step_count,
-        full_pressure_waveform_steps=full_pressure_waveform_steps,
+    expected = (
+        frozen_run_fingerprint
+        if frozen_run_fingerprint is not None
+        else checkpoint_run_fingerprint(
+            args=args,
+            spec=spec,
+            step_count=step_count,
+            full_pressure_waveform_steps=full_pressure_waveform_steps,
+        )
     )
     if _checkpoint_resume_physical_fingerprint(
         actual
@@ -273,6 +394,28 @@ def validate_checkpoint_run_fingerprint(
             "checkpoint run fingerprint does not match current configuration; "
             "restart with the same source config, pressure schedule, grid, solver, "
             "solid, and FSI options"
+        )
+
+def validate_frozen_checkpoint_run_fingerprint(
+    frozen_run_fingerprint: Mapping[str, object],
+    *,
+    args: argparse.Namespace,
+    spec: SquidReducedSpec,
+    step_count: int,
+    full_pressure_waveform_steps: int,
+) -> None:
+    current = checkpoint_run_fingerprint(
+        args=args,
+        spec=spec,
+        step_count=step_count,
+        full_pressure_waveform_steps=full_pressure_waveform_steps,
+    )
+    if _checkpoint_normalized_value(
+        frozen_run_fingerprint
+    ) != _checkpoint_normalized_value(current):
+        raise RuntimeError(
+            "checkpoint source inputs changed during initialization; "
+            "restart setup with stable source files"
         )
 
 def _array_to_payload(payload: dict[str, np.ndarray], name: str, value: object) -> None:
@@ -648,6 +791,81 @@ def restore_sharp_marker_state_arrays(
         full[:count] = array
         field.from_numpy(full)
 
+def _checkpoint_value(checkpoint, key: str) -> np.ndarray:
+    if key not in checkpoint:
+        raise ValueError(f"checkpoint is missing {key!r}")
+    return np.asarray(checkpoint[key])
+
+def _checkpoint_scalar(checkpoint, key: str) -> float:
+    value = _checkpoint_value(checkpoint, key)
+    if value.size != 1:
+        raise ValueError(f"checkpoint {key!r} must be a scalar")
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"checkpoint {key!r} must be numeric") from exc
+    if not math.isfinite(scalar):
+        raise ValueError(f"checkpoint {key!r} must be finite")
+    return scalar
+
+def _checkpoint_count(checkpoint, key: str) -> int:
+    value = _checkpoint_scalar(checkpoint, key)
+    if not value.is_integer() or value < 0.0:
+        raise ValueError(f"checkpoint {key!r} must be a non-negative integer")
+    return int(value)
+
+def _checkpoint_integral_number(value: object, *, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"checkpoint {field} must be an integral non-boolean number")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    raise ValueError(f"checkpoint {field} must be an integral non-boolean number")
+
+def _checkpoint_integral_sequence(value: object, *, field: str) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"checkpoint {field} must be a sequence of integers")
+    return tuple(
+        _checkpoint_integral_number(item, field=f"{field}[{index}]")
+        for index, item in enumerate(value)
+    )
+
+def _checkpoint_vector(checkpoint, key: str) -> np.ndarray:
+    value = _checkpoint_value(checkpoint, key)
+    if value.shape != (3,):
+        raise ValueError(f"checkpoint {key!r} must have shape (3,)")
+    try:
+        vector = value.astype(np.float32, copy=True)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"checkpoint {key!r} must be numeric") from exc
+    if not bool(np.all(np.isfinite(vector))):
+        raise ValueError(f"checkpoint {key!r} must be finite")
+    return vector
+
+def _checkpoint_field_array(
+    checkpoint,
+    key: str,
+    field,
+    *,
+    active_count: int | None = None,
+) -> np.ndarray:
+    expected = np.asarray(field.to_numpy())
+    if active_count is not None:
+        expected = expected[:active_count]
+    value = _checkpoint_value(checkpoint, key)
+    if value.shape != expected.shape:
+        raise ValueError(
+            f"checkpoint {key!r} shape mismatch: {value.shape} != {expected.shape}"
+        )
+    try:
+        decoded = value.astype(expected.dtype, copy=True)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"checkpoint {key!r} has an incompatible dtype") from exc
+    if not bool(np.all(np.isfinite(decoded))):
+        raise ValueError(f"checkpoint {key!r} must be finite")
+    return decoded
+
 def write_run_checkpoint(
     path: Path,
     *,
@@ -659,6 +877,7 @@ def write_run_checkpoint(
     solid_mpm: object,
     interface_reaction_state: InterfaceReactionRelaxationState,
     sharp_coupling_state=None,
+    frozen_run_fingerprint: Mapping[str, object] | None = None,
 ) -> None:
     payload: dict[str, np.ndarray] = {}
     metadata = {
@@ -669,11 +888,15 @@ def write_run_checkpoint(
         "solid_model": str(args.solid_model),
         "grid_nodes": [int(value) for value in simulator.spec.grid_nodes],
         "particle_count": int(getattr(solid_mpm, "particle_count", 0)),
-        "run_fingerprint": checkpoint_run_fingerprint(
-            args=args,
-            spec=simulator.spec,
-            step_count=step_count,
-            full_pressure_waveform_steps=full_pressure_waveform_steps,
+        "run_fingerprint": _checkpoint_normalized_value(
+            frozen_run_fingerprint
+            if frozen_run_fingerprint is not None
+            else checkpoint_run_fingerprint(
+                args=args,
+                spec=simulator.spec,
+                step_count=step_count,
+                full_pressure_waveform_steps=full_pressure_waveform_steps,
+            )
         ),
         "interface_reaction_state": _checkpoint_interface_state_dict(
             interface_reaction_state
@@ -681,46 +904,22 @@ def write_run_checkpoint(
     }
     _array_to_payload(payload, "__metadata__", np.asarray(json.dumps(metadata)))
 
-    for name in (
-        "time_s",
-        "pressure_load_pa",
-        "hydraulic_pressure_pa",
-        "main_w_m",
-        "main_v_mps",
-        "tail_w_m",
-        "tail_v_mps",
-        "volume_flux_m3s",
-        "nozzle_velocity_z_mps",
-        "max_speed_mps",
-        "lip_flow_z_m3s",
-        "outlet_flow_z_m3s",
-        "downstream_flow_z_m3s",
-    ):
+    for name in CHECKPOINT_SIM_SCALAR_FIELD_NAMES:
         _array_to_payload(payload, f"sim_{name}", _read_scalar_field(getattr(simulator, name)))
-    for name in (
-        "lip_sample_count",
-        "outlet_sample_count",
-        "downstream_sample_count",
-    ):
+    for name in CHECKPOINT_SIM_COUNT_FIELD_NAMES:
         _array_to_payload(payload, f"sim_{name}", int(getattr(simulator, name)[None]))
-    for name in (
-        "primary_interface_reaction_force_n",
-        "secondary_interface_reaction_force_n",
-    ):
+    for name in CHECKPOINT_SIM_VECTOR_FIELD_NAMES:
         _array_to_payload(payload, f"sim_{name}", _read_vector_field(getattr(simulator, name)))
 
     fluid = simulator.fluid
-    for name in ("velocity", "velocity_prev", "pressure"):
+    for name in CHECKPOINT_FLUID_FIELD_NAMES:
         _array_to_payload(payload, f"fluid_{name}", getattr(fluid, name).to_numpy())
 
-    if args.solid_model == "tri_mooney_shell_mpm":
-        for name in ("x", "u", "v"):
-            _array_to_payload(payload, f"solid_{name}", getattr(solid_mpm, name).to_numpy())
-    elif args.solid_model == "neo_hookean_mpm":
-        for name in ("x", "v", "C", "F"):
-            _array_to_payload(payload, f"solid_{name}", getattr(solid_mpm, name).to_numpy())
-    else:
+    solid_field_names = CHECKPOINT_SOLID_FIELD_NAMES.get(str(args.solid_model))
+    if solid_field_names is None:
         raise ValueError(f"unsupported solid model for checkpoint: {args.solid_model!r}")
+    for name in solid_field_names:
+        _array_to_payload(payload, f"solid_{name}", getattr(solid_mpm, name).to_numpy())
 
     if sharp_coupling_state is not None:
         marker_state = sharp_marker_state_arrays(sharp_coupling_state.markers)
@@ -746,12 +945,22 @@ def load_run_checkpoint(
     step_count: int | None = None,
     full_pressure_waveform_steps: int | None = None,
     sharp_coupling_state=None,
+    frozen_run_fingerprint: Mapping[str, object] | None = None,
 ) -> tuple[int, InterfaceReactionRelaxationState]:
     if not path.exists():
         raise FileNotFoundError(f"checkpoint not found: {path}")
     with np.load(path, allow_pickle=False) as checkpoint:
-        metadata = json.loads(str(checkpoint["__metadata__"]))
-        if int(metadata.get("version", -1)) != RUN_CHECKPOINT_VERSION:
+        try:
+            metadata = json.loads(str(checkpoint["__metadata__"]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("checkpoint metadata is missing or invalid") from exc
+        if not isinstance(metadata, dict):
+            raise ValueError("checkpoint metadata must be an object")
+        version = _checkpoint_integral_number(
+            metadata.get("version"),
+            field="version",
+        )
+        if version != RUN_CHECKPOINT_VERSION:
             raise ValueError(
                 f"unsupported checkpoint version: {metadata.get('version')!r}"
             )
@@ -760,71 +969,105 @@ def load_run_checkpoint(
                 "checkpoint solid model does not match --solid-model: "
                 f"{metadata.get('solid_model')!r} != {args.solid_model!r}"
             )
-        if tuple(int(value) for value in metadata.get("grid_nodes", ())) != tuple(
-            int(value) for value in simulator.spec.grid_nodes
-        ):
+        grid_nodes = _checkpoint_integral_sequence(
+            metadata.get("grid_nodes"),
+            field="grid_nodes",
+        )
+        if grid_nodes != tuple(int(value) for value in simulator.spec.grid_nodes):
             raise ValueError("checkpoint grid shape does not match current configuration")
-        if int(metadata.get("particle_count", -1)) != int(getattr(solid_mpm, "particle_count", 0)):
+        particle_count = _checkpoint_integral_number(
+            metadata.get("particle_count"),
+            field="particle_count",
+        )
+        if particle_count != int(getattr(solid_mpm, "particle_count", 0)):
             raise ValueError("checkpoint solid particle count does not match current configuration")
+        stored_requested_steps = _checkpoint_integral_number(
+            metadata.get("requested_steps"),
+            field="requested_steps",
+        )
+        if stored_requested_steps <= 0:
+            raise ValueError("checkpoint requested_steps must be positive")
+        effective_requested_steps = _checkpoint_integral_number(
+            stored_requested_steps if step_count is None else step_count,
+            field="requested_steps",
+        )
+        if effective_requested_steps <= 0:
+            raise ValueError("checkpoint requested_steps must be positive")
+        stored_waveform_steps = _checkpoint_integral_number(
+            metadata.get("full_pressure_waveform_steps"),
+            field="full_pressure_waveform_steps",
+        )
+        effective_waveform_steps = _checkpoint_integral_number(
+            (
+                stored_waveform_steps
+                if full_pressure_waveform_steps is None
+                else full_pressure_waveform_steps
+            ),
+            field="full_pressure_waveform_steps",
+        )
+        if stored_waveform_steps <= 0 or effective_waveform_steps <= 0:
+            raise ValueError(
+                "checkpoint full_pressure_waveform_steps must be positive"
+            )
         validate_checkpoint_run_fingerprint(
             metadata,
             args=args,
             spec=simulator.spec,
-            step_count=(
-                int(metadata["requested_steps"])
-                if step_count is None
-                else int(step_count)
-            ),
-            full_pressure_waveform_steps=(
-                int(metadata["full_pressure_waveform_steps"])
-                if full_pressure_waveform_steps is None
-                else int(full_pressure_waveform_steps)
-            ),
+            step_count=effective_requested_steps,
+            full_pressure_waveform_steps=effective_waveform_steps,
+            frozen_run_fingerprint=frozen_run_fingerprint,
         )
+        completed_step = _checkpoint_integral_number(
+            metadata.get("completed_step"),
+            field="completed_step",
+        )
+        if completed_step < 0:
+            raise ValueError("checkpoint completed_step must be non-negative")
+        if completed_step >= effective_requested_steps:
+            raise ValueError(
+                "checkpoint completed_step must be less than requested_steps: "
+                f"{completed_step} >= {effective_requested_steps}"
+            )
+        interface_state = _interface_state_from_checkpoint(
+            metadata.get("interface_reaction_state")
+        )
+        solid_field_names = CHECKPOINT_SOLID_FIELD_NAMES.get(str(args.solid_model))
+        if solid_field_names is None:
+            raise ValueError(
+                f"unsupported solid model for checkpoint: {args.solid_model!r}"
+            )
 
-        for name in (
-            "time_s",
-            "pressure_load_pa",
-            "hydraulic_pressure_pa",
-            "main_w_m",
-            "main_v_mps",
-            "tail_w_m",
-            "tail_v_mps",
-            "volume_flux_m3s",
-            "nozzle_velocity_z_mps",
-            "max_speed_mps",
-            "lip_flow_z_m3s",
-            "outlet_flow_z_m3s",
-            "downstream_flow_z_m3s",
-        ):
-            _write_scalar_field(getattr(simulator, name), checkpoint[f"sim_{name}"])
-        for name in (
-            "lip_sample_count",
-            "outlet_sample_count",
-            "downstream_sample_count",
-        ):
-            getattr(simulator, name)[None] = int(np.asarray(checkpoint[f"sim_{name}"]))
-        for name in (
-            "primary_interface_reaction_force_n",
-            "secondary_interface_reaction_force_n",
-        ):
-            _write_vector_field(getattr(simulator, name), checkpoint[f"sim_{name}"])
-
+        scalar_values = {
+            name: _checkpoint_scalar(checkpoint, f"sim_{name}")
+            for name in CHECKPOINT_SIM_SCALAR_FIELD_NAMES
+        }
+        count_values = {
+            name: _checkpoint_count(checkpoint, f"sim_{name}")
+            for name in CHECKPOINT_SIM_COUNT_FIELD_NAMES
+        }
+        vector_values = {
+            name: _checkpoint_vector(checkpoint, f"sim_{name}")
+            for name in CHECKPOINT_SIM_VECTOR_FIELD_NAMES
+        }
         fluid = simulator.fluid
-        for name in ("velocity", "velocity_prev", "pressure"):
-            getattr(fluid, name).from_numpy(checkpoint[f"fluid_{name}"])
-        fluid.pressure_tmp.from_numpy(checkpoint["fluid_pressure"])
-        fluid.pressure_accum.from_numpy(checkpoint["fluid_pressure"])
+        fluid_values = {
+            name: _checkpoint_field_array(
+                checkpoint,
+                f"fluid_{name}",
+                getattr(fluid, name),
+            )
+            for name in CHECKPOINT_FLUID_FIELD_NAMES
+        }
+        solid_values = {
+            name: _checkpoint_field_array(
+                checkpoint,
+                f"solid_{name}",
+                getattr(solid_mpm, name),
+            )
+            for name in solid_field_names
+        }
 
-        if args.solid_model == "tri_mooney_shell_mpm":
-            for name in ("x", "u", "v"):
-                getattr(solid_mpm, name).from_numpy(checkpoint[f"solid_{name}"])
-        elif args.solid_model == "neo_hookean_mpm":
-            for name in ("x", "v", "C", "F"):
-                getattr(solid_mpm, name).from_numpy(checkpoint[f"solid_{name}"])
-        else:
-            raise ValueError(f"unsupported solid model for checkpoint: {args.solid_model!r}")
-
+        marker_values: dict[str, np.ndarray] = {}
         if sharp_coupling_state is not None:
             missing_marker_keys = [
                 f"marker_{name}"
@@ -838,15 +1081,34 @@ def load_run_checkpoint(
                     "sharp-coupling run from it would rebuild the immersed "
                     "boundary from rest geometry against a deformed fluid state"
                 )
-            restore_sharp_marker_state_arrays(
-                sharp_coupling_state.markers,
-                {
-                    name: checkpoint[f"marker_{name}"]
-                    for name in CHECKPOINT_MARKER_STATE_FIELD_NAMES
-                },
-            )
+            marker_count = int(sharp_coupling_state.markers.marker_count)
+            marker_values = {
+                name: _checkpoint_field_array(
+                    checkpoint,
+                    f"marker_{name}",
+                    getattr(sharp_coupling_state.markers, name),
+                    active_count=marker_count,
+                )
+                for name in CHECKPOINT_MARKER_STATE_FIELD_NAMES
+            }
 
-        return (
-            int(metadata["completed_step"]),
-            _interface_state_from_checkpoint(metadata.get("interface_reaction_state")),
+    # Commit only after every metadata field and array has been decoded and
+    # validated. Malformed checkpoints therefore leave the live solver intact.
+    for name, value in scalar_values.items():
+        _write_scalar_field(getattr(simulator, name), value)
+    for name, value in count_values.items():
+        getattr(simulator, name)[None] = value
+    for name, value in vector_values.items():
+        _write_vector_field(getattr(simulator, name), value)
+    for name, value in fluid_values.items():
+        getattr(fluid, name).from_numpy(value)
+    fluid.pressure_tmp.from_numpy(fluid_values["pressure"])
+    fluid.pressure_accum.from_numpy(fluid_values["pressure"])
+    for name, value in solid_values.items():
+        getattr(solid_mpm, name).from_numpy(value)
+    if sharp_coupling_state is not None:
+        restore_sharp_marker_state_arrays(
+            sharp_coupling_state.markers,
+            marker_values,
         )
+    return completed_step, interface_state

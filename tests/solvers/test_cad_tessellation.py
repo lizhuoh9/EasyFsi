@@ -139,6 +139,52 @@ class CadTessellationTests(unittest.TestCase):
         self.assertEqual(by_id[14]["face_ids"], [0, 3])
         self.assertEqual(by_id[8]["source_mesh_face_count"], 3)
 
+    def test_step_part_entity_tag_expands_all_part_surfaces_on_tag_collision(
+        self,
+    ) -> None:
+        result = StepTessellationResult(
+            mesh=trimesh.Trimesh(
+                vertices=np.asarray(
+                    [
+                        [0.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                    dtype=float,
+                ),
+                faces=np.asarray([[0, 1, 2], [0, 1, 3], [0, 2, 3]], dtype=np.int64),
+                process=False,
+            ),
+            surface_entities=[
+                StepSurfaceEntity(1, np.asarray([0]), np.zeros(3)),
+                StepSurfaceEntity(2, np.asarray([1, 2]), np.zeros(3)),
+            ],
+            part_entities=[
+                StepPartEntity(
+                    entity_dim=3,
+                    entity_tag=1,
+                    name="part",
+                    surface_tags=(1, 2),
+                    face_ids=np.asarray([0, 1, 2]),
+                    centroid_m=np.zeros(3),
+                )
+            ],
+            curve_entities=[],
+        )
+        config = {
+            "named_selections": [
+                {
+                    "id": 9,
+                    "selection_source": {"kind": "step_part", "cad_tags": [1]},
+                }
+            ]
+        }
+
+        remapped = remap_step_named_selection_face_ids(config, result)
+
+        self.assertEqual(remapped["named_selections"][0]["face_ids"], [0, 1, 2])
+
     def test_build_step_derived_source_config_records_hash_provenance(self) -> None:
         base_config = {
             "mesh_path": "old.stl",

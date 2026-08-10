@@ -1348,7 +1348,10 @@ def main() -> int:
         "[traction_selected_formulation_coupled_step50] wrote "
         f"{payload['candidate_status']} to {OUTPUT_DIR}"
     )
-    return 0
+    return int(
+        payload["candidate_status"]
+        != "selected_formulation_coupled_step50_passed"
+    )
 
 
 if __name__ == "__main__":

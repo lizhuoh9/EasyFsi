@@ -344,22 +344,37 @@ def _least_squares_coefficients(
         return None
     for column in columns:
         _same_length(column, rhs, lhs_name="column", rhs_name="rhs")
+    values = tuple(value for column in columns for value in column) + tuple(rhs)
+    if not all(math.isfinite(value) for value in values):
+        return None
+    scale = max((abs(value) for value in values), default=0.0)
+    if scale == 0.0:
+        return None
+    scaled_columns = tuple(
+        tuple(value / scale for value in column) for column in columns
+    )
+    scaled_rhs = tuple(value / scale for value in rhs)
     dimension = len(rhs)
-    max_column_norm = max((_force_norm(column) for column in columns), default=0.0)
-    tolerance = 1.0e-12 * max(max_column_norm, _force_norm(rhs), 1.0)
+    max_column_norm = max(
+        (_force_norm(column) for column in scaled_columns),
+        default=0.0,
+    )
+    tolerance = 1.0e-12 * max(max_column_norm, _force_norm(scaled_rhs), 1.0)
     q_vectors: list[ForceVector] = []
     r_matrix: list[list[float]] = []
     retained_indices: list[int] = []
 
-    for original_index, column in enumerate(columns):
+    for original_index, column in enumerate(scaled_columns):
         candidate = [float(value) for value in column]
         projections: list[float] = []
         for q_vector in q_vectors:
-            projection = sum(q_value * value for q_value, value in zip(q_vector, candidate))
+            projection = math.fsum(
+                q_value * value for q_value, value in zip(q_vector, candidate)
+            )
             projections.append(projection)
             for axis in range(dimension):
                 candidate[axis] -= projection * q_vector[axis]
-        diagonal = math.sqrt(sum(value * value for value in candidate))
+        diagonal = math.hypot(*candidate)
         if diagonal <= tolerance:
             continue
         for row_index, projection in enumerate(projections):
@@ -371,7 +386,7 @@ def _least_squares_coefficients(
     if len(retained_indices) == 0:
         return None
 
-    projected_rhs = [_force_dot(q_vector, rhs) for q_vector in q_vectors]
+    projected_rhs = [_force_dot(q_vector, scaled_rhs) for q_vector in q_vectors]
     retained_solution = [0.0 for _ in retained_indices]
     for row_index in range(len(retained_indices) - 1, -1, -1):
         diagonal = r_matrix[row_index][row_index]

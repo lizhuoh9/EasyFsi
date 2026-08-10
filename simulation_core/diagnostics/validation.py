@@ -62,6 +62,8 @@ class ReferenceCurve:
 
     def value_at(self, time_s: float) -> float:
         query = float(time_s)
+        if not math.isfinite(query):
+            raise ValueError("time_s must be finite")
         first_time = self.points[0][0]
         last_time = self.points[-1][0]
         if query < first_time or query > last_time:
@@ -78,13 +80,19 @@ class ReferenceCurve:
 
     def relative_error_at(self, *, time_s: float, computed_value: float) -> float:
         reference = self.value_at(time_s)
+        computed = float(computed_value)
+        if not math.isfinite(computed):
+            raise ValueError("computed_value must be finite")
         if abs(reference) <= 1.0e-30:
-            return abs(float(computed_value) - reference)
-        return abs(float(computed_value) - reference) / abs(reference)
+            return abs(computed - reference)
+        return abs(computed - reference) / abs(reference)
 
 
 def vector_norm(values: Any) -> float:
-    return math.sqrt(sum(float(value) * float(value) for value in values))
+    components = tuple(float(value) for value in values)
+    if not all(math.isfinite(value) for value in components):
+        raise ValueError("values must contain only finite numbers")
+    return math.hypot(*components)
 
 
 def finite_field_diagnostics(
@@ -142,11 +150,17 @@ def force_nonzero_when_loaded(
     force_required: bool,
     tolerance_n: float = 0.0,
 ) -> bool:
+    load = float(load_value)
+    tolerance = float(tolerance_n)
+    if not math.isfinite(load):
+        raise ValueError("load_value must be finite")
+    if not math.isfinite(tolerance) or tolerance < 0.0:
+        raise ValueError("tolerance_n must be a finite non-negative number")
     if not force_required:
         return True
-    if abs(float(load_value)) <= 0.0:
+    if load == 0.0:
         return True
-    return vector_norm(force_components_n) > float(tolerance_n)
+    return vector_norm(force_components_n) > tolerance
 
 
 def boundary_drive_compliance_report(

@@ -38,7 +38,8 @@ Select-String -Path simulation_core\fluids\solver.py `
 
 ANSYS 初始化/预流问题优先检查：
 
-- `prepare_sst_wall_distance`：SST wall-distance 准备。
+- `prepare_sst_wall_distance`：SST wall-distance 准备；固定几何命中严格
+  geometry/topology/wall-flag cache key 时复用，任一 obstacle writer 会统一失效。
 - `advance_sst_transport`：k/omega transport。
 - `predict`：动量预测和 SST 动量 Helmholtz。
 - `_solve_sst_momentum_unsplit_helmholtz`：assembly、PCG 和 commit。

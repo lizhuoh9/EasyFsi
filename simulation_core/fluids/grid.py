@@ -1,4 +1,5 @@
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -185,6 +186,8 @@ class RefinementRegion:
         bounds_max = tuple(float(v) for v in self.bounds_max_m)
         if len(bounds_min) != 3 or len(bounds_max) != 3:
             raise ValueError("RefinementRegion bounds must have three coordinates")
+        if any(not math.isfinite(value) for value in bounds_min + bounds_max):
+            raise ValueError("RefinementRegion bounds must be finite")
         if any(hi <= lo for lo, hi in zip(bounds_min, bounds_max, strict=True)):
             raise ValueError("RefinementRegion bounds_max_m must be greater than bounds_min_m")
         spacing = self.target_spacing_m
@@ -194,8 +197,8 @@ class RefinementRegion:
                 raise ValueError("target_spacing_m tuple must have three values")
         else:
             target = (float(spacing),) * 3
-        if any(value <= 0.0 for value in target):
-            raise ValueError("target_spacing_m must be positive")
+        if any(not math.isfinite(value) or value <= 0.0 for value in target):
+            raise ValueError("target_spacing_m must be finite and positive")
         object.__setattr__(self, "bounds_min_m", bounds_min)
         object.__setattr__(self, "bounds_max_m", bounds_max)
         object.__setattr__(self, "target_spacing_m", target)
@@ -215,6 +218,13 @@ class GradedGridSpec:
         bounds_max = tuple(float(v) for v in self.bounds_max_m)
         if len(bounds_min) != 3 or len(bounds_max) != 3:
             raise ValueError("GradedGridSpec bounds must have three coordinates")
+        if any(not math.isfinite(value) for value in bounds_min + bounds_max):
+            raise ValueError("GradedGridSpec bounds must be finite")
+        if any(
+            not math.isfinite(hi - lo)
+            for lo, hi in zip(bounds_min, bounds_max, strict=True)
+        ):
+            raise ValueError("GradedGridSpec axis lengths must be finite")
         if any(hi <= lo for lo, hi in zip(bounds_min, bounds_max, strict=True)):
             raise ValueError("bounds_max_m must be greater than bounds_min_m")
         spacing = self.farfield_spacing_m
@@ -224,16 +234,21 @@ class GradedGridSpec:
                 raise ValueError("farfield_spacing_m tuple must have three values")
         else:
             farfield = (float(spacing),) * 3
-        if any(value <= 0.0 for value in farfield):
-            raise ValueError("farfield_spacing_m must be positive")
-        if self.max_growth_ratio <= 1.0:
-            raise ValueError("max_growth_ratio must be greater than 1")
-        max_cells = None if self.max_cells is None else int(self.max_cells)
+        if any(not math.isfinite(value) or value <= 0.0 for value in farfield):
+            raise ValueError("farfield_spacing_m must be finite and positive")
+        growth_ratio = float(self.max_growth_ratio)
+        if not math.isfinite(growth_ratio) or growth_ratio <= 1.0:
+            raise ValueError("max_growth_ratio must be finite and greater than 1")
+        try:
+            max_cells = None if self.max_cells is None else int(self.max_cells)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError("max_cells must be finite and positive when provided") from exc
         if max_cells is not None and max_cells <= 0:
-            raise ValueError("max_cells must be positive when provided")
+            raise ValueError("max_cells must be finite and positive when provided")
         object.__setattr__(self, "bounds_min_m", bounds_min)
         object.__setattr__(self, "bounds_max_m", bounds_max)
         object.__setattr__(self, "farfield_spacing_m", farfield)
+        object.__setattr__(self, "max_growth_ratio", growth_ratio)
         object.__setattr__(self, "refinement_regions", tuple(self.refinement_regions))
         object.__setattr__(self, "max_cells", max_cells)
 
@@ -249,6 +264,108 @@ def _fill_axis_gap(left: float, right: float, spacing: float) -> list[float]:
     return [left + width * index for index in range(1, cells)]
 
 
+_WIDTH_TOLERANCE = 1.0e-10
+
+
+def _side_width_bounds(
+    cells: int,
+    *,
+    inner_width: float,
+    farfield_spacing: float,
+    max_growth_ratio: float,
+) -> tuple[list[float], list[float]]:
+    lower: list[float] = []
+    upper: list[float] = []
+    lower_width = upper_width = float(inner_width)
+    for _ in range(cells):
+        lower_width /= max_growth_ratio
+        upper_width = min(farfield_spacing, upper_width * max_growth_ratio)
+        lower.append(lower_width)
+        upper.append(upper_width)
+    return lower, upper
+
+
+def _bridge_width_bounds(
+    cells: int,
+    *,
+    left_width: float,
+    right_width: float,
+    farfield_spacing: float,
+    max_growth_ratio: float,
+) -> tuple[list[float], list[float]]:
+    left_lower, left_upper = _side_width_bounds(
+        cells,
+        inner_width=left_width,
+        farfield_spacing=farfield_spacing,
+        max_growth_ratio=max_growth_ratio,
+    )
+    right_lower, right_upper = _side_width_bounds(
+        cells,
+        inner_width=right_width,
+        farfield_spacing=farfield_spacing,
+        max_growth_ratio=max_growth_ratio,
+    )
+    lower = [
+        max(left_lower[index], right_lower[cells - index - 1])
+        for index in range(cells)
+    ]
+    upper = [
+        min(left_upper[index], right_upper[cells - index - 1])
+        for index in range(cells)
+    ]
+    return lower, upper
+
+
+def _minimum_feasible_width_bounds(
+    *,
+    distance: float,
+    max_cells: int,
+    width_bounds: Callable[[int], tuple[list[float], list[float]]],
+) -> tuple[list[float], list[float]]:
+    def can_span_distance(cells: int) -> bool:
+        lower, upper = width_bounds(cells)
+        bounds_are_feasible = all(
+            low <= high * (1.0 + _WIDTH_TOLERANCE)
+            for low, high in zip(lower, upper, strict=True)
+        )
+        return bounds_are_feasible and (
+            distance <= math.fsum(upper) * (1.0 + _WIDTH_TOLERANCE)
+        )
+
+    if not can_span_distance(max_cells):
+        raise ValueError("graded transition cannot span the requested distance")
+    # Adding cells only relaxes endpoint envelopes and increases span capacity.
+    low = 1
+    high = max_cells
+    while low < high:
+        middle = (low + high) // 2
+        if can_span_distance(middle):
+            high = middle
+        else:
+            low = middle + 1
+    lower, upper = width_bounds(low)
+    if distance < math.fsum(lower) * (1.0 - _WIDTH_TOLERANCE):
+        raise ValueError("graded transition is shorter than its minimum width")
+    return lower, upper
+
+
+def _interpolate_width_bounds(
+    *,
+    distance: float,
+    lower: list[float],
+    upper: list[float],
+) -> tuple[float, ...]:
+    lower_sum = math.fsum(lower)
+    upper_sum = math.fsum(upper)
+    if upper_sum <= lower_sum:
+        return tuple(lower)
+    alpha = min(1.0, max(0.0, (distance - lower_sum) / (upper_sum - lower_sum)))
+    return tuple(
+        lower_width + alpha * (upper_width - lower_width)
+        for lower_width, upper_width in zip(lower, upper, strict=True)
+    )
+
+
 def _graded_side_widths(
     *,
     distance: float,
@@ -261,39 +378,32 @@ def _graded_side_widths(
     smallest_anchor = max(min(inner_width, farfield_spacing), 1.0e-12)
     max_cells = max(64, int(distance / smallest_anchor) * 8 + 64)
     growth = float(max_growth_ratio)
-    for cells in range(1, max_cells + 1):
-        lower: list[float] = []
-        upper: list[float] = []
-        for index in range(cells):
-            steps = index + 1
-            lower_width = float(inner_width) / (growth**steps)
-            upper_width = min(float(farfield_spacing), float(inner_width) * (growth**steps))
-            if lower_width > upper_width * (1.0 + 1.0e-10):
-                break
-            lower.append(lower_width)
-            upper.append(upper_width)
-        if len(lower) != cells:
-            continue
 
-        lower_sum = sum(lower)
-        upper_sum = sum(upper)
-        if distance < lower_sum * (1.0 - 1.0e-10) or distance > upper_sum * (1.0 + 1.0e-10):
-            continue
-        if upper_sum <= lower_sum:
-            widths = tuple(lower)
-        else:
-            alpha = (float(distance) - lower_sum) / (upper_sum - lower_sum)
-            widths = tuple(
-                lower_width + alpha * (upper_width - lower_width)
-                for lower_width, upper_width in zip(lower, upper, strict=True)
-            )
-        if _axis_widths_respect_growth(
-            widths,
-            max_growth_ratio=max_growth_ratio,
-            left_boundary_width=inner_width,
-        ):
-            return widths
-    raise ValueError("could not build graded side satisfying max_growth_ratio")
+    def width_bounds(cells: int) -> tuple[list[float], list[float]]:
+        return _side_width_bounds(
+            cells,
+            inner_width=inner_width,
+            farfield_spacing=farfield_spacing,
+            max_growth_ratio=growth,
+        )
+
+    lower, upper = _minimum_feasible_width_bounds(
+        distance=distance,
+        max_cells=max_cells,
+        width_bounds=width_bounds,
+    )
+    widths = _interpolate_width_bounds(
+        distance=distance,
+        lower=lower,
+        upper=upper,
+    )
+    if not _axis_widths_respect_growth(
+        widths,
+        max_growth_ratio=max_growth_ratio,
+        left_boundary_width=inner_width,
+    ):
+        raise ValueError("could not build graded side satisfying max_growth_ratio")
+    return widths
 
 
 @dataclass(frozen=True)
@@ -339,60 +449,35 @@ def _graded_bridge_widths(
         return ()
     smallest_anchor = max(min(left_width, right_width, farfield_spacing), 1.0e-12)
     max_cells = max(64, int(distance / smallest_anchor) * 8 + 64)
-    for cells in range(1, max_cells + 1):
-        left_upper: list[float] = []
-        value = float(left_width)
-        for _ in range(cells):
-            value = min(float(farfield_spacing), value * float(max_growth_ratio))
-            left_upper.append(value)
-        right_upper: list[float] = []
-        value = float(right_width)
-        for _ in range(cells):
-            value = min(float(farfield_spacing), value * float(max_growth_ratio))
-            right_upper.append(value)
+    growth = float(max_growth_ratio)
 
-        lower: list[float] = []
-        upper: list[float] = []
-        feasible = True
-        for index in range(cells):
-            left_steps = index + 1
-            right_steps = cells - index
-            lower_width = max(
-                float(left_width) / (float(max_growth_ratio) ** left_steps),
-                float(right_width) / (float(max_growth_ratio) ** right_steps),
-            )
-            upper_width = min(
-                float(farfield_spacing),
-                left_upper[index],
-                right_upper[cells - index - 1],
-            )
-            if lower_width > upper_width * (1.0 + 1.0e-10):
-                feasible = False
-                break
-            lower.append(lower_width)
-            upper.append(upper_width)
-        if not feasible:
-            continue
-        lower_sum = sum(lower)
-        upper_sum = sum(upper)
-        if distance < lower_sum * (1.0 - 1.0e-10) or distance > upper_sum * (1.0 + 1.0e-10):
-            continue
-        if upper_sum <= lower_sum:
-            widths = tuple(lower)
-        else:
-            alpha = (distance - lower_sum) / (upper_sum - lower_sum)
-            widths = tuple(
-                lower_width + alpha * (upper_width - lower_width)
-                for lower_width, upper_width in zip(lower, upper, strict=True)
-            )
-        if _axis_widths_respect_growth(
-            widths,
-            max_growth_ratio=max_growth_ratio,
-            left_boundary_width=left_width,
-            right_boundary_width=right_width,
-        ):
-            return widths
-    raise ValueError("could not build graded bridge satisfying max_growth_ratio")
+    def width_bounds(cells: int) -> tuple[list[float], list[float]]:
+        return _bridge_width_bounds(
+            cells,
+            left_width=left_width,
+            right_width=right_width,
+            farfield_spacing=farfield_spacing,
+            max_growth_ratio=growth,
+        )
+
+    lower, upper = _minimum_feasible_width_bounds(
+        distance=distance,
+        max_cells=max_cells,
+        width_bounds=width_bounds,
+    )
+    widths = _interpolate_width_bounds(
+        distance=distance,
+        lower=lower,
+        upper=upper,
+    )
+    if not _axis_widths_respect_growth(
+        widths,
+        max_growth_ratio=max_growth_ratio,
+        left_boundary_width=left_width,
+        right_boundary_width=right_width,
+    ):
+        raise ValueError("could not build graded bridge satisfying max_growth_ratio")
+    return widths
 
 
 def _axis_refinement_segments(

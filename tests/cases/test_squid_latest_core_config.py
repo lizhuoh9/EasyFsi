@@ -7789,10 +7789,10 @@ class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
         solid.region_id[0] = 7
         return runtime, simulator, solid
 
-    def test_run_checkpoint_version_is_3(self) -> None:
-        # H1: S2 changed the drive physics in a way the arg fingerprint cannot
-        # see, so pre-S2 checkpoints must be hard-rejected via a version bump.
-        self.assertEqual(RUN_CHECKPOINT_VERSION, 3)
+    def test_run_checkpoint_version_is_4(self) -> None:
+        # Version 4 adds content fingerprints and atomic restore validation, so
+        # older payload contracts must be rejected before any live-state write.
+        self.assertEqual(RUN_CHECKPOINT_VERSION, 4)
 
     def test_checkpoint_fingerprint_includes_diagnostic_neumann_rows_and_arch(
         self,

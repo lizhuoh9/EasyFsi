@@ -81,7 +81,20 @@ flow field is established before the MPM body advances:
 ```
 
 The reviewable CI/local gate for this ANSYS validation surface lives in
-`.github\workflows\ansys-vertical-flap-validation.yml`.
+`.github\workflows\ansys-vertical-flap-validation.yml`. It installs the pinned,
+Python 3.10-compatible direct dependencies from `requirements.txt` and has three
+explicit layers:
+
+- Linux runs Ruff, compilation, and fast platform-independent contracts.
+- Windows runs the complete ANSYS artifact and runtime contract matrix.
+- A weekly or manually requested self-hosted Windows CUDA job first runs the
+  focused solver-state CUDA contracts, then the isolated 10/30/50-step run;
+  ordinary pushes and pull requests execute neither that GPU gate nor the long
+  simulation.
+
+Local focused checks are evidence only for the contracts actually run. They do
+not establish a successful remote Actions run, a production preflow, or Fluent
+parity.
 
 For the coarse flow-collapse diagnostic baseline, run:
 

@@ -27,8 +27,11 @@ def _usage() -> str:
 
 def dispatch(argv: Sequence[str]) -> dict[str, object]:
     args = list(argv)
-    if not args or args[0] in {"-h", "--help"}:
+    if not args:
         raise SystemExit(_usage())
+    if args[0] in {"-h", "--help"}:
+        print(_usage())
+        raise SystemExit(0)
     case_name = args[0]
     if case_name not in CASE_MODULES:
         raise SystemExit(f"Unknown case '{args[0]}'.\n\n{_usage()}")

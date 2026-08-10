@@ -17,6 +17,63 @@ from simulation_core import (
 
 
 class TriSurfaceRegionDiagnosticsTests(unittest.TestCase):
+    def test_f32_kernel_parameters_reject_f64_overflow_before_launch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "f32"):
+            TriSurfaceRegionDiagnostics._velocity_tuple(
+                (1.0e100, 0.0, 0.0),
+                "velocity_mps",
+            )
+        with self.assertRaisesRegex(ValueError, "f32"):
+            TriSurfaceRegionDiagnostics._non_negative_float(1.0e100, "dt_s")
+        with self.assertRaisesRegex(ValueError, "f32"):
+            TriSurfaceRegionDiagnostics._positive_float(1.0e-100, "dt_s")
+
+    def test_force_spread_rejects_invalid_physical_inputs_before_device_work(self) -> None:
+        runtime = TaichiRuntimeConfig(arch="cuda")
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=runtime,
+        )
+        diagnostics = TriSurfaceRegionDiagnostics(face_capacity=1, runtime=runtime)
+        diagnostics.load_faces(
+            centroid_m=np.asarray([[0.5, 0.5, 0.5]], dtype=np.float32),
+            normal=np.asarray([[1.0, 0.0, 0.0]], dtype=np.float32),
+            area_m2=np.asarray([1.0], dtype=np.float32),
+            region_id=np.asarray([1], dtype=np.int32),
+        )
+        valid = {
+            "probe_distance_m": 0.01,
+            "density_kgm3": 1000.0,
+            "viscosity_pa_s": 1.0e-3,
+            "dt_s": 1.0e-3,
+            "constraint_force_scale": 1.0,
+        }
+
+        for name, invalid in (
+            ("dt_s", 0.0),
+            ("viscosity_pa_s", -1.0),
+            ("constraint_force_scale", -1.0),
+            ("density_kgm3", math.nan),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, name):
+                diagnostics.spread_fsi_forces(
+                    fluid.velocity,
+                    fluid.pressure,
+                    fluid.force,
+                    fluid.volume_source_s,
+                    fluid.obstacle,
+                    grid_fields=fluid,
+                    primary_region_id=1,
+                    secondary_region_id=2,
+                    primary_velocity_mps=(0.0, 0.0, 0.0),
+                    secondary_velocity_mps=(0.0, 0.0, 0.0),
+                    bounds_min_m=(0.0, 0.0, 0.0),
+                    bounds_max_m=(1.0, 1.0, 1.0),
+                    spacing_m=fluid.spec.spacing_m,
+                    grid_nodes=fluid.spec.grid_nodes,
+                    **{**valid, name: invalid},
+                )
+
     def test_spacing_m_is_documented_as_graded_grid_compatibility_hint(self) -> None:
         documentation = inspect.getdoc(TriSurfaceRegionDiagnostics)
 
@@ -30,11 +87,8 @@ class TriSurfaceRegionDiagnosticsTests(unittest.TestCase):
         diagnostics = TriSurfaceRegionDiagnostics(face_capacity=1, runtime=runtime)
         expected_sample_count = 16_777_217
         expected_invalid_count = 16_777_219
-        packed_snapshot = np.zeros(10, dtype=np.float32)
-        packed_snapshot[6:8] = np.asarray(
-            [expected_sample_count, expected_invalid_count],
-            dtype=np.int32,
-        ).view(np.float32)
+        packed_snapshot = np.zeros(10, dtype=np.float64)
+        packed_snapshot[6:8] = (expected_sample_count, expected_invalid_count)
         diagnostics.report_force_pair_snapshot.from_numpy(packed_snapshot)
 
         report = diagnostics.force_pair_report()
@@ -83,6 +137,7 @@ class TriSurfaceRegionDiagnosticsTests(unittest.TestCase):
 
         self.assertIn("report_force_cell_hash_keys", source)
         self.assertIn("report_force_cell_hash_force_n", source)
+        self.assertIn("ti.loop_config(serialize=True)", source)
         self.assertNotIn("for previous in range(index)", source)
         self.assertNotIn("for candidate in range(stored_count)", source)
 
@@ -133,7 +188,7 @@ class TriSurfaceRegionDiagnosticsTests(unittest.TestCase):
             viscosity_pa_s=fluid.spec.viscosity_pa_s,
         )
 
-        self.assertEqual(diagnostics.last_report_host_reads, 3)
+        self.assertEqual(diagnostics.last_report_host_reads, 1)
         self.assertEqual(report.pressure_traction_face_count, 1)
         self.assertAlmostEqual(report.pressure_traction_abs_force_n, 20.0, delta=1.0e-5)
         self.assertAlmostEqual(report.pressure_traction_force_n[2], -20.0, delta=1.0e-5)
@@ -732,7 +787,7 @@ class TriSurfaceRegionDiagnosticsTests(unittest.TestCase):
         )
 
         diagnostics.reset_force_impulse_accumulator()
-        sentinel_snapshot = np.linspace(10.0, 19.0, 10, dtype=np.float32)
+        sentinel_snapshot = np.linspace(10.0, 19.0, 10, dtype=np.float64)
         diagnostics.report_force_pair_snapshot.from_numpy(sentinel_snapshot)
         report = diagnostics.spread_fsi_forces(
             fluid.velocity,

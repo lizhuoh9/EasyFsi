@@ -46,6 +46,28 @@ class ValidationArtifactHygieneTests(unittest.TestCase):
             {item["rule"] for item in result["violations"]},
         )
 
+    def test_unlisted_artifact_fails_checksum_manifest_completeness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            listed = root / "listed.json"
+            listed.write_text('{"status": "tracked"}\n', encoding="utf-8")
+            (root / "omitted.json").write_text(
+                '{"status": "must also be tracked"}\n',
+                encoding="utf-8",
+            )
+            _write_checksums(root, [listed])
+
+            result = CHECKER.check_validation_artifact_hygiene(
+                [root],
+                active_contract_manifest=root / "missing_manifest.json",
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn(
+            "checksum_entry_missing",
+            {item["rule"] for item in result["violations"]},
+        )
+
 
 def _write_checksums(root: Path, files: list[Path]) -> None:
     rows = []

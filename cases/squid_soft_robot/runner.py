@@ -44,9 +44,11 @@ from .cli import (
     raise_for_unsupported_hibm_mpm_sharp_iteration_options,
 )
 from .checkpointing import (
+    checkpoint_run_fingerprint,
     checkpoint_path_for_args,
     load_run_checkpoint,
     resume_history_rows_for_checkpoint,
+    validate_frozen_checkpoint_run_fingerprint,
     validate_resume_history_checkpoint_alignment,
     write_run_checkpoint,
 )
@@ -907,6 +909,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     graded_grid_enabled = spec.graded_grid is not None
     full_pressure_waveform_steps = resolve_step_count(None, spec)
     step_count = resolve_step_count(args.steps, spec)
+    frozen_run_fingerprint = checkpoint_run_fingerprint(
+        args=args,
+        spec=spec,
+        step_count=step_count,
+        full_pressure_waveform_steps=full_pressure_waveform_steps,
+    )
     pressure_solver_name = resolve_pressure_solver(
         args.pressure_solver,
         graded_grid_enabled=graded_grid_enabled,
@@ -1738,6 +1746,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
         return tri_report
 
+    validate_frozen_checkpoint_run_fingerprint(
+        frozen_run_fingerprint,
+        args=args,
+        spec=spec,
+        step_count=step_count,
+        full_pressure_waveform_steps=full_pressure_waveform_steps,
+    )
     history_path = output_dir / "history.csv"
     rows: list[dict[str, object]] = []
     partial_run_stopped = False
@@ -1755,6 +1770,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             step_count=step_count,
             full_pressure_waveform_steps=full_pressure_waveform_steps,
             sharp_coupling_state=sharp_coupling_state,
+            frozen_run_fingerprint=frozen_run_fingerprint,
         )
         if completed_step >= step_count:
             raise ValueError(
@@ -1948,6 +1964,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             output_dir=output_dir,
             process_path=process_path,
             run_checkpoint_path=run_checkpoint_path,
+            frozen_run_fingerprint=frozen_run_fingerprint,
             simulator=simulator,
             solid_mpm=solid_mpm,
             spec=spec,
@@ -1998,6 +2015,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             solid_mpm=solid_mpm,
             interface_reaction_state=interface_reaction_state,
             sharp_coupling_state=sharp_coupling_state,
+            frozen_run_fingerprint=frozen_run_fingerprint,
         )
 
     if sharp_case_runner_enabled:

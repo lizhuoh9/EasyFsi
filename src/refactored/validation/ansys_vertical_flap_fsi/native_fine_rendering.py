@@ -456,36 +456,64 @@ def build_gif(
 ) -> Path:
     if not frame_paths:
         raise ValueError("cannot build GIF without velocity frames")
+    duration = int(duration_ms)
+    max_width = int(max_width_px)
+    if duration <= 0 or max_width <= 0:
+        raise ValueError("GIF duration and maximum width must be positive")
     try:
-        from PIL import Image
+        from PIL import GifImagePlugin, Image
     except ImportError as exc:  # pragma: no cover - environment contract
         raise RuntimeError("Pillow is required to build the velocity GIF") from exc
-    images = []
-    try:
-        for path in frame_paths:
-            with Image.open(path) as source:
-                image = source.convert("RGB")
-                if image.width > max_width_px:
-                    height = max(1, round(image.height * max_width_px / image.width))
-                    image = image.resize((max_width_px, height), Image.Resampling.LANCZOS)
-                images.append(image.copy())
-        dimensions = {(image.width, image.height) for image in images}
-        if len(dimensions) != 1:
+
+    expected_size: tuple[int, int] | None = None
+    for path in frame_paths:
+        with Image.open(path) as source:
+            size = _gif_frame_size(source.size, max_width=max_width)
+        if expected_size is None:
+            expected_size = size
+        elif size != expected_size:
             raise ValueError("velocity GIF frame dimensions are inconsistent")
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        images[0].save(
-            output_path,
-            save_all=True,
-            append_images=images[1:],
-            duration=int(duration_ms),
-            loop=0,
-            optimize=False,
-        )
-        return output_path
-    finally:
-        for image in images:
-            image.close()
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("wb") as stream:
+        for index, path in enumerate(frame_paths):
+            with Image.open(path) as source:
+                rgb = source.convert("RGB")
+            try:
+                if rgb.size != expected_size:
+                    resized = rgb.resize(expected_size, Image.Resampling.LANCZOS)
+                    rgb.close()
+                    rgb = resized
+                paletted = rgb.convert("P", palette=Image.Palette.ADAPTIVE)
+            finally:
+                rgb.close()
+            try:
+                if index == 0:
+                    header, _ = GifImagePlugin.getheader(
+                        paletted,
+                        info={"loop": 0},
+                    )
+                    for block in header:
+                        stream.write(block)
+                for block in GifImagePlugin.getdata(
+                    paletted,
+                    duration=duration,
+                    disposal=2,
+                    include_color_table=index > 0,
+                ):
+                    stream.write(block)
+            finally:
+                paletted.close()
+        stream.write(b";")
+    return output_path
+
+
+def _gif_frame_size(size: tuple[int, int], *, max_width: int) -> tuple[int, int]:
+    width, height = size
+    if width <= max_width:
+        return width, height
+    return max_width, max(1, round(height * max_width / width))
 
 
 def render_final_field_comparison(

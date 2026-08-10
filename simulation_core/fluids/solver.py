@@ -1,9 +1,11 @@
+import hashlib
 import math
 import os
 from collections.abc import Callable, Mapping, Sequence
 from math import sqrt
 from numbers import Integral
 from types import MappingProxyType
+from typing import NamedTuple
 
 import numpy as np
 import taichi as ti
@@ -45,6 +47,7 @@ SST_TRANSPORT_MAX_CONSECUTIVE_TRIAL_RETRIES = 16
 SST_MOMENTUM_MAX_CONSECUTIVE_TRIAL_RETRIES = 16
 HIBM_REACHABILITY_FLOOD_BATCH_SWEEPS = 8
 HIBM_COMPONENT_LABEL_BATCH_SWEEPS = 8
+_F32_MAX = float(np.finfo(np.float32).max)
 PRESSURE_OUTLET_BACKFLOW_POLICIES = {"clamp", "allow"}
 OBSTACLE_NORMAL_VELOCITY_POLICIES = {"face_clamp", "cell_zero_only"}
 PRESSURE_INTERFACE_MATRIX_FV_CG_REQUIRED_SOLVERS = frozenset(
@@ -58,6 +61,120 @@ PRESSURE_INTERFACE_MATRIX_FV_CG_REQUIRED_SOLVERS = frozenset(
 PRESSURE_INTERFACE_MATRIX_FV_CG_FORCE_REASON = (
     "pressure_interface_matrix_requires_rowlist_fv_cg"
 )
+
+
+def _f32_float(value: object, *, name: str) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be finite and f32-representable") from exc
+    if (
+        not math.isfinite(numeric)
+        or abs(numeric) > _F32_MAX
+        or (numeric != 0.0 and np.float32(numeric) == 0.0)
+    ):
+        raise ValueError(f"{name} must be finite and f32-representable")
+    return numeric
+
+
+def _finite_float(
+    value: object,
+    *,
+    name: str,
+    minimum: float,
+    inclusive: bool,
+) -> float:
+    numeric = _f32_float(value, name=name)
+    below_minimum = numeric < minimum if inclusive else numeric <= minimum
+    if below_minimum:
+        relation = "at least" if inclusive else "greater than"
+        raise ValueError(
+            f"{name} must be finite, f32-representable, and {relation} {minimum:g}"
+        )
+    return numeric
+
+
+def _pressure_poisson_coefficients(
+    *,
+    density_kgm3: float,
+    dt_s: float,
+    spacing_m: tuple[float, float, float],
+) -> tuple[float, float, float, float]:
+    dx, dy, dz = spacing_m
+    return (
+        _finite_float(
+            density_kgm3 / dt_s,
+            name="pressure rhs scale",
+            minimum=0.0,
+            inclusive=False,
+        ),
+        *(
+            _finite_float(
+                1.0 / (spacing * spacing),
+                name=f"inverse {axis}-spacing squared",
+                minimum=0.0,
+                inclusive=False,
+            )
+            for axis, spacing in zip("xyz", (dx, dy, dz), strict=True)
+        ),
+    )
+
+
+def _validated_count(
+    value: object,
+    *,
+    name: str,
+    allow_zero: bool,
+) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value,
+        (Integral, np.integer),
+    ):
+        raise TypeError(f"{name} must be an integer")
+    count = int(value)
+    if count < 0 or (count == 0 and not allow_zero):
+        qualifier = "non-negative" if allow_zero else "positive"
+        raise ValueError(f"{name} must be {qualifier}")
+    return count
+
+
+def _vector_field_capacity(field: object, *, name: str) -> int:
+    shape = getattr(field, "shape", None)
+    if not isinstance(shape, tuple) or len(shape) != 1:
+        raise TypeError(f"{name} must be a one-dimensional field")
+    if int(getattr(field, "n", 0)) != 3 or int(getattr(field, "m", 0)) != 1:
+        raise TypeError(f"{name} must be a field of 3-vectors")
+    return int(shape[0])
+
+
+def _field_numpy(field: object, *, name: str) -> np.ndarray:
+    to_numpy = getattr(field, "to_numpy", None)
+    if not callable(to_numpy):
+        raise TypeError(f"{name} must provide to_numpy()")
+    try:
+        return np.asarray(to_numpy())
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} could not be validated") from exc
+
+
+def _strict_array_digest(*arrays: np.ndarray) -> str:
+    digest = hashlib.sha256()
+    for array in arrays:
+        contiguous = np.ascontiguousarray(array)
+        digest.update(contiguous.dtype.str.encode("ascii"))
+        digest.update(repr(contiguous.shape).encode("ascii"))
+        digest.update(contiguous.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+class _SSTWallDistanceCacheKey(NamedTuple):
+    wall_flags: tuple[bool, bool, bool, bool, bool, bool]
+    obstacle_topology_revision: int
+    inactive_axis: int
+    marker_count: int
+    segment_count: int
+    marker_digest: str
+    segment_digest: str
 
 
 def _diagnostic_int(value: object, default: int = -1) -> int:
@@ -738,6 +855,10 @@ class CartesianFluidSolver:
         self._sst_outlet_face_code = self.EXTERNAL_FACE_ZMIN
         self._sst_wall_distance_valid = False
         self._sst_saved_wall_distance_valid = False
+        self._sst_wall_distance_cache_key: _SSTWallDistanceCacheKey | None = None
+        self._sst_saved_wall_distance_cache_key: _SSTWallDistanceCacheKey | None = None
+        self._sst_saved_no_slip_domain_walls = self._sst_no_slip_domain_walls
+        self._sst_saved_no_slip_domain_wall_mask = 0
         self._sst_last_diffusion_substeps = 0
         self._sst_last_diffusion_cfl = 0.0
         self._sst_last_transport_rejected_trial_count = 0
@@ -828,6 +949,7 @@ class CartesianFluidSolver:
         self.saved_sst_specific_dissipation_rate = ti.field(dtype=ti.f32, shape=shape)
         self.saved_sst_eddy_viscosity_pa_s = ti.field(dtype=ti.f32, shape=shape)
         self.saved_sst_wall_distance_m = ti.field(dtype=ti.f32, shape=shape)
+        self.saved_fsi_pressure = ti.field(dtype=ti.f64, shape=shape)
         self.sst_reduction_max_diffusivity_m2_s = ti.field(dtype=ti.f64, shape=())
         self.sst_reduction_min_k = ti.field(dtype=ti.f64, shape=())
         self.sst_reduction_max_k = ti.field(dtype=ti.f64, shape=())
@@ -2059,6 +2181,7 @@ class CartesianFluidSolver:
             self.saved_sst_wall_distance_m[i, j, k] = 1.0e20
             self.saved_pressure_interface_matrix_rhs[i, j, k] = 0.0
             self.fsi_pressure[i, j, k] = 0.0
+            self.saved_fsi_pressure[i, j, k] = 0.0
             self.pressure_tmp[i, j, k] = 0.0
             self.pressure_accum[i, j, k] = 0.0
             self.divergence[i, j, k] = 0.0
@@ -2278,8 +2401,14 @@ class CartesianFluidSolver:
         )
         self._clear_kernel()
         self.turbulence_model = "laminar"
+        self._sst_no_slip_domain_walls = (False,) * 6
+        self._sst_saved_no_slip_domain_walls = (False,) * 6
+        self.sst_no_slip_domain_wall_mask[None] = 0
+        self._sst_saved_no_slip_domain_wall_mask = 0
         self._sst_wall_distance_valid = False
         self._sst_saved_wall_distance_valid = False
+        self._sst_wall_distance_cache_key = None
+        self._sst_saved_wall_distance_cache_key = None
         self._sst_last_diffusion_substeps = 0
         self._sst_last_diffusion_cfl = 0.0
         self.external_velocity_boundary_x_face_active_component_mask.fill(0)
@@ -3358,7 +3487,7 @@ class CartesianFluidSolver:
         effective_internal_node_code = (
             int(internal_node_code) if bool(convert_internal_nodes) else -2147483648
         )
-        self._invalidate_hibm_pressure_reachability()
+        self._invalidate_external_obstacle_topology_derived_state()
         self._apply_hibm_internal_obstacles_kernel(
             node_kind_code,
             effective_internal_node_code,
@@ -3658,7 +3787,7 @@ class CartesianFluidSolver:
         self.last_hibm_solid_band_velocity_dirichlet_protected_cells = -1
         self.last_hibm_solid_band_mask_protected_cells = -1
         if not count_only:
-            self._invalidate_hibm_pressure_reachability()
+            self._invalidate_external_obstacle_topology_derived_state()
         if split_populations:
             self._mark_hibm_solid_band_population_split_kernel(
                 node_kind_code,
@@ -4252,6 +4381,7 @@ class CartesianFluidSolver:
         self._invalidate_hibm_pressure_reachability()
         self._invalidate_velocity_dirichlet_component_ledger()
         self._sst_wall_distance_valid = False
+        self._sst_wall_distance_cache_key = None
 
     def _mark_hibm_pressure_reachability_valid(
         self,
@@ -4473,7 +4603,7 @@ class CartesianFluidSolver:
         structurally unselectable (air is a subset of the unreached set).
         """
         self._ensure_hibm_base_obstacle()
-        self._invalidate_hibm_pressure_reachability()
+        self._invalidate_external_obstacle_topology_derived_state()
         self._mark_hibm_air_backed_cells_kernel()
         converted = int(self.report_hibm_air_backed_cells[None])
         self.last_hibm_air_backed_cell_count = converted
@@ -4824,7 +4954,7 @@ class CartesianFluidSolver:
         ):
             return 0
 
-        self._invalidate_hibm_pressure_reachability()
+        self._invalidate_external_obstacle_topology_derived_state()
         protect_radius = int(protect_velocity_dirichlet_radius_cells)
         if protect_radius >= 0:
             protect_radius = max(0, protect_radius)
@@ -5140,6 +5270,7 @@ class CartesianFluidSolver:
         for i, j, k in self.velocity:
             self.saved_velocity[i, j, k] = self.velocity[i, j, k]
             self.saved_pressure[i, j, k] = self.pressure[i, j, k]
+            self.saved_fsi_pressure[i, j, k] = self.fsi_pressure[i, j, k]
             self.saved_sst_turbulent_kinetic_energy[i, j, k] = (
                 self.sst_turbulent_kinetic_energy[i, j, k]
             )
@@ -5217,6 +5348,7 @@ class CartesianFluidSolver:
             self.velocity[i, j, k] = self.saved_velocity[i, j, k]
             self.velocity_prev[i, j, k] = self.saved_velocity[i, j, k]
             self.pressure[i, j, k] = self.saved_pressure[i, j, k]
+            self.fsi_pressure[i, j, k] = self.saved_fsi_pressure[i, j, k]
             self.sst_turbulent_kinetic_energy[i, j, k] = (
                 self.saved_sst_turbulent_kinetic_energy[i, j, k]
             )
@@ -5327,6 +5459,13 @@ class CartesianFluidSolver:
     def save_state(self) -> None:
         self._save_state_kernel()
         self._sst_saved_wall_distance_valid = bool(self._sst_wall_distance_valid)
+        self._sst_saved_wall_distance_cache_key = self._sst_wall_distance_cache_key
+        self._sst_saved_no_slip_domain_walls = tuple(
+            self._sst_no_slip_domain_walls
+        )
+        self._sst_saved_no_slip_domain_wall_mask = int(
+            self.sst_no_slip_domain_wall_mask[None]
+        )
         self._saved_hibm_dynamic_solid_volume_enabled = bool(
             self.hibm_dynamic_solid_volume_enabled
         )
@@ -5339,7 +5478,23 @@ class CartesianFluidSolver:
         self._invalidate_external_obstacle_topology_derived_state()
         self._restore_state_kernel()
         self._clear_hibm_pressure_outlet_classification_kernel()
+        self._sst_no_slip_domain_walls = tuple(
+            self._sst_saved_no_slip_domain_walls
+        )
+        self.sst_no_slip_domain_wall_mask[None] = int(
+            self._sst_saved_no_slip_domain_wall_mask
+        )
         self._sst_wall_distance_valid = bool(self._sst_saved_wall_distance_valid)
+        restored_cache_key = self._sst_saved_wall_distance_cache_key
+        if isinstance(restored_cache_key, _SSTWallDistanceCacheKey):
+            restored_cache_key = restored_cache_key._replace(
+                obstacle_topology_revision=int(
+                    self.hibm_external_obstacle_topology_revision
+                )
+            )
+        self._sst_wall_distance_cache_key = (
+            restored_cache_key if self._sst_wall_distance_valid else None
+        )
         self.hibm_dynamic_solid_volume_enabled = bool(
             self._saved_hibm_dynamic_solid_volume_enabled
         )
@@ -5469,7 +5624,17 @@ class CartesianFluidSolver:
         self._invalidate_velocity_dirichlet_component_ledger()
 
     def _invalidate_velocity_dirichlet_component_ledger(self) -> int:
-        self._clear_canonical_exact_hard_face_component_mask_kernel()
+        try:
+            object.__getattribute__(
+                self,
+                "canonical_exact_hard_face_component_mask",
+            )
+        except AttributeError:
+            # Host-only contract probes construct an intentionally incomplete
+            # owner; production solvers always own and clear this device mask.
+            pass
+        else:
+            self._clear_canonical_exact_hard_face_component_mask_kernel()
         generation = int(self.velocity_dirichlet_component_ledger_generation) + 1
         self.velocity_dirichlet_component_ledger_generation = generation
         self.velocity_dirichlet_component_ledger_sealed = False
@@ -6314,6 +6479,119 @@ class CartesianFluidSolver:
                     best = ti.min(best, delta.norm())
                 self.sst_wall_distance_m[i, j, k] = ti.max(best, 1.0e-12)
 
+    def _sst_wall_distance_input_identity(
+        self,
+        *,
+        wall_flags: tuple[bool, bool, bool, bool, bool, bool],
+        marker_position_m: object | None,
+        marker_count: object,
+        projection_segment_indices: object | None,
+        projection_segment_count: object,
+        inactive_axis: int,
+    ) -> _SSTWallDistanceCacheKey:
+        """Validate counted geometry and return its exact device-value identity."""
+
+        marker_total = _validated_count(
+            marker_count,
+            name="marker_count",
+            allow_zero=True,
+        )
+        segment_total = _validated_count(
+            projection_segment_count,
+            name="projection_segment_count",
+            allow_zero=True,
+        )
+        marker_capacity = 0
+        if marker_position_m is not None:
+            marker_capacity = _vector_field_capacity(
+                marker_position_m,
+                name="marker_position_m",
+            )
+        if marker_total > marker_capacity:
+            raise ValueError(
+                "marker_count exceeds marker_position_m capacity: "
+                f"count={marker_total}, capacity={marker_capacity}"
+            )
+        if (marker_total > 0 or segment_total > 0) and marker_position_m is None:
+            raise ValueError(
+                "marker_position_m is required for active SST wall geometry"
+            )
+
+        segment_endpoints = np.empty((0, 2), dtype=np.int64)
+        if segment_total > 0:
+            if projection_segment_indices is None:
+                raise ValueError(
+                    "projection_segment_indices is required when "
+                    "projection_segment_count is positive"
+                )
+            segment_capacity = _vector_field_capacity(
+                projection_segment_indices,
+                name="projection_segment_indices",
+            )
+            if segment_total > segment_capacity:
+                raise ValueError(
+                    "projection_segment_count exceeds segment field capacity: "
+                    f"count={segment_total}, capacity={segment_capacity}"
+                )
+            raw_segments = _field_numpy(
+                projection_segment_indices,
+                name="projection_segment_indices",
+            )
+            if raw_segments.shape != (segment_capacity, 3) or not np.issubdtype(
+                raw_segments.dtype,
+                np.integer,
+            ):
+                raise TypeError(
+                    "projection_segment_indices must contain integer 3-vectors"
+                )
+            segment_endpoints = np.asarray(
+                raw_segments[:segment_total, :2],
+                dtype=np.int64,
+            )
+            if np.any(segment_endpoints < 0) or np.any(
+                segment_endpoints >= marker_capacity
+            ):
+                raise ValueError(
+                    "projection segment endpoint is outside marker_position_m "
+                    f"capacity {marker_capacity}"
+                )
+
+        marker_digest = ""
+        if marker_total > 0 or segment_total > 0:
+            raw_positions = _field_numpy(
+                marker_position_m,
+                name="marker_position_m",
+            )
+            if raw_positions.shape != (marker_capacity, 3):
+                raise TypeError("marker_position_m must contain 3-vectors")
+            used_indices = np.arange(marker_total, dtype=np.int64)
+            if segment_total > 0:
+                used_indices = np.unique(
+                    np.concatenate((used_indices, segment_endpoints.reshape(-1)))
+                )
+            used_positions = np.asarray(raw_positions[used_indices])
+            try:
+                finite_positions = bool(np.all(np.isfinite(used_positions)))
+            except TypeError as exc:
+                raise ValueError(
+                    "marker_position_m must contain finite numeric values"
+                ) from exc
+            if not finite_positions:
+                raise ValueError("marker_position_m contains a non-finite endpoint")
+            marker_digest = _strict_array_digest(used_indices, used_positions)
+
+        return _SSTWallDistanceCacheKey(
+            wall_flags=wall_flags,
+            obstacle_topology_revision=int(
+                self.hibm_external_obstacle_topology_revision
+            ),
+            inactive_axis=int(inactive_axis),
+            marker_count=marker_total,
+            segment_count=segment_total,
+            marker_digest=marker_digest,
+            segment_digest=_strict_array_digest(segment_endpoints),
+        )
+
     def prepare_sst_wall_distance(
         self,
         *,
@@ -6342,26 +6620,27 @@ class CartesianFluidSolver:
         )
         if len(wall_flags) != 6:
             raise ValueError("no_slip_domain_walls must contain six booleans")
-        marker_total = int(marker_count)
-        if marker_total < 0:
-            raise ValueError("marker_count must be non-negative")
-        segment_total = int(projection_segment_count)
-        if segment_total < 0:
-            raise ValueError("projection_segment_count must be non-negative")
         resolved_inactive_axis = -1 if inactive_axis is None else int(inactive_axis)
         if resolved_inactive_axis not in (-1, 0, 1, 2):
             raise ValueError("inactive_axis must be None, 0, 1, or 2")
-        if marker_total > 0 and marker_position_m is None:
-            raise ValueError("marker_position_m is required when marker_count is positive")
-        if segment_total > 0 and marker_position_m is None:
-            raise ValueError(
-                "marker_position_m is required when projection_segment_count is positive"
-            )
-        if segment_total > 0 and projection_segment_indices is None:
-            raise ValueError(
-                "projection_segment_indices is required when "
-                "projection_segment_count is positive"
-            )
+        cache_key = self._sst_wall_distance_input_identity(
+            wall_flags=wall_flags,
+            marker_position_m=marker_position_m,
+            marker_count=marker_count,
+            projection_segment_indices=projection_segment_indices,
+            projection_segment_count=projection_segment_count,
+            inactive_axis=resolved_inactive_axis,
+        )
+        marker_total = cache_key.marker_count
+        segment_total = cache_key.segment_count
+        if self._sst_wall_distance_valid and cache_key == (
+            self._sst_wall_distance_cache_key
+        ):
+            return
+        # A failed rebuild must not leave the previous field published under
+        # a new geometry identity.
+        self._sst_wall_distance_valid = False
+        self._sst_wall_distance_cache_key = None
         # A very distant wall gives the intended free-stream F1 -> 0 limit.
         # The previous domain-diagonal fallback spuriously activated the
         # near-wall branch even when no physical wall existed.
@@ -6407,6 +6686,7 @@ class CartesianFluidSolver:
         self.sst_no_slip_domain_wall_mask[None] = sum(
             (1 << face) for face, active in enumerate(wall_flags) if active
         )
+        self._sst_wall_distance_cache_key = cache_key
         self._sst_wall_distance_valid = True
 
     def configure_sst_2003(
@@ -15080,14 +15360,29 @@ class CartesianFluidSolver:
         kinematic_viscosity_m2_s: float | None = None,
         no_slip_domain_walls: tuple[bool, bool, bool, bool, bool, bool] | None = None,
     ) -> None:
-        step_dt_s = self.dt if dt_s is None else float(dt_s)
-        if step_dt_s <= 0.0:
-            raise ValueError("dt_s must be positive")
+        step_dt_s = _finite_float(
+            self.dt if dt_s is None else dt_s,
+            name="dt_s",
+            minimum=0.0,
+            inclusive=False,
+        )
+        density_kgm3 = _finite_float(
+            self.rho,
+            name="density_kgm3",
+            minimum=0.0,
+            inclusive=False,
+        )
+        dynamic_viscosity_pa_s = _finite_float(
+            self.mu,
+            name="viscosity_pa_s",
+            minimum=0.0,
+            inclusive=True,
+        )
         scheme = str(advection_scheme).lower()
         if scheme not in {"euler", "rk2", "muscl_tvd"}:
             raise ValueError(f"unsupported advection_scheme: {advection_scheme!r}")
         nu_m2_s = (
-            float(self.mu / self.rho)
+            dynamic_viscosity_pa_s / density_kgm3
             if kinematic_viscosity_m2_s is None
             else float(kinematic_viscosity_m2_s)
         )
@@ -18452,6 +18747,41 @@ class CartesianFluidSolver:
         ti.atomic_add(field[None].z, value.z)
 
     @ti.kernel
+    def _count_invalid_surface_force_inputs_kernel(
+        self,
+        surface_position_m: ti.template(),
+        surface_force_n: ti.template(),
+        vertex_count: ti.i32,
+    ):
+        self.reduction_count[None] = 0
+        for vertex in range(vertex_count):
+            position = surface_position_m[vertex]
+            force = surface_force_n[vertex]
+            invalid = 0
+            for component in ti.static(range(3)):
+                position_component = position[component]
+                force_component = force[component]
+                if (
+                    ti.math.isnan(position_component)
+                    or ti.math.isinf(position_component)
+                    or ti.abs(position_component) > _F32_MAX
+                    or (
+                        position_component != 0.0
+                        and ti.cast(position_component, ti.f32) == 0.0
+                    )
+                    or ti.math.isnan(force_component)
+                    or ti.math.isinf(force_component)
+                    or ti.abs(force_component) > _F32_MAX
+                    or (
+                        force_component != 0.0
+                        and ti.cast(force_component, ti.f32) == 0.0
+                    )
+                ):
+                    invalid = 1
+            if invalid != 0:
+                ti.atomic_add(self.reduction_count[None], 1)
+
+    @ti.kernel
     def _spread_surface_forces_kernel(
         self,
         surface_position_m: ti.template(),
@@ -18538,16 +18868,59 @@ class CartesianFluidSolver:
         center_m: tuple[float, float, float],
         force_sign: float = -1.0,
     ) -> ForceSpreadingReport:
-        if vertex_count <= 0:
-            raise ValueError("vertex_count must be positive")
+        count = _validated_count(
+            vertex_count,
+            name="vertex_count",
+            allow_zero=False,
+        )
+        position_capacity = _vector_field_capacity(
+            surface_position_m,
+            name="surface_position_m",
+        )
+        force_capacity = _vector_field_capacity(
+            surface_force_n,
+            name="surface_force_n",
+        )
+        if count > position_capacity or count > force_capacity:
+            raise ValueError(
+                "vertex_count exceeds a surface field capacity: "
+                f"count={count}, position_capacity={position_capacity}, "
+                f"force_capacity={force_capacity}"
+            )
+        try:
+            center = np.asarray(center_m, dtype=np.float64)
+            sign = float(force_sign)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("center_m and force_sign must be finite") from exc
+        if center.shape != (3,):
+            raise ValueError("center_m must contain three finite values")
+        center = np.asarray(
+            tuple(
+                _f32_float(component, name=f"center_m[{index}]")
+                for index, component in enumerate(center)
+            ),
+            dtype=np.float64,
+        )
+        sign = _f32_float(sign, name="force_sign")
+        self._count_invalid_surface_force_inputs_kernel(
+            surface_position_m,
+            surface_force_n,
+            count,
+        )
+        invalid_count = int(self.reduction_count[None])
+        if invalid_count > 0:
+            raise ValueError(
+                "active surface position/force rows contain "
+                f"{invalid_count} values that are not finite and f32-representable"
+            )
         self._spread_surface_forces_kernel(
             surface_position_m,
             surface_force_n,
-            int(vertex_count),
-            float(center_m[0]),
-            float(center_m[1]),
-            float(center_m[2]),
-            float(force_sign),
+            count,
+            float(center[0]),
+            float(center[1]),
+            float(center[2]),
+            sign,
         )
         return ForceSpreadingReport(
             surface_force_n=self._read_vector(self.report_surface_force_n),
@@ -18591,12 +18964,21 @@ class CartesianFluidSolver:
         *,
         read_report: bool = True,
     ) -> FluidImpulseReport | None:
-        step_dt_s = self.dt if dt_s is None else float(dt_s)
-        if step_dt_s <= 0.0:
-            raise ValueError("dt_s must be positive")
+        step_dt_s = _finite_float(
+            self.dt if dt_s is None else dt_s,
+            name="dt_s",
+            minimum=0.0,
+            inclusive=False,
+        )
+        density_kgm3 = _finite_float(
+            self.rho,
+            name="density_kgm3",
+            minimum=0.0,
+            inclusive=False,
+        )
         self._apply_body_force_kernel(
-            float(step_dt_s),
-            float(self.rho),
+            step_dt_s,
+            density_kgm3,
         )
         if not read_report:
             return None
@@ -26573,9 +26955,34 @@ class CartesianFluidSolver:
         homogenize_pressure_interface_rhs_for_increment: bool = False,
         pressure_velocity_nullspace_projector: object | None = None,
     ) -> dict[str, float]:
+        iterations = _validated_count(
+            iterations,
+            name="iterations",
+            allow_zero=False,
+        )
+        divergence_cleanup_iterations = _validated_count(
+            divergence_cleanup_iterations,
+            name="divergence_cleanup_iterations",
+            allow_zero=True,
+        )
+        step_dt_s = _finite_float(
+            self.dt if dt_s is None else dt_s,
+            name="dt_s",
+            minimum=0.0,
+            inclusive=False,
+        )
+        density_kgm3 = _finite_float(
+            self.rho,
+            name="density_kgm3",
+            minimum=0.0,
+            inclusive=False,
+        )
+        rhs_scale, inv_dx2, inv_dy2, inv_dz2 = _pressure_poisson_coefficients(
+            density_kgm3=density_kgm3,
+            dt_s=step_dt_s,
+            spacing_m=(self.dx, self.dy, self.dz),
+        )
         self._require_velocity_dirichlet_component_ledger_sealed()
-        if iterations <= 0:
-            raise ValueError("iterations must be positive")
         homogenize_pressure_interface_rhs_for_increment_enabled = bool(
             homogenize_pressure_interface_rhs_for_increment
         )
@@ -26590,9 +26997,6 @@ class CartesianFluidSolver:
         pressure_solve_context_payload = _validated_pressure_solve_context(
             pressure_solve_context
         )
-        step_dt_s = self.dt if dt_s is None else float(dt_s)
-        if step_dt_s <= 0.0:
-            raise ValueError("dt_s must be positive")
         canonical_authority = self._velocity_dirichlet_boundary_authority_code()
         velocity_inlet_zmax_mode = self._resolve_velocity_inlet_zmax_topology_mode(
             velocity_inlet_zmax,
@@ -26617,7 +27021,7 @@ class CartesianFluidSolver:
                 "or 'cell_zero_only'"
             )
         constraint_blend = float(velocity_constraint_blend)
-        if not 0.0 <= constraint_blend <= 1.0:
+        if not math.isfinite(constraint_blend) or not 0.0 <= constraint_blend <= 1.0:
             raise ValueError("velocity_constraint_blend must be in [0, 1]")
         constraint_solid_mobility_ratio = float(velocity_constraint_solid_mobility_ratio)
         if (
@@ -26628,7 +27032,7 @@ class CartesianFluidSolver:
                 "velocity_constraint_solid_mobility_ratio must be a finite non-negative number"
             )
         cleanup_relaxation = float(divergence_cleanup_relaxation)
-        if not 0.0 <= cleanup_relaxation <= 1.0:
+        if not math.isfinite(cleanup_relaxation) or not 0.0 <= cleanup_relaxation <= 1.0:
             raise ValueError("divergence_cleanup_relaxation must be in [0, 1]")
         cg_relative_tolerance = float(cg_tolerance)
         if not math.isfinite(cg_relative_tolerance) or cg_relative_tolerance < 0.0:
@@ -27631,10 +28035,6 @@ class CartesianFluidSolver:
             warm_start_copy_in()
         else:
             warm_start_copy_in()
-        rhs_scale = self.rho / step_dt_s
-        inv_dx2 = 1.0 / (self.dx * self.dx)
-        inv_dy2 = 1.0 / (self.dy * self.dy)
-        inv_dz2 = 1.0 / (self.dz * self.dz)
         self._solve_pressure_poisson_with_solver(
             iterations=int(iterations),
             rhs_scale=float(rhs_scale),

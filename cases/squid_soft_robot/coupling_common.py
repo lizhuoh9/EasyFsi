@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from simulation_core import InterfaceReactionRelaxationState
 
@@ -9,6 +10,9 @@ from .cli import INTERFACE_REACTION_ROBIN_TARGET_CHOICES
 from .history import _required_finite_row_number
 from .rows import signed_positive_source_flux_ratio
 from .source_config import _vector3
+
+if TYPE_CHECKING:
+    from .spec import SquidReducedSpec
 
 
 def _combine_region_pair_vectors(

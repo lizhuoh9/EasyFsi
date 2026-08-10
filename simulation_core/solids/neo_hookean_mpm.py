@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 
 import taichi as ti
 
@@ -61,7 +62,24 @@ def _validate_fixed_region_contract(
 def _vector3(value: tuple[float, float, float], name: str) -> tuple[float, float, float]:
     if len(value) != 3:
         raise ValueError(f"{name} must contain exactly 3 components")
-    return (float(value[0]), float(value[1]), float(value[2]))
+    result = (float(value[0]), float(value[1]), float(value[2]))
+    if not all(math.isfinite(component) for component in result):
+        raise ValueError(f"{name} must contain only finite values")
+    return result
+
+
+def _positive_float(value: float, name: str) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a finite positive number")
+    return result
+
+
+def _non_negative_float(value: float, name: str) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return result
 
 
 def _raise_if_out_of_bounds_exceeds_tolerance(
@@ -132,22 +150,28 @@ class NeoHookeanMpmState:
         out_of_bounds_particle_tolerance: int = 0,
         runtime: TaichiRuntimeConfig | None = None,
     ):
-        init_taichi(runtime)
+        particle_capacity = int(particle_capacity)
         if particle_capacity <= 0:
             raise ValueError("particle_capacity must be positive")
-        if min(grid_nodes) < 4:
+        grid_nodes = tuple(int(value) for value in grid_nodes)
+        if len(grid_nodes) != 3 or min(grid_nodes) < 4:
             raise ValueError("grid_nodes must be at least 4 in each direction")
         if int(out_of_bounds_particle_tolerance) < 0:
             raise ValueError("out_of_bounds_particle_tolerance must be non-negative")
-        self.particle_capacity = int(particle_capacity)
+        bounds_min = _vector3(bounds_min_m, "bounds_min_m")
+        bounds_max = _vector3(bounds_max_m, "bounds_max_m")
+        if any(upper <= lower for lower, upper in zip(bounds_min, bounds_max)):
+            raise ValueError("bounds_max_m must be greater than bounds_min_m")
+        init_taichi(runtime)
+        self.particle_capacity = particle_capacity
         self.out_of_bounds_particle_tolerance = int(out_of_bounds_particle_tolerance)
         self.require_nonempty_region_counts = False
         self.require_nonempty_secondary_region_count = False
         self.particle_count = 0
-        self.grid_nodes = tuple(int(value) for value in grid_nodes)
+        self.grid_nodes = grid_nodes
         self.nx, self.ny, self.nz = self.grid_nodes
-        self.bounds_min = tuple(float(value) for value in bounds_min_m)
-        self.bounds_max = tuple(float(value) for value in bounds_max_m)
+        self.bounds_min = bounds_min
+        self.bounds_max = bounds_max
         self.dx = (
             (self.bounds_max[0] - self.bounds_min[0]) / self.nx,
             (self.bounds_max[1] - self.bounds_min[1]) / self.ny,
@@ -294,9 +318,17 @@ class NeoHookeanMpmState:
         box_max_m: tuple[float, float, float],
         density_kgm3: float,
     ) -> None:
-        nxp, nyp, nzp = (int(value) for value in particle_counts)
+        counts = tuple(int(value) for value in particle_counts)
+        if len(counts) != 3:
+            raise ValueError("particle_counts must contain exactly 3 values")
+        nxp, nyp, nzp = counts
         if min(nxp, nyp, nzp) <= 0:
             raise ValueError("particle_counts must be positive")
+        box_min = _vector3(box_min_m, "box_min_m")
+        box_max = _vector3(box_max_m, "box_max_m")
+        if any(upper <= lower for lower, upper in zip(box_min, box_max)):
+            raise ValueError("box_max_m must be greater than box_min_m")
+        density = _positive_float(density_kgm3, "density_kgm3")
         particle_count = nxp * nyp * nzp
         if particle_count > self.particle_capacity:
             raise ValueError("particle count exceeds capacity")
@@ -305,13 +337,13 @@ class NeoHookeanMpmState:
             nxp,
             nyp,
             nzp,
-            float(box_min_m[0]),
-            float(box_min_m[1]),
-            float(box_min_m[2]),
-            float(box_max_m[0]),
-            float(box_max_m[1]),
-            float(box_max_m[2]),
-            float(density_kgm3),
+            box_min[0],
+            box_min[1],
+            box_min[2],
+            box_max[0],
+            box_max[1],
+            box_max[2],
+            density,
         )
         self.require_nonempty_region_counts = False
         self.require_nonempty_secondary_region_count = False
@@ -389,8 +421,22 @@ class NeoHookeanMpmState:
         primary_thickness_m: float,
         secondary_thickness_m: float,
     ) -> None:
+        layer_count = int(layer_count)
         if layer_count <= 0:
             raise ValueError("layer_count must be positive")
+        primary_region_id = int(primary_region_id)
+        secondary_region_id = int(secondary_region_id)
+        if primary_region_id == secondary_region_id:
+            raise ValueError("primary_region_id and secondary_region_id must be distinct")
+        density = _positive_float(density_kgm3, "density_kgm3")
+        primary_thickness = _positive_float(
+            primary_thickness_m,
+            "primary_thickness_m",
+        )
+        secondary_thickness = _positive_float(
+            secondary_thickness_m,
+            "secondary_thickness_m",
+        )
         if tri_surface.face_count <= 0:
             raise ValueError("tri_surface must contain faces")
         active_regions = set(
@@ -417,7 +463,7 @@ class NeoHookeanMpmState:
                 f"secondary_region_id={int(secondary_region_id)}"
                 f"{fixed_region_clause}"
             )
-        particle_count = int(tri_surface.face_count) * int(layer_count)
+        particle_count = int(tri_surface.face_count) * layer_count
         if particle_count > self.particle_capacity:
             raise ValueError("particle count exceeds capacity")
         self.particle_count = particle_count
@@ -427,13 +473,13 @@ class NeoHookeanMpmState:
             tri_surface.area_m2,
             tri_surface.region_id,
             int(tri_surface.face_count),
-            int(layer_count),
-            int(primary_region_id),
-            int(secondary_region_id),
+            layer_count,
+            primary_region_id,
+            secondary_region_id,
             int(fixed_region_id),
-            float(density_kgm3),
-            float(primary_thickness_m),
-            float(secondary_thickness_m),
+            density,
+            primary_thickness,
+            secondary_thickness,
         )
         self.require_nonempty_region_counts = True
         # Mirrors TriMooneyShellMpmState's require_nonempty_primary_region_count
@@ -1223,6 +1269,12 @@ class NeoHookeanMpmState:
     ) -> NeoHookeanMpmReport | None:
         if self.particle_count <= 0:
             raise ValueError("initialize particles before stepping")
+        dt = _non_negative_float(dt_s, "dt_s")
+        mu = _non_negative_float(mu_pa, "mu_pa")
+        lame_lambda = _non_negative_float(lambda_pa, "lambda_pa")
+        damping = _non_negative_float(velocity_damping, "velocity_damping")
+        if int(primary_region_id) == int(secondary_region_id):
+            raise ValueError("primary_region_id and secondary_region_id must be distinct")
         if fixed_node_lock_policy not in FIXED_NODE_LOCK_POLICIES:
             choices = ", ".join(sorted(FIXED_NODE_LOCK_POLICIES))
             raise ValueError(
@@ -1236,7 +1288,7 @@ class NeoHookeanMpmState:
                 f"got {constitutive_model!r}"
             )
         flip_blend = float(velocity_transfer_flip_blend)
-        if not 0.0 <= flip_blend <= 1.0:
+        if not math.isfinite(flip_blend) or not 0.0 <= flip_blend <= 1.0:
             raise ValueError("velocity_transfer_flip_blend must be in [0, 1]")
         if self._out_of_bounds_guard_batch_active and read_report:
             raise ValueError(
@@ -1251,10 +1303,10 @@ class NeoHookeanMpmState:
             self.last_out_of_bounds_guard_host_reads = 0
         self._step_kernel(
             int(self.particle_count),
-            float(dt_s),
-            float(mu_pa),
-            float(lambda_pa),
-            float(velocity_damping),
+            dt,
+            mu,
+            lame_lambda,
+            damping,
             int(primary_region_id),
             int(secondary_region_id),
             int(FIXED_NODE_LOCK_POLICIES[fixed_node_lock_policy]),

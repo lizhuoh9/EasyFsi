@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +10,16 @@ import run_simulation
 
 
 class GenericEntrypointTests(unittest.TestCase):
+    def test_help_exits_successfully_and_prints_usage(self) -> None:
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as raised:
+                run_simulation.dispatch(["--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("Usage: python run_simulation.py", stdout.getvalue())
+
     def test_dispatches_squid_case_without_running_solver_in_entrypoint(self) -> None:
         received_args: list[str] | None = None
 

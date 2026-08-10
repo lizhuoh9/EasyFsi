@@ -539,13 +539,6 @@ def _float_or_none(value: Any) -> float | None:
     return parsed
 
 
-def _optional_int(value: Any) -> int | None:
-    parsed = _float_or_none(value)
-    if parsed is None:
-        return None
-    return int(parsed)
-
-
 def _last_window_coverage(
     window: list[dict[str, Any]],
     profile: TemporalGateProfile,
@@ -558,10 +551,8 @@ def _last_window_coverage(
         ``history[-profile.last_window_steps:]``, so a short ``history``
         yields a short ``window`` -- Python slicing never raises, so this
         must be checked explicitly instead of trusting the slice length).
-      - contiguity: the "step" values inside the window must be strictly
-        increasing with a single constant positive stride (no missing,
-        duplicated, or reordered rows silently masquerading as a full
-        window).
+      - contiguity: every "step" must be an integer and advance by exactly
+        one. A fixed stride greater than one is still missing solver steps.
 
     Absence of coverage is reported with an explicit, actionable reason so
     callers never mistake a truncated window for a "strict" pass.
@@ -571,10 +562,12 @@ def _last_window_coverage(
             f"last_window_insufficient_history_{len(window)}_of_"
             f"{profile.last_window_steps}"
         )
-    steps = [_optional_int(item.get("step")) for item in window]
-    if any(step is None for step in steps):
+    parsed_steps = [_float_or_none(item.get("step")) for item in window]
+    if any(step is None for step in parsed_steps):
         return False, "last_window_step_missing"
-    strides = {current - previous for previous, current in zip(steps, steps[1:])}
-    if strides and (len(strides) != 1 or next(iter(strides)) <= 0):
+    if any(not step.is_integer() for step in parsed_steps if step is not None):
+        return False, "last_window_step_nonintegral"
+    steps = [int(step) for step in parsed_steps if step is not None]
+    if any(current != previous + 1 for previous, current in zip(steps, steps[1:])):
         return False, "last_window_step_noncontiguous"
     return True, ""

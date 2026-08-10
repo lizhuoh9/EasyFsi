@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import inspect
+import weakref
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image
 
+from src.refactored.validation.ansys_vertical_flap_fsi import (
+    native_fine_rendering,
+)
+from src.refactored.validation.turek_hron_fsi import rendering as rendering_module
 from src.refactored.validation.turek_hron_fsi.rendering import (
     FlowSnapshotContractError,
     _overlay_deformed_beam,
@@ -186,3 +192,56 @@ def test_two_synthetic_snapshots_render_with_one_fixed_scale_and_make_gif(
     assert result.gif_path.is_file()
     with Image.open(result.gif_path) as animation:
         assert animation.n_frames == 2
+
+
+def test_renderer_releases_full_snapshot_before_loading_the_next(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshots = tmp_path / "flow_snapshots"
+    for step in (2, 4, 6):
+        _write_snapshot(snapshots, step=step, peak_speed_mps=float(step))
+
+    original_load = rendering_module.load_flow_snapshot
+    frame_references: list[weakref.ReferenceType[object]] = []
+    live_before_load: list[int] = []
+
+    def tracked_load(path: str | Path, **kwargs: object):
+        live_before_load.append(sum(ref() is not None for ref in frame_references))
+        frame = original_load(path, **kwargs)
+        frame_references.append(weakref.ref(frame))
+        return frame
+
+    def touch_frame(_frame: object, output_path: Path, **_kwargs: object) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.touch()
+
+    def touch_gif(
+        _frame_paths: object,
+        output_path: str | Path,
+        **_kwargs: object,
+    ) -> Path:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        return path
+
+    monkeypatch.setattr(rendering_module, "load_flow_snapshot", tracked_load)
+    monkeypatch.setattr(rendering_module, "_render_velocity_frame", touch_frame)
+    monkeypatch.setattr(rendering_module, "build_gif", touch_gif)
+
+    result = rendering_module.render_turek_hron_flow_gif(
+        snapshots,
+        tmp_path / "rendered" / "velocity.gif",
+    )
+
+    assert result.steps == (2, 4, 6)
+    assert len(live_before_load) == 6
+    assert live_before_load == [0] * 6
+
+
+def test_gif_encoder_writes_frames_incrementally() -> None:
+    source = inspect.getsource(native_fine_rendering.build_gif)
+
+    assert "GifImagePlugin.getdata" in source
+    assert "append_images" not in source

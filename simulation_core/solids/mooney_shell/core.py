@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import taichi as ti
 
@@ -75,7 +77,7 @@ def _mesh_bounds_with_padding(
 
 def _validate_flip_blend(flip_blend: float) -> float:
     value = float(flip_blend)
-    if not 0.0 <= value <= 1.0:
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise ValueError("flip_blend must be in [0, 1]")
     return value
 
@@ -83,7 +85,24 @@ def _validate_flip_blend(flip_blend: float) -> float:
 def _vector3(value: tuple[float, float, float], name: str) -> tuple[float, float, float]:
     if len(value) != 3:
         raise ValueError(f"{name} must contain exactly 3 components")
-    return (float(value[0]), float(value[1]), float(value[2]))
+    result = (float(value[0]), float(value[1]), float(value[2]))
+    if not all(math.isfinite(component) for component in result):
+        raise ValueError(f"{name} must contain only finite values")
+    return result
+
+
+def _positive_float(value: float, name: str) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a finite positive number")
+    return result
+
+
+def _non_negative_float(value: float, name: str) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return result
 
 
 def _raise_if_all_particles_out_of_bounds(
@@ -102,7 +121,10 @@ def _raise_if_out_of_bounds_exceeds_tolerance(
     grid_out_of_bounds_particle_count: int,
     tolerance: int,
 ) -> None:
-    if grid_out_of_bounds_particle_count > int(tolerance):
+    if (
+        particle_count > 0
+        and grid_out_of_bounds_particle_count >= particle_count
+    ) or grid_out_of_bounds_particle_count > int(tolerance):
         raise RuntimeError(
             f"{grid_out_of_bounds_particle_count} of {particle_count} MPM particles "
             "are outside the background grid; refusing to advance a partial solid"
@@ -202,20 +224,33 @@ class TriMooneyShellMpmState:
             raise ValueError("mesh must contain at least one vertex")
         if mesh.face_count <= 0:
             raise ValueError("mesh must contain at least one triangle")
-        if thickness_m <= 0.0:
-            raise ValueError("thickness_m must be positive")
-        if density_kgm3 <= 0.0:
-            raise ValueError("density_kgm3 must be positive")
-        if c1_pa <= 0.0 or c2_pa < 0.0:
-            raise ValueError("Mooney constants must be non-negative with c1 > 0")
-        if membrane_force_scale <= 0.0:
-            raise ValueError("membrane_force_scale must be positive")
-        if min(grid_nodes) < 4:
+        thickness_m = _positive_float(thickness_m, "thickness_m")
+        density_kgm3 = _positive_float(density_kgm3, "density_kgm3")
+        c1_pa = _positive_float(c1_pa, "c1_pa")
+        c2_pa = _non_negative_float(c2_pa, "c2_pa")
+        membrane_force_scale = _positive_float(
+            membrane_force_scale,
+            "membrane_force_scale",
+        )
+        bounds_padding_fraction = _positive_float(
+            bounds_padding_fraction,
+            "bounds_padding_fraction",
+        )
+        primary_thickness_m = _positive_float(
+            thickness_m if primary_thickness_m is None else primary_thickness_m,
+            "primary_thickness_m",
+        )
+        secondary_thickness_m = _positive_float(
+            thickness_m if secondary_thickness_m is None else secondary_thickness_m,
+            "secondary_thickness_m",
+        )
+        grid_nodes = tuple(int(value) for value in grid_nodes)
+        if len(grid_nodes) != 3 or min(grid_nodes) < 4:
             raise ValueError("grid_nodes must be at least 4 in each direction")
-        if bounds_padding_fraction <= 0.0:
-            raise ValueError("bounds_padding_fraction must be positive")
         if int(out_of_bounds_particle_tolerance) < 0:
             raise ValueError("out_of_bounds_particle_tolerance must be non-negative")
+        if int(primary_region_id) == int(secondary_region_id):
+            raise ValueError("primary_region_id and secondary_region_id must be distinct")
 
         vertices = np.asarray(mesh.vertices, dtype=np.float32)
         faces = np.asarray(mesh.faces, dtype=np.int32)
@@ -259,9 +294,9 @@ class TriMooneyShellMpmState:
             if require_nonempty_region_counts is None
             else region_counts_required
         )
-        self.primary_thickness_m = float(thickness_m if primary_thickness_m is None else primary_thickness_m)
-        self.secondary_thickness_m = float(thickness_m if secondary_thickness_m is None else secondary_thickness_m)
-        self.grid_nodes = tuple(int(value) for value in grid_nodes)
+        self.primary_thickness_m = primary_thickness_m
+        self.secondary_thickness_m = secondary_thickness_m
+        self.grid_nodes = grid_nodes
         self.nx, self.ny, self.nz = self.grid_nodes
         self.bounds_min = bounds_min
         self.bounds_max = bounds_max
@@ -1104,7 +1139,8 @@ class TriMooneyShellMpmState:
 
         for p in range(self.particle_count):
             coord = self._particle_grid_coordinate(p)
-            if self._particle_grid_out_of_bounds(coord) == 0:
+            was_out_of_bounds = self._particle_grid_out_of_bounds(coord)
+            if was_out_of_bounds == 0:
                 pic_v = self._interpolate_grid_velocity(p)
                 flip_v = self.v[p] + self._interpolate_grid_velocity_delta(p)
                 new_v = (1.0 - flip_blend) * pic_v + flip_blend * flip_v
@@ -1127,7 +1163,10 @@ class TriMooneyShellMpmState:
                 self.u[p] += delta_x
                 ti.atomic_max(self.report_max_speed_mps[None], self.v[p].norm())
             report_coord = self._particle_grid_coordinate(p)
-            if self._particle_grid_out_of_bounds(report_coord) == 0:
+            is_out_of_bounds = self._particle_grid_out_of_bounds(report_coord)
+            if was_out_of_bounds == 0 and is_out_of_bounds != 0:
+                ti.atomic_add(self.report_grid_out_of_bounds_particle_count[None], 1)
+            if is_out_of_bounds == 0:
                 self._atomic_add_vector(self.report_current_center_sum_m, self.x[p])
                 self._atomic_add_vector(self.report_radial_rest_center_sum_m, self.rest_x[p])
                 ti.atomic_add(self.report_radial_center_count[None], 1)
@@ -1669,21 +1708,22 @@ class UvMooneyShellMpmState:
         bounds_scale: float = 2.0,
         runtime: TaichiRuntimeConfig | None = None,
     ):
-        init_taichi(runtime)
-        if radius_m <= 0.0:
-            raise ValueError("radius_m must be positive")
-        if thickness_m <= 0.0:
-            raise ValueError("thickness_m must be positive")
-        if density_kgm3 <= 0.0:
-            raise ValueError("density_kgm3 must be positive")
-        if c1_pa <= 0.0 or c2_pa < 0.0:
-            raise ValueError("Mooney constants must be non-negative with c1 > 0")
-        if membrane_force_scale <= 0.0:
-            raise ValueError("membrane_force_scale must be positive")
-        if min(grid_nodes) < 4:
+        radius_m = _positive_float(radius_m, "radius_m")
+        thickness_m = _positive_float(thickness_m, "thickness_m")
+        density_kgm3 = _positive_float(density_kgm3, "density_kgm3")
+        c1_pa = _positive_float(c1_pa, "c1_pa")
+        c2_pa = _non_negative_float(c2_pa, "c2_pa")
+        membrane_force_scale = _positive_float(
+            membrane_force_scale,
+            "membrane_force_scale",
+        )
+        bounds_scale = _positive_float(bounds_scale, "bounds_scale")
+        grid_nodes = tuple(int(value) for value in grid_nodes)
+        if len(grid_nodes) != 3 or min(grid_nodes) < 4:
             raise ValueError("grid_nodes must be at least 4 in each direction")
         if bounds_scale <= 1.0:
             raise ValueError("bounds_scale must be greater than 1")
+        init_taichi(runtime)
 
         self.latitude_bands = int(resolution.latitude_bands)
         self.longitude_segments = int(resolution.longitude_segments)
@@ -1694,7 +1734,7 @@ class UvMooneyShellMpmState:
         self.c1_pa = float(c1_pa)
         self.c2_pa = float(c2_pa)
         self.membrane_force_scale = float(membrane_force_scale)
-        self.grid_nodes = tuple(int(value) for value in grid_nodes)
+        self.grid_nodes = grid_nodes
         self.nx, self.ny, self.nz = self.grid_nodes
         bound = bounds_scale * self.radius_m
         self.bounds_min = (-bound, -bound, -bound)
@@ -2331,7 +2371,8 @@ class UvMooneyShellMpmState:
 
         for p in range(self.particle_count):
             coord = self._particle_grid_coordinate(p)
-            if self._particle_grid_out_of_bounds(coord) == 0:
+            was_out_of_bounds = self._particle_grid_out_of_bounds(coord)
+            if was_out_of_bounds == 0:
                 pic_v = self._interpolate_grid_velocity(p)
                 flip_v = self.v[p] + self._interpolate_grid_velocity_delta(p)
                 new_v = (1.0 - flip_blend) * pic_v + flip_blend * flip_v
@@ -2343,6 +2384,12 @@ class UvMooneyShellMpmState:
             else:
                 self.x[p] += dt_s * self.v[p]
                 ti.atomic_max(self.report_max_speed_mps[None], self.v[p].norm())
+            report_coord = self._particle_grid_coordinate(p)
+            if (
+                was_out_of_bounds == 0
+                and self._particle_grid_out_of_bounds(report_coord) != 0
+            ):
+                ti.atomic_add(self.report_grid_out_of_bounds_particle_count[None], 1)
 
         radial_center_count = ti.max(ti.cast(self.report_radial_center_count[None], ti.f32), 1.0)
         current_center = self.report_current_center_sum_m[None] / radial_center_count

@@ -2758,12 +2758,6 @@ def build_final_run_report(context: Mapping[str, object]) -> dict[str, object]:
         ),
         "max_fsi_fluid_reaction_full_3d_residual_n": max_fluid_reaction_full_residual_n,
         "max_fsi_fluid_reaction_full_3d_relative_error": max_fluid_reaction_full_relative_error,
-        "interface_reaction_aitken_lower_bound": (
-            interface_reaction_aitken_lower_bound
-        ),
-        "interface_reaction_aitken_upper_bound": (
-            interface_reaction_aitken_upper_bound
-        ),
         "max_interface_reaction_relaxation_effective": max_interface_reaction_relaxation_effective,
         "min_interface_reaction_relaxation_effective": min_interface_reaction_relaxation_effective,
         "max_positive_main_interface_reaction_power_w": max_positive_main_interface_reaction_power_w,

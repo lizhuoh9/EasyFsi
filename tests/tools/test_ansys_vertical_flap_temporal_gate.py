@@ -202,6 +202,34 @@ class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
             report["flow_temporal_fail_reasons"],
         )
 
+    def test_last_window_steps_with_constant_stride_two_is_not_contiguous(self):
+        row = _row()
+        history = _history(step_count=5)
+        for item, step in zip(history, (2, 4, 6, 8, 10), strict=True):
+            item["step"] = step
+
+        report = gates.classify_flow_temporal(row, history)
+
+        self.assertEqual(report["flow_temporal_status"], "flow_temporal_failed")
+        self.assertIn(
+            "last_window_step_noncontiguous",
+            report["flow_temporal_fail_reasons"],
+        )
+
+    def test_last_window_fractional_steps_are_not_truncated(self):
+        row = _row()
+        history = _history(step_count=5)
+        for item, step in zip(history, (6.9, 7.9, 8.9, 9.9, 10.9), strict=True):
+            item["step"] = step
+
+        report = gates.classify_flow_temporal(row, history)
+
+        self.assertEqual(report["flow_temporal_status"], "flow_temporal_failed")
+        self.assertIn(
+            "last_window_step_nonintegral",
+            report["flow_temporal_fail_reasons"],
+        )
+
     def test_missing_history_is_not_applicable(self):
         flow_report = gates.classify_flow_temporal(_row(), [])
         coupling_report = gates.classify_coupling_settling(_row(), [])

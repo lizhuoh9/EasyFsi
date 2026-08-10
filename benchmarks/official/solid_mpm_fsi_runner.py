@@ -445,6 +445,12 @@ PREFLOW_TRACTION_NOT_EVALUATED = "not_evaluated"
 PREFLOW_TRACTION_INVALID = "invalid"
 
 
+def _advance_particle_position_generation(current_generation: int) -> int:
+    """Return the next runner-owned generation after one solid position write."""
+
+    return int(current_generation) + 1
+
+
 def _advance_solid_substeps_batched(
     solid: NeoHookeanMpmState,
     config: Any,
@@ -454,6 +460,7 @@ def _advance_solid_substeps_batched(
     mu_pa: float,
     lambda_pa: float,
     solid_substep_velocity_damping: float,
+    particle_position_write_observer: Callable[[], None] | None = None,
 ) -> Any:
     """Advance one FSI solid step with one fail-closed host guard read.
 
@@ -488,8 +495,12 @@ def _advance_solid_substeps_batched(
                 ),
                 read_report=False,
             )
+            if particle_position_write_observer is not None:
+                particle_position_write_observer()
             if config.enforce_plane_strain_x:
                 solid.enforce_rest_x_plane()
+                if particle_position_write_observer is not None:
+                    particle_position_write_observer()
         return solid.end_out_of_bounds_guard_batch()
     except BaseException:
         # end_out_of_bounds_guard_batch() closes its host lifecycle before its
@@ -517,6 +528,14 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     """Run a generic Cartesian fluid to rectangular solid MPM marker-FSI smoke."""
     run_started_s = time.perf_counter()
     _validate_rectangular_solid_config(config)
+    particle_position_generation = 0
+
+    def record_particle_position_write() -> None:
+        nonlocal particle_position_generation
+        particle_position_generation = _advance_particle_position_generation(
+            particle_position_generation
+        )
+
     runtime = TaichiRuntimeConfig(arch="cuda")
 
     _emit_run_progress(
@@ -587,6 +606,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     )
     phase_started_s = time.perf_counter()
     solid = _build_solid(config, runtime)
+    record_particle_position_write()
     if profile_wall_time:
         _synchronize_hibm_sharp_boundary_stage_timing()
     solid_build_wall_time_s = time.perf_counter() - phase_started_s
@@ -650,6 +670,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         progress_observer=progress_observer,
         run_started_s=run_started_s,
         profile_wall_time=profile_wall_time,
+        particle_position_generation=particle_position_generation,
     )
     preflow_report = {
         **preflow_report,
@@ -763,6 +784,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             solid.x,
             particle_count=solid.particle_count,
             support_radius_m=config.mpm_support_radius_m,
+            particle_position_generation=particle_position_generation,
         )
         solid_substep_dt_s = config.dt_s / float(solid_substeps)
         solid_substep_velocity_damping = _solid_substep_velocity_damping(
@@ -777,6 +799,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             mu_pa=mu_pa,
             lambda_pa=lambda_pa,
             solid_substep_velocity_damping=solid_substep_velocity_damping,
+            particle_position_write_observer=record_particle_position_write,
         )
         latest_feedback_report = markers.update_surface_feedback_from_mpm_surface_particles(
             solid.x,
@@ -789,6 +812,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
             preserve_marker_area=bool(
                 getattr(config, "preserve_marker_area_during_surface_feedback", False)
             ),
+            particle_position_generation=particle_position_generation,
         )
         latest_dynamic_obstacle_report = _update_fluid_obstacle_from_solid(
             fluid,
@@ -9837,6 +9861,7 @@ def _run_or_restore_fixed_solid_preflow(
     progress_observer: Callable[[dict[str, object]], None] | None = None,
     run_started_s: float | None = None,
     profile_wall_time: bool = False,
+    particle_position_generation: int | None = None,
 ) -> dict[str, object]:
     input_path, output_path = _preflow_snapshot_paths(config)
     identity = (
@@ -9866,6 +9891,7 @@ def _run_or_restore_fixed_solid_preflow(
         progress_observer=progress_observer,
         run_started_s=run_started_s,
         profile_wall_time=profile_wall_time,
+        particle_position_generation=particle_position_generation,
     )
     report["preflow_snapshot_loaded"] = False
     if output_path is not None:
@@ -9890,6 +9916,7 @@ def _run_fixed_solid_preflow(
     progress_observer: Callable[[dict[str, object]], None] | None = None,
     run_started_s: float | None = None,
     profile_wall_time: bool = False,
+    particle_position_generation: int | None = None,
 ) -> dict[str, object]:
     requested_steps = int(getattr(config, "preflow_steps", 0))
     tolerance = float(getattr(config, "preflow_convergence_tolerance", 0.0))
@@ -10056,6 +10083,7 @@ def _run_fixed_solid_preflow(
             solid.x,
             particle_count=solid.particle_count,
             support_radius_m=config.mpm_support_radius_m,
+            particle_position_generation=particle_position_generation,
         )
         if profile_wall_time:
             _synchronize_hibm_sharp_boundary_stage_timing()

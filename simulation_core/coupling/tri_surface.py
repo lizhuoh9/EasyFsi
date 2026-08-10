@@ -7,6 +7,9 @@ import taichi as ti
 from simulation_core.diagnostics.runtime import TaichiRuntimeConfig, init_taichi
 
 
+_F32_MAX = float(np.finfo(np.float32).max)
+
+
 @dataclass(frozen=True)
 class TriSurfaceDiagnosticReport:
     face_count: int
@@ -73,10 +76,11 @@ class TriSurfaceRegionDiagnostics:
     """
 
     def __init__(self, face_capacity: int, runtime: TaichiRuntimeConfig | None = None):
-        init_taichi(runtime)
+        face_capacity = int(face_capacity)
         if face_capacity <= 0:
             raise ValueError("face_capacity must be positive")
-        self.face_capacity = int(face_capacity)
+        init_taichi(runtime)
+        self.face_capacity = face_capacity
         self.face_count = 0
 
         self.centroid_m = ti.Vector.field(3, dtype=ti.f32, shape=self.face_capacity)
@@ -85,7 +89,7 @@ class TriSurfaceRegionDiagnostics:
         self.area_m2 = ti.field(dtype=ti.f32, shape=self.face_capacity)
         self.region_id = ti.field(dtype=ti.i32, shape=self.face_capacity)
 
-        self.report_pressure_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.report_pressure_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
         self.report_pressure_abs_force_n = ti.field(dtype=ti.f32, shape=())
         self.report_pressure_area_m2 = ti.field(dtype=ti.f32, shape=())
         self.report_pressure_face_count = ti.field(dtype=ti.i32, shape=())
@@ -95,28 +99,26 @@ class TriSurfaceRegionDiagnostics:
         self.report_invalid_probe_count = ti.field(dtype=ti.i32, shape=())
         self.report_invalid_probe_area_m2 = ti.field(dtype=ti.f32, shape=())
         self.report_invalid_probe_volume_source_m3s = ti.field(dtype=ti.f32, shape=())
-        self.report_grid_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_primary_fluid_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_secondary_fluid_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_constraint_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_primary_pressure_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_secondary_pressure_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_primary_constraint_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_secondary_constraint_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_viscous_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_fluid_stress_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_primary_viscous_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_secondary_viscous_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_primary_fluid_stress_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_secondary_fluid_stress_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.report_volume_source_m3s = ti.field(dtype=ti.f32, shape=())
-        self.report_primary_volume_source_m3s = ti.field(dtype=ti.f32, shape=())
-        self.report_secondary_volume_source_m3s = ti.field(dtype=ti.f32, shape=())
+        self.report_grid_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_primary_fluid_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_secondary_fluid_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_constraint_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_primary_pressure_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_secondary_pressure_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_primary_constraint_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_secondary_constraint_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_viscous_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_fluid_stress_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_primary_viscous_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_secondary_viscous_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_primary_fluid_stress_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_secondary_fluid_stress_force_n = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_volume_source_m3s = ti.field(dtype=ti.f64, shape=())
+        self.report_primary_volume_source_m3s = ti.field(dtype=ti.f64, shape=())
+        self.report_secondary_volume_source_m3s = ti.field(dtype=ti.f64, shape=())
         self.report_active_force_cells = ti.field(dtype=ti.i32, shape=())
-        self.report_float_snapshot_a = ti.Vector.field(32, dtype=ti.f32, shape=())
-        self.report_float_snapshot_b = ti.Vector.field(22, dtype=ti.f32, shape=())
-        self.report_force_pair_snapshot = ti.Vector.field(10, dtype=ti.f32, shape=())
-        self.report_count_snapshot = ti.Vector.field(4, dtype=ti.i32, shape=())
+        self.report_float_snapshot = ti.field(dtype=ti.f64, shape=58)
+        self.report_force_pair_snapshot = ti.Vector.field(10, dtype=ti.f64, shape=())
         self.report_force_cell_index_capacity = max(1, self.face_capacity * 8)
         self.report_force_cell_index_count = ti.field(dtype=ti.i32, shape=())
         self.report_force_cell_indices = ti.field(
@@ -174,10 +176,10 @@ class TriSurfaceRegionDiagnostics:
             raise ValueError("area_m2 must contain finite values")
         if np.any(areas < 0.0):
             raise ValueError("area_m2 must be non-negative")
-        normal_norms = np.linalg.norm(normals, axis=1)
+        normal_norms = np.linalg.norm(normals.astype(np.float64), axis=1)
         if np.any(normal_norms <= 1.0e-12):
             raise ValueError("normal vectors must be non-degenerate")
-        normals = normals / normal_norms[:, None]
+        normals = (normals / normal_norms[:, None]).astype(np.float32)
 
         self.face_count = int(centroids.shape[0])
         padded_centroids = np.zeros((self.face_capacity, 3), dtype=np.float32)
@@ -195,20 +197,95 @@ class TriSurfaceRegionDiagnostics:
         self.region_id.from_numpy(padded_regions)
 
     @staticmethod
+    def _finite_f32_float(value: object, name: str) -> float:
+        try:
+            result = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{name} must be finite and representable as f32") from exc
+        if not math.isfinite(result) or abs(result) > _F32_MAX:
+            raise ValueError(f"{name} must be finite and representable as f32")
+        device_value = np.float32(result)
+        if not np.isfinite(device_value) or (result != 0.0 and device_value == 0.0):
+            raise ValueError(f"{name} must be finite and representable as f32")
+        return result
+
+    @classmethod
     def _velocity_tuple(
+        cls,
         velocity_mps: tuple[float, float, float],
         name: str,
     ) -> tuple[float, float, float]:
         if len(velocity_mps) != 3:
             raise ValueError(f"{name} must contain exactly 3 components")
-        return (float(velocity_mps[0]), float(velocity_mps[1]), float(velocity_mps[2]))
-
-    @staticmethod
-    def _non_negative_float(value: object, name: str) -> float:
-        result = float(value)
-        if not math.isfinite(result) or result < 0.0:
-            raise ValueError(f"{name} must be a finite non-negative number")
+        result = (
+            cls._finite_f32_float(velocity_mps[0], name),
+            cls._finite_f32_float(velocity_mps[1], name),
+            cls._finite_f32_float(velocity_mps[2], name),
+        )
         return result
+
+    @classmethod
+    def _non_negative_float(cls, value: object, name: str) -> float:
+        result = cls._finite_f32_float(value, name)
+        if result < 0.0:
+            raise ValueError(
+                f"{name} must be a finite f32-representable non-negative number"
+            )
+        return result
+
+    @classmethod
+    def _positive_float(cls, value: object, name: str) -> float:
+        result = cls._non_negative_float(value, name)
+        if result == 0.0:
+            raise ValueError(f"{name} must be positive")
+        return result
+
+    @classmethod
+    def _grid_contract(
+        cls,
+        *,
+        probe_distance_m: float,
+        bounds_min_m: tuple[float, float, float],
+        bounds_max_m: tuple[float, float, float],
+        spacing_m: tuple[float, float, float],
+        grid_nodes: tuple[int, int, int],
+    ) -> tuple[
+        float,
+        tuple[float, float, float],
+        tuple[float, float, float],
+        tuple[int, int, int],
+    ]:
+        probe_distance = cls._non_negative_float(probe_distance_m, "probe_distance_m")
+        bounds_min = cls._velocity_tuple(bounds_min_m, "bounds_min_m")
+        bounds_max = cls._velocity_tuple(bounds_max_m, "bounds_max_m")
+        if any(upper <= lower for lower, upper in zip(bounds_min, bounds_max)):
+            raise ValueError("bounds_max_m must be greater than bounds_min_m")
+        spacing = cls._velocity_tuple(spacing_m, "spacing_m")
+        if any(value <= 0.0 for value in spacing):
+            raise ValueError("spacing_m must contain positive values")
+        nodes = tuple(int(value) for value in grid_nodes)
+        if len(nodes) != 3 or any(value <= 1 for value in nodes):
+            raise ValueError("grid_nodes must contain three values greater than one")
+        return probe_distance, bounds_min, bounds_max, nodes
+
+    @classmethod
+    def _force_physics_contract(
+        cls,
+        *,
+        density_kgm3: float,
+        viscosity_pa_s: float,
+        dt_s: float,
+        constraint_force_scale: float,
+    ) -> tuple[float, float, float, float]:
+        return (
+            cls._positive_float(density_kgm3, "density_kgm3"),
+            cls._non_negative_float(viscosity_pa_s, "viscosity_pa_s"),
+            cls._positive_float(dt_s, "dt_s"),
+            cls._non_negative_float(
+                constraint_force_scale,
+                "constraint_force_scale",
+            ),
+        )
 
     @ti.kernel
     def _update_region_offsets_kernel(
@@ -493,6 +570,9 @@ class TriSurfaceRegionDiagnostics:
             self.report_force_cell_index_count[None],
             ti.static(self.report_force_cell_index_capacity),
         )
+        # Open addressing and same-cell force accumulation share table slots.
+        # Preserve deterministic insert/sum semantics without host round-trips.
+        ti.loop_config(serialize=True)
         for index in range(stored_count):
             linear_index = self.report_force_cell_indices[index]
             if linear_index != 0:
@@ -528,7 +608,7 @@ class TriSurfaceRegionDiagnostics:
 
     @ti.func
     def _pack_full_report_snapshot(self):
-        self.report_float_snapshot_a[None] = ti.Vector(
+        values_a = ti.Vector(
             [
                 self.report_pressure_force_n[None].x,
                 self.report_pressure_force_n[None].y,
@@ -564,7 +644,7 @@ class TriSurfaceRegionDiagnostics:
                 self.report_secondary_constraint_force_n[None].y,
             ]
         )
-        self.report_float_snapshot_b[None] = ti.Vector(
+        values_b = ti.Vector(
             [
                 self.report_secondary_constraint_force_n[None].z,
                 self.report_viscous_force_n[None].x,
@@ -590,13 +670,22 @@ class TriSurfaceRegionDiagnostics:
                 self.report_secondary_volume_source_m3s[None],
             ]
         )
-        self.report_count_snapshot[None] = ti.Vector(
-            [
-                self.report_pressure_face_count[None],
-                self.report_sample_count[None],
-                self.report_invalid_probe_count[None],
-                self.report_active_force_cells[None],
-            ]
+        for index in ti.static(range(32)):
+            self.report_float_snapshot[index] = values_a[index]
+        for index in ti.static(range(22)):
+            self.report_float_snapshot[32 + index] = values_b[index]
+        self.report_float_snapshot[54] = ti.cast(
+            self.report_pressure_face_count[None],
+            ti.f64,
+        )
+        self.report_float_snapshot[55] = ti.cast(self.report_sample_count[None], ti.f64)
+        self.report_float_snapshot[56] = ti.cast(
+            self.report_invalid_probe_count[None],
+            ti.f64,
+        )
+        self.report_float_snapshot[57] = ti.cast(
+            self.report_active_force_cells[None],
+            ti.f64,
         )
 
     @ti.func
@@ -609,10 +698,8 @@ class TriSurfaceRegionDiagnostics:
                 self.report_secondary_fluid_force_n[None].x,
                 self.report_secondary_fluid_force_n[None].y,
                 self.report_secondary_fluid_force_n[None].z,
-                # Preserve the i32 bit patterns while retaining a single
-                # mixed-purpose f32 snapshot and one device-to-host read.
-                ti.bit_cast(self.report_sample_count[None], ti.f32),
-                ti.bit_cast(self.report_invalid_probe_count[None], ti.f32),
+                ti.cast(self.report_sample_count[None], ti.f64),
+                ti.cast(self.report_invalid_probe_count[None], ti.f64),
                 self.report_invalid_probe_area_m2[None],
                 self.report_invalid_probe_volume_source_m3s[None],
             ]
@@ -630,7 +717,7 @@ class TriSurfaceRegionDiagnostics:
         )
 
     @ti.kernel
-    def accumulate_force_impulse(self, dt_s: ti.f64):
+    def _accumulate_force_impulse_kernel(self, dt_s: ti.f64):
         self.force_impulse_n_s[None][0] += (
             ti.cast(self.report_primary_fluid_force_n[None].x, ti.f64) * dt_s
         )
@@ -648,6 +735,11 @@ class TriSurfaceRegionDiagnostics:
         )
         self.force_impulse_n_s[None][5] += (
             ti.cast(self.report_secondary_fluid_force_n[None].z, ti.f64) * dt_s
+        )
+
+    def accumulate_force_impulse(self, dt_s: float) -> None:
+        self._accumulate_force_impulse_kernel(
+            self._non_negative_float(dt_s, "dt_s")
         )
 
     @ti.func
@@ -1934,18 +2026,22 @@ class TriSurfaceRegionDiagnostics:
             secondary_pressure_robin_impedance_ns_m,
             "secondary_pressure_robin_impedance_ns_m",
         )
-        primary_reference = float(primary_pressure_robin_reference_pa)
-        secondary_reference = float(secondary_pressure_robin_reference_pa)
-        if not math.isfinite(primary_reference):
-            raise ValueError("primary_pressure_robin_reference_pa must be finite")
-        if not math.isfinite(secondary_reference):
-            raise ValueError("secondary_pressure_robin_reference_pa must be finite")
-        primary_area_m2 = float(primary_interface_area_m2)
-        secondary_area_m2 = float(secondary_interface_area_m2)
-        if not math.isfinite(primary_area_m2) or primary_area_m2 < 0.0:
-            raise ValueError("primary_interface_area_m2 must be a finite non-negative number")
-        if not math.isfinite(secondary_area_m2) or secondary_area_m2 < 0.0:
-            raise ValueError("secondary_interface_area_m2 must be a finite non-negative number")
+        primary_reference = self._finite_f32_float(
+            primary_pressure_robin_reference_pa,
+            "primary_pressure_robin_reference_pa",
+        )
+        secondary_reference = self._finite_f32_float(
+            secondary_pressure_robin_reference_pa,
+            "secondary_pressure_robin_reference_pa",
+        )
+        primary_area_m2 = self._non_negative_float(
+            primary_interface_area_m2,
+            "primary_interface_area_m2",
+        )
+        secondary_area_m2 = self._non_negative_float(
+            secondary_interface_area_m2,
+            "secondary_interface_area_m2",
+        )
         if primary_impedance > 0.0 and primary_area_m2 <= 0.0:
             raise ValueError(
                 "primary_interface_area_m2 must be positive when primary pressure Robin impedance is nonzero"
@@ -1960,15 +2056,13 @@ class TriSurfaceRegionDiagnostics:
         dt = self._non_negative_float(dt_s, "dt_s")
         if dt <= 0.0:
             raise ValueError("dt_s must be positive")
-        probe_distance = self._non_negative_float(probe_distance_m, "probe_distance_m")
-        bounds_min = self._velocity_tuple(bounds_min_m, "bounds_min_m")
-        bounds_max = self._velocity_tuple(bounds_max_m, "bounds_max_m")
-        grid_nodes_tuple = tuple(int(v) for v in grid_nodes)
-        if len(grid_nodes_tuple) != 3 or any(v <= 1 for v in grid_nodes_tuple):
-            raise ValueError("grid_nodes must contain three values greater than one")
-        spacing_tuple = self._velocity_tuple(spacing_m, "spacing_m")
-        if any(value <= 0.0 for value in spacing_tuple):
-            raise ValueError("spacing_m must be positive")
+        probe_distance, bounds_min, bounds_max, grid_nodes_tuple = self._grid_contract(
+            probe_distance_m=probe_distance_m,
+            bounds_min_m=bounds_min_m,
+            bounds_max_m=bounds_max_m,
+            spacing_m=spacing_m,
+            grid_nodes=grid_nodes,
+        )
         grid_field_tuple = self._grid_field_tuple(grid_fields)
         self._spread_pressure_interface_matrix_terms_kernel(
             diagonal_field,
@@ -2033,6 +2127,19 @@ class TriSurfaceRegionDiagnostics:
         read_full_report: bool = True,
         read_force_pair_report: bool = True,
     ) -> TriSurfaceDiagnosticReport | TriSurfaceForcePairReport | None:
+        density, viscosity, dt, force_scale = self._force_physics_contract(
+            density_kgm3=density_kgm3,
+            viscosity_pa_s=viscosity_pa_s,
+            dt_s=dt_s,
+            constraint_force_scale=constraint_force_scale,
+        )
+        probe_distance, bounds_min, bounds_max, nodes = self._grid_contract(
+            probe_distance_m=probe_distance_m,
+            bounds_min_m=bounds_min_m,
+            bounds_max_m=bounds_max_m,
+            spacing_m=spacing_m,
+            grid_nodes=grid_nodes,
+        )
         primary_velocity = self._velocity_tuple(primary_velocity_mps, "primary_velocity_mps")
         secondary_velocity = self._velocity_tuple(secondary_velocity_mps, "secondary_velocity_mps")
         primary_impedance_force = self._velocity_tuple(
@@ -2043,8 +2150,14 @@ class TriSurfaceRegionDiagnostics:
             secondary_interface_impedance_force_n,
             "secondary_interface_impedance_force_n",
         )
-        primary_area_m2 = float(primary_interface_area_m2)
-        secondary_area_m2 = float(secondary_interface_area_m2)
+        primary_area_m2 = self._non_negative_float(
+            primary_interface_area_m2,
+            "primary_interface_area_m2",
+        )
+        secondary_area_m2 = self._non_negative_float(
+            secondary_interface_area_m2,
+            "secondary_interface_area_m2",
+        )
         force_solid_mobility_ratio = self._non_negative_float(
             constraint_force_solid_mobility_ratio,
             "constraint_force_solid_mobility_ratio",
@@ -2085,10 +2198,6 @@ class TriSurfaceRegionDiagnostics:
                 "secondary_velocity_target_solid_mobility_ratio",
             )
         )
-        if not math.isfinite(primary_area_m2) or primary_area_m2 < 0.0:
-            raise ValueError("primary_interface_area_m2 must be a finite non-negative number")
-        if not math.isfinite(secondary_area_m2) or secondary_area_m2 < 0.0:
-            raise ValueError("secondary_interface_area_m2 must be a finite non-negative number")
         if any(component != 0.0 for component in primary_impedance_force) and primary_area_m2 <= 0.0:
             raise ValueError("primary_interface_area_m2 must be positive when primary impedance force is nonzero")
         if any(component != 0.0 for component in secondary_impedance_force) and secondary_area_m2 <= 0.0:
@@ -2106,11 +2215,11 @@ class TriSurfaceRegionDiagnostics:
             int(secondary_region_id),
             ti.Vector(primary_velocity),
             ti.Vector(secondary_velocity),
-            float(probe_distance_m),
-            float(density_kgm3),
-            float(viscosity_pa_s),
-            float(dt_s),
-            float(constraint_force_scale),
+            probe_distance,
+            density,
+            viscosity,
+            dt,
+            force_scale,
             force_solid_mobility_ratio,
             primary_force_solid_mobility_ratio,
             secondary_force_solid_mobility_ratio,
@@ -2120,15 +2229,15 @@ class TriSurfaceRegionDiagnostics:
             ti.Vector(secondary_impedance_force),
             float(primary_area_m2),
             float(secondary_area_m2),
-            float(bounds_min_m[0]),
-            float(bounds_min_m[1]),
-            float(bounds_min_m[2]),
-            float(bounds_max_m[0]),
-            float(bounds_max_m[1]),
-            float(bounds_max_m[2]),
-            int(grid_nodes[0]),
-            int(grid_nodes[1]),
-            int(grid_nodes[2]),
+            bounds_min[0],
+            bounds_min[1],
+            bounds_min[2],
+            bounds_max[0],
+            bounds_max[1],
+            bounds_max[2],
+            nodes[0],
+            nodes[1],
+            nodes[2],
             int(bool(read_full_report)),
             1,
             int(bool(read_force_pair_report)),
@@ -2174,6 +2283,19 @@ class TriSurfaceRegionDiagnostics:
         primary_interface_area_m2: float = 0.0,
         secondary_interface_area_m2: float = 0.0,
     ) -> TriSurfaceDiagnosticReport:
+        density, viscosity, dt, force_scale = self._force_physics_contract(
+            density_kgm3=density_kgm3,
+            viscosity_pa_s=viscosity_pa_s,
+            dt_s=dt_s,
+            constraint_force_scale=constraint_force_scale,
+        )
+        probe_distance, bounds_min, bounds_max, nodes = self._grid_contract(
+            probe_distance_m=probe_distance_m,
+            bounds_min_m=bounds_min_m,
+            bounds_max_m=bounds_max_m,
+            spacing_m=spacing_m,
+            grid_nodes=grid_nodes,
+        )
         primary_velocity = self._velocity_tuple(primary_velocity_mps, "primary_velocity_mps")
         secondary_velocity = self._velocity_tuple(secondary_velocity_mps, "secondary_velocity_mps")
         primary_impedance_force = self._velocity_tuple(
@@ -2184,8 +2306,14 @@ class TriSurfaceRegionDiagnostics:
             secondary_interface_impedance_force_n,
             "secondary_interface_impedance_force_n",
         )
-        primary_area_m2 = float(primary_interface_area_m2)
-        secondary_area_m2 = float(secondary_interface_area_m2)
+        primary_area_m2 = self._non_negative_float(
+            primary_interface_area_m2,
+            "primary_interface_area_m2",
+        )
+        secondary_area_m2 = self._non_negative_float(
+            secondary_interface_area_m2,
+            "secondary_interface_area_m2",
+        )
         force_solid_mobility_ratio = self._non_negative_float(
             constraint_force_solid_mobility_ratio,
             "constraint_force_solid_mobility_ratio",
@@ -2226,10 +2354,6 @@ class TriSurfaceRegionDiagnostics:
                 "secondary_velocity_target_solid_mobility_ratio",
             )
         )
-        if not math.isfinite(primary_area_m2) or primary_area_m2 < 0.0:
-            raise ValueError("primary_interface_area_m2 must be a finite non-negative number")
-        if not math.isfinite(secondary_area_m2) or secondary_area_m2 < 0.0:
-            raise ValueError("secondary_interface_area_m2 must be a finite non-negative number")
         if any(component != 0.0 for component in primary_impedance_force) and primary_area_m2 <= 0.0:
             raise ValueError("primary_interface_area_m2 must be positive when primary impedance force is nonzero")
         if any(component != 0.0 for component in secondary_impedance_force) and secondary_area_m2 <= 0.0:
@@ -2247,11 +2371,11 @@ class TriSurfaceRegionDiagnostics:
             int(secondary_region_id),
             ti.Vector(primary_velocity),
             ti.Vector(secondary_velocity),
-            float(probe_distance_m),
-            float(density_kgm3),
-            float(viscosity_pa_s),
-            float(dt_s),
-            float(constraint_force_scale),
+            probe_distance,
+            density,
+            viscosity,
+            dt,
+            force_scale,
             force_solid_mobility_ratio,
             primary_force_solid_mobility_ratio,
             secondary_force_solid_mobility_ratio,
@@ -2261,15 +2385,15 @@ class TriSurfaceRegionDiagnostics:
             ti.Vector(secondary_impedance_force),
             float(primary_area_m2),
             float(secondary_area_m2),
-            float(bounds_min_m[0]),
-            float(bounds_min_m[1]),
-            float(bounds_min_m[2]),
-            float(bounds_max_m[0]),
-            float(bounds_max_m[1]),
-            float(bounds_max_m[2]),
-            int(grid_nodes[0]),
-            int(grid_nodes[1]),
-            int(grid_nodes[2]),
+            bounds_min[0],
+            bounds_min[1],
+            bounds_min[2],
+            bounds_max[0],
+            bounds_max[1],
+            bounds_max[2],
+            nodes[0],
+            nodes[1],
+            nodes[2],
             1,
             0,
             0,
@@ -2293,6 +2417,13 @@ class TriSurfaceRegionDiagnostics:
         grid_nodes: tuple[int, int, int],
         read_full_report: bool = True,
     ) -> TriSurfaceDiagnosticReport | None:
+        probe_distance, bounds_min, bounds_max, nodes = self._grid_contract(
+            probe_distance_m=probe_distance_m,
+            bounds_min_m=bounds_min_m,
+            bounds_max_m=bounds_max_m,
+            spacing_m=spacing_m,
+            grid_nodes=grid_nodes,
+        )
         primary_velocity = self._velocity_tuple(primary_velocity_mps, "primary_velocity_mps")
         secondary_velocity = self._velocity_tuple(secondary_velocity_mps, "secondary_velocity_mps")
         grid_field_tuple = self._grid_field_tuple(grid_fields)
@@ -2339,16 +2470,16 @@ class TriSurfaceRegionDiagnostics:
             int(secondary_region_id),
             ti.Vector(primary_velocity),
             ti.Vector(secondary_velocity),
-            float(probe_distance_m),
-            float(bounds_min_m[0]),
-            float(bounds_min_m[1]),
-            float(bounds_min_m[2]),
-            float(bounds_max_m[0]),
-            float(bounds_max_m[1]),
-            float(bounds_max_m[2]),
-            int(grid_nodes[0]),
-            int(grid_nodes[1]),
-            int(grid_nodes[2]),
+            probe_distance,
+            bounds_min[0],
+            bounds_min[1],
+            bounds_min[2],
+            bounds_max[0],
+            bounds_max[1],
+            bounds_max[2],
+            nodes[0],
+            nodes[1],
+            nodes[2],
             int(bool(read_full_report)),
             write_region_fields,
         )
@@ -2374,6 +2505,14 @@ class TriSurfaceRegionDiagnostics:
         grid_nodes: tuple[int, int, int],
         viscosity_pa_s: float,
     ) -> TriSurfaceDiagnosticReport:
+        viscosity = self._non_negative_float(viscosity_pa_s, "viscosity_pa_s")
+        probe_distance, bounds_min, bounds_max, nodes = self._grid_contract(
+            probe_distance_m=probe_distance_m,
+            bounds_min_m=bounds_min_m,
+            bounds_max_m=bounds_max_m,
+            spacing_m=spacing_m,
+            grid_nodes=grid_nodes,
+        )
         primary_velocity = self._velocity_tuple(primary_velocity_mps, "primary_velocity_mps")
         secondary_velocity = self._velocity_tuple(secondary_velocity_mps, "secondary_velocity_mps")
         grid_field_tuple = self._grid_field_tuple(grid_fields)
@@ -2390,26 +2529,25 @@ class TriSurfaceRegionDiagnostics:
             int(secondary_region_id),
             ti.Vector(primary_velocity),
             ti.Vector(secondary_velocity),
-            float(probe_distance_m),
-            float(bounds_min_m[0]),
-            float(bounds_min_m[1]),
-            float(bounds_min_m[2]),
-            float(bounds_max_m[0]),
-            float(bounds_max_m[1]),
-            float(bounds_max_m[2]),
-            int(grid_nodes[0]),
-            int(grid_nodes[1]),
-            int(grid_nodes[2]),
-            float(viscosity_pa_s),
+            probe_distance,
+            bounds_min[0],
+            bounds_min[1],
+            bounds_min[2],
+            bounds_max[0],
+            bounds_max[1],
+            bounds_max[2],
+            nodes[0],
+            nodes[1],
+            nodes[2],
+            viscosity,
         )
         return self.report(stress_fields_computed=True, force_fields_computed=False)
 
     def force_pair_report(self) -> TriSurfaceForcePairReport:
         values = self.report_force_pair_snapshot.to_numpy()
         self.last_report_host_reads = 1
-        packed_counts = np.asarray(values[6:8], dtype=np.float32).view(np.int32)
-        sample_count = int(packed_counts[0])
-        invalid_count = int(packed_counts[1])
+        sample_count = int(values[6])
+        invalid_count = int(values[7])
         total_probe_count = sample_count + invalid_count
         valid_fraction = sample_count / max(total_probe_count, 1)
         return TriSurfaceForcePairReport(
@@ -2446,23 +2584,15 @@ class TriSurfaceRegionDiagnostics:
         return (math.nan, math.nan, math.nan)
 
     def report(self, *, stress_fields_computed: bool, force_fields_computed: bool) -> TriSurfaceDiagnosticReport:
-        values_a = self.report_float_snapshot_a[None]
-        values_b = self.report_float_snapshot_b[None]
-        counts = self.report_count_snapshot[None]
-        self.last_report_host_reads = 3
+        values = self.report_float_snapshot.to_numpy()
+        counts = values[54:58].astype(np.int64)
+        self.last_report_host_reads = 1
 
-        def vector_from_a(offset: int) -> tuple[float, float, float]:
+        def vector(offset: int) -> tuple[float, float, float]:
             return (
-                float(values_a[offset]),
-                float(values_a[offset + 1]),
-                float(values_a[offset + 2]),
-            )
-
-        def vector_from_b(offset: int) -> tuple[float, float, float]:
-            return (
-                float(values_b[offset]),
-                float(values_b[offset + 1]),
-                float(values_b[offset + 2]),
+                float(values[offset]),
+                float(values[offset + 1]),
+                float(values[offset + 2]),
             )
 
         sample_count = int(counts[1])
@@ -2471,17 +2601,17 @@ class TriSurfaceRegionDiagnostics:
         valid_fraction = sample_count / max(total_probe_count, 1)
         residual_l2 = math.nan
         if stress_fields_computed and sample_count > 0:
-            residual_l2 = (float(values_a[5]) / sample_count) ** 0.5
+            residual_l2 = (float(values[5]) / sample_count) ** 0.5
         elif stress_fields_computed:
             residual_l2 = 0.0
         nan_vector = self._nan_vector3()
         pressure_force = (
-            vector_from_a(0)
+            vector(0)
             if stress_fields_computed
             else nan_vector
         )
         pressure_abs_force_n = (
-            float(values_a[3])
+            float(values[3])
             if stress_fields_computed
             else math.nan
         )
@@ -2491,52 +2621,52 @@ class TriSurfaceRegionDiagnostics:
             else None
         )
         pressure_area_m2 = (
-            float(values_a[4])
+            float(values[4])
             if stress_fields_computed
             else math.nan
         )
         residual_max = (
-            float(values_a[6])
+            float(values[6])
             if stress_fields_computed
             else math.nan
         )
         primary_pressure_force = (
-            vector_from_a(21)
+            vector(21)
             if stress_fields_computed
             else nan_vector
         )
         secondary_pressure_force = (
-            vector_from_a(24)
+            vector(24)
             if stress_fields_computed
             else nan_vector
         )
         viscous_force = (
-            vector_from_b(1)
+            vector(33)
             if stress_fields_computed
             else nan_vector
         )
         fluid_stress_force = (
-            vector_from_b(4)
+            vector(36)
             if stress_fields_computed
             else nan_vector
         )
         primary_viscous_force = (
-            vector_from_b(7)
+            vector(39)
             if stress_fields_computed
             else nan_vector
         )
         secondary_viscous_force = (
-            vector_from_b(10)
+            vector(42)
             if stress_fields_computed
             else nan_vector
         )
         primary_fluid_stress_force = (
-            vector_from_b(13)
+            vector(45)
             if stress_fields_computed
             else nan_vector
         )
         secondary_fluid_stress_force = (
-            vector_from_b(16)
+            vector(48)
             if stress_fields_computed
             else nan_vector
         )
@@ -2545,47 +2675,47 @@ class TriSurfaceRegionDiagnostics:
         force_valid_count = sample_count if force_fields_computed else None
         force_valid_fraction = valid_fraction if force_fields_computed else math.nan
         grid_force = (
-            vector_from_a(9)
+            vector(9)
             if force_fields_computed
             else nan_vector
         )
         primary_fluid_force = (
-            vector_from_a(12)
+            vector(12)
             if force_fields_computed
             else nan_vector
         )
         secondary_fluid_force = (
-            vector_from_a(15)
+            vector(15)
             if force_fields_computed
             else nan_vector
         )
         constraint_force = (
-            vector_from_a(18)
+            vector(18)
             if force_fields_computed
             else nan_vector
         )
         primary_constraint_force = (
-            vector_from_a(27)
+            vector(27)
             if force_fields_computed
             else nan_vector
         )
         secondary_constraint_force = (
-            (float(values_a[30]), float(values_a[31]), float(values_b[0]))
+            vector(30)
             if force_fields_computed
             else nan_vector
         )
         volume_source_m3s = (
-            float(values_b[19])
+            float(values[51])
             if force_fields_computed
             else math.nan
         )
         primary_volume_source_m3s = (
-            float(values_b[20])
+            float(values[52])
             if force_fields_computed
             else math.nan
         )
         secondary_volume_source_m3s = (
-            float(values_b[21])
+            float(values[53])
             if force_fields_computed
             else math.nan
         )
@@ -2605,8 +2735,8 @@ class TriSurfaceRegionDiagnostics:
             projected_ibm_sample_count=sample_count,
             invalid_probe_count=invalid_count,
             valid_probe_fraction=valid_fraction,
-            invalid_probe_area_m2=float(values_a[7]),
-            invalid_probe_volume_source_m3s=float(values_a[8]),
+            invalid_probe_area_m2=float(values[7]),
+            invalid_probe_volume_source_m3s=float(values[8]),
             force_sample_count=force_sample_count,
             force_invalid_probe_count=force_invalid_count,
             force_valid_probe_count=force_valid_count,

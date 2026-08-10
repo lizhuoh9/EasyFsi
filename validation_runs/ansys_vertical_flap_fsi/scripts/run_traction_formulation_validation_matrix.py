@@ -515,7 +515,7 @@ def _run_config(
 def _history_row(scenario: str, raw: dict[str, Any]) -> dict[str, Any]:
     projection = dict(raw.get("flow_projection_report", {}))
     force = _vector(raw.get("total_marker_force_n"))
-    return {
+    row = {
         "scenario": scenario,
         "step": int(raw.get("preflow_step") or 0),
         "flow_phase": raw.get("flow_phase", "preflow"),

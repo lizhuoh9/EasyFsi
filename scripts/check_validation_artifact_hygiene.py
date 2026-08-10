@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import json
 import re
-import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -106,6 +105,7 @@ def _check_checksums(root: Path, violations: list[dict[str, str]]) -> None:
             "CHECKSUMS.sha256 is missing",
         )
         return
+    listed_paths: set[str] = set()
     for line in checksum_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -114,8 +114,35 @@ def _check_checksums(root: Path, violations: list[dict[str, str]]) -> None:
         except ValueError:
             _add_violation(violations, checksum_path, "checksum_row_invalid", line)
             continue
-        target = root / name
-        if not target.exists():
+        if not SHA256_RE.fullmatch(expected):
+            _add_violation(
+                violations,
+                checksum_path,
+                "checksum_digest_invalid",
+                expected,
+            )
+            continue
+        normalized_name = Path(name).as_posix()
+        if normalized_name in listed_paths:
+            _add_violation(
+                violations,
+                checksum_path,
+                "checksum_target_duplicate",
+                normalized_name,
+            )
+            continue
+        listed_paths.add(normalized_name)
+        root_resolved = root.resolve()
+        target = (root / name).resolve()
+        if not target.is_relative_to(root_resolved):
+            _add_violation(
+                violations,
+                checksum_path,
+                "checksum_target_outside_root",
+                name,
+            )
+            continue
+        if not target.is_file():
             _add_violation(
                 violations,
                 checksum_path,
@@ -131,6 +158,19 @@ def _check_checksums(root: Path, violations: list[dict[str, str]]) -> None:
                 "checksum_mismatch",
                 f"{name}: expected {expected}, got {actual}",
             )
+
+    managed_paths = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and path != checksum_path
+    }
+    for name in sorted(managed_paths - listed_paths):
+        _add_violation(
+            violations,
+            checksum_path,
+            "checksum_entry_missing",
+            name,
+        )
 
 
 def _active_contract_incomplete(path: Path) -> bool:

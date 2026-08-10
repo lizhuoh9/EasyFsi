@@ -483,19 +483,16 @@ def face_ids_for_step_part_or_surface_tags(
     result: StepTessellationResult,
     tags: Sequence[int],
 ) -> list[int]:
-    tag_set = {int(tag) for tag in tags}
+    part_by_tag = _face_ids_by_entity_tag(result.part_entities)
     surface_by_tag = _face_ids_by_entity_tag(result.surface_entities)
-    part_blocks = [
-        np.asarray(part.face_ids, dtype=np.intp)
-        for part in result.part_entities
-        if set(int(tag) for tag in part.surface_tags).issubset(tag_set)
-        and len(part.surface_tags) > 0
-    ]
-    if part_blocks:
-        return _unique_face_ids(part_blocks)
-    return _unique_face_ids(
-        [surface_by_tag[tag] for tag in tag_set if tag in surface_by_tag]
-    )
+    face_blocks: list[np.ndarray] = []
+    for raw_tag in tags:
+        tag = int(raw_tag)
+        if tag in part_by_tag:
+            face_blocks.append(part_by_tag[tag])
+        elif tag in surface_by_tag:
+            face_blocks.append(surface_by_tag[tag])
+    return _unique_face_ids(face_blocks)
 
 
 def _selection_source_tags(selection: Mapping[str, object]) -> tuple[str, tuple[int, ...]]:

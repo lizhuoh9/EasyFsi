@@ -8896,6 +8896,7 @@ class HibmMpmSharpPathFailFastTests(unittest.TestCase):
             active_pair_count: int,
             residual_n: float,
         ):
+            required_marker_count = 1
             return SimpleNamespace(
                 mpm_external_force_clear=HibmMpmExternalForceClearReport(
                     cleared_particle_count=cleared_particle_count,
@@ -8908,6 +8909,37 @@ class HibmMpmSharpPathFailFastTests(unittest.TestCase):
                     total_marker_force_n=(0.0, 0.0, 0.0),
                     total_mpm_external_force_n=(0.0, 0.0, 0.0),
                     action_reaction_residual_n=residual_n,
+                ),
+                marker_forces=SimpleNamespace(
+                    total_marker_count=required_marker_count,
+                    total_marker_force_n=(0.0, 0.0, 0.0),
+                    fluid_reaction_force_n=(0.0, 0.0, 0.0),
+                    action_reaction_residual_n=0.0,
+                    primary_stress_invalid_marker_count=0,
+                    secondary_stress_invalid_marker_count=0,
+                ),
+                fluid_stress=SimpleNamespace(
+                    valid_marker_count=required_marker_count,
+                    invalid_marker_count=0,
+                    viscous_gradient_invalid_marker_count=0,
+                    max_abs_traction_pa=0.0,
+                ),
+                no_slip_residual=SimpleNamespace(
+                    valid_marker_count=required_marker_count,
+                    invalid_marker_count=0,
+                    max_no_slip_residual_mps=0.0,
+                    l2_no_slip_residual_mps=0.0,
+                ),
+                fluid_projection={
+                    "cg_converged_all": True,
+                    "cg_breakdown_count": 0,
+                    "cg_relative_residual_max": 0.0,
+                    "pressure_solve_failed": False,
+                    "pressure_projection_physical_failure": False,
+                },
+                pressure_disconnected_region=SimpleNamespace(
+                    component_overflow=False,
+                    component_labels_converged=True,
                 ),
             )
 

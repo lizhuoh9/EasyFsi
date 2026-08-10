@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from simulation_core import (

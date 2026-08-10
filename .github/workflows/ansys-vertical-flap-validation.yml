@@ -2,6 +2,13 @@ name: ANSYS vertical flap validation contracts
 
 on:
   workflow_dispatch:
+    inputs:
+      run_cuda_step50:
+        description: Run the long CUDA step-50 validation on a self-hosted runner
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 18 * * 1"
   push:
     branches:
       - main
@@ -12,6 +19,58 @@ on:
       - main
 
 jobs:
+  quality-and-fast-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run static quality gates
+        run: |
+          python -m ruff check . --select F601,F821
+          python -m compileall -q simulation_core cases tools
+
+      - name: Run fast platform-independent contracts
+        run: |
+          python -m unittest -v \
+            tests.integration.test_validation_ci_workflow \
+            tests.integration.test_generic_entrypoint \
+            tests.integration.test_ansys_vertical_flap_step50_cli \
+            tests.cases.test_squid_import_contracts \
+            tests.cases.test_squid_checkpoint_atomicity \
+            tests.cases.test_squid_explicit_context_contract \
+            tests.cases.test_squid_sharp_contract_fixes \
+            tests.benchmarks.test_main_audit_particle_bin_generation_wiring \
+            tests.solvers.test_main_audit_graded_grid_performance \
+            tests.solvers.test_main_audit_numeric_contracts \
+            tests.solvers.test_cad_tessellation.CadTessellationTests.test_step_part_entity_tag_expands_all_part_surfaces_on_tag_collision \
+            tests.solvers.test_hibm.HibmMpmSharpPathFailFastTests.test_sharp_mpm_step_requires_fresh_external_force_before_solid_advance \
+            tests.solvers.test_tri_surface.TriSurfaceRegionDiagnosticsTests.test_f32_kernel_parameters_reject_f64_overflow_before_launch \
+            tests.cases.test_squid_latest_core_config.SquidRunCheckpointMarkerStateTests.test_run_checkpoint_version_is_4 \
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_full_domain_runner_passes_full_step_neumann_dt_once \
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_full_domain_runner_uses_full_span_flaps \
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_canonical_runner_rejects_underresolved_solid_particles_for_fine_grid \
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_full_domain_runner_uses_local_surface_force_support_radius \
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_full_domain_runner_persists_solid_substeps_in_process_updates \
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_full_domain_runner_has_official_style_stationary_preflow_option \
+            tests.tools.test_ansys_vertical_flap_temporal_gate \
+            tests.tools.test_validation_artifact_hygiene
+
+          python -m pytest -q \
+            tests/validation/test_turek_hron_rendering.py::test_two_synthetic_snapshots_render_with_one_fixed_scale_and_make_gif
+
   contracts:
     runs-on: windows-latest
     timeout-minutes: 20
@@ -25,11 +84,11 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install minimal runtime dependencies
+      - name: Install locked dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy taichi pillow trimesh
+          python -m pip install -r requirements.txt
 
       - name: Compile ANSYS validation modules
         shell: pwsh
@@ -473,3 +532,45 @@ jobs:
             tests.solvers.test_hibm_traction_symmetric_pressure_pair `
             tests.solvers.test_hibm_traction_pressure_pair_anchor_map `
             tests.solvers.test_hibm_traction_per_face_one_sided_pressure
+
+  scheduled-cuda-step50:
+    if: github.event_name == 'schedule' || inputs.run_cuda_step50 == true
+    runs-on: [self-hosted, windows, x64, cuda]
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run focused CUDA state-contract regressions
+        shell: pwsh
+        run: |
+          python -m unittest -v `
+            tests.solvers.test_main_audit_coupling_contracts `
+            tests.solvers.test_main_audit_fluid_state_contracts `
+            tests.solvers.test_main_audit_solid_input_contracts `
+            tests.solvers.test_mooney_shell_post_step_oob_cuda `
+            tests.solvers.test_tri_surface.TriSurfaceRegionDiagnosticsTests.test_report_only_active_force_cells_match_final_cancelled_force_field
+
+      - name: Run staged CUDA step-50 validation
+        shell: pwsh
+        run: |
+          python validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_coupled_step50.py
+
+      - name: Upload staged CUDA diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ansys-vertical-flap-cuda-step50
+          path: validation_runs/ansys_vertical_flap_fsi/traction_selected_formulation_coupled_step50_diagnostics

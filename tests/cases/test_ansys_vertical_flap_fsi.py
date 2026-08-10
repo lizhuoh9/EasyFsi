@@ -1,7 +1,6 @@
 import inspect
 import math
 import unittest
-import importlib.util
 from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
@@ -3199,77 +3198,44 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertGreater(thin_wall_pressure_probe_max_multiplier(fine), 25.0)
 
     def test_full_domain_runner_passes_full_step_neumann_dt_once(self):
-        runner_source = Path(
-            "_codex_validation/official_ansys_fluent_vertical_flap_full_domain_solve_20260622/"
-            "run_full_domain_two_flap_true_sharp_fsi.py"
-        ).read_text(encoding="utf-8")
+        runner_source = inspect.getsource(
+            solid_mpm_fsi_runner._apply_hibm_sharp_marker_boundary_to_fluid
+        )
 
-        self.assertIn("pressure_neumann_dt_s=float(config.dt_s)", runner_source)
+        self.assertIn("dt_s=float(config.dt_s)", runner_source)
         self.assertNotIn(
-            "pressure_neumann_dt_s=float(config.dt_s) / float(max(1, int(fluid_substeps)))",
+            "dt_s=float(config.dt_s) / float(max(1, int(fluid_substeps)))",
             runner_source,
         )
 
     def test_full_domain_runner_uses_full_span_flaps(self):
-        runner_path = Path(
-            "_codex_validation/official_ansys_fluent_vertical_flap_full_domain_solve_20260622/"
-            "run_full_domain_two_flap_true_sharp_fsi.py"
+        config = VerticalFlapFsiConfig(grid_nodes=(4, 224, 448))
+
+        lower, upper = solid_mpm_fsi_runner._solid_box(config)
+
+        self.assertAlmostEqual(lower[0], 0.0)
+        self.assertAlmostEqual(upper[0], config.span_m)
+
+    def test_canonical_runner_rejects_underresolved_solid_particles_for_fine_grid(
+        self,
+    ):
+        config = VerticalFlapFsiConfig(
+            grid_nodes=(4, 224, 448),
+            enforce_solid_seeding_limit=True,
         )
-        spec = importlib.util.spec_from_file_location("full_domain_flap_runner", runner_path)
-        self.assertIsNotNone(spec)
-        runner = importlib.util.module_from_spec(spec)
-        self.assertIsNotNone(spec.loader)
-        spec.loader.exec_module(runner)
+        seeding = solid_mpm_fsi_runner.solid_seeding_report(config)
 
-        config = runner._config(1, grid_nodes=(4, 224, 448), markers_per_face=84)
-        boxes = runner._flap_boxes(config)
-
-        self.assertAlmostEqual(boxes["lower"][0][0], 0.0)
-        self.assertAlmostEqual(boxes["lower"][1][0], config.span_m)
-        self.assertAlmostEqual(boxes["upper"][0][0], 0.0)
-        self.assertAlmostEqual(boxes["upper"][1][0], config.span_m)
-
-    def test_full_domain_runner_uses_resolved_solid_particles_for_fine_grid(self):
-        runner_path = Path(
-            "_codex_validation/official_ansys_fluent_vertical_flap_full_domain_solve_20260622/"
-            "run_full_domain_two_flap_true_sharp_fsi.py"
-        )
-        spec = importlib.util.spec_from_file_location("full_domain_flap_runner", runner_path)
-        self.assertIsNotNone(spec)
-        runner = importlib.util.module_from_spec(spec)
-        self.assertIsNotNone(spec.loader)
-        spec.loader.exec_module(runner)
-
-        config = runner._config(1, grid_nodes=(4, 224, 448))
-        flap_grid_cells_y = config.flap_height_m / (
-            config.duct_height_m / config.grid_nodes[1]
-        )
-        flap_grid_cells_z = config.flap_thickness_m / (
-            config.duct_length_m / config.grid_nodes[2]
-        )
-
-        self.assertGreaterEqual(config.solid_particle_counts[1], flap_grid_cells_y)
-        self.assertGreaterEqual(config.solid_particle_counts[2], flap_grid_cells_z)
-        self.assertGreater(config.solid_substeps, 0)
-        self.assertLessEqual(config.solid_substeps, 400)
+        self.assertFalse(seeding["solid_seeding_guard_satisfied"])
+        with self.assertRaisesRegex(ValueError, "too sparse"):
+            solid_mpm_fsi_runner._enforce_solid_seeding_limit(config)
 
     def test_full_domain_runner_uses_local_surface_force_support_radius(self):
-        runner_path = Path(
-            "_codex_validation/official_ansys_fluent_vertical_flap_full_domain_solve_20260622/"
-            "run_full_domain_two_flap_true_sharp_fsi.py"
-        )
-        spec = importlib.util.spec_from_file_location("full_domain_flap_runner", runner_path)
-        self.assertIsNotNone(spec)
-        runner = importlib.util.module_from_spec(spec)
-        self.assertIsNotNone(spec.loader)
-        spec.loader.exec_module(runner)
-
         base = VerticalFlapFsiConfig(
             grid_nodes=(4, 224, 448),
             solid_particle_counts=(1, 80, 24),
         )
         expected = surface_force_support_radius_m(base)
-        config = runner._config(1, grid_nodes=(4, 224, 448))
+        config = vertical_flap_case.with_local_surface_force_support(base)
 
         self.assertAlmostEqual(config.mpm_support_radius_m, expected)
         self.assertLess(config.mpm_support_radius_m, 0.001)
@@ -3277,39 +3243,30 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertNotAlmostEqual(config.mpm_support_radius_m, 0.006)
 
     def test_full_domain_runner_persists_solid_substeps_in_process_updates(self):
-        runner_source = Path(
-            "_codex_validation/official_ansys_fluent_vertical_flap_full_domain_solve_20260622/"
-            "run_full_domain_two_flap_true_sharp_fsi.py"
-        ).read_text(encoding="utf-8")
+        runner_source = inspect.getsource(
+            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+        )
 
-        self.assertGreaterEqual(
-            runner_source.count('"solid_substeps": int(config.solid_substeps)'),
-            3,
+        self.assertIn(
+            'solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])',
+            runner_source,
         )
         self.assertGreaterEqual(
-            runner_source.count('"mpm_support_radius_m": float(config.mpm_support_radius_m)'),
-            4,
+            runner_source.count("support_radius_m=config.mpm_support_radius_m"),
+            2,
         )
+        self.assertIn("solid_substeps=solid_substeps", runner_source)
 
     def test_full_domain_runner_has_official_style_stationary_preflow_option(self):
-        runner_source = Path(
-            "_codex_validation/official_ansys_fluent_vertical_flap_full_domain_solve_20260622/"
-            "run_full_domain_two_flap_true_sharp_fsi.py"
-        ).read_text(encoding="utf-8")
+        parser_source = inspect.getsource(vertical_flap_case._build_parser)
+        preflow_source = inspect.getsource(solid_mpm_fsi_runner._run_fixed_solid_preflow)
 
-        self.assertIn("PREFLOW_STEPS = 0", runner_source)
-        self.assertIn('parser.add_argument("--preflow-steps"', runner_source)
-        self.assertIn("def stationary_fluid_load_step() -> Any:", runner_source)
-        self.assertIn("def fixed_solid_step() -> dict[str, Any]:", runner_source)
-        self.assertIn("preflow_fixed_solid", runner_source)
-        self.assertIn("solid_step=fixed_solid_step", runner_source)
-        self.assertIn('"preflow_steps": preflow_count', runner_source)
-        preflow_block = runner_source[
-            runner_source.index("def stationary_fluid_load_step() -> Any:"):
-            runner_source.index("for step_index in range(config.step_count):")
-        ]
-        self.assertNotIn("solid.step(", preflow_block)
-        self.assertNotIn("pressure_scale", preflow_block)
+        self.assertEqual(VerticalFlapFsiConfig.preflow_steps, 0)
+        self.assertIn('"--preflow-steps"', parser_source)
+        self.assertIn("_flow_advance_current_step(", preflow_source)
+        self.assertIn("_sample_stress_to_marker_forces(", preflow_source)
+        self.assertNotIn("solid.step(", preflow_source)
+        self.assertNotIn("_advance_solid_substeps_batched(", preflow_source)
 
     # Closed-loop flow recomputation is now structural, but the 50-step
     # displacement history still fails the official-web physical targets.

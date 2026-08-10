@@ -1,16 +1,17 @@
 # Direct dependencies of the refactored HIBM-MPM solver tree.
-# Versions mirror the validated Python 3.10 environment (`pip show`,
-# 2026-07-10) that the validation runs and test suite used. Only direct deps are
-# pinned; transitive packages resolve from these.
+# Versions pin the validated Python 3.10 runtime used by the solver and CI.
+# Only direct dependencies are listed; transitive packages resolve from these.
 #
 # Core solver (imported at top level by simulation_core/ and cases/):
 numpy==2.1.2
 taichi==1.7.4
 trimesh==4.11.5
 # Numerics / diagnostics and rendering helpers (tools/, validation scripts):
-scipy==1.16.1
+scipy==1.15.3
 matplotlib==3.10.0
+pillow==12.2.0
 # Official Fluent HDF5 case/data readers and fine-FSI validation contracts:
 h5py==3.16.0
-# Test runner:
+# Test and static-quality runners:
 pytest==9.0.3
+ruff==0.15.20

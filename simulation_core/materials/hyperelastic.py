@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from math import sqrt
+import math
 
 import taichi as ti
 
@@ -11,16 +11,29 @@ ECOFLEX_SERIES_TECH_BULLETIN_URL = "https://www.smooth-on.com/tb/files/ECOFLEX_S
 
 
 def psi_to_pa(value_psi: float) -> float:
-    return float(value_psi) * PSI_TO_PA
+    return _finite_float(value_psi, "value_psi") * PSI_TO_PA
+
+
+def _finite_float(value: float, name: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+def _positive_float(value: float, name: str) -> float:
+    result = _finite_float(value, name)
+    if result <= 0.0:
+        raise ValueError(f"{name} must be positive")
+    return result
 
 
 def incompressible_uniaxial_nominal_stress_pa(stretch: float, shear_modulus_pa: float) -> float:
     """Nominal stress for incompressible Neo-Hookean uniaxial tension."""
 
-    stretch = float(stretch)
-    if stretch <= 0.0:
-        raise ValueError("stretch must be positive")
-    return float(shear_modulus_pa) * (stretch - stretch ** -2)
+    stretch = _positive_float(stretch, "stretch")
+    shear_modulus = _positive_float(shear_modulus_pa, "shear_modulus_pa")
+    return shear_modulus * (stretch - stretch ** -2)
 
 
 @dataclass(frozen=True)
@@ -46,26 +59,33 @@ class NeoHookeanMaterial:
 
     @property
     def sound_speed_mps(self) -> float:
-        return sqrt((self.bulk_modulus_pa + (4.0 / 3.0) * self.shear_modulus_pa) / self.density_kgm3)
+        self.validate()
+        return math.sqrt(
+            (self.bulk_modulus_pa + (4.0 / 3.0) * self.shear_modulus_pa)
+            / self.density_kgm3
+        )
 
     def stable_explicit_dt_s(self, spacing_m: float, cfl: float = 0.35) -> float:
-        spacing_m = float(spacing_m)
-        cfl = float(cfl)
-        if spacing_m <= 0.0:
-            raise ValueError("spacing_m must be positive")
-        if cfl <= 0.0:
-            raise ValueError("cfl must be positive")
+        spacing_m = _positive_float(spacing_m, "spacing_m")
+        cfl = _positive_float(cfl, "cfl")
         return cfl * spacing_m / self.sound_speed_mps
 
     def validate(self) -> None:
-        if self.density_kgm3 <= 0.0:
-            raise ValueError("density_kgm3 must be positive")
-        if self.shear_modulus_pa <= 0.0:
-            raise ValueError("shear_modulus_pa must be positive")
-        if self.bulk_modulus_pa <= 0.0:
-            raise ValueError("bulk_modulus_pa must be positive")
-        if not 0.0 <= self.poissons_ratio < 0.5:
+        _positive_float(self.density_kgm3, "density_kgm3")
+        _positive_float(self.shear_modulus_pa, "shear_modulus_pa")
+        _positive_float(self.bulk_modulus_pa, "bulk_modulus_pa")
+        _positive_float(self.youngs_modulus_pa, "youngs_modulus_pa")
+        poissons_ratio = _finite_float(self.poissons_ratio, "poissons_ratio")
+        if not 0.0 <= poissons_ratio < 0.5:
             raise ValueError("poissons_ratio must be in [0, 0.5)")
+        for name in (
+            "tensile_strength_pa",
+            "modulus_100_pa",
+            "elongation_at_break_percent",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _positive_float(value, name)
 
     @classmethod
     def from_youngs_modulus(
@@ -82,10 +102,8 @@ class NeoHookeanMaterial:
         modulus_100_pa: float | None = None,
         elongation_at_break_percent: float | None = None,
     ) -> "NeoHookeanMaterial":
-        youngs_modulus_pa = float(youngs_modulus_pa)
-        poissons_ratio = float(poissons_ratio)
-        if youngs_modulus_pa <= 0.0:
-            raise ValueError("youngs_modulus_pa must be positive")
+        youngs_modulus_pa = _positive_float(youngs_modulus_pa, "youngs_modulus_pa")
+        poissons_ratio = _finite_float(poissons_ratio, "poissons_ratio")
         if not 0.0 <= poissons_ratio < 0.5:
             raise ValueError("poissons_ratio must be in [0, 0.5)")
         shear_modulus_pa = youngs_modulus_pa / (2.0 * (1.0 + poissons_ratio))
@@ -121,9 +139,7 @@ class NeoHookeanMaterial:
         tensile_strength_pa: float | None = None,
         elongation_at_break_percent: float | None = None,
     ) -> "NeoHookeanMaterial":
-        modulus_100_pa = float(modulus_100_pa)
-        if modulus_100_pa <= 0.0:
-            raise ValueError("modulus_100_pa must be positive")
+        modulus_100_pa = _positive_float(modulus_100_pa, "modulus_100_pa")
         shear_modulus_pa = modulus_100_pa / (2.0 - 2.0 ** -2)
         youngs_modulus_pa = 2.0 * shear_modulus_pa * (1.0 + float(poissons_ratio))
         return cls.from_youngs_modulus(
@@ -244,7 +260,7 @@ class NeoHookeanStressProbe:
         if len(stretch) != 3:
             raise ValueError("stretch must contain exactly three values")
         stretch = tuple(float(value) for value in stretch)
-        if min(stretch) <= 0.0:
+        if not all(math.isfinite(value) and value > 0.0 for value in stretch):
             raise ValueError("all stretch values must be positive")
         self._evaluate_diagonal_kernel(
             stretch[0],

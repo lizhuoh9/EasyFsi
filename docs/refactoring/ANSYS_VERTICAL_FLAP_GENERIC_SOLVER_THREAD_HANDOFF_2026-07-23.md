@@ -1483,3 +1483,41 @@ solid/case 配置合同：
 新增单次 immutable alias 合同先 RED、精简后 GREEN。最终聚焦验证包含 typed-context、sharp、checkpoint、preflight、package export 和 architecture boundary；同时执行 `ruff F401/F821/F841`、`py_compile` 与 `git diff --check`。仍未运行长时间 squid production、Taichi 数值回归、full suite、preflow 或 Fluent parity。
 
 本轮仍没有 commit、stage、push、reset 或 clean；既有 dirty/untracked 工作继续保留。
+
+### 12.23 EasyFsi main 审计修复与有界性能收口（2026-08-10）
+
+本节覆盖基线 `736a8ddebba353d55f2aaf559dab1ad3e631679d` 的只读审查后续。修复优先处理会让失败事务、旧缓存或非有限输入继续进入数值推进的真实缺陷；没有为了增加测试数量运行 full suite、长时间 preflow、50-step production 或 Fluent parity。
+
+正确性与事务边界：
+
+- HIBM→MPM 推进门现在要求 marker/load/stress/no-slip/projection 报告完整、计数一致、力与残差有限，任一缺失或失败均不再推进 solid。
+- Marker–MAC 的新 prepare、失败 prepare 和 stale audit 会先退休旧 committed/prepared/pressure-nullspace 生命周期；marker/device loader 与 feedback 改为完整验证后再发布，失败不会留下可消费的半写几何。
+- obstacle topology 的所有 writer 统一失效 pressure reachability、hard-face ledger/device mask 与 SST wall-distance identity；`save_state/restore_state` 同步覆盖 `fsi_pressure`、SST wall flags/mask/valid/cache key。
+- `FluidDomainSpec` 与 fluid step API、TriSurface、hyperelastic、Mooney/Neo-Hookean、marker counted-field 和 segment endpoint 均在 device work 前拒绝 NaN/Inf、非法物理量、容量越界，以及 f32 溢出或非零值下溢为零；pressure RHS/metric 等派生系数也在任何投影状态写入前验证。
+- Mooney 粒子在本步积分后越界会当步 fail closed，且“全部粒子越界但 tolerance 等于粒子数”不再被接受。
+- squid checkpoint 升级为 v4，指纹加入 CAD/STEP、实际生效的 surface/volume cache、拓扑内容和遗漏的 projection 参数；runner 冻结初始化输入身份并在 source-dependent setup 后复核，运行中漂移 fail closed。restore 对版本、维度、步号和数组完整解码/严格校验后一次提交，避免半恢复。
+- traction history 的 36 个字段、严格连续整数 temporal gate、fresh-clone canonical 测试、STEP part tag、`run_simulation.py --help` 正常退出和 checksum 目录闭包均已修复。
+- IQN-ILS 先做全局缩放再 QR，范数/点积采用抗溢出实现；ReferenceCurve、loaded-force 与材料参数不再允许非有限值或负容差绕过。
+
+性能与可读性：
+
+- 固定几何 SST wall distance 现在使用具名严格 cache key，包含 geometry/device value digest、topology revision、wall flags、inactive axis、marker/segment count 与 endpoints。命中时跳过 full-grid/JFA/segment 内核；按当前目标网格每个固定步避免约 `327,680 x 129 = 42,270,720` 次点—线段检查。
+- Marker–MAC 在 `marker_count <= 64` 时保留原小规模单核路径；更大 marker 集使用 device-resident exact-f32 open-address canonicalization，从 O(M²) 降为 expected O(M)，并保持最小 owner、`+0/-0` 和精确 target-conflict 语义。
+- MPM bin cache 以 field identity、显式 position generation、count、radius 和 capacity 为键。official runner 在初始化和每个 solid position write 后单调推进 generation，使 post-solid feedback 的 bins 可被下一步 scatter 安全复用；scatter→solid→feedback 之间仍因位置真实变化而重建。
+- graded-grid side/bridge 从 O(N²) 改为二分最小可行格数加线性包络；TriSurface 报告合并为一次 f64 snapshot；Turek-Hron NPZ 与 GIF 均逐帧流式处理，内存不再随 `frames x cells/pixels` 增长。
+- 没有机械拆分 2.8 万行 Taichi 类。新增逻辑集中在统一 topology invalidator、具名 cache key、边界验证 helper 和 runner generation observer；大类按 kernel family 迁移仍应是独立 source-hash/JIT 任务。
+
+保留的性能边界：
+
+- particle-bin exclusive prefix scan 仍是 device serial。Taichi 1.7.4 的 `PrefixSumExecutor` 只接受具备 SNode 的固定 field，不能直接替换当前按粒子数惰性分配的 `ti.ndarray`；自写 Blelloch scan 会增加 `2 log2(H)` 次 launch，必须先做阈值 A/B，不能把理论并行当成已证实加速。
+- 因此本轮解决了重复 rebuild 和大 marker 的降阶问题，但不宣称 prefix scan 已并行化，也不宣称新 source 已取得 full-grid wall-time 加速比。
+
+验证边界：
+
+- coupling 新合同 `19/19`、fluid 新合同 `14/14`，并完成有效 pressure projection、TriSurface 抵消哈希和各自聚焦旧 CUDA 兼容性检查；
+- checkpoint/validation/STEP/CLI/artifact 聚焦反例全部由 RED 转 GREEN；
+- numeric/solid/grid/runner/CI/renderer 聚合检查 `27 passed`；发布前 Linux-compatible fast unittest `94/94` 与 Turek renderer pytest `1/1` 通过；聚焦 CUDA state contracts 与 TriSurface cancellation 合计 `39/39` 通过；
+- 51 个当前改动/新增 Python 文件 `py_compile` 通过，仓库 Ruff `F601/F821` 与 scoped `git diff --check` 通过；
+- 未运行 full suite、覆盖率、长 preflow、50-step production、squid production 或 Fluent parity，因此不能据此宣称完整数值 parity。
+
+CI 现在从 Python 3.10 兼容的锁定 `requirements.txt` 安装依赖（SciPy 固定为 `1.15.3`），并分为 Linux 快速静态/纯合同、Windows 完整 ANSYS 合同、以及仅 weekly/manual 触发的 self-hosted Windows CUDA 层；该 CUDA 层先运行聚焦 state contracts，再进入 10/30/50-step 验证。step50 CLI 只有真实通过状态返回零；远端 Actions 是否绿色仍必须以真实 run URL/status 为证据。

@@ -117,6 +117,7 @@ class StepLoopResources:
     output_dir: Path
     process_path: Path
     run_checkpoint_path: Path
+    frozen_run_fingerprint: Mapping[str, object]
     simulator: ReducedSquidFSI
     solid_mpm: NeoHookeanMpmState | TriMooneyShellMpmState | None
     spec: SquidReducedSpec

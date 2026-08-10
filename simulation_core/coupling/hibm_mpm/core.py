@@ -1,5 +1,6 @@
 import dataclasses
 import math
+import operator
 import os
 import threading
 import time
@@ -346,9 +347,40 @@ def _vector3(value: Sequence[float], *, name: str) -> tuple[float, float, float]
     return (vector[0], vector[1], vector[2])
 
 
+_F32_MAX = float(np.finfo(np.float32).max)
+
+
+def _f32_round_trip(value: float, *, name: str) -> float:
+    scalar = float(value)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        converted = float(np.float32(scalar))
+    if (
+        not math.isfinite(scalar)
+        or not math.isfinite(converted)
+        or (scalar != 0.0 and converted == 0.0)
+    ):
+        raise ValueError(
+            f"{name} must remain finite without non-zero underflow when converted to f32"
+        )
+    return converted
+
+
+def _vector3_for_f32_field(
+    value: Sequence[float],
+    *,
+    name: str,
+) -> tuple[float, float, float]:
+    vector = _vector3(value, name=name)
+    return tuple(_f32_round_trip(component, name=name) for component in vector)
+
+
+def _scalar_for_f32_field(value: float, *, name: str) -> float:
+    return _f32_round_trip(value, name=name)
+
+
 def _normalize_vector3(value: Sequence[float], *, name: str) -> tuple[float, float, float]:
     vector = _vector3(value, name=name)
-    norm = math.sqrt(sum(component * component for component in vector))
+    norm = math.hypot(*vector)
     if norm <= 0.0:
         raise ValueError(f"{name} must contain non-zero vectors")
     return tuple(component / norm for component in vector)
@@ -364,6 +396,26 @@ def _cell_vector3(value: Sequence[int], *, name: str) -> tuple[int, int, int]:
     if any(component < 0 for component in vector):
         raise ValueError(f"{name} must contain non-negative cell indices")
     return (vector[0], vector[1], vector[2])
+
+
+def _require_counted_field_capacity(
+    field,
+    count: int,
+    *,
+    count_name: str,
+    field_name: str,
+) -> None:
+    requested = int(count)
+    if requested < 0:
+        raise ValueError(f"{count_name} must be nonnegative")
+    shape = getattr(field, "shape", None)
+    if shape is None or len(shape) < 1:
+        raise TypeError(f"{field_name} must expose a leading capacity")
+    capacity = int(shape[0])
+    if requested > capacity:
+        raise ValueError(
+            f"{count_name}={requested} exceeds {field_name} capacity={capacity}"
+        )
 
 
 def _positive_divergence_stencil_touch_mask(row_mask: np.ndarray) -> np.ndarray:
@@ -1171,6 +1223,7 @@ class HibmMpmSurfaceMarkers:
             dtype=ti.i32,
             shape=(),
         )
+        self._input_validation_failure_count = ti.field(dtype=ti.i32, shape=())
         self.report_pressure_neumann_gradient_marker_count = ti.field(
             dtype=ti.i32,
             shape=(),
@@ -1194,6 +1247,9 @@ class HibmMpmSurfaceMarkers:
         self._mpm_bin_members = None
         self._mpm_marker_neighbor_slots = None
         self._mpm_marker_neighbor_slot_counts = None
+        self._mpm_particle_bin_cache_source = None
+        self._mpm_particle_bin_cache_key = None
+        self._mpm_marker_neighbor_cache_key = None
         # Taichi zero-initializes fields, and (0, 0, 0) is a real cell
         # index: establish the unset sentinel before anyone can sample.
         self._reset_stress_diagnostics_kernel(int(self.marker_capacity))
@@ -1315,6 +1371,15 @@ class HibmMpmSurfaceMarkers:
         self._current_no_slip_sampling_identity = None
         return int(self.marker_geometry_revision)
 
+    def _retire_active_marker_geometry(self) -> None:
+        """Hide a surface whose device write may have completed only partly."""
+
+        self.marker_count = 0
+        self.projection_vertex_count = 0
+        self.projection_triangle_count = 0
+        self.projection_segment_count = 0
+        self._open_ribbon_tip_cap_binding = None
+
     def load_markers(
         self,
         *,
@@ -1353,20 +1418,26 @@ class HibmMpmSurfaceMarkers:
         regions = np.zeros((self.marker_capacity,), dtype=np.int32)
         pressure_owners = np.full((self.marker_capacity,), -1, dtype=np.int32)
         for marker in range(count):
-            position = _vector3(positions_m[marker], name="positions_m")
+            position = _vector3_for_f32_field(
+                positions_m[marker],
+                name="positions_m",
+            )
             if pressure_probe_origins_m is None:
                 pressure_probe_origin = position
                 origin_explicit = 0
             else:
-                pressure_probe_origin = _vector3(
+                pressure_probe_origin = _vector3_for_f32_field(
                     pressure_probe_origins_m[marker],
                     name="pressure_probe_origins_m",
                 )
                 origin_explicit = 1
-            velocity = _vector3(velocities_mps[marker], name="velocities_mps")
+            velocity = _vector3_for_f32_field(
+                velocities_mps[marker],
+                name="velocities_mps",
+            )
             normal = _normalize_vector3(normals[marker], name="normals")
-            area = float(areas_m2[marker])
-            if not math.isfinite(area) or area < 0.0:
+            area = _scalar_for_f32_field(areas_m2[marker], name="areas_m2")
+            if area < 0.0:
                 raise ValueError("areas_m2 must contain finite non-negative values")
             positions[marker, :] = position
             pressure_probe_origins[marker, :] = pressure_probe_origin
@@ -1377,14 +1448,9 @@ class HibmMpmSurfaceMarkers:
             regions[marker] = int(region_ids[marker])
             pressure_owners[marker] = marker
         self._begin_marker_geometry_write()
-        # Commit scalar ownership only after every host input has validated.
-        # A rejected load must leave both the active marker set and its
-        # projection topology observable exactly as they were before the call.
-        self.marker_count = int(count)
-        self.projection_vertex_count = int(count)
-        self.projection_triangle_count = 0
-        self.projection_segment_count = 0
-        self._open_ribbon_tip_cap_binding = None
+        # All host inputs are valid.  Hide the old active view before device
+        # writes, then publish the replacement counts only after every write.
+        self._retire_active_marker_geometry()
         self.x_gamma_m.from_numpy(positions)
         self.pressure_probe_origin_m.from_numpy(pressure_probe_origins)
         self.pressure_probe_origin_explicit.from_numpy(pressure_probe_origin_explicit)
@@ -1401,6 +1467,8 @@ class HibmMpmSurfaceMarkers:
         )
         self.reset_pressure_pair_anchor_cells()
         self.reset_stress_diagnostics(count)
+        self.marker_count = int(count)
+        self.projection_vertex_count = int(count)
 
     def set_pressure_probe_origins_m(
         self,
@@ -1409,8 +1477,11 @@ class HibmMpmSurfaceMarkers:
         count = int(self.marker_count)
         if len(origins_m) != count:
             raise ValueError("pressure probe origin marker count must match markers")
-        for marker in range(count):
-            origin = _vector3(origins_m[marker], name="pressure_probe_origins_m")
+        validated_origins = [
+            _vector3_for_f32_field(origin, name="pressure_probe_origins_m")
+            for origin in origins_m
+        ]
+        for marker, origin in enumerate(validated_origins):
             self.pressure_probe_origin_m[marker] = origin
             self.pressure_probe_origin_explicit[marker] = 1
 
@@ -1816,7 +1887,7 @@ class HibmMpmSurfaceMarkers:
         return int(self.projection_vertex_count)
 
     @ti.kernel
-    def _load_projection_triangles_from_field_kernel(
+    def _validate_projection_triangles_from_field_kernel(
         self,
         triangle_indices: ti.template(),
         triangle_count: ti.i32,
@@ -1835,6 +1906,15 @@ class HibmMpmSurfaceMarkers:
             )
             if invalid:
                 self.report_projection_triangle_invalid_count[None] += 1
+
+    @ti.kernel
+    def _load_projection_triangles_from_field_kernel(
+        self,
+        triangle_indices: ti.template(),
+        triangle_count: ti.i32,
+    ):
+        for triangle_index in range(triangle_count):
+            triangle = triangle_indices[triangle_index]
             self.projection_triangle_indices[triangle_index] = triangle
 
     def load_projection_triangles_from_field(
@@ -1850,10 +1930,13 @@ class HibmMpmSurfaceMarkers:
             raise ValueError(
                 "projection triangle count exceeds projection_triangle_capacity"
             )
-        self._begin_marker_geometry_write()
-        self.projection_triangle_count = 0
-        self.projection_segment_count = 0
-        self._load_projection_triangles_from_field_kernel(
+        _require_counted_field_capacity(
+            triangle_indices,
+            count,
+            count_name="triangle_count",
+            field_name="triangle_indices",
+        )
+        self._validate_projection_triangles_from_field_kernel(
             triangle_indices,
             count,
             int(self.marker_count),
@@ -1861,17 +1944,22 @@ class HibmMpmSurfaceMarkers:
         invalid_count = int(self.report_projection_triangle_invalid_count[None])
         if invalid_count > 0:
             raise ValueError("projection triangle index out of marker range")
+        self._begin_marker_geometry_write()
+        self.projection_triangle_count = 0
+        self.projection_segment_count = 0
+        self._load_projection_triangles_from_field_kernel(triangle_indices, count)
         self.projection_triangle_count = count
         return self.projection_triangle_count
 
     @ti.kernel
-    def _load_markers_from_surface_fields_kernel(
+    def _validate_surface_fields_kernel(
         self,
         surface_position_m: ti.template(),
+        surface_velocity_mps: ti.template(),
         surface_normal: ti.template(),
         surface_area_m2: ti.template(),
-        surface_region_id: ti.template(),
         marker_count: ti.i32,
+        use_surface_velocity: ti.i32,
         initial_velocity_x_mps: ti.f32,
         initial_velocity_y_mps: ti.f32,
         initial_velocity_z_mps: ti.f32,
@@ -1886,17 +1974,59 @@ class HibmMpmSurfaceMarkers:
             ]
         )
         for marker in range(marker_count):
+            position = surface_position_m[marker]
             normal = surface_normal[marker]
-            normal_norm = normal.norm()
             area = surface_area_m2[marker]
-            if normal_norm <= 1.0e-12 or area < 0.0:
+            velocity = initial_velocity
+            if use_surface_velocity != 0:
+                velocity = surface_velocity_mps[marker]
+            normal_scale = ti.max(
+                ti.max(ti.abs(normal.x), ti.abs(normal.y)),
+                ti.abs(normal.z),
+            )
+            valid = (
+                self._vector3_fits_f32(position)
+                * self._vector3_fits_f32(velocity)
+                * self._vector3_is_finite(normal)
+            )
+            if (
+                valid == 0
+                or normal_scale <= 1.0e-12
+                or ti.math.isnan(area)
+                or ti.math.isinf(area)
+                or area < 0.0
+                or area > _F32_MAX
+            ):
                 self.report_surface_field_load_invalid_marker_count[None] += 1
+
+    @ti.kernel
+    def _load_markers_from_surface_fields_kernel(
+        self,
+        surface_position_m: ti.template(),
+        surface_normal: ti.template(),
+        surface_area_m2: ti.template(),
+        surface_region_id: ti.template(),
+        marker_count: ti.i32,
+        initial_velocity_x_mps: ti.f32,
+        initial_velocity_y_mps: ti.f32,
+        initial_velocity_z_mps: ti.f32,
+    ):
+        initial_velocity = ti.Vector(
+            [
+                initial_velocity_x_mps,
+                initial_velocity_y_mps,
+                initial_velocity_z_mps,
+            ]
+        )
+        for marker in range(marker_count):
+            normal = surface_normal[marker]
+            area = surface_area_m2[marker]
             self.x_gamma_m[marker] = surface_position_m[marker]
             self.pressure_probe_origin_m[marker] = surface_position_m[marker]
             self.pressure_probe_origin_explicit[marker] = 0
             self.v_gamma_mps[marker] = initial_velocity
-            self.n_gamma[marker] = normal / ti.max(normal_norm, 1.0e-12)
-            self.A_gamma_m2[marker] = ti.max(area, 0.0)
+            self.n_gamma[marker] = self._normalize_vector3_safe(normal)
+            self.A_gamma_m2[marker] = area
             self.region_id[marker] = surface_region_id[marker]
             self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
             self.F_gamma_n[marker] = ti.Vector([0.0, 0.0, 0.0])
@@ -1911,21 +2041,16 @@ class HibmMpmSurfaceMarkers:
         surface_region_id: ti.template(),
         marker_count: ti.i32,
     ):
-        self.report_surface_field_load_marker_count[None] = marker_count
-        self.report_surface_field_load_invalid_marker_count[None] = 0
         for marker in range(marker_count):
             normal = surface_normal[marker]
-            normal_norm = normal.norm()
             area = surface_area_m2[marker]
-            if normal_norm <= 1.0e-12 or area < 0.0:
-                self.report_surface_field_load_invalid_marker_count[None] += 1
             velocity = surface_velocity_mps[marker]
             self.x_gamma_m[marker] = surface_position_m[marker]
             self.pressure_probe_origin_m[marker] = surface_position_m[marker]
             self.pressure_probe_origin_explicit[marker] = 0
             self.v_gamma_mps[marker] = velocity
-            self.n_gamma[marker] = normal / ti.max(normal_norm, 1.0e-12)
-            self.A_gamma_m2[marker] = ti.max(area, 0.0)
+            self.n_gamma[marker] = self._normalize_vector3_safe(normal)
+            self.A_gamma_m2[marker] = area
             self.region_id[marker] = surface_region_id[marker]
             self.t_gamma_pa[marker] = ti.Vector([0.0, 0.0, 0.0])
             self.F_gamma_n[marker] = ti.Vector([0.0, 0.0, 0.0])
@@ -1946,18 +2071,60 @@ class HibmMpmSurfaceMarkers:
             raise ValueError("marker_count must be non-negative")
         if count > self.marker_capacity:
             raise ValueError("marker_count exceeds marker_capacity")
+        counted_fields = (
+            (surface_position_m, "surface_position_m"),
+            (surface_normal, "surface_normal"),
+            (surface_area_m2, "surface_area_m2"),
+            (surface_region_id, "surface_region_id"),
+        )
+        for field, field_name in counted_fields:
+            _require_counted_field_capacity(
+                field,
+                count,
+                count_name="marker_count",
+                field_name=field_name,
+            )
         initial_velocity = None
         if surface_velocity_mps is None:
-            initial_velocity = _vector3(
+            initial_velocity = _vector3_for_f32_field(
                 initial_velocity_mps,
                 name="initial_velocity_mps",
             )
+        else:
+            _require_counted_field_capacity(
+                surface_velocity_mps,
+                count,
+                count_name="marker_count",
+                field_name="surface_velocity_mps",
+            )
+        validation_velocity_field = (
+            surface_position_m
+            if surface_velocity_mps is None
+            else surface_velocity_mps
+        )
+        validation_initial_velocity = initial_velocity or (0.0, 0.0, 0.0)
+        self._validate_surface_fields_kernel(
+            surface_position_m,
+            validation_velocity_field,
+            surface_normal,
+            surface_area_m2,
+            count,
+            0 if surface_velocity_mps is None else 1,
+            float(validation_initial_velocity[0]),
+            float(validation_initial_velocity[1]),
+            float(validation_initial_velocity[2]),
+        )
+        invalid_count = int(self.report_surface_field_load_invalid_marker_count[None])
+        if invalid_count > 0:
+            raise ValueError(
+                "surface fields must contain finite f32-representable positions and "
+                "velocities, finite non-negative areas, and non-zero finite normals"
+            )
         self._begin_marker_geometry_write()
-        self.marker_count = count
-        self.projection_vertex_count = count
-        self.projection_triangle_count = 0
-        self.projection_segment_count = 0
-        self._open_ribbon_tip_cap_binding = None
+        # Device writes are not rollbackable.  Publish an empty host view until
+        # every field write and reset succeeds, so a caught runtime failure
+        # cannot expose a partially replaced surface as active geometry.
+        self._retire_active_marker_geometry()
         if surface_velocity_mps is None:
             self._load_markers_from_surface_fields_kernel(
                 surface_position_m,
@@ -1982,11 +2149,8 @@ class HibmMpmSurfaceMarkers:
         pressure_owners[:count] = np.arange(count, dtype=np.int32)
         self.projection_vertex_pressure_owner_index.from_numpy(pressure_owners)
         self.reset_stress_diagnostics(count)
-        invalid_count = int(self.report_surface_field_load_invalid_marker_count[None])
-        if invalid_count > 0:
-            raise ValueError(
-                "surface fields must contain non-negative areas and non-zero normals"
-            )
+        self.marker_count = count
+        self.projection_vertex_count = count
         return count
 
     @ti.kernel
@@ -8553,6 +8717,41 @@ class HibmMpmSurfaceMarkers:
         return finite
 
     @ti.func
+    def _vector3_fits_f32(self, value):
+        fits = self._vector3_is_finite(value)
+        converted = ti.Vector(
+            [
+                ti.cast(value.x, ti.f32),
+                ti.cast(value.y, ti.f32),
+                ti.cast(value.z, ti.f32),
+            ]
+        )
+        if self._vector3_is_finite(converted) == 0:
+            fits = 0
+        if (
+            ti.abs(value.x) > _F32_MAX
+            or ti.abs(value.y) > _F32_MAX
+            or ti.abs(value.z) > _F32_MAX
+        ):
+            fits = 0
+        if value.x != 0.0 and converted.x == 0.0:
+            fits = 0
+        if value.y != 0.0 and converted.y == 0.0:
+            fits = 0
+        if value.z != 0.0 and converted.z == 0.0:
+            fits = 0
+        return fits
+
+    @ti.func
+    def _normalize_vector3_safe(self, value):
+        scale = ti.max(
+            ti.max(ti.abs(value.x), ti.abs(value.y)),
+            ti.abs(value.z),
+        )
+        scaled = value / scale
+        return scaled / ti.sqrt(scaled.dot(scaled))
+
+    @ti.func
     def _mpm_particle_bin_hash_slot(
         self,
         bin_x,
@@ -8695,14 +8894,12 @@ class HibmMpmSurfaceMarkers:
 
     @staticmethod
     def _require_particle_field_capacity(field, particle_count: int, name: str) -> None:
-        shape = getattr(field, "shape", None)
-        if shape is None or len(shape) < 1:
-            raise TypeError(f"{name} must expose a leading particle capacity")
-        capacity = int(shape[0])
-        if int(particle_count) > capacity:
-            raise ValueError(
-                f"particle_count={int(particle_count)} exceeds {name} capacity={capacity}"
-            )
+        _require_counted_field_capacity(
+            field,
+            particle_count,
+            count_name="particle_count",
+            field_name=name,
+        )
 
     def _ensure_mpm_particle_bin_workspace(self, particle_count: int) -> None:
         required = int(particle_count)
@@ -8714,20 +8911,40 @@ class HibmMpmSurfaceMarkers:
         hash_capacity = 32
         while hash_capacity < 2 * particle_capacity:
             hash_capacity *= 2
-        self._mpm_bin_particle_capacity = particle_capacity
-        self._mpm_bin_hash_capacity = hash_capacity
-        self._mpm_bin_counts = ti.ndarray(dtype=ti.i32, shape=hash_capacity)
-        self._mpm_bin_offsets = ti.ndarray(dtype=ti.i32, shape=hash_capacity + 1)
-        self._mpm_bin_write_cursors = ti.ndarray(dtype=ti.i32, shape=hash_capacity)
-        self._mpm_bin_members = ti.ndarray(dtype=ti.i32, shape=particle_capacity)
-        self._mpm_marker_neighbor_slots = ti.ndarray(
+        self._mpm_particle_bin_cache_source = None
+        self._mpm_particle_bin_cache_key = None
+        self._mpm_marker_neighbor_cache_key = None
+        bin_counts = ti.ndarray(dtype=ti.i32, shape=hash_capacity)
+        bin_offsets = ti.ndarray(dtype=ti.i32, shape=hash_capacity + 1)
+        bin_write_cursors = ti.ndarray(dtype=ti.i32, shape=hash_capacity)
+        bin_members = ti.ndarray(dtype=ti.i32, shape=particle_capacity)
+        marker_neighbor_slots = ti.ndarray(
             dtype=ti.i32,
             shape=self.marker_capacity * 27,
         )
-        self._mpm_marker_neighbor_slot_counts = ti.ndarray(
+        marker_neighbor_slot_counts = ti.ndarray(
             dtype=ti.i32,
             shape=self.marker_capacity,
         )
+        self._mpm_bin_counts = bin_counts
+        self._mpm_bin_offsets = bin_offsets
+        self._mpm_bin_write_cursors = bin_write_cursors
+        self._mpm_bin_members = bin_members
+        self._mpm_marker_neighbor_slots = marker_neighbor_slots
+        self._mpm_marker_neighbor_slot_counts = marker_neighbor_slot_counts
+        self._mpm_bin_particle_capacity = particle_capacity
+        self._mpm_bin_hash_capacity = hash_capacity
+
+    @ti.kernel
+    def _validate_mpm_particle_positions_kernel(
+        self,
+        particle_position_m: ti.template(),
+        particle_count: ti.i32,
+    ):
+        self._input_validation_failure_count[None] = 0
+        for particle in range(particle_count):
+            if self._vector3_fits_f32(particle_position_m[particle]) == 0:
+                self._input_validation_failure_count[None] += 1
 
     def _prepare_mpm_particle_bins(
         self,
@@ -8735,43 +8952,104 @@ class HibmMpmSurfaceMarkers:
         *,
         particle_count: int,
         support_radius_m: float,
+        particle_position_generation: int | None = None,
     ) -> None:
-        self._ensure_mpm_particle_bin_workspace(particle_count)
-        self._reset_mpm_particle_bins_kernel(
-            self._mpm_bin_counts,
-            self._mpm_bin_offsets,
-            self._mpm_bin_write_cursors,
-            int(self._mpm_bin_hash_capacity),
-        )
-        self._count_mpm_particles_per_bin_kernel(
-            particle_position_m,
-            self._mpm_bin_counts,
+        """Build search bins, reusing them only with an explicit source generation.
+
+        The caller-owned generation must change after every write to
+        ``particle_position_m``.  Omitting it deliberately disables particle-bin
+        reuse because Taichi fields do not expose a mutation generation.
+        """
+
+        generation = None
+        if particle_position_generation is not None:
+            try:
+                generation = operator.index(particle_position_generation)
+            except TypeError as exc:
+                raise ValueError(
+                    "particle_position_generation must be a nonnegative integer"
+                ) from exc
+            if generation < 0:
+                raise ValueError(
+                    "particle_position_generation must be a nonnegative integer"
+                )
+        particle_key = (
+            generation,
             int(particle_count),
             float(support_radius_m),
             int(self._mpm_bin_hash_capacity),
         )
-        self._scan_mpm_particle_bin_offsets_kernel(
-            self._mpm_bin_counts,
-            self._mpm_bin_offsets,
-            self._mpm_bin_write_cursors,
-            int(self._mpm_bin_hash_capacity),
+        particle_bins_are_current = (
+            generation is not None
+            and self._mpm_particle_bin_cache_source is particle_position_m
+            and self._mpm_particle_bin_cache_key == particle_key
         )
-        self._fill_mpm_particle_bin_members_kernel(
-            particle_position_m,
-            self._mpm_bin_offsets,
-            self._mpm_bin_write_cursors,
-            self._mpm_bin_members,
-            int(particle_count),
-            float(support_radius_m),
-            int(self._mpm_bin_hash_capacity),
-        )
-        self._build_mpm_marker_neighbor_slots_kernel(
-            self._mpm_marker_neighbor_slots,
-            self._mpm_marker_neighbor_slot_counts,
+        if not particle_bins_are_current:
+            self._validate_mpm_particle_positions_kernel(
+                particle_position_m,
+                int(particle_count),
+            )
+            if int(self._input_validation_failure_count[None]) > 0:
+                raise ValueError(
+                    "particle_position_m must contain finite f32-representable values"
+                )
+            self._ensure_mpm_particle_bin_workspace(particle_count)
+            particle_key = (
+                generation,
+                int(particle_count),
+                float(support_radius_m),
+                int(self._mpm_bin_hash_capacity),
+            )
+            self._mpm_particle_bin_cache_source = None
+            self._mpm_particle_bin_cache_key = None
+            self._reset_mpm_particle_bins_kernel(
+                self._mpm_bin_counts,
+                self._mpm_bin_offsets,
+                self._mpm_bin_write_cursors,
+                int(self._mpm_bin_hash_capacity),
+            )
+            self._count_mpm_particles_per_bin_kernel(
+                particle_position_m,
+                self._mpm_bin_counts,
+                int(particle_count),
+                float(support_radius_m),
+                int(self._mpm_bin_hash_capacity),
+            )
+            self._scan_mpm_particle_bin_offsets_kernel(
+                self._mpm_bin_counts,
+                self._mpm_bin_offsets,
+                self._mpm_bin_write_cursors,
+                int(self._mpm_bin_hash_capacity),
+            )
+            self._fill_mpm_particle_bin_members_kernel(
+                particle_position_m,
+                self._mpm_bin_offsets,
+                self._mpm_bin_write_cursors,
+                self._mpm_bin_members,
+                int(particle_count),
+                float(support_radius_m),
+                int(self._mpm_bin_hash_capacity),
+            )
+            if generation is not None:
+                self._mpm_particle_bin_cache_source = particle_position_m
+                self._mpm_particle_bin_cache_key = particle_key
+
+        neighbor_key = (
+            int(self.marker_geometry_revision),
             int(self.marker_count),
             float(support_radius_m),
             int(self._mpm_bin_hash_capacity),
         )
+        if self._mpm_marker_neighbor_cache_key != neighbor_key:
+            self._mpm_marker_neighbor_cache_key = None
+            self._build_mpm_marker_neighbor_slots_kernel(
+                self._mpm_marker_neighbor_slots,
+                self._mpm_marker_neighbor_slot_counts,
+                int(self.marker_count),
+                float(support_radius_m),
+                int(self._mpm_bin_hash_capacity),
+            )
+            self._mpm_marker_neighbor_cache_key = neighbor_key
 
     @ti.kernel
     def _clear_mpm_external_forces_kernel(
@@ -8917,12 +9195,16 @@ class HibmMpmSurfaceMarkers:
         *,
         particle_count: int,
         support_radius_m: float,
+        particle_position_generation: int | None = None,
     ) -> HibmMpmMpmForceScatterReport:
         particles = int(particle_count)
         if particles <= 0:
             raise ValueError("particle_count must be positive")
-        support_radius = float(support_radius_m)
-        if not math.isfinite(support_radius) or support_radius <= 0.0:
+        support_radius = _scalar_for_f32_field(
+            support_radius_m,
+            name="support_radius_m",
+        )
+        if support_radius <= 0.0:
             raise ValueError("support_radius_m must be a finite positive number")
         self._require_particle_field_capacity(
             external_force_n,
@@ -8938,6 +9220,7 @@ class HibmMpmSurfaceMarkers:
             particle_position_m,
             particle_count=particles,
             support_radius_m=support_radius,
+            particle_position_generation=particle_position_generation,
         )
         self._scatter_marker_forces_to_mpm_particles_kernel(
             external_force_n,
@@ -8983,6 +9266,50 @@ class HibmMpmSurfaceMarkers:
                 self.report_mpm_scatter_candidate_pair_count[None]
             ),
         )
+
+    @ti.kernel
+    def _validate_mpm_feedback_fields_kernel(
+        self,
+        particle_position_m: ti.template(),
+        particle_velocity_mps: ti.template(),
+        particle_count: ti.i32,
+    ):
+        self._input_validation_failure_count[None] = 0
+        for particle in range(particle_count):
+            if (
+                self._vector3_fits_f32(particle_position_m[particle]) == 0
+                or self._vector3_fits_f32(particle_velocity_mps[particle]) == 0
+            ):
+                self._input_validation_failure_count[None] += 1
+
+    @ti.kernel
+    def _validate_mpm_surface_feedback_fields_kernel(
+        self,
+        particle_position_m: ti.template(),
+        particle_velocity_mps: ti.template(),
+        particle_normal: ti.template(),
+        particle_area_m2: ti.template(),
+        particle_count: ti.i32,
+    ):
+        self._input_validation_failure_count[None] = 0
+        for particle in range(particle_count):
+            area = particle_area_m2[particle]
+            normal = particle_normal[particle]
+            normal_scale = ti.max(
+                ti.max(ti.abs(normal.x), ti.abs(normal.y)),
+                ti.abs(normal.z),
+            )
+            if (
+                self._vector3_fits_f32(particle_position_m[particle]) == 0
+                or self._vector3_fits_f32(particle_velocity_mps[particle]) == 0
+                or self._vector3_fits_f32(normal) == 0
+                or (area > 0.0 and normal_scale <= 1.0e-12)
+                or ti.math.isnan(area)
+                or ti.math.isinf(area)
+                or area < 0.0
+                or ti.abs(area) > _F32_MAX
+            ):
+                self._input_validation_failure_count[None] += 1
 
     @ti.kernel
     def _update_surface_feedback_from_mpm_particles_kernel(
@@ -9072,15 +9399,19 @@ class HibmMpmSurfaceMarkers:
         particle_count: int,
         support_radius_m: float,
         dt_s: float,
+        particle_position_generation: int | None = None,
     ) -> HibmMpmSurfaceUpdateReport:
         particles = int(particle_count)
         if particles <= 0:
             raise ValueError("particle_count must be positive")
-        support_radius = float(support_radius_m)
-        if not math.isfinite(support_radius) or support_radius <= 0.0:
+        support_radius = _scalar_for_f32_field(
+            support_radius_m,
+            name="support_radius_m",
+        )
+        if support_radius <= 0.0:
             raise ValueError("support_radius_m must be a finite positive number")
-        feedback_dt = float(dt_s)
-        if not math.isfinite(feedback_dt) or feedback_dt <= 0.0:
+        feedback_dt = _scalar_for_f32_field(dt_s, name="dt_s")
+        if feedback_dt <= 0.0:
             raise ValueError("dt_s must be a finite positive number")
         self._require_particle_field_capacity(
             particle_position_m, particles, "particle_position_m"
@@ -9088,26 +9419,40 @@ class HibmMpmSurfaceMarkers:
         self._require_particle_field_capacity(
             particle_velocity_mps, particles, "particle_velocity_mps"
         )
-        self._begin_marker_geometry_write()
+        self._validate_mpm_feedback_fields_kernel(
+            particle_position_m,
+            particle_velocity_mps,
+            particles,
+        )
+        if int(self._input_validation_failure_count[None]) > 0:
+            raise ValueError(
+                "MPM feedback fields must contain finite f32-representable values"
+            )
         self._prepare_mpm_particle_bins(
             particle_position_m,
             particle_count=particles,
             support_radius_m=support_radius,
+            particle_position_generation=particle_position_generation,
         )
-        self._update_surface_feedback_from_mpm_particles_kernel(
-            particle_position_m,
-            particle_velocity_mps,
-            int(self.marker_count),
-            particles,
-            support_radius,
-            feedback_dt,
-            self._mpm_bin_counts,
-            self._mpm_bin_offsets,
-            self._mpm_bin_members,
-            self._mpm_marker_neighbor_slots,
-            self._mpm_marker_neighbor_slot_counts,
-        )
-        self._refresh_open_ribbon_tip_cap_projection_vertices()
+        self._begin_marker_geometry_write()
+        try:
+            self._update_surface_feedback_from_mpm_particles_kernel(
+                particle_position_m,
+                particle_velocity_mps,
+                int(self.marker_count),
+                particles,
+                support_radius,
+                feedback_dt,
+                self._mpm_bin_counts,
+                self._mpm_bin_offsets,
+                self._mpm_bin_members,
+                self._mpm_marker_neighbor_slots,
+                self._mpm_marker_neighbor_slot_counts,
+            )
+            self._refresh_open_ribbon_tip_cap_projection_vertices()
+        except Exception:
+            self._retire_active_marker_geometry()
+            raise
         return HibmMpmSurfaceUpdateReport(
             updated_marker_count=int(
                 self.report_surface_feedback_updated_marker_count[None]
@@ -9190,12 +9535,13 @@ class HibmMpmSurfaceMarkers:
                             if weight > 0.0:
                                 velocity_sum += weight * particle_velocity_mps[particle]
                                 weight_sum += weight
-                                particle_surface_normal = particle_normal[particle]
                                 particle_surface_area = particle_area_m2[particle]
-                                if (
-                                    particle_surface_normal.norm() > 1.0e-12
-                                    and particle_surface_area > 0.0
-                                ):
+                                if particle_surface_area > 0.0:
+                                    particle_surface_normal = (
+                                        self._normalize_vector3_safe(
+                                            particle_normal[particle]
+                                        )
+                                    )
                                     normal_sum += weight * particle_surface_normal
                                     area_sum += weight * particle_surface_area
                                     geometry_weight_sum += weight
@@ -9213,8 +9559,12 @@ class HibmMpmSurfaceMarkers:
                     self.report_surface_feedback_max_speed_mps[None],
                     new_velocity.norm(),
                 )
-                if geometry_weight_sum > 1.0e-12 and normal_sum.norm() > 1.0e-12:
-                    new_normal = normal_sum.normalized()
+                normal_sum_scale = ti.max(
+                    ti.max(ti.abs(normal_sum.x), ti.abs(normal_sum.y)),
+                    ti.abs(normal_sum.z),
+                )
+                if geometry_weight_sum > 1.0e-12 and normal_sum_scale > 1.0e-12:
+                    new_normal = self._normalize_vector3_safe(normal_sum)
                     new_area = area_sum / geometry_weight_sum
                     if preserve_marker_area != 0:
                         new_area = old_area
@@ -9261,15 +9611,19 @@ class HibmMpmSurfaceMarkers:
         support_radius_m: float,
         dt_s: float,
         preserve_marker_area: bool = False,
+        particle_position_generation: int | None = None,
     ) -> HibmMpmSurfaceUpdateReport:
         particles = int(particle_count)
         if particles <= 0:
             raise ValueError("particle_count must be positive")
-        support_radius = float(support_radius_m)
-        if not math.isfinite(support_radius) or support_radius <= 0.0:
+        support_radius = _scalar_for_f32_field(
+            support_radius_m,
+            name="support_radius_m",
+        )
+        if support_radius <= 0.0:
             raise ValueError("support_radius_m must be a finite positive number")
-        feedback_dt = float(dt_s)
-        if not math.isfinite(feedback_dt) or feedback_dt <= 0.0:
+        feedback_dt = _scalar_for_f32_field(dt_s, name="dt_s")
+        if feedback_dt <= 0.0:
             raise ValueError("dt_s must be a finite positive number")
         self._require_particle_field_capacity(
             particle_position_m, particles, "particle_position_m"
@@ -9283,29 +9637,46 @@ class HibmMpmSurfaceMarkers:
         self._require_particle_field_capacity(
             particle_area_m2, particles, "particle_area_m2"
         )
-        self._begin_marker_geometry_write()
-        self._prepare_mpm_particle_bins(
-            particle_position_m,
-            particle_count=particles,
-            support_radius_m=support_radius,
-        )
-        self._update_surface_feedback_from_mpm_surface_particles_kernel(
+        self._validate_mpm_surface_feedback_fields_kernel(
             particle_position_m,
             particle_velocity_mps,
             particle_normal,
             particle_area_m2,
-            int(self.marker_count),
             particles,
-            support_radius,
-            feedback_dt,
-            1 if preserve_marker_area else 0,
-            self._mpm_bin_counts,
-            self._mpm_bin_offsets,
-            self._mpm_bin_members,
-            self._mpm_marker_neighbor_slots,
-            self._mpm_marker_neighbor_slot_counts,
         )
-        self._refresh_open_ribbon_tip_cap_projection_vertices()
+        if int(self._input_validation_failure_count[None]) > 0:
+            raise ValueError(
+                "MPM surface feedback fields must contain finite "
+                "f32-representable values"
+            )
+        self._prepare_mpm_particle_bins(
+            particle_position_m,
+            particle_count=particles,
+            support_radius_m=support_radius,
+            particle_position_generation=particle_position_generation,
+        )
+        self._begin_marker_geometry_write()
+        try:
+            self._update_surface_feedback_from_mpm_surface_particles_kernel(
+                particle_position_m,
+                particle_velocity_mps,
+                particle_normal,
+                particle_area_m2,
+                int(self.marker_count),
+                particles,
+                support_radius,
+                feedback_dt,
+                1 if preserve_marker_area else 0,
+                self._mpm_bin_counts,
+                self._mpm_bin_offsets,
+                self._mpm_bin_members,
+                self._mpm_marker_neighbor_slots,
+                self._mpm_marker_neighbor_slot_counts,
+            )
+            self._refresh_open_ribbon_tip_cap_projection_vertices()
+        except Exception:
+            self._retire_active_marker_geometry()
+            raise
         return HibmMpmSurfaceUpdateReport(
             updated_marker_count=int(
                 self.report_surface_feedback_updated_marker_count[None]
@@ -12054,6 +12425,12 @@ class HibmMpmIbBoundaryConditions:
         marker_pressure_neumann_gradient_pa_per_m_field,
     ) -> HibmMpmIbBoundaryConditionReport:
         self._validate_search_and_markers(search, markers)
+        _require_counted_field_capacity(
+            marker_pressure_neumann_gradient_pa_per_m_field,
+            int(markers.projection_vertex_count),
+            count_name="projection_vertex_count",
+            field_name="marker_pressure_neumann_gradient_pa_per_m_field",
+        )
         self._build_from_search_kernel(
             search.node_kind_code,
             search.nearest_marker,
@@ -27989,19 +28366,118 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
 def hibm_mpm_external_force_fresh_for_solid_step(
     load_report: HibmMpmSharpFluidToMpmLoadReport,
 ) -> bool:
-    clear = load_report.mpm_external_force_clear
-    scatter = load_report.mpm_force_scatter
-    force_values = (
-        *scatter.total_marker_force_n,
-        *scatter.total_mpm_external_force_n,
-        scatter.action_reaction_residual_n,
-        clear.max_abs_external_force_before_n,
+    """Return whether one complete load transaction may advance the solid."""
+
+    try:
+        clear = load_report.mpm_external_force_clear
+        scatter = load_report.mpm_force_scatter
+        marker_forces = load_report.marker_forces
+        stress = load_report.fluid_stress
+        no_slip = load_report.no_slip_residual
+        projection = load_report.fluid_projection
+        disconnected = load_report.pressure_disconnected_region
+
+        scatter_marker_force = _vector3(
+            scatter.total_marker_force_n,
+            name="scatter.total_marker_force_n",
+        )
+        scatter_external_force = _vector3(
+            scatter.total_mpm_external_force_n,
+            name="scatter.total_mpm_external_force_n",
+        )
+        reported_marker_force = _vector3(
+            marker_forces.total_marker_force_n,
+            name="marker_forces.total_marker_force_n",
+        )
+        fluid_reaction_force = _vector3(
+            marker_forces.fluid_reaction_force_n,
+            name="marker_forces.fluid_reaction_force_n",
+        )
+
+        required_markers = int(marker_forces.total_marker_count)
+        counts_are_complete = (
+            required_markers > 0
+            and int(clear.cleared_particle_count) > 0
+            and int(scatter.active_marker_count) == required_markers
+            and int(scatter.invalid_marker_count) == 0
+            and int(scatter.active_pair_count) >= required_markers
+            and int(stress.valid_marker_count) == required_markers
+            and int(stress.invalid_marker_count) == 0
+            and int(stress.viscous_gradient_invalid_marker_count) == 0
+            and int(no_slip.valid_marker_count) == required_markers
+            and int(no_slip.invalid_marker_count) == 0
+            and int(marker_forces.primary_stress_invalid_marker_count) == 0
+            and int(marker_forces.secondary_stress_invalid_marker_count) == 0
+        )
+        required_projection_fields = {
+            "cg_converged_all",
+            "cg_breakdown_count",
+            "cg_relative_residual_max",
+            "pressure_solve_failed",
+            "pressure_projection_physical_failure",
+        }
+        projection_residual = float(projection["cg_relative_residual_max"])
+        projection_is_valid = (
+            required_projection_fields <= projection.keys()
+            and bool(projection["cg_converged_all"])
+            and int(projection["cg_breakdown_count"]) == 0
+            and math.isfinite(projection_residual)
+            and projection_residual >= 0.0
+            and not bool(projection["pressure_solve_failed"])
+            and not bool(projection["pressure_projection_physical_failure"])
+            and not bool(projection.get("cg_breakdown", ""))
+            and not bool(disconnected.component_overflow)
+            and bool(disconnected.component_labels_converged)
+        )
+        force_values = (
+            *scatter_marker_force,
+            *scatter_external_force,
+            *reported_marker_force,
+            *fluid_reaction_force,
+            scatter.action_reaction_residual_n,
+            marker_forces.action_reaction_residual_n,
+            clear.max_abs_external_force_before_n,
+            stress.max_abs_traction_pa,
+            no_slip.max_no_slip_residual_mps,
+            no_slip.l2_no_slip_residual_mps,
+        )
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+    if not counts_are_complete or not projection_is_valid:
+        return False
+    if not all(math.isfinite(float(value)) for value in force_values):
+        return False
+
+    force_scale_n = max(
+        math.hypot(*scatter_marker_force),
+        math.hypot(*scatter_external_force),
+        math.hypot(*reported_marker_force),
+        1.0e-2,
     )
+    if not math.isfinite(force_scale_n):
+        return False
+    residual_tolerance_n = max(1.0e-8, 1.0e-6 * force_scale_n)
+    if not math.isfinite(residual_tolerance_n):
+        return False
+    cross_report_residual_n = math.hypot(
+        *(
+            float(scatter_component) - float(report_component)
+            for scatter_component, report_component in zip(
+                scatter_marker_force,
+                reported_marker_force,
+                strict=True,
+            )
+        )
+    )
+    if not math.isfinite(cross_report_residual_n):
+        return False
     return (
-        clear.cleared_particle_count > 0
-        and scatter.active_marker_count > 0
-        and scatter.active_pair_count > 0
-        and all(math.isfinite(float(value)) for value in force_values)
+        0.0 <= float(scatter.action_reaction_residual_n) <= residual_tolerance_n
+        and 0.0
+        <= float(marker_forces.action_reaction_residual_n)
+        <= residual_tolerance_n
+        and cross_report_residual_n <= residual_tolerance_n
     )
 
 

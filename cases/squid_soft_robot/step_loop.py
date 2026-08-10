@@ -193,6 +193,7 @@ def run_squid_step_loop(context: StepLoopContext) -> StepLoopResult:
     output_dir = resources.output_dir
     process_path = resources.process_path
     run_checkpoint_path = resources.run_checkpoint_path
+    frozen_run_fingerprint = resources.frozen_run_fingerprint
     simulator = resources.simulator
     solid_mpm = resources.solid_mpm
     spec = resources.spec
@@ -1705,6 +1706,7 @@ def run_squid_step_loop(context: StepLoopContext) -> StepLoopResult:
                     solid_mpm=solid_mpm,
                     interface_reaction_state=interface_reaction_state,
                     sharp_coupling_state=sharp_coupling_state,
+                    frozen_run_fingerprint=frozen_run_fingerprint,
                 )
                 checkpoint_wall_time_s = (
                     time.perf_counter() - checkpoint_wall_started_at
@@ -3094,6 +3096,7 @@ def run_squid_step_loop(context: StepLoopContext) -> StepLoopResult:
                 solid_mpm=solid_mpm,
                 interface_reaction_state=interface_reaction_state,
                 sharp_coupling_state=sharp_coupling_state,
+                frozen_run_fingerprint=frozen_run_fingerprint,
             )
             checkpoint_wall_time_s = time.perf_counter() - checkpoint_wall_started_at
             row["checkpoint_wall_time_s"] = checkpoint_wall_time_s

@@ -3,8 +3,9 @@
 The case stores the streamwise coordinate on solver z in the opposite
 direction to the benchmark coordinate.  This module makes that mapping
 explicit: every plotted field uses ``physical x = channel_length - solver z``.
-All snapshots are loaded and validated before any PNG is written, and one
-global velocity range is then used for the complete animation.
+Snapshots are validated in a first streaming pass before any PNG is written.
+A second streaming pass renders with one global velocity range, so memory use
+does not grow with the number of saved frames.
 """
 
 from __future__ import annotations
@@ -38,6 +39,13 @@ REQUIRED_FLOW_SNAPSHOT_FIELDS = (
     "beam_marker_rest_xyz_m",
     "beam_marker_displacement_xyz_m",
     "time_s",
+)
+_SEQUENCE_ARRAY_FIELDS = (
+    ("physical x grid", "physical_x_centers_m"),
+    ("y grid", "y_centers_m"),
+    ("grid_nodes", "grid_nodes"),
+    ("cell_spacing_m", "cell_spacing_m"),
+    ("beam rest geometry", "beam_rest_xyz_m"),
 )
 
 
@@ -282,18 +290,34 @@ def render_turek_hron_flow_gif(
     show_marker_points: bool = False,
     show_rest_geometry: bool = False,
 ) -> TurekHronRenderResult:
-    """Validate all periodic NPZs, render fixed-scale PNGs, and write a GIF."""
+    """Validate and render periodic NPZs with memory bounded to one frame."""
 
     source_paths = discover_flow_snapshot_paths(
         snapshot_dir,
         expected_step_interval=expected_step_interval,
     )
-    frames = [
-        load_flow_snapshot(path, channel_length_m=channel_length_m)
-        for path in source_paths
-    ]
-    _validate_frame_sequence(frames)
-    vmax = _velocity_vmax(frames, requested=velocity_vmax_mps)
+    reference: tuple[tuple[str, np.ndarray], ...] | None = None
+    previous_time_s: float | None = None
+    observed_vmax = 0.0
+    steps: list[int] = []
+    for source_path in source_paths:
+        frame = load_flow_snapshot(source_path, channel_length_m=channel_length_m)
+        if reference is None:
+            reference = _sequence_reference(frame)
+        else:
+            _validate_frame_against_reference(
+                frame,
+                reference=reference,
+                previous_time_s=previous_time_s,
+            )
+        previous_time_s = frame.time_s
+        observed_vmax = max(observed_vmax, _frame_velocity_vmax(frame))
+        steps.append(frame.step)
+        del frame
+    vmax = _resolve_velocity_vmax(
+        requested=velocity_vmax_mps,
+        observed=observed_vmax,
+    )
 
     gif_path = Path(output_gif)
     frames_directory = (
@@ -303,7 +327,8 @@ def render_turek_hron_flow_gif(
     )
     frames_directory.mkdir(parents=True, exist_ok=True)
     rendered: list[Path] = []
-    for frame in frames:
+    for source_path in source_paths:
+        frame = load_flow_snapshot(source_path, channel_length_m=channel_length_m)
         output_path = frames_directory / f"velocity_step_{frame.step:06d}.png"
         _render_velocity_frame(
             frame,
@@ -315,6 +340,7 @@ def render_turek_hron_flow_gif(
             show_rest_geometry=bool(show_rest_geometry),
         )
         rendered.append(output_path)
+        del frame
     built_gif = build_gif(
         rendered,
         gif_path,
@@ -325,54 +351,62 @@ def render_turek_hron_flow_gif(
         gif_path=built_gif,
         frame_paths=tuple(rendered),
         source_paths=tuple(source_paths),
-        steps=tuple(frame.step for frame in frames),
+        steps=tuple(steps),
         velocity_vmin_mps=VELOCITY_VMIN_MPS,
         velocity_vmax_mps=vmax,
     )
 
 
-def _validate_frame_sequence(frames: Sequence[FlowSnapshotFrame]) -> None:
-    if not frames:
-        raise FlowSnapshotContractError("no flow snapshots were loaded")
-    first = frames[0]
-    for previous, frame in zip(frames, frames[1:]):
-        if frame.time_s <= previous.time_s:
-            raise FlowSnapshotContractError(
-                f"flow snapshot time_s is not strictly increasing at {frame.source_path.name}"
-            )
-        for field, actual, expected in (
-            ("physical x grid", frame.physical_x_centers_m, first.physical_x_centers_m),
-            ("y grid", frame.y_centers_m, first.y_centers_m),
-            ("grid_nodes", frame.grid_nodes, first.grid_nodes),
-            ("cell_spacing_m", frame.cell_spacing_m, first.cell_spacing_m),
-            ("beam rest geometry", frame.beam_rest_xyz_m, first.beam_rest_xyz_m),
-        ):
-            if actual.shape != expected.shape or not np.allclose(
-                actual, expected, rtol=0.0, atol=1.0e-12
-            ):
-                raise FlowSnapshotContractError(
-                    f"{field} changes across snapshots at {frame.source_path.name}"
-                )
+def _sequence_reference(
+    frame: FlowSnapshotFrame,
+) -> tuple[tuple[str, np.ndarray], ...]:
+    return tuple(
+        (label, getattr(frame, attribute))
+        for label, attribute in _SEQUENCE_ARRAY_FIELDS
+    )
 
 
-def _velocity_vmax(
-    frames: Sequence[FlowSnapshotFrame],
+def _validate_frame_against_reference(
+    frame: FlowSnapshotFrame,
     *,
-    requested: float | None,
-) -> float:
+    reference: tuple[tuple[str, np.ndarray], ...],
+    previous_time_s: float | None,
+) -> None:
+    if previous_time_s is not None and frame.time_s <= previous_time_s:
+        raise FlowSnapshotContractError(
+            f"flow snapshot time_s is not strictly increasing at {frame.source_path.name}"
+        )
+    for (label, expected), (_, attribute) in zip(
+        reference,
+        _SEQUENCE_ARRAY_FIELDS,
+    ):
+        actual = getattr(frame, attribute)
+        if actual.shape != expected.shape or not np.allclose(
+            actual,
+            expected,
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
+            raise FlowSnapshotContractError(
+                f"{label} changes across snapshots at {frame.source_path.name}"
+            )
+
+
+def _frame_velocity_vmax(frame: FlowSnapshotFrame) -> float:
+    fluid_mask = ~frame.obstacle_mask
+    return (
+        float(np.max(frame.velocity_magnitude_mps[fluid_mask]))
+        if np.any(fluid_mask)
+        else 0.0
+    )
+
+
+def _resolve_velocity_vmax(*, requested: float | None, observed: float) -> float:
     if requested is not None:
         vmax = float(requested)
         if not np.isfinite(vmax) or vmax <= VELOCITY_VMIN_MPS:
             raise FlowSnapshotContractError("velocity_vmax_mps must be finite and positive")
         return vmax
-    observed = max(
-        (
-            float(np.max(frame.velocity_magnitude_mps[~frame.obstacle_mask]))
-            if np.any(~frame.obstacle_mask)
-            else 0.0
-        )
-        for frame in frames
-    )
     return observed if observed > 0.0 else 1.0
 
 

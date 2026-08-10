@@ -3,9 +3,13 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from .history import _required_finite_row_number
 from .source_config import _mapping_config_float
+
+if TYPE_CHECKING:
+    from .spec import SquidReducedSpec
 
 def pressure_schedule_from_config(
     config: Mapping[str, object],

@@ -33,6 +33,11 @@ HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_BYTES = (
     HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS**2 * 8
 )
 HIBM_MARKER_PRESSURE_NULLSPACE_RESOURCE_MAX_BYTES = 256 * 1024 * 1024
+HIBM_MARKER_CONSTRAINT_HASH_THRESHOLD = 64
+
+
+def _uses_marker_constraint_hash(marker_count: int) -> bool:
+    return int(marker_count) > HIBM_MARKER_CONSTRAINT_HASH_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,10 @@ class HibmMpmMarkerMacConstraintOperator:
         self.grid_nodes = shape
         self.marker_capacity = int(marker_capacity)
         self.constraint_capacity = 3 * self.marker_capacity
+        marker_constraint_hash_capacity = 1
+        while marker_constraint_hash_capacity < 2 * self.marker_capacity:
+            marker_constraint_hash_capacity *= 2
+        self._marker_constraint_hash_capacity = marker_constraint_hash_capacity
 
         self._row_active = ti.field(dtype=ti.i32, shape=self.constraint_capacity)
         self._row_pcg_active = ti.field(
@@ -153,6 +162,28 @@ class HibmMpmMarkerMacConstraintOperator:
         self._marker_snapshot_active = ti.field(
             dtype=ti.i32,
             shape=self.marker_capacity,
+        )
+        self._marker_constraint_owner = ti.field(
+            dtype=ti.i32,
+            shape=self.marker_capacity,
+        )
+        self._marker_constraint_hash_occupied = ti.field(
+            dtype=ti.i32,
+            shape=self._marker_constraint_hash_capacity,
+        )
+        self._marker_constraint_hash_position_m = ti.Vector.field(
+            3,
+            dtype=ti.f32,
+            shape=self._marker_constraint_hash_capacity,
+        )
+        self._marker_constraint_hash_target_mps = ti.Vector.field(
+            3,
+            dtype=ti.f32,
+            shape=self._marker_constraint_hash_capacity,
+        )
+        self._marker_constraint_hash_owner = ti.field(
+            dtype=ti.i32,
+            shape=self._marker_constraint_hash_capacity,
         )
         self._marker_position_snapshot_m = ti.Vector.field(
             3,
@@ -1007,6 +1038,105 @@ class HibmMpmMarkerMacConstraintOperator:
                 relation = 2
         return relation
 
+    @ti.func
+    def _normalized_marker_position_bits(self, value):
+        bits = ti.cast(ti.bit_cast(value, ti.i32), ti.i64) & ti.i64(4294967295)
+        if (bits & 0x7FFFFFFF) == 0:
+            bits = 0
+        return bits
+
+    @ti.func
+    def _marker_constraint_hash_slot(self, position_m):
+        bits_x = self._normalized_marker_position_bits(position_m.x)
+        bits_y = self._normalized_marker_position_bits(position_m.y)
+        bits_z = self._normalized_marker_position_bits(position_m.z)
+        hashed = (
+            bits_x * 73856093
+            ^ bits_y * 19349663
+            ^ bits_z * 83492791
+        )
+        return ti.cast(
+            hashed & (self._marker_constraint_hash_capacity - 1),
+            ti.i32,
+        )
+
+    @ti.kernel
+    def _reset_marker_constraint_hash_kernel(self):
+        for slot in range(self._marker_constraint_hash_capacity):
+            self._marker_constraint_hash_occupied[slot] = 0
+
+    @ti.kernel
+    def _canonicalize_marker_constraints_kernel(
+        self,
+        marker_position_m: ti.template(),
+        marker_velocity_mps: ti.template(),
+        marker_region_id: ti.template(),
+        marker_count: ti.i32,
+        primary_region_id: ti.i32,
+        secondary_region_id: ti.i32,
+    ):
+        # Marker-index order makes the first representative the minimum owner
+        # without atomics.  Exact tuple comparisons resolve every hash collision.
+        ti.loop_config(serialize=True)
+        for marker in range(marker_count):
+            region = marker_region_id[marker]
+            active = region == primary_region_id or region == secondary_region_id
+            self._marker_constraint_owner[marker] = -1
+            if active:
+                self._marker_constraint_owner[marker] = marker
+                position = marker_position_m[marker]
+                target = marker_velocity_mps[marker]
+                position_has_nan = False
+                for axis in ti.static(range(3)):
+                    position_has_nan = (
+                        position_has_nan or position[axis] != position[axis]
+                    )
+                if not position_has_nan:
+                    slot = self._marker_constraint_hash_slot(position)
+                    probe = 0
+                    resolved = 0
+                    while (
+                        probe < self._marker_constraint_hash_capacity
+                        and resolved == 0
+                    ):
+                        if self._marker_constraint_hash_occupied[slot] == 0:
+                            self._marker_constraint_hash_occupied[slot] = 1
+                            self._marker_constraint_hash_position_m[slot] = position
+                            self._marker_constraint_hash_target_mps[slot] = target
+                            self._marker_constraint_hash_owner[slot] = marker
+                            resolved = 1
+                        else:
+                            representative = (
+                                self._marker_constraint_hash_position_m[slot]
+                            )
+                            same_position = True
+                            for axis in ti.static(range(3)):
+                                same_position = same_position and (
+                                    position[axis] == representative[axis]
+                                )
+                            if same_position:
+                                representative_target = (
+                                    self._marker_constraint_hash_target_mps[slot]
+                                )
+                                same_target = True
+                                for axis in ti.static(range(3)):
+                                    same_target = same_target and (
+                                        target[axis] == representative_target[axis]
+                                    )
+                                self._marker_constraint_owner[marker] = (
+                                    self._marker_constraint_hash_owner[slot]
+                                )
+                                if not same_target:
+                                    ti.atomic_max(self._failure_code[None], 2)
+                                resolved = 1
+                            else:
+                                slot = (slot + 1) & (
+                                    self._marker_constraint_hash_capacity - 1
+                                )
+                        probe += 1
+                    if resolved == 0:
+                        ti.atomic_max(self._failure_code[None], 9)
+
     @ti.kernel
     def _validate_markers_kernel(
         self,
@@ -1030,7 +1160,9 @@ class HibmMpmMarkerMacConstraintOperator:
         for marker in range(marker_count):
             region = marker_region_id[marker]
             active = region == primary_region_id or region == secondary_region_id
+            constraint_owner = -1
             if active:
+                constraint_owner = marker
                 ti.atomic_add(self._device_active_marker_count[None], 1)
                 if use_prepared_sampling_identity != 0:
                     sample_valid = prepared_sample_valid[marker] != 0
@@ -1079,21 +1211,25 @@ class HibmMpmMarkerMacConstraintOperator:
                 )
                 if not inside_half_open_domain:
                     ti.atomic_max(self._failure_code[None], 6)
-                for other in range(marker + 1, marker_count):
-                    other_region = marker_region_id[other]
-                    other_active = (
-                        other_region == primary_region_id
-                        or other_region == secondary_region_id
-                    )
-                    if other_active:
-                        relation = self._coincident_marker_constraint_relation(
-                            marker_position_m,
-                            marker_velocity_mps,
-                            marker,
-                            other,
+                if marker_count <= HIBM_MARKER_CONSTRAINT_HASH_THRESHOLD:
+                    for prior in range(marker):
+                        prior_region = marker_region_id[prior]
+                        prior_active = (
+                            prior_region == primary_region_id
+                            or prior_region == secondary_region_id
                         )
-                        if relation == 1:
-                            ti.atomic_max(self._failure_code[None], 2)
+                        if prior_active:
+                            relation = self._coincident_marker_constraint_relation(
+                                marker_position_m,
+                                marker_velocity_mps,
+                                marker,
+                                prior,
+                            )
+                            if relation == 1:
+                                ti.atomic_max(self._failure_code[None], 2)
+                            elif relation == 2:
+                                constraint_owner = ti.min(constraint_owner, prior)
+            self._marker_constraint_owner[marker] = constraint_owner
 
     @ti.func
     def _component_is_free(
@@ -1125,7 +1261,6 @@ class HibmMpmMarkerMacConstraintOperator:
         k: ti.i32,
         axis: ti.i32,
     ):
-        index = ti.Vector([i, j, k])
         widths = ti.Vector(
             [cell_width_x_m[i], cell_width_y_m[j], cell_width_z_m[k]]
         )
@@ -1201,23 +1336,9 @@ class HibmMpmMarkerMacConstraintOperator:
             self._marker_region_snapshot[marker] = region
             if marker_active:
                 self._marker_position_snapshot_m[marker] = marker_position_m[marker]
-            unique_constraint = marker_active
-            if marker_active:
-                for prior in range(marker):
-                    prior_region = marker_region_id[prior]
-                    prior_active = (
-                        prior_region == primary_region_id
-                        or prior_region == secondary_region_id
-                    )
-                    if prior_active:
-                        relation = self._coincident_marker_constraint_relation(
-                            marker_position_m,
-                            marker_velocity_mps,
-                            marker,
-                            prior,
-                        )
-                        if relation == 2:
-                            unique_constraint = False
+            unique_constraint = (
+                marker_active and self._marker_constraint_owner[marker] == marker
+            )
             for axis in ti.static(range(3)):
                 row = 3 * marker + axis
                 if unique_constraint:
@@ -1741,6 +1862,32 @@ class HibmMpmMarkerMacConstraintOperator:
         self._pressure_actuation_generation = 0
         self._pressure_nullspace_topology_generation = 0
         self._pressure_nullspace_component_face_valid_mask_generation = 0
+
+    def _retire_transaction_lifecycle(self) -> None:
+        """Fail closed before an attempted transaction can touch device rows."""
+
+        self._phase = "failed"
+        self._prepared = False
+        self._converged = False
+        self._committed = False
+        self._markers = None
+        self._fluid = None
+        self._component_face_valid_mask = None
+        self._prepared_obstacle_field = None
+        self._marker_count = 0
+        self._active_marker_count = 0
+        self._constraint_count = 0
+        self._iterations = 0
+        self._absolute_tolerance_mps = math.nan
+        self._max_residual_mps = math.inf
+        self._prepared_ledger_generation = -1
+        self._prepared_primary_region_id = -1
+        self._prepared_secondary_region_id = -1
+        self.prepared_sampling_identity = None
+        self._prepared_sampling_identity_generation = 0
+        self._prepared_topology_generation = 0
+        self._prepared_component_face_valid_mask_generation = 0
+        self._clear_pressure_nullspace_lifecycle()
 
     def _poison_pressure_nullspace_transaction(self) -> None:
         """Make a failed pressure transaction impossible to reuse.
@@ -2592,9 +2739,7 @@ class HibmMpmMarkerMacConstraintOperator:
         )
 
     def _invalidate_stale_transaction(self, reason: str) -> None:
-        self._phase = "failed"
-        self._prepared = False
-        self._converged = False
+        self._retire_transaction_lifecycle()
         raise RuntimeError(f"stale marker MAC constraint transaction: {reason}")
 
     def _audit_transaction_inputs(
@@ -2708,10 +2853,10 @@ class HibmMpmMarkerMacConstraintOperator:
             raise RuntimeError(
                 "cannot prepare over a pending uncommitted marker MAC transaction"
             )
+        self._retire_transaction_lifecycle()
         # A new affine J transaction invalidates every pressure factor built
         # from the preceding marker/topology generation, even if validation of
         # the new transaction later fails.
-        self._clear_pressure_nullspace_lifecycle()
 
         marker_count = int(markers.marker_count)
         if marker_count < 0 or marker_count > self.marker_capacity:
@@ -2780,6 +2925,16 @@ class HibmMpmMarkerMacConstraintOperator:
             fluid.cell_face_y_m,
             fluid.cell_face_z_m,
         )
+        if _uses_marker_constraint_hash(marker_count):
+            self._reset_marker_constraint_hash_kernel()
+            self._canonicalize_marker_constraints_kernel(
+                sample_position_m,
+                markers.v_gamma_mps,
+                markers.region_id,
+                marker_count,
+                selected_regions[0],
+                selected_regions[1],
+            )
         failure_code = int(self._failure_code[None])
         if failure_code == 1:
             raise RuntimeError("nonfinite marker constraint input")
@@ -2799,6 +2954,8 @@ class HibmMpmMarkerMacConstraintOperator:
             raise RuntimeError(
                 "active marker constraint has no valid MAC component support"
             )
+        if failure_code == 9:
+            raise RuntimeError("marker constraint canonical hash table is full")
         active_marker_count = int(self._device_active_marker_count[None])
         self._reset_transaction_kernel()
         if prepared_sampling_identity is not None:

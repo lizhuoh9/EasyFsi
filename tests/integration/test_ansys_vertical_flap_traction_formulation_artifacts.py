@@ -89,6 +89,23 @@ REQUIRED_HISTORY_FIELDS = {
 
 
 class AnsysVerticalFlapTractionFormulationArtifactTests(unittest.TestCase):
+    def test_history_row_preserves_all_face_diagnostic_fields(self):
+        raw = {
+            "preflow_step": 1,
+            **{
+                field: f"value-{index}"
+                for index, field in enumerate(
+                    traction_matrix.FACE_DIAGNOSTIC_EXTRA_FIELDS,
+                    start=1,
+                )
+            },
+        }
+
+        row = traction_matrix._history_row("diagnostic", raw)
+
+        for field in traction_matrix.FACE_DIAGNOSTIC_EXTRA_FIELDS:
+            self.assertEqual(row[field], raw[field])
+
     def test_traction_formulation_matrix_is_reviewable(self):
         payload = _read_json(MATRIX_JSON)
         rows = payload["rows"]

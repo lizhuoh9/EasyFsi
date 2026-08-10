@@ -110,6 +110,7 @@ class SquidExplicitContextContractTests(unittest.TestCase):
                 "output_dir",
                 "process_path",
                 "run_checkpoint_path",
+                "frozen_run_fingerprint",
                 "simulator",
                 "solid_mpm",
                 "spec",
@@ -149,7 +150,7 @@ class SquidExplicitContextContractTests(unittest.TestCase):
             )
             for field in fields(group)
         ]
-        self.assertEqual(len(grouped_names), 103)
+        self.assertEqual(len(grouped_names), 104)
         self.assertEqual(len(grouped_names), len(set(grouped_names)))
 
     def test_runner_builds_typed_step_loop_context_without_locals(self) -> None:

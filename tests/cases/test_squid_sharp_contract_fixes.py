@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import inspect
+import json
+import os
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -148,6 +150,168 @@ class SquidSharpCliContractTests(unittest.TestCase):
         self.assertTrue(
             expected.issubset(checkpointing.CHECKPOINT_ARG_FINGERPRINT_FIELDS)
         )
+
+    def test_checkpoint_fingerprint_hashes_geometry_cache_and_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            step_path = root / "squid.step"
+            cache_path = root / "squid.surface.stl"
+            config_path = root / "simulation_config.json"
+            step_path.write_bytes(b"step-v1")
+            cache_path.write_bytes(b"cache-v1")
+
+            def write_config(face_ids: list[int]) -> None:
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "mesh_path": str(step_path),
+                            "surface_mesh_cache_path": str(cache_path),
+                            "named_selections": [{"id": 7, "face_ids": face_ids}],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            write_config([1, 2])
+            args = parse_args(["--source-config", str(config_path)])
+            spec = _MinimalCheckpointSpec(source_config_path=str(config_path))
+
+            baseline = checkpointing.checkpoint_run_fingerprint(
+                args=args,
+                spec=spec,
+                step_count=1,
+                full_pressure_waveform_steps=1,
+            )
+            step_path.write_bytes(b"step-v2")
+            changed_step = checkpointing.checkpoint_run_fingerprint(
+                args=args,
+                spec=spec,
+                step_count=1,
+                full_pressure_waveform_steps=1,
+            )
+            step_path.write_bytes(b"step-v1")
+            cache_path.write_bytes(b"cache-v2")
+            changed_cache = checkpointing.checkpoint_run_fingerprint(
+                args=args,
+                spec=spec,
+                step_count=1,
+                full_pressure_waveform_steps=1,
+            )
+            cache_path.write_bytes(b"cache-v1")
+            write_config([1, 3])
+            changed_topology = checkpointing.checkpoint_run_fingerprint(
+                args=args,
+                spec=spec,
+                step_count=1,
+                full_pressure_waveform_steps=1,
+            )
+
+        self.assertNotEqual(baseline, changed_step)
+        self.assertNotEqual(baseline, changed_cache)
+        self.assertNotEqual(baseline, changed_topology)
+
+    def test_checkpoint_fingerprint_hashes_effective_volume_particle_cache(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "simulation_config.json"
+            particle_cache_path = root / "simulation_config.mesh.volume_particles.npz"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "analysis_settings": {
+                            "fluid_active_mask_enabled": True,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            particle_cache_path.write_bytes(b"volume-cache-v1")
+            args = parse_args(["--source-config", str(config_path)])
+            spec = _MinimalCheckpointSpec(source_config_path=str(config_path))
+
+            baseline = checkpointing.checkpoint_run_fingerprint(
+                args=args,
+                spec=spec,
+                step_count=1,
+                full_pressure_waveform_steps=1,
+            )
+            original_stat = particle_cache_path.stat()
+            particle_cache_path.write_bytes(b"volume-cache-v2")
+            os.utime(
+                particle_cache_path,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            changed = checkpointing.checkpoint_run_fingerprint(
+                args=args,
+                spec=spec,
+                step_count=1,
+                full_pressure_waveform_steps=1,
+            )
+
+        self.assertNotEqual(baseline, changed)
+
+    def test_checkpoint_fingerprint_ignores_volume_cache_for_surface_only_mask(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "simulation_config.json"
+            particle_cache_path = root / "simulation_config.mesh.volume_particles.npz"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "analysis_settings": {
+                            "fluid_active_mask_enabled": True,
+                            "solid_obstacle_surface_only_region_ids": [5],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            particle_cache_path.write_bytes(b"unused-cache-v1")
+            args = parse_args(["--source-config", str(config_path)])
+            spec = _MinimalCheckpointSpec(source_config_path=str(config_path))
+
+            baseline = checkpointing.checkpoint_run_fingerprint(
+                args=args,
+                spec=spec,
+                step_count=1,
+                full_pressure_waveform_steps=1,
+            )
+            particle_cache_path.write_bytes(b"unused-cache-v2-expanded")
+            changed = checkpointing.checkpoint_run_fingerprint(
+                args=args,
+                spec=spec,
+                step_count=1,
+                full_pressure_waveform_steps=1,
+            )
+
+        self.assertEqual(baseline, changed)
+
+    def test_checkpoint_fingerprint_includes_post_dirichlet_projection_count(
+        self,
+    ) -> None:
+        self.assertIn(
+            "hibm_post_dirichlet_consistency_projections",
+            checkpointing.CHECKPOINT_ARG_FINGERPRINT_FIELDS,
+        )
+        spec = _MinimalCheckpointSpec(source_config_path="source.json")
+        default = checkpointing.checkpoint_run_fingerprint(
+            args=parse_args([]),
+            spec=spec,
+            step_count=1,
+            full_pressure_waveform_steps=1,
+        )
+        changed = checkpointing.checkpoint_run_fingerprint(
+            args=parse_args(["--hibm-post-dirichlet-consistency-projections", "2"]),
+            spec=spec,
+            step_count=1,
+            full_pressure_waveform_steps=1,
+        )
+
+        self.assertNotEqual(default, changed)
 
     def test_checkpoint_fingerprint_uses_the_effective_neo_lock_policy(self) -> None:
         default_args = parse_args(["--solid-model", "neo_hookean_mpm"])
