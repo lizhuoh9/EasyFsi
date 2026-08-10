@@ -1384,7 +1384,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             problem.metadata["out_of_plane_boundary_policy"],
-            "finite_slab_x_faces_no_periodic_or_slip",
+            "strict_periodic_or_slip",
         )
 
     def test_slab_equivalence_diagnostics_expose_3d_and_per_depth_quantities(self):
@@ -1615,12 +1615,14 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         config = VerticalFlapFsiConfig(
             flow_hibm_sharp_search_radius_m=0.0123,
             flow_hibm_sharp_interior_probe_distance_m=0.0045,
+            flow_hibm_sharp_interior_probe_distance_xyz_m=(0.001, 0.002, 0.003),
             flow_hibm_sharp_interpolate_velocity_rows=False,
         )
 
         for field_name in (
             "flow_hibm_sharp_search_radius_m",
             "flow_hibm_sharp_interior_probe_distance_m",
+            "flow_hibm_sharp_interior_probe_distance_xyz_m",
             "flow_hibm_sharp_interpolate_velocity_rows",
         ):
             self.assertIn(field_name, VerticalFlapFsiConfig.__dataclass_fields__)
@@ -1631,6 +1633,10 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(
             solid_mpm_fsi_runner._hibm_sharp_interior_probe_distance_m(config),
             0.0045,
+        )
+        self.assertEqual(
+            solid_mpm_fsi_runner._hibm_sharp_interior_probe_distance_xyz_m(config),
+            (0.001, 0.002, 0.003),
         )
         self.assertFalse(config.flow_hibm_sharp_interpolate_velocity_rows)
 

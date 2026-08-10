@@ -16,14 +16,46 @@ FIXED_NODE_LOCK_POLICIES = {
 CONSTITUTIVE_NEO_HOOKEAN = 0
 CONSTITUTIVE_LINEAR_ELASTIC = 1
 CONSTITUTIVE_SAINT_VENANT_KIRCHHOFF = 2
+CONSTITUTIVE_PLANE_STRESS_LINEAR_ELASTIC = 3
 CONSTITUTIVE_MODELS = {
     "3d_neo_hookean": CONSTITUTIVE_NEO_HOOKEAN,
     "neo_hookean": CONSTITUTIVE_NEO_HOOKEAN,
     "linear_elastic": CONSTITUTIVE_LINEAR_ELASTIC,
-    "plane_stress_linear_elastic": CONSTITUTIVE_LINEAR_ELASTIC,
+    "plane_stress_linear_elastic": CONSTITUTIVE_PLANE_STRESS_LINEAR_ELASTIC,
     "saint_venant_kirchhoff": CONSTITUTIVE_SAINT_VENANT_KIRCHHOFF,
     "svk": CONSTITUTIVE_SAINT_VENANT_KIRCHHOFF,
 }
+
+
+def _validate_fixed_region_contract(
+    *,
+    fixed_region_id: int,
+    primary_region_id: int,
+    secondary_region_id: int,
+    active_region_ids,
+) -> int:
+    fixed = int(fixed_region_id)
+    primary = int(primary_region_id)
+    secondary = int(secondary_region_id)
+    if fixed < 0:
+        return fixed
+    if fixed == primary:
+        raise ValueError(
+            "fixed_region_id must be distinct from primary_region_id; "
+            f"both are {fixed}"
+        )
+    if fixed == secondary:
+        raise ValueError(
+            "fixed_region_id must be distinct from secondary_region_id; "
+            f"both are {fixed}"
+        )
+    active = {int(region_id) for region_id in active_region_ids}
+    if fixed not in active:
+        raise ValueError(
+            f"fixed_region_id={fixed} matched no faces of the supplied surface; "
+            "the fixed-region constraint would be silently vacuous"
+        )
+    return fixed
 
 
 def _vector3(value: tuple[float, float, float], name: str) -> tuple[float, float, float]:
@@ -365,6 +397,12 @@ class NeoHookeanMpmState:
             int(region)
             for region in tri_surface.region_id.to_numpy()[: int(tri_surface.face_count)]
         )
+        fixed_region_id = _validate_fixed_region_contract(
+            fixed_region_id=fixed_region_id,
+            primary_region_id=primary_region_id,
+            secondary_region_id=secondary_region_id,
+            active_region_ids=active_regions,
+        )
         supported_regions = {int(primary_region_id), int(secondary_region_id)}
         fixed_region_clause = ""
         if int(fixed_region_id) >= 0:
@@ -378,17 +416,6 @@ class NeoHookeanMpmState:
                 f"primary_region_id={int(primary_region_id)} and "
                 f"secondary_region_id={int(secondary_region_id)}"
                 f"{fixed_region_clause}"
-            )
-        if int(fixed_region_id) >= 0 and int(fixed_region_id) not in active_regions:
-            # S2-A11c: a fixed region that matches no faces would be a
-            # silently vacuous constraint (the 2s run died exactly this way:
-            # fixed_region_id=5 wired against a mesh subset without the rim).
-            raise ValueError(
-                "initialize_layered_tri_surface: "
-                f"fixed_region_id={int(fixed_region_id)} matched no faces of "
-                "the supplied surface - the fixed-region constraint would be "
-                "silently vacuous; supply the mesh subset containing the "
-                "fixed region or disable the constraint"
             )
         particle_count = int(tri_surface.face_count) * int(layer_count)
         if particle_count > self.particle_capacity:
@@ -841,6 +868,18 @@ class NeoHookeanMpmState:
                     )
                     P = Fp @ second_piola
                     stress_map = P @ Fp.transpose()
+                elif constitutive_model == CONSTITUTIVE_PLANE_STRESS_LINEAR_ELASTIC:
+                    displacement_gradient = Fp - self._identity()
+                    strain = 0.5 * (
+                        displacement_gradient + displacement_gradient.transpose()
+                    )
+                    in_plane_trace = strain[1, 1] + strain[2, 2]
+                    P = ti.Matrix.zero(ti.f32, 3, 3)
+                    for row, column in ti.static(ti.ndrange((1, 3), (1, 3))):
+                        P[row, column] = 2.0 * mu_pa * strain[row, column]
+                    P[1, 1] += lambda_pa * in_plane_trace
+                    P[2, 2] += lambda_pa * in_plane_trace
+                    stress_map = P
                 elif constitutive_model == CONSTITUTIVE_LINEAR_ELASTIC:
                     displacement_gradient = Fp - self._identity()
                     strain = 0.5 * (

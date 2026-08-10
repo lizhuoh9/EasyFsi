@@ -1,7 +1,50 @@
 from __future__ import annotations
 
+import json
 import math
+import os
+import time
 from collections.abc import Mapping
+from dataclasses import asdict
+
+from simulation_core import (
+    boundary_drive_compliance_report,
+    checks_passed,
+    finite_field_diagnostics,
+    vector_norm,
+)
+
+from .cli import FSI_STABILIZATION_PRESET_CONFLICT_POLICY
+from .coupling_common import (
+    fsi_physical_interface_map_stability_report,
+    outlet_to_fsi_volume_source_gate_scope,
+    physical_outlet_to_fsi_volume_source_passes,
+    pressure_flux_trend_report,
+    pressure_outlet_source_ratio_passes,
+)
+from .coupling_legacy import legacy_projected_reduced_fsi_coupling_enabled
+from .history import (
+    _final_row_int,
+    _final_row_number,
+    _final_row_number_or_none,
+    _required_finite_row_number,
+    _required_finite_row_vector,
+    _row_bool,
+    _rows_any_bool,
+    _rows_max_int,
+    count_enabled_unconverged_fsi_rows,
+    finite_required_row_fields_for_mode,
+    finite_required_row_fields_for_solid_model,
+    solid_mpm_force_nonzero_when_pressure_loaded,
+)
+from .outputs import run_process_completion_status
+from .rows import signed_positive_source_flux_ratio
+from .schedules import pressure_schedule_applied_in_history
+from .setup import (
+    reduced_active_water_connectivity,
+    reduced_water_geometry_report,
+    refinement_region_summary,
+)
 
 
 def _context_value(context: Mapping[str, object], name: str):
@@ -150,28 +193,15 @@ def runtime_budget_report(
 
 
 def build_final_run_report(context: Mapping[str, object]) -> dict[str, object]:
-    FSI_STABILIZATION_PRESET_CONFLICT_POLICY = _context_value(context, "FSI_STABILIZATION_PRESET_CONFLICT_POLICY")
-    _final_row_int = _context_value(context, "_final_row_int")
-    _final_row_number = _context_value(context, "_final_row_number")
-    _final_row_number_or_none = _context_value(context, "_final_row_number_or_none")
-    _required_finite_row_vector = _context_value(context, "_required_finite_row_vector")
-    _row_bool = _context_value(context, "_row_bool")
-    _rows_max_int = _context_value(context, "_rows_max_int")
     adaptive_fluid_substeps_enabled = _context_value(context, "adaptive_fluid_substeps_enabled")
     args = _context_value(context, "args")
-    asdict = _context_value(context, "asdict")
-    boundary_drive_compliance_report = _context_value(context, "boundary_drive_compliance_report")
     cad_provenance = _context_value(context, "cad_provenance")
     cg_preconditioner = _context_value(context, "cg_preconditioner")
     cg_tolerance = _context_value(context, "cg_tolerance")
-    checks_passed = _context_value(context, "checks_passed")
-    count_enabled_unconverged_fsi_rows = _context_value(context, "count_enabled_unconverged_fsi_rows")
     effective_fluid_substep_dt_s = _context_value(context, "effective_fluid_substep_dt_s")
     effective_fluid_substeps = _context_value(context, "effective_fluid_substeps")
     effective_multigrid_cycles = _context_value(context, "effective_multigrid_cycles")
     estimated_solid_particle_spacing_m = _context_value(context, "estimated_solid_particle_spacing_m")
-    finite_field_diagnostics = _context_value(context, "finite_field_diagnostics")
-    finite_required_row_fields_for_solid_model = _context_value(context, "finite_required_row_fields_for_solid_model")
     first_step = _context_value(context, "first_step")
     fluid_grid_axis_max_spacing_m = _context_value(context, "fluid_grid_axis_max_spacing_m")
     fluid_grid_axis_min_spacing_m = _context_value(context, "fluid_grid_axis_min_spacing_m")
@@ -208,7 +238,6 @@ def build_final_run_report(context: Mapping[str, object]) -> dict[str, object]:
     fsi_coupling_trust_region_rebound_stop_max_residual_n = _context_value(context, "fsi_coupling_trust_region_rebound_stop_max_residual_n")
     fsi_coupling_trust_region_shrink_factor = _context_value(context, "fsi_coupling_trust_region_shrink_factor")
     fsi_marker_coupling_tolerance_mps = _context_value(context, "fsi_marker_coupling_tolerance_mps")
-    fsi_physical_interface_map_stability_report = _context_value(context, "fsi_physical_interface_map_stability_report")
     fsi_solid_response_dt_s = _context_value(context, "fsi_solid_response_dt_s")
     fsi_solid_response_mobility_coupling = _context_value(context, "fsi_solid_response_mobility_coupling")
     fsi_solid_response_velocity_mobility_coupling = _context_value(context, "fsi_solid_response_velocity_mobility_coupling")
@@ -228,58 +257,42 @@ def build_final_run_report(context: Mapping[str, object]) -> dict[str, object]:
     interface_reaction_robin_impedance_ns_m = _context_value(context, "interface_reaction_robin_impedance_ns_m")
     interface_reaction_robin_matrix_impedance_ns_m = _context_value(context, "interface_reaction_robin_matrix_impedance_ns_m")
     interface_reaction_robin_target_mode = _context_value(context, "interface_reaction_robin_target_mode")
-    json = _context_value(context, "json")
-    legacy_projected_reduced_fsi_coupling_enabled = _context_value(context, "legacy_projected_reduced_fsi_coupling_enabled")
     material = _context_value(context, "material")
-    math = _context_value(context, "math")
     max_wall_time_s = _context_value(context, "max_wall_time_s")
     membrane_thickness_scale = _context_value(context, "membrane_thickness_scale")
     multigrid_cycles = _context_value(context, "multigrid_cycles")
-    os = _context_value(context, "os")
-    outlet_to_fsi_volume_source_gate_scope = _context_value(context, "outlet_to_fsi_volume_source_gate_scope")
     output_dir = _context_value(context, "output_dir")
     partial_run_reason = _context_value(context, "partial_run_reason")
     partial_run_stopped = _context_value(context, "partial_run_stopped")
-    physical_outlet_to_fsi_volume_source_passes = _context_value(context, "physical_outlet_to_fsi_volume_source_passes")
     pressure_boundary_mapping = _context_value(context, "pressure_boundary_mapping")
     pressure_closure_normal = _context_value(context, "pressure_closure_normal")
     pressure_far_side_normal_sign = _context_value(context, "pressure_far_side_normal_sign")
-    pressure_flux_trend_report = _context_value(context, "pressure_flux_trend_report")
     pressure_load_direction = _context_value(context, "pressure_load_direction")
     pressure_load_region_id = _context_value(context, "pressure_load_region_id")
     pressure_load_source_region_id = _context_value(context, "pressure_load_source_region_id")
     pressure_outlet_boundary_report = _context_value(context, "pressure_outlet_boundary_report")
-    pressure_outlet_source_ratio_passes = _context_value(context, "pressure_outlet_source_ratio_passes")
     pressure_outlet_source_ratio_tolerance = _context_value(context, "pressure_outlet_source_ratio_tolerance")
     pressure_outlet_zmin_enabled = _context_value(context, "pressure_outlet_zmin_enabled")
     pressure_projection_budget = _context_value(context, "pressure_projection_budget")
-    pressure_schedule_applied_in_history = _context_value(context, "pressure_schedule_applied_in_history")
     pressure_schedule_input = _context_value(context, "pressure_schedule_input")
     pressure_solver_name = _context_value(context, "pressure_solver_name")
     primary_shell_region_id = _context_value(context, "primary_shell_region_id")
     process_path = _context_value(context, "process_path")
     projection_divergence_cleanup_iterations = _context_value(context, "projection_divergence_cleanup_iterations")
     real_cad_step_binding = _context_value(context, "real_cad_step_binding")
-    reduced_active_water_connectivity = _context_value(context, "reduced_active_water_connectivity")
-    reduced_water_geometry_report = _context_value(context, "reduced_water_geometry_report")
-    refinement_region_summary = _context_value(context, "refinement_region_summary")
     region14_aperture_carve_enabled = _context_value(context, "region14_aperture_carve_enabled")
     region14_aperture_carve_source = _context_value(context, "region14_aperture_carve_source")
     region14_aperture_geometry = _context_value(context, "region14_aperture_geometry")
     reuse_accepted_fsi_trial_state = _context_value(context, "reuse_accepted_fsi_trial_state")
     rows = _context_value(context, "rows")
     run_checkpoint_path = _context_value(context, "run_checkpoint_path")
-    run_process_completion_status = _context_value(context, "run_process_completion_status")
-    runtime_budget_report = _context_value(context, "runtime_budget_report")
     secondary_shell_region_id = _context_value(context, "secondary_shell_region_id")
-    signed_positive_source_flux_ratio = _context_value(context, "signed_positive_source_flux_ratio")
     simulator = _context_value(context, "simulator")
     solid_density_scale = _context_value(context, "solid_density_scale")
     solid_mpm_bounds_max_m = _context_value(context, "solid_mpm_bounds_max_m")
     solid_mpm_bounds_min_m = _context_value(context, "solid_mpm_bounds_min_m")
     solid_mpm_bounds_padding_m = _context_value(context, "solid_mpm_bounds_padding_m")
     solid_mpm_flip_blend = _context_value(context, "solid_mpm_flip_blend")
-    solid_mpm_force_nonzero_when_pressure_loaded = _context_value(context, "solid_mpm_force_nonzero_when_pressure_loaded")
     solid_mpm_substeps = _context_value(context, "solid_mpm_substeps")
     solid_sub_dt_s = _context_value(context, "solid_sub_dt_s")
     solid_substep_velocity_damping = _context_value(context, "solid_substep_velocity_damping")
@@ -294,11 +307,8 @@ def build_final_run_report(context: Mapping[str, object]) -> dict[str, object]:
     step_count = _context_value(context, "step_count")
     tail_refinement_geometry = _context_value(context, "tail_refinement_geometry")
     tail_refinement_region = _context_value(context, "tail_refinement_region")
-    time = _context_value(context, "time")
     total_fsi_face_area_m2 = _context_value(context, "total_fsi_face_area_m2")
     tri_metadata = _context_value(context, "tri_metadata")
-    validation_scope_report = _context_value(context, "validation_scope_report")
-    vector_norm = _context_value(context, "vector_norm")
 
     last = rows[-1] if rows else {}
     max_abs_main = max(abs(float(row["main_displacement_z_m"])) for row in rows) if rows else 0.0
@@ -2819,23 +2829,11 @@ def build_final_run_report(context: Mapping[str, object]) -> dict[str, object]:
 
 
 def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, object]:
-    FSI_STABILIZATION_PRESET_CONFLICT_POLICY = _context_value(context, "FSI_STABILIZATION_PRESET_CONFLICT_POLICY")
-    _final_row_int = _context_value(context, "_final_row_int")
-    _final_row_number = _context_value(context, "_final_row_number")
-    _final_row_number_or_none = _context_value(context, "_final_row_number_or_none")
-    _required_finite_row_number = _context_value(context, "_required_finite_row_number")
-    _row_bool = _context_value(context, "_row_bool")
-    _rows_any_bool = _context_value(context, "_rows_any_bool")
-    _rows_max_int = _context_value(context, "_rows_max_int")
     adaptive_fluid_substeps_enabled = _context_value(context, "adaptive_fluid_substeps_enabled")
     args = _context_value(context, "args")
-    asdict = _context_value(context, "asdict")
     cad_provenance = _context_value(context, "cad_provenance")
-    checks_passed = _context_value(context, "checks_passed")
     effective_fluid_substep_dt_s = _context_value(context, "effective_fluid_substep_dt_s")
     effective_fluid_substeps = _context_value(context, "effective_fluid_substeps")
-    finite_field_diagnostics = _context_value(context, "finite_field_diagnostics")
-    finite_required_row_fields_for_mode = _context_value(context, "finite_required_row_fields_for_mode")
     fluid_grid_axis_max_spacing_m = _context_value(context, "fluid_grid_axis_max_spacing_m")
     fluid_grid_axis_min_spacing_m = _context_value(context, "fluid_grid_axis_min_spacing_m")
     fluid_grid_resolution = _context_value(context, "fluid_grid_resolution")
@@ -2859,16 +2857,11 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
     full_pressure_waveform_steps = _context_value(context, "full_pressure_waveform_steps")
     history_path = _context_value(context, "history_path")
     initial_fluid_obstacle_mode = _context_value(context, "initial_fluid_obstacle_mode")
-    json = _context_value(context, "json")
     material = _context_value(context, "material")
-    math = _context_value(context, "math")
     membrane_thickness_scale = _context_value(context, "membrane_thickness_scale")
-    os = _context_value(context, "os")
-    outlet_to_fsi_volume_source_gate_scope = _context_value(context, "outlet_to_fsi_volume_source_gate_scope")
     output_dir = _context_value(context, "output_dir")
     partial_run_reason = _context_value(context, "partial_run_reason")
     partial_run_stopped = _context_value(context, "partial_run_stopped")
-    physical_outlet_to_fsi_volume_source_passes = _context_value(context, "physical_outlet_to_fsi_volume_source_passes")
     pressure_boundary_mapping = _context_value(context, "pressure_boundary_mapping")
     pressure_closure_normal = _context_value(context, "pressure_closure_normal")
     pressure_far_side_normal_sign = _context_value(context, "pressure_far_side_normal_sign")
@@ -2877,26 +2870,21 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
     pressure_load_source_region_id = _context_value(context, "pressure_load_source_region_id")
     pressure_outlet_boundary_report = _context_value(context, "pressure_outlet_boundary_report")
     pressure_outlet_zmin_enabled = _context_value(context, "pressure_outlet_zmin_enabled")
-    pressure_schedule_applied_in_history = _context_value(context, "pressure_schedule_applied_in_history")
     pressure_schedule_input = _context_value(context, "pressure_schedule_input")
     pressure_solver_name = _context_value(context, "pressure_solver_name")
     primary_shell_region_id = _context_value(context, "primary_shell_region_id")
     process_path = _context_value(context, "process_path")
     real_cad_step_binding = _context_value(context, "real_cad_step_binding")
-    reduced_water_geometry_report = _context_value(context, "reduced_water_geometry_report")
     region14_aperture_carve_enabled = _context_value(context, "region14_aperture_carve_enabled")
     region14_aperture_carve_source = _context_value(context, "region14_aperture_carve_source")
     region14_aperture_geometry = _context_value(context, "region14_aperture_geometry")
     rows = _context_value(context, "rows")
-    run_process_completion_status = _context_value(context, "run_process_completion_status")
     secondary_shell_region_id = _context_value(context, "secondary_shell_region_id")
-    signed_positive_source_flux_ratio = _context_value(context, "signed_positive_source_flux_ratio")
     simulator = _context_value(context, "simulator")
     solid_density_scale = _context_value(context, "solid_density_scale")
     solid_mpm_bounds_max_m = _context_value(context, "solid_mpm_bounds_max_m")
     solid_mpm_bounds_min_m = _context_value(context, "solid_mpm_bounds_min_m")
     solid_mpm_bounds_padding_m = _context_value(context, "solid_mpm_bounds_padding_m")
-    solid_mpm_force_nonzero_when_pressure_loaded = _context_value(context, "solid_mpm_force_nonzero_when_pressure_loaded")
     solid_mpm_substeps = _context_value(context, "solid_mpm_substeps")
     solid_sub_dt_s = _context_value(context, "solid_sub_dt_s")
     solid_substep_velocity_damping = _context_value(context, "solid_substep_velocity_damping")
@@ -2908,10 +2896,7 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
     spec = _context_value(context, "spec")
     stable_solid_dt_s = _context_value(context, "stable_solid_dt_s")
     step_count = _context_value(context, "step_count")
-    time = _context_value(context, "time")
     tri_metadata = _context_value(context, "tri_metadata")
-    validation_scope_report = _context_value(context, "validation_scope_report")
-    vector_norm = _context_value(context, "vector_norm")
 
     last = rows[-1] if rows else {}
     max_cfl = max(float(row["cfl"]) for row in rows) if rows else 0.0

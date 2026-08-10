@@ -388,6 +388,41 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
                 constitutive_model="unknown_model",
             )
 
+    def test_plane_stress_linear_elastic_zeroes_out_of_plane_stress(self) -> None:
+        """The vertical-flap 2-D plane is yz, so x is stress-free."""
+
+        deformation_gradient = np.array(
+            [
+                [1.08, 0.03, -0.04],
+                [0.02, 1.05, 0.07],
+                [-0.01, 0.03, 0.96],
+            ],
+            dtype=np.float64,
+        )
+        mu_pa = 3.5e5
+        plane_stress_lambda_pa = 5.0e5
+        displacement_gradient = deformation_gradient - np.eye(3, dtype=np.float64)
+        strain = 0.5 * (displacement_gradient + displacement_gradient.T)
+        in_plane_trace = float(strain[1, 1] + strain[2, 2])
+        expected_stress_map = np.zeros((3, 3), dtype=np.float64)
+        expected_stress_map[1:, 1:] = 2.0 * mu_pa * strain[1:, 1:]
+        expected_stress_map[1, 1] += plane_stress_lambda_pa * in_plane_trace
+        expected_stress_map[2, 2] += plane_stress_lambda_pa * in_plane_trace
+
+        actual_stress_map = _single_particle_constitutive_stress_map(
+            deformation_gradient,
+            constitutive_model="plane_stress_linear_elastic",
+            mu_pa=mu_pa,
+            lambda_pa=plane_stress_lambda_pa,
+        )
+
+        np.testing.assert_allclose(
+            actual_stress_map,
+            expected_stress_map,
+            rtol=5.0e-4,
+            atol=5.0,
+        )
+
     def test_saint_venant_kirchhoff_constitutive_model_is_explicitly_selectable(
         self,
     ) -> None:

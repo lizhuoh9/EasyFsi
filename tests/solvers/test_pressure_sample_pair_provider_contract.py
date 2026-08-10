@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -133,6 +134,135 @@ class PressureSamplePairProviderContractTests(unittest.TestCase):
         self.assertEqual(int(obstacle[inside]), 0)
         self.assertEqual(int(obstacle[outside]), 0)
         self.assertEqual(pair_map.pairs[0].diagnostic_reason, "runtime_dynamic_fluid_side_cell_pair")
+
+    def test_dynamic_pairs_follow_dominant_y_normal_across_thin_wall(self) -> None:
+        provider = _moving_interface_provider()
+        obstacle = np.zeros((8, 8, 8), dtype=np.int32)
+        obstacle[4, 3:5, 4] = 1
+        geometry = {
+            "marker_positions_m": ((0.5, 0.5, 0.5),),
+            "marker_normals": ((0.0, 1.0, 1.0e-14),),
+            "marker_region_ids": (101,),
+            "marker_geometry_revision": 13,
+        }
+
+        pair_map = provider.compute_pairs(
+            geometry,
+            fluid_state={"obstacle": obstacle},
+        )
+
+        inside = pair_map.inside_cells[0]
+        outside = pair_map.outside_cells[0]
+
+        def pressure_pa(cell: tuple[int, int, int]) -> float:
+            return 10.0 + (float(cell[1]) + 0.5) / 8.0
+
+        self.assertLess(inside[1], 4)
+        self.assertGreater(outside[1], 4)
+        self.assertEqual(int(obstacle[inside]), 0)
+        self.assertEqual(int(obstacle[outside]), 0)
+        self.assertLess(pressure_pa(inside) - pressure_pa(outside), 0.0)
+
+    def test_runner_runtime_provider_uses_normal_aware_y_wall_rays(self) -> None:
+        from benchmarks.official import solid_mpm_fsi_runner
+
+        obstacle = np.zeros((8, 8, 8), dtype=np.int32)
+        obstacle[4, 3:5, 4] = 1
+        config = SimpleNamespace(
+            span_m=1.0,
+            duct_height_m=2.0,
+            duct_length_m=1.0,
+            flap_height_m=0.5,
+            flap_thickness_m=0.1,
+            grid_nodes=(8, 8, 8),
+        )
+        pair_map = solid_mpm_fsi_runner._runtime_pressure_pair_anchor_map(
+            {
+                "marker_positions_m": ((0.5, 0.5, 0.5),),
+                "marker_normals": ((0.0, 1.0, 1.0e-14),),
+                "marker_region_ids": (101,),
+            },
+            config,
+            fluid_state={"obstacle": obstacle},
+        )
+
+        inside = pair_map.inside_cells[0]
+        outside = pair_map.outside_cells[0]
+        self.assertLess(inside[1], 4)
+        self.assertGreater(outside[1], 4)
+        self.assertEqual(int(obstacle[inside]), 0)
+        self.assertEqual(int(obstacle[outside]), 0)
+
+    def test_normal_aware_rays_are_explicit_and_legacy_default_stays_anchored(
+        self,
+    ) -> None:
+        arguments = {
+            "marker_positions_m": ((0.5, 0.5, 0.75),),
+            "marker_normals": ((0.8, 0.0, 0.6),),
+            "marker_region_ids": (101,),
+            "domain_bounds_m": ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+            "grid_nodes": (4, 4, 4),
+            "anchor_axis": 2,
+            "inside_axis_position_m": 0.5,
+        }
+
+        function_default = compute_runtime_anchored_cell_pair_map(**arguments)
+        function_explicit_legacy = compute_runtime_anchored_cell_pair_map(
+            normal_aware_rays=False,
+            **arguments,
+        )
+        function_normal_aware = compute_runtime_anchored_cell_pair_map(
+            normal_aware_rays=True,
+            **arguments,
+        )
+        provider_default = RuntimeAnchoredCellPairProvider(
+            domain_bounds_m=arguments["domain_bounds_m"],
+            grid_nodes=arguments["grid_nodes"],
+            anchor_axis=2,
+            inside_axis_position_m=0.5,
+        ).compute_pairs(
+            {
+                "marker_positions_m": arguments["marker_positions_m"],
+                "marker_normals": arguments["marker_normals"],
+                "marker_region_ids": arguments["marker_region_ids"],
+            }
+        )
+
+        for legacy_pair_map in (
+            function_default,
+            function_explicit_legacy,
+            provider_default,
+        ):
+            self.assertEqual(legacy_pair_map.inside_cells, ((2, 2, 2),))
+            self.assertEqual(legacy_pair_map.outside_cells, ((2, 2, 3),))
+        self.assertEqual(function_normal_aware.inside_cells, ((1, 2, 3),))
+        self.assertEqual(function_normal_aware.outside_cells, ((3, 2, 3),))
+
+    def test_normal_aware_rays_reject_f32_scale_ambiguous_normal(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            compute_runtime_anchored_cell_pair_map(
+                marker_positions_m=((0.5, 0.5, 0.5),),
+                marker_normals=((1.0, 1.0 - 5.0e-8, 0.0),),
+                marker_region_ids=(101,),
+                domain_bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+                grid_nodes=(4, 4, 4),
+                anchor_axis=2,
+                inside_axis_position_m=0.5,
+                normal_aware_rays=True,
+            )
+
+    def test_normal_aware_rays_mode_requires_a_bool(self) -> None:
+        with self.assertRaisesRegex(TypeError, "normal_aware_rays must be a bool"):
+            compute_runtime_anchored_cell_pair_map(
+                marker_positions_m=((0.5, 0.5, 0.5),),
+                marker_normals=((0.0, 0.0, 1.0),),
+                marker_region_ids=(101,),
+                domain_bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+                grid_nodes=(4, 4, 4),
+                anchor_axis=2,
+                inside_axis_position_m=0.5,
+                normal_aware_rays=1,
+            )
 
     def test_linear_pressure_field_load_is_translation_invariant_after_refresh(self) -> None:
         provider = _moving_interface_provider()
@@ -278,16 +408,39 @@ class PressureSamplePairProviderContractTests(unittest.TestCase):
                 anchor_axis=2,
                 inside_axis_position_m=0.5,
             )
-        with self.assertRaisesRegex(ValueError, "nonzero anchor-axis"):
+        with self.assertRaisesRegex(ValueError, "non-degenerate"):
             compute_runtime_anchored_cell_pair_map(
                 marker_positions_m=((0.5, 0.5, 0.5),),
-                marker_normals=((1.0, 0.0, 0.0),),
+                marker_normals=((0.0, 0.0, 0.0),),
                 marker_region_ids=(101,),
                 domain_bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
                 grid_nodes=(4, 4, 4),
                 anchor_axis=2,
                 inside_axis_position_m=0.5,
+                normal_aware_rays=True,
             )
+
+    def test_invalid_marker_normals_fail_closed(self) -> None:
+        arguments = {
+            "marker_positions_m": ((0.5, 0.5, 0.5),),
+            "marker_region_ids": (101,),
+            "domain_bounds_m": ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+            "grid_nodes": (4, 4, 4),
+            "anchor_axis": 2,
+            "inside_axis_position_m": 0.5,
+            "normal_aware_rays": True,
+        }
+        for normal, error in (
+            ((float("nan"), 0.0, 1.0), "finite"),
+            ((0.0, 0.0, 0.0), "non-degenerate"),
+            ((1.0, 1.0, 0.0), "ambiguous"),
+        ):
+            with self.subTest(normal=normal):
+                with self.assertRaisesRegex(ValueError, error):
+                    compute_runtime_anchored_cell_pair_map(
+                        marker_normals=(normal,),
+                        **arguments,
+                    )
 
     def test_invalid_provider_geometry_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "outside_axis_offset_cells"):
@@ -381,6 +534,7 @@ def _moving_interface_provider() -> RuntimeAnchoredCellPairProvider:
         anchor_axis=2,
         inside_axis_position_m=0.5,
         outside_axis_offset_cells=1,
+        normal_aware_rays=True,
     )
 
 

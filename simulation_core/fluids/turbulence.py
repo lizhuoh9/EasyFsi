@@ -145,6 +145,212 @@ class SSTLocalSourceStep:
             object.__setattr__(self, descriptor.name, _readonly_array(getattr(self, descriptor.name)))
 
 
+@dataclass(frozen=True)
+class SSTWallCorrelationResult:
+    """Local Fluent-style, y+-insensitive SST wall-correlation quantities.
+
+    The result is local algebra only: it neither infers wall distance nor
+    applies a boundary condition to a transport field.  Every array is a
+    read-only copy so callers cannot mutate the calculation after the fact.
+    """
+
+    u_star: FloatArray
+    y_plus: FloatArray
+    u_laminar_plus: FloatArray
+    u_turbulent_plus: FloatArray
+    u_plus: FloatArray
+    u_tau: FloatArray
+    wall_shear_stress: FloatArray
+    kinematic_wall_traction_coefficient: FloatArray
+    d_u_turbulent_plus_d_y_plus: FloatArray
+    omega_laminar_plus: FloatArray
+    omega_turbulent_plus: FloatArray
+    omega_plus: FloatArray
+    wall_specific_dissipation_rate: FloatArray
+    production_laminar: FloatArray
+    production_turbulent: FloatArray
+    wall_production: FloatArray
+
+    def __post_init__(self) -> None:
+        for descriptor in fields(self):
+            object.__setattr__(self, descriptor.name, _readonly_array(getattr(self, descriptor.name)))
+
+
+def sst_wall_correlation(
+    *,
+    relative_tangential_velocity: ArrayLike,
+    wall_distance: ArrayLike,
+    turbulent_kinetic_energy: ArrayLike,
+    specific_dissipation_rate: ArrayLike,
+    density: ArrayLike,
+    kinematic_viscosity: ArrayLike,
+) -> SSTWallCorrelationResult:
+    """Evaluate Fluent's y+-insensitive ``correlation`` wall algebra.
+
+    ``relative_tangential_velocity`` may be signed; its magnitude defines the
+    wall law.  Turbulent kinetic energy is non-negative, while the other fluid
+    state inputs are positive.  ``specific_dissipation_rate`` is the cell
+    value used by the correlation-production branch (not the wall omega
+    target). This function intentionally leaves transport and boundary
+    enforcement to the caller.
+    """
+
+    values = _broadcast_named(
+        relative_tangential_velocity=relative_tangential_velocity,
+        wall_distance=wall_distance,
+        turbulent_kinetic_energy=turbulent_kinetic_energy,
+        specific_dissipation_rate=specific_dissipation_rate,
+        density=density,
+        kinematic_viscosity=kinematic_viscosity,
+    )
+    relative_velocity = values["relative_tangential_velocity"]
+    _require_finite("relative_tangential_velocity", relative_velocity)
+    _require_positive("wall_distance", values["wall_distance"])
+    _require_non_negative(
+        "turbulent_kinetic_energy",
+        values["turbulent_kinetic_energy"],
+    )
+    _require_positive("specific_dissipation_rate", values["specific_dissipation_rate"])
+    _require_positive("density", values["density"])
+    _require_positive("kinematic_viscosity", values["kinematic_viscosity"])
+
+    # Fluent's y+-insensitive SST correlation constants, kept here rather
+    # than borrowing the transport-model constants because the two models use
+    # different calibrated wall-law values (notably kappa).
+    kappa = 0.4187
+    e_constant = 9.793
+    c_mu = beta_star = 0.09
+    beta_i = 0.075
+    c_calib = 1.0 / 3.0
+    c_exp = 1.3
+
+    dy = values["wall_distance"]
+    k = values["turbulent_kinetic_energy"]
+    omega = values["specific_dissipation_rate"]
+    rho = values["density"]
+    nu = values["kinematic_viscosity"]
+    speed = np.abs(relative_velocity)
+
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        u_star = np.sqrt(nu * speed / dy + np.sqrt(c_mu) * k)
+        y_plus = dy * u_star / nu
+        u_laminar_plus = y_plus
+        u_turbulent_plus = np.log(e_constant * np.maximum(y_plus, 0.2)) / kappa
+        # Algebraically equivalent to ``(a**-4 + b**-4)**-0.25``, but
+        # remains finite when the laminar branch is extremely small (the
+        # production solver evaluates this law in f32).
+        u_plus_min = np.minimum(u_laminar_plus, u_turbulent_plus)
+        u_plus_max = np.maximum(u_laminar_plus, u_turbulent_plus)
+        u_plus_ratio = np.divide(
+            u_plus_min,
+            u_plus_max,
+            out=np.zeros_like(u_plus_min),
+            where=u_plus_max > 0.0,
+        )
+        u_plus = u_plus_min / (1.0 + u_plus_ratio**4.0) ** 0.25
+        u_tau = np.divide(
+            speed,
+            u_plus,
+            out=np.zeros_like(speed),
+            where=u_plus > 0.0,
+        )
+        wall_shear_stress = rho * u_tau * u_star
+        kinematic_wall_traction_coefficient = np.divide(
+            u_star,
+            u_plus,
+            out=np.array(nu / dy, copy=True),
+            where=u_plus > 0.0,
+        )
+        d_u_turbulent_plus_d_y_plus = np.where(
+            y_plus > 0.2,
+            1.0 / (kappa * y_plus),
+            0.0,
+        )
+        omega_laminar_plus = np.divide(
+            c_calib * 6.0,
+            beta_i * y_plus**2.0,
+            out=np.full_like(y_plus, np.inf),
+            where=y_plus > 0.0,
+        )
+        omega_turbulent_plus = d_u_turbulent_plus_d_y_plus / np.sqrt(beta_star)
+        omega_plus = omega_laminar_plus * (
+            1.0 + (omega_turbulent_plus / omega_laminar_plus) ** c_exp
+        ) ** (1.0 / c_exp)
+        regular_wall_omega = u_star**2.0 / nu * omega_plus
+        laminar_wall_omega = c_calib * 6.0 * nu / (beta_i * dy**2.0)
+        wall_specific_dissipation_rate = np.where(
+            y_plus <= 0.2,
+            laminar_wall_omega,
+            regular_wall_omega,
+        )
+        dynamic_viscosity = rho * nu
+        production_laminar = (
+            rho
+            * k
+            / omega
+            * (wall_shear_stress / dynamic_viscosity) ** 2.0
+        )
+        production_turbulent = (
+            wall_shear_stress**2.0
+            / dynamic_viscosity
+            * d_u_turbulent_plus_d_y_plus
+        )
+        wall_production = np.divide(
+            production_laminar * production_turbulent,
+            production_laminar + production_turbulent,
+            out=np.zeros_like(production_laminar),
+            where=(production_laminar + production_turbulent) > 0.0,
+        )
+
+    for name, value in (
+        ("u_star", u_star),
+        ("y_plus", y_plus),
+        ("u_laminar_plus", u_laminar_plus),
+        ("u_turbulent_plus", u_turbulent_plus),
+        ("u_plus", u_plus),
+        ("u_tau", u_tau),
+        ("wall_shear_stress", wall_shear_stress),
+        ("kinematic_wall_traction_coefficient", kinematic_wall_traction_coefficient),
+        ("d_u_turbulent_plus_d_y_plus", d_u_turbulent_plus_d_y_plus),
+        ("omega_turbulent_plus", omega_turbulent_plus),
+        ("wall_specific_dissipation_rate", wall_specific_dissipation_rate),
+        ("production_laminar", production_laminar),
+        ("production_turbulent", production_turbulent),
+        ("wall_production", wall_production),
+    ):
+        _require_finite(name, value)
+
+    # At the exact laminar limit y+ == 0 the two nondimensional omega
+    # quantities diverge, while their dimensional product has the finite
+    # analytic limit evaluated above.  Preserve that mathematical distinction
+    # instead of hiding it behind an arbitrary positive y+ floor.
+    for name, value in (
+        ("omega_laminar_plus", omega_laminar_plus),
+        ("omega_plus", omega_plus),
+    ):
+        if np.any(np.isnan(value)) or np.any(value <= 0.0):
+            raise ValueError(f"{name} must be positive and not NaN")
+
+    return SSTWallCorrelationResult(
+        u_star=u_star,
+        y_plus=y_plus,
+        u_laminar_plus=u_laminar_plus,
+        u_turbulent_plus=u_turbulent_plus,
+        u_plus=u_plus,
+        u_tau=u_tau,
+        wall_shear_stress=wall_shear_stress,
+        kinematic_wall_traction_coefficient=kinematic_wall_traction_coefficient,
+        d_u_turbulent_plus_d_y_plus=d_u_turbulent_plus_d_y_plus,
+        omega_laminar_plus=omega_laminar_plus,
+        omega_turbulent_plus=omega_turbulent_plus,
+        omega_plus=omega_plus,
+        wall_specific_dissipation_rate=wall_specific_dissipation_rate,
+        production_laminar=production_laminar,
+        production_turbulent=production_turbulent,
+        wall_production=wall_production,
+    )
+
+
 def validate_sst_state(
     *,
     turbulent_kinetic_energy: ArrayLike,
@@ -467,10 +673,12 @@ __all__ = [
     "SSTConstants",
     "SSTLocalSourceStep",
     "SSTValidatedState",
+    "SSTWallCorrelationResult",
     "blend_sst_coefficients",
     "sst_blending_functions",
     "sst_eddy_viscosity",
     "sst_local_source_step",
     "sst_production_limiter",
+    "sst_wall_correlation",
     "validate_sst_state",
 ]

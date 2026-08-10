@@ -483,6 +483,12 @@ class HibmMpmMarkerMacConstraintOperator:
                             same_index = same_index and (
                                 self._stencil_free[second_row, second_support] != 0
                             )
+                            same_index = same_index and (
+                                self._stencil_weight[first_row, first_support] != 0.0
+                            )
+                            same_index = same_index and (
+                                self._stencil_weight[second_row, second_support] != 0.0
+                            )
                             same_index = same_index and first_index.x >= 0
                             same_index = same_index and second_index.x >= 0
                             same_index = (

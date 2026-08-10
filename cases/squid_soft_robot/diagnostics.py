@@ -3,11 +3,10 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 
-import numpy as np
 
 from simulation_core import vector_norm
 
-from .history import _final_row_number, _required_finite_row_number, _row_bool
+from .history import _required_finite_row_number, _row_bool
 from .source_config import _vector3
 
 def fsi_trial_acceptance_passes(
@@ -203,8 +202,6 @@ def _raise_for_closure_coverage_floor(
     recent = rows[-int(patience):]
     last_value = 0.0
     for row in recent:
-        if field not in row:
-            return
         value = _required_finite_row_number(
             row,
             field,

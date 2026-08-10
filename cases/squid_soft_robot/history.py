@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import math
 import os
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -851,20 +852,37 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
                 continue
             seen.add(key)
             fieldnames.append(key)
-    temp_path = path.with_name(path.name + ".tmp")
-    with temp_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    last_error: PermissionError | None = None
-    for _ in range(WRITE_CSV_REPLACE_ATTEMPTS):
-        try:
-            os.replace(temp_path, path)
-            return
-        except PermissionError as exc:
-            last_error = exc
-            time.sleep(WRITE_CSV_REPLACE_BACKOFF_S)
-    raise last_error
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            newline="",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        last_error: PermissionError | None = None
+        for _ in range(WRITE_CSV_REPLACE_ATTEMPTS):
+            try:
+                os.replace(temp_path, path)
+                temp_path = None
+                return
+            except PermissionError as exc:
+                last_error = exc
+                time.sleep(WRITE_CSV_REPLACE_BACKOFF_S)
+        raise last_error
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 def read_csv_rows(path: Path) -> list[dict[str, object]]:
     if not path.exists():

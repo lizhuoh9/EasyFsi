@@ -134,6 +134,7 @@ class RuntimeAnchoredCellPairProvider:
     anchor_axis: int
     inside_axis_position_m: float
     outside_axis_offset_cells: int = 1
+    normal_aware_rays: bool = False
 
     def compute_pairs(
         self,
@@ -152,6 +153,7 @@ class RuntimeAnchoredCellPairProvider:
             anchor_axis=self.anchor_axis,
             inside_axis_position_m=self.inside_axis_position_m,
             outside_axis_offset_cells=self.outside_axis_offset_cells,
+            normal_aware_rays=self.normal_aware_rays,
             obstacle_cells=_fluid_obstacle_cells(fluid_state),
             marker_geometry_revision=marker_geometry_revision(markers),
         )
@@ -273,6 +275,7 @@ def compute_runtime_anchored_cell_pair_map(
     anchor_axis: int,
     inside_axis_position_m: float,
     outside_axis_offset_cells: int = 1,
+    normal_aware_rays: bool = False,
     obstacle_cells: Any = None,
     marker_geometry_revision: int | None = None,
 ) -> PressureSamplePairMap:
@@ -284,6 +287,8 @@ def compute_runtime_anchored_cell_pair_map(
     axis = int(anchor_axis)
     if axis not in (0, 1, 2):
         raise ValueError("anchor_axis must be 0, 1, or 2")
+    if type(normal_aware_rays) is not bool:
+        raise TypeError("normal_aware_rays must be a bool")
     grid = _grid_nodes(grid_nodes)
     bounds_min = _point3(domain_bounds_m[0], name="domain_bounds_m min")
     bounds_max = _point3(domain_bounds_m[1], name="domain_bounds_m max")
@@ -310,7 +315,10 @@ def compute_runtime_anchored_cell_pair_map(
     ):
         position = _point3(position_value, name="marker_positions_m")
         normal = _point3(normal_value, name="marker_normals")
-        normal_axis_value = normal[axis]
+        normal_axis = _dominant_normal_axis(normal) if normal_aware_rays else axis
+        normal_axis_value = normal[normal_axis]
+        if not math.isfinite(normal_axis_value):
+            raise ValueError("marker normal must contain finite values")
         if abs(normal_axis_value) <= 1.0e-12:
             raise ValueError("marker normal must have nonzero anchor-axis component")
         base_cell = tuple(
@@ -327,16 +335,29 @@ def compute_runtime_anchored_cell_pair_map(
         if obstacle is None:
             inside_cell = list(base_cell)
             outside_cell = list(base_cell)
-            inside_cell[axis] = inside_axis_cell
-            outside_cell[axis] = _clamp_cell(
-                base_cell[axis] + direction * offset,
-                grid[axis],
-            )
+            if normal_axis == axis:
+                # Preserve the original anchored behavior for the declared
+                # axis, including the established z-normal runtime contract.
+                inside_cell[axis] = inside_axis_cell
+                outside_cell[axis] = _clamp_cell(
+                    base_cell[axis] + direction * offset,
+                    grid[axis],
+                )
+            else:
+                inside_cell[normal_axis] = _clamp_cell(
+                    base_cell[normal_axis] - direction * offset,
+                    grid[normal_axis],
+                )
+                outside_cell[normal_axis] = _clamp_cell(
+                    base_cell[normal_axis] + direction * offset,
+                    grid[normal_axis],
+                )
+                diagnostic_reason = "runtime_normal_ray_cell_pair"
         else:
             inside_cell = list(
                 _first_fluid_cell_on_axis_side(
                     base_cell,
-                    axis=axis,
+                    axis=normal_axis,
                     side_direction=-direction,
                     start_offset=offset,
                     grid=grid,
@@ -348,7 +369,7 @@ def compute_runtime_anchored_cell_pair_map(
             outside_cell = list(
                 _first_fluid_cell_on_axis_side(
                     base_cell,
-                    axis=axis,
+                    axis=normal_axis,
                     side_direction=direction,
                     start_offset=offset,
                     grid=grid,
@@ -381,6 +402,28 @@ def compute_runtime_anchored_cell_pair_map(
         ),
         marker_geometry_revision=marker_geometry_revision,
     )
+
+
+def _dominant_normal_axis(normal: Point3) -> int:
+    magnitudes = tuple(abs(float(component)) for component in normal)
+    if not all(math.isfinite(component) for component in magnitudes):
+        raise ValueError("marker normal must contain finite values")
+    largest = max(magnitudes)
+    if largest <= 1.0e-12:
+        raise ValueError("marker normal must be non-degenerate")
+    relative_ambiguity_tolerance = 1.0e-6
+    ambiguity_tolerance = max(
+        1.0e-12,
+        largest * relative_ambiguity_tolerance,
+    )
+    dominant_axes = tuple(
+        axis
+        for axis, magnitude in enumerate(magnitudes)
+        if largest - magnitude <= ambiguity_tolerance
+    )
+    if len(dominant_axes) != 1:
+        raise ValueError("marker normal dominant axis is ambiguous")
+    return dominant_axes[0]
 
 
 def _fluid_obstacle_cells(fluid_state: Any) -> Any:

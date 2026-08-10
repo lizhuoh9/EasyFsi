@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 
@@ -11,8 +11,6 @@ import taichi as ti
 
 from simulation_core import InterfaceReactionRelaxationState
 
-from .history import _final_row_int, _final_row_number, _row_bool, read_csv_rows
-from .schedules import pressure_schedule_dict
 
 RUN_CHECKPOINT_VERSION = 3
 
@@ -49,6 +47,8 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "tail_refinement_padding_m",
     "time_step_scale",
     "solid_model",
+    "fixed_rim_region_id",
+    "neo_fixed_node_lock_policy",
     "solid_mpm_layers",
     "solid_mpm_substeps",
     "membrane_thickness_scale",
@@ -113,6 +113,11 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "fsi_coupling_tolerance_n",
     "fsi_marker_coupling_tolerance_mps",
     "disable_pressure_outlet_zmin",
+    "far_pressure_air_backed",
+    "far_pressure_inside_probe_max_multiplier",
+    "two_sided_probe_max_multiplier",
+    "one_sided_probe_max_multiplier",
+    "far_pressure_air_backed_probe_normal_sign",
     "disable_reduced_obstacles",
     "source_config_intersect_reduced_water_domain",
     "source_config_connect_surface_seeds_to_zmin",
@@ -222,6 +227,13 @@ def checkpoint_run_fingerprint(
         name: getattr(args, name, None)
         for name in CHECKPOINT_ARG_FINGERPRINT_FIELDS
     }
+    if (
+        arg_payload.get("solid_model") == "neo_hookean_mpm"
+        and arg_payload.get("neo_fixed_node_lock_policy") is None
+    ):
+        # Fingerprint the effective runtime policy, so the case default and an
+        # explicit equivalent value remain resume-compatible.
+        arg_payload["neo_fixed_node_lock_policy"] = "pure_fixed_mass"
     if arg_payload.get("source_config") is not None:
         arg_payload["source_config"] = str(Path(str(arg_payload["source_config"])).resolve())
     payload = {

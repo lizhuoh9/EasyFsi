@@ -26,6 +26,7 @@ from .source_config import (
     source_config_requests_region14_aperture_carve,
     source_config_solid_obstacle_particle_region_ids,
     source_config_volume_particle_cache_path,
+    validate_fixed_rim_region_contract,
 )
 from .spec import SquidReducedSpec, required_tuple3
 
@@ -1163,7 +1164,7 @@ def build_tri_surface_diagnostics(
     water_obstacle_mask: np.ndarray | None = None,
     water_grid: CartesianGrid | None = None,
     region_ids: tuple[int, ...] = (7, 8),
-    solid_region_ids: tuple[int, ...] = (7, 8, 5),
+    fixed_rim_region_id: int = 5,
 ) -> tuple[
     TriSurfaceRegionDiagnostics,
     dict[str, object],
@@ -1172,6 +1173,15 @@ def build_tri_surface_diagnostics(
     TriSurfaceRegionDiagnostics,
 ]:
     import trimesh
+
+    if len(region_ids) != 2:
+        raise ValueError("region_ids must contain primary and secondary FSI regions")
+    fixed_rim_region_id = validate_fixed_rim_region_contract(
+        fixed_rim_region_id=fixed_rim_region_id,
+        primary_region_id=region_ids[0],
+        secondary_region_id=region_ids[1],
+    )
+    solid_region_ids = tuple(dict.fromkeys((*region_ids, fixed_rim_region_id)))
 
     mesh_path = _surface_mesh_path(config)
     mesh_scale_to_m = float(config.get("mesh_scale_to_m", 1.0))
@@ -1246,6 +1256,16 @@ def build_tri_surface_diagnostics(
         )
     solid_faces, solid_centroids, solid_areas, solid_normals, solid_region_array, solid_region_face_counts = (
         build_region_subset(solid_region_ids, "solid MPM")
+    )
+    validate_fixed_rim_region_contract(
+        fixed_rim_region_id=fixed_rim_region_id,
+        primary_region_id=region_ids[0],
+        secondary_region_id=region_ids[1],
+        available_region_ids=(
+            int(region_id)
+            for region_id, count in solid_region_face_counts.items()
+            if int(count) > 0
+        ),
     )
     solid_normal_orientation: dict[str, object] = {
         "method": "mesh_face_winding",
@@ -1331,6 +1351,7 @@ def build_tri_surface_diagnostics(
         ),
         "solid_surface_vertex_count": int(tri_surface_mesh.vertex_count),
         "solid_surface_face_count": int(tri_surface_mesh.face_count),
+        "fixed_rim_region_id": int(fixed_rim_region_id),
         "solid_surface_edge_note": "deduplicated from FSI triangles plus fixed rim triangles for TriMooneyShellMpmState",
         "centroid_bounds_min_m": [float(value) for value in np.min(centroids, axis=0)],
         "centroid_bounds_max_m": [float(value) for value in np.max(centroids, axis=0)],

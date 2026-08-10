@@ -72,6 +72,31 @@ def _call_name(call: ast.Call) -> str:
     return ""
 
 
+def _statement_lists(node: ast.AST) -> list[list[ast.stmt]]:
+    """Return every concrete statement list nested below ``node``."""
+
+    result: list[list[ast.stmt]] = []
+    for _, value in ast.iter_fields(node):
+        if isinstance(value, list):
+            statements = [item for item in value if isinstance(item, ast.stmt)]
+            if statements:
+                result.append(statements)
+            for item in value:
+                if isinstance(item, ast.AST):
+                    result.extend(_statement_lists(item))
+        elif isinstance(value, ast.AST):
+            result.extend(_statement_lists(value))
+    return result
+
+
+def _assignment_call_name(statement: ast.stmt) -> tuple[str, str] | None:
+    if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
+        return None
+    if len(statement.targets) != 1 or not isinstance(statement.targets[0], ast.Name):
+        return None
+    return statement.targets[0].id, _call_name(statement.value)
+
+
 def _healthy_canonical_device_report() -> dict[str, object]:
     report: dict[str, object] = {key: 0 for key in CANONICAL_REPORT_KEYS}
     report.update(
@@ -200,6 +225,264 @@ for _method_name in EXPECTED_PREPARE_METHODS:
 
 
 class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
+    def test_preflow_cold_jit_stage_progress_contract_is_host_only(self) -> None:
+        """Preflow must expose fine-grained runner stages without timing I/O."""
+
+        preflow = _function_node("_run_fixed_solid_preflow")
+        advance = _function_node("_flow_advance_current_step")
+        boundary = _function_node("_apply_hibm_sharp_marker_boundary_to_fluid")
+        self.assertIn("preflow_stage_observer", ast.unparse(advance.args))
+        self.assertIn("stage_observer", ast.unparse(boundary.args))
+        canonical_ledger_calls = [
+            call
+            for call in ast.walk(boundary)
+            if isinstance(call, ast.Call)
+            and _call_name(call)
+            == "assemble_velocity_dirichlet_component_face_ledger"
+        ]
+        self.assertEqual(len(canonical_ledger_calls), 1)
+        canonical_ledger_observer_keywords = [
+            keyword
+            for keyword in canonical_ledger_calls[0].keywords
+            if keyword.arg == "stage_observer"
+        ]
+        self.assertEqual(len(canonical_ledger_observer_keywords), 1)
+        self.assertEqual(
+            ast.unparse(canonical_ledger_observer_keywords[0].value),
+            "canonical_ledger_stage_observer",
+        )
+        canonical_ledger_measure_calls = [
+            call
+            for call in ast.walk(boundary)
+            if isinstance(call, ast.Call)
+            and _call_name(call) == "_measure_hibm_sharp_boundary_stage"
+            and len(call.args) >= 2
+            and ast.unparse(call.args[1]) == "'canonical_ledger_build'"
+        ]
+        self.assertEqual(len(canonical_ledger_measure_calls), 1)
+        excluded_wall_time_keywords = [
+            keyword
+            for keyword in canonical_ledger_measure_calls[0].keywords
+            if keyword.arg == "excluded_wall_time"
+        ]
+        self.assertEqual(len(excluded_wall_time_keywords), 1)
+        self.assertIn(
+            "canonical_ledger_observer_wall_time_s",
+            ast.unparse(excluded_wall_time_keywords[0].value),
+        )
+        preflow_source = ast.unparse(preflow)
+        self.assertIn("phase='preflow_stage'", preflow_source)
+        self.assertIn("if progress_observer is not None", preflow_source)
+        self.assertIn(
+            "preflow_stage_observer=preflow_stage_observer",
+            preflow_source,
+        )
+        self.assertIn("PreflowStageObserverError", preflow_source)
+        self.assertGreaterEqual(preflow_source.count("observer_wall_time_s"), 4)
+        observer_handler = next(
+            handler
+            for handler in ast.walk(preflow)
+            if isinstance(handler, ast.ExceptHandler)
+            and isinstance(handler.type, ast.Name)
+            and handler.type.id == "Exception"
+        )
+        raised = next(
+            node for node in ast.walk(observer_handler) if isinstance(node, ast.Raise)
+        )
+        self.assertEqual(ast.unparse(raised.exc.func), "PreflowStageObserverError")
+        self.assertEqual(ast.unparse(raised.cause), "exc")
+        self.assertNotIn("except BaseException as exc", preflow_source)
+        for field_name in (
+            "preflow_step",
+            "preflow_steps_requested",
+            "preflow_steps_completed",
+            "preflow_stage",
+        ):
+            self.assertIn(field_name, preflow_source)
+        required_stages = {
+            "hibm_resource_allocate",
+            "hibm_search_classify",
+            "hibm_internal_obstacle_publish",
+            "hibm_boundary_build",
+            "hibm_velocity_row_assembly",
+            "pre_predictor_hibm",
+            "sst_wall_distance",
+            "sst_transport",
+            "momentum_predictor",
+            "projection_hibm",
+            "main_pressure_projection",
+        }
+        runner_source = RUNNER_PATH.read_text(encoding="utf-8")
+        for stage in required_stages:
+            with self.subTest(stage=stage):
+                self.assertIn(f'"{stage}_before"', runner_source)
+                self.assertIn(f'"{stage}_after"', runner_source)
+        self.assertIn("consistency_hibm_before[", advance_source := ast.unparse(advance))
+        self.assertIn("consistency_pressure_projection_before[", advance_source)
+        indexed_consistency_events = (
+            "consistency_hibm_before",
+            "consistency_hibm_after",
+            "consistency_pressure_projection_before",
+            "consistency_pressure_projection_after",
+        )
+        for event in indexed_consistency_events:
+            with self.subTest(indexed_event=event):
+                event_calls = [
+                    call
+                    for call in ast.walk(advance)
+                    if isinstance(call, ast.Call)
+                    and _call_name(call) == "preflow_stage_observer"
+                    and call.args
+                    and event in ast.unparse(call.args[0])
+                ]
+                self.assertEqual(len(event_calls), 1)
+                self.assertIn(
+                    "consistency_projection_index + 1",
+                    ast.unparse(event_calls[0].args[0]),
+                )
+        apply_calls = [
+            call
+            for call in ast.walk(advance)
+            if isinstance(call, ast.Call)
+            and _call_name(call) == "_apply_hibm_sharp_marker_boundary_to_fluid"
+        ]
+        self.assertGreaterEqual(len(apply_calls), 3)
+        for call in apply_calls:
+            stage_observer_keyword = next(
+                (
+                    keyword
+                    for keyword in call.keywords
+                    if keyword.arg == "stage_observer"
+                ),
+                None,
+            )
+            self.assertIsNotNone(stage_observer_keyword)
+            self.assertEqual(
+                ast.unparse(stage_observer_keyword.value),
+                "preflow_stage_observer",
+            )
+        recursive_calls = [
+            call
+            for call in ast.walk(advance)
+            if isinstance(call, ast.Call)
+            and _call_name(call) == "_flow_advance_current_step"
+        ]
+        self.assertEqual(len(recursive_calls), 1)
+        recursive_observer_keywords = [
+            keyword
+            for keyword in recursive_calls[0].keywords
+            if keyword.arg == "preflow_stage_observer"
+        ]
+        self.assertEqual(len(recursive_observer_keywords), 1)
+        self.assertEqual(
+            ast.unparse(recursive_observer_keywords[0].value),
+            "preflow_stage_observer",
+        )
+        for before, assignment_target, call_name, after in (
+            (
+                "projection_hibm_before",
+                "sharp_boundary_report",
+                "_apply_hibm_sharp_marker_boundary_to_fluid",
+                "projection_hibm_after",
+            ),
+            (
+                "main_pressure_projection_before",
+                "main_flow_report",
+                "_project_current_flow",
+                "main_pressure_projection_after",
+            ),
+            (
+                "consistency_hibm_before",
+                "consistency_boundary_report",
+                "_apply_hibm_sharp_marker_boundary_to_fluid",
+                "consistency_hibm_after",
+            ),
+            (
+                "consistency_pressure_projection_before",
+                "consistency_flow_report",
+                "_project_current_flow",
+                "consistency_pressure_projection_after",
+            ),
+        ):
+            with self.subTest(before=before):
+                matching_statement_lists: list[list[ast.stmt]] = []
+                for statements in _statement_lists(advance):
+                    before_indices = [
+                        index
+                        for index, statement in enumerate(statements)
+                        if before in ast.unparse(statement)
+                    ]
+                    call_indices = [
+                        index
+                        for index, statement in enumerate(statements)
+                        if _assignment_call_name(statement)
+                        == (assignment_target, call_name)
+                    ]
+                    after_indices = [
+                        index
+                        for index, statement in enumerate(statements)
+                        if after in ast.unparse(statement)
+                    ]
+                    if any(
+                        before_index < call_index < after_index
+                        for before_index in before_indices
+                        for call_index in call_indices
+                        for after_index in after_indices
+                    ):
+                        matching_statement_lists.append(statements)
+                self.assertEqual(
+                    len(matching_statement_lists),
+                    1,
+                    "before/call/after must be ordered in one enclosing statement list",
+                )
+        initial_assignment = next(
+            node
+            for node in ast.walk(preflow)
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "preflow_stage_observer"
+        )
+        self.assertEqual(ast.unparse(initial_assignment.value), "None")
+        observer_guard = next(
+            node
+            for node in ast.walk(preflow)
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "progress_observer is not None"
+        )
+        self.assertIn("preflow_stage_observer = emit_preflow_stage", ast.unparse(observer_guard))
+        timer_assignments = [
+            node
+            for node in ast.walk(preflow)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id in {"preflow_flow_advance_wall_time_s", "preflow_step_wall_time_s"}
+                for target in node.targets
+            )
+        ]
+        self.assertEqual(len(timer_assignments), 2)
+        for assignment in timer_assignments:
+            self.assertIsInstance(assignment.value, ast.Call)
+            timer_call = assignment.value
+            self.assertEqual(_call_name(timer_call), "max")
+            self.assertEqual(len(timer_call.args), 2)
+            self.assertEqual(ast.unparse(timer_call.args[0]), "0.0")
+            elapsed_minus_observer = timer_call.args[1]
+            self.assertIsInstance(elapsed_minus_observer, ast.BinOp)
+            self.assertIsInstance(elapsed_minus_observer.op, ast.Sub)
+            self.assertEqual(
+                ast.unparse(elapsed_minus_observer.right),
+                "observer_wall_time_s",
+            )
+        numeric_handlers = [
+            handler
+            for handler in ast.walk(preflow)
+            if isinstance(handler, ast.ExceptHandler)
+            and "FloatingPointError" in ast.unparse(handler.type)
+        ]
+        self.assertEqual(len(numeric_handlers), 1)
+        self.assertNotIn("PreflowStageObserverError", ast.unparse(numeric_handlers[0]))
+
     def test_runner_device_report_key_set_matches_canonical_report_contract(
         self,
     ) -> None:

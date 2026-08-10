@@ -4,14 +4,12 @@ import math
 import os
 import sys
 import time
-from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
 from functools import wraps
 from pathlib import Path
 
 import numpy as np
-import taichi as ti
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -21,121 +19,51 @@ if str(REPO_ROOT) not in sys.path:
 from simulation_core import (
     AxisAlignedBoundary,
     CG_PRECONDITIONER_CHOICES,
-    CartesianGrid,
     CartesianFluidSolver,
     CflSubstepController,
-    FluidDomainSpec,
-    GradedGridSpec,
-    HibmMpmSharpCouplingState,
+    FSI_COUPLING_MODE_HIBM_MPM_SHARP,
     INTERFACE_REACTION_SOLVER_CHOICES,
-    InterfaceReactionFixedPointResult,
     InterfaceReactionRelaxationState,
-    InterfaceReactionTargetEvaluation,
     NeoHookeanMpmState,
     RefinementRegion,
-    SurfaceMesh,
     TaichiRuntimeConfig,
     TriMooneyShellMpmState,
-    TriSurfaceRegionDiagnostics,
-    action_reaction_balance,
     advance_projected_ibm_region_pair_fluid_step,
-    boundary_drive_compliance_report,
-    build_graded_grid,
-    checks_passed,
-    finite_field_diagnostics,
-    hibm_mpm_sharp_step_summary,
     require_implemented_fsi_coupling_mode,
-    robin_neumann_impedance_force,
-    solve_and_apply_interface_reaction_step,
-    update_interface_reaction_for_next_step,
-    vector_norm,
 )
 from simulation_core.materials.hyperelastic import ecoflex_0010_material
 from simulation_core.coupling.pressure_interface import (
     far_pressure_side_normal_sign_from_direction,
 )
-from simulation_core.diagnostics.runtime import init_taichi
 
 from .cli import (
-    FLUID_ADVECTION_SCHEME_CHOICES,
-    FSI_STABILIZATION_PRESET_CHOICES,
     FSI_STABILIZATION_PRESET_CONFLICT_POLICY,
-    FSI_STABILIZATION_PRESET_MANAGED_FIELDS,
     INTERFACE_REACTION_ROBIN_TARGET_CHOICES,
-    PRESSURE_SOLVE_FAILURE_POLICY_CHOICES,
-    PRESSURE_SOLVER_CHOICES,
     fsi_stabilization_effective_parameters_from_args,
     parse_args,
     raise_for_unsupported_hibm_mpm_sharp_iteration_options,
-    resolve_fsi_stabilization_preset_parameters,
 )
 from .checkpointing import (
-    CHECKPOINT_ARG_FINGERPRINT_FIELDS,
-    CHECKPOINT_MARKER_STATE_FIELD_NAMES,
-    RUN_CHECKPOINT_FILENAME,
-    RUN_CHECKPOINT_VERSION,
     checkpoint_path_for_args,
-    checkpoint_run_fingerprint,
     load_run_checkpoint,
-    relaxed_sharp_marker_state_arrays,
-    relaxed_sharp_pressure_neumann_gradient_state_array,
-    restore_sharp_marker_state_arrays,
-    restore_sharp_pressure_neumann_gradient_state_array,
     resume_history_rows_for_checkpoint,
-    _sharp_marker_aitken_relaxation,
-    _sharp_marker_fixed_point_residual_vector_mps,
-    sharp_marker_fixed_point_residual_diagnostics_mps,
-    sharp_marker_fixed_point_residual_mps,
-    sharp_marker_state_arrays,
-    sharp_pressure_neumann_gradient_state_array,
-    validate_checkpoint_run_fingerprint,
     validate_resume_history_checkpoint_alignment,
     write_run_checkpoint,
 )
 from .coupling_common import (
-    _combine_region_pair_vectors,
-    _split_region_pair_vector,
-    _taichi_vector3_to_tuple,
-    fsi_physical_interface_map_stability_passes,
-    fsi_physical_interface_map_stability_report,
-    fsi_same_step_rerun_fluid_substeps,
-    fsi_same_step_rerun_triggered,
     hydraulic_diagnostics,
-    interface_reaction_target_for_mode,
-    outlet_to_fsi_volume_source_gate_scope,
-    physical_outlet_to_fsi_volume_source_passes,
-    physical_positive_source_flux_ratio_passes,
-    pressure_flux_trend_report,
-    pressure_outlet_source_ratio_passes,
-    robin_previous_velocity_for_step,
-    solid_response_constraint_force_mobility_ratio,
 )
 from .coupling_legacy import (
     legacy_projected_reduced_coupling_control,
-    legacy_projected_reduced_fsi_coupling_enabled,
 )
 from .coupling_sharp import (
     build_hibm_mpm_sharp_coupling_state,
     hibm_mpm_sharp_coupling_control,
     raise_for_unsupported_hibm_mpm_sharp_robin_options,
 )
-from .diagnostics import (
-    _raise_for_closure_coverage_floor,
-    _raise_for_step_numerical_guard,
-    _raise_for_step_solid_out_of_bounds_guard,
-    force_decomposition_report,
-    fsi_trial_acceptance_passes,
-    fsi_trial_acceptance_rejection_reason,
-    sharp_report_fluid_projection_failure_reason,
-)
-from .rows import build_hibm_mpm_sharp_case_row, signed_positive_source_flux_ratio
 from .runtime_state import ReducedSquidFSI
 from .setup import (
-    _cell_indices_for_points,
-    _clear_surface_region_normal_probe_obstacle_cells,
-    _connect_surface_seed_components_to_zmin,
     _solid_band_protection_mask_from_cells,
-    _surface_region_seed_mask,
     build_source_config_fluid_obstacle_mask,
     build_tri_surface_diagnostics,
     cartesian_grid_axis_max_spacing_m,
@@ -145,10 +73,7 @@ from .setup import (
     compute_region_geometry_stats,
     effective_fluid_substeps_for_grid,
     fluid_grid_resolution_report,
-    nozzle_radius_at_z_m,
-    nozzle_taper_geometry,
     pressure_projection_budget_report,
-    reduced_active_water_connectivity,
     reduced_water_geometry_report,
     refinement_region_summary,
     resolve_divergence_cleanup_iterations,
@@ -163,93 +88,48 @@ from .setup import (
 from .summary import (
     build_final_run_report,
     build_sharp_case_run_report,
-    runtime_budget_report,
-    validation_scope_report,
 )
 from .history import (
-    FINITE_REQUIRED_ROW_FIELDS,
-    HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS,
-    NEO_HOOKEAN_REQUIRED_ROW_FIELDS,
-    _final_row_int,
-    _final_row_number,
-    _final_row_number_or_none,
-    _required_finite_report_number,
-    _required_finite_row_number,
-    _required_finite_row_vector,
-    _required_finite_triplet,
-    _row_bool,
-    _rows_any_bool,
-    _rows_max_int,
-    count_enabled_unconverged_fsi_rows,
-    divergence_sample_report_fields,
-    finite_required_row_fields_for_mode,
-    finite_required_row_fields_for_solid_model,
     read_csv_rows,
-    required_fluid_impulse_report,
-    required_projected_ibm_force_report,
-    solid_force_vector_from_report,
-    solid_mpm_force_nonzero_when_pressure_loaded,
     write_csv,
 )
 from .fluid_step import (
     build_projected_ibm_region_pair_step_config,
-    z_displacement_vector,
     z_velocity_vector,
 )
 from .solid_step import build_solid_substep_plan
+from .step_context import (
+    StepLoopCallbacks,
+    StepLoopContext,
+    StepLoopMutableState,
+    StepLoopResources,
+    StepLoopSettings,
+)
 from .step_loop import run_squid_step_loop
-from .outputs import run_process_completion_status
 from .schedules import (
     PRESSURE_SCHEDULE_FIELDS,
-    pressure_schedule_applied_in_history,
-    pressure_schedule_dict,
-    pressure_schedule_from_config,
     pressure_schedule_pa,
     pressure_schedule_step_end_pa,
     spec_with_pressure_schedule_overrides,
 )
-from .snapshots import (
-    _write_fluid_snapshot_npz,
-    _write_hibm_high_residual_cell_dump,
-    _write_hibm_pressure_neumann_invalid_row_dump,
-    _write_hibm_zero_correctable_cell_dump,
-    _write_step_failure_artifacts,
-)
 from .source_config import (
-    DEFAULT_SOURCE_CONFIG,
-    PressureBoundaryShellMapping,
-    _face_ids_for_region,
-    _selection_ids_as_int_tuple,
     _source_config_pressure_load_direction,
     _vector3,
     load_source_config,
     source_config_cad_provenance_report,
     source_config_pressure_boundary_shell_mapping,
-    source_config_pressure_load_region_id,
     source_config_requests_fluid_active_mask,
     source_config_requests_reduced_water_intersection,
     source_config_requests_region14_aperture_carve,
-    source_config_shell_region_pair,
-    source_config_solid_obstacle_particle_region_ids,
-    source_config_volume_particle_cache_path,
+    validate_fixed_rim_region_contract,
 )
 from .spec import (
-    SquidReducedSpec,
     _finite_positive_scale,
     infer_spec,
-    required_tuple3,
     resolve_step_count,
     shell_surface_mass_budget,
     spec_with_membrane_thickness_scale,
 )
-
-
-# Windows MoveFileEx(REPLACE_EXISTING) fails with EACCES while ANY external
-# process (a monitor, Excel, antivirus, an indexer) holds the destination
-# open without FILE_SHARE_DELETE. 2026-06-13 incident: a monitoring reader
-# killed the 4000-step production run at step 506 through exactly this
-# window. Transient holders are absorbed by retrying; a persistent holder
-# still raises after the budget (5 s) - never hang, never silently drop.
 
 
 class SourceConfigNotFoundError(FileNotFoundError):
@@ -321,12 +201,68 @@ def _run_process_failure_guard(func):
     return wrapper
 
 
+def _validated_probe_multiplier(value: object, *, option_name: str) -> float:
+    multiplier = float(value)
+    if not math.isfinite(multiplier) or multiplier < 3.0:
+        raise ValueError(f"{option_name} must be finite and >= 3")
+    return multiplier
+
+
+def validate_sharp_case_cli_contract(args: argparse.Namespace) -> None:
+    if str(args.fsi_coupling_mode) != FSI_COUPLING_MODE_HIBM_MPM_SHARP:
+        return
+    if bool(args.far_pressure_air_backed) and bool(args.disable_pressure_outlet_zmin):
+        raise ValueError(
+            "air-backed far-pressure classification requires the z-min pressure outlet; "
+            "enable the outlet or pass --no-far-pressure-air-backed"
+        )
+    _validated_probe_multiplier(
+        args.far_pressure_inside_probe_max_multiplier,
+        option_name="--far-pressure-inside-probe-max-multiplier",
+    )
+    _validated_probe_multiplier(
+        args.two_sided_probe_max_multiplier,
+        option_name="--two-sided-probe-max-multiplier",
+    )
+    _validated_probe_multiplier(
+        args.one_sided_probe_max_multiplier,
+        option_name="--one-sided-probe-max-multiplier",
+    )
+    seed_normal_sign = float(args.far_pressure_air_backed_probe_normal_sign)
+    if not math.isfinite(seed_normal_sign) or seed_normal_sign not in (-1.0, 0.0, 1.0):
+        raise ValueError("air-backed probe normal sign must be -1.0, 0.0, or 1.0")
+
+
+def resolve_neo_fixed_node_lock_policy(args: argparse.Namespace) -> str | None:
+    configured = args.neo_fixed_node_lock_policy
+    if str(args.solid_model) == "neo_hookean_mpm":
+        return "pure_fixed_mass" if configured is None else str(configured)
+    if configured is not None:
+        raise ValueError(
+            "--neo-fixed-node-lock-policy is a Neo-only option; Tri-Mooney "
+            "clamps fixed rim particles directly"
+        )
+    return None
+
+
 @_run_process_failure_guard
 def run(args: argparse.Namespace) -> dict[str, object]:
     # Validate the input config FIRST: everything below (including the
     # output-dir mkdir and the run_process.json write further down) must not
     # happen when the source config does not exist.
     _validate_source_config_exists(args)
+    validate_sharp_case_cli_contract(args)
+    fixed_rim_region_id = int(args.fixed_rim_region_id)
+    neo_fixed_node_lock_policy = resolve_neo_fixed_node_lock_policy(args)
+    far_pressure_air_backed = bool(args.far_pressure_air_backed)
+    far_pressure_inside_probe_max_multiplier = float(
+        args.far_pressure_inside_probe_max_multiplier
+    )
+    two_sided_probe_max_multiplier = float(args.two_sided_probe_max_multiplier)
+    one_sided_probe_max_multiplier = float(args.one_sided_probe_max_multiplier)
+    far_pressure_air_backed_probe_normal_sign = float(
+        args.far_pressure_air_backed_probe_normal_sign
+    )
     membrane_thickness_scale = _finite_positive_scale(
         args.membrane_thickness_scale,
         option_name="--membrane-thickness-scale",
@@ -336,8 +272,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         option_name="--solid-density-scale",
     )
     interface_reaction_relaxation = float(args.interface_reaction_relaxation)
-    if not math.isfinite(interface_reaction_relaxation) or not 0.0 <= interface_reaction_relaxation <= 1.0:
-        raise ValueError("--interface-reaction-relaxation must be a finite number in [0, 1]")
+    if (
+        not math.isfinite(interface_reaction_relaxation)
+        or not 0.0 <= interface_reaction_relaxation <= 1.0
+    ):
+        raise ValueError(
+            "--interface-reaction-relaxation must be a finite number in [0, 1]"
+        )
     fsi_constraint_force_solid_mobility_ratio = float(
         args.fsi_constraint_force_solid_mobility_ratio
     )
@@ -366,8 +307,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         args.fsi_solid_response_velocity_mobility_coupling
     )
     fsi_velocity_constraint_blend = float(args.fsi_velocity_constraint_blend)
-    if not math.isfinite(fsi_velocity_constraint_blend) or not 0.0 <= fsi_velocity_constraint_blend <= 1.0:
-        raise ValueError("--fsi-velocity-constraint-blend must be a finite number in [0, 1]")
+    if (
+        not math.isfinite(fsi_velocity_constraint_blend)
+        or not 0.0 <= fsi_velocity_constraint_blend <= 1.0
+    ):
+        raise ValueError(
+            "--fsi-velocity-constraint-blend must be a finite number in [0, 1]"
+        )
     fsi_velocity_constraint_solid_mobility_ratio = float(
         args.fsi_velocity_constraint_solid_mobility_ratio
     )
@@ -532,7 +478,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
     fsi_coupling_tolerance_n = float(args.fsi_coupling_tolerance_n)
     if not math.isfinite(fsi_coupling_tolerance_n) or fsi_coupling_tolerance_n < 0.0:
-        raise ValueError("--fsi-coupling-tolerance-n must be a finite non-negative number")
+        raise ValueError(
+            "--fsi-coupling-tolerance-n must be a finite non-negative number"
+        )
     fsi_marker_coupling_tolerance_mps = float(args.fsi_marker_coupling_tolerance_mps)
     if (
         not math.isfinite(fsi_marker_coupling_tolerance_mps)
@@ -546,7 +494,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         not math.isfinite(fsi_coupling_target_map_relaxation)
         or not 0.0 < fsi_coupling_target_map_relaxation <= 1.0
     ):
-        raise ValueError("--fsi-coupling-target-map-relaxation must be a finite number in (0, 1]")
+        raise ValueError(
+            "--fsi-coupling-target-map-relaxation must be a finite number in (0, 1]"
+        )
     fsi_coupling_solver = str(args.fsi_coupling_solver)
     if fsi_coupling_solver not in INTERFACE_REACTION_SOLVER_CHOICES:
         choices = ", ".join(INTERFACE_REACTION_SOLVER_CHOICES)
@@ -600,9 +550,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(
             "--fsi-coupling-trust-region-force-increment-n must be positive or infinity"
         )
-    fsi_coupling_trust_region_adaptive = bool(
-        args.fsi_coupling_trust_region_adaptive
-    )
+    fsi_coupling_trust_region_adaptive = bool(args.fsi_coupling_trust_region_adaptive)
     fsi_coupling_trust_region_shrink_factor = float(
         args.fsi_coupling_trust_region_shrink_factor
     )
@@ -673,9 +621,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "--fsi-coupling-trust-region-rebound-stop-max-residual-n must be "
             "non-negative or infinity"
         )
-    if (
-        fsi_coupling_trust_region_adaptive
-        and math.isinf(fsi_coupling_trust_region_force_increment_n)
+    if fsi_coupling_trust_region_adaptive and math.isinf(
+        fsi_coupling_trust_region_force_increment_n
     ):
         raise ValueError(
             "--fsi-coupling-trust-region-adaptive requires a finite "
@@ -692,9 +639,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     sharp_case_runner_enabled = sharp_coupling_control.enabled
     reuse_accepted_fsi_trial_state = bool(args.reuse_accepted_fsi_trial_state)
-    pressure_outlet_source_ratio_tolerance = float(args.pressure_outlet_source_ratio_tolerance)
-    if not math.isfinite(pressure_outlet_source_ratio_tolerance) or pressure_outlet_source_ratio_tolerance < 0.0:
-        raise ValueError("--pressure-outlet-source-ratio-tolerance must be a finite non-negative number")
+    pressure_outlet_source_ratio_tolerance = float(
+        args.pressure_outlet_source_ratio_tolerance
+    )
+    if (
+        not math.isfinite(pressure_outlet_source_ratio_tolerance)
+        or pressure_outlet_source_ratio_tolerance < 0.0
+    ):
+        raise ValueError(
+            "--pressure-outlet-source-ratio-tolerance must be a finite non-negative number"
+        )
     cg_tolerance = float(args.cg_tolerance)
     if not math.isfinite(cg_tolerance) or cg_tolerance < 0.0:
         raise ValueError("--cg-tolerance must be a finite non-negative number")
@@ -725,10 +679,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "--interface-reaction-robin-matrix-impedance-ns-m must be a "
             "finite non-negative number"
         )
-    interface_reaction_robin_target_mode = str(args.interface_reaction_robin_target_mode)
-    if interface_reaction_robin_target_mode not in INTERFACE_REACTION_ROBIN_TARGET_CHOICES:
+    interface_reaction_robin_target_mode = str(
+        args.interface_reaction_robin_target_mode
+    )
+    if (
+        interface_reaction_robin_target_mode
+        not in INTERFACE_REACTION_ROBIN_TARGET_CHOICES
+    ):
         choices = ", ".join(INTERFACE_REACTION_ROBIN_TARGET_CHOICES)
-        raise ValueError(f"--interface-reaction-robin-target-mode must be one of: {choices}")
+        raise ValueError(
+            f"--interface-reaction-robin-target-mode must be one of: {choices}"
+        )
     raise_for_unsupported_hibm_mpm_sharp_robin_options(
         fsi_coupling_mode=fsi_coupling_mode,
         interface_reaction_robin_impedance_ns_m=(
@@ -797,17 +758,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     spec, pressure_schedule_input = spec_with_pressure_schedule_overrides(
         spec,
-        {
-            field: getattr(args, field, None)
-            for field in PRESSURE_SCHEDULE_FIELDS
-        },
+        {field: getattr(args, field, None) for field in PRESSURE_SCHEDULE_FIELDS},
     )
     baseline_spec = spec
     spec = spec_with_membrane_thickness_scale(spec, membrane_thickness_scale)
     baseline_material = ecoflex_0010_material(poissons_ratio=args.poissons_ratio)
-    solid_density_kgm3 = (
-        float(baseline_material.density_kgm3) * solid_density_scale
-    )
+    solid_density_kgm3 = float(baseline_material.density_kgm3) * solid_density_scale
     material = replace(baseline_material, density_kgm3=solid_density_kgm3)
     material.validate()
     solid_surface_mass_report = shell_surface_mass_budget(
@@ -830,7 +786,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             cad_provenance.get("direct_cad_step_binding", False),
         )
     )
-    if bool(getattr(args, "require_real_cad_step", False)) and not real_cad_step_binding:
+    if (
+        bool(getattr(args, "require_real_cad_step", False))
+        and not real_cad_step_binding
+    ):
         raise ValueError(
             "source config must provide a verified real STEP CAD binding when "
             "--require-real-cad-step is set; cached STL files require matching "
@@ -843,6 +802,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     pressure_load_source_region_id = pressure_boundary_mapping.source_region_id
     primary_shell_region_id = pressure_boundary_mapping.primary_shell_region_id
     secondary_shell_region_id = pressure_boundary_mapping.secondary_shell_region_id
+    validate_fixed_rim_region_contract(
+        fixed_rim_region_id=fixed_rim_region_id,
+        primary_region_id=primary_shell_region_id,
+        secondary_region_id=secondary_shell_region_id,
+    )
     pressure_load_region_id = pressure_boundary_mapping.target_shell_region_id
     pressure_load_direction = _source_config_pressure_load_direction(source_config)
     region14_aperture_geometry = compute_region_geometry_stats(source_config, 14)
@@ -874,7 +838,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         region14_aperture_carve_source = "not_requested"
     elif not region14_aperture_geometry_available:
         region14_aperture_carve_source = "requested_but_unavailable"
-    elif bool(args.use_region14_aperture_carve) and source_config_region14_aperture_requested:
+    elif (
+        bool(args.use_region14_aperture_carve)
+        and source_config_region14_aperture_requested
+    ):
         region14_aperture_carve_source = "source_config_and_cli"
     elif source_config_region14_aperture_requested:
         region14_aperture_carve_source = "source_config"
@@ -906,7 +873,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         tail_target_spacing_m = (
             float(args.tail_refinement_target_spacing_m)
             if args.tail_refinement_target_spacing_m is not None
-            else min(float(spec.tail_membrane_thickness_m), float(args.graded_grid_farfield_spacing_m))
+            else min(
+                float(spec.tail_membrane_thickness_m),
+                float(args.graded_grid_farfield_spacing_m),
+            )
         )
         tail_padding_m = (
             float(args.tail_refinement_padding_m)
@@ -958,7 +928,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             getattr(args, "divergence_cleanup_iterations_explicit", True)
         ),
     )
-    multigrid_cycles = None if args.multigrid_cycles is None else int(args.multigrid_cycles)
+    multigrid_cycles = (
+        None if args.multigrid_cycles is None else int(args.multigrid_cycles)
+    )
     if multigrid_cycles is not None and multigrid_cycles <= 0:
         raise ValueError("--multigrid-cycles must be positive")
     grid_for_effective_cycles = cartesian_grid_for_spec(spec)
@@ -1074,9 +1046,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "interface_reaction_robin_target_mode": (
                 interface_reaction_robin_target_mode
             ),
-            "fsi_coupling_target_map_relaxation": (
-                fsi_coupling_target_map_relaxation
-            ),
+            "fsi_coupling_target_map_relaxation": (fsi_coupling_target_map_relaxation),
             "fsi_coupling_iterations_base": fsi_coupling_iterations,
             "fsi_coupling_adaptive_iterations_max": (
                 fsi_coupling_adaptive_iterations_max
@@ -1126,9 +1096,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "fsi_coupling_trust_region_force_increment_n": (
                 fsi_coupling_trust_region_force_increment_n
             ),
-            "fsi_coupling_trust_region_adaptive": (
-                fsi_coupling_trust_region_adaptive
-            ),
+            "fsi_coupling_trust_region_adaptive": (fsi_coupling_trust_region_adaptive),
             "fsi_coupling_trust_region_shrink_factor": (
                 fsi_coupling_trust_region_shrink_factor
             ),
@@ -1156,7 +1124,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             ),
             "interface_reaction_relaxation": interface_reaction_relaxation,
             "fluid_grid_spacing_m": (
-                None if uniform_spacing_m is None else [float(value) for value in uniform_spacing_m]
+                None
+                if uniform_spacing_m is None
+                else [float(value) for value in uniform_spacing_m]
             ),
             "fluid_grid_min_spacing_m": [
                 float(value) for value in cartesian_grid_axis_min_spacing_m(grid)
@@ -1167,7 +1137,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "fluid_grid_nodes": spec.grid_nodes,
             "fluid_grid_graded_enabled": graded_grid_enabled,
             "fluid_grid_refinement_region_count": (
-                0 if spec.graded_grid is None else len(spec.graded_grid.refinement_regions)
+                0
+                if spec.graded_grid is None
+                else len(spec.graded_grid.refinement_regions)
             ),
             "fluid_grid_resolution": fluid_grid_resolution,
             "tail_refinement_enabled": tail_refinement_region is not None,
@@ -1184,7 +1156,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             ),
             "region14_aperture_carve_enabled": region14_aperture_carve_enabled,
             "region14_aperture_carve_source": region14_aperture_carve_source,
-            "open_downstream_farfield_enabled": bool(spec.downstream_farfield_open_enabled),
+            "open_downstream_farfield_enabled": bool(
+                spec.downstream_farfield_open_enabled
+            ),
             "region14_aperture_geometry": region14_aperture_geometry,
             "reduced_water_geometry": reduced_water_geometry_report(spec),
             "spec": asdict(spec),
@@ -1281,7 +1255,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 source_config_fluid_topology_report.get("final_obstacle_cell_count", 0)
                 or 0
             )
-            total_fluid_cell_count = int(np.prod(tuple(int(value) for value in fluid_grid.grid_nodes)))
+            total_fluid_cell_count = int(
+                np.prod(tuple(int(value) for value in fluid_grid.grid_nodes))
+            )
             if source_config_reduced_water_intersection_requested:
                 simulator.intersect_current_obstacles_with_reduced_squid_water_domain()
                 combined_obstacle_cell_count = simulator.fluid.obstacle_cell_count()
@@ -1296,7 +1272,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         total_fluid_cell_count - pre_intersection_obstacle_cell_count
                     ),
                     "reduced_water_intersection_added_obstacle_cell_count": max(
-                        combined_obstacle_cell_count - pre_intersection_obstacle_cell_count,
+                        combined_obstacle_cell_count
+                        - pre_intersection_obstacle_cell_count,
                         0,
                     ),
                     "fluid_active_cell_count": total_fluid_cell_count
@@ -1345,11 +1322,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         spec=spec,
         probe_distance_m=fluid_probe_distance_m,
         water_obstacle_mask=source_config_water_obstacle_mask,
-        water_grid=fluid_grid if source_config_water_obstacle_mask is not None else None,
+        water_grid=fluid_grid
+        if source_config_water_obstacle_mask is not None
+        else None,
         region_ids=(primary_shell_region_id, secondary_shell_region_id),
-        solid_region_ids=tuple(
-            dict.fromkeys((primary_shell_region_id, secondary_shell_region_id, 5))
-        ),
+        fixed_rim_region_id=fixed_rim_region_id,
     )
     if len(tri_surface_result) == 5:
         (
@@ -1371,13 +1348,39 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(
             "build_tri_surface_diagnostics must return 4 or 5 result entries"
         )
+    solid_region_face_counts = tri_metadata.get("solid_region_face_counts")
+    if isinstance(solid_region_face_counts, Mapping):
+        available_solid_region_ids = (
+            int(region_id)
+            for region_id, count in solid_region_face_counts.items()
+            if int(count) > 0
+        )
+    else:
+        solid_area_by_region = tri_metadata.get("solid_area_m2_by_region", {})
+        if not isinstance(solid_area_by_region, Mapping):
+            raise ValueError(
+                "tri surface diagnostics did not report solid fixed-rim regions"
+            )
+        available_solid_region_ids = (
+            int(region_id)
+            for region_id, area_m2 in solid_area_by_region.items()
+            if float(area_m2) > 0.0
+        )
+    validate_fixed_rim_region_contract(
+        fixed_rim_region_id=fixed_rim_region_id,
+        primary_region_id=primary_shell_region_id,
+        secondary_region_id=secondary_shell_region_id,
+        available_region_ids=available_solid_region_ids,
+    )
     diagnostic_region_normals = tri_metadata.get(
         "diagnostic_area_weighted_normal_by_region",
         {},
     )
     if not isinstance(diagnostic_region_normals, Mapping):
         raise ValueError("tri surface diagnostics did not report region normals")
-    pressure_closure_normal = diagnostic_region_normals.get(str(primary_shell_region_id))
+    pressure_closure_normal = diagnostic_region_normals.get(
+        str(primary_shell_region_id)
+    )
     if pressure_closure_normal is None:
         raise ValueError(
             "tri surface diagnostics did not report a pressure closure normal "
@@ -1409,18 +1412,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "selector": pressure_outlet_boundary.selector,
         }
     )
-    total_fsi_face_area_m2 = (
-        float(
-            tri_metadata["diagnostic_area_m2_by_region"].get(
-                str(primary_shell_region_id),
-                0.0,
-            )
+    total_fsi_face_area_m2 = float(
+        tri_metadata["diagnostic_area_m2_by_region"].get(
+            str(primary_shell_region_id),
+            0.0,
         )
-        + float(
-            tri_metadata["diagnostic_area_m2_by_region"].get(
-                str(secondary_shell_region_id),
-                0.0,
-            )
+    ) + float(
+        tri_metadata["diagnostic_area_m2_by_region"].get(
+            str(secondary_shell_region_id),
+            0.0,
         )
     )
     primary_fsi_face_area_m2 = float(
@@ -1450,12 +1450,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             )
         )
         * spec.tail_membrane_thickness_m
-        + float(tri_metadata["solid_area_m2_by_region"].get("5", 0.0))
+        + float(
+            tri_metadata["solid_area_m2_by_region"].get(
+                str(fixed_rim_region_id),
+                0.0,
+            )
+        )
         * spec.main_membrane_thickness_m
     )
     estimated_solid_particle_count = max(
         1,
-        int(tri_metadata["solid_surface_face_count"]) * max(1, int(args.solid_mpm_layers)),
+        int(tri_metadata["solid_surface_face_count"])
+        * max(1, int(args.solid_mpm_layers)),
     )
     estimated_solid_particle_spacing_m = (
         total_solid_volume_m3 / float(estimated_solid_particle_count)
@@ -1501,7 +1507,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             face_region_id=tri_surface_region_ids,
             primary_region_id=primary_shell_region_id,
             secondary_region_id=secondary_shell_region_id,
-            fixed_region_id=5,
+            fixed_region_id=fixed_rim_region_id,
             primary_thickness_m=spec.main_membrane_thickness_m,
             secondary_thickness_m=spec.tail_membrane_thickness_m,
             runtime=runtime,
@@ -1519,7 +1525,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             layer_count=args.solid_mpm_layers,
             primary_region_id=primary_shell_region_id,
             secondary_region_id=secondary_shell_region_id,
-            fixed_region_id=5,
+            fixed_region_id=fixed_rim_region_id,
             density_kgm3=material.density_kgm3,
             primary_thickness_m=spec.main_membrane_thickness_m,
             secondary_thickness_m=spec.tail_membrane_thickness_m,
@@ -1538,9 +1544,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
 
     def publish_solid_report_to_reduced_state(current_time_s: float, report) -> None:
-        hydraulic_pressure_pa, volume_flux_m3s, nozzle_velocity_z_mps = hydraulic_diagnostics(
-            spec,
-            report.primary_mean_velocity_mps[2],
+        hydraulic_pressure_pa, volume_flux_m3s, nozzle_velocity_z_mps = (
+            hydraulic_diagnostics(
+                spec,
+                report.primary_mean_velocity_mps[2],
+            )
         )
         simulator.set_structure_state(
             time_s=current_time_s + spec.dt_s,
@@ -1610,6 +1618,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     velocity_damping=solid_substep_velocity_damping,
                     primary_region_id=primary_shell_region_id,
                     secondary_region_id=secondary_shell_region_id,
+                    fixed_node_lock_policy=neo_fixed_node_lock_policy,
                     read_report=False,
                 )
             report = solid_mpm.report()
@@ -1627,8 +1636,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         secondary_constraint_force_solid_mobility_ratio: float | None = None,
         primary_velocity_target_solid_mobility_ratio: float | None = None,
         secondary_velocity_target_solid_mobility_ratio: float | None = None,
-        primary_interface_impedance_force_n: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        secondary_interface_impedance_force_n: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        primary_interface_impedance_force_n: tuple[float, float, float] = (
+            0.0,
+            0.0,
+            0.0,
+        ),
+        secondary_interface_impedance_force_n: tuple[float, float, float] = (
+            0.0,
+            0.0,
+            0.0,
+        ),
         fluid_substeps: int | None = None,
         read_full_report: bool = True,
     ):
@@ -1743,7 +1760,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             raise ValueError(
                 f"checkpoint already completed {completed_step} steps, "
                 f"which is not less than requested --steps={step_count}"
-        )
+            )
         rows = read_csv_rows(history_path)
         rows = resume_history_rows_for_checkpoint(
             rows,
@@ -1779,16 +1796,191 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         except (TypeError, ValueError):
             previous_step_fluid_substeps = effective_fluid_substeps
 
-    step_loop_result = run_squid_step_loop({**globals(), **locals()})
-    rows = step_loop_result["rows"]
-    interface_reaction_state = step_loop_result.get(
-        "interface_reaction_state",
-        interface_reaction_state,
+    step_loop_context = StepLoopContext(
+        settings=StepLoopSettings(
+            adaptive_fluid_substeps_enabled=adaptive_fluid_substeps_enabled,
+            cg_preconditioner=cg_preconditioner,
+            cg_tolerance=cg_tolerance,
+            effective_fluid_substeps=effective_fluid_substeps,
+            effective_multigrid_cycles=effective_multigrid_cycles,
+            estimated_solid_particle_spacing_m=estimated_solid_particle_spacing_m,
+            far_pressure_air_backed=far_pressure_air_backed,
+            far_pressure_air_backed_probe_normal_sign=(
+                far_pressure_air_backed_probe_normal_sign
+            ),
+            far_pressure_inside_probe_max_multiplier=(
+                far_pressure_inside_probe_max_multiplier
+            ),
+            fixed_rim_region_id=fixed_rim_region_id,
+            fluid_grid_axis_min_spacing_m=fluid_grid_axis_min_spacing_m,
+            fluid_probe_distance_m=fluid_probe_distance_m,
+            fsi_constraint_force_solid_mobility_ratio=(
+                fsi_constraint_force_solid_mobility_ratio
+            ),
+            fsi_coupling_adaptive_iterations_cfl_threshold=(
+                fsi_coupling_adaptive_iterations_cfl_threshold
+            ),
+            fsi_coupling_adaptive_iterations_max=(fsi_coupling_adaptive_iterations_max),
+            fsi_coupling_adaptive_iterations_residual_threshold_n=(
+                fsi_coupling_adaptive_iterations_residual_threshold_n
+            ),
+            fsi_coupling_iterations=fsi_coupling_iterations,
+            fsi_coupling_max_accepted_residual_n=(fsi_coupling_max_accepted_residual_n),
+            fsi_coupling_mode=fsi_coupling_mode,
+            fsi_coupling_rejected_trial_backtrack=(
+                fsi_coupling_rejected_trial_backtrack
+            ),
+            fsi_coupling_residual_continuation_iterations_max=(
+                fsi_coupling_residual_continuation_iterations_max
+            ),
+            fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max=(
+                fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max
+            ),
+            fsi_coupling_residual_continuation_rebound_secant_factor=(
+                fsi_coupling_residual_continuation_rebound_secant_factor
+            ),
+            fsi_coupling_residual_continuation_rebound_secant_from_best=(
+                fsi_coupling_residual_continuation_rebound_secant_from_best
+            ),
+            fsi_coupling_residual_continuation_threshold_n=(
+                fsi_coupling_residual_continuation_threshold_n
+            ),
+            fsi_coupling_residual_growth_rejection_factor=(
+                fsi_coupling_residual_growth_rejection_factor
+            ),
+            fsi_coupling_same_step_rerun_fluid_substep_factor=(
+                fsi_coupling_same_step_rerun_fluid_substep_factor
+            ),
+            fsi_coupling_same_step_rerun_iterations_max=(
+                fsi_coupling_same_step_rerun_iterations_max
+            ),
+            fsi_coupling_same_step_rerun_residual_threshold_n=(
+                fsi_coupling_same_step_rerun_residual_threshold_n
+            ),
+            fsi_coupling_solver=fsi_coupling_solver,
+            fsi_coupling_target_map_relaxation=fsi_coupling_target_map_relaxation,
+            fsi_coupling_tolerance_n=fsi_coupling_tolerance_n,
+            fsi_coupling_trial_interior_divergence_tolerance=(
+                fsi_coupling_trial_interior_divergence_tolerance
+            ),
+            fsi_coupling_trust_region_adaptive=fsi_coupling_trust_region_adaptive,
+            fsi_coupling_trust_region_force_increment_n=(
+                fsi_coupling_trust_region_force_increment_n
+            ),
+            fsi_coupling_trust_region_growth_factor=(
+                fsi_coupling_trust_region_growth_factor
+            ),
+            fsi_coupling_trust_region_rebound_backtrack=(
+                fsi_coupling_trust_region_rebound_backtrack
+            ),
+            fsi_coupling_trust_region_rebound_factor=(
+                fsi_coupling_trust_region_rebound_factor
+            ),
+            fsi_coupling_trust_region_rebound_stop_factor=(
+                fsi_coupling_trust_region_rebound_stop_factor
+            ),
+            fsi_coupling_trust_region_rebound_stop_max_residual_n=(
+                fsi_coupling_trust_region_rebound_stop_max_residual_n
+            ),
+            fsi_coupling_trust_region_shrink_factor=(
+                fsi_coupling_trust_region_shrink_factor
+            ),
+            fsi_marker_coupling_tolerance_mps=fsi_marker_coupling_tolerance_mps,
+            fsi_solid_response_dt_s=fsi_solid_response_dt_s,
+            fsi_solid_response_mobility_coupling=(fsi_solid_response_mobility_coupling),
+            fsi_solid_response_velocity_mobility_coupling=(
+                fsi_solid_response_velocity_mobility_coupling
+            ),
+            fsi_velocity_constraint_blend=fsi_velocity_constraint_blend,
+            fsi_velocity_constraint_solid_mobility_ratio=(
+                fsi_velocity_constraint_solid_mobility_ratio
+            ),
+            fsi_velocity_target_solid_mobility_ratio=(
+                fsi_velocity_target_solid_mobility_ratio
+            ),
+            full_pressure_waveform_steps=full_pressure_waveform_steps,
+            interface_reaction_aitken=interface_reaction_aitken,
+            interface_reaction_aitken_lower_bound=(
+                interface_reaction_aitken_lower_bound
+            ),
+            interface_reaction_aitken_upper_bound=(
+                interface_reaction_aitken_upper_bound
+            ),
+            interface_reaction_passivity_limit=interface_reaction_passivity_limit,
+            interface_reaction_relaxation=interface_reaction_relaxation,
+            interface_reaction_robin_impedance_ns_m=(
+                interface_reaction_robin_impedance_ns_m
+            ),
+            interface_reaction_robin_matrix_impedance_ns_m=(
+                interface_reaction_robin_matrix_impedance_ns_m
+            ),
+            interface_reaction_robin_target_mode=interface_reaction_robin_target_mode,
+            max_wall_time_s=max_wall_time_s,
+            neo_fixed_node_lock_policy=neo_fixed_node_lock_policy,
+            one_sided_probe_max_multiplier=one_sided_probe_max_multiplier,
+            pressure_far_side_normal_sign=pressure_far_side_normal_sign,
+            pressure_load_region_id=pressure_load_region_id,
+            pressure_outlet_zmin_enabled=pressure_outlet_zmin_enabled,
+            pressure_solver_name=pressure_solver_name,
+            primary_fsi_face_area_m2=primary_fsi_face_area_m2,
+            primary_shell_region_id=primary_shell_region_id,
+            projection_divergence_cleanup_iterations=(
+                projection_divergence_cleanup_iterations
+            ),
+            reuse_accepted_fsi_trial_state=reuse_accepted_fsi_trial_state,
+            secondary_fsi_face_area_m2=secondary_fsi_face_area_m2,
+            secondary_shell_region_id=secondary_shell_region_id,
+            sharp_case_runner_enabled=sharp_case_runner_enabled,
+            solid_mpm_flip_blend=solid_mpm_flip_blend,
+            solid_mpm_substeps=solid_mpm_substeps,
+            solid_response_dt_s=solid_response_dt_s,
+            solid_sub_dt_s=solid_sub_dt_s,
+            solid_substep_velocity_damping=solid_substep_velocity_damping,
+            step_count=step_count,
+            two_sided_probe_max_multiplier=two_sided_probe_max_multiplier,
+        ),
+        resources=StepLoopResources(
+            args=args,
+            fluid_substep_controller=fluid_substep_controller,
+            fsi_coupling_mode_report=fsi_coupling_mode_report,
+            history_path=history_path,
+            material=material,
+            output_dir=output_dir,
+            process_path=process_path,
+            run_checkpoint_path=run_checkpoint_path,
+            simulator=simulator,
+            solid_mpm=solid_mpm,
+            spec=spec,
+            tri_diagnostics=tri_diagnostics,
+        ),
+        callbacks=StepLoopCallbacks(
+            advance_fluid_step=advance_fluid_step,
+            advance_physical_solid_step=advance_physical_solid_step,
+            publish_solid_report_to_reduced_state=(
+                publish_solid_report_to_reduced_state
+            ),
+        ),
+        state=StepLoopMutableState(
+            first_step=first_step,
+            rows=rows,
+            run_started_at_perf=run_started_at_perf,
+            sharp_coupling_state=sharp_coupling_state,
+            interface_reaction_state=interface_reaction_state,
+            partial_run_reason=partial_run_reason,
+            partial_run_stopped=partial_run_stopped,
+            previous_step_cfl=previous_step_cfl,
+            previous_step_fluid_substeps=previous_step_fluid_substeps,
+            previous_step_fsi_coupling_residual_norm_n=(
+                previous_step_fsi_coupling_residual_norm_n
+            ),
+        ),
     )
-    sharp_coupling_state = step_loop_result.get(
-        "sharp_coupling_state",
-        sharp_coupling_state,
-    )
+    step_loop_result = run_squid_step_loop(step_loop_context)
+    rows = step_loop_result.rows
+    interface_reaction_state = step_loop_result.interface_reaction_state
+    sharp_coupling_state = step_loop_result.sharp_coupling_state
+    partial_run_stopped = step_loop_result.partial_run_stopped
+    partial_run_reason = step_loop_result.partial_run_reason
 
     write_csv(history_path, rows)
 
@@ -1809,9 +2001,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
 
     if sharp_case_runner_enabled:
-        return build_sharp_case_run_report({**globals(), **locals(), **step_loop_result})
+        return build_sharp_case_run_report(locals())
 
-    return build_final_run_report({**globals(), **locals(), **step_loop_result})
+    return build_final_run_report(locals())
 
 
 def main(argv: list[str] | None = None) -> dict[str, object]:

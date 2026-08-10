@@ -10,7 +10,6 @@ from simulation_core import (
     CG_PRECONDITIONER_CHOICES,
     FSI_COUPLING_MODE_CHOICES,
     FSI_COUPLING_MODE_HIBM_MPM_SHARP,
-    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
     INTERFACE_REACTION_SOLVER_CHOICES,
 )
 
@@ -433,6 +432,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Solid model. tri_mooney_shell_mpm is the paper-calibrated arbitrary-triangle "
             "shell MPM; neo_hookean_mpm is the volumetric layered branch."
+        ),
+    )
+    parser.add_argument(
+        "--fixed-rim-region-id",
+        type=int,
+        default=5,
+        help=(
+            "Named CAD region used for the fixed membrane rim and the sharp "
+            "air-backing reachability barrier. It must differ from both moving "
+            "FSI regions and must contain faces."
+        ),
+    )
+    parser.add_argument(
+        "--neo-fixed-node-lock-policy",
+        choices=("any_fixed_particle", "pure_fixed_mass"),
+        default=None,
+        help=(
+            "Neo-Hookean-only grid-node locking policy. The Neo default is "
+            "pure_fixed_mass, which avoids locking mixed free/fixed nodes. "
+            "Tri-Mooney clamps fixed rim vertices directly and rejects this option "
+            "when it is explicitly supplied. The case remains zero-gravity."
         ),
     )
     parser.add_argument("--solid-mpm-layers", type=int, default=2)
@@ -1006,6 +1026,45 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--disable-pressure-outlet-zmin", action="store_true")
+    parser.add_argument(
+        "--far-pressure-air-backed",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Classify the prescribed far-pressure compartment as air-backed on "
+            "the sharp path. Use --no-far-pressure-air-backed as an escape hatch. "
+            "Air backing requires the z-min pressure outlet."
+        ),
+    )
+    parser.add_argument(
+        "--far-pressure-inside-probe-max-multiplier",
+        type=float,
+        default=12.0,
+        help="Maximum far-pressure inside probe distance multiplier; must be >= 3.",
+    )
+    parser.add_argument(
+        "--two-sided-probe-max-multiplier",
+        type=float,
+        default=12.0,
+        help="Maximum two-sided pressure probe distance multiplier; must be >= 3.",
+    )
+    parser.add_argument(
+        "--one-sided-probe-max-multiplier",
+        type=float,
+        default=12.0,
+        help="Maximum one-sided pressure probe distance multiplier; must be >= 3.",
+    )
+    parser.add_argument(
+        "--far-pressure-air-backed-probe-normal-sign",
+        type=float,
+        choices=(-1.0, 0.0, 1.0),
+        default=0.0,
+        help=(
+            "Independent air-backed seed probe side: -1 or +1 restricts seeding "
+            "to that marker-normal side; safe default 0 probes both sides. This "
+            "does not change the separately derived far-pressure traction sign."
+        ),
+    )
     parser.add_argument("--disable-reduced-obstacles", action="store_true")
     parser.add_argument(
         "--source-config-intersect-reduced-water-domain",

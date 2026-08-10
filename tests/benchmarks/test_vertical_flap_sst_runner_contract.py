@@ -69,6 +69,14 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
         self.assertEqual(config.flow_backflow_turbulent_viscosity_ratio, 10.0)
         self.assertEqual(config.flow_turbulence_inlet_face, "zmax")
         self.assertEqual(config.flow_turbulence_outlet_face, "zmin")
+        self.assertEqual(
+            VerticalFlapFsiConfig().flow_sst_near_wall_treatment,
+            "resolved",
+        )
+        self.assertEqual(
+            config.flow_sst_near_wall_treatment,
+            "fluent_correlation",
+        )
         self.assertEqual(config.flow_advection_scheme, "muscl_tvd")
         self.assertEqual(config.flow_predictor_substeps, 1)
         self.assertIn("muscl_tvd", runner.FLOW_ADVECTION_SCHEMES)
@@ -116,6 +124,10 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
                 "positive and finite",
             ),
             ({"flow_sst_max_automatic_substeps": 0}, "must be positive"),
+            (
+                {"flow_sst_near_wall_treatment": "unsupported"},
+                "unsupported flow_sst_near_wall_treatment",
+            ),
             ({"flow_turbulence_inlet_face": "bad"}, "physical face"),
             ({"flow_turbulence_outlet_face": "bad"}, "physical face"),
             (
@@ -164,6 +176,7 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
             no_slip_domain_walls=runner._flow_predictor_no_slip_domain_walls(
                 config
             ),
+            near_wall_treatment="fluent_correlation",
             max_automatic_substeps=config.flow_sst_max_automatic_substeps,
         )
 
@@ -189,8 +202,15 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
                 "kinematic_viscosity_m2_s",
                 "no_slip_domain_walls",
                 "advection_scheme",
+                "stage_observer",
             },
         )
+        observer_keyword = next(
+            keyword
+            for keyword in sst_calls[0].keywords
+            if keyword.arg == "stage_observer"
+        )
+        self.assertEqual(ast.unparse(observer_keyword.value), "sst_stage_observer")
         advection_keyword = next(
             keyword
             for keyword in sst_calls[0].keywords
@@ -198,6 +218,27 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
         )
         self.assertIsInstance(advection_keyword.value, ast.Name)
         self.assertEqual(advection_keyword.value.id, "advection_scheme")
+
+    def test_sst_stage_observer_synchronizes_before_timing_callback_io(self) -> None:
+        function = _runner_function("_flow_advance_current_step")
+        observer = next(
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "emit_sst_stage"
+        )
+        source = ast.unparse(observer)
+
+        self.assertIn("if measure_wall_times:", source)
+        sync_index = source.index(
+            "_synchronize_hibm_sharp_boundary_stage_timing()"
+        )
+        clock_index = source.index("observer_started_s = time.perf_counter()")
+        callback_index = source.index(
+            "preflow_stage_observer(f'sst_{stage_name}')"
+        )
+        self.assertLess(sync_index, clock_index)
+        self.assertLess(clock_index, callback_index)
 
     def test_flow_report_exposes_sst_model_and_automatic_substep_diagnostics(
         self,
@@ -229,8 +270,64 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
                 "flow_momentum_advection_substeps_total",
                 "flow_momentum_advection_cfl_max",
                 "flow_momentum_advection_max_substep_cfl",
+                "flow_sst_transport_wall_time_s",
+                "flow_momentum_predictor_wall_time_s",
             }.issubset(report_keys)
         )
+
+    def test_preflow_rows_expose_wall_time_and_substep_costs(self) -> None:
+        function = _runner_function("_run_fixed_solid_preflow")
+        report_keys = {
+            key.value
+            for node in ast.walk(function)
+            if isinstance(node, ast.Dict)
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+
+        self.assertTrue(
+            {
+                "preflow_step_wall_time_s",
+                "preflow_flow_advance_wall_time_s",
+                "flow_sst_transport_wall_time_s",
+                "flow_momentum_predictor_wall_time_s",
+            }.issubset(report_keys)
+        )
+
+    def test_synchronized_timing_is_opt_in(self) -> None:
+        events: list[str] = []
+
+        result, elapsed_s = runner._measure_taichi_operation_wall_time(
+            lambda: events.append("operation") or sentinel.result,
+            enabled=False,
+            synchronize=lambda: events.append("sync"),
+            clock=MagicMock(side_effect=[10.0, 12.0]),
+        )
+
+        self.assertIs(result, sentinel.result)
+        self.assertEqual(elapsed_s, 0.0)
+        self.assertEqual(events, ["operation"])
+
+    def test_synchronized_timing_closes_failed_operation_and_preserves_error(
+        self,
+    ) -> None:
+        events: list[str] = []
+        primary = RuntimeError("primary kernel failure")
+
+        def fail() -> None:
+            events.append("operation")
+            raise primary
+
+        with self.assertRaisesRegex(RuntimeError, "primary kernel failure") as caught:
+            runner._measure_taichi_operation_wall_time(
+                fail,
+                enabled=True,
+                synchronize=lambda: events.append("sync"),
+                clock=MagicMock(side_effect=[10.0]),
+            )
+
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(events, ["sync", "operation", "sync"])
 
     def test_transport_diagnostics_are_selected_for_artifact_rows(self) -> None:
         report = {

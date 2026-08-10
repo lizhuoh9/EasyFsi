@@ -514,8 +514,25 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
                 save_solver_npz_from_flow_snapshot(path, snapshot)
             self.assertFalse(path.exists())
 
-    def test_sustained_inlet_predictor_runs_core_predictor_before_projection(self):
+    def test_sustained_inlet_predictor_projects_each_physical_substep(self):
         fluid = _FakePredictorFluid()
+        projection_calls: list[tuple[float, bool]] = []
+
+        def record_projection(
+            fluid: _FakePredictorFluid,
+            config: object,
+            *,
+            reset_pressure: bool,
+            **projection_options: object,
+        ) -> dict[str, object]:
+            projection_calls.append((float(config.dt_s), bool(reset_pressure)))
+            return _fake_project_current_flow(
+                fluid,
+                config,
+                reset_pressure=reset_pressure,
+                **projection_options,
+            )
+
         config = SimpleNamespace(
             dt_s=5.0e-4,
             grid_nodes=(2, 2, 3),
@@ -530,7 +547,7 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
         )
         original_project = fsi_runner._project_current_flow
         try:
-            fsi_runner._project_current_flow = _fake_project_current_flow
+            fsi_runner._project_current_flow = record_projection
             report = fsi_runner._flow_advance_current_step(
                 fluid,
                 config,
@@ -538,7 +555,7 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
                 step_index_local=3,
                 step_index_global=3,
                 preflow_history=[],
-                reset_pressure=False,
+                reset_pressure=True,
             )
         finally:
             fsi_runner._project_current_flow = original_project
@@ -551,14 +568,26 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
                 "apply_velocity_dirichlet_boundary_rows",
                 "predict:0.00025:rk2",
                 "apply_velocity_dirichlet_boundary_rows",
+                "project",
+                "clear_volume_source",
+                "add_zmax_velocity_inlet_volume_source:-8.0",
+                "apply_velocity_dirichlet_boundary_rows",
                 "predict:0.00025:rk2",
                 "apply_velocity_dirichlet_boundary_rows",
                 "project",
             ],
         )
         self.assertTrue(report["flow_predictor_applied"])
+        self.assertEqual(
+            projection_calls,
+            [(2.5e-4, True), (2.5e-4, False)],
+        )
         self.assertIn("advection_scheme=rk2", report["flow_predictor_note"])
-        self.assertIn("substeps=2", report["flow_predictor_note"])
+        self.assertEqual(report["flow_predictor_projection_segment_count"], 2)
+        self.assertAlmostEqual(
+            report["flow_predictor_projection_segment_dt_s"],
+            2.5e-4,
+        )
 
     def test_sustained_boundary_predictor_does_not_inject_volume_source(self):
         fluid = _FakePredictorFluid()
@@ -596,6 +625,9 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
                 "apply_velocity_dirichlet_boundary_rows",
                 "predict:0.00025:rk2",
                 "apply_velocity_dirichlet_boundary_rows",
+                "project",
+                "clear_volume_source",
+                "apply_velocity_dirichlet_boundary_rows",
                 "predict:0.00025:rk2",
                 "apply_velocity_dirichlet_boundary_rows",
                 "project",
@@ -605,6 +637,115 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
         self.assertFalse(report["flow_volume_source_applied"])
         self.assertEqual(report["flow_inlet_source_factor"], 0.0)
         self.assertEqual(report["flow_inlet_source_normal_velocity_mps"], 0.0)
+        self.assertEqual(report["flow_predictor_projection_segment_count"], 2)
+
+    def test_interleaved_segment_report_preserves_main_projection_and_topology_truth(self):
+        combined = fsi_runner._combine_interleaved_flow_predictor_segment_reports(
+            [
+                {
+                    "projection_report": {
+                        "pre_projection_l2": 1.0,
+                        "pre_projection_max_abs": 2.0,
+                        "projection_l2": 0.1,
+                        "projection_max_abs": 0.2,
+                        "cg_iterations_total": 3,
+                    },
+                    "flow_main_projection_pre_projection_l2": 11.0,
+                    "flow_main_projection_pre_projection_max_abs": 12.0,
+                    "flow_main_projection_l2": 0.11,
+                    "flow_main_projection_max_abs": 0.12,
+                    "hibm_preassembly_topology_mutated": True,
+                    "hibm_post_dirichlet_consistency_projection_count": 2,
+                },
+                {
+                    "projection_report": {
+                        "pre_projection_l2": 4.0,
+                        "pre_projection_max_abs": 5.0,
+                        "projection_l2": 0.4,
+                        "projection_max_abs": 0.5,
+                        "cg_iterations_total": 7,
+                    },
+                    "flow_main_projection_pre_projection_l2": 21.0,
+                    "flow_main_projection_pre_projection_max_abs": 22.0,
+                    "flow_main_projection_l2": 0.21,
+                    "flow_main_projection_max_abs": 0.22,
+                    "hibm_preassembly_topology_mutated": False,
+                    "hibm_post_dirichlet_consistency_projection_count": 1,
+                },
+            ],
+            configured_substeps=2,
+            segment_dt_s=2.5e-4,
+            reset_pressure=True,
+        )
+
+        self.assertTrue(combined["hibm_preassembly_topology_mutated"])
+        self.assertEqual(
+            combined["hibm_post_dirichlet_consistency_projection_count"],
+            3,
+        )
+        self.assertEqual(
+            combined["projection_report"]["cg_iterations_total"],
+            10,
+        )
+        self.assertEqual(
+            combined["flow_predictor_projection_segment_pre_projection_l2_max"],
+            21.0,
+        )
+        self.assertEqual(
+            combined["flow_predictor_projection_segment_trace"],
+            [
+                {
+                    "segment_index": 1,
+                    "pre_projection_l2": 11.0,
+                    "pre_projection_max_abs": 12.0,
+                    "projection_l2": 0.11,
+                    "projection_max_abs": 0.12,
+                    "cg_converged_all": True,
+                    "cg_iterations_total": 3,
+                },
+                {
+                    "segment_index": 2,
+                    "pre_projection_l2": 21.0,
+                    "pre_projection_max_abs": 22.0,
+                    "projection_l2": 0.21,
+                    "projection_max_abs": 0.22,
+                    "cg_converged_all": True,
+                    "cg_iterations_total": 7,
+                },
+            ],
+        )
+
+    def test_nested_projection_report_preserves_existing_all_flags(self):
+        combined = fsi_runner._combine_flow_projection_reports(
+            [
+                {
+                    "pre_projection_velocity_projector_prepared": True,
+                    "pre_projection_velocity_projector_prepared_all": False,
+                    "pre_projection_velocity_projector_converged": True,
+                    "pre_projection_velocity_projector_converged_all": False,
+                    "pre_projection_velocity_projector_committed": True,
+                    "pre_projection_velocity_projector_committed_all": False,
+                },
+                {
+                    "pre_projection_velocity_projector_prepared": True,
+                    "pre_projection_velocity_projector_prepared_all": True,
+                    "pre_projection_velocity_projector_converged": True,
+                    "pre_projection_velocity_projector_converged_all": True,
+                    "pre_projection_velocity_projector_committed": True,
+                    "pre_projection_velocity_projector_committed_all": True,
+                },
+            ]
+        )
+
+        self.assertFalse(
+            combined["pre_projection_velocity_projector_prepared_all"]
+        )
+        self.assertFalse(
+            combined["pre_projection_velocity_projector_converged_all"]
+        )
+        self.assertFalse(
+            combined["pre_projection_velocity_projector_committed_all"]
+        )
 
     def test_marker_feedback_populates_velocity_constraint_fields(self):
         fluid = _FakePredictorFluid(shape=(2, 2, 2))

@@ -54,6 +54,10 @@ class HibmJointQpConvergenceError(RuntimeError):
         self.diagnostics = dict(diagnostics)
 
 
+class PreflowStageObserverError(RuntimeError):
+    """Host telemetry failure; never reclassify it as a solver failure."""
+
+
 _HIBM_SHARP_BOUNDARY_TIMING_STAGE_NAMES = (
     "canonical_ledger_build",
     "canonical_prepare_seal",
@@ -70,11 +74,48 @@ def _empty_hibm_sharp_boundary_stage_wall_times() -> dict[str, float]:
 
 
 def _synchronize_hibm_sharp_boundary_stage_timing() -> None:
-    # Keep Taichi optional at module import time.  An active sharp-boundary
-    # assembly has already initialized its runtime before any timed stage.
+    # Keep Taichi optional at module import time.  Lightweight contract tests
+    # use host-only fluid doubles without initializing Taichi; production
+    # timing still synchronizes every active CUDA runtime boundary.
     import taichi as ti
 
+    if ti.lang.impl.get_runtime().prog is None:
+        return
     ti.sync()
+
+
+def _measure_taichi_operation_wall_time(
+    operation: Callable[[], Any],
+    *,
+    enabled: bool,
+    clock: Callable[[], float] | None = None,
+    synchronize: Callable[[], None] | None = None,
+) -> tuple[Any, float]:
+    if not enabled:
+        return operation(), 0.0
+    clock_fn = time.perf_counter if clock is None else clock
+    synchronize_fn = (
+        _synchronize_hibm_sharp_boundary_stage_timing
+        if synchronize is None
+        else synchronize
+    )
+    synchronize_fn()
+    started_s = float(clock_fn())
+    try:
+        result = operation()
+    except BaseException:
+        try:
+            synchronize_fn()
+        except BaseException:
+            # Preserve the primary operation failure.  A closing asynchronous
+            # synchronization failure is secondary diagnostic damage.
+            pass
+        raise
+    synchronize_fn()
+    elapsed_s = float(clock_fn()) - started_s
+    if not math.isfinite(elapsed_s) or elapsed_s < 0.0:
+        elapsed_s = 0.0
+    return result, elapsed_s
 
 
 def _measure_hibm_sharp_boundary_stage(
@@ -84,6 +125,7 @@ def _measure_hibm_sharp_boundary_stage(
     *,
     clock: Callable[[], float] | None = None,
     synchronize: Callable[[], None] | None = None,
+    excluded_wall_time: Callable[[], float] | None = None,
 ) -> Any:
     if stage_name not in _HIBM_SHARP_BOUNDARY_TIMING_STAGE_NAMES:
         raise ValueError(
@@ -98,6 +140,9 @@ def _measure_hibm_sharp_boundary_stage(
     )
     synchronize_fn()
     started_s = float(clock_fn())
+    excluded_started_s = (
+        float(excluded_wall_time()) if excluded_wall_time is not None else 0.0
+    )
     try:
         return operation()
     finally:
@@ -105,7 +150,13 @@ def _measure_hibm_sharp_boundary_stage(
         # failed kernels cannot leak asynchronous work into the next stage.
         synchronize_fn()
         ended_s = float(clock_fn())
-        elapsed_s = ended_s - started_s
+        excluded_ended_s = (
+            float(excluded_wall_time()) if excluded_wall_time is not None else 0.0
+        )
+        excluded_elapsed_s = excluded_ended_s - excluded_started_s
+        if not math.isfinite(excluded_elapsed_s) or excluded_elapsed_s < 0.0:
+            excluded_elapsed_s = 0.0
+        elapsed_s = ended_s - started_s - excluded_elapsed_s
         if not math.isfinite(elapsed_s) or elapsed_s < 0.0:
             elapsed_s = 0.0
         previous_s = float(stage_wall_times.get(stage_name, 0.0))
@@ -158,6 +209,26 @@ def _hibm_sharp_boundary_stage_wall_times_from_report(
     )
 
 
+def _emit_run_progress(
+    observer: Callable[[dict[str, object]], None] | None,
+    *,
+    run_started_s: float,
+    phase: str,
+    status: str = "running",
+    **fields: object,
+) -> None:
+    if observer is None:
+        return
+    observer(
+        {
+            "status": str(status),
+            "phase": str(phase),
+            "elapsed_s": max(0.0, time.perf_counter() - run_started_s),
+            **fields,
+        }
+    )
+
+
 PRIMARY_REGION_ID = 101
 SECONDARY_REGION_ID = 202
 SECONDARY_UNUSED_REGION_ID = SECONDARY_REGION_ID
@@ -166,11 +237,17 @@ STREAMWISE_AXIS_INDEX = 2
 OUT_OF_PLANE_AXIS_INDEX = 0
 AXIS_NAMES = ("x", "y", "z")
 OUT_OF_PLANE_BOUNDARY_POLICY = "finite_slab_x_faces_no_periodic_or_slip"
+STRICT_OUT_OF_PLANE_BOUNDARY_POLICY = "strict_periodic_or_slip"
 OUT_OF_PLANE_BOUNDARY_NOTE = (
     "The official case is conceptual 2D. This runner extrudes it into a finite "
     "3D slab and does not yet impose a strict periodic/slip condition on the "
     "out-of-plane x faces, so depth-normalized quantities are diagnostic rather "
     "than a full Fluent parity claim."
+)
+STRICT_OUT_OF_PLANE_BOUNDARY_NOTE = (
+    "The official case is conceptual 2D. This runner extrudes it into a finite "
+    "3D slab with exact zero-normal external x-face data and tangential "
+    "zero-gradient symmetry, providing a strict slip out-of-plane closure."
 )
 FLOW_SOLUTION_MODE = "computed_projection"
 DEFAULT_SOLID_CFL_TARGET = 0.5
@@ -190,6 +267,7 @@ FLOW_SOLID_BOUNDARY_MODES = {
 FLOW_INLET_SOURCE_PROFILES = {"constant", "linear_ramp"}
 FLOW_INLET_SOURCE_SCHEDULE_SCOPES = {"global", "phase_local"}
 FLOW_TURBULENCE_MODELS = {"laminar", "sst_2003"}
+FLOW_SST_NEAR_WALL_TREATMENTS = {"resolved", "fluent_correlation"}
 FLOW_OUTLET_BALANCE_POLICIES = {"report_only"}
 TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES = "dual_physical_faces"
 TRACTION_MARKER_LAYOUT_SINGLE_MID_SURFACE = "single_mid_surface"
@@ -433,12 +511,44 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         [int, float, dict[str, object], dict[str, np.ndarray]], None
     ]
     | None = None,
+    progress_observer: Callable[[dict[str, object]], None] | None = None,
+    profile_wall_time: bool = False,
 ) -> dict[str, object]:
     """Run a generic Cartesian fluid to rectangular solid MPM marker-FSI smoke."""
+    run_started_s = time.perf_counter()
     _validate_rectangular_solid_config(config)
     runtime = TaichiRuntimeConfig(arch="cuda")
+
+    _emit_run_progress(
+        progress_observer,
+        run_started_s=run_started_s,
+        phase="initialization_fluid_build",
+    )
+    phase_started_s = time.perf_counter()
     fluid = _build_fluid(config, runtime)
+    if profile_wall_time:
+        _synchronize_hibm_sharp_boundary_stage_timing()
+    fluid_build_wall_time_s = time.perf_counter() - phase_started_s
+
+    _emit_run_progress(
+        progress_observer,
+        run_started_s=run_started_s,
+        phase="initialization_flow_field",
+        previous_phase_wall_time_s=fluid_build_wall_time_s,
+    )
+    phase_started_s = time.perf_counter()
     _initialize_computed_flow(fluid, config)
+    if profile_wall_time:
+        _synchronize_hibm_sharp_boundary_stage_timing()
+    flow_field_initialization_wall_time_s = time.perf_counter() - phase_started_s
+
+    _emit_run_progress(
+        progress_observer,
+        run_started_s=run_started_s,
+        phase="initialization_markers",
+        previous_phase_wall_time_s=flow_field_initialization_wall_time_s,
+    )
+    phase_started_s = time.perf_counter()
     markers = _build_markers(config, runtime)
     anchor_install_report = _install_selected_pressure_pair_anchor_markers(
         markers,
@@ -448,6 +558,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         anchor_install_report.pop("pressure_pair_anchor_pair_map", {})
     )
     pressure_pair_anchor_runtime_refresh_count = 0
+    if profile_wall_time:
+        _synchronize_hibm_sharp_boundary_stage_timing()
+    marker_build_wall_time_s = time.perf_counter() - phase_started_s
 
     def refresh_runtime_pressure_pair_anchors() -> None:
         nonlocal anchor_install_report
@@ -466,10 +579,27 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         pressure_pair_anchor_pair_map = dict(pair_map.as_diagnostics())
         pressure_pair_anchor_runtime_refresh_count = next_refresh_count
 
+    _emit_run_progress(
+        progress_observer,
+        run_started_s=run_started_s,
+        phase="initialization_solid",
+        previous_phase_wall_time_s=marker_build_wall_time_s,
+    )
+    phase_started_s = time.perf_counter()
     solid = _build_solid(config, runtime)
+    if profile_wall_time:
+        _synchronize_hibm_sharp_boundary_stage_timing()
+    solid_build_wall_time_s = time.perf_counter() - phase_started_s
     # Install the physical MPM volume before fixed-solid preflow.  In sharp
     # mode it is stored in a dedicated layer; the first HIBM assembly then
     # combines it with the static geometry and carves only external row owners.
+    _emit_run_progress(
+        progress_observer,
+        run_started_s=run_started_s,
+        phase="initialization_interface",
+        previous_phase_wall_time_s=solid_build_wall_time_s,
+    )
+    phase_started_s = time.perf_counter()
     if bool(
         _use_hibm_sharp_marker_boundary(config)
         and getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)
@@ -492,12 +622,40 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     solid_substep_cfl = solid_substep_cfl_report(config)
     solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])
     solid_seeding = _enforce_solid_seeding_limit(config)
+    if profile_wall_time:
+        _synchronize_hibm_sharp_boundary_stage_timing()
+    interface_initialization_wall_time_s = time.perf_counter() - phase_started_s
+    initialization_phase_wall_time_s = {
+        "fluid_build": float(fluid_build_wall_time_s),
+        "flow_field": float(flow_field_initialization_wall_time_s),
+        "markers": float(marker_build_wall_time_s),
+        "solid": float(solid_build_wall_time_s),
+        "interface": float(interface_initialization_wall_time_s),
+    }
+    initialization_wall_time_s = sum(
+        initialization_phase_wall_time_s.values()
+    )
+    _emit_run_progress(
+        progress_observer,
+        run_started_s=run_started_s,
+        phase="preflow",
+        initialization_wall_time_s=initialization_wall_time_s,
+        initialization_phase_wall_time_s=initialization_phase_wall_time_s,
+    )
     preflow_report = _run_or_restore_fixed_solid_preflow(
         markers=markers,
         fluid=fluid,
         solid=solid,
         config=config,
+        progress_observer=progress_observer,
+        run_started_s=run_started_s,
+        profile_wall_time=profile_wall_time,
     )
+    preflow_report = {
+        **preflow_report,
+        "initialization_wall_time_s": float(initialization_wall_time_s),
+        "initialization_phase_wall_time_s": initialization_phase_wall_time_s,
+    }
     preflow_history = preflow_report["preflow_history"]
     # A restored snapshot or the final fixed-solid HIBM assembly may replace
     # the obstacle view.  Seal anchors against that actual pre-FSI state.
@@ -549,6 +707,7 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 bool(getattr(config, "flow_reset_pressure_each_step", False))
                 or (step_index == 0 and not preflow_history)
             ),
+            measure_wall_times=profile_wall_time,
         )
         observer_flow_snapshot = (
             _synchronized_flow_boundary_snapshot(
@@ -712,6 +871,42 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                     "flow_predictor_applied"
                 ],
                 "flow_predictor_note": latest_flow_report["flow_predictor_note"],
+                "flow_predictor_projection_segment_count": int(
+                    latest_flow_report.get(
+                        "flow_predictor_projection_segment_count",
+                        1,
+                    )
+                ),
+                "flow_predictor_projection_segment_dt_s": float(
+                    latest_flow_report.get(
+                        "flow_predictor_projection_segment_dt_s",
+                        config.dt_s,
+                    )
+                ),
+                "flow_predictor_projection_segment_pre_projection_l2_max": float(
+                    latest_flow_report.get(
+                        "flow_predictor_projection_segment_pre_projection_l2_max",
+                        latest_flow_report.get(
+                            "flow_main_projection_pre_projection_l2",
+                            0.0,
+                        ),
+                    )
+                ),
+                "flow_predictor_projection_segment_pre_projection_max_abs_max": float(
+                    latest_flow_report.get(
+                        "flow_predictor_projection_segment_pre_projection_max_abs_max",
+                        latest_flow_report.get(
+                            "flow_main_projection_pre_projection_max_abs",
+                            0.0,
+                        ),
+                    )
+                ),
+                "flow_predictor_projection_segment_trace": list(
+                    latest_flow_report.get(
+                        "flow_predictor_projection_segment_trace",
+                        [],
+                    )
+                ),
                 "flow_predictor_kinematic_viscosity_m2_s": latest_flow_report[
                     "flow_predictor_kinematic_viscosity_m2_s"
                 ],
@@ -2074,6 +2269,14 @@ def _validate_rectangular_solid_config(config: Any) -> None:
                 raise ValueError(f"{field_name} must be positive and finite")
         if int(getattr(config, "flow_sst_max_automatic_substeps", 4096)) <= 0:
             raise ValueError("flow_sst_max_automatic_substeps must be positive")
+        near_wall_treatment = str(
+            getattr(config, "flow_sst_near_wall_treatment", "resolved")
+        ).lower()
+        if near_wall_treatment not in FLOW_SST_NEAR_WALL_TREATMENTS:
+            raise ValueError(
+                "unsupported flow_sst_near_wall_treatment: "
+                f"{near_wall_treatment!r}"
+            )
         inlet_face = str(
             getattr(config, "flow_turbulence_inlet_face", "zmax")
         ).lower()
@@ -2718,6 +2921,13 @@ def _marker_total_area_m2(markers: HibmMpmSurfaceMarkers) -> float:
     return float(np.sum(markers.A_gamma_m2.to_numpy()[:marker_count]))
 
 
+def _out_of_plane_boundary_policy(config: Any) -> str:
+    symmetry_flags = _flow_symmetry_domain_walls(config)
+    if symmetry_flags[0] and symmetry_flags[1]:
+        return STRICT_OUT_OF_PLANE_BOUNDARY_POLICY
+    return OUT_OF_PLANE_BOUNDARY_POLICY
+
+
 def slab_equivalence_diagnostics(
     config: Any,
     *,
@@ -2736,9 +2946,20 @@ def slab_equivalence_diagnostics(
     marker_face_count: int | None = None,
     conceptual_coordinate_model: str = "cartesian-2d",
     runtime_discretization_model: str = "cartesian-3d-half-domain",
-    out_of_plane_boundary_policy: str = OUT_OF_PLANE_BOUNDARY_POLICY,
+    out_of_plane_boundary_policy: str | None = None,
     pressure_force_source: str = "marker_traction_pressure_integral",
 ) -> dict[str, object]:
+    resolved_out_of_plane_boundary_policy = (
+        _out_of_plane_boundary_policy(config)
+        if out_of_plane_boundary_policy is None
+        else str(out_of_plane_boundary_policy)
+    )
+    out_of_plane_boundary_note = (
+        STRICT_OUT_OF_PLANE_BOUNDARY_NOTE
+        if resolved_out_of_plane_boundary_policy
+        == STRICT_OUT_OF_PLANE_BOUNDARY_POLICY
+        else OUT_OF_PLANE_BOUNDARY_NOTE
+    )
     extrusion_depth_m = _positive_finite(
         getattr(config, "span_m"),
         field_name="span_m/extrusion_depth_m",
@@ -2849,11 +3070,12 @@ def slab_equivalence_diagnostics(
         "displacement_depth_scaling_expectation": (
             "depth_invariant_when_force_and_mass_scale_together"
         ),
-        "out_of_plane_boundary_policy": str(out_of_plane_boundary_policy),
+        "out_of_plane_boundary_policy": resolved_out_of_plane_boundary_policy,
         "out_of_plane_boundary_residual_modeling_error": (
-            str(out_of_plane_boundary_policy) != "strict_periodic_or_slip"
+            resolved_out_of_plane_boundary_policy
+            != STRICT_OUT_OF_PLANE_BOUNDARY_POLICY
         ),
-        "out_of_plane_boundary_note": OUT_OF_PLANE_BOUNDARY_NOTE,
+        "out_of_plane_boundary_note": out_of_plane_boundary_note,
         "fluent_parity_claimed": False,
     }
 
@@ -2873,6 +3095,34 @@ def _display_grid_after_symmetry_mirror(
     if _is_official_half_domain(case_metadata):
         grid[1] *= 2
     return grid
+
+
+def _materialize_symmetry_external_normal_faces(
+    fluid: CartesianFluidSolver,
+    config: Any,
+) -> None:
+    """Register exact zero-normal data on configured symmetry faces.
+
+    The compact backward-MAC field has no storage row for a maximum-side
+    physical face.  Post-projection symmetry copying therefore cannot by
+    itself close that face for MUSCL transport: without a directed external
+    normal, the transport ledger would reuse the last *internal* compact face.
+    Keep the tangential components unprescribed so the existing symmetry
+    kernels retain their zero-gradient/free-slip behavior.
+    """
+
+    symmetry_flags = _flow_symmetry_domain_walls(config)
+    for boundary_face_index, active in enumerate(symmetry_flags):
+        if not active:
+            continue
+        axis_index = boundary_face_index // 2
+        side_index = boundary_face_index % 2
+        fluid.refresh_external_velocity_boundary_face_uniform(
+            axis_index=axis_index,
+            side_index=side_index,
+            target_velocity_mps=(0.0, 0.0, 0.0),
+            active_component_mask=1 << axis_index,
+        )
 
 
 def _build_fluid(config: Any, runtime: TaichiRuntimeConfig) -> CartesianFluidSolver:
@@ -2917,10 +3167,14 @@ def _build_fluid(config: Any, runtime: TaichiRuntimeConfig) -> CartesianFluidSol
                 getattr(config, "flow_turbulence_outlet_face", "zmin")
             ),
             no_slip_domain_walls=_flow_predictor_no_slip_domain_walls(config),
+            near_wall_treatment=str(
+                getattr(config, "flow_sst_near_wall_treatment", "resolved")
+            ),
             max_automatic_substeps=int(
                 getattr(config, "flow_sst_max_automatic_substeps", 4096)
             ),
         )
+    _materialize_symmetry_external_normal_faces(fluid, config)
     return fluid
 
 
@@ -3538,7 +3792,12 @@ def _combine_flow_projection_reports(
         ),
     ):
         combined[aggregate_key] = all(
-            bool(report.get(report_key, False))
+            bool(
+                report.get(
+                    aggregate_key,
+                    report.get(report_key, False),
+                )
+            )
             for report in projection_reports
         )
     pressure_marker_active_key = (
@@ -6318,6 +6577,30 @@ def _hibm_sharp_interior_probe_distance_m(config: Any) -> float:
     return 1.5 * max(_grid_spacing_m(config))
 
 
+def _hibm_sharp_interior_probe_distance_xyz_m(
+    config: Any,
+) -> tuple[float, float, float] | None:
+    configured = getattr(
+        config,
+        "flow_hibm_sharp_interior_probe_distance_xyz_m",
+        None,
+    )
+    if configured is None:
+        return None
+    values = tuple(float(value) for value in configured)
+    if len(values) != 3:
+        raise ValueError(
+            "flow_hibm_sharp_interior_probe_distance_xyz_m must contain "
+            "exactly three values"
+        )
+    if any(not math.isfinite(value) or value <= 0.0 for value in values):
+        raise ValueError(
+            "flow_hibm_sharp_interior_probe_distance_xyz_m must contain "
+            "finite positive values"
+        )
+    return values
+
+
 def _apply_hibm_sharp_marker_boundary_to_fluid(
     markers: HibmMpmSurfaceMarkers | None,
     fluid: CartesianFluidSolver,
@@ -6327,6 +6610,7 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
     boundary_cache: dict[str, object] | None = None,
     reuse_topology_from_previous_assembly: bool = False,
     topology_only: bool = False,
+    stage_observer: Callable[[str], None] | None = None,
 ) -> dict[str, object]:
     if not _use_hibm_sharp_marker_boundary(config):
         return _empty_hibm_sharp_marker_boundary_report()
@@ -6343,6 +6627,9 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
     search_radius_m = _hibm_sharp_search_radius_m(config)
     search_radius_xyz_m = _hibm_sharp_search_radius_xyz_m(config)
     interior_probe_distance_m = _hibm_sharp_interior_probe_distance_m(config)
+    interior_probe_distance_xyz_m = (
+        _hibm_sharp_interior_probe_distance_xyz_m(config)
+    )
     dynamic_solid_volume_enabled = bool(
         getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)
     )
@@ -6430,6 +6717,8 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
                 "cached HIBM pre-projection velocity projector marker owner changed"
             )
     else:
+        if stage_observer is not None:
+            stage_observer("hibm_resource_allocate_before")
         runtime = TaichiRuntimeConfig(arch="cuda")
         ib_search = HibmMpmIbNodeSearch(
             grid_nodes=tuple(config.grid_nodes),
@@ -6465,6 +6754,8 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
         }
         if boundary_cache is not None:
             boundary_cache["hibm_sharp_marker_boundary"] = cache_entry
+        if stage_observer is not None:
+            stage_observer("hibm_resource_allocate_after")
     topology_reused = bool(
         reuse_topology_from_previous_assembly
         and isinstance(cache_entry, dict)
@@ -6481,6 +6772,8 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             cache_entry["internal_obstacle_cell_count"]
         )
     else:
+        if stage_observer is not None:
+            stage_observer("hibm_search_classify_before")
         if isinstance(cache_entry, dict):
             # Invalidate host metadata before search overwrites its device
             # fields.  If search or obstacle publication raises, a later call
@@ -6504,6 +6797,9 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             search_radius_xyz_m=search_radius_xyz_m,
             search_inactive_axis=OUT_OF_PLANE_AXIS_INDEX,
         )
+        if stage_observer is not None:
+            stage_observer("hibm_search_classify_after")
+            stage_observer("hibm_internal_obstacle_publish_before")
         internal_obstacle_cell_count = fluid.apply_hibm_internal_obstacles(
             ib_search.node_kind_code,
             internal_node_code=HibmMpmIbNodeSearch._NODE_INTERNAL,
@@ -6511,6 +6807,8 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             carve_external_nodes_from_dynamic_volume=dynamic_solid_volume_enabled,
             convert_internal_nodes=not dynamic_solid_volume_enabled,
         )
+        if stage_observer is not None:
+            stage_observer("hibm_internal_obstacle_publish_after")
         if isinstance(cache_entry, dict):
             cache_entry["classified_topology_key"] = classified_topology_key
             cache_entry["search_report"] = search_report
@@ -6564,7 +6862,10 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             density_kgm3=float(config.air_density_kgm3),
             dt_s=float(config.dt_s),
             probe_distance_m=interior_probe_distance_m,
+            probe_distance_xyz_m=interior_probe_distance_xyz_m,
         )
+    if stage_observer is not None:
+        stage_observer("hibm_boundary_build_before")
     ib_boundary.build_from_search_device_fields(
         ib_search,
         markers,
@@ -6624,6 +6925,20 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
                 f"assembly: {authority!r}"
             )
 
+        canonical_ledger_observer_wall_time_s = 0.0
+        canonical_ledger_stage_observer: Callable[[str], None] | None = None
+        if stage_observer is not None:
+            def emit_canonical_ledger_stage(stage: str) -> None:
+                nonlocal canonical_ledger_observer_wall_time_s
+                observer_started_s = time.perf_counter()
+                try:
+                    stage_observer(stage)
+                finally:
+                    canonical_ledger_observer_wall_time_s += max(
+                        0.0, time.perf_counter() - observer_started_s
+                    )
+
+            canonical_ledger_stage_observer = emit_canonical_ledger_stage
         fluid._invalidate_velocity_dirichlet_component_ledger()
         builder_result = _measure_hibm_sharp_boundary_stage(
             stage_wall_times,
@@ -6680,6 +6995,12 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             primary_region_id=PRIMARY_REGION_ID,
             secondary_region_id=SECONDARY_REGION_ID,
             interpolate_interior_velocity=interpolate_interior_velocity,
+            stage_observer=canonical_ledger_stage_observer,
+            ),
+            excluded_wall_time=(
+                (lambda: canonical_ledger_observer_wall_time_s)
+                if canonical_ledger_stage_observer is not None
+                else None
             ),
         )
         _measure_hibm_sharp_boundary_stage(
@@ -6694,7 +7015,11 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             fluid=fluid,
         )
 
+    if stage_observer is not None:
+        stage_observer("hibm_velocity_row_assembly_before")
     velocity_report = assemble_velocity_rows()
+    if stage_observer is not None:
+        stage_observer("hibm_velocity_row_assembly_after")
     fluid.clear_pressure_interface_matrix_terms()
     cleanup_report = {
         "hibm_preassembly_overflow_singleton_cleanup_cell_count": 0,
@@ -6797,7 +7122,11 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
                 topology_stable = True
                 break
             cleanup_report["hibm_preassembly_topology_mutated"] = True
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_assembly_before")
             velocity_report = assemble_velocity_rows()
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_assembly_after")
         if not topology_stable:
             refresh_pressure_reachability()
             raise RuntimeError(
@@ -6846,6 +7175,8 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
         grid_nodes=fluid.grid.grid_nodes,
         ),
     )
+    if stage_observer is not None:
+        stage_observer("hibm_boundary_build_after")
     return {
         "flow_solid_boundary_mode": _flow_solid_boundary_mode(config),
         "hibm_sharp_marker_boundary_enabled": True,
@@ -7107,6 +7438,164 @@ def _apply_obstacle_no_slip_rows(
     return int(np.count_nonzero(constrained))
 
 
+class _FlowPredictorSegmentConfig:
+    """Read-only view of a flow config for one predictor/projection segment."""
+
+    __slots__ = ("_base_config", "dt_s", "flow_predictor_substeps")
+
+    def __init__(
+        self,
+        base_config: Any,
+        *,
+        dt_s: float,
+    ) -> None:
+        object.__setattr__(self, "_base_config", base_config)
+        object.__setattr__(self, "dt_s", float(dt_s))
+        object.__setattr__(self, "flow_predictor_substeps", 1)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base_config, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError(
+            "flow predictor segment config is immutable; "
+            f"cannot set {name!r}"
+        )
+
+
+def _combine_interleaved_flow_predictor_segment_reports(
+    segment_reports: list[dict[str, object]],
+    *,
+    configured_substeps: int,
+    segment_dt_s: float,
+    reset_pressure: bool,
+) -> dict[str, object]:
+    """Combine full projection reports from interleaved physical segments."""
+
+    if not segment_reports:
+        raise ValueError("interleaved predictor requires at least one segment report")
+    combined = dict(segment_reports[-1])
+    segment_projection_reports = [
+        dict(report.get("projection_report", {})) for report in segment_reports
+    ]
+    combined_projection_report = _combine_flow_projection_reports(
+        segment_projection_reports
+    )
+    for key in (
+        "hibm_post_dirichlet_consistency_projection_count",
+        "flow_sst_transport_substeps_total",
+        "flow_sst_transport_rejected_trial_count_total",
+        "flow_momentum_advection_substeps_total",
+        "flow_momentum_advection_rejected_trial_count_total",
+    ):
+        if any(key in report for report in segment_reports):
+            combined[key] = sum(int(report.get(key, 0)) for report in segment_reports)
+    for key in (
+        "flow_sst_transport_wall_time_s",
+        "flow_momentum_predictor_wall_time_s",
+    ):
+        if any(key in report for report in segment_reports):
+            combined[key] = sum(
+                float(report.get(key, 0.0)) for report in segment_reports
+            )
+    for key in (
+        "flow_sst_transport_diffusion_cfl_max",
+        "flow_momentum_advection_cfl_max",
+        "flow_momentum_advection_max_substep_cfl",
+    ):
+        if any(key in report for report in segment_reports):
+            combined[key] = max(float(report.get(key, 0.0)) for report in segment_reports)
+    consistency_count = int(
+        combined.get("hibm_post_dirichlet_consistency_projection_count", 0)
+    )
+    combined_projection_report[
+        "hibm_post_dirichlet_consistency_projection_count"
+    ] = consistency_count
+    combined_projection_report[
+        "hibm_post_dirichlet_consistency_projection_applied"
+    ] = bool(consistency_count)
+    combined["projection_report"] = combined_projection_report
+    combined["hibm_post_dirichlet_consistency_projection_applied"] = bool(
+        consistency_count
+    )
+    combined["flow_pressure_reset_applied"] = bool(reset_pressure)
+    # A topology mutation in any physical segment invalidates the whole outer
+    # step for stationary/snapshot readiness.  Later cache-reuse segments must
+    # not erase that evidence by contributing a terminal False value.
+    combined["hibm_preassembly_topology_mutated"] = any(
+        bool(report.get("hibm_preassembly_topology_mutated", False))
+        for report in segment_reports
+    )
+    combined["flow_predictor_projection_segment_count"] = int(configured_substeps)
+    combined["flow_predictor_projection_segment_dt_s"] = float(segment_dt_s)
+    combined["flow_predictor_projection_segment_pre_projection_l2_max"] = max(
+        float(
+            segment_report.get(
+                "flow_main_projection_pre_projection_l2",
+                projection_report.get("pre_projection_l2", 0.0),
+            )
+        )
+        for segment_report, projection_report in zip(
+            segment_reports, segment_projection_reports, strict=True
+        )
+    )
+    combined[
+        "flow_predictor_projection_segment_pre_projection_max_abs_max"
+    ] = max(
+        float(
+            segment_report.get(
+                "flow_main_projection_pre_projection_max_abs",
+                projection_report.get("pre_projection_max_abs", 0.0),
+            )
+        )
+        for segment_report, projection_report in zip(
+            segment_reports, segment_projection_reports, strict=True
+        )
+    )
+    combined["flow_predictor_projection_segment_trace"] = [
+        {
+            "segment_index": int(segment_index),
+            "pre_projection_l2": float(
+                segment_report.get(
+                    "flow_main_projection_pre_projection_l2",
+                    report.get("pre_projection_l2", 0.0),
+                )
+            ),
+            "pre_projection_max_abs": float(
+                segment_report.get(
+                    "flow_main_projection_pre_projection_max_abs",
+                    report.get("pre_projection_max_abs", 0.0),
+                )
+            ),
+            "projection_l2": float(
+                segment_report.get(
+                    "flow_main_projection_l2",
+                    report.get("projection_l2", 0.0),
+                )
+            ),
+            "projection_max_abs": float(
+                segment_report.get(
+                    "flow_main_projection_max_abs",
+                    report.get("projection_max_abs", 0.0),
+                )
+            ),
+            "cg_converged_all": bool(report.get("cg_converged_all", True)),
+            "cg_iterations_total": int(report.get("cg_iterations_total", 0)),
+        }
+        for segment_index, (segment_report, report) in enumerate(
+            zip(segment_reports, segment_projection_reports, strict=True),
+            start=1,
+        )
+    ]
+    combined["flow_predictor_note"] = (
+        "core fluid predictor and full sharp-boundary pressure projection "
+        f"interleaved across {configured_substeps} physical segments "
+        f"(segment_dt_s={segment_dt_s:g}); each segment used: "
+        f"{combined.get('flow_predictor_note', '')}"
+    )
+    return combined
+
+
 def _flow_advance_current_step(
     fluid: CartesianFluidSolver,
     config: Any,
@@ -7118,7 +7607,43 @@ def _flow_advance_current_step(
     step_index_global: int,
     preflow_history: list[dict[str, object]],
     reset_pressure: bool,
+    measure_wall_times: bool = False,
+    preflow_stage_observer: Callable[[str], None] | None = None,
 ) -> dict[str, object]:
+    configured_predictor_substeps = int(
+        getattr(config, "flow_predictor_substeps", 1)
+    )
+    mode = _effective_flow_driver_mode(config, flow_phase=flow_phase)
+    predictor_modes = {
+        FLOW_DRIVER_SUSTAINED_BOUNDARY_PREDICTOR,
+        FLOW_DRIVER_SUSTAINED_PREDICTOR,
+    }
+    if configured_predictor_substeps > 1 and mode in predictor_modes:
+        segment_dt_s = float(config.dt_s) / float(configured_predictor_substeps)
+        segment_config = _FlowPredictorSegmentConfig(config, dt_s=segment_dt_s)
+        segment_reports = [
+            _flow_advance_current_step(
+                fluid,
+                segment_config,
+                markers=markers,
+                sharp_boundary_cache=sharp_boundary_cache,
+                flow_phase=flow_phase,
+                step_index_local=step_index_local,
+                step_index_global=step_index_global,
+                preflow_history=preflow_history,
+                reset_pressure=bool(reset_pressure and segment_index == 0),
+                measure_wall_times=measure_wall_times,
+                preflow_stage_observer=preflow_stage_observer,
+            )
+            for segment_index in range(configured_predictor_substeps)
+        ]
+        return _combine_interleaved_flow_predictor_segment_reports(
+            segment_reports,
+            configured_substeps=configured_predictor_substeps,
+            segment_dt_s=segment_dt_s,
+            reset_pressure=reset_pressure,
+        )
+
     source_schedule_scope = _flow_source_schedule_scope(config)
     source_schedule_step_index = _flow_source_schedule_step_index(
         config,
@@ -7149,6 +7674,8 @@ def _flow_advance_current_step(
     # MPM step.  Refresh the carve and velocity rows before any predictor
     # substep consumes them.  The second assembly below runs after prediction
     # so the pressure-Neumann gradient is sampled from the current predictor.
+    if preflow_stage_observer is not None:
+        preflow_stage_observer("pre_predictor_hibm_before")
     pre_predictor_sharp_boundary_report = (
         _apply_hibm_sharp_marker_boundary_to_fluid(
             markers,
@@ -7157,8 +7684,11 @@ def _flow_advance_current_step(
             update_pressure_gradient=False,
             boundary_cache=sharp_boundary_cache,
             reuse_topology_from_previous_assembly=True,
+            stage_observer=preflow_stage_observer,
         )
     )
+    if preflow_stage_observer is not None:
+        preflow_stage_observer("pre_predictor_hibm_after")
     _require_hibm_velocity_dirichlet_health(
         pre_predictor_sharp_boundary_report,
         context=(
@@ -7186,7 +7716,11 @@ def _flow_advance_current_step(
     momentum_advection_rejected_trial_count_total = 0
     momentum_advection_cfl_max = 0.0
     momentum_advection_max_substep_cfl = 0.0
+    sst_transport_wall_time_s = 0.0
+    momentum_predictor_wall_time_s = 0.0
     if turbulence_model == "sst_2003" and markers is not None:
+        if preflow_stage_observer is not None:
+            preflow_stage_observer("sst_wall_distance_before")
         fluid.prepare_sst_wall_distance(
             no_slip_domain_walls=_flow_predictor_no_slip_domain_walls(config),
             marker_position_m=markers.x_gamma_m,
@@ -7195,6 +7729,8 @@ def _flow_advance_current_step(
             projection_segment_count=int(markers.projection_segment_count),
             inactive_axis=OUT_OF_PLANE_AXIS_INDEX,
         )
+        if preflow_stage_observer is not None:
+            preflow_stage_observer("sst_wall_distance_after")
 
     if mode == FLOW_DRIVER_PROJECTION_ONLY:
         pass
@@ -7239,6 +7775,23 @@ def _flow_advance_current_step(
         predictor_note = ""
         predictor_kinematic_viscosity_m2_s = 0.0
         predictor_no_slip_domain_walls = _flow_predictor_no_slip_domain_walls(config)
+        sst_stage_observer: Callable[[str], None] | None = None
+        sst_stage_observer_wall_time_s = 0.0
+        if preflow_stage_observer is not None:
+
+            def emit_sst_stage(stage_name: str) -> None:
+                nonlocal sst_stage_observer_wall_time_s
+                if measure_wall_times:
+                    _synchronize_hibm_sharp_boundary_stage_timing()
+                observer_started_s = time.perf_counter()
+                try:
+                    preflow_stage_observer(f"sst_{stage_name}")
+                finally:
+                    sst_stage_observer_wall_time_s += max(
+                        0.0, time.perf_counter() - observer_started_s
+                    )
+
+            sst_stage_observer = emit_sst_stage
         if predictor_applied:
             advection_scheme = str(
                 getattr(config, "flow_advection_scheme", "euler")
@@ -7251,16 +7804,39 @@ def _flow_advance_current_step(
             for _predictor_substep in range(predictor_substeps):
                 fluid.apply_velocity_dirichlet_boundary_rows(read_report=False)
                 if turbulence_model == "sst_2003":
-                    current_sst_report = fluid.advance_sst_transport(
-                        dt_s=predictor_dt_s,
-                        kinematic_viscosity_m2_s=(
-                            predictor_kinematic_viscosity_m2_s
-                        ),
-                        no_slip_domain_walls=(
-                            predictor_no_slip_domain_walls
-                        ),
-                        advection_scheme=advection_scheme,
+                    if preflow_stage_observer is not None:
+                        preflow_stage_observer("sst_transport_before")
+                    sst_observer_wall_time_before_s = (
+                        sst_stage_observer_wall_time_s
                     )
+                    (
+                        current_sst_report,
+                        current_sst_wall_time_s,
+                    ) = _measure_taichi_operation_wall_time(
+                        lambda: fluid.advance_sst_transport(
+                            dt_s=predictor_dt_s,
+                            kinematic_viscosity_m2_s=(
+                                predictor_kinematic_viscosity_m2_s
+                            ),
+                            no_slip_domain_walls=(
+                                predictor_no_slip_domain_walls
+                            ),
+                            advection_scheme=advection_scheme,
+                            stage_observer=sst_stage_observer,
+                        ),
+                        enabled=measure_wall_times,
+                    )
+                    current_sst_wall_time_s = max(
+                        0.0,
+                        current_sst_wall_time_s
+                        - (
+                            sst_stage_observer_wall_time_s
+                            - sst_observer_wall_time_before_s
+                        ),
+                    )
+                    if preflow_stage_observer is not None:
+                        preflow_stage_observer("sst_transport_after")
+                    sst_transport_wall_time_s += current_sst_wall_time_s
                     sst_transport_report = dict(current_sst_report)
                     sst_transport_substeps_total += int(
                         current_sst_report["diffusion_substeps"]
@@ -7276,12 +7852,26 @@ def _flow_advance_current_step(
                             ]
                         ),
                     )
-                fluid.predict(
-                    dt_s=predictor_dt_s,
-                    advection_scheme=advection_scheme,
-                    kinematic_viscosity_m2_s=predictor_kinematic_viscosity_m2_s,
-                    no_slip_domain_walls=predictor_no_slip_domain_walls,
+                if preflow_stage_observer is not None:
+                    preflow_stage_observer("momentum_predictor_before")
+                _, current_predictor_wall_time_s = (
+                    _measure_taichi_operation_wall_time(
+                        lambda: fluid.predict(
+                            dt_s=predictor_dt_s,
+                            advection_scheme=advection_scheme,
+                            kinematic_viscosity_m2_s=(
+                                predictor_kinematic_viscosity_m2_s
+                            ),
+                            no_slip_domain_walls=(
+                                predictor_no_slip_domain_walls
+                            ),
+                        ),
+                        enabled=measure_wall_times,
+                    )
                 )
+                if preflow_stage_observer is not None:
+                    preflow_stage_observer("momentum_predictor_after")
+                momentum_predictor_wall_time_s += current_predictor_wall_time_s
                 momentum_advection_scheme = str(
                     getattr(fluid, "_last_momentum_advection_scheme", advection_scheme)
                 )
@@ -7343,6 +7933,9 @@ def _flow_advance_current_step(
     driver_report.update(
         {
             "flow_turbulence_model": turbulence_model,
+            "flow_sst_near_wall_treatment": str(
+                getattr(config, "flow_sst_near_wall_treatment", "resolved")
+            ),
             "flow_sst_transport_applied": bool(sst_transport_report),
             "flow_sst_transport_substeps_total": int(
                 sst_transport_substeps_total
@@ -7402,6 +7995,12 @@ def _flow_advance_current_step(
             "flow_momentum_advection_max_substep_cfl": float(
                 momentum_advection_max_substep_cfl
             ),
+            "flow_sst_transport_wall_time_s": float(
+                sst_transport_wall_time_s
+            ),
+            "flow_momentum_predictor_wall_time_s": float(
+                momentum_predictor_wall_time_s
+            ),
             **{
                 f"flow_sst_{key}": value
                 for key, value in sst_transport_report.items()
@@ -7410,6 +8009,8 @@ def _flow_advance_current_step(
         }
     )
 
+    if preflow_stage_observer is not None:
+        preflow_stage_observer("projection_hibm_before")
     sharp_boundary_report = _apply_hibm_sharp_marker_boundary_to_fluid(
         markers,
         fluid,
@@ -7417,7 +8018,10 @@ def _flow_advance_current_step(
         update_pressure_gradient=True,
         boundary_cache=sharp_boundary_cache,
         reuse_topology_from_previous_assembly=True,
+        stage_observer=preflow_stage_observer,
     )
+    if preflow_stage_observer is not None:
+        preflow_stage_observer("projection_hibm_after")
     sharp_boundary_report = dict(sharp_boundary_report)
     _require_hibm_velocity_dirichlet_health(
         sharp_boundary_report,
@@ -7521,6 +8125,8 @@ def _flow_advance_current_step(
     joint_qp_cycle_trace: list[dict[str, object]] = []
     terminal_no_slip_report: dict[str, object] | None = None
 
+    if preflow_stage_observer is not None:
+        preflow_stage_observer("main_pressure_projection_before")
     main_flow_report = _project_current_flow(
         fluid,
         config,
@@ -7546,6 +8152,8 @@ def _flow_advance_current_step(
             pre_projection_velocity_projector
         ),
     )
+    if preflow_stage_observer is not None:
+        preflow_stage_observer("main_pressure_projection_after")
     flow_report = main_flow_report
     main_projection_report = dict(main_flow_report["projection_report"])
     projection_reports = [main_projection_report]
@@ -7571,6 +8179,10 @@ def _flow_advance_current_step(
     for consistency_projection_index in range(consistency_projection_count):
         if joint_qp_converged:
             break
+        if preflow_stage_observer is not None:
+            preflow_stage_observer(
+                f"consistency_hibm_before[{consistency_projection_index + 1}]"
+            )
         consistency_boundary_report = _apply_hibm_sharp_marker_boundary_to_fluid(
             markers,
             fluid,
@@ -7578,7 +8190,12 @@ def _flow_advance_current_step(
             update_pressure_gradient=False,
             boundary_cache=sharp_boundary_cache,
             reuse_topology_from_previous_assembly=True,
+            stage_observer=preflow_stage_observer,
         )
+        if preflow_stage_observer is not None:
+            preflow_stage_observer(
+                f"consistency_hibm_after[{consistency_projection_index + 1}]"
+            )
         consistency_boundary_report = dict(consistency_boundary_report)
         _require_hibm_velocity_dirichlet_health(
             consistency_boundary_report,
@@ -7621,6 +8238,11 @@ def _flow_advance_current_step(
                 ),
             )
         terminal_sharp_boundary_report = consistency_boundary_report
+        if preflow_stage_observer is not None:
+            preflow_stage_observer(
+                "consistency_pressure_projection_before["
+                f"{consistency_projection_index + 1}]"
+            )
         consistency_flow_report = _project_current_flow(
             fluid,
             config,
@@ -7656,6 +8278,11 @@ def _flow_advance_current_step(
                 pre_projection_velocity_projector
             ),
         )
+        if preflow_stage_observer is not None:
+            preflow_stage_observer(
+                "consistency_pressure_projection_after["
+                f"{consistency_projection_index + 1}]"
+            )
         consistency_projection_report = dict(
             consistency_flow_report["projection_report"]
         )
@@ -7707,6 +8334,19 @@ def _flow_advance_current_step(
             context=f"{flow_phase} step {step_index_local}",
         )
     flow_report["projection_report"] = combined_projection_report
+    # Preserve the predictor -> main-projection transition explicitly.  The
+    # combined report is intentionally terminal-state based and therefore its
+    # pre_projection_* values may belong to a later consistency projection.
+    for source_key, report_key in (
+        ("pre_projection_l2", "flow_main_projection_pre_projection_l2"),
+        (
+            "pre_projection_max_abs",
+            "flow_main_projection_pre_projection_max_abs",
+        ),
+        ("projection_l2", "flow_main_projection_l2"),
+        ("projection_max_abs", "flow_main_projection_max_abs"),
+    ):
+        flow_report[report_key] = float(main_projection_report.get(source_key, 0.0))
     flow_report["hibm_post_dirichlet_consistency_projection_count"] = int(
         actual_consistency_projection_count
     )
@@ -9194,6 +9834,9 @@ def _run_or_restore_fixed_solid_preflow(
     fluid: Any,
     solid: Any,
     config: Any,
+    progress_observer: Callable[[dict[str, object]], None] | None = None,
+    run_started_s: float | None = None,
+    profile_wall_time: bool = False,
 ) -> dict[str, object]:
     input_path, output_path = _preflow_snapshot_paths(config)
     identity = (
@@ -9215,7 +9858,15 @@ def _run_or_restore_fixed_solid_preflow(
             config=config,
             expected_identity=identity,
         )
-    report = _run_fixed_solid_preflow(markers, fluid, solid, config)
+    report = _run_fixed_solid_preflow(
+        markers,
+        fluid,
+        solid,
+        config,
+        progress_observer=progress_observer,
+        run_started_s=run_started_s,
+        profile_wall_time=profile_wall_time,
+    )
     report["preflow_snapshot_loaded"] = False
     if output_path is not None:
         _write_fixed_solid_preflow_snapshot(
@@ -9235,6 +9886,10 @@ def _run_fixed_solid_preflow(
     fluid: CartesianFluidSolver,
     solid: NeoHookeanMpmState,
     config: Any,
+    *,
+    progress_observer: Callable[[dict[str, object]], None] | None = None,
+    run_started_s: float | None = None,
+    profile_wall_time: bool = False,
 ) -> dict[str, object]:
     requested_steps = int(getattr(config, "preflow_steps", 0))
     tolerance = float(getattr(config, "preflow_convergence_tolerance", 0.0))
@@ -9249,8 +9904,69 @@ def _run_fixed_solid_preflow(
     converged = requested_steps == 0
     stop_reason = "not_requested" if requested_steps == 0 else "max_steps"
     sharp_boundary_cache: dict[str, object] = {}
+    effective_run_started_s = (
+        time.perf_counter()
+        if run_started_s is None
+        else float(run_started_s)
+    )
+
+    def emit_completed_step(row: Mapping[str, object]) -> None:
+        _emit_run_progress(
+            progress_observer,
+            run_started_s=effective_run_started_s,
+            phase="preflow_step",
+            preflow_step=int(row["preflow_step"]),
+            preflow_steps_requested=requested_steps,
+            preflow_steps_completed=len(history),
+            preflow_step_wall_time_s=float(
+                row["preflow_step_wall_time_s"]
+            ),
+            preflow_flow_advance_wall_time_s=float(
+                row["preflow_flow_advance_wall_time_s"]
+            ),
+            flow_momentum_advection_substeps_total=int(
+                row.get("flow_momentum_advection_substeps_total", 0)
+            ),
+            flow_sst_transport_substeps_total=int(
+                row.get("flow_sst_transport_substeps_total", 0)
+            ),
+        )
 
     for preflow_index in range(requested_steps):
+        _emit_run_progress(
+            progress_observer,
+            run_started_s=effective_run_started_s,
+            phase="preflow_step",
+            preflow_step=preflow_index + 1,
+            preflow_steps_requested=requested_steps,
+            preflow_steps_completed=len(history),
+        )
+        observer_wall_time_s = 0.0
+        preflow_stage_observer: Callable[[str], None] | None = None
+        if progress_observer is not None:
+            def emit_preflow_stage(preflow_stage: str) -> None:
+                nonlocal observer_wall_time_s
+                observer_started_s = time.perf_counter()
+                try:
+                    _emit_run_progress(
+                        progress_observer,
+                        run_started_s=effective_run_started_s,
+                        phase="preflow_stage",
+                        preflow_step=preflow_index + 1,
+                        preflow_steps_requested=requested_steps,
+                        preflow_steps_completed=len(history),
+                        preflow_stage=preflow_stage,
+                    )
+                except Exception as exc:
+                    raise PreflowStageObserverError(
+                        f"preflow stage observer failed at {preflow_stage!r}"
+                    ) from exc
+                finally:
+                    observer_wall_time_s += max(
+                        0.0, time.perf_counter() - observer_started_s
+                    )
+            preflow_stage_observer = emit_preflow_stage
+        preflow_step_started_s = time.perf_counter()
         if _flow_driver_requires_full_field_reinitialize(
             _effective_flow_driver_mode(config, flow_phase="preflow")
         ):
@@ -9265,6 +9981,9 @@ def _run_fixed_solid_preflow(
         previous_feedback_constraint_cells = set(
             feedback_constraint_report.get("_feedback_constraint_cells", set())
         )
+        if profile_wall_time:
+            _synchronize_hibm_sharp_boundary_stage_timing()
+        flow_advance_started_s = time.perf_counter()
         try:
             flow_report = _flow_advance_current_step(
                 fluid,
@@ -9279,6 +9998,8 @@ def _run_fixed_solid_preflow(
                     bool(getattr(config, "flow_reset_pressure_each_step", False))
                     or preflow_index == 0
                 ),
+                measure_wall_times=profile_wall_time,
+                preflow_stage_observer=preflow_stage_observer,
             )
         except (FloatingPointError, ValueError) as exc:
             previous = history[-1] if history else {}
@@ -9300,6 +10021,11 @@ def _run_fixed_solid_preflow(
                 f"completed_steps={len(history)}, "
                 f"previous_step={previous_summary}: {exc}"
             ) from exc
+        if profile_wall_time:
+            _synchronize_hibm_sharp_boundary_stage_timing()
+        preflow_flow_advance_wall_time_s = (
+            max(0.0, time.perf_counter() - flow_advance_started_s - observer_wall_time_s)
+        )
         feedback_constraint_report[
             "no_slip_projected_residual_after_projection_mps"
         ] = (
@@ -9331,8 +10057,23 @@ def _run_fixed_solid_preflow(
             particle_count=solid.particle_count,
             support_radius_m=config.mpm_support_radius_m,
         )
+        if profile_wall_time:
+            _synchronize_hibm_sharp_boundary_stage_timing()
+        preflow_step_wall_time_s = (
+            max(0.0, time.perf_counter() - preflow_step_started_s - observer_wall_time_s)
+        )
         row = {
             "preflow_step": preflow_index + 1,
+            "preflow_step_wall_time_s": float(preflow_step_wall_time_s),
+            "preflow_flow_advance_wall_time_s": float(
+                preflow_flow_advance_wall_time_s
+            ),
+            "flow_sst_transport_wall_time_s": float(
+                flow_report.get("flow_sst_transport_wall_time_s", 0.0)
+            ),
+            "flow_momentum_predictor_wall_time_s": float(
+                flow_report.get("flow_momentum_predictor_wall_time_s", 0.0)
+            ),
             "fluid_recomputed": True,
             "flow_driver_mode": flow_report["flow_driver_mode"],
             "flow_driver_diagnostic_only": flow_report["flow_driver_diagnostic_only"],
@@ -9370,6 +10111,33 @@ def _run_fixed_solid_preflow(
             ),
             "flow_predictor_applied": flow_report["flow_predictor_applied"],
             "flow_predictor_note": flow_report["flow_predictor_note"],
+            "flow_predictor_projection_segment_count": int(
+                flow_report.get("flow_predictor_projection_segment_count", 1)
+            ),
+            "flow_predictor_projection_segment_dt_s": float(
+                flow_report.get(
+                    "flow_predictor_projection_segment_dt_s",
+                    config.dt_s,
+                )
+            ),
+            "flow_predictor_projection_segment_pre_projection_l2_max": float(
+                flow_report.get(
+                    "flow_predictor_projection_segment_pre_projection_l2_max",
+                    flow_report.get("flow_main_projection_pre_projection_l2", 0.0),
+                )
+            ),
+            "flow_predictor_projection_segment_pre_projection_max_abs_max": float(
+                flow_report.get(
+                    "flow_predictor_projection_segment_pre_projection_max_abs_max",
+                    flow_report.get(
+                        "flow_main_projection_pre_projection_max_abs",
+                        0.0,
+                    ),
+                )
+            ),
+            "flow_predictor_projection_segment_trace": list(
+                flow_report.get("flow_predictor_projection_segment_trace", [])
+            ),
             "flow_predictor_kinematic_viscosity_m2_s": flow_report[
                 "flow_predictor_kinematic_viscosity_m2_s"
             ],
@@ -9614,11 +10382,13 @@ def _run_fixed_solid_preflow(
                 converged = True
                 stop_reason = "converged"
                 history.append(row)
+                emit_completed_step(row)
                 break
         else:
             row["velocity_peak_relative_delta"] = ""
             row["pressure_range_relative_delta"] = ""
         history.append(row)
+        emit_completed_step(row)
         if convergence_mode == "windowed_stationary":
             stationary_report = _preflow_windowed_stationary_report(history, config)
             row["preflow_stationary_gate_passed"] = bool(
@@ -11250,6 +12020,7 @@ def _runtime_pressure_pair_anchor_map(
         anchor_axis=STREAMWISE_AXIS_INDEX,
         inside_axis_position_m=inside_axis_position_m,
         outside_axis_offset_cells=1,
+        normal_aware_rays=True,
     )
     return provider.compute_pairs(markers, fluid_state=fluid_state)
 

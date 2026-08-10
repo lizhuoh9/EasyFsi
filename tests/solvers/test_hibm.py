@@ -2563,6 +2563,138 @@ class HibmMpmIbNodeSearchTests(unittest.TestCase):
                 atol=1.0e-6,
             )
 
+    def test_inactive_axis_segment_search_uses_oriented_chord_normal(
+        self,
+    ) -> None:
+        """The step-3 flap geometry must publish one self-consistent ray."""
+
+        runtime = TaichiRuntimeConfig(arch="cuda")
+        marker_positions_m = (
+            (0.001500000013038516, 0.008645190857350826, 0.04687650874257088),
+            (0.001500000013038516, 0.008801305666565895, 0.04687337204813957),
+        )
+        marker_normals = (
+            (0.0, -0.013713118620216846, -0.9999059438705444),
+        ) * 2
+        markers = HibmMpmSurfaceMarkers(
+            marker_capacity=2,
+            projection_triangle_capacity=1,
+            runtime=runtime,
+        )
+        markers.load_markers(
+            positions_m=marker_positions_m,
+            velocities_mps=((0.0, 0.0, 0.0),) * 2,
+            normals=marker_normals,
+            areas_m2=(1.0e-6, 1.0e-6),
+            region_ids=(202, 202),
+        )
+        markers.set_projection_segments(((0, 1),))
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(1, 1, 1),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=2,
+            runtime=runtime,
+        )
+        cell_center_x_m = ti.field(dtype=ti.f32, shape=1)
+        cell_center_y_m = ti.field(dtype=ti.f32, shape=1)
+        cell_center_z_m = ti.field(dtype=ti.f32, shape=1)
+        cell_center_x_m[0] = 0.000375000003259629
+        cell_center_y_m[0] = 0.0087890625
+        cell_center_z_m[0] = 0.046562500298023224
+
+        report = search.search_and_classify_grid_fields(
+            markers,
+            cell_center_x_m=cell_center_x_m,
+            cell_center_y_m=cell_center_y_m,
+            cell_center_z_m=cell_center_z_m,
+            search_radius_m=4.0e-4,
+            interior_probe_distance_m=1.6e-3,
+            search_inactive_axis=0,
+        )
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(1, 1, 1),
+            marker_capacity=2,
+            runtime=runtime,
+        )
+        boundary.build_from_search(
+            search,
+            markers,
+            marker_pressure_neumann_gradient_pa_per_m=(0.0, 0.0),
+        )
+
+        node = (0, 0, 0)
+        self.assertEqual(report.invalid_projection_count, 0)
+        self.assertEqual(report.external_ib_node_count, 1)
+        self.assertEqual(
+            tuple(int(value) for value in search.node_projection_marker_indices[node]),
+            (0, 1, -1),
+        )
+        chord = np.asarray(marker_positions_m[1]) - np.asarray(marker_positions_m[0])
+        chord[0] = 0.0
+        expected_normal = np.asarray((0.0, -chord[2], chord[1]))
+        expected_normal /= np.linalg.norm(expected_normal)
+        if float(np.dot(expected_normal, np.asarray(marker_normals[0]))) < 0.0:
+            expected_normal *= -1.0
+        probe_ray = np.asarray(search.interior_fluid_point_m(node)) - np.asarray(
+            search.boundary_point_m(node)
+        )
+        probe_normal = probe_ray / np.linalg.norm(probe_ray)
+
+        self.assertAlmostEqual(
+            float(np.dot(probe_normal, chord / np.linalg.norm(chord))),
+            0.0,
+            delta=1.0e-6,
+        )
+        np.testing.assert_allclose(
+            probe_normal,
+            expected_normal,
+            rtol=0.0,
+            atol=1.0e-6,
+        )
+        np.testing.assert_allclose(
+            boundary.pressure_neumann_normal(node),
+            expected_normal,
+            rtol=0.0,
+            atol=1.0e-6,
+        )
+
+    def test_inactive_axis_segment_search_rejects_ambiguous_chord_orientation(
+        self,
+    ) -> None:
+        """A tangential marker normal cannot choose either chord-normal side."""
+
+        markers = HibmMpmSurfaceMarkers(
+            marker_capacity=2,
+            projection_triangle_capacity=1,
+        )
+        inv_sqrt2 = 1.0 / math.sqrt(2.0)
+        markers.load_markers(
+            positions_m=((0.5, 0.25, 0.25), (0.5, 0.75, 0.75)),
+            velocities_mps=((0.0, 0.0, 0.0),) * 2,
+            normals=((0.0, inv_sqrt2, inv_sqrt2),) * 2,
+            areas_m2=(0.5, 0.5),
+            region_ids=(7, 7),
+        )
+        markers.set_projection_segments(((0, 1),))
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(1, 1, 1),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=2,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"invalid projection segment geometry before IB search: count=1",
+        ):
+            search.search_and_classify(
+                markers,
+                search_radius_m=0.25,
+                interior_probe_distance_m=0.05,
+                search_inactive_axis=0,
+            )
+
     def test_inactive_axis_point_search_projects_normal_before_probe(
         self,
     ) -> None:

@@ -1580,6 +1580,52 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
             np.all(solver.sst_turbulent_kinetic_energy.to_numpy() > 0.0)
         )
 
+    def test_sst_transport_accepts_laminar_zero_k_without_retry(
+        self,
+    ) -> None:
+        walls = (False, False, True, False, False, False)
+        solver = _cuda_solver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(4, 4, 4),
+                density_kgm3=1.0,
+                viscosity_pa_s=1.0e-5,
+                dt_s=2.93691e-11,
+            )
+        )
+        solver.configure_sst_2003(
+            inlet_velocity_mps=1.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=walls,
+            near_wall_treatment="fluent_correlation",
+        )
+        solver.set_uniform_velocity((0.0, 0.0, 0.0))
+        solver.sst_turbulent_kinetic_energy.fill(0.0)
+        solver.sst_specific_dissipation_rate.fill(404679.90625)
+
+        # Zero turbulent kinetic energy is a valid laminar-limit state; only
+        # omega must remain strictly positive.
+        report = solver.advance_sst_transport(
+            dt_s=2.93691e-11,
+            no_slip_domain_walls=walls,
+        )
+
+        self.assertEqual(int(report["rejected_transport_trial_count"]), 0)
+        self.assertEqual(solver._sst_last_transport_rejected_trial_count, 0)
+        k_after = solver.sst_turbulent_kinetic_energy.to_numpy()
+        omega_after = solver.sst_specific_dissipation_rate.to_numpy()
+        mu_t_after = solver.sst_eddy_viscosity_pa_s.to_numpy()
+        self.assertTrue(np.all(np.isfinite(k_after)))
+        self.assertTrue(np.all(k_after >= 0.0))
+        self.assertTrue(np.all(np.isfinite(omega_after)))
+        self.assertTrue(np.all(omega_after > 0.0))
+        zero_k = k_after == 0.0
+        self.assertTrue(np.any(zero_k))
+        np.testing.assert_array_equal(
+            mu_t_after[zero_k],
+            np.zeros_like(mu_t_after[zero_k]),
+        )
+
     def test_sst_lod_diffusion_conserves_on_a_graded_variable_coefficient_grid(
         self,
     ) -> None:
@@ -2377,6 +2423,370 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
             float(solver.sst_specific_dissipation_rate[fresh]), 3.0, places=5
         )
         self.assertAlmostEqual(float(solver.sst_eddy_viscosity_pa_s[fresh]), 4.0e-4, places=8)
+
+    def test_fresh_fluid_sst_reconstruction_ignores_velocity_only_boundary_weight(
+        self,
+    ) -> None:
+        solver = _cuda_solver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(4, 4, 4),
+                density_kgm3=1.0,
+                viscosity_pa_s=1.0e-5,
+                dt_s=1.0e-4,
+            )
+        )
+        solver.configure_sst_2003(
+            inlet_velocity_mps=1.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=_OPEN_WALLS,
+        )
+        fresh = (2, 2, 2)
+        donor = (1, 2, 2)
+        obstacle = np.ones((4, 4, 4), dtype=np.int32)
+        obstacle[fresh] = 0
+        obstacle[donor] = 0
+        solver.obstacle.from_numpy(obstacle)
+        solver.sst_turbulent_kinetic_energy[fresh] = 1.0e-12
+        solver.sst_specific_dissipation_rate[fresh] = 1.0e12
+        solver.sst_eddy_viscosity_pa_s[fresh] = 0.0
+        solver.sst_turbulent_kinetic_energy[donor] = 2.0
+        solver.sst_specific_dissipation_rate[donor] = 3.0
+        solver.sst_eddy_viscosity_pa_s[donor] = 4.0e-4
+        solver.velocity_dirichlet_boundary_active[fresh] = 1
+        solver.velocity_dirichlet_boundary_value_mps[fresh] = (7.0, 8.0, 9.0)
+        solver.fresh_fluid_reconstruction_pending[fresh] = 1
+
+        solver._reconstruct_hibm_fresh_fluid_cells_kernel(1)
+
+        self.assertEqual(int(solver.fresh_fluid_reconstruction_pending[fresh]), 0)
+        self.assertAlmostEqual(
+            float(solver.sst_turbulent_kinetic_energy[fresh]), 2.0, places=5
+        )
+        self.assertAlmostEqual(
+            float(solver.sst_specific_dissipation_rate[fresh]), 3.0, places=5
+        )
+        self.assertAlmostEqual(
+            float(solver.sst_eddy_viscosity_pa_s[fresh]), 4.0e-4, places=8
+        )
+
+    def test_fresh_fluid_reconstruction_advances_one_frozen_wave_per_pass(
+        self,
+    ) -> None:
+        def run_layout(
+            *,
+            donor: tuple[int, int, int],
+            first_layer: tuple[int, int, int],
+            second_layer: tuple[int, int, int],
+        ) -> tuple[dict[str, np.ndarray | int], dict[str, np.ndarray | int]]:
+            solver = _cuda_solver(
+                FluidDomainSpec.unit_box(
+                    grid_nodes=(5, 4, 4),
+                    density_kgm3=1.0,
+                    viscosity_pa_s=1.0e-5,
+                    dt_s=1.0e-4,
+                )
+            )
+            solver.configure_sst_2003(
+                inlet_velocity_mps=1.0,
+                turbulence_intensity=0.05,
+                turbulent_viscosity_ratio=10.0,
+                no_slip_domain_walls=_OPEN_WALLS,
+            )
+            obstacle = np.ones((5, 4, 4), dtype=np.int32)
+            obstacle[donor] = 0
+            obstacle[first_layer] = 0
+            obstacle[second_layer] = 0
+            solver.obstacle.from_numpy(obstacle)
+            solver.fresh_fluid_reconstruction_pending.fill(0)
+            solver.fresh_fluid_reconstruction_pending[first_layer] = 1
+            solver.fresh_fluid_reconstruction_pending[second_layer] = 1
+
+            donor_velocity = np.array((1.25, -2.5, 3.75), dtype=np.float32)
+            donor_velocity_prev = np.array((-4.0, 5.0, -6.0), dtype=np.float32)
+            solver.velocity[donor] = donor_velocity
+            solver.velocity_prev[donor] = donor_velocity_prev
+            solver.sst_turbulent_kinetic_energy[donor] = 2.0
+            solver.sst_specific_dissipation_rate[donor] = 3.0
+            solver.sst_eddy_viscosity_pa_s[donor] = 4.0e-4
+            solver.velocity[first_layer] = (10.0, 11.0, 12.0)
+            solver.velocity_prev[first_layer] = (13.0, 14.0, 15.0)
+            solver.sst_turbulent_kinetic_energy[first_layer] = 0.25
+            solver.sst_specific_dissipation_rate[first_layer] = 100.0
+            solver.sst_eddy_viscosity_pa_s[first_layer] = 1.0e-4
+            solver.velocity[second_layer] = (20.0, 21.0, 22.0)
+            solver.velocity_prev[second_layer] = (23.0, 24.0, 25.0)
+            solver.sst_turbulent_kinetic_energy[second_layer] = 0.5
+            solver.sst_specific_dissipation_rate[second_layer] = 200.0
+            solver.sst_eddy_viscosity_pa_s[second_layer] = 2.0e-4
+
+            def snapshot() -> dict[str, np.ndarray | int]:
+                indices = (first_layer, second_layer)
+                return {
+                    "pending": np.array(
+                        [
+                            int(solver.fresh_fluid_reconstruction_pending[index])
+                            for index in indices
+                        ],
+                        dtype=np.int32,
+                    ),
+                    "velocity": np.array(
+                        [np.asarray(solver.velocity[index]) for index in indices]
+                    ),
+                    "velocity_prev": np.array(
+                        [np.asarray(solver.velocity_prev[index]) for index in indices]
+                    ),
+                    "sst_k": np.array(
+                        [
+                            float(solver.sst_turbulent_kinetic_energy[index])
+                            for index in indices
+                        ]
+                    ),
+                    "sst_omega": np.array(
+                        [
+                            float(solver.sst_specific_dissipation_rate[index])
+                            for index in indices
+                        ]
+                    ),
+                    "sst_mu_t": np.array(
+                        [
+                            float(solver.sst_eddy_viscosity_pa_s[index])
+                            for index in indices
+                        ]
+                    ),
+                    "reconstructed_count": int(solver.reduction_count[None]),
+                }
+
+            solver._reconstruct_hibm_fresh_fluid_cells_kernel(1)
+            after_first_pass = snapshot()
+            solver._reconstruct_hibm_fresh_fluid_cells_kernel(1)
+            after_second_pass = snapshot()
+            return after_first_pass, after_second_pass
+
+        layouts = (
+            {
+                "donor": (1, 2, 2),
+                "first_layer": (2, 2, 2),
+                "second_layer": (3, 2, 2),
+            },
+            {
+                "donor": (3, 1, 1),
+                "first_layer": (2, 1, 1),
+                "second_layer": (1, 1, 1),
+            },
+        )
+        results = [run_layout(**layout) for layout in layouts]
+        donor_velocity = np.array((1.25, -2.5, 3.75), dtype=np.float32)
+        donor_velocity_prev = np.array((-4.0, 5.0, -6.0), dtype=np.float32)
+        untouched_second_velocity = np.array((20.0, 21.0, 22.0), dtype=np.float32)
+        untouched_second_velocity_prev = np.array((23.0, 24.0, 25.0), dtype=np.float32)
+
+        for after_first_pass, after_second_pass in results:
+            np.testing.assert_array_equal(after_first_pass["pending"], (0, 1))
+            self.assertEqual(after_first_pass["reconstructed_count"], 1)
+            np.testing.assert_allclose(
+                after_first_pass["velocity"],
+                (donor_velocity, untouched_second_velocity),
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+            np.testing.assert_allclose(
+                after_first_pass["velocity_prev"],
+                (donor_velocity_prev, untouched_second_velocity_prev),
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+            np.testing.assert_allclose(
+                after_first_pass["sst_k"], (2.0, 0.5), rtol=0.0, atol=1.0e-6
+            )
+            np.testing.assert_allclose(
+                after_first_pass["sst_omega"],
+                (3.0, 200.0),
+                rtol=0.0,
+                atol=1.0e-5,
+            )
+            np.testing.assert_allclose(
+                after_first_pass["sst_mu_t"],
+                (4.0e-4, 2.0e-4),
+                rtol=0.0,
+                atol=1.0e-8,
+            )
+            np.testing.assert_array_equal(after_second_pass["pending"], (0, 0))
+            self.assertEqual(after_second_pass["reconstructed_count"], 1)
+            np.testing.assert_allclose(
+                after_second_pass["velocity"],
+                (donor_velocity, donor_velocity),
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+            np.testing.assert_allclose(
+                after_second_pass["velocity_prev"],
+                (donor_velocity_prev, donor_velocity_prev),
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+            np.testing.assert_allclose(
+                after_second_pass["sst_k"], (2.0, 2.0), rtol=0.0, atol=1.0e-6
+            )
+            np.testing.assert_allclose(
+                after_second_pass["sst_omega"], (3.0, 3.0), rtol=0.0, atol=1.0e-6
+            )
+            np.testing.assert_allclose(
+                after_second_pass["sst_mu_t"],
+                (4.0e-4, 4.0e-4),
+                rtol=0.0,
+                atol=1.0e-8,
+            )
+
+        for field_name in (
+            "pending",
+            "velocity",
+            "velocity_prev",
+            "sst_k",
+            "sst_omega",
+            "sst_mu_t",
+            "reconstructed_count",
+        ):
+            np.testing.assert_allclose(
+                results[0][0][field_name],
+                results[1][0][field_name],
+                rtol=0.0,
+                atol=1.0e-8,
+            )
+            np.testing.assert_allclose(
+                results[0][1][field_name],
+                results[1][1][field_name],
+                rtol=0.0,
+                atol=1.0e-8,
+            )
+
+    def test_fresh_fluid_sst_reconstruction_fails_closed_without_sst_donor(
+        self,
+    ) -> None:
+        solver = _cuda_solver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(4, 4, 4),
+                density_kgm3=1.0,
+                viscosity_pa_s=1.0e-5,
+                dt_s=1.0e-4,
+            )
+        )
+        solver.configure_sst_2003(
+            inlet_velocity_mps=1.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=_OPEN_WALLS,
+        )
+        fresh = (2, 2, 2)
+        obstacle = np.ones((4, 4, 4), dtype=np.int32)
+        obstacle[fresh] = 0
+        solver.obstacle.from_numpy(obstacle)
+        solver.sst_turbulent_kinetic_energy[fresh] = 0.25
+        solver.sst_specific_dissipation_rate[fresh] = 1234.0
+        solver.sst_eddy_viscosity_pa_s[fresh] = 1.0e-4
+        solver.velocity_dirichlet_boundary_active[fresh] = 1
+        solver.velocity_dirichlet_boundary_value_mps[fresh] = (7.0, 8.0, 9.0)
+        solver.fresh_fluid_reconstruction_pending[fresh] = 1
+        solver.hibm_fresh_fluid_cell[fresh] = 1
+        solver.report_hibm_fresh_fluid_cells[None] = 1
+
+        with self.assertRaisesRegex(RuntimeError, "without a reconstructable"):
+            solver._reconstruct_fresh_fluid_cells()
+
+        self.assertEqual(int(solver.fresh_fluid_reconstruction_pending[fresh]), 1)
+        self.assertAlmostEqual(
+            float(solver.sst_turbulent_kinetic_energy[fresh]), 0.25, places=6
+        )
+        self.assertAlmostEqual(
+            float(solver.sst_specific_dissipation_rate[fresh]), 1234.0, places=3
+        )
+        self.assertAlmostEqual(
+            float(solver.sst_eddy_viscosity_pa_s[fresh]), 1.0e-4, places=8
+        )
+
+    def test_fresh_fluid_reconstruction_advances_one_snapshot_wave_per_pass(
+        self,
+    ) -> None:
+        for donor, first_layer, second_layer in (
+            ((1, 2, 2), (2, 2, 2), (3, 2, 2)),
+            ((3, 2, 2), (2, 2, 2), (1, 2, 2)),
+        ):
+            with self.subTest(donor=donor):
+                solver = _cuda_solver(
+                    FluidDomainSpec.unit_box(
+                        grid_nodes=(5, 5, 5),
+                        density_kgm3=1.0,
+                        viscosity_pa_s=1.0e-5,
+                        dt_s=1.0e-4,
+                    )
+                )
+                solver.configure_sst_2003(
+                    inlet_velocity_mps=1.0,
+                    turbulence_intensity=0.05,
+                    turbulent_viscosity_ratio=10.0,
+                    no_slip_domain_walls=_OPEN_WALLS,
+                )
+                obstacle = np.ones((5, 5, 5), dtype=np.int32)
+                for cell in (donor, first_layer, second_layer):
+                    obstacle[cell] = 0
+                solver.obstacle.from_numpy(obstacle)
+                solver.velocity[donor] = (1.0, 2.0, 3.0)
+                solver.velocity_prev[donor] = (-1.0, -2.0, -3.0)
+                solver.sst_turbulent_kinetic_energy[donor] = 2.0
+                solver.sst_specific_dissipation_rate[donor] = 3.0
+                solver.sst_eddy_viscosity_pa_s[donor] = 4.0e-4
+                for cell in (first_layer, second_layer):
+                    solver.velocity[cell] = (91.0, 92.0, 93.0)
+                    solver.velocity_prev[cell] = (-91.0, -92.0, -93.0)
+                    solver.sst_turbulent_kinetic_energy[cell] = 1.0e-12
+                    solver.sst_specific_dissipation_rate[cell] = 1.0e12
+                    solver.sst_eddy_viscosity_pa_s[cell] = 0.0
+                    solver.fresh_fluid_reconstruction_pending[cell] = 1
+
+                solver._snapshot_fresh_fluid_reconstruction_pending_kernel()
+                solver._reconstruct_hibm_fresh_fluid_cells_kernel(1)
+
+                self.assertEqual(
+                    int(solver.fresh_fluid_reconstruction_pending[first_layer]),
+                    0,
+                )
+                self.assertEqual(
+                    int(solver.fresh_fluid_reconstruction_pending[second_layer]),
+                    1,
+                )
+                self.assertAlmostEqual(
+                    float(solver.sst_turbulent_kinetic_energy[first_layer]),
+                    2.0,
+                    places=5,
+                )
+                self.assertAlmostEqual(
+                    float(solver.sst_specific_dissipation_rate[second_layer]),
+                    float(np.float32(1.0e12)),
+                    delta=0.0,
+                )
+
+                solver._snapshot_fresh_fluid_reconstruction_pending_kernel()
+                solver._reconstruct_hibm_fresh_fluid_cells_kernel(1)
+
+                self.assertEqual(
+                    int(solver.fresh_fluid_reconstruction_pending[second_layer]),
+                    0,
+                )
+                self.assertAlmostEqual(
+                    float(solver.sst_turbulent_kinetic_energy[second_layer]),
+                    2.0,
+                    places=5,
+                )
+                self.assertAlmostEqual(
+                    float(solver.sst_specific_dissipation_rate[second_layer]),
+                    3.0,
+                    places=5,
+                )
+                self.assertAlmostEqual(
+                    float(solver.sst_eddy_viscosity_pa_s[second_layer]),
+                    4.0e-4,
+                    places=8,
+                )
 
     def test_save_restore_round_trips_all_sst_physical_state(self) -> None:
         solver = _cuda_solver(

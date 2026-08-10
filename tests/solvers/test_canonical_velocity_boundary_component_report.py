@@ -82,6 +82,37 @@ CANONICAL_RELOCATION_COUNTER_FIELDS = (
 
 
 class CanonicalVelocityBoundaryComponentReportContracts(unittest.TestCase):
+    def test_marker_closure_kaczmarz_avoids_static_stencil_ir_expansion(
+        self,
+    ) -> None:
+        """The serialized sweep must not clone its 3 x 8 x 8 stencil graph."""
+
+        sweep_source = inspect.getsource(
+            HibmMpmIbBoundaryConditions._marker_target_closure_kaczmarz_sweep_kernel
+        )
+        self.assertIn("ti.loop_config(serialize=True)", sweep_source)
+        self.assertIn("for axis in range(3):", sweep_source)
+        self.assertEqual(
+            sweep_source.count("for oi, oj, ok in ti.ndrange(2, 2, 2):"),
+            2,
+        )
+        self.assertNotIn("for axis in ti.static(range(3)):", sweep_source)
+        self.assertNotIn(
+            "for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):",
+            sweep_source,
+        )
+
+    def test_claim_prepare_uses_runtime_axis_loop_to_bound_cold_jit_ir(self) -> None:
+        """The large claim body must not be cloned three times by ``ti.static``."""
+
+        prepare_source = inspect.getsource(
+            HibmMpmIbBoundaryConditions._prepare_velocity_dirichlet_component_face_claims_kernel
+        )
+        self.assertIn("for axis in range(3):", prepare_source)
+        self.assertNotIn("for axis in ti.static(range(3)):", prepare_source)
+        self.assertNotIn("ti.static(axis ==", prepare_source)
+        self.assertNotIn("ti.static(axis !=", prepare_source)
+
     def test_canonical_actual_sample_walk_avoids_pathological_static_expansion(
         self,
     ) -> None:

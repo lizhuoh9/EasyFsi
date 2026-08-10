@@ -29,9 +29,12 @@ REPO_ROOT = _repo_root()
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# Avoid stale/shared Taichi offline-cache locks from unrelated local runs. This
-# changes compilation caching only; solver numerics are unchanged.
-os.environ.setdefault("TI_OFFLINE_CACHE", "0")
+DEFAULT_TAICHI_OFFLINE_CACHE_DIR = (
+    REPO_ROOT
+    / "validation_runs"
+    / ".taichi_cache"
+    / "ansys_vertical_flap_cuda_f32"
+)
 
 from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     ANSYS_VERTICAL_FLAP_CASE_METADATA,
@@ -177,6 +180,89 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+def _record_failure_artifacts(
+    *,
+    output_dir: Path,
+    exc: BaseException,
+    elapsed_s: float,
+    config_payload: dict[str, Any],
+    config: VerticalFlapFsiConfig | None,
+) -> None:
+    interrupted = isinstance(exc, KeyboardInterrupt)
+    exception_status = "interrupted" if interrupted else "failed"
+    exception_artifact_name = (
+        "interruption.json" if interrupted else "failure.json"
+    )
+    reporting_errors: list[str] = []
+    try:
+        exception_diagnostics = _exception_diagnostics(exc)
+    except BaseException as diagnostics_exc:
+        exception_diagnostics = {}
+        reporting_errors.append(
+            "exception diagnostics failed: "
+            f"{type(diagnostics_exc).__name__}: {diagnostics_exc}"
+        )
+    failure_payload = {
+        "status": exception_status,
+        "elapsed_s": float(elapsed_s),
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+        "pressure_solve_diagnostics": exception_diagnostics,
+        "traceback": traceback.format_exc(),
+        "config": config_payload,
+        "grid": _grid_summary(config) if config is not None else None,
+    }
+    try:
+        _write_json_atomic(
+            output_dir / exception_artifact_name,
+            failure_payload,
+        )
+    except BaseException as artifact_exc:
+        reporting_errors.append(
+            f"{exception_artifact_name} write failed: "
+            f"{type(artifact_exc).__name__}: {artifact_exc}"
+        )
+
+    progress_path = output_dir / "progress.json"
+    try:
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        progress = {"step_completed": 0, "time_s": 0.0}
+    try:
+        _write_json_atomic(
+            progress_path,
+            {
+                **progress,
+                "status": exception_status,
+                "phase": exception_status,
+                "elapsed_s": float(elapsed_s),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "pressure_solve_diagnostics": exception_diagnostics,
+                "reporting_errors": reporting_errors,
+            },
+        )
+    except BaseException as progress_exc:
+        reporting_errors.append(
+            "progress write failed: "
+            f"{type(progress_exc).__name__}: {progress_exc}"
+        )
+    if reporting_errors:
+        print(
+            json.dumps(
+                {
+                    "status": "artifact_reporting_degraded",
+                    "primary_error_type": type(exc).__name__,
+                    "primary_error": str(exc),
+                    "reporting_errors": reporting_errors,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -211,6 +297,60 @@ def _prepare_output_dir(output_dir: Path) -> None:
             raise RuntimeError(f"refusing to reuse non-empty output directory: {output_dir}")
         return
     output_dir.mkdir(parents=True, exist_ok=False)
+
+
+def _configure_taichi_offline_cache(
+    *,
+    enabled: bool,
+    cache_dir: Path,
+) -> dict[str, object]:
+    resolved_cache_dir = cache_dir.resolve()
+    os.environ["TI_OFFLINE_CACHE"] = "1" if enabled else "0"
+    os.environ["SIMULATION_TAICHI_OFFLINE_CACHE"] = (
+        "1" if enabled else "0"
+    )
+    if enabled:
+        resolved_cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ[
+            "SIMULATION_TAICHI_OFFLINE_CACHE_FILE_PATH"
+        ] = str(resolved_cache_dir)
+    else:
+        os.environ.pop(
+            "SIMULATION_TAICHI_OFFLINE_CACHE_FILE_PATH",
+            None,
+        )
+    return {
+        "configuration_state": "requested_before_taichi_init",
+        "offline_cache_enabled": bool(enabled),
+        "offline_cache_file_path": (
+            str(resolved_cache_dir) if enabled else ""
+        ),
+    }
+
+
+def _make_run_progress_observer(
+    *,
+    output_dir: Path,
+):
+    def observe(event: dict[str, object]) -> None:
+        progress_path = output_dir / "progress.json"
+        try:
+            existing = json.loads(progress_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            existing = {}
+        _write_json_atomic(
+            progress_path,
+            {
+                "status": "running",
+                "phase": "initializing",
+                "step_completed": 0,
+                "time_s": 0.0,
+                **existing,
+                **event,
+            },
+        )
+
+    return observe
 
 
 def _require_vector_rows(snapshot: dict[str, Any], key: str) -> np.ndarray:
@@ -426,6 +566,7 @@ def _make_step_observer(
         )
         progress = {
             "status": "running",
+            "phase": "fsi_step",
             "step_completed": int(step_index),
             "time_s": float(time_s),
             "max_displacement_m": history_row.get("max_displacement_m"),
@@ -437,8 +578,13 @@ def _make_step_observer(
             ),
             "frame": frame_summary,
         }
-        _write_json_atomic(progress_path, progress)
-        print(json.dumps(_json_safe(progress), sort_keys=True), flush=True)
+        try:
+            existing = json.loads(progress_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            existing = {}
+        next_progress = {**existing, **progress}
+        _write_json_atomic(progress_path, next_progress)
+        print(json.dumps(_json_safe(next_progress), sort_keys=True), flush=True)
 
     return observe
 
@@ -612,6 +758,19 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
                 float(config.duct_length_m) / float(args.grid_nodes[2]),
             )
         ),
+        # Pressure-Neumann sampling follows the marker normal.  Preserve each
+        # axis' mesh depth so the coarse inactive extrusion spacing cannot
+        # push an in-plane wall-normal probe many cells into the fluid.
+        flow_hibm_sharp_interior_probe_distance_xyz_m=(
+            1.5 * (float(config.span_m) / float(args.grid_nodes[0])),
+            1.5
+            * (
+                0.5
+                * float(config.duct_height_m)
+                / float(args.grid_nodes[1])
+            ),
+            1.5 * (float(config.duct_length_m) / float(args.grid_nodes[2])),
+        ),
         flow_hibm_sharp_interpolate_velocity_rows=not bool(
             getattr(args, "disable_hibm_interpolate_velocity_rows", False)
         ),
@@ -667,6 +826,10 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
             flow_hibm_sharp_interior_probe_distance_m=float(
                 getattr(args, "hibm_interior_probe_distance_m")
             ),
+            # An explicit legacy scalar override must retain its historical
+            # isotropic semantics instead of being shadowed by the fine-grid
+            # tuple above.
+            flow_hibm_sharp_interior_probe_distance_xyz_m=None,
         )
     return with_local_surface_force_support(config)
 
@@ -880,6 +1043,28 @@ def main() -> int:
         action="store_true",
         help="Disable solver-to-Fluent streamwise axis reversal.",
     )
+    parser.add_argument(
+        "--taichi-offline-cache-dir",
+        type=Path,
+        default=DEFAULT_TAICHI_OFFLINE_CACHE_DIR,
+        help=(
+            "Reusable isolated Taichi kernel-cache directory. This affects "
+            "compilation latency only, never solver numerics."
+        ),
+    )
+    parser.add_argument(
+        "--disable-taichi-offline-cache",
+        action="store_true",
+        help="Force cold Taichi JIT compilation for diagnostic A/B runs.",
+    )
+    parser.add_argument(
+        "--profile-wall-time",
+        action="store_true",
+        help=(
+            "Enable synchronized GPU phase timing. This adds host/device "
+            "barriers and is diagnostic-only."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--save-step-fields",
@@ -893,30 +1078,79 @@ def main() -> int:
 
     output_dir = Path(args.output_dir).resolve()
     _prepare_output_dir(output_dir)
+    start = time.perf_counter()
+    progress_observer = _make_run_progress_observer(output_dir=output_dir)
+    progress_observer(
+        {
+            "status": "running",
+            "phase": "setup",
+            "elapsed_s": 0.0,
+        }
+    )
+    config: VerticalFlapFsiConfig | None = None
+    config_payload: dict[str, Any] = {}
+    try:
+        taichi_runtime = _configure_taichi_offline_cache(
+            enabled=not bool(args.disable_taichi_offline_cache),
+            cache_dir=Path(args.taichi_offline_cache_dir),
+        )
+        progress_observer(
+            {
+                "phase": "configuring",
+                "taichi_runtime": taichi_runtime,
+            }
+        )
+        config = _build_config(args)
+        config_payload = asdict(config)
+        manifest = {
+            "run_label": args.run_label,
+            "repo_root": str(REPO_ROOT),
+            "script": str(Path(__file__).resolve()),
+            "case": "official Fluent fsi_2way vertical flap",
+            "solver_entry": (
+                "cases.ansys_vertical_flap_fsi."
+                "run_vertical_flap_fsi_smoke"
+            ),
+            "selected_formulation": "selected_formulation_solver_config",
+            "physical_solid_bounds": PHYSICAL_SOLID_BOUNDS,
+            "config": config_payload,
+            "grid": _grid_summary(config),
+            "dry_run": bool(args.dry_run),
+            "save_step_fields": bool(args.save_step_fields),
+            "profile_wall_time": bool(args.profile_wall_time),
+            "taichi_runtime": taichi_runtime,
+            "source_sha256": _source_hashes(),
+        }
+        _write_json_atomic(output_dir / "run_manifest.json", manifest)
+        _write_json_atomic(output_dir / "our_solver_config.json", config_payload)
+        if args.dry_run:
+            progress_observer(
+                {
+                    "status": "dry_run",
+                    "phase": "dry_run",
+                    "elapsed_s": time.perf_counter() - start,
+                }
+            )
+            print(json.dumps({"status": "dry_run", "output_dir": str(output_dir)}))
+            return 0
+    except (Exception, KeyboardInterrupt) as exc:
+        _record_failure_artifacts(
+            output_dir=output_dir,
+            exc=exc,
+            elapsed_s=time.perf_counter() - start,
+            config_payload=config_payload,
+            config=config,
+        )
+        raise
 
-    config = _build_config(args)
-    config_payload = asdict(config)
-    manifest = {
-        "run_label": args.run_label,
-        "repo_root": str(REPO_ROOT),
-        "script": str(Path(__file__).resolve()),
-        "case": "official Fluent fsi_2way vertical flap",
-        "solver_entry": "cases.ansys_vertical_flap_fsi.run_vertical_flap_fsi_smoke",
-        "selected_formulation": "selected_formulation_solver_config",
-        "physical_solid_bounds": PHYSICAL_SOLID_BOUNDS,
-        "config": config_payload,
-        "grid": _grid_summary(config),
-        "dry_run": bool(args.dry_run),
-        "save_step_fields": bool(args.save_step_fields),
-        "source_sha256": _source_hashes(),
-    }
-    _write_json_atomic(output_dir / "run_manifest.json", manifest)
-    _write_json_atomic(output_dir / "our_solver_config.json", config_payload)
-
-    if args.dry_run:
-        print(json.dumps({"status": "dry_run", "output_dir": str(output_dir)}))
-        return 0
-
+    progress_observer(
+        {
+            "status": "running",
+            "phase": "initializing",
+            "elapsed_s": time.perf_counter() - start,
+            "taichi_runtime": taichi_runtime,
+        }
+    )
     step_observer = (
         _make_step_observer(
             output_dir=output_dir,
@@ -928,17 +1162,12 @@ def main() -> int:
         if args.save_step_fields
         else None
     )
-    if step_observer is not None:
-        _write_json_atomic(
-            output_dir / "progress.json",
-            {"status": "initializing", "step_completed": 0, "time_s": 0.0},
-        )
-
-    start = time.perf_counter()
     try:
         report = run_vertical_flap_fsi_smoke(
             config,
             step_observer=step_observer,
+            progress_observer=progress_observer,
+            profile_wall_time=bool(args.profile_wall_time),
         )
         elapsed_s = time.perf_counter() - start
         report = dict(report)
@@ -986,53 +1215,27 @@ def main() -> int:
         terminal_status = (
             "completed" if summary.get("status") == "completed" else "blocked"
         )
-        if step_observer is not None:
-            progress_path = output_dir / "progress.json"
-            progress = json.loads(progress_path.read_text(encoding="utf-8"))
-            _write_json_atomic(
-                progress_path,
-                {**progress, "status": terminal_status, "elapsed_s": elapsed_s},
-            )
+        progress_path = output_dir / "progress.json"
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        _write_json_atomic(
+            progress_path,
+            {
+                **progress,
+                "status": terminal_status,
+                "phase": terminal_status,
+                "elapsed_s": elapsed_s,
+            },
+        )
         print(json.dumps(_json_safe(summary), sort_keys=True))
         return 0 if terminal_status == "completed" else 1
     except (Exception, KeyboardInterrupt) as exc:
-        elapsed_s = time.perf_counter() - start
-        interrupted = isinstance(exc, KeyboardInterrupt)
-        exception_status = "interrupted" if interrupted else "failed"
-        exception_artifact_name = (
-            "interruption.json" if interrupted else "failure.json"
+        _record_failure_artifacts(
+            output_dir=output_dir,
+            exc=exc,
+            elapsed_s=time.perf_counter() - start,
+            config_payload=config_payload,
+            config=config,
         )
-        exception_diagnostics = _exception_diagnostics(exc)
-        _write_json_atomic(
-            output_dir / exception_artifact_name,
-            {
-                "status": exception_status,
-                "elapsed_s": elapsed_s,
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-                "pressure_solve_diagnostics": exception_diagnostics,
-                "traceback": traceback.format_exc(),
-                "config": config_payload,
-                "grid": _grid_summary(config),
-            },
-        )
-        if step_observer is not None:
-            progress_path = output_dir / "progress.json"
-            try:
-                progress = json.loads(progress_path.read_text(encoding="utf-8"))
-            except (FileNotFoundError, json.JSONDecodeError):
-                progress = {"step_completed": 0, "time_s": 0.0}
-            _write_json_atomic(
-                progress_path,
-                {
-                    **progress,
-                    "status": exception_status,
-                    "elapsed_s": elapsed_s,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "pressure_solve_diagnostics": exception_diagnostics,
-                },
-            )
         raise
 
 

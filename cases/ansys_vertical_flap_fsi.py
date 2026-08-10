@@ -26,7 +26,6 @@ from benchmarks.official.official_benchmark_solver import (
     run_official_fsi_benchmark,
 )
 from benchmarks.official.solid_mpm_fsi_runner import (
-    OUT_OF_PLANE_BOUNDARY_POLICY,
     run_rectangular_solid_marker_mpm_fsi_smoke,
     slab_equivalence_diagnostics,
 )
@@ -219,6 +218,7 @@ class VerticalFlapFsiConfig:
     flow_backflow_turbulent_viscosity_ratio: float = 10.0
     flow_turbulence_inlet_face: str = "zmax"
     flow_turbulence_outlet_face: str = "zmin"
+    flow_sst_near_wall_treatment: str = "resolved"
     flow_sst_max_automatic_substeps: int = 4096
     flow_predictor_no_slip_domain_walls: tuple[str, ...] = ("ymin",)
     flow_symmetry_domain_walls: tuple[str, ...] = ("ymax",)
@@ -233,6 +233,9 @@ class VerticalFlapFsiConfig:
     flow_hibm_sharp_search_radius_m: float | None = None
     flow_hibm_sharp_search_radius_xyz_m: tuple[float, float, float] | None = None
     flow_hibm_sharp_interior_probe_distance_m: float | None = None
+    flow_hibm_sharp_interior_probe_distance_xyz_m: (
+        tuple[float, float, float] | None
+    ) = None
     flow_hibm_sharp_interpolate_velocity_rows: bool = True
     # Keep the moving physical flap volume independent of the narrow HIBM
     # interface-row search.  Validation launchers enable this together with
@@ -369,7 +372,10 @@ class AnsysVerticalFlapProblem:
             raise ValueError(
                 "replay_from_diagnostics requires selected_anchor_markers_json"
             )
-        config = VerticalFlapFsiConfig(step_count=self.step_count)
+        config = VerticalFlapFsiConfig(
+            step_count=self.step_count,
+            flow_symmetry_domain_walls=("xmin", "xmax", "ymax"),
+        )
         primary_region = SurfaceRegion(
             region_id="primary_flap_face",
             marker_count=config.marker_count,
@@ -430,7 +436,6 @@ class AnsysVerticalFlapProblem:
             config,
             conceptual_coordinate_model=CASE_SPEC.coordinate_model,
             runtime_discretization_model=runtime_discretization_model,
-            out_of_plane_boundary_policy=OUT_OF_PLANE_BOUNDARY_POLICY,
         )
         runtime_bounds_m = (
             (0.0, 0.0, 0.0),
@@ -541,6 +546,8 @@ def selected_formulation_solver_config(
         flow_turbulent_viscosity_ratio=10.0,
         flow_backflow_turbulence_intensity=0.05,
         flow_backflow_turbulent_viscosity_ratio=10.0,
+        flow_sst_near_wall_treatment="fluent_correlation",
+        flow_symmetry_domain_walls=("xmin", "xmax", "ymax"),
         # Production uses one physical outer step; the core conservative
         # transport owns its CFL-sized SSP-RK2 slices.  Repeating a fixed
         # semi-Lagrangian remap here was the dominant long-run diffusion source.
@@ -628,14 +635,22 @@ def run_vertical_flap_fsi_smoke(
     config: VerticalFlapFsiConfig | None = None,
     *,
     step_observer: Callable[..., None] | None = None,
+    progress_observer: Callable[[dict[str, object]], None] | None = None,
+    profile_wall_time: bool = False,
 ) -> dict[str, object]:
     cfg = with_local_surface_force_support(config or VerticalFlapFsiConfig())
     runner = (
         _run_vertical_flap_fsi_core
-        if step_observer is None
+        if (
+            step_observer is None
+            and progress_observer is None
+            and not profile_wall_time
+        )
         else lambda active_config: _run_vertical_flap_fsi_core(
             active_config,
             step_observer=step_observer,
+            progress_observer=progress_observer,
+            profile_wall_time=profile_wall_time,
         )
     )
     return run_official_fsi_benchmark(
@@ -654,6 +669,8 @@ def _run_vertical_flap_fsi_core(
     config: VerticalFlapFsiConfig,
     *,
     step_observer: Callable[..., None] | None = None,
+    progress_observer: Callable[[dict[str, object]], None] | None = None,
+    profile_wall_time: bool = False,
 ) -> dict[str, object]:
     return run_rectangular_solid_marker_mpm_fsi_smoke(
         case_id=CASE_SPEC.case_id,
@@ -662,6 +679,8 @@ def _run_vertical_flap_fsi_core(
         reference_results=ANSYS_VERTICAL_FLAP_REFERENCE_RESULTS,
         config=config,
         step_observer=step_observer,
+        progress_observer=progress_observer,
+        profile_wall_time=profile_wall_time,
     )
 
 

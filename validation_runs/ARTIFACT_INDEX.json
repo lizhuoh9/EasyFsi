@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "generated_on": "2026-08-10",
+  "scope": "canonical ANSYS vertical-flap evidence and current local run dependencies",
+  "artifacts": [
+    {
+      "path": "ansys_vertical_flap_fsi/official_fluent_fine_mesh_steady_2026-07-01",
+      "case": "ansys_vertical_flap_fsi",
+      "role": "fluent_steady_reference",
+      "status": "completed",
+      "source_identity": "see run-local transcripts and checksums",
+      "size_bytes": 194811733,
+      "canonical": true,
+      "referenced_by": [],
+      "retention": "preserve"
+    },
+    {
+      "path": "ansys_vertical_flap_fsi/official_fluent_fine_fsi_valid_2026-07-10/runs/fresh50_20260713_104843/fsi_production",
+      "case": "ansys_vertical_flap_fsi",
+      "role": "fluent_transient_fsi_reference",
+      "status": "completed",
+      "source_identity": "see run-local manifests and checksums",
+      "size_bytes": 592394650,
+      "canonical": true,
+      "referenced_by": [],
+      "retention": "preserve"
+    },
+    {
+      "path": "ansys_vertical_flap_fsi/official_fluent_fine_fsi_valid_2026-07-10/runs/fresh50_20260713_104843/postprocess_compare31_strict_pressure_20260719_142808_r2",
+      "case": "ansys_vertical_flap_fsi",
+      "role": "strict_pressure_postprocess",
+      "status": "completed",
+      "source_identity": "see run-local summary and checksums",
+      "size_bytes": 159041516,
+      "canonical": true,
+      "referenced_by": ["docs/refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md"],
+      "retention": "preserve"
+    },
+    {
+      "path": "ansys_vertical_flap_fsi/official_fluent_fine_fsi_valid_2026-07-10/runs/steady_extension_from100_fixed1000_20260719",
+      "case": "ansys_vertical_flap_fsi",
+      "role": "fluent_fixed_budget_steady_extension",
+      "status": "completed",
+      "source_identity": "see run-local transcript and summary",
+      "size_bytes": 62982049,
+      "canonical": true,
+      "referenced_by": [],
+      "retention": "preserve"
+    },
+    {
+      "path": "solver_vs_fluent_comparison_20260713",
+      "case": "ansys_vertical_flap_fsi",
+      "role": "comparison_bundle",
+      "status": "completed",
+      "source_identity": "see comparison summary",
+      "size_bytes": 19384151,
+      "canonical": true,
+      "referenced_by": [],
+      "retention": "preserve"
+    },
+    {
+      "path": "solver_soaks/vf48w_sst_inner_stage_trace_20260724_c",
+      "case": "ansys_vertical_flap_fsi",
+      "role": "sst_cold_inner_stage_trace",
+      "status": "completed",
+      "source_identity": "vf48w",
+      "size_bytes": 2462277,
+      "canonical": true,
+      "referenced_by": ["docs/refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md"],
+      "retention": "preserve"
+    },
+    {
+      "path": "solver_soaks/vf48x_sst_warm_trace_20260724_a",
+      "case": "ansys_vertical_flap_fsi",
+      "role": "sst_warm_trace",
+      "status": "completed",
+      "source_identity": "vf48x",
+      "size_bytes": 2462171,
+      "canonical": true,
+      "referenced_by": ["docs/refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md"],
+      "retention": "preserve"
+    },
+    {
+      "path": ".taichi_cache/vf48w_sst_inner_stage_trace_cuda_f32",
+      "case": "ansys_vertical_flap_fsi",
+      "role": "local_rebuildable_taichi_warm_cache",
+      "status": "cache",
+      "source_identity": "shared by vf48w and vf48x",
+      "size_bytes": 67008882,
+      "canonical": false,
+      "referenced_by": [],
+      "retention": "local_rebuildable_preserve_until_initialization_investigation_closes"
+    }
+  ]
+}

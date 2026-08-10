@@ -547,3 +547,133 @@ v45i -> v46e2 的严格指标：
 3. 读取当前 dirty diff，保留所有既有用户修改；不要用 reset/clean 追求表面 clean。
 4. 只选择 12.7 的一个可证伪物理假设或 12.8 的 checkpoint 基础设施作为单独任务；先 RED，再最小通用实现，再完整证据。
 5. 不得修改 E、密度、marker area、压力/速度/位移缩放或 hardcode Fluent 结果来制造通过。
+
+## 13. 2026-07-22 官方竖直薄板复现的硬停止裁决
+
+本节覆盖 12.10 之后的最新工作。用户已经明确纠正任务边界：本轮必须用我们的通用求解器复现 **ANSYS/Fluent 官方竖直薄板案例**，不是转去做 Turek-Hron FSI1，也不能用相邻案例代替。为避免继续陷入“发现一个异常就加一个分支”的循环，本轮固定为以下裁决链：
+
+1. 当前源码对应的完整稳态预流和严格快照；
+2. 同一官方案例 1 个耦合步门禁；
+3. 从同一稳态快照独立启动 50 步；
+4. 只有 50/50 完成后才运行锁定 Fluent fresh50 严格比较；
+5. 若 50 步暴露新的几何类，先停止实现并保存证据，不直接追加补丁。
+
+### 13.1 本轮已实现但尚未完成长程验收的通用修复
+
+本轮在 `simulation_core/coupling/hibm_mpm/core.py` 和 `tests/solvers/_hibm_component_face_ledger_contracts.py` 中处理了一个已由生产工件证明的声明冲突：两个相邻 direct/actual author 通过仅相差 F32 舍入的同段边界锚点发现同一 canonical MAC face。实现不是平均 author target，而是要求：
+
+- 恰好两个 component-axis 相邻作者；
+- 同 region、同一有效非退化 segment、法向严格对齐；
+- 边界锚点在 F32/网格尺度容差内重合；
+- nominal probe 只相差 source-row 平移；
+- canonical face 在唯一正向射线上且存在合法 MAC interior sample；
+- 任何第三作者、不同 region/segment、退化几何、零/负 progress 或缺失实际采样继续 fail closed。
+
+聚焦 RED/GREEN 证据：
+
+- 正例 `test_interpolation_reconstructs_coincident_same_segment_nominal_probes` 与零 progress 负例：`2/2 passed`；
+- continuous/adjacent/degenerate/one-sided/disjoint-segment 五个相邻回归：`5/5 passed`；
+- 第三作者 cardinality 合同单独通过；
+- `py_compile` 与 `git diff --check` 通过；
+- 一次 10-test 大批量运行因 Taichi 模板编译超过 1 小时而超时，**不得写成全绿**；关键测试随后按小批量重跑通过；
+- 最终只读审查未发现剩余 High/Medium correctness blocker。
+
+这些结果只证明聚焦合同成立；下面的 50 步结果已经证明它还不是完整的动态几何合同，不能写成“求解器已修好”。
+
+### 13.2 当前源码的完整稳态预流和快照
+
+正式运行目录：
+
+`validation_runs\solver_soaks\vf48b_pf4`
+
+快照前缀：
+
+`validation_runs\solver_soaks\vf48b_snap4\preflow_state`
+
+结果：
+
+- `status=completed`，windowed-stationary 在请求 200 步中的第 92 步停止；连续 3 个窗口通过；
+- 最后窗口 eddy-viscosity/k/pressure-range/velocity-peak relative span 分别为 `0.0064423 / 0.0077705 / 0.00031367 / 9.84594e-6`；
+- 92/92 次 CG 收敛，pressure failure=0，最大 CG relative residual=`9.95336e-7`；
+- 最大 projected no-slip=`1.00051e-6 m/s`；SST rejected/invalid/nonfinite=0；
+- HIBM target/region/alpha/claim conflict 全部为 0；projection-only seam merge 最大为 4；
+- 快照 schema=8、fields=31；generation NPZ 声明与实算 SHA256 都是 `960680b51e235b4d0250893fa67b1f68314da064fe85e7091707ffc573b8d87d`；
+- config/geometry/source identity 分别为 `96d7742c...f29`、`f300eeb9...bd4`、`f71c7b81...eba`。
+
+### 13.3 同一官方案例 1 个耦合步门禁
+
+运行目录：
+
+`validation_runs\solver_soaks\vf48b_gate1step_2`
+
+精确身份使用 fine grid `(4,256,320)`、solid particles `(1,256,20)`、marker count 64、solid substeps 1600、pressure projection iterations 1080、FV multigrid、pressure failure policy `raise`、`flow_predictor_substeps=2`、runtime anchored pressure pair，并从 13.2 快照启动。
+
+结果：
+
+- `status=completed`，requested/completed=`1/1`，step artifact validation=`passed`；
+- target/region/alpha/claim conflict=`0/0/0/0`，missing actual sample=0；
+- 两次 pressure CG projection 全部收敛，breakdown=0，最大 relative residual=`9.33194e-7`；
+- pressure physical failure=false；projected no-slip 最大=`5.69395e-7 m/s`；
+- SST rejected trial=0，invalid/nonpositive count=0；`k_min=0` 是允许的有限非负状态，`omega_min=758.361 s^-1`；
+- 最大位移=`1.01717e-5 m`，tip mean displacement=`[0, 8.51182e-7, -9.27560e-6] m`；
+- total marker force=`[0,0,-0.01100615] N`，fluid reaction=`[0,0,0.01100615] N`，action-reaction residual=`5.20e-18 N`。
+
+这一结果只授权进入独立 50 步，不授权 Fluent parity 声明。
+
+### 13.4 独立 50 步在第 2 步失败
+
+运行目录：
+
+`validation_runs\solver_soaks\vf48b_fsi50_2`
+
+真实结果：
+
+- 第 1 步完整提交并保存 field/history；
+- 第 2 步边界重组时 fail closed；`progress.json` 为 `status=failed, step_completed=1`；
+- 失败是 `conflicting canonical component-face claims (target): count=20`；
+- 首个 witness 为 face `(0,129,155)`、axis `y`、region `303`，作者 `(0,128,155)` 与 `(0,129,155)`，两者都声明同一有向 segment `(130,131)`。
+
+首个 witness 的几何已经完成只读裁决：
+
+- marker-130 权重分别为 `0.5557321310` 和 `0.5559315681`；
+- 共享 MAC face 投影到有限 segment 的唯一 marker-130 权重为约 `0.5558324376`，被两个作者严格夹住；用另一端参数表示即 `0.4442678988 > 0.4441675624 > 0.4440684021`；
+- 两 boundary anchor 的距离为 `5.96065e-7 m`，约为 streamwise cell width 的 `0.1907%`；这是真实 segment 参数差，不是 F32 把同一点拆成两点；
+- 两 anchor 的 y 坐标几乎相同，shared face-y 不在二者之间，所以现有 face-axis bracket reconstruction 正确拒绝外推；
+- 两 anchor 又不满足 F32 coincidence，所以 13.1 的窄合同也正确拒绝；
+- 有限 segment projection 本身给出唯一内部横坐标和连续 marker boundary velocity。因此值得修的缺口是 **same-segment distinct-anchor、segment-parameter-bracketed、face-first reconstruction**，不是提高容差、平均 target 或允许 one-sided face-axis extrapolation。
+
+目前只能证明第一条 witness 属于该类。`failure.json` 没有保存其余 19 条的完整作者几何，不能声称 20 条全部同类。为抓取全量 witness，曾启动：
+
+- 目录 `validation_runs\solver_soaks\vf48b_diag_step2_1`；
+- 目标文件 `validation_runs\solver_soaks\vf48b_diag_step2_1_claims.json`。
+
+现有诊断包装器会在每次提交前把大规模 Taichi 临时场复制到 host。该运行约 21 分钟仍未到第一个可捕获点，只有 config/manifest，没有 progress、failure 或 claims；进程被有界终止。不得把全量分类写成已完成，也不要续跑该目录。
+
+### 13.5 Fluent 严格比较没有运行
+
+`vf48b_fsi50_2` 只有 1 个完成步，没有 summary 和连续 50 个 step fields/history，不符合严格比较输入合同，因此本轮没有运行后处理，也没有新 GIF 或 parity 报告。
+
+锁定比较入口仍是：
+
+`validation_runs\ansys_vertical_flap_fsi\our_solver_vs_native_fluent_fine_2026-07-10\scripts\postprocess_our_solver_vs_native_fluent.py`
+
+锁定 Fluent 输入仍是：
+
+`validation_runs\ansys_vertical_flap_fsi\official_fluent_fine_fsi_valid_2026-07-10\runs\fresh50_20260713_104843\postprocess_compare31_strict_pressure_20260719_142808_r2`
+
+另一个必须显式处理的身份问题：当前 strict contract 要求 `flow_predictor_substeps=1`，而本轮候选为 2。即使未来完成 50/50，也不能临时放宽比较器；只有完整 50 步物理证据支持后，才可把 solver config、身份合同和对应测试一起正式升级。
+
+### 13.6 下一线程唯一允许的继续路径
+
+本轮在此停止继续补丁，当前结论是：**官方案例稳态预流和 1 步通过，但 50 步在第 2 步失败；求解器尚未复现 Fluent 官方案例。** 下一线程不得从“把 anchor tolerance 再放宽一点”开始，只允许以下顺序：
+
+1. 先读本节、`vf48b_fsi50_2/failure.json`、`progress.json` 和 `step_history/step_0001.json`；确认没有残留 Python/Taichi 进程。
+2. 先增加轻量、device-side 的冲突分类计数或只保存 bounded duplicate witnesses；禁止再次在每次提交前复制整个声明场。目标是在同一第 2 步失败点证明 20 条是否全部满足同一 segment-parameter-bracketing 不变量。
+3. 写真实 RED：两个相邻 component-axis authors、同 region/normal/有向 segment、不同 segment 权重、face-axis 不可 bracket、face-projected segment 参数严格被 author 参数夹住；期望由 face projection 唯一重建，且交换 source-to-payload 映射后结果字节级不变。仅反转遍历顺序不算 author-order 测试。
+4. 同时保留 fail-closed 负例：第三作者、region/segment 不同、法向或 probe-ray 不一致、canonical segment 参数未被夹住、endpoint-clamped/退化 segment、零/负 face progress、缺失合法 MAC sample。
+5. 只有全量 20 条都属于这一合同，才把当前 coincidence-only 分支收敛为统一的 face-first finite-segment reconstruction；canonical boundary point 和 boundary velocity来自 shared face 的有限线段投影，canonical interior sample 沿经验证的唯一内法线获取。禁止 author target 平均、容差放宽和 face-axis 外推。
+6. 代码变化会改变 snapshot source identity；聚焦 RED/GREEN 和只读 High/Medium=0 后，必须重新跑全新 current-source 稳态预流，不能复用 `vf48b_snap4`。
+7. 然后依次跑全新 2-step gate 和独立 50-step gate。若出现任何不在 RED 覆盖内的新几何类，立即停止并做架构复审，不得再追加第三个局部例外。
+8. 只有 50/50、全部物理健康门和身份升级审查通过，才运行锁定 Fluent strict comparison。比较脚本完成也只代表 `diagnostic_complete`；压力、速度、位移全部达到合同之前必须保持 `parity_claimed=false`。
+
+当前工作树包含大量既有用户修改和本轮未提交修改；不要 reset/clean，不要提交或推送，除非用户另行明确要求。

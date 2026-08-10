@@ -1,6 +1,6 @@
 import math
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from math import sqrt
 from numbers import Integral
 from types import MappingProxyType
@@ -719,6 +719,9 @@ class CartesianFluidSolver:
         # strong-coupling lifecycle.  The default model stays laminar; these
         # fields are inert until configure_sst_2003() is called.
         self.turbulence_model = "laminar"
+        # Fluent's near-wall correlation is opt-in.  Keep resolved walls as
+        # the default so existing SST cases retain their exact path.
+        self._sst_near_wall_treatment = "resolved"
         self._sst_no_slip_domain_walls = (
             False,
             False,
@@ -787,6 +790,7 @@ class CartesianFluidSolver:
             3, dtype=ti.i32, shape=shape
         )
         self.sst_no_slip_domain_wall_mask = ti.field(dtype=ti.i32, shape=())
+        self.sst_near_wall_correlation_enabled = ti.field(dtype=ti.i32, shape=())
         self.sst_blending_f1 = ti.field(dtype=ti.f32, shape=shape)
         self.sst_blending_f2 = ti.field(dtype=ti.f32, shape=shape)
         self.sst_sigma_k = ti.field(dtype=ti.f32, shape=shape)
@@ -850,6 +854,7 @@ class CartesianFluidSolver:
         # previous composite obstacle controls fresh-fluid reconstruction;
         # dynamic volume/carve fields control the next composite mask.
         self.saved_obstacle = ti.field(dtype=ti.i32, shape=shape)
+        self.saved_hibm_air_cell = ti.field(dtype=ti.i32, shape=shape)
         self.saved_hibm_dynamic_solid_volume_obstacle = ti.field(
             dtype=ti.i32, shape=shape
         )
@@ -1146,6 +1151,10 @@ class CartesianFluidSolver:
             dtype=ti.i32,
             shape=HIBM_PRESSURE_COMPONENT_CAPACITY,
         )
+        self.hibm_air_component_converted = ti.field(
+            dtype=ti.i32,
+            shape=HIBM_PRESSURE_COMPONENT_CAPACITY,
+        )
         self.report_hibm_air_backed_cells = ti.field(dtype=ti.i32, shape=())
         self.report_hibm_air_backed_components = ti.field(dtype=ti.i32, shape=())
         self.report_hibm_air_backed_cell_volume_m3 = ti.field(
@@ -1262,6 +1271,10 @@ class CartesianFluidSolver:
             dtype=ti.i32,
             shape=shape,
         )
+        self.fresh_fluid_reconstruction_pending_snapshot = ti.field(
+            dtype=ti.i32,
+            shape=shape,
+        )
         self.hibm_solid_band_protection_cell = ti.field(dtype=ti.i32, shape=shape)
         self.hibm_solid_band_candidate_cell = ti.field(dtype=ti.i32, shape=shape)
         self.hibm_no_slip_sampling_obstacle = ti.field(dtype=ti.i32, shape=shape)
@@ -1374,6 +1387,14 @@ class CartesianFluidSolver:
             shape=shape,
         )
         self.velocity_dirichlet_boundary_owned_component_mask = ti.field(
+            dtype=ti.i32,
+            shape=shape,
+        )
+        # Device-resident, generation-scoped hard-face ledger consumed by the
+        # legacy predictor.  It is rebuilt only after a canonical component
+        # ledger seals and is cleared on every invalidation, so unprepared or
+        # legacy authority can never expose stale immersed walls to transport.
+        self.canonical_exact_hard_face_component_mask = ti.field(
             dtype=ti.i32,
             shape=shape,
         )
@@ -3182,7 +3203,17 @@ class CartesianFluidSolver:
                 ti.atomic_add(self.report_hibm_fresh_fluid_cells[None], 1)
 
     @ti.kernel
-    def _reconstruct_hibm_fresh_fluid_cells_kernel(self):
+    def _snapshot_fresh_fluid_reconstruction_pending_kernel(self):
+        for i, j, k in self.fresh_fluid_reconstruction_pending:
+            self.fresh_fluid_reconstruction_pending_snapshot[i, j, k] = (
+                self.fresh_fluid_reconstruction_pending[i, j, k]
+            )
+
+    @ti.kernel
+    def _reconstruct_hibm_fresh_fluid_cells_kernel(
+        self,
+        sst_enabled: ti.i32,
+    ):
         self.reduction_count[None] = 0
         for i, j, k in self.fresh_fluid_reconstruction_pending:
             if (
@@ -3194,13 +3225,14 @@ class CartesianFluidSolver:
                 sst_k_sum = 0.0
                 sst_omega_sum = 0.0
                 sst_mu_t_sum = 0.0
-                weight = 0.0
+                velocity_weight = 0.0
+                sst_weight = 0.0
                 if self.velocity_dirichlet_boundary_active[i, j, k] != 0:
                     velocity_sum += self.velocity_dirichlet_boundary_value_mps[i, j, k]
                     velocity_prev_sum += (
                         self.velocity_dirichlet_boundary_value_mps[i, j, k]
                     )
-                    weight += 1.0
+                    velocity_weight += 1.0
                 for offset in ti.static(
                     (
                         (-1, 0, 0),
@@ -3222,25 +3254,59 @@ class CartesianFluidSolver:
                         and 0 <= nk
                         and nk < self.nz
                         and self.obstacle[ni, nj, nk] == 0
-                        and self.fresh_fluid_reconstruction_pending[
+                        and self.fresh_fluid_reconstruction_pending_snapshot[
                             ni, nj, nk
                         ] == 0
                     ):
                         velocity_sum += self.velocity[ni, nj, nk]
                         velocity_prev_sum += self.velocity_prev[ni, nj, nk]
-                        sst_k_sum += self.sst_turbulent_kinetic_energy[ni, nj, nk]
-                        sst_omega_sum += self.sst_specific_dissipation_rate[ni, nj, nk]
-                        sst_mu_t_sum += self.sst_eddy_viscosity_pa_s[ni, nj, nk]
-                        weight += 1.0
-                if weight > 0.0:
-                    self.velocity[i, j, k] = velocity_sum / weight
-                    self.velocity_prev[i, j, k] = velocity_prev_sum / weight
+                        velocity_weight += 1.0
+                        if sst_enabled != 0:
+                            donor_k = self.sst_turbulent_kinetic_energy[ni, nj, nk]
+                            donor_omega = self.sst_specific_dissipation_rate[ni, nj, nk]
+                            donor_mu_t = self.sst_eddy_viscosity_pa_s[ni, nj, nk]
+                            finite_sst = (
+                                donor_k == donor_k
+                                and donor_omega == donor_omega
+                                and donor_mu_t == donor_mu_t
+                                and ti.abs(donor_k) < 1.0e30
+                                and ti.abs(donor_omega) < 1.0e30
+                                and ti.abs(donor_mu_t) < 1.0e30
+                            )
+                            if (
+                                finite_sst
+                                and donor_k >= 0.0
+                                and donor_omega > 0.0
+                                and donor_mu_t >= 0.0
+                            ):
+                                sst_k_sum += donor_k
+                                sst_omega_sum += donor_omega
+                                sst_mu_t_sum += donor_mu_t
+                                sst_weight += 1.0
+                if velocity_weight > 0.0:
+                    self.velocity[i, j, k] = velocity_sum / velocity_weight
+                    self.velocity_prev[i, j, k] = (
+                        velocity_prev_sum / velocity_weight
+                    )
+                if sst_enabled != 0 and sst_weight > 0.0:
                     # Moving HIBM cells inherit the same neighboring physical
-                    # turbulence state as momentum.  Leaving the former solid
-                    # values (k~0, omega~1e12) creates a persistent dead zone.
-                    self.sst_turbulent_kinetic_energy[i, j, k] = sst_k_sum / weight
-                    self.sst_specific_dissipation_rate[i, j, k] = sst_omega_sum / weight
-                    self.sst_eddy_viscosity_pa_s[i, j, k] = sst_mu_t_sum / weight
+                    # turbulence state as momentum, but a velocity-only
+                    # Dirichlet row is not an SST donor and must not dilute
+                    # these averages.  Leaving the former solid values
+                    # (k~0, omega~1e12) creates a persistent dead zone.
+                    self.sst_turbulent_kinetic_energy[i, j, k] = (
+                        sst_k_sum / sst_weight
+                    )
+                    self.sst_specific_dissipation_rate[i, j, k] = (
+                        sst_omega_sum / sst_weight
+                    )
+                    self.sst_eddy_viscosity_pa_s[i, j, k] = (
+                        sst_mu_t_sum / sst_weight
+                    )
+                if (
+                    velocity_weight > 0.0
+                    and (sst_enabled == 0 or sst_weight > 0.0)
+                ):
                     self.fresh_fluid_reconstruction_pending[i, j, k] = 0
                     ti.atomic_add(self.reduction_count[None], 1)
 
@@ -3259,17 +3325,24 @@ class CartesianFluidSolver:
         initial_count = int(self.report_hibm_fresh_fluid_cells[None])
         if initial_count <= 0:
             return
+        sst_enabled = 1 if self.turbulence_model == "sst_2003" else 0
         for _ in range(self.nx + self.ny + self.nz):
-            self._reconstruct_hibm_fresh_fluid_cells_kernel()
+            self._snapshot_fresh_fluid_reconstruction_pending_kernel()
+            self._reconstruct_hibm_fresh_fluid_cells_kernel(sst_enabled)
             if int(self.reduction_count[None]) <= 0:
                 break
         self._count_unresolved_fresh_fluid_cells_kernel()
         unresolved = int(self.reduction_count[None])
         if unresolved > 0:
+            required_state = (
+                "velocity and SST state"
+                if self.turbulence_model == "sst_2003"
+                else "velocity state"
+            )
             raise RuntimeError(
                 "dynamic solid update left "
                 f"{unresolved} fresh fluid cells without a reconstructable "
-                "fluid or velocity-boundary neighbor"
+                f"{required_state} donor"
             )
 
     def apply_hibm_internal_obstacles(
@@ -4104,27 +4177,13 @@ class CartesianFluidSolver:
             self.hibm_pressure_outlet_reachable_next[i, j, k] = 0
 
     @ti.kernel
-    def _expand_hibm_pressure_outlet_reachable_kernel(self) -> ti.i32:
-        changed = 0
-        for i, j, k in self.obstacle:
-            reachable = self.hibm_pressure_outlet_reachable[i, j, k]
-            if (
-                self.obstacle[i, j, k] == 0
-                and self.hibm_pressure_reachability_barrier[i, j, k] == 0
-                and reachable == 0
-                and self._pressure_outlet_reachable_neighbor_exists(i, j, k)
-            ):
-                reachable = 1
-                changed += 1
-            self.hibm_pressure_outlet_reachable_next[i, j, k] = reachable
-        return changed
-
-    @ti.kernel
-    def _commit_hibm_pressure_outlet_reachable_kernel(self):
-        for i, j, k in self.obstacle:
-            self.hibm_pressure_outlet_reachable[i, j, k] = (
-                self.hibm_pressure_outlet_reachable_next[i, j, k]
-            )
+    def _clear_hibm_pressure_outlet_classification_kernel(self):
+        for i, j, k in self.hibm_pressure_outlet_reachable:
+            self.hibm_pressure_outlet_reachable[i, j, k] = 0
+            self.hibm_pressure_outlet_reachable_next[i, j, k] = 0
+            self.hibm_pressure_unreached_component_label[i, j, k] = 1 << 30
+        for slot in self.hibm_air_component_selected:
+            self.hibm_air_component_selected[slot] = 0
 
     @ti.kernel
     def _expand_and_commit_hibm_pressure_outlet_reachable_kernel(self):
@@ -4247,6 +4306,10 @@ class CartesianFluidSolver:
             self.last_hibm_unreached_components_with_interface_hits = 0
             self._hibm_reachability_checksum = None
             self._invalidate_hibm_pressure_reachability()
+            # Closed-Neumann component labeling reuses these full-grid fields.
+            # Retire that device state together with the host reachability
+            # contract so a later air seed cannot consume shared stale labels.
+            self._clear_hibm_pressure_outlet_classification_kernel()
             if not bool(use_existing_reachability_barrier):
                 self._prepare_hibm_pressure_reachability_barrier(
                     None,
@@ -4349,8 +4412,7 @@ class CartesianFluidSolver:
         self.report_hibm_air_backed_components[None] = 0
         self.report_hibm_air_backed_cell_volume_m3[None] = ti.cast(0.0, ti.f64)
         for slot in self.hibm_air_component_selected:
-            if self.hibm_air_component_selected[slot] != 0:
-                ti.atomic_add(self.report_hibm_air_backed_components[None], 1)
+            self.hibm_air_component_converted[slot] = 0
         for i, j, k in self.obstacle:
             self.hibm_air_cell[i, j, k] = 0
             if (
@@ -4364,6 +4426,16 @@ class CartesianFluidSolver:
                     and label <= -1
                     and self.hibm_air_component_selected[-label - 1] != 0
                 ):
+                    component_slot = -label - 1
+                    component_was_converted = ti.atomic_or(
+                        self.hibm_air_component_converted[component_slot],
+                        1,
+                    )
+                    if component_was_converted == 0:
+                        ti.atomic_add(
+                            self.report_hibm_air_backed_components[None],
+                            1,
+                        )
                     self.obstacle[i, j, k] = 1
                     self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
                     self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
@@ -4379,26 +4451,26 @@ class CartesianFluidSolver:
     def convert_hibm_air_backed_cells(self) -> int:
         """Convert seed-selected unreached components into air cells (S2-A12).
 
-        Consumes this step's outlet-reachability flood and per-component
-        labels (the last ``mark_hibm_pressure_outlet_disconnected_
-        nonprojectable_cells`` call) plus the fixed-capacity selection mask
-        written by the marker-side far-side seed scan. Every active
-        unreached cell of a selected component converts exactly like a band
-        cell (obstacle, velocity/velocity_prev zeroed, volume source and
-        divergence cleared) and is tagged in ``hibm_air_cell``: the declared
-        air chamber leaves the incompressible solve entirely, so the vacated-zone
-        volume-creation debt (the anchored unreached residual) becomes
-        structurally impossible. Pressure is NOT written here - the HIBM
+        The caller must first run ``apply_hibm_internal_obstacles``, then a
+        current ``pressure_outlet_zmin=True`` reachability/component-label
+        pass, and finally the marker-side far-side seed scan. This method
+        consumes that classification and its fixed-capacity selection mask.
+        Every active unreached cell of a selected component converts exactly
+        like a band cell (obstacle, velocity/velocity_prev zeroed, volume
+        source and divergence cleared) and is tagged in ``hibm_air_cell``: the
+        declared air chamber leaves the incompressible solve entirely, so the
+        vacated-zone volume-creation debt (the anchored unreached residual)
+        becomes structurally impossible. Pressure is NOT written here - the HIBM
         assemble stamps the declared chamber pressure via
         :meth:`write_hibm_air_backed_cell_pressures` strictly after the
         A8'' converted-cell fill, so the sampling view reads exactly p_far.
 
-        Stateless per step: the caller reruns classification each assemble
-        (checkpoints carry no obstacle/air state); cells that leave the
-        classification re-wet through the hibm fresh-fluid reconstruction
-        on the next ``apply_hibm_internal_obstacles``. Outlet-reachable
-        water is structurally unselectable (air is a subset of the
-        unreached set).
+        The operation is not idempotent: a second call without a new
+        ``apply_hibm_internal_obstacles``/classification cycle sees the first
+        call's cells as obstacles, clears their air tags, and reports zero
+        converted cells and components. Cells re-wet through fresh-fluid
+        reconstruction in the next apply cycle. Outlet-reachable water is
+        structurally unselectable (air is a subset of the unreached set).
         """
         self._ensure_hibm_base_obstacle()
         self._invalidate_hibm_pressure_reachability()
@@ -4859,18 +4931,22 @@ class CartesianFluidSolver:
     @ti.kernel
     def _write_hibm_air_backed_cell_pressures_kernel(self, pressure_pa: ti.f32):
         for i, j, k in self.pressure:
-            if self.hibm_air_cell[i, j, k] != 0:
+            if (
+                self.hibm_air_cell[i, j, k] != 0
+                and self.obstacle[i, j, k] != 0
+            ):
                 self.pressure[i, j, k] = pressure_pa
 
     def write_hibm_air_backed_cell_pressures(self, pressure_pa: float) -> int:
         """Stamp the declared chamber pressure into air cells (S2-A12).
 
-        Called by the HIBM assemble strictly AFTER
-        :meth:`fill_hibm_converted_cell_pressures` (the fill treats air
-        cells as ordinary converted cells and would leave water-diffused
-        values in the pocket) and strictly BEFORE the stress sampling, so
-        the dedicated sampling view reads exactly the declared far pressure
-        there. Returns the air-cell count of the last conversion.
+        The HIBM assemble calls this after
+        :meth:`fill_hibm_converted_cell_pressures` and before stress sampling,
+        so the dedicated sampling view reads exactly the declared far pressure.
+        The sharp-step driver calls it again after the final optional post-solid
+        projection, because pressure solvers zero obstacle rows. A stale air tag
+        on an active fluid cell is ignored. Returns the air-cell count of the
+        last conversion.
         """
         value = float(pressure_pa)
         if not math.isfinite(value):
@@ -5077,6 +5153,7 @@ class CartesianFluidSolver:
                 self.sst_wall_distance_m[i, j, k]
             )
             self.saved_obstacle[i, j, k] = self.obstacle[i, j, k]
+            self.saved_hibm_air_cell[i, j, k] = self.hibm_air_cell[i, j, k]
             self.saved_hibm_dynamic_solid_volume_obstacle[i, j, k] = (
                 self.hibm_dynamic_solid_volume_obstacle[i, j, k]
             )
@@ -5153,6 +5230,7 @@ class CartesianFluidSolver:
                 self.saved_sst_wall_distance_m[i, j, k]
             )
             self.obstacle[i, j, k] = self.saved_obstacle[i, j, k]
+            self.hibm_air_cell[i, j, k] = self.saved_hibm_air_cell[i, j, k]
             self.hibm_dynamic_solid_volume_obstacle[i, j, k] = (
                 self.saved_hibm_dynamic_solid_volume_obstacle[i, j, k]
             )
@@ -5218,7 +5296,6 @@ class CartesianFluidSolver:
             self.marker_feedback_owned[i, j, k] = 0
             self.marker_feedback_region_min[i, j, k] = 2147483647
             self.marker_feedback_region_max[i, j, k] = -2147483648
-            self.hibm_air_cell[i, j, k] = 0
         for side, j, k in self.external_velocity_boundary_x_face_active_component_mask:
             self.external_velocity_boundary_x_face_active_component_mask[
                 side, j, k
@@ -5261,6 +5338,7 @@ class CartesianFluidSolver:
         self.hibm_external_obstacle_topology_revision += 1
         self._invalidate_external_obstacle_topology_derived_state()
         self._restore_state_kernel()
+        self._clear_hibm_pressure_outlet_classification_kernel()
         self._sst_wall_distance_valid = bool(self._sst_saved_wall_distance_valid)
         self.hibm_dynamic_solid_volume_enabled = bool(
             self._saved_hibm_dynamic_solid_volume_enabled
@@ -5391,6 +5469,7 @@ class CartesianFluidSolver:
         self._invalidate_velocity_dirichlet_component_ledger()
 
     def _invalidate_velocity_dirichlet_component_ledger(self) -> int:
+        self._clear_canonical_exact_hard_face_component_mask_kernel()
         generation = int(self.velocity_dirichlet_component_ledger_generation) + 1
         self.velocity_dirichlet_component_ledger_generation = generation
         self.velocity_dirichlet_component_ledger_sealed = False
@@ -5491,6 +5570,7 @@ class CartesianFluidSolver:
                 f"{invalid_capabilities}, generation="
                 f"{int(self.velocity_dirichlet_component_ledger_generation)}"
             )
+        self._refresh_canonical_exact_hard_face_component_mask()
         self.velocity_dirichlet_component_ledger_sealed = True
 
     def _require_velocity_dirichlet_component_ledger_sealed(self) -> None:
@@ -6338,6 +6418,7 @@ class CartesianFluidSolver:
         inlet_face: str = "zmax",
         outlet_face: str = "zmin",
         no_slip_domain_walls: tuple[bool, bool, bool, bool, bool, bool] | None = None,
+        near_wall_treatment: str = "resolved",
         backflow_turbulence_intensity: float | None = None,
         backflow_turbulent_viscosity_ratio: float | None = None,
         max_automatic_substeps: int = 4096,
@@ -6355,6 +6436,11 @@ class CartesianFluidSolver:
             raise ValueError("turbulent_viscosity_ratio must be positive and finite")
         if self.mu <= 0.0:
             raise ValueError("SST-2003 requires positive molecular viscosity")
+        normalized_near_wall_treatment = str(near_wall_treatment).strip().lower()
+        if normalized_near_wall_treatment not in ("resolved", "fluent_correlation"):
+            raise ValueError(
+                "near_wall_treatment must be 'resolved' or 'fluent_correlation'"
+            )
         substep_limit = int(max_automatic_substeps)
         if substep_limit <= 0:
             raise ValueError("max_automatic_substeps must be positive")
@@ -6419,6 +6505,10 @@ class CartesianFluidSolver:
         self._sst_inlet_face_code = inlet_face_code
         self._sst_outlet_face_code = outlet_face_code
         self._sst_max_automatic_substeps = substep_limit
+        self._sst_near_wall_treatment = normalized_near_wall_treatment
+        self.sst_near_wall_correlation_enabled[None] = (
+            1 if normalized_near_wall_treatment == "fluent_correlation" else 0
+        )
         self.prepare_sst_wall_distance(no_slip_domain_walls=wall_flags)
         self.turbulence_model = "sst_2003"
 
@@ -6529,6 +6619,71 @@ class CartesianFluidSolver:
         return ti.Vector([smooth, limited_slope, extension_slope])
 
     @ti.func
+    def _muscl_axis_neighbor_is_open(
+        self,
+        i,
+        j,
+        k,
+        axis: ti.template(),
+        side: ti.template(),
+    ):
+        """Return whether one cell neighbour is connected for reconstruction."""
+
+        neighbor_is_open = 0
+        if ti.static(axis == 0):
+            if ti.static(side < 0):
+                if (
+                    i > 0
+                    and self.obstacle[i - 1, j, k] == 0
+                    and self._canonical_hibm_exact_component_owner(i, j, k, 0)
+                    == 0
+                ):
+                    neighbor_is_open = 1
+            else:
+                if (
+                    i + 1 < self.nx
+                    and self.obstacle[i + 1, j, k] == 0
+                    and self._canonical_hibm_exact_component_owner(i + 1, j, k, 0)
+                    == 0
+                ):
+                    neighbor_is_open = 1
+        elif ti.static(axis == 1):
+            if ti.static(side < 0):
+                if (
+                    j > 0
+                    and self.obstacle[i, j - 1, k] == 0
+                    and self._canonical_hibm_exact_component_owner(i, j, k, 1)
+                    == 0
+                ):
+                    neighbor_is_open = 1
+            else:
+                if (
+                    j + 1 < self.ny
+                    and self.obstacle[i, j + 1, k] == 0
+                    and self._canonical_hibm_exact_component_owner(i, j + 1, k, 1)
+                    == 0
+                ):
+                    neighbor_is_open = 1
+        else:
+            if ti.static(side < 0):
+                if (
+                    k > 0
+                    and self.obstacle[i, j, k - 1] == 0
+                    and self._canonical_hibm_exact_component_owner(i, j, k, 2)
+                    == 0
+                ):
+                    neighbor_is_open = 1
+            else:
+                if (
+                    k + 1 < self.nz
+                    and self.obstacle[i, j, k + 1] == 0
+                    and self._canonical_hibm_exact_component_owner(i, j, k + 1, 2)
+                    == 0
+                ):
+                    neighbor_is_open = 1
+        return neighbor_is_open
+
+    @ti.func
     def _muscl_extremum_stencil_is_unconstrained(
         self,
         i,
@@ -6559,6 +6714,27 @@ class CartesianFluidSolver:
                 != 0
             ):
                 unconstrained = 0
+        # Five sampled cells span four primal faces.  A canonical fluid-fluid
+        # wall is not visible in ``obstacle`` and must truncate the stencil at
+        # the owned face just like a phase-changing obstacle interface.
+        for face_offset in ti.static(range(-1, 3)):
+            ii = i
+            jj = j
+            kk = k
+            if ti.static(axis == 0):
+                ii += face_offset
+            elif ti.static(axis == 1):
+                jj += face_offset
+            else:
+                kk += face_offset
+            if 0 <= ii < self.nx and 0 <= jj < self.ny and 0 <= kk < self.nz:
+                if (
+                    self._canonical_hibm_exact_component_owner(
+                        ii, jj, kk, axis
+                    )
+                    != 0
+                ):
+                    unconstrained = 0
         return unconstrained
 
     @ti.func
@@ -6812,58 +6988,6 @@ class CartesianFluidSolver:
         return smooth_info
 
     @ti.func
-    def _muscl_vector_slope(self, field: ti.template(), i, j, k, axis):
-        center = field[i, j, k]
-        minus = center
-        plus = center
-        minus_distance = 1.0
-        plus_distance = 1.0
-        minus_valid = 0
-        plus_valid = 0
-        if axis == 0:
-            if i > 0 and self.obstacle[i - 1, j, k] == 0:
-                minus = field[i - 1, j, k]
-                minus_distance = self.center_distance_x_m[i]
-                minus_valid = 1
-            if i + 1 < self.nx and self.obstacle[i + 1, j, k] == 0:
-                plus = field[i + 1, j, k]
-                plus_distance = self.center_distance_x_m[i + 1]
-                plus_valid = 1
-        elif axis == 1:
-            if j > 0 and self.obstacle[i, j - 1, k] == 0:
-                minus = field[i, j - 1, k]
-                minus_distance = self.center_distance_y_m[j]
-                minus_valid = 1
-            if j + 1 < self.ny and self.obstacle[i, j + 1, k] == 0:
-                plus = field[i, j + 1, k]
-                plus_distance = self.center_distance_y_m[j + 1]
-                plus_valid = 1
-        else:
-            if k > 0 and self.obstacle[i, j, k - 1] == 0:
-                minus = field[i, j, k - 1]
-                minus_distance = self.center_distance_z_m[k]
-                minus_valid = 1
-            if k + 1 < self.nz and self.obstacle[i, j, k + 1] == 0:
-                plus = field[i, j, k + 1]
-                plus_distance = self.center_distance_z_m[k + 1]
-                plus_valid = 1
-
-        slope = ti.Vector([0.0, 0.0, 0.0])
-        for component in ti.static(range(3)):
-            backward = (center[component] - minus[component]) / minus_distance
-            forward = (plus[component] - center[component]) / plus_distance
-            if minus_valid != 0 and plus_valid != 0:
-                centered = (
-                    plus_distance * backward + minus_distance * forward
-                ) / (
-                    minus_distance + plus_distance
-                )
-                slope[component] = self._muscl_minmod3(
-                    2.0 * backward, centered, 2.0 * forward
-                )
-        return slope
-
-    @ti.func
     def _muscl_vector_component_slope(
         self, field: ti.template(), i, j, k, axis: ti.template(), component: ti.template()
     ):
@@ -6879,6 +7003,8 @@ class CartesianFluidSolver:
                 and i + 1 < self.nx
                 and self.obstacle[i - 1, j, k] == 0
                 and self.obstacle[i + 1, j, k] == 0
+                and self._muscl_axis_neighbor_is_open(i, j, k, axis, -1) != 0
+                and self._muscl_axis_neighbor_is_open(i, j, k, axis, 1) != 0
             ):
                 minus = field[i - 1, j, k][component]
                 plus = field[i + 1, j, k][component]
@@ -6895,6 +7021,8 @@ class CartesianFluidSolver:
                 and j + 1 < self.ny
                 and self.obstacle[i, j - 1, k] == 0
                 and self.obstacle[i, j + 1, k] == 0
+                and self._muscl_axis_neighbor_is_open(i, j, k, axis, -1) != 0
+                and self._muscl_axis_neighbor_is_open(i, j, k, axis, 1) != 0
             ):
                 minus = field[i, j - 1, k][component]
                 plus = field[i, j + 1, k][component]
@@ -6911,6 +7039,8 @@ class CartesianFluidSolver:
                 and k + 1 < self.nz
                 and self.obstacle[i, j, k - 1] == 0
                 and self.obstacle[i, j, k + 1] == 0
+                and self._muscl_axis_neighbor_is_open(i, j, k, axis, -1) != 0
+                and self._muscl_axis_neighbor_is_open(i, j, k, axis, 1) != 0
             ):
                 minus = field[i, j, k - 1][component]
                 plus = field[i, j, k + 1][component]
@@ -6990,7 +7120,9 @@ class CartesianFluidSolver:
                 ] = extension
 
     @ti.func
-    def _muscl_scalar_slope(self, field: ti.template(), i, j, k, axis):
+    def _muscl_scalar_slope(
+        self, field: ti.template(), i, j, k, axis: ti.template()
+    ):
         center = field[i, j, k]
         minus = center
         plus = center
@@ -6998,30 +7130,30 @@ class CartesianFluidSolver:
         plus_distance = 1.0
         minus_valid = 0
         plus_valid = 0
-        if axis == 0:
-            if i > 0 and self.obstacle[i - 1, j, k] == 0:
+        if ti.static(axis == 0):
+            if self._muscl_axis_neighbor_is_open(i, j, k, axis, -1) != 0:
                 minus = field[i - 1, j, k]
                 minus_distance = self.center_distance_x_m[i]
                 minus_valid = 1
-            if i + 1 < self.nx and self.obstacle[i + 1, j, k] == 0:
+            if self._muscl_axis_neighbor_is_open(i, j, k, axis, 1) != 0:
                 plus = field[i + 1, j, k]
                 plus_distance = self.center_distance_x_m[i + 1]
                 plus_valid = 1
-        elif axis == 1:
-            if j > 0 and self.obstacle[i, j - 1, k] == 0:
+        elif ti.static(axis == 1):
+            if self._muscl_axis_neighbor_is_open(i, j, k, axis, -1) != 0:
                 minus = field[i, j - 1, k]
                 minus_distance = self.center_distance_y_m[j]
                 minus_valid = 1
-            if j + 1 < self.ny and self.obstacle[i, j + 1, k] == 0:
+            if self._muscl_axis_neighbor_is_open(i, j, k, axis, 1) != 0:
                 plus = field[i, j + 1, k]
                 plus_distance = self.center_distance_y_m[j + 1]
                 plus_valid = 1
         else:
-            if k > 0 and self.obstacle[i, j, k - 1] == 0:
+            if self._muscl_axis_neighbor_is_open(i, j, k, axis, -1) != 0:
                 minus = field[i, j, k - 1]
                 minus_distance = self.center_distance_z_m[k]
                 minus_valid = 1
-            if k + 1 < self.nz and self.obstacle[i, j, k + 1] == 0:
+            if self._muscl_axis_neighbor_is_open(i, j, k, axis, 1) != 0:
                 plus = field[i, j, k + 1]
                 plus_distance = self.center_distance_z_m[k + 1]
                 plus_valid = 1
@@ -7064,32 +7196,44 @@ class CartesianFluidSolver:
 
     @ti.func
     def _muscl_vector_face_state(
-        self, field: ti.template(), i, j, k, axis, side
+        self,
+        field: ti.template(),
+        i,
+        j,
+        k,
+        axis: ti.template(),
+        side: ti.template(),
     ):
         center = field[i, j, k]
         neighbor = center
         neighbor_valid = 0
-        if axis == 0:
-            if side < 0 and i > 0 and self.obstacle[i - 1, j, k] == 0:
-                neighbor = field[i - 1, j, k]
-                neighbor_valid = 1
-            elif side > 0 and i + 1 < self.nx and self.obstacle[i + 1, j, k] == 0:
-                neighbor = field[i + 1, j, k]
-                neighbor_valid = 1
-        elif axis == 1:
-            if side < 0 and j > 0 and self.obstacle[i, j - 1, k] == 0:
-                neighbor = field[i, j - 1, k]
-                neighbor_valid = 1
-            elif side > 0 and j + 1 < self.ny and self.obstacle[i, j + 1, k] == 0:
-                neighbor = field[i, j + 1, k]
-                neighbor_valid = 1
+        if ti.static(axis == 0):
+            if ti.static(side < 0):
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i - 1, j, k]
+                    neighbor_valid = 1
+            else:
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i + 1, j, k]
+                    neighbor_valid = 1
+        elif ti.static(axis == 1):
+            if ti.static(side < 0):
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i, j - 1, k]
+                    neighbor_valid = 1
+            else:
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i, j + 1, k]
+                    neighbor_valid = 1
         else:
-            if side < 0 and k > 0 and self.obstacle[i, j, k - 1] == 0:
-                neighbor = field[i, j, k - 1]
-                neighbor_valid = 1
-            elif side > 0 and k + 1 < self.nz and self.obstacle[i, j, k + 1] == 0:
-                neighbor = field[i, j, k + 1]
-                neighbor_valid = 1
+            if ti.static(side < 0):
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i, j, k - 1]
+                    neighbor_valid = 1
+            else:
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i, j, k + 1]
+                    neighbor_valid = 1
         value = center
         for component in ti.static(range(3)):
             # Packed backward-MAC components do not share one collocated
@@ -7099,8 +7243,8 @@ class CartesianFluidSolver:
             # live at C_axis and reconstruct to the primal scalar faces.
             face_position = 0.0
             center_position = 0.0
-            if axis == 0:
-                if component == 0:
+            if ti.static(axis == 0):
+                if ti.static(component == 0):
                     center_position = self.cell_face_x_m[i]
                     face_position = (
                         self.cell_face_x_m[0]
@@ -7110,8 +7254,8 @@ class CartesianFluidSolver:
                 else:
                     center_position = self.cell_center_x_m[i]
                     face_position = self.cell_face_x_m[i if side < 0 else i + 1]
-            elif axis == 1:
-                if component == 1:
+            elif ti.static(axis == 1):
+                if ti.static(component == 1):
                     center_position = self.cell_face_y_m[j]
                     face_position = (
                         self.cell_face_y_m[0]
@@ -7122,7 +7266,7 @@ class CartesianFluidSolver:
                     center_position = self.cell_center_y_m[j]
                     face_position = self.cell_face_y_m[j if side < 0 else j + 1]
             else:
-                if component == 2:
+                if ti.static(component == 2):
                     center_position = self.cell_face_z_m[k]
                     face_position = (
                         self.cell_face_z_m[0]
@@ -7172,41 +7316,47 @@ class CartesianFluidSolver:
         i,
         j,
         k,
-        axis,
-        side,
+        axis: ti.template(),
+        side: ti.template(),
     ):
         center = field[i, j, k]
         face_position = 0.0
         center_position = 0.0
         neighbor = center
         neighbor_valid = 0
-        if axis == 0:
+        if ti.static(axis == 0):
             face_position = self.cell_face_x_m[i if side < 0 else i + 1]
             center_position = self.cell_center_x_m[i]
-            if side < 0 and i > 0 and self.obstacle[i - 1, j, k] == 0:
-                neighbor = field[i - 1, j, k]
-                neighbor_valid = 1
-            elif side > 0 and i + 1 < self.nx and self.obstacle[i + 1, j, k] == 0:
-                neighbor = field[i + 1, j, k]
-                neighbor_valid = 1
-        elif axis == 1:
+            if ti.static(side < 0):
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i - 1, j, k]
+                    neighbor_valid = 1
+            else:
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i + 1, j, k]
+                    neighbor_valid = 1
+        elif ti.static(axis == 1):
             face_position = self.cell_face_y_m[j if side < 0 else j + 1]
             center_position = self.cell_center_y_m[j]
-            if side < 0 and j > 0 and self.obstacle[i, j - 1, k] == 0:
-                neighbor = field[i, j - 1, k]
-                neighbor_valid = 1
-            elif side > 0 and j + 1 < self.ny and self.obstacle[i, j + 1, k] == 0:
-                neighbor = field[i, j + 1, k]
-                neighbor_valid = 1
+            if ti.static(side < 0):
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i, j - 1, k]
+                    neighbor_valid = 1
+            else:
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i, j + 1, k]
+                    neighbor_valid = 1
         else:
             face_position = self.cell_face_z_m[k if side < 0 else k + 1]
             center_position = self.cell_center_z_m[k]
-            if side < 0 and k > 0 and self.obstacle[i, j, k - 1] == 0:
-                neighbor = field[i, j, k - 1]
-                neighbor_valid = 1
-            elif side > 0 and k + 1 < self.nz and self.obstacle[i, j, k + 1] == 0:
-                neighbor = field[i, j, k + 1]
-                neighbor_valid = 1
+            if ti.static(side < 0):
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i, j, k - 1]
+                    neighbor_valid = 1
+            else:
+                if self._muscl_axis_neighbor_is_open(i, j, k, axis, side) != 0:
+                    neighbor = field[i, j, k + 1]
+                    neighbor_valid = 1
         value = center + slope_field[i, j, k][axis] * (
             face_position - center_position
         )
@@ -7226,7 +7376,9 @@ class CartesianFluidSolver:
         return value
 
     @ti.func
-    def _muscl_sst_k_face_state(self, i, j, k, axis, side):
+    def _muscl_sst_k_face_state(
+        self, i, j, k, axis: ti.template(), side: ti.template()
+    ):
         return self._muscl_scalar_face_state(
             self.sst_turbulent_kinetic_energy_prev,
             self.muscl_sst_k_slope,
@@ -7240,7 +7392,9 @@ class CartesianFluidSolver:
         )
 
     @ti.func
-    def _muscl_sst_omega_face_state(self, i, j, k, axis, side):
+    def _muscl_sst_omega_face_state(
+        self, i, j, k, axis: ti.template(), side: ti.template()
+    ):
         return self._muscl_scalar_face_state(
             self.sst_specific_dissipation_rate_prev,
             self.muscl_sst_omega_slope,
@@ -7252,112 +7406,6 @@ class CartesianFluidSolver:
             axis,
             side,
         )
-
-    @ti.func
-    def _muscl_momentum_face_flux(
-        self,
-        field: ti.template(),
-        i,
-        j,
-        k,
-        axis,
-        side,
-        no_slip_xmin,
-        no_slip_xmax,
-        no_slip_ymin,
-        no_slip_ymax,
-        no_slip_zmin,
-        no_slip_zmax,
-    ):
-        ni = i
-        nj = j
-        nk = k
-        inside_domain = 1
-        if axis == 0:
-            ni += side
-            inside_domain = 1 if 0 <= ni < self.nx else 0
-        elif axis == 1:
-            nj += side
-            inside_domain = 1 if 0 <= nj < self.ny else 0
-        else:
-            nk += side
-            inside_domain = 1 if 0 <= nk < self.nz else 0
-
-        flux = ti.Vector([0.0, 0.0, 0.0])
-        current_face = self._muscl_vector_face_state(field, i, j, k, axis, side)
-        if inside_domain != 0 and self.obstacle[ni, nj, nk] == 0:
-            neighbor_face = self._muscl_vector_face_state(
-                field, ni, nj, nk, axis, -side
-            )
-            left = neighbor_face if side < 0 else current_face
-            right = current_face if side < 0 else neighbor_face
-            # The compact velocity layout owns the backward MAC face at the
-            # plus-side storage row.  Reuse that exact mass flux here instead
-            # of inventing a cell-centred average that would disagree with the
-            # pressure projection/divergence operator.
-            normal_velocity = (
-                field[i, j, k][axis]
-                if side < 0
-                else field[ni, nj, nk][axis]
-            )
-            flux = normal_velocity * (left if normal_velocity >= 0.0 else right)
-        elif inside_domain != 0:
-            wall_velocity = self._sst_local_wall_velocity(i, j, k)
-            left = wall_velocity if side < 0 else current_face
-            right = current_face if side < 0 else wall_velocity
-            # The interface face may be stored on either the fluid or obstacle
-            # row.  Canonical velocity ownership has already written the exact
-            # wall-normal value into the plus-side (backward-MAC) row.
-            normal_velocity = (
-                field[i, j, k][axis]
-                if side < 0
-                else field[ni, nj, nk][axis]
-            )
-            flux = normal_velocity * (left if normal_velocity >= 0.0 else right)
-        else:
-            side_index = 0 if side < 0 else 1
-            exact_mask = 0
-            exact_target = current_face
-            wall = 0
-            if axis == 0:
-                exact_mask = self.external_velocity_boundary_x_face_active_component_mask[
-                    side_index, j, k
-                ]
-                exact_target = self.external_velocity_boundary_x_face_value_mps[
-                    side_index, j, k
-                ]
-                wall = no_slip_xmin if side < 0 else no_slip_xmax
-            elif axis == 1:
-                exact_mask = self.external_velocity_boundary_y_face_active_component_mask[
-                    side_index, i, k
-                ]
-                exact_target = self.external_velocity_boundary_y_face_value_mps[
-                    side_index, i, k
-                ]
-                wall = no_slip_ymin if side < 0 else no_slip_ymax
-            else:
-                exact_mask = self.external_velocity_boundary_z_face_active_component_mask[
-                    side_index, i, j
-                ]
-                exact_target = self.external_velocity_boundary_z_face_value_mps[
-                    side_index, i, j
-                ]
-                wall = no_slip_zmin if side < 0 else no_slip_zmax
-            boundary = current_face
-            if wall != 0:
-                boundary = ti.Vector([0.0, 0.0, 0.0])
-            for component in ti.static(range(3)):
-                if (exact_mask & (1 << component)) != 0:
-                    boundary[component] = exact_target[component]
-            normal_velocity = current_face[axis]
-            if wall != 0:
-                normal_velocity = 0.0
-            if (exact_mask & (1 << axis)) != 0:
-                normal_velocity = exact_target[axis]
-            left = boundary if side < 0 else current_face
-            right = current_face if side < 0 else boundary
-            flux = normal_velocity * (left if normal_velocity >= 0.0 else right)
-        return flux
 
     @ti.kernel
     def _synchronize_muscl_minimum_normal_boundary_rows_kernel(
@@ -7495,7 +7543,13 @@ class CartesianFluidSolver:
             else:
                 minus_fluid = self.obstacle[face - 1, j, k] == 0
                 plus_fluid = self.obstacle[face, j, k] == 0
-                if minus_fluid and plus_fluid:
+                canonical_wall = (
+                    self._canonical_hibm_exact_component_owner(
+                        face, j, k, 0
+                    )
+                    != 0
+                )
+                if minus_fluid and plus_fluid and not canonical_wall:
                     normal_velocity = source[face, j, k].x
                 # Any immersed primal face is impermeable in the wall-relative
                 # transport ledger.  In particular, never admit a stale raw A
@@ -7539,7 +7593,13 @@ class CartesianFluidSolver:
             else:
                 minus_fluid = self.obstacle[i, face - 1, k] == 0
                 plus_fluid = self.obstacle[i, face, k] == 0
-                if minus_fluid and plus_fluid:
+                canonical_wall = (
+                    self._canonical_hibm_exact_component_owner(
+                        i, face, k, 1
+                    )
+                    != 0
+                )
+                if minus_fluid and plus_fluid and not canonical_wall:
                     normal_velocity = source[i, face, k].y
             self.muscl_normal_velocity_y[i, face, k] = normal_velocity
 
@@ -7579,7 +7639,13 @@ class CartesianFluidSolver:
             else:
                 minus_fluid = self.obstacle[i, j, face - 1] == 0
                 plus_fluid = self.obstacle[i, j, face] == 0
-                if minus_fluid and plus_fluid:
+                canonical_wall = (
+                    self._canonical_hibm_exact_component_owner(
+                        i, j, face, 2
+                    )
+                    != 0
+                )
+                if minus_fluid and plus_fluid and not canonical_wall:
                     normal_velocity = source[i, j, face].z
             self.muscl_normal_velocity_z[i, j, face] = normal_velocity
 
@@ -7898,6 +7964,8 @@ class CartesianFluidSolver:
         self,
         source: object,
         wall_flag_codes: tuple[int, int, int, int, int, int],
+        *,
+        dual_geometry_prepared: bool = False,
     ) -> None:
         # The minimum-side normal compact rows are colocated with physical
         # boundary faces.  Synchronize them before slope/state construction so
@@ -7921,7 +7989,8 @@ class CartesianFluidSolver:
         # face velocities; immersed moving-wall faces are closed in relative
         # coordinates and exact external faces retain their directed target.
         self._compute_muscl_primal_normal_velocity_ledger(source, wall_flag_codes)
-        self._compute_muscl_momentum_dual_geometry_kernel()
+        if not dual_geometry_prepared:
+            self._compute_muscl_momentum_dual_geometry_kernel()
         for axis in range(3):
             self._prepare_muscl_velocity_axis_reconstruction_kernel(source, axis)
         # Phase 2: lift each scalar primal flux into the three component-native
@@ -7984,7 +8053,22 @@ class CartesianFluidSolver:
                 physical_interface = (
                     has_minus_neighbor != 0 and minus_fluid != plus_fluid
                 )
-                if physical_interface:
+                component_bit = 1 << component
+                canonical_exact_owner = 0
+                if ti.static(canonical_authority == 1):
+                    if (
+                        self._canonical_hibm_exact_component_owner(
+                            i, j, k, component
+                        )
+                    ) != 0:
+                        canonical_exact_owner = 1
+                if canonical_exact_owner != 0:
+                    updated[component] = (
+                        self.velocity_dirichlet_boundary_value_mps[i, j, k][
+                            component
+                        ]
+                    )
+                elif physical_interface:
                     # Strict exact owners were synchronized to their target
                     # before flux construction.  A soft active owner, however,
                     # must retain the already-applied source value: the generic
@@ -7992,7 +8076,6 @@ class CartesianFluidSolver:
                     # rows and cannot recreate a value erased here.  Only a
                     # truly unowned impermeable face is fail-closed to zero.
                     active_owner = 0
-                    component_bit = 1 << component
                     if ti.static(canonical_authority == 1):
                         if (
                             self.velocity_dirichlet_boundary_active_component_mask[
@@ -8104,6 +8187,12 @@ class CartesianFluidSolver:
                 )
                 exact_owner = 0
                 if ti.static(canonical_authority == 1):
+                    if (
+                        self._canonical_hibm_exact_component_owner(
+                            i, j, k, component
+                        )
+                    ) != 0:
+                        exact_owner = 1
                     pressure_mobility = (
                         self.velocity_dirichlet_boundary_pressure_mobility[
                             i, j, k
@@ -8246,7 +8335,16 @@ class CartesianFluidSolver:
                 physical_interface = (
                     has_minus_neighbor != 0 and minus_fluid != plus_fluid
                 )
-                if dual_volume > 1.0e-30 and not physical_interface:
+                canonical_exact_owner = (
+                    self._canonical_hibm_exact_component_owner(
+                        i, j, k, component
+                    )
+                ) != 0
+                if (
+                    dual_volume > 1.0e-30
+                    and not physical_interface
+                    and not canonical_exact_owner
+                ):
                     x_out = 0.0
                     x_in = 0.0
                     y_out = 0.0
@@ -8369,22 +8467,167 @@ class CartesianFluidSolver:
         )
 
     @ti.func
+    def _storage_path_crosses_obstacle_or_canonical_hibm_wall(
+        self,
+        i,
+        j,
+        k,
+        target_i,
+        target_j,
+        target_k,
+    ):
+        """Fail closed when a storage-cell path crosses an obstacle or hard face."""
+
+        blocked = 0
+        delta_i = ti.abs(target_i - i)
+        delta_j = ti.abs(target_j - j)
+        delta_k = ti.abs(target_k - k)
+        steps = ti.max(delta_i, ti.max(delta_j, delta_k))
+        march_steps = ti.min(steps, PREDICTOR_BACKTRACE_OBSTACLE_MARCH_MAX_STEPS)
+        previous_i = i
+        previous_j = j
+        previous_k = k
+        step = 1
+        while step <= march_steps:
+            fraction = ti.cast(step, ti.f32) / ti.cast(march_steps, ti.f32)
+            sample_i = ti.min(
+                ti.max(
+                    ti.floor(
+                        ti.cast(i, ti.f32)
+                        + ti.cast(target_i - i, ti.f32) * fraction
+                        + 0.5,
+                        ti.i32,
+                    ),
+                    0,
+                ),
+                self.nx - 1,
+            )
+            sample_j = ti.min(
+                ti.max(
+                    ti.floor(
+                        ti.cast(j, ti.f32)
+                        + ti.cast(target_j - j, ti.f32) * fraction
+                        + 0.5,
+                        ti.i32,
+                    ),
+                    0,
+                ),
+                self.ny - 1,
+            )
+            sample_k = ti.min(
+                ti.max(
+                    ti.floor(
+                        ti.cast(k, ti.f32)
+                        + ti.cast(target_k - k, ti.f32) * fraction
+                        + 0.5,
+                        ti.i32,
+                    ),
+                    0,
+                ),
+                self.nz - 1,
+            )
+            if self.obstacle[sample_i, sample_j, sample_k] != 0:
+                blocked = 1
+            if sample_i != previous_i:
+                face_i = ti.max(sample_i, previous_i)
+                for transverse_j, transverse_k in ti.ndrange(2, 2):
+                    candidate_j = previous_j if transverse_j == 0 else sample_j
+                    candidate_k = previous_k if transverse_k == 0 else sample_k
+                    if self.canonical_exact_hard_face_component_mask[face_i, candidate_j, candidate_k] & 1 != 0:
+                        blocked = 1
+            if sample_j != previous_j:
+                face_j = ti.max(sample_j, previous_j)
+                for transverse_i, transverse_k in ti.ndrange(2, 2):
+                    candidate_i = previous_i if transverse_i == 0 else sample_i
+                    candidate_k = previous_k if transverse_k == 0 else sample_k
+                    if self.canonical_exact_hard_face_component_mask[candidate_i, face_j, candidate_k] & 2 != 0:
+                        blocked = 1
+            if sample_k != previous_k:
+                face_k = ti.max(sample_k, previous_k)
+                for transverse_i, transverse_j in ti.ndrange(2, 2):
+                    candidate_i = previous_i if transverse_i == 0 else sample_i
+                    candidate_j = previous_j if transverse_j == 0 else sample_j
+                    if self.canonical_exact_hard_face_component_mask[candidate_i, candidate_j, face_k] & 4 != 0:
+                        blocked = 1
+            previous_i = sample_i
+            previous_j = sample_j
+            previous_k = sample_k
+            step += 1
+        return blocked
+
+    @ti.func
+    def _storage_corner_path_crosses_obstacle_or_canonical_hibm_wall(
+        self,
+        anchor_i,
+        anchor_j,
+        anchor_k,
+        sample_i,
+        sample_j,
+        sample_k,
+    ):
+        blocked = 0
+        if (
+            self.obstacle[anchor_i, anchor_j, anchor_k] != 0
+            or self.obstacle[sample_i, sample_j, sample_k] != 0
+        ):
+            blocked = 1
+        if sample_i != anchor_i:
+            face_i = sample_i if sample_i > anchor_i else anchor_i
+            for transverse_j, transverse_k in ti.ndrange(2, 2):
+                candidate_j = anchor_j if transverse_j == 0 else sample_j
+                candidate_k = anchor_k if transverse_k == 0 else sample_k
+                if self.canonical_exact_hard_face_component_mask[face_i, candidate_j, candidate_k] & 1 != 0:
+                    blocked = 1
+        if sample_j != anchor_j:
+            face_j = sample_j if sample_j > anchor_j else anchor_j
+            for transverse_i, transverse_k in ti.ndrange(2, 2):
+                candidate_i = anchor_i if transverse_i == 0 else sample_i
+                candidate_k = anchor_k if transverse_k == 0 else sample_k
+                if self.canonical_exact_hard_face_component_mask[candidate_i, face_j, candidate_k] & 2 != 0:
+                    blocked = 1
+        if sample_k != anchor_k:
+            face_k = sample_k if sample_k > anchor_k else anchor_k
+            for transverse_i, transverse_j in ti.ndrange(2, 2):
+                candidate_i = anchor_i if transverse_i == 0 else sample_i
+                candidate_j = anchor_j if transverse_j == 0 else sample_j
+                if self.canonical_exact_hard_face_component_mask[candidate_i, candidate_j, face_k] & 4 != 0:
+                    blocked = 1
+        return blocked
+
+    @ti.func
     def _sample_velocity_prev_trilinear(self, gx, gy, gz, fallback):
         i0 = ti.min(ti.max(ti.floor(gx, ti.i32), 0), self.nx - 2)
         j0 = ti.min(ti.max(ti.floor(gy, ti.i32), 0), self.ny - 2)
         k0 = ti.min(ti.max(ti.floor(gz, ti.i32), 0), self.nz - 2)
+        anchor_i = ti.min(ti.max(ti.floor(gx + 0.5, ti.i32), 0), self.nx - 1)
+        anchor_j = ti.min(ti.max(ti.floor(gy + 0.5, ti.i32), 0), self.ny - 1)
+        anchor_k = ti.min(ti.max(ti.floor(gz + 0.5, ti.i32), 0), self.nz - 1)
         tx = ti.min(ti.max(gx - ti.cast(i0, ti.f32), 0.0), 1.0)
         ty = ti.min(ti.max(gy - ti.cast(j0, ti.f32), 0.0), 1.0)
         tz = ti.min(ti.max(gz - ti.cast(k0, ti.f32), 0.0), 1.0)
         value = ti.Vector([0.0, 0.0, 0.0])
         fluid_weight = 0.0
-        for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
-            wx = 1.0 - tx if oi == 0 else tx
-            wy = 1.0 - ty if oj == 0 else ty
-            wz = 1.0 - tz if ok == 0 else tz
+        for oi, oj, ok in ti.ndrange(2, 2, 2):
+            wx = ti.select(oi == 0, 1.0 - tx, tx)
+            wy = ti.select(oj == 0, 1.0 - ty, ty)
+            wz = ti.select(ok == 0, 1.0 - tz, tz)
             weight = wx * wy * wz
-            if self.obstacle[i0 + oi, j0 + oj, k0 + ok] == 0:
-                value += weight * self.velocity_prev[i0 + oi, j0 + oj, k0 + ok]
+            sample_i = i0 + oi
+            sample_j = j0 + oj
+            sample_k = k0 + ok
+            if (
+                self.obstacle[sample_i, sample_j, sample_k] == 0
+                and self._storage_corner_path_crosses_obstacle_or_canonical_hibm_wall(
+                    anchor_i,
+                    anchor_j,
+                    anchor_k,
+                    sample_i,
+                    sample_j,
+                    sample_k,
+                )
+                == 0
+            ):
+                value += weight * self.velocity_prev[sample_i, sample_j, sample_k]
                 fluid_weight += weight
         if fluid_weight > 1.0e-12:
             value /= fluid_weight
@@ -8432,37 +8675,6 @@ class CartesianFluidSolver:
     @ti.func
     def _grid_coordinate_z(self, z):
         return self._axis_grid_coordinate_device(z, self.cell_face_z_m, self.cell_center_z_m, self.nz)
-
-    @ti.func
-    def _sst_scalar_prev_trilinear(
-        self,
-        field: ti.template(),
-        gx,
-        gy,
-        gz,
-        fallback,
-    ):
-        i0 = ti.min(ti.max(ti.floor(gx, ti.i32), 0), self.nx - 2)
-        j0 = ti.min(ti.max(ti.floor(gy, ti.i32), 0), self.ny - 2)
-        k0 = ti.min(ti.max(ti.floor(gz, ti.i32), 0), self.nz - 2)
-        tx = ti.min(ti.max(gx - ti.cast(i0, ti.f32), 0.0), 1.0)
-        ty = ti.min(ti.max(gy - ti.cast(j0, ti.f32), 0.0), 1.0)
-        tz = ti.min(ti.max(gz - ti.cast(k0, ti.f32), 0.0), 1.0)
-        value = 0.0
-        fluid_weight = 0.0
-        for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
-            wx = 1.0 - tx if oi == 0 else tx
-            wy = 1.0 - ty if oj == 0 else ty
-            wz = 1.0 - tz if ok == 0 else tz
-            weight = wx * wy * wz
-            if self.obstacle[i0 + oi, j0 + oj, k0 + ok] == 0:
-                value += weight * field[i0 + oi, j0 + oj, k0 + ok]
-                fluid_weight += weight
-        if fluid_weight > 1.0e-12:
-            value /= fluid_weight
-        else:
-            value = fallback
-        return value
 
     @ti.func
     def _sst_scalar_derivative_x(self, field: ti.template(), i, j, k):
@@ -8848,105 +9060,6 @@ class CartesianFluidSolver:
                 - self.external_velocity_boundary_z_face_value_mps[side, i, j - 1].z
             ) / self.center_distance_y_m[j]
         return value
-
-    @ti.func
-    def _sst_velocity_field_derivative_x(self, field: ti.template(), i, j, k):
-        value = ti.Vector([0.0, 0.0, 0.0])
-        has_minus = i > 0 and self.obstacle[i - 1, j, k] == 0
-        has_plus = i + 1 < self.nx and self.obstacle[i + 1, j, k] == 0
-        minus_wall = (i > 0 and self.obstacle[i - 1, j, k] != 0) or (
-            i == 0 and (self.sst_no_slip_domain_wall_mask[None] & 1) != 0
-        )
-        plus_wall = (i + 1 < self.nx and self.obstacle[i + 1, j, k] != 0) or (
-            i == self.nx - 1 and (self.sst_no_slip_domain_wall_mask[None] & 2) != 0
-        )
-        wall_velocity = self._sst_local_wall_velocity(i, j, k)
-        if minus_wall:
-            value = (field[i, j, k] - wall_velocity) / (0.5 * self.cell_width_x_m[i])
-        elif plus_wall:
-            value = (wall_velocity - field[i, j, k]) / (0.5 * self.cell_width_x_m[i])
-        elif has_minus and has_plus:
-            distance = self.center_distance_x_m[i] + self.center_distance_x_m[i + 1]
-            value = (field[i + 1, j, k] - field[i - 1, j, k]) / distance
-        elif has_plus:
-            value = (field[i + 1, j, k] - field[i, j, k]) / self.center_distance_x_m[i + 1]
-        elif has_minus:
-            value = (field[i, j, k] - field[i - 1, j, k]) / self.center_distance_x_m[i]
-        return value
-
-    @ti.func
-    def _sst_velocity_field_derivative_y(self, field: ti.template(), i, j, k):
-        value = ti.Vector([0.0, 0.0, 0.0])
-        has_minus = j > 0 and self.obstacle[i, j - 1, k] == 0
-        has_plus = j + 1 < self.ny and self.obstacle[i, j + 1, k] == 0
-        minus_wall = (j > 0 and self.obstacle[i, j - 1, k] != 0) or (
-            j == 0 and (self.sst_no_slip_domain_wall_mask[None] & 4) != 0
-        )
-        plus_wall = (j + 1 < self.ny and self.obstacle[i, j + 1, k] != 0) or (
-            j == self.ny - 1 and (self.sst_no_slip_domain_wall_mask[None] & 8) != 0
-        )
-        wall_velocity = self._sst_local_wall_velocity(i, j, k)
-        if minus_wall:
-            value = (field[i, j, k] - wall_velocity) / (0.5 * self.cell_width_y_m[j])
-        elif plus_wall:
-            value = (wall_velocity - field[i, j, k]) / (0.5 * self.cell_width_y_m[j])
-        elif has_minus and has_plus:
-            distance = self.center_distance_y_m[j] + self.center_distance_y_m[j + 1]
-            value = (field[i, j + 1, k] - field[i, j - 1, k]) / distance
-        elif has_plus:
-            value = (field[i, j + 1, k] - field[i, j, k]) / self.center_distance_y_m[j + 1]
-        elif has_minus:
-            value = (field[i, j, k] - field[i, j - 1, k]) / self.center_distance_y_m[j]
-        return value
-
-    @ti.func
-    def _sst_velocity_field_derivative_z(self, field: ti.template(), i, j, k):
-        value = ti.Vector([0.0, 0.0, 0.0])
-        has_minus = k > 0 and self.obstacle[i, j, k - 1] == 0
-        has_plus = k + 1 < self.nz and self.obstacle[i, j, k + 1] == 0
-        minus_wall = (k > 0 and self.obstacle[i, j, k - 1] != 0) or (
-            k == 0 and (self.sst_no_slip_domain_wall_mask[None] & 16) != 0
-        )
-        plus_wall = (k + 1 < self.nz and self.obstacle[i, j, k + 1] != 0) or (
-            k == self.nz - 1 and (self.sst_no_slip_domain_wall_mask[None] & 32) != 0
-        )
-        wall_velocity = self._sst_local_wall_velocity(i, j, k)
-        if minus_wall:
-            value = (field[i, j, k] - wall_velocity) / (0.5 * self.cell_width_z_m[k])
-        elif plus_wall:
-            value = (wall_velocity - field[i, j, k]) / (0.5 * self.cell_width_z_m[k])
-        elif has_minus and has_plus:
-            distance = self.center_distance_z_m[k] + self.center_distance_z_m[k + 1]
-            value = (field[i, j, k + 1] - field[i, j, k - 1]) / distance
-        elif has_plus:
-            value = (field[i, j, k + 1] - field[i, j, k]) / self.center_distance_z_m[k + 1]
-        elif has_minus:
-            value = (field[i, j, k] - field[i, j, k - 1]) / self.center_distance_z_m[k]
-        return value
-
-    @ti.func
-    def _sst_velocity_derivative_x(self, i, j, k):
-        return self._sst_velocity_field_derivative_x(self.velocity, i, j, k)
-
-    @ti.func
-    def _sst_velocity_derivative_y(self, i, j, k):
-        return self._sst_velocity_field_derivative_y(self.velocity, i, j, k)
-
-    @ti.func
-    def _sst_velocity_derivative_z(self, i, j, k):
-        return self._sst_velocity_field_derivative_z(self.velocity, i, j, k)
-
-    @ti.func
-    def _sst_velocity_prev_derivative_x(self, i, j, k):
-        return self._sst_velocity_field_derivative_x(self.velocity_prev, i, j, k)
-
-    @ti.func
-    def _sst_velocity_prev_derivative_y(self, i, j, k):
-        return self._sst_velocity_field_derivative_y(self.velocity_prev, i, j, k)
-
-    @ti.func
-    def _sst_velocity_prev_derivative_z(self, i, j, k):
-        return self._sst_velocity_field_derivative_z(self.velocity_prev, i, j, k)
 
     @ti.func
     def _sst_obstacle_interface_normal_owner_is_exact(
@@ -9480,6 +9593,33 @@ class CartesianFluidSolver:
                 self.external_velocity_boundary_z_face_value_mps[1, i, j]
             )
 
+        minus_canonical_wall_mask = 0
+        plus_canonical_wall_mask = 0
+        if has_minus:
+            minus_canonical_wall_mask = (
+                self._sst_canonical_hibm_wall_target_component_mask(
+                    i,
+                    j,
+                    k,
+                    derivative_axis,
+                )
+            )
+        if has_plus:
+            plus_canonical_wall_mask = (
+                self._sst_canonical_hibm_wall_target_component_mask(
+                    plus_i,
+                    plus_j,
+                    plus_k,
+                    derivative_axis,
+                )
+            )
+        if minus_canonical_wall_mask != 0:
+            has_minus = False
+            minus_obstacle_wall = True
+        if plus_canonical_wall_mask != 0:
+            has_plus = False
+            plus_obstacle_wall = True
+
         obstacle_minus_target = ti.Vector([0.0, 0.0, 0.0])
         obstacle_plus_target = ti.Vector([0.0, 0.0, 0.0])
         if minus_obstacle_wall:
@@ -9487,6 +9627,7 @@ class CartesianFluidSolver:
                 self.sst_obstacle_interface_wall_target_component_mask[
                     i, j, k
                 ][derivative_axis]
+                | minus_canonical_wall_mask
             )
             for component in ti.static(range(3)):
                 if (valid_mask & (1 << component)) != 0:
@@ -9500,6 +9641,7 @@ class CartesianFluidSolver:
                 self.sst_obstacle_interface_wall_target_component_mask[
                     plus_i, plus_j, plus_k
                 ][derivative_axis]
+                | plus_canonical_wall_mask
             )
             for component in ti.static(range(3)):
                 if (valid_mask & (1 << component)) != 0:
@@ -9606,7 +9748,10 @@ class CartesianFluidSolver:
                 self.sst_gamma[i, j, k] = 5.0 / 9.0
                 self.sst_strain_rate_magnitude_s[i, j, k] = 0.0
             else:
-                k_value = ti.max(self.sst_turbulent_kinetic_energy[i, j, k], 1.0e-12)
+                # The SST model admits the laminar limit k == 0.  Do not
+                # manufacture eddy viscosity from an artificial positive k
+                # floor; omega remains the strictly-positive state variable.
+                k_value = ti.max(self.sst_turbulent_kinetic_energy[i, j, k], 0.0)
                 omega = ti.max(self.sst_specific_dissipation_rate[i, j, k], 1.0e-12)
                 wall_distance = ti.max(self.sst_wall_distance_m[i, j, k], 1.0e-12)
                 grad_k = ti.Vector(
@@ -9791,8 +9936,6 @@ class CartesianFluidSolver:
             else:
                 k_center = self.sst_turbulent_kinetic_energy_prev[i, j, k]
                 omega_center = self.sst_specific_dissipation_rate_prev[i, j, k]
-                velocity = self.velocity[i, j, k]
-
                 fk_x_b = 0.0
                 fk_x_f = 0.0
                 fk_y_b = 0.0
@@ -10267,10 +10410,27 @@ class CartesianFluidSolver:
                 gamma = self.sst_gamma[i, j, k]
                 nu_t = self.sst_eddy_viscosity_pa_s[i, j, k] / self.rho
                 raw_production_per_mass = nu_t * strain * strain
+                correlation_wall_ledger = ti.Vector([0.0, 0.0])
+                if self.sst_near_wall_correlation_enabled[None] != 0:
+                    correlation_wall_ledger = self._sst_correlation_cell_wall_production(
+                        i, j, k, molecular_nu_m2_s
+                    )
                 limited_production_per_mass = ti.min(
                     raw_production_per_mass,
                     10.0 * 0.09 * k_center * omega_center,
                 )
+                limited_correlation_production = 0.0
+                if correlation_wall_ledger[1] > 0.0:
+                    # Pk is volumetric in the Fluent correlation.  Limit this
+                    # one physical ledger once, then use it in both SST
+                    # equations; do not add bulk nu_t*S^2 at wall cells.
+                    limited_correlation_production = ti.min(
+                        correlation_wall_ledger[0],
+                        10.0 * 0.09 * self.rho * k_center * omega_center,
+                    )
+                    limited_production_per_mass = (
+                        limited_correlation_production / self.rho
+                    )
                 next_k = (
                     transported_k + dt_s * limited_production_per_mass
                 ) / (1.0 + dt_s * 0.09 * omega_center)
@@ -10311,6 +10471,10 @@ class CartesianFluidSolver:
                     * ti.max(eddy_denominator, 1.0e-20)
                     / 0.31,
                 )
+                if correlation_wall_ledger[1] > 0.0:
+                    production_over_mu_t = limited_correlation_production / ti.max(
+                        self.sst_eddy_viscosity_pa_s[i, j, k], 1.0e-30
+                    )
                 omega_positive = gamma * production_over_mu_t + ti.max(
                     cross_diffusion,
                     0.0,
@@ -10341,13 +10505,415 @@ class CartesianFluidSolver:
                 if (
                     not finite_k
                     or not finite_omega
-                    or next_k <= 0.0
+                    or next_k < 0.0
                     or next_omega <= 0.0
                 ):
                     ti.atomic_add(
                         self.sst_reduction_explicit_candidate_invalid_count[None],
                         1,
                     )
+
+    @ti.func
+    def _sst_wall_face_correlation(
+        self,
+        relative_tangential_speed_mps,
+        wall_distance_m,
+        turbulent_kinetic_energy_m2_s2,
+        specific_dissipation_rate_s,
+        density_kg_m3,
+        kinematic_viscosity_m2_s,
+    ):
+        """Fluent SST wall-correlation algebra (ANSYS Eqs. 394--407)."""
+
+        # These guards only protect a degenerate face from division by zero;
+        # the calibrated correlation constants are deliberately unmodified.
+        kappa = 0.4187
+        e_constant = 9.793
+        c_mu = 0.09
+        beta_star = 0.09
+        beta_i = 0.075
+        c_calib = 1.0 / 3.0
+        c_exp = 1.3
+        eps = 1.0e-30
+        speed = ti.abs(relative_tangential_speed_mps)
+        distance = ti.max(wall_distance_m, eps)
+        nu = ti.max(kinematic_viscosity_m2_s, eps)
+        turbulent_kinetic_energy = ti.max(turbulent_kinetic_energy_m2_s2, 0.0)
+        u_star = ti.sqrt(
+            ti.max(
+                nu * speed / distance + ti.sqrt(c_mu) * turbulent_kinetic_energy,
+                0.0,
+            )
+        )
+        y_plus = distance * u_star / nu
+        u_laminar_plus = y_plus
+        u_turbulent_plus = ti.log(e_constant * ti.max(y_plus, 0.2)) / kappa
+        u_plus_min = ti.min(u_laminar_plus, u_turbulent_plus)
+        u_plus_max = ti.max(u_laminar_plus, u_turbulent_plus)
+        u_plus_ratio = u_plus_min / ti.max(u_plus_max, eps)
+        u_plus = u_plus_min / (1.0 + u_plus_ratio**4.0) ** 0.25
+        u_tau = speed * 0.0
+        if u_plus > 0.0:
+            u_tau = speed / u_plus
+        tau_wall = density_kg_m3 * u_tau * u_star
+        d_u_turbulent_plus_d_y_plus = y_plus * 0.0
+        if y_plus > 0.2:
+            d_u_turbulent_plus_d_y_plus = 1.0 / (kappa * y_plus)
+        # Below y+=0.2 the turbulent omega branch is exactly zero, so the
+        # dimensional wall omega has this analytic finite form.  Evaluating
+        # the uncancelled y+^-2 expression at y+=0 produces 0*inf in f32.
+        omega_wall = c_calib * 6.0 * nu / (beta_i * distance * distance)
+        if y_plus > 0.2:
+            omega_laminar_plus = c_calib * 6.0 / (
+                beta_i * y_plus * y_plus
+            )
+            omega_turbulent_plus = (
+                d_u_turbulent_plus_d_y_plus / ti.sqrt(beta_star)
+            )
+            omega_plus = omega_laminar_plus * (
+                1.0 + (omega_turbulent_plus / omega_laminar_plus) ** c_exp
+            ) ** (1.0 / c_exp)
+            omega_wall = u_star * u_star / nu * omega_plus
+        kinematic_wall_traction_coefficient = nu / distance
+        if u_plus > 0.0:
+            kinematic_wall_traction_coefficient = u_star / u_plus
+        dynamic_viscosity = ti.max(density_kg_m3 * nu, eps)
+        production_laminar = (
+            density_kg_m3
+            * turbulent_kinetic_energy
+            / ti.max(specific_dissipation_rate_s, eps)
+            * (tau_wall / dynamic_viscosity) ** 2.0
+        )
+        production_turbulent = (
+            tau_wall * tau_wall
+            / dynamic_viscosity
+            * d_u_turbulent_plus_d_y_plus
+        )
+        production_sum = production_laminar + production_turbulent
+        production_wall = production_sum * 0.0
+        if production_sum > 0.0:
+            production_wall = production_laminar * production_turbulent / production_sum
+        return ti.Vector(
+            [
+                omega_wall,
+                tau_wall,
+                production_wall,
+                kinematic_wall_traction_coefficient,
+            ]
+        )
+
+    @ti.func
+    def _canonical_hibm_exact_component_owner(
+        self,
+        i,
+        j,
+        k,
+        component: ti.template(),
+    ):
+        """Return whether a canonical fluid row exactly owns one component."""
+
+        exact_owner = 0
+        if (
+            self.velocity_dirichlet_boundary_authority_code_device[None] != 0
+            and self.obstacle[i, j, k] == 0
+        ):
+            contract_tolerance = ti.cast(1.0e-6, ti.f32)
+            component_bit = 1 << component
+            pressure_mobility = (
+                self.velocity_dirichlet_boundary_pressure_mobility[i, j, k][
+                    component
+                ]
+            )
+            enforcement_weight = (
+                self.velocity_dirichlet_boundary_component_enforcement_weight[
+                    i, j, k
+                ][component]
+            )
+            target = self.velocity_dirichlet_boundary_value_mps[i, j, k][component]
+            if (
+                (
+                    self.velocity_dirichlet_boundary_active_component_mask[i, j, k]
+                    & component_bit
+                )
+                != 0
+                and (
+                    self.velocity_dirichlet_boundary_hard_fixed_component_mask[
+                        i, j, k
+                    ]
+                    & component_bit
+                )
+                != 0
+                and (
+                    self.velocity_dirichlet_boundary_owned_component_mask[i, j, k]
+                    & component_bit
+                )
+                != 0
+                and (
+                    self.velocity_dirichlet_boundary_external_exact_component_mask[
+                        i, j, k
+                    ]
+                    & component_bit
+                )
+                == 0
+                and pressure_mobility == pressure_mobility
+                and ti.abs(pressure_mobility) <= contract_tolerance
+                and enforcement_weight == enforcement_weight
+                and ti.abs(enforcement_weight - 1.0) <= contract_tolerance
+                and target == target
+                and ti.abs(target) < 1.0e30
+            ):
+                exact_owner = 1
+        return exact_owner
+
+    @ti.kernel
+    def _refresh_canonical_exact_hard_face_component_mask_kernel(self):
+        for i, j, k in self.canonical_exact_hard_face_component_mask:
+            exact_mask = 0
+            if self.velocity_dirichlet_boundary_authority_code_device[None] != 0:
+                for component in ti.static(range(3)):
+                    if (
+                        self._canonical_hibm_exact_component_owner(
+                            i, j, k, component
+                        )
+                        != 0
+                    ):
+                        exact_mask |= 1 << component
+            self.canonical_exact_hard_face_component_mask[i, j, k] = exact_mask
+
+    @ti.kernel
+    def _clear_canonical_exact_hard_face_component_mask_kernel(self):
+        for i, j, k in self.canonical_exact_hard_face_component_mask:
+            self.canonical_exact_hard_face_component_mask[i, j, k] = 0
+
+    def _refresh_canonical_exact_hard_face_component_mask(self) -> None:
+        authority = self._validated_velocity_dirichlet_boundary_authority(
+            self.velocity_dirichlet_boundary_authority
+        )
+        if authority == "canonical":
+            self._refresh_canonical_exact_hard_face_component_mask_kernel()
+        else:
+            self._clear_canonical_exact_hard_face_component_mask_kernel()
+
+    @ti.func
+    def _canonical_hibm_hard_face_target_component_mask(
+        self,
+        i,
+        j,
+        k,
+        normal_axis,
+    ):
+        """Return exact components owned by one canonical fluid-row face."""
+
+        exact_component_mask = 0
+        for component in ti.static(range(3)):
+            if self._canonical_hibm_exact_component_owner(
+                i, j, k, component
+            ) != 0:
+                exact_component_mask |= 1 << component
+        normal_bit = 1 << normal_axis
+        if (exact_component_mask & normal_bit) == 0:
+            exact_component_mask = 0
+        return exact_component_mask
+
+    @ti.func
+    def _sst_canonical_hibm_wall_target_component_mask(
+        self,
+        i,
+        j,
+        k,
+        normal_axis,
+    ):
+        """SST view of the shared canonical hard-face contract."""
+
+        return self._canonical_hibm_hard_face_target_component_mask(
+            i,
+            j,
+            k,
+            normal_axis,
+        )
+
+    @ti.func
+    def _sst_correlation_wall_face_values(
+        self,
+        i,
+        j,
+        k,
+        axis_index,
+        side,
+        external_no_slip,
+        molecular_nu_m2_s,
+    ):
+        """Return [is_wall, omega, tau, Pk, kinematic_coeff, target_x, target_y, target_z]."""
+
+        ni = i
+        nj = j
+        nk = k
+        if axis_index == 0:
+            ni += side
+        elif axis_index == 1:
+            nj += side
+        else:
+            nk += side
+        in_domain = 0 <= ni < self.nx and 0 <= nj < self.ny and 0 <= nk < self.nz
+        external_target_mask = 0
+        external_target = ti.Vector([0.0, 0.0, 0.0])
+        if not in_domain:
+            side_index = 0 if side < 0 else 1
+            if axis_index == 0:
+                external_target_mask = (
+                    self.external_velocity_boundary_x_face_active_component_mask[
+                        side_index, j, k
+                    ]
+                )
+                external_target = self.external_velocity_boundary_x_face_value_mps[
+                    side_index, j, k
+                ]
+            elif axis_index == 1:
+                external_target_mask = (
+                    self.external_velocity_boundary_y_face_active_component_mask[
+                        side_index, i, k
+                    ]
+                )
+                external_target = self.external_velocity_boundary_y_face_value_mps[
+                    side_index, i, k
+                ]
+            else:
+                external_target_mask = (
+                    self.external_velocity_boundary_z_face_active_component_mask[
+                        side_index, i, j
+                    ]
+                )
+                external_target = self.external_velocity_boundary_z_face_value_mps[
+                    side_index, i, j
+                ]
+        owner_i = i
+        owner_j = j
+        owner_k = k
+        canonical_hibm_target_mask = 0
+        if in_domain:
+            if side > 0:
+                owner_i = ni
+                owner_j = nj
+                owner_k = nk
+            canonical_hibm_target_mask = (
+                self._sst_canonical_hibm_wall_target_component_mask(
+                    owner_i,
+                    owner_j,
+                    owner_k,
+                    axis_index,
+                )
+            )
+        wall = False
+        if in_domain:
+            wall = (
+                self.obstacle[ni, nj, nk] != 0
+                or canonical_hibm_target_mask != 0
+            )
+        else:
+            # Wall identity comes exclusively from the configured no-slip
+            # face.  The external exact ledger supplies its moving target; a
+            # normal-only inlet/outlet must remain an open boundary.
+            wall = external_no_slip != 0
+
+        target = ti.Vector([0.0, 0.0, 0.0])
+        omega_wall = 0.0
+        tau_wall = 0.0
+        production_wall = 0.0
+        kinematic_wall_traction_coefficient = 0.0
+        if wall:
+            face_wall_distance = self.sst_wall_distance_m[i, j, k]
+            if not in_domain:
+                if axis_index == 0:
+                    face_wall_distance = 0.5 * self.cell_width_x_m[i]
+                elif axis_index == 1:
+                    face_wall_distance = 0.5 * self.cell_width_y_m[j]
+                else:
+                    face_wall_distance = 0.5 * self.cell_width_z_m[k]
+            # A solid storage row supplies only a provenance-validated target;
+            # otherwise it is a sentinel and the physical no-slip target is 0.
+            if in_domain:
+                target_mask = self.sst_obstacle_interface_wall_target_component_mask[
+                    owner_i, owner_j, owner_k
+                ][axis_index] | canonical_hibm_target_mask
+                for component in ti.static(range(3)):
+                    if (target_mask & (1 << component)) != 0:
+                        target[component] = self.velocity_dirichlet_boundary_value_mps[
+                            owner_i, owner_j, owner_k
+                        ][component]
+            else:
+                for component in ti.static(range(3)):
+                    if (external_target_mask & (1 << component)) != 0:
+                        target[component] = external_target[component]
+            relative_velocity = self.sst_cell_center_velocity_mps[i, j, k] - target
+            tangential_speed_squared = 0.0
+            for component in ti.static(range(3)):
+                if component != axis_index:
+                    tangential_speed_squared += relative_velocity[component] ** 2.0
+            correlation = self._sst_wall_face_correlation(
+                ti.sqrt(ti.max(tangential_speed_squared, 0.0)),
+                face_wall_distance,
+                self.sst_turbulent_kinetic_energy[i, j, k],
+                self.sst_specific_dissipation_rate[i, j, k],
+                self.rho,
+                molecular_nu_m2_s,
+            )
+            omega_wall = correlation[0]
+            tau_wall = correlation[1]
+            production_wall = correlation[2]
+            kinematic_wall_traction_coefficient = correlation[3]
+        return ti.Vector(
+            [
+                1.0 if wall else 0.0,
+                omega_wall,
+                tau_wall,
+                production_wall,
+                kinematic_wall_traction_coefficient,
+                target.x,
+                target.y,
+                target.z,
+            ]
+        )
+
+    @ti.func
+    def _sst_correlation_cell_wall_production(
+        self,
+        i,
+        j,
+        k,
+        molecular_nu_m2_s,
+    ):
+        """Area-average one Pk ledger across a cell's physical wall faces."""
+
+        weighted_production = 0.0
+        wall_area = 0.0
+        for axis_index in ti.static(range(3)):
+            area = self.cell_width_y_m[j] * self.cell_width_z_m[k]
+            no_slip_min = (self.sst_no_slip_domain_wall_mask[None] & 1) != 0
+            no_slip_max = (self.sst_no_slip_domain_wall_mask[None] & 2) != 0
+            if axis_index == 1:
+                area = self.cell_width_x_m[i] * self.cell_width_z_m[k]
+                no_slip_min = (self.sst_no_slip_domain_wall_mask[None] & 4) != 0
+                no_slip_max = (self.sst_no_slip_domain_wall_mask[None] & 8) != 0
+            elif axis_index == 2:
+                area = self.cell_width_x_m[i] * self.cell_width_y_m[j]
+                no_slip_min = (self.sst_no_slip_domain_wall_mask[None] & 16) != 0
+                no_slip_max = (self.sst_no_slip_domain_wall_mask[None] & 32) != 0
+            backward = self._sst_correlation_wall_face_values(
+                i, j, k, axis_index, -1, no_slip_min, molecular_nu_m2_s
+            )
+            forward = self._sst_correlation_wall_face_values(
+                i, j, k, axis_index, 1, no_slip_max, molecular_nu_m2_s
+            )
+            if backward[0] != 0.0:
+                weighted_production += area * backward[3]
+                wall_area += area
+            if forward[0] != 0.0:
+                weighted_production += area * forward[3]
+                wall_area += area
+        production = 0.0
+        if wall_area > 0.0:
+            production = weighted_production / wall_area
+        return ti.Vector([production, wall_area])
 
     @ti.func
     def _sst_wall_omega_target(self, molecular_nu_m2_s, wall_distance_m):
@@ -10412,6 +10978,61 @@ class CartesianFluidSolver:
                             1,
                         )
 
+    @ti.kernel
+    def _sst_correlation_wall_omega_guard_kernel(
+        self,
+        molecular_nu_m2_s: ti.f32,
+    ):
+        """Fail closed on the actual correlation omega target of every wall face."""
+
+        self.sst_reduction_wall_omega_guard_count[None] = 0
+        self.sst_reduction_wall_omega_target_max_s[None] = 0.0
+        for i, j, k in self.sst_turbulent_kinetic_energy:
+            if self.obstacle[i, j, k] == 0:
+                for axis_index in ti.static(range(3)):
+                    no_slip_min = (self.sst_no_slip_domain_wall_mask[None] & 1) != 0
+                    no_slip_max = (self.sst_no_slip_domain_wall_mask[None] & 2) != 0
+                    if axis_index == 1:
+                        no_slip_min = (
+                            self.sst_no_slip_domain_wall_mask[None] & 4
+                        ) != 0
+                        no_slip_max = (
+                            self.sst_no_slip_domain_wall_mask[None] & 8
+                        ) != 0
+                    elif axis_index == 2:
+                        no_slip_min = (
+                            self.sst_no_slip_domain_wall_mask[None] & 16
+                        ) != 0
+                        no_slip_max = (
+                            self.sst_no_slip_domain_wall_mask[None] & 32
+                        ) != 0
+                    for side in ti.static((-1, 1)):
+                        external_no_slip = no_slip_min if side < 0 else no_slip_max
+                        correlation = self._sst_correlation_wall_face_values(
+                            i,
+                            j,
+                            k,
+                            axis_index,
+                            side,
+                            external_no_slip,
+                            molecular_nu_m2_s,
+                        )
+                        if correlation[0] != 0.0:
+                            omega_wall = ti.cast(correlation[1], ti.f64)
+                            ti.atomic_max(
+                                self.sst_reduction_wall_omega_target_max_s[None],
+                                omega_wall,
+                            )
+                            if (
+                                omega_wall != omega_wall
+                                or ti.abs(omega_wall) >= 1.0e300
+                                or omega_wall > SST_WALL_OMEGA_NUMERICAL_LIMIT_S
+                            ):
+                                ti.atomic_add(
+                                    self.sst_reduction_wall_omega_guard_count[None],
+                                    1,
+                                )
+
     @ti.func
     def _sst_lod_face_terms(
         self,
@@ -10453,7 +11074,31 @@ class CartesianFluidSolver:
         terms = ti.Vector([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         d_k_center = self._sst_k_diffusivity(i, j, k, molecular_nu_m2_s)
         d_w_center = self._sst_omega_diffusivity(i, j, k, molecular_nu_m2_s)
-        if in_domain != 0 and self.obstacle[ni, nj, nk] == 0:
+        correlation = ti.Vector([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        correlation_wall = 0
+        if self.sst_near_wall_correlation_enabled[None] != 0:
+            correlation = self._sst_correlation_wall_face_values(
+                i,
+                j,
+                k,
+                axis_index,
+                side,
+                external_no_slip,
+                molecular_nu_m2_s,
+            )
+            if correlation[0] != 0.0:
+                correlation_wall = 1
+        if correlation_wall != 0:
+            wall_distance = ti.max(self.sst_wall_distance_m[i, j, k], 1.0e-12)
+            face_distance = wall_distance
+            if in_domain == 0:
+                face_distance = 0.5 * cell_width
+            # Fluent's correlation imposes zero k diffusion flux.  Its omega
+            # target is evaluated on this exact wall ledger face, including a
+            # canonical HIBM hard face whose two storage cells remain fluid.
+            terms[3] = dt_s * d_w_center / (cell_width * face_distance)
+            terms[5] = terms[3] * correlation[1]
+        elif in_domain != 0 and self.obstacle[ni, nj, nk] == 0:
             center_distance = 1.0
             if axis_index == 0:
                 center_distance = self.center_distance_x_m[i if side < 0 else i + 1]
@@ -11208,6 +11853,25 @@ class CartesianFluidSolver:
                     ti.f64,
                 )
 
+        component_bit = 1 << component
+        canonical_hibm_target_mask = (
+            self._sst_canonical_hibm_wall_target_component_mask(
+                i,
+                j,
+                k,
+                component,
+            )
+        )
+        if (canonical_hibm_target_mask & component_bit) != 0:
+            # A canonical exact HIBM component is an identity MAC row even
+            # when both adjacent scalar storage cells remain fluid.  Leaving
+            # it free would assemble a shared edge through the physical wall.
+            kind = 2
+            target = ti.cast(
+                self.velocity_dirichlet_boundary_value_mps[i, j, k][component],
+                ti.f64,
+            )
+
         if coordinate == 0 and plus_fluid != 0:
             external_exact = 0
             external_target = ti.cast(0.0, ti.f64)
@@ -11322,9 +11986,21 @@ class CartesianFluidSolver:
                 component_coordinate = k
                 plus_component_width = self.cell_width_z_m[k]
 
+            plus_patch_canonical_wall = False
+            if self.sst_near_wall_correlation_enabled[None] != 0:
+                plus_patch_canonical_wall = (
+                    self._sst_canonical_hibm_wall_target_component_mask(
+                        ni,
+                        nj,
+                        nk,
+                        axis_index,
+                    )
+                    != 0
+                )
             if (
                 self.obstacle[i, j, k] == 0
                 and self.obstacle[ni, nj, nk] == 0
+                and not plus_patch_canonical_wall
             ):
                 nu_current = molecular_nu_m2_s + (
                     self.sst_eddy_viscosity_pa_s[i, j, k] / self.rho
@@ -11352,9 +12028,21 @@ class CartesianFluidSolver:
                     minus_component_width = self.cell_width_y_m[mj]
                 elif component == 2:
                     minus_component_width = self.cell_width_z_m[mk]
+                minus_patch_canonical_wall = False
+                if self.sst_near_wall_correlation_enabled[None] != 0:
+                    minus_patch_canonical_wall = (
+                        self._sst_canonical_hibm_wall_target_component_mask(
+                            mni,
+                            mnj,
+                            mnk,
+                            axis_index,
+                        )
+                        != 0
+                    )
                 if (
                     self.obstacle[mi, mj, mk] == 0
                     and self.obstacle[mni, mnj, mnk] == 0
+                    and not minus_patch_canonical_wall
                 ):
                     nu_current = molecular_nu_m2_s + (
                         self.sst_eddy_viscosity_pa_s[mi, mj, mk] / self.rho
@@ -11677,6 +12365,28 @@ class CartesianFluidSolver:
                         )
                         patch_is_dirichlet = 1
 
+                if self.sst_near_wall_correlation_enabled[None] != 0:
+                    correlation = self._sst_correlation_wall_face_values(
+                        pi,
+                        pj,
+                        pk,
+                        axis_index,
+                        side,
+                        external_no_slip,
+                        molecular_nu_m2_s,
+                    )
+                    if correlation[0] != 0.0:
+                        # The correlation provides a finite kinematic traction
+                        # coefficient even at zero relative speed.  Use it
+                        # directly so this remains an SPD wall contribution.
+                        patch_coefficient = (
+                            ti.cast(dt_s, ti.f64)
+                            * ti.cast(patch_area, ti.f64)
+                            * ti.cast(correlation[4], ti.f64)
+                        )
+                        patch_target = ti.cast(correlation[5 + component], ti.f64)
+                        patch_is_dirichlet = 1
+
                 if patch_is_dirichlet != 0:
                     integrated_diagonal += patch_coefficient
                     integrated_rhs += patch_coefficient * patch_target
@@ -11750,12 +12460,6 @@ class CartesianFluidSolver:
             edge_coefficient[i, j, k] = 0.0
             diagonal = self.fv_diag[i, j, k]
             if diagonal > 0.0:
-                volume = ti.cast(
-                    self.muscl_momentum_dual_volume_m3[
-                        i, j, k, component
-                    ],
-                    ti.f64,
-                )
                 rhs = self.cg_rhs[i, j, k]
                 for side_code in ti.static(range(2)):
                     side = -1
@@ -12013,6 +12717,7 @@ class CartesianFluidSolver:
         wall_flag_codes: tuple[int, int, int, int, int, int],
         relative_tolerance: float = 1.0e-7,
         max_iterations: int = 1024,
+        dual_geometry_prepared: bool = False,
     ) -> dict[str, object]:
         """Solve the frozen, variable-viscosity MAC Helmholtz system.
 
@@ -12051,7 +12756,12 @@ class CartesianFluidSolver:
         self._prepare_sst_obstacle_interface_wall_target_masks_kernel(
             canonical_authority
         )
-        self._compute_muscl_momentum_dual_geometry_kernel()
+        if self.sst_near_wall_correlation_enabled[None] != 0:
+            # Refresh the local fluid velocity before freezing correlation wall
+            # traction coefficients for this Helmholtz solve.
+            self._reconstruct_sst_cell_center_velocity_from_mac_kernel(self.velocity)
+        if not dual_geometry_prepared:
+            self._compute_muscl_momentum_dual_geometry_kernel()
 
         component_reports: list[dict[str, object]] = []
         all_converged = True
@@ -12372,7 +13082,7 @@ class CartesianFluidSolver:
                     k_value == k_value
                     and omega == omega
                     and mu_t == mu_t
-                    and k_value > 0.0
+                    and k_value >= 0.0
                     and omega > 0.0
                     and mu_t >= 0.0
                     and ti.abs(k_value) < 1.0e300
@@ -12429,6 +13139,7 @@ class CartesianFluidSolver:
         kinematic_viscosity_m2_s: float | None = None,
         no_slip_domain_walls: tuple[bool, bool, bool, bool, bool, bool] | None = None,
         advection_scheme: str = "euler",
+        stage_observer: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
         """Advance SST transport with explicit-advection/implicit-diffusion IMEX.
 
@@ -12464,40 +13175,75 @@ class CartesianFluidSolver:
         )
         if len(wall_flags) != 6:
             raise ValueError("no_slip_domain_walls must contain six booleans")
+        explicit_transport_substeps = 0
+
+        def observe_initial_transport_stage(stage_name: str) -> None:
+            if stage_observer is not None and explicit_transport_substeps == 0:
+                stage_observer(stage_name)
+
         if not self._sst_wall_distance_valid or wall_flags != self._sst_no_slip_domain_walls:
             self.prepare_sst_wall_distance(no_slip_domain_walls=wall_flags)
         wall_flag_codes = tuple(1 if flag else 0 for flag in wall_flags)
-        self._sst_wall_omega_guard_kernel(float(nu_m2_s), *wall_flag_codes)
-        wall_omega_guard_count = int(
-            self.sst_reduction_wall_omega_guard_count[None]
-        )
-        wall_omega_target_max_s = float(
-            self.sst_reduction_wall_omega_target_max_s[None]
-        )
-        if wall_omega_guard_count:
-            raise FloatingPointError(
-                "SST wall-omega numerical limit would be reached; refusing "
-                "to clip the physical wall target: "
-                f"guard_cell_count={wall_omega_guard_count}, "
-                f"target_max_s={wall_omega_target_max_s:g}, "
-                f"limit_s={SST_WALL_OMEGA_NUMERICAL_LIMIT_S:g}"
+        wall_omega_guard_count = 0
+        wall_omega_target_max_s = 0.0
+        observe_initial_transport_stage("wall_target_guard_before")
+        if self._sst_near_wall_treatment == "resolved":
+            self._sst_wall_omega_guard_kernel(float(nu_m2_s), *wall_flag_codes)
+            wall_omega_guard_count = int(
+                self.sst_reduction_wall_omega_guard_count[None]
             )
+            wall_omega_target_max_s = float(
+                self.sst_reduction_wall_omega_target_max_s[None]
+            )
+            if wall_omega_guard_count:
+                raise FloatingPointError(
+                    "SST wall-omega numerical limit would be reached; refusing "
+                    "to clip the physical wall target: "
+                    f"guard_cell_count={wall_omega_guard_count}, "
+                    f"target_max_s={wall_omega_target_max_s:g}, "
+                    f"limit_s={SST_WALL_OMEGA_NUMERICAL_LIMIT_S:g}"
+                )
+        else:
+            canonical_authority = self._velocity_dirichlet_boundary_authority_code()
+            self._prepare_sst_obstacle_interface_wall_target_masks_kernel(
+                canonical_authority
+            )
+            self._reconstruct_sst_cell_center_velocity_from_mac_kernel(self.velocity)
+            self._sst_correlation_wall_omega_guard_kernel(float(nu_m2_s))
+            wall_omega_guard_count = int(
+                self.sst_reduction_wall_omega_guard_count[None]
+            )
+            wall_omega_target_max_s = float(
+                self.sst_reduction_wall_omega_target_max_s[None]
+            )
+            if wall_omega_guard_count:
+                raise FloatingPointError(
+                    "SST correlation wall-omega numerical limit would be reached; "
+                    "refusing to clip the physical wall target: "
+                    f"guard_face_count={wall_omega_guard_count}, "
+                    f"target_max_s={wall_omega_target_max_s:g}, "
+                    f"limit_s={SST_WALL_OMEGA_NUMERICAL_LIMIT_S:g}"
+                )
+        observe_initial_transport_stage("wall_target_guard_after")
         # Populate the same backward-MAC normal face velocities consumed by
         # conservative momentum transport for every scalar reconstruction.
         # Euler/MUSCL may choose different face *states*, but neither may
         # invent a different mass flux or estimate CFL from cell speed.
+        observe_initial_transport_stage("primal_flux_ledger_before")
         self._compute_muscl_primal_normal_velocity_ledger(
             self.velocity, wall_flag_codes
         )
+        observe_initial_transport_stage("primal_flux_ledger_after")
 
         inverse_spacing_squared_sum = (
             1.0 / max(self.dx * self.dx, 1.0e-30)
             + 1.0 / max(self.dy * self.dy, 1.0e-30)
             + 1.0 / max(self.dz * self.dz, 1.0e-30)
         )
+        observe_initial_transport_stage("advection_rate_before")
         advection_rate_s = float(self._muscl_scalar_face_advection_rate_kernel())
+        observe_initial_transport_stage("advection_rate_after")
         remaining_dt_s = float(step_dt_s)
-        explicit_transport_substeps = 0
         initial_diffusion_cfl = 0.0
         initial_total_cfl = 0.0
         maximum_diffusivity_seen = 0.0
@@ -12507,10 +13253,14 @@ class CartesianFluidSolver:
         while remaining_dt_s > max(step_dt_s * 1.0e-12, 1.0e-15):
             # Freeze mu_t/sigma for one complete x-y-z LOD factorization.  It
             # is refreshed before the next explicit slice, never between axes.
+            observe_initial_transport_stage("coefficient_update_before")
             self._update_sst_coefficients_checked(float(nu_m2_s))
+            observe_initial_transport_stage("coefficient_update_after")
+            observe_initial_transport_stage("max_diffusivity_before")
             max_diffusivity = float(
                 self._sst_max_diffusivity_kernel(float(nu_m2_s))
             )
+            observe_initial_transport_stage("max_diffusivity_after")
             maximum_diffusivity_seen = max(maximum_diffusivity_seen, max_diffusivity)
             diffusion_rate_s = 2.0 * max_diffusivity * inverse_spacing_squared_sum
             explicit_total_rate_s = advection_rate_s
@@ -12534,14 +13284,21 @@ class CartesianFluidSolver:
                     f"current_advection_rate_s={advection_rate_s:g}, "
                     f"implicit_diffusion_cfl={diffusion_rate_s * stable_dt_s:g}"
                 )
+            observe_initial_transport_stage("transport_base_copy_before")
             self._copy_sst_state_to_transport_base_kernel()
+            observe_initial_transport_stage("transport_base_copy_after")
             trial_dt_s = float(stable_dt_s)
             consecutive_trial_retries = 0
             while True:
                 current_advection_cfl = advection_rate_s * trial_dt_s
+                observe_initial_transport_stage("previous_state_copy_before")
                 self._copy_sst_state_to_prev_kernel()
+                observe_initial_transport_stage("previous_state_copy_after")
                 if scheme == "muscl_tvd":
+                    observe_initial_transport_stage("muscl_reconstruction_before")
                     self._prepare_muscl_sst_reconstruction()
+                    observe_initial_transport_stage("muscl_reconstruction_after")
+                observe_initial_transport_stage("explicit_transport_before")
                 self._advance_sst_transport_kernel(
                     float(trial_dt_s),
                     float(nu_m2_s),
@@ -12554,15 +13311,21 @@ class CartesianFluidSolver:
                     int(self._sst_outlet_face_code),
                     *wall_flag_codes,
                 )
+                observe_initial_transport_stage("explicit_transport_after")
+                observe_initial_transport_stage("candidate_diagnostics_before")
                 explicit_candidate_invalid_count = (
                     self._sst_explicit_candidate_invalid_count_host()
                 )
-                accepted_state_invalid_count = 0
+                observe_initial_transport_stage("candidate_diagnostics_after")
+                accepted_state_invalid_count: int | None = None
                 trial_failure = ""
                 if explicit_candidate_invalid_count:
                     trial_failure = "explicit_candidate_positivity"
                 else:
+                    observe_initial_transport_stage("state_commit_before")
                     self._commit_sst_transport_kernel()
+                    observe_initial_transport_stage("state_commit_after")
+                    observe_initial_transport_stage("lod_axis_x_before")
                     self._sst_lod_backward_euler_axis_kernel(
                         float(trial_dt_s),
                         float(nu_m2_s),
@@ -12570,6 +13333,8 @@ class CartesianFluidSolver:
                         wall_flag_codes[0],
                         wall_flag_codes[1],
                     )
+                    observe_initial_transport_stage("lod_axis_x_after")
+                    observe_initial_transport_stage("lod_axis_y_before")
                     self._sst_lod_backward_euler_axis_kernel(
                         float(trial_dt_s),
                         float(nu_m2_s),
@@ -12577,6 +13342,8 @@ class CartesianFluidSolver:
                         wall_flag_codes[2],
                         wall_flag_codes[3],
                     )
+                    observe_initial_transport_stage("lod_axis_y_after")
+                    observe_initial_transport_stage("lod_axis_z_before")
                     self._sst_lod_backward_euler_axis_kernel(
                         float(trial_dt_s),
                         float(nu_m2_s),
@@ -12584,13 +13351,22 @@ class CartesianFluidSolver:
                         wall_flag_codes[4],
                         wall_flag_codes[5],
                     )
+                    observe_initial_transport_stage("lod_axis_z_after")
+                    observe_initial_transport_stage("wall_state_before")
                     self._apply_sst_wall_state_kernel(
                         float(nu_m2_s),
                         *wall_flag_codes,
                     )
+                    observe_initial_transport_stage("wall_state_after")
+                    observe_initial_transport_stage(
+                        "accepted_state_diagnostics_before"
+                    )
                     self._sst_state_diagnostics_kernel()
                     accepted_state_invalid_count = int(
                         self.sst_reduction_nonfinite_or_nonpositive_count[None]
+                    )
+                    observe_initial_transport_stage(
+                        "accepted_state_diagnostics_after"
                     )
                     if accepted_state_invalid_count:
                         trial_failure = "implicit_result_positivity"
@@ -12598,13 +13374,27 @@ class CartesianFluidSolver:
                 if not trial_failure:
                     break
 
-                self._restore_sst_state_from_transport_base_kernel()
+                try:
+                    if stage_observer is not None:
+                        stage_observer("transport_base_restore_before")
+                finally:
+                    # Rollback is a transaction invariant.  A diagnostic
+                    # callback must not leave a rejected implicit trial in the
+                    # live SST fields when it raises.
+                    self._restore_sst_state_from_transport_base_kernel()
+                if stage_observer is not None:
+                    stage_observer("transport_base_restore_after")
                 consecutive_trial_retries += 1
                 rejected_trial_count_total += 1
                 if (
                     consecutive_trial_retries
                     > SST_TRANSPORT_MAX_CONSECUTIVE_TRIAL_RETRIES
                 ):
+                    accepted_state_invalid_summary = (
+                        str(accepted_state_invalid_count)
+                        if accepted_state_invalid_count is not None
+                        else "not_evaluated"
+                    )
                     raise FloatingPointError(
                         "SST IMEX transport could not commit a positive substep "
                         "after automatic rollback retries: "
@@ -12613,7 +13403,7 @@ class CartesianFluidSolver:
                         f"explicit_candidate_invalid_cell_count="
                         f"{explicit_candidate_invalid_count}, "
                         f"accepted_state_invalid_cell_count="
-                        f"{accepted_state_invalid_count}, "
+                        f"{accepted_state_invalid_summary}, "
                         f"candidate_min_k="
                         f"{float(self.sst_reduction_explicit_candidate_min_k[None]):g}, "
                         f"candidate_min_omega="
@@ -12638,9 +13428,16 @@ class CartesianFluidSolver:
             )
             explicit_transport_substeps += 1
             remaining_dt_s = max(0.0, remaining_dt_s - trial_dt_s)
+        if stage_observer is not None:
+            stage_observer("final_coefficient_update_before")
         self._update_sst_coefficients_checked(float(nu_m2_s))
+        if stage_observer is not None:
+            stage_observer("final_coefficient_update_after")
+            stage_observer("final_state_diagnostics_before")
         self._sst_state_diagnostics_kernel()
         invalid_count = int(self.sst_reduction_nonfinite_or_nonpositive_count[None])
+        if stage_observer is not None:
+            stage_observer("final_state_diagnostics_after")
         if invalid_count:
             raise FloatingPointError(
                 "SST transport produced non-finite or non-positive state: "
@@ -12671,6 +13468,8 @@ class CartesianFluidSolver:
                 float(self.sst_reduction_min_omega[None]),
             )
 
+        if stage_observer is not None:
+            stage_observer("volume_moments_before")
         fluid_volume_m3, k_volume_sum, k_squared_volume_sum = volume_moments(
             self.sst_turbulent_kinetic_energy,
             accumulate_volume=True,
@@ -12687,6 +13486,8 @@ class CartesianFluidSolver:
                 accumulate_volume=False,
             )
         )
+        if stage_observer is not None:
+            stage_observer("volume_moments_after")
         molecular_mu = max(self.mu, 1.0e-30)
         if not math.isfinite(fluid_volume_m3) or fluid_volume_m3 <= 0.0:
             raise FloatingPointError(
@@ -12905,61 +13706,62 @@ class CartesianFluidSolver:
 
     @ti.func
     def _backtrace_crosses_obstacle(self, i, j, k, x, y, z):
-        blocked = 0
         gx = self._grid_coordinate_x(x)
         gy = self._grid_coordinate_y(y)
         gz = self._grid_coordinate_z(z)
         target_i = ti.min(ti.max(ti.floor(gx + 0.5, ti.i32), 0), self.nx - 1)
         target_j = ti.min(ti.max(ti.floor(gy + 0.5, ti.i32), 0), self.ny - 1)
         target_k = ti.min(ti.max(ti.floor(gz + 0.5, ti.i32), 0), self.nz - 1)
-        delta_i = ti.abs(target_i - i)
-        delta_j = ti.abs(target_j - j)
-        delta_k = ti.abs(target_k - k)
-        steps = ti.max(delta_i, ti.max(delta_j, delta_k))
-        march_steps = ti.min(steps, PREDICTOR_BACKTRACE_OBSTACLE_MARCH_MAX_STEPS)
-        step = 1
-        while step <= march_steps:
-            fraction = ti.cast(step, ti.f32) / ti.cast(march_steps, ti.f32)
-            sample_i = ti.min(
-                ti.max(
-                    ti.floor(
-                        ti.cast(i, ti.f32)
-                        + (gx - ti.cast(i, ti.f32)) * fraction
-                        + 0.5,
-                        ti.i32,
-                    ),
-                    0,
-                ),
-                self.nx - 1,
-            )
-            sample_j = ti.min(
-                ti.max(
-                    ti.floor(
-                        ti.cast(j, ti.f32)
-                        + (gy - ti.cast(j, ti.f32)) * fraction
-                        + 0.5,
-                        ti.i32,
-                    ),
-                    0,
-                ),
-                self.ny - 1,
-            )
-            sample_k = ti.min(
-                ti.max(
-                    ti.floor(
-                        ti.cast(k, ti.f32)
-                        + (gz - ti.cast(k, ti.f32)) * fraction
-                        + 0.5,
-                        ti.i32,
-                    ),
-                    0,
-                ),
-                self.nz - 1,
-            )
-            if self.obstacle[sample_i, sample_j, sample_k] != 0:
-                blocked = 1
-            step += 1
-        return blocked
+        return self._storage_path_crosses_obstacle_or_canonical_hibm_wall(
+            i, j, k, target_i, target_j, target_k
+        )
+
+    @ti.func
+    def _laminar_diffusion_face_flux(
+        self,
+        center,
+        neighbor,
+        owner_i,
+        owner_j,
+        owner_k,
+        center_distance_m,
+        half_width_m,
+        normal_axis: ti.template(),
+        forward: ti.template(),
+    ):
+        flux = ti.Vector([0.0, 0.0, 0.0])
+        exact_mask = self.canonical_exact_hard_face_component_mask[
+            owner_i, owner_j, owner_k
+        ]
+        normal_bit = 1 << normal_axis
+        target = self.velocity_dirichlet_boundary_value_mps[
+            owner_i, owner_j, owner_k
+        ]
+        for component in ti.static(range(3)):
+            if (exact_mask & normal_bit) != 0:
+                if ti.static(forward):
+                    if (exact_mask & (1 << component)) != 0:
+                        flux[component] = (
+                            target[component] - center[component]
+                        ) / half_width_m
+                    else:
+                        flux[component] = 0.0
+                else:
+                    if (exact_mask & (1 << component)) != 0:
+                        flux[component] = (
+                            center[component] - target[component]
+                        ) / half_width_m
+                    else:
+                        flux[component] = 0.0
+            elif ti.static(forward):
+                flux[component] = (
+                    neighbor[component] - center[component]
+                ) / center_distance_m
+            else:
+                flux[component] = (
+                    center[component] - neighbor[component]
+                ) / center_distance_m
+        return flux
 
     @ti.kernel
     def _predict_kernel(
@@ -13055,7 +13857,17 @@ class CartesianFluidSolver:
                 flux_z_forward = ti.Vector([0.0, 0.0, 0.0])
                 if i > 0:
                     if self.obstacle[im, j, k] == 0:
-                        flux_x_backward = (center - self.velocity_prev[im, j, k]) / self.center_distance_x_m[i]
+                        flux_x_backward = self._laminar_diffusion_face_flux(
+                            center,
+                            self.velocity_prev[im, j, k],
+                            i,
+                            j,
+                            k,
+                            self.center_distance_x_m[i],
+                            0.5 * self.cell_width_x_m[i],
+                            0,
+                            False,
+                        )
                     else:
                         flux_x_backward = center / (0.5 * self.cell_width_x_m[i])
                 else:
@@ -13082,7 +13894,17 @@ class CartesianFluidSolver:
                         flux_x_backward.z = center.z / half_width
                 if i < self.nx - 1:
                     if self.obstacle[ip, j, k] == 0:
-                        flux_x_forward = (self.velocity_prev[ip, j, k] - center) / self.center_distance_x_m[i + 1]
+                        flux_x_forward = self._laminar_diffusion_face_flux(
+                            center,
+                            self.velocity_prev[ip, j, k],
+                            ip,
+                            j,
+                            k,
+                            self.center_distance_x_m[i + 1],
+                            0.5 * self.cell_width_x_m[i],
+                            0,
+                            True,
+                        )
                     else:
                         flux_x_forward = -center / (0.5 * self.cell_width_x_m[i])
                 else:
@@ -13109,7 +13931,17 @@ class CartesianFluidSolver:
                         flux_x_forward.z = -center.z / half_width
                 if j > 0:
                     if self.obstacle[i, jm, k] == 0:
-                        flux_y_backward = (center - self.velocity_prev[i, jm, k]) / self.center_distance_y_m[j]
+                        flux_y_backward = self._laminar_diffusion_face_flux(
+                            center,
+                            self.velocity_prev[i, jm, k],
+                            i,
+                            j,
+                            k,
+                            self.center_distance_y_m[j],
+                            0.5 * self.cell_width_y_m[j],
+                            1,
+                            False,
+                        )
                     else:
                         flux_y_backward = center / (0.5 * self.cell_width_y_m[j])
                 else:
@@ -13136,7 +13968,17 @@ class CartesianFluidSolver:
                         flux_y_backward.z = center.z / half_width
                 if j < self.ny - 1:
                     if self.obstacle[i, jp, k] == 0:
-                        flux_y_forward = (self.velocity_prev[i, jp, k] - center) / self.center_distance_y_m[j + 1]
+                        flux_y_forward = self._laminar_diffusion_face_flux(
+                            center,
+                            self.velocity_prev[i, jp, k],
+                            i,
+                            jp,
+                            k,
+                            self.center_distance_y_m[j + 1],
+                            0.5 * self.cell_width_y_m[j],
+                            1,
+                            True,
+                        )
                     else:
                         flux_y_forward = -center / (0.5 * self.cell_width_y_m[j])
                 else:
@@ -13163,7 +14005,17 @@ class CartesianFluidSolver:
                         flux_y_forward.z = -center.z / half_width
                 if k > 0:
                     if self.obstacle[i, j, km] == 0:
-                        flux_z_backward = (center - self.velocity_prev[i, j, km]) / self.center_distance_z_m[k]
+                        flux_z_backward = self._laminar_diffusion_face_flux(
+                            center,
+                            self.velocity_prev[i, j, km],
+                            i,
+                            j,
+                            k,
+                            self.center_distance_z_m[k],
+                            0.5 * self.cell_width_z_m[k],
+                            2,
+                            False,
+                        )
                     else:
                         flux_z_backward = center / (0.5 * self.cell_width_z_m[k])
                 else:
@@ -13190,7 +14042,17 @@ class CartesianFluidSolver:
                         flux_z_backward.z = center.z / half_width
                 if k < self.nz - 1:
                     if self.obstacle[i, j, kp] == 0:
-                        flux_z_forward = (self.velocity_prev[i, j, kp] - center) / self.center_distance_z_m[k + 1]
+                        flux_z_forward = self._laminar_diffusion_face_flux(
+                            center,
+                            self.velocity_prev[i, j, kp],
+                            i,
+                            j,
+                            kp,
+                            self.center_distance_z_m[k + 1],
+                            0.5 * self.cell_width_z_m[k],
+                            2,
+                            True,
+                        )
                     else:
                         flux_z_forward = -center / (0.5 * self.cell_width_z_m[k])
                 else:
@@ -13754,18 +14616,31 @@ class CartesianFluidSolver:
                     )
                     no_slip = (no_slip_domain_mask & 32) != 0
 
+        canonical_wall_target_mask = 0
+        if not domain_wall:
+            canonical_wall_target_mask = (
+                self._sst_canonical_hibm_wall_target_component_mask(
+                    owner_i,
+                    owner_j,
+                    owner_k,
+                    normal_axis,
+                )
+            )
+        canonical_wall = canonical_wall_target_mask != 0
         gradient = ti.Vector([0.0, 0.0, 0.0])
         target = 0.0
         has_owner_target = False
         legacy_raw_target = False
-        if obstacle_wall:
+        if obstacle_wall or canonical_wall:
             component_bit = 1 << normal_axis
-            has_owner_target = (
-                self.sst_obstacle_interface_wall_target_component_mask[
-                    owner_i, owner_j, owner_k
-                ][normal_axis]
-                & component_bit
-            ) != 0
+            owner_target_mask = canonical_wall_target_mask
+            if obstacle_wall:
+                owner_target_mask |= (
+                    self.sst_obstacle_interface_wall_target_component_mask[
+                        owner_i, owner_j, owner_k
+                    ][normal_axis]
+                )
+            has_owner_target = (owner_target_mask & component_bit) != 0
             if has_owner_target:
                 target = self.velocity_dirichlet_boundary_value_mps[
                     owner_i, owner_j, owner_k
@@ -13845,7 +14720,24 @@ class CartesianFluidSolver:
                     side, i, j
                 )
 
-        closed_wall = obstacle_wall or (domain_wall and (external_exact or no_slip))
+        closed_wall = (
+            obstacle_wall
+            or canonical_wall
+            or (domain_wall and (external_exact or no_slip))
+        )
+        correlation_wall = (
+            obstacle_wall or canonical_wall or (domain_wall and no_slip)
+        )
+        if (
+            self.sst_near_wall_correlation_enabled[None] != 0
+            and correlation_wall
+        ):
+            # Correlation already supplies tangential wall traction through the
+            # implicit Helmholtz boundary term.  Retain only the normal
+            # constraint below; do not double-count a transpose wall traction.
+            for tangent_axis in ti.static(range(3)):
+                if tangent_axis != normal_axis:
+                    gradient[tangent_axis] = 0.0
         if closed_wall:
             center = self.sst_cell_center_velocity_mps[i, j, k][normal_axis]
             if ti.static(side == 0):
@@ -13918,6 +14810,37 @@ class CartesianFluidSolver:
                             i, j, k, normal_axis
                         )
                     )
+                    backward_canonical_wall = False
+                    if (
+                        has_backward_cell
+                        and self.obstacle[
+                            backward_i, backward_j, backward_k
+                        ]
+                        == 0
+                    ):
+                        backward_canonical_wall = (
+                            self._sst_canonical_hibm_wall_target_component_mask(
+                                i,
+                                j,
+                                k,
+                                normal_axis,
+                            )
+                            != 0
+                        )
+                    forward_canonical_wall = False
+                    if (
+                        has_forward_cell
+                        and self.obstacle[forward_i, forward_j, forward_k] == 0
+                    ):
+                        forward_canonical_wall = (
+                            self._sst_canonical_hibm_wall_target_component_mask(
+                                forward_i,
+                                forward_j,
+                                forward_k,
+                                normal_axis,
+                            )
+                            != 0
+                        )
                     backward_flux = ti.Vector([0.0, 0.0, 0.0])
                     if (
                         has_backward_cell
@@ -13925,6 +14848,7 @@ class CartesianFluidSolver:
                             backward_i, backward_j, backward_k
                         ]
                         == 0
+                        and not backward_canonical_wall
                     ):
                         backward_gradient = (
                             self._sst_momentum_transpose_cached_gradient_row(
@@ -13960,6 +14884,7 @@ class CartesianFluidSolver:
                     if (
                         has_forward_cell
                         and self.obstacle[forward_i, forward_j, forward_k] == 0
+                        and not forward_canonical_wall
                     ):
                         forward_gradient = (
                             self._sst_momentum_transpose_cached_gradient_row(
@@ -14005,6 +14930,10 @@ class CartesianFluidSolver:
                 i > 0
                 and self.obstacle[i - 1, j, k] == 0
                 and self.obstacle[i, j, k] == 0
+                and self._sst_canonical_hibm_wall_target_component_mask(
+                    i, j, k, 0
+                )
+                == 0
             ):
                 minus_distance_m = 0.5 * self.cell_width_x_m[i - 1]
                 plus_distance_m = 0.5 * self.cell_width_x_m[i]
@@ -14020,6 +14949,10 @@ class CartesianFluidSolver:
                 j > 0
                 and self.obstacle[i, j - 1, k] == 0
                 and self.obstacle[i, j, k] == 0
+                and self._sst_canonical_hibm_wall_target_component_mask(
+                    i, j, k, 1
+                )
+                == 0
             ):
                 minus_distance_m = 0.5 * self.cell_width_y_m[j - 1]
                 plus_distance_m = 0.5 * self.cell_width_y_m[j]
@@ -14035,6 +14968,10 @@ class CartesianFluidSolver:
                 k > 0
                 and self.obstacle[i, j, k - 1] == 0
                 and self.obstacle[i, j, k] == 0
+                and self._sst_canonical_hibm_wall_target_component_mask(
+                    i, j, k, 2
+                )
+                == 0
             ):
                 minus_distance_m = 0.5 * self.cell_width_z_m[k - 1]
                 plus_distance_m = 0.5 * self.cell_width_z_m[k]
@@ -14156,6 +15093,7 @@ class CartesianFluidSolver:
         )
         if not math.isfinite(nu_m2_s) or nu_m2_s < 0.0:
             raise ValueError("kinematic_viscosity_m2_s must be finite and non-negative")
+        self._require_velocity_dirichlet_component_ledger_sealed()
         max_speed_mps = float(self._max_fluid_speed_kernel())
         advection_cfl = max_speed_mps * step_dt_s / max(
             min(self.dx, self.dy, self.dz),
@@ -14205,6 +15143,11 @@ class CartesianFluidSolver:
             # second-order time accuracy; automatic substeps make the public
             # operation safe for long physical steps without repeated
             # semi-Lagrangian remapping.
+            # The MAC dual volumes depend only on the grid and obstacle mask,
+            # neither of which changes inside one predictor transaction.  A
+            # production step may evaluate three flux states for each of many
+            # automatic substeps, so prepare this full-grid geometry once.
+            self._compute_muscl_momentum_dual_geometry_kernel()
             remaining_advection_dt_s = float(step_dt_s)
             advection_substeps = 0
             rejected_stage_trials = 0
@@ -14222,7 +15165,9 @@ class CartesianFluidSolver:
                 while True:
                     self._copy_velocity_to_transport_base_kernel()
                     self._compute_muscl_momentum_fluxes(
-                        self.velocity_transport_base, wall_flag_codes
+                        self.velocity_transport_base,
+                        wall_flag_codes,
+                        dual_geometry_prepared=True,
                     )
                     advection_rate_s = self._muscl_momentum_advection_rate_s()
                     if (
@@ -14257,7 +15202,9 @@ class CartesianFluidSolver:
                     )
                     self._copy_velocity_to_prev_kernel()
                     self._compute_muscl_momentum_fluxes(
-                        self.velocity_prev, wall_flag_codes
+                        self.velocity_prev,
+                        wall_flag_codes,
+                        dual_geometry_prepared=True,
                     )
                     stage_rate_s = self._muscl_momentum_advection_rate_s()
                     stage_rate_is_valid = (
@@ -14295,7 +15242,9 @@ class CartesianFluidSolver:
                         # this commit gate, a bad final stage contaminates the
                         # next slice's rollback base and cannot be recovered.
                         self._compute_muscl_momentum_fluxes(
-                            self.velocity, wall_flag_codes
+                            self.velocity,
+                            wall_flag_codes,
+                            dual_geometry_prepared=True,
                         )
                         final_rate_s = self._muscl_momentum_advection_rate_s()
                         final_rate_is_valid = (
@@ -14380,6 +15329,11 @@ class CartesianFluidSolver:
                 1 if scheme == "rk2" else 0,
                 *wall_flag_codes,
             )
+            if self.velocity_dirichlet_boundary_authority == "canonical":
+                self._apply_velocity_dirichlet_boundary_rows_dispatch(
+                    read_report=False,
+                    preserve_projected_rows=True,
+                )
             self._last_momentum_advection_scheme = str(scheme)
             self._last_momentum_advection_substeps = 1
             self._last_momentum_advection_cfl = float(advection_cfl)
@@ -14476,6 +15430,7 @@ class CartesianFluidSolver:
                                 wall_flag_codes=wall_flag_codes,
                                 relative_tolerance=1.0e-7,
                                 max_iterations=helmholtz_iteration_budget,
+                                dual_geometry_prepared=True,
                             )
                         )
                         component_iterations = sum(
@@ -17130,9 +18085,6 @@ class CartesianFluidSolver:
         target_z_mps: ti.f32,
     ):
         target = ti.Vector([target_x_mps, target_y_mps, target_z_mps])
-        i = 0
-        if side_index == 1:
-            i = self.nx - 1
         for j, k in ti.ndrange(self.ny, self.nz):
             self.external_velocity_boundary_x_face_active_component_mask[
                 side_index, j, k
@@ -17153,9 +18105,6 @@ class CartesianFluidSolver:
         target_z_mps: ti.f32,
     ):
         target = ti.Vector([target_x_mps, target_y_mps, target_z_mps])
-        j = 0
-        if side_index == 1:
-            j = self.ny - 1
         for i, k in ti.ndrange(self.nx, self.nz):
             self.external_velocity_boundary_y_face_active_component_mask[
                 side_index, i, k
@@ -17176,9 +18125,6 @@ class CartesianFluidSolver:
         target_z_mps: ti.f32,
     ):
         target = ti.Vector([target_x_mps, target_y_mps, target_z_mps])
-        k = 0
-        if side_index == 1:
-            k = self.nz - 1
         for i, j in ti.ndrange(self.nx, self.ny):
             self.external_velocity_boundary_z_face_active_component_mask[
                 side_index, i, j

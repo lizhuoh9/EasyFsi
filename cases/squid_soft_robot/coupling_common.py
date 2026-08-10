@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 
-from simulation_core import InterfaceReactionRelaxationState, vector_norm
+from simulation_core import InterfaceReactionRelaxationState
 
 from .cli import INTERFACE_REACTION_ROBIN_TARGET_CHOICES
 from .history import _required_finite_row_number

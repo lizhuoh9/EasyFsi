@@ -55,3 +55,17 @@ def outlet_zflux_sum_kernel(
     for i, j in ti.ndrange(nx, ny):
         total += ti.cast(velocity[i, j, 0].z, ti.f64)
     return total
+
+
+@ti.kernel
+def boundary_zflux_sums_kernel(
+    velocity: ti.template(), nx: ti.i32, ny: ti.i32, nz: ti.i32
+) -> ti.types.vector(2, ti.f64):
+    """Return actual inlet/outlet z-flux sums in one device reduction."""
+
+    inlet_total = ti.cast(0.0, ti.f64)
+    outlet_total = ti.cast(0.0, ti.f64)
+    for i, j in ti.ndrange(nx, ny):
+        inlet_total += ti.cast(velocity[i, j, nz - 1].z, ti.f64)
+        outlet_total += ti.cast(velocity[i, j, 0].z, ti.f64)
+    return ti.Vector([inlet_total, outlet_total])

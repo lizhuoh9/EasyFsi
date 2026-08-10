@@ -19,6 +19,37 @@ def load_source_config(path: Path) -> dict[str, object]:
         raise FileNotFoundError(f"source config not found: {path}")
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
+
+def validate_fixed_rim_region_contract(
+    *,
+    fixed_rim_region_id: int,
+    primary_region_id: int,
+    secondary_region_id: int,
+    available_region_ids: Sequence[int] | None = None,
+) -> int:
+    fixed = int(fixed_rim_region_id)
+    primary = int(primary_region_id)
+    secondary = int(secondary_region_id)
+    if fixed < 0:
+        raise ValueError("fixed_rim_region_id must be non-negative")
+    if fixed == primary:
+        raise ValueError(
+            "fixed_rim_region_id must be distinct from primary_region_id; "
+            f"both are {fixed}"
+        )
+    if fixed == secondary:
+        raise ValueError(
+            "fixed_rim_region_id must be distinct from secondary_region_id; "
+            f"both are {fixed}"
+        )
+    if available_region_ids is not None:
+        available = {int(region_id) for region_id in available_region_ids}
+        if fixed not in available:
+            raise ValueError(
+                f"fixed_rim_region_id={fixed} matched no faces in the solid surface"
+            )
+    return fixed
+
 def source_config_cad_provenance_report(
     config: Mapping[str, object],
     *,

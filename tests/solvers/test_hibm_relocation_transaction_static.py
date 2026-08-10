@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -240,6 +241,310 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
             "self._clear_velocity_dirichlet_relocation_shadow_claims_kernel()"
         )
         self.assertLess(last_field, materialization_barrier)
+
+    def test_component_face_ledger_exposes_host_only_fine_stage_observer(self) -> None:
+        """Cold-JIT timing boundaries remain outside every Taichi kernel."""
+
+        module = ast.parse(self.source)
+        ledger = next(
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "assemble_velocity_dirichlet_component_face_ledger"
+        )
+        keyword_defaults = dict(
+            zip(ledger.args.kwonlyargs, ledger.args.kw_defaults, strict=True)
+        )
+        self.assertIn("stage_observer", (arg.arg for arg in keyword_defaults))
+        observer_default = next(
+            default
+            for arg, default in keyword_defaults.items()
+            if arg.arg == "stage_observer"
+        )
+        self.assertIsInstance(observer_default, ast.Constant)
+        self.assertIsNone(observer_default.value)
+
+        stage_operations = (
+            (
+                "hibm_velocity_row_relocation_clear",
+                "_clear_canonical_velocity_dirichlet_relocation_transaction_kernel",
+            ),
+            (
+                "hibm_velocity_row_relocation_arbitrate",
+                "_arbitrate_canonical_velocity_dirichlet_obstacle_relocation_kernel",
+            ),
+            (
+                "hibm_velocity_row_relocation_materialize",
+                "_materialize_canonical_velocity_dirichlet_relocation_winners_kernel",
+            ),
+            (
+                "hibm_velocity_row_direct_presample",
+                "_presample_canonical_velocity_dirichlet_direct_actual_samples_kernel",
+            ),
+            (
+                "hibm_velocity_row_segment_pair_precompute",
+                "_precompute_velocity_dirichlet_component_face_segment_pair_geometry_kernel",
+            ),
+            (
+                "hibm_velocity_row_claim_prepare",
+                "_prepare_velocity_dirichlet_component_face_claims_kernel",
+            ),
+            (
+                "hibm_velocity_row_segment_reconstruct",
+                "_reconstruct_velocity_dirichlet_component_face_segment_claims_kernel",
+            ),
+            (
+                "hibm_velocity_row_merge_audit",
+                "_audit_canonical_velocity_dirichlet_relocation_merges_kernel",
+            ),
+            (
+                "hibm_velocity_row_marker_closure",
+                "_close_owned_hard_targets_to_marker_constraints",
+            ),
+            (
+                "hibm_velocity_row_report",
+                "_report_velocity_dirichlet_component_face_ledger_kernel",
+            ),
+        )
+        self.assertFalse(
+            any(
+                isinstance(node, ast.FunctionDef) and node.name == "emit_stage"
+                for node in ast.walk(ledger)
+            )
+        )
+        for prefix, operation_name in stage_operations:
+            with self.subTest(stage=prefix):
+                placements = []
+                for statements in self._statement_lists(ledger):
+                    before_indices = [
+                        index
+                        for index, statement in enumerate(statements)
+                        if self._is_stage_observer_event(
+                            statement, f"{prefix}_before"
+                        )
+                    ]
+                    operation_indices = [
+                        index
+                        for index, statement in enumerate(statements)
+                        if self._statement_calls_method(statement, operation_name)
+                    ]
+                    after_indices = [
+                        index
+                        for index, statement in enumerate(statements)
+                        if self._is_stage_observer_event(
+                            statement, f"{prefix}_after"
+                        )
+                    ]
+                    for before in before_indices:
+                        for operation in operation_indices:
+                            for after in after_indices:
+                                if before < operation < after:
+                                    placements.append((before, operation, after))
+                self.assertEqual(len(placements), 1, placements)
+
+    def test_marker_closure_exposes_host_only_fine_stage_observer(self) -> None:
+        """Closure timing must not change the sampled or iterated physics."""
+
+        module = ast.parse(self.source)
+        closure = next(
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_close_owned_hard_targets_to_marker_constraints"
+        )
+        ledger = next(
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "assemble_velocity_dirichlet_component_face_ledger"
+        )
+        keyword_defaults = dict(
+            zip(closure.args.kwonlyargs, closure.args.kw_defaults, strict=True)
+        )
+        self.assertIn("stage_observer", (arg.arg for arg in keyword_defaults))
+        observer_default = next(
+            default
+            for arg, default in keyword_defaults.items()
+            if arg.arg == "stage_observer"
+        )
+        self.assertIsInstance(observer_default, ast.Constant)
+        self.assertIsNone(observer_default.value)
+        self.assertFalse(
+            any(
+                isinstance(node, ast.FunctionDef) and node.name == "emit_stage"
+                for node in ast.walk(closure)
+            )
+        )
+
+        closure_calls = [
+            call
+            for call in ast.walk(ledger)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "_close_owned_hard_targets_to_marker_constraints"
+        ]
+        self.assertEqual(len(closure_calls), 1)
+        observer_keywords = [
+            keyword
+            for keyword in closure_calls[0].keywords
+            if keyword.arg == "stage_observer"
+        ]
+        self.assertEqual(len(observer_keywords), 1)
+        self.assertIsInstance(observer_keywords[0].value, ast.Name)
+        self.assertEqual(observer_keywords[0].value.id, "stage_observer")
+
+        stage_operations = (
+            (
+                "hibm_marker_closure_prospective_sampling_view",
+                "_build_prospective_marker_target_closure_sampling_view_kernel",
+            ),
+            (
+                "hibm_marker_closure_direct_no_slip_identity",
+                "_prepare_no_slip_sampling_direct_identity_kernel",
+            ),
+            (
+                "hibm_marker_closure_fallback_no_slip_identity",
+                "_prepare_no_slip_sampling_fallback_identity_kernel",
+            ),
+            (
+                "hibm_marker_closure_initial_measure",
+                "_measure_marker_target_closure_kernel",
+            ),
+            (
+                "hibm_marker_closure_kaczmarz_sweeps",
+                "_marker_target_closure_kaczmarz_sweep_kernel",
+            ),
+            (
+                "hibm_marker_closure_final_measure",
+                "_measure_marker_target_closure_kernel",
+            ),
+        )
+        for prefix, operation_name in stage_operations:
+            with self.subTest(stage=prefix):
+                placements = []
+                for statements in self._statement_lists(closure):
+                    before_indices = [
+                        index
+                        for index, statement in enumerate(statements)
+                        if self._is_stage_observer_event(
+                            statement, f"{prefix}_before"
+                        )
+                    ]
+                    operation_indices = [
+                        index
+                        for index, statement in enumerate(statements)
+                        if self._statement_calls_method(statement, operation_name)
+                    ]
+                    after_indices = [
+                        index
+                        for index, statement in enumerate(statements)
+                        if self._is_stage_observer_event(
+                            statement, f"{prefix}_after"
+                        )
+                    ]
+                    for before in before_indices:
+                        for operation in operation_indices:
+                            for after in after_indices:
+                                if before < operation < after:
+                                    placements.append((before, operation, after))
+                self.assertEqual(len(placements), 1, placements)
+
+        for prefix, operation_name, guard_test in (
+            (
+                "hibm_marker_closure_fallback_no_slip_identity",
+                "_prepare_no_slip_sampling_fallback_identity_kernel",
+                "unresolved_marker_count > 0",
+            ),
+            (
+                "hibm_marker_closure_kaczmarz_sweeps",
+                "_marker_target_closure_kaczmarz_sweep_kernel",
+                "initial_adjustable_max_residual > closure_tolerance",
+            ),
+        ):
+            with self.subTest(conditional_stage=prefix):
+                guard = next(
+                    node
+                    for node in ast.walk(closure)
+                    if isinstance(node, ast.If)
+                    and ast.unparse(node.test) == guard_test
+                )
+                self.assertTrue(
+                    any(
+                        self._is_stage_observer_event(
+                            statement, f"{prefix}_before"
+                        )
+                        for statement in guard.body
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        self._statement_calls_method(statement, operation_name)
+                        for statement in guard.body
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        self._is_stage_observer_event(
+                            statement, f"{prefix}_after"
+                        )
+                        for statement in guard.body
+                    )
+                )
+
+    @staticmethod
+    def _statement_lists(node: ast.AST) -> list[list[ast.stmt]]:
+        statement_lists = []
+        for _, value in ast.iter_fields(node):
+            if isinstance(value, list):
+                if value and all(isinstance(item, ast.stmt) for item in value):
+                    statement_lists.append(value)
+                for item in value:
+                    if isinstance(item, ast.AST):
+                        statement_lists.extend(
+                            HibmRelocationTransactionStaticTests._statement_lists(item)
+                        )
+            elif isinstance(value, ast.AST):
+                statement_lists.extend(
+                    HibmRelocationTransactionStaticTests._statement_lists(value)
+                )
+        return statement_lists
+
+    @staticmethod
+    def _is_stage_observer_event(statement: ast.stmt, stage: str) -> bool:
+        if (
+            not isinstance(statement, ast.If)
+            or statement.orelse
+            or len(statement.body) != 1
+            or not isinstance(statement.test, ast.Compare)
+            or not isinstance(statement.test.left, ast.Name)
+            or statement.test.left.id != "stage_observer"
+            or len(statement.test.ops) != 1
+            or not isinstance(statement.test.ops[0], ast.IsNot)
+            or len(statement.test.comparators) != 1
+            or not isinstance(statement.test.comparators[0], ast.Constant)
+            or statement.test.comparators[0].value is not None
+        ):
+            return False
+        event = statement.body[0]
+        return (
+            isinstance(event, ast.Expr)
+            and isinstance(event.value, ast.Call)
+            and isinstance(event.value.func, ast.Name)
+            and event.value.func.id == "stage_observer"
+            and len(event.value.args) == 1
+            and isinstance(event.value.args[0], ast.Constant)
+            and event.value.args[0].value == stage
+            and not event.value.keywords
+        )
+
+    @staticmethod
+    def _statement_calls_method(statement: ast.stmt, method_name: str) -> bool:
+        return any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == method_name
+            for node in ast.walk(statement)
+        )
 
 
 if __name__ == "__main__":

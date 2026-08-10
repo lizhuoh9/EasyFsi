@@ -117,6 +117,20 @@ def save_solver_npz_from_flow_snapshot(
         ),
         dtype=np.float64,
     )
+    dirichlet_active_component_mask = np.asarray(
+        snapshot.get(
+            "velocity_dirichlet_boundary_active_component_mask",
+            np.zeros_like(obstacle),
+        ),
+        dtype=np.int32,
+    )
+    dirichlet_hard_component_mask = np.asarray(
+        snapshot.get(
+            "velocity_dirichlet_boundary_hard_fixed_component_mask",
+            np.zeros_like(obstacle),
+        ),
+        dtype=np.int32,
+    )
     cell_center_y = np.asarray(snapshot["cell_center_y_m"], dtype=np.float64)
     cell_center_z = np.asarray(snapshot["cell_center_z_m"], dtype=np.float64)
     if velocity.ndim != 4 or velocity.shape[-1] != 3:
@@ -127,18 +141,49 @@ def save_solver_npz_from_flow_snapshot(
         raise ValueError("snapshot velocity_dirichlet_boundary_active shape must match velocity grid")
     if dirichlet_weight.shape != velocity.shape[:3]:
         raise ValueError("snapshot velocity_dirichlet_boundary_projection_weight shape must match velocity grid")
+    if dirichlet_active_component_mask.shape != velocity.shape[:3]:
+        raise ValueError(
+            "snapshot velocity_dirichlet_boundary_active_component_mask shape "
+            "must match velocity grid"
+        )
+    if dirichlet_hard_component_mask.shape != velocity.shape[:3]:
+        raise ValueError(
+            "snapshot velocity_dirichlet_boundary_hard_fixed_component_mask "
+            "shape must match velocity grid"
+        )
 
-    boundary_surrogate_3d = dirichlet_active & (dirichlet_weight > 0.0)
+    boundary_surrogate_3d = (
+        (dirichlet_active & (dirichlet_weight > 0.0))
+        | (dirichlet_active_component_mask != 0)
+        | (dirichlet_hard_component_mask != 0)
+    )
     fluid_3d = ~obstacle
     comparison_3d = fluid_3d & ~boundary_surrogate_3d if exclude_velocity_dirichlet_rows else fluid_3d
     cell_center_velocity = _cell_center_velocity_from_solver_faces(velocity)
     u_3d = float(streamwise_velocity_sign) * cell_center_velocity[:, :, :, 2]
     v_3d = cell_center_velocity[:, :, :, 1]
     if span_reduction == "mean":
-        u = _masked_span_mean(u_3d, fluid_3d)
-        v = _masked_span_mean(v_3d, fluid_3d)
-        p = _masked_span_mean(pressure, fluid_3d)
-        fluid_mask = np.any(comparison_3d, axis=0)
+        physical_mean_mask = comparison_3d if exclude_velocity_dirichlet_rows else fluid_3d
+        physical_slice_available = np.any(physical_mean_mask, axis=0)
+        display_u = _masked_span_mean(u_3d, fluid_3d)
+        display_v = _masked_span_mean(v_3d, fluid_3d)
+        display_p = _masked_span_mean(pressure, fluid_3d)
+        u = np.where(
+            physical_slice_available,
+            _masked_span_mean(u_3d, physical_mean_mask),
+            display_u,
+        )
+        v = np.where(
+            physical_slice_available,
+            _masked_span_mean(v_3d, physical_mean_mask),
+            display_v,
+        )
+        p = np.where(
+            physical_slice_available,
+            _masked_span_mean(pressure, physical_mean_mask),
+            display_p,
+        )
+        fluid_mask = physical_slice_available
         display_fluid_mask = np.any(fluid_3d, axis=0)
         boundary_surrogate_mask = np.any(boundary_surrogate_3d, axis=0)
     elif span_reduction == "center":

@@ -15,6 +15,37 @@ from simulation_core.diagnostics.runtime import TaichiRuntimeConfig, init_taichi
 _DIAG_INDEX_SAMPLE_CAPACITY = 8
 
 
+def _validate_fixed_region_contract(
+    *,
+    fixed_region_id: int,
+    primary_region_id: int,
+    secondary_region_id: int,
+    active_region_ids,
+) -> int:
+    fixed = int(fixed_region_id)
+    primary = int(primary_region_id)
+    secondary = int(secondary_region_id)
+    if fixed < 0:
+        return fixed
+    if fixed == primary:
+        raise ValueError(
+            "fixed_region_id must be distinct from primary_region_id; "
+            f"both are {fixed}"
+        )
+    if fixed == secondary:
+        raise ValueError(
+            "fixed_region_id must be distinct from secondary_region_id; "
+            f"both are {fixed}"
+        )
+    active = {int(region_id) for region_id in active_region_ids}
+    if fixed not in active:
+        raise ValueError(
+            f"fixed_region_id={fixed} matched no faces of the supplied surface; "
+            "the fixed-region constraint would be silently vacuous"
+        )
+    return fixed
+
+
 def _unique_undirected_edges(faces: np.ndarray) -> np.ndarray:
     edges: set[tuple[int, int]] = set()
     for ia, ib, ic in np.asarray(faces, dtype=np.int32):
@@ -167,7 +198,6 @@ class TriMooneyShellMpmState:
         require_nonempty_region_counts: bool | None = None,
         runtime: TaichiRuntimeConfig | None = None,
     ):
-        init_taichi(runtime)
         if mesh.vertex_count <= 0:
             raise ValueError("mesh must contain at least one vertex")
         if mesh.face_count <= 0:
@@ -195,6 +225,12 @@ class TriMooneyShellMpmState:
             regions = np.asarray(face_region_id, dtype=np.int32)
             if regions.shape != (mesh.face_count,):
                 raise ValueError("face_region_id must have shape (face_count,)")
+        fixed_region_id = _validate_fixed_region_contract(
+            fixed_region_id=fixed_region_id,
+            primary_region_id=primary_region_id,
+            secondary_region_id=secondary_region_id,
+            active_region_ids=regions,
+        )
         primary_region_present = bool(np.any(regions == int(primary_region_id)))
         secondary_region_present = bool(np.any(regions == int(secondary_region_id)))
         region_counts_required = (
@@ -203,6 +239,7 @@ class TriMooneyShellMpmState:
             else bool(require_nonempty_region_counts)
         )
         bounds_min, bounds_max = _mesh_bounds_with_padding(vertices, bounds_padding_fraction)
+        init_taichi(runtime)
 
         self.particle_count = int(mesh.vertex_count)
         self.face_count = int(mesh.face_count)

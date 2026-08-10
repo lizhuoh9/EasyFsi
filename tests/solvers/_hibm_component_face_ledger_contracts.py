@@ -2539,6 +2539,532 @@ class CanonicalComponentFaceLedgerContractMixin:
         )
 
     @classmethod
+    def _load_interpolated_continuous_segment_pair_fixture(
+        cls,
+        *,
+        reverse_authors: bool = False,
+        adjacent_segments: bool = False,
+    ) -> None:
+        """Load the production-shaped two-row shared-y-face cohort."""
+
+        source_rows = ((0, 0, 1), (0, 1, 1))
+        if adjacent_segments:
+            marker_positions_m = (
+                (0.125, 0.125, 0.50),
+                (0.125, 0.25, 0.50),
+                (0.125, 0.50, 0.50),
+            )
+            author_payloads = (
+                (
+                    (0.125, 0.225, 0.50),
+                    (0.125, 0.225, 0.125),
+                    (0, 1, -1),
+                    (0.2, 0.8, 0.0),
+                    1,
+                ),
+                (
+                    (0.125, 0.30, 0.50),
+                    (0.125, 0.30, 0.25),
+                    (1, 2, -1),
+                    (0.8, 0.2, 0.0),
+                    1,
+                ),
+            )
+        else:
+            marker_positions_m = (
+                (0.125, 0.25, 0.50),
+                (0.125, 0.50, 0.50),
+            )
+            author_payloads = (
+                (
+                    (0.125, 0.25, 0.50),
+                    (0.125, 0.25, 0.125),
+                    (0, 1, -1),
+                    (1.0, 0.0, 0.0),
+                    0,
+                ),
+                (
+                    (0.125, 0.375, 0.50),
+                    (0.125, 0.375, 0.25),
+                    (0, 1, -1),
+                    (0.5, 0.5, 0.0),
+                    0,
+                ),
+            )
+        if reverse_authors:
+            author_payloads = tuple(reversed(author_payloads))
+        cls._load_component_face_claims(
+            tuple(
+                _ComponentFaceClaim(
+                    source_row=source_row,
+                    boundary_point_m=payload[0],
+                    interior_point_m=payload[1],
+                    normal=(0.0, 0.0, -1.0),
+                    target_velocity_mps=(0.0, 0.0, 0.0),
+                    region_id=202,
+                )
+                for source_row, payload in zip(
+                    source_rows,
+                    author_payloads,
+                    strict=True,
+                )
+            ),
+            use_segment_fixture=True,
+        )
+        markers = cls.segment_component_face_markers
+        search = cls.segment_component_face_search
+        markers.load_markers(
+            positions_m=marker_positions_m,
+            velocities_mps=((0.0, 0.0, 0.0),) * len(marker_positions_m),
+            normals=((0.0, 0.0, -1.0),) * len(marker_positions_m),
+            areas_m2=(0.5,) * len(marker_positions_m),
+            region_ids=(202,) * len(marker_positions_m),
+        )
+        for source_row, payload in zip(
+            source_rows,
+            author_payloads,
+            strict=True,
+        ):
+            search.nearest_marker[source_row] = payload[4]
+            search.node_projection_marker_indices[source_row] = payload[2]
+            search.node_projection_marker_weights[source_row] = payload[3]
+
+    @classmethod
+    def _load_coincident_boundary_same_segment_probe_pair_fixture(
+        cls,
+        *,
+        reverse_authors: bool = False,
+    ) -> None:
+        """Load two shared-y-face authors with one coincident boundary anchor."""
+
+        source_rows = ((0, 0, 1), (0, 1, 1))
+        lower_anchor_z_m = float(
+            np.nextafter(np.float32(0.375), np.float32(0.0))
+        )
+        upper_anchor_z_m = float(
+            np.nextafter(np.float32(0.375), np.float32(1.0))
+        )
+        surface_payloads = (
+            lower_anchor_z_m,
+            upper_anchor_z_m,
+        )
+        if reverse_authors:
+            surface_payloads = tuple(reversed(surface_payloads))
+        boundary_target_mps = (0.0, 0.75, 0.0)
+        claims = tuple(
+            _ComponentFaceClaim(
+                source_row=source_row,
+                boundary_point_m=(0.125, 0.125, surface_anchor_z_m),
+                interior_point_m=(
+                    0.125,
+                    nominal_probe_y_m,
+                    surface_anchor_z_m,
+                ),
+                normal=(0.0, 1.0, 0.0),
+                target_velocity_mps=boundary_target_mps,
+                region_id=202,
+            )
+            for source_row, nominal_probe_y_m, surface_anchor_z_m in zip(
+                source_rows,
+                (0.375, 0.625),
+                surface_payloads,
+                strict=True,
+            )
+        )
+        cls._load_component_face_claims(
+            claims,
+            use_segment_fixture=True,
+        )
+        markers = cls.segment_component_face_markers
+        search = cls.segment_component_face_search
+        markers.load_markers(
+            positions_m=(
+                (0.125, 0.125, 0.25),
+                (0.125, 0.125, 0.50),
+            ),
+            velocities_mps=(boundary_target_mps,) * 2,
+            normals=((0.0, 1.0, 0.0),) * 2,
+            areas_m2=(0.5, 0.5),
+            region_ids=(202, 202),
+        )
+        for source_row, surface_anchor_z_m in zip(
+            source_rows,
+            surface_payloads,
+            strict=True,
+        ):
+            marker_b_weight = (surface_anchor_z_m - 0.25) / 0.25
+            search.nearest_marker[source_row] = 0
+            search.node_projection_marker_indices[source_row] = (0, 1, -1)
+            search.node_projection_marker_weights[source_row] = (
+                1.0 - marker_b_weight,
+                marker_b_weight,
+                0.0,
+            )
+
+    @classmethod
+    def _load_distinct_anchor_same_segment_face_projection_fixture(
+        cls,
+        *,
+        reverse_authors: bool = False,
+    ) -> None:
+        """Load the unbracketed-y, segment-bracketed shared-face RED."""
+
+        source_rows = ((0, 0, 1), (0, 1, 1))
+        author_payloads = (
+            (
+                (0.125, 0.125, 0.325),
+                (0.125, 0.375, 0.325),
+                (0.0, 0.60, 0.0),
+                (0.70, 0.30, 0.0),
+                0,
+            ),
+            (
+                (0.125, 0.125, 0.400),
+                (0.125, 0.375, 0.400),
+                (0.0, 1.20, 0.0),
+                (0.40, 0.60, 0.0),
+                1,
+            ),
+        )
+        if reverse_authors:
+            author_payloads = tuple(reversed(author_payloads))
+        cls._load_component_face_claims(
+            tuple(
+                _ComponentFaceClaim(
+                    source_row=source_row,
+                    boundary_point_m=payload[0],
+                    interior_point_m=payload[1],
+                    normal=(0.0, 1.0, 0.0),
+                    target_velocity_mps=payload[2],
+                    region_id=202,
+                )
+                for source_row, payload in zip(
+                    source_rows,
+                    author_payloads,
+                    strict=True,
+                )
+            ),
+            use_segment_fixture=True,
+        )
+        markers = cls.segment_component_face_markers
+        search = cls.segment_component_face_search
+        markers.load_markers(
+            positions_m=(
+                (0.125, 0.125, 0.25),
+                (0.125, 0.125, 0.50),
+            ),
+            velocities_mps=(
+                (0.0, 0.0, 0.0),
+                (0.0, 2.0, 0.0),
+            ),
+            normals=((0.0, 1.0, 0.0),) * 2,
+            areas_m2=(0.5, 0.5),
+            region_ids=(202, 202),
+        )
+        for source_row, payload in zip(
+            source_rows,
+            author_payloads,
+            strict=True,
+        ):
+            search.nearest_marker[source_row] = payload[4]
+            search.node_projection_marker_indices[source_row] = (0, 1, -1)
+            search.node_projection_marker_weights[source_row] = payload[3]
+
+    @classmethod
+    def _load_short_f32_segment_physical_anchor_fixture(
+        cls,
+        *,
+        reverse_authors: bool = False,
+        corrupt_second_anchor: bool = False,
+    ) -> None:
+        """Load a short segment whose F32 anchor is physically consistent."""
+
+        source_rows = ((0, 0, 1), (0, 1, 1))
+        marker_a_z_m = np.float32(0.37496)
+        marker_b_z_m = np.float32(0.37504)
+        segment_z_m = np.float32(marker_b_z_m - marker_a_z_m)
+        author_weights = (np.float32(0.3), np.float32(0.7))
+        anchor_z_m = tuple(
+            np.float32(marker_a_z_m + weight * segment_z_m)
+            for weight in author_weights
+        )
+        if corrupt_second_anchor:
+            anchor_z_m = (
+                anchor_z_m[0],
+                np.float32(anchor_z_m[1] + np.float32(1.0e-6)),
+            )
+        author_payloads = tuple(
+            (
+                (0.125, 0.125, float(anchor)),
+                (0.125, 0.375, float(anchor)),
+                (0.0, float(np.float32(2.0) * weight), 0.0),
+                (float(np.float32(1.0) - weight), float(weight), 0.0),
+                0 if float(weight) < 0.5 else 1,
+            )
+            for weight, anchor in zip(
+                author_weights,
+                anchor_z_m,
+                strict=True,
+            )
+        )
+        if reverse_authors:
+            author_payloads = tuple(reversed(author_payloads))
+        cls._load_component_face_claims(
+            tuple(
+                _ComponentFaceClaim(
+                    source_row=source_row,
+                    boundary_point_m=payload[0],
+                    interior_point_m=payload[1],
+                    normal=(0.0, 1.0, 0.0),
+                    target_velocity_mps=payload[2],
+                    region_id=202,
+                )
+                for source_row, payload in zip(
+                    source_rows,
+                    author_payloads,
+                    strict=True,
+                )
+            ),
+            use_segment_fixture=True,
+        )
+        markers = cls.segment_component_face_markers
+        search = cls.segment_component_face_search
+        markers.load_markers(
+            positions_m=(
+                (0.125, 0.125, float(marker_a_z_m)),
+                (0.125, 0.125, float(marker_b_z_m)),
+            ),
+            velocities_mps=((0.0, 0.0, 0.0), (0.0, 2.0, 0.0)),
+            normals=((0.0, 1.0, 0.0),) * 2,
+            areas_m2=(0.5, 0.5),
+            region_ids=(202, 202),
+        )
+        for source_row, payload in zip(
+            source_rows,
+            author_payloads,
+            strict=True,
+        ):
+            search.nearest_marker[source_row] = payload[4]
+            search.node_projection_marker_indices[source_row] = (0, 1, -1)
+            search.node_projection_marker_weights[source_row] = payload[3]
+
+    @classmethod
+    def _load_vf48c_captured_interpolated_segment_pair_fixture(
+        cls,
+        case_name: str,
+        *,
+        reverse_authors: bool = False,
+    ) -> dict[str, object]:
+        """Load one exact active-plane witness from the vf48c 68-lane capture.
+
+        Marker indices are compacted, but every stored F32 y-z coordinate,
+        author weight, normal, and serialized target comes from
+        ``vf48c_diag_full_afterstep3_saved_chordnormal_20260723_a_claims``.
+        The local four-cell grid preserves the captured target and preceding
+        widths; its far cells merely contain the already-accepted probes.
+        """
+
+        source_rows = ((0, 1, 1), (0, 1, 2))
+        target = (0, 1, 2)
+        if case_name == "adjacent_strict_nearest":
+            # Production segments (106,107) and (105,106): the winning
+            # primitive projects in its interior and the loser clamps to 106.
+            face_center_m = (
+                0.000375000003259629,
+                0.006601562723517418,
+                0.046562500298023224,
+            )
+            dy_m = 7.81253911554813e-05
+            dz_m = 0.0003124997019767761
+            region_id = 202
+            marker_positions_m = (
+                (0.001500000013038516, 0.0064510987140238285, 0.04687691479921341),
+                (0.001500000013038516, 0.006606992334127426, 0.04687266796827316),
+                (0.001500000013038516, 0.006762884557247162, 0.04686838760972023),
+            )
+            marker_velocities_mps = (
+                (-2.68781635837101e-10, -0.019029440358281136, -0.0852612853050232),
+                (-2.84329837452191e-10, -0.019266681745648384, -0.08784008026123047),
+                (-2.97122881853795e-10, -0.019509775564074516, -0.09044352918863297),
+            )
+            marker_normal = (0.0, -0.02733924612402916, -0.9996261596679688)
+            author_payloads = (
+                (
+                    (0.000375000003259629, 0.006614363752305508, 0.046872466802597046),
+                    (0.000375000003259629, 0.006570685189217329, 0.04528167471289635),
+                    (0.0, -0.027446772903203964, -0.9996232986450195),
+                    (-2.84934742467158e-10, -0.01927817612886429, -0.08796317875385284),
+                    (1, 2, -1),
+                    (0.9527151584625244, 0.0472848117351532, 0.0),
+                    1,
+                ),
+                (
+                    (0.000375000003259629, 0.006605756469070911, 0.04687270149588585),
+                    (0.000375000003259629, 0.006570926867425442, 0.045594166964292526),
+                    (0.0, -0.027231713756918907, -0.9996291995048523),
+                    (-2.84206602696457e-10, -0.01926480047404766, -0.08781963586807251),
+                    (0, 1, -1),
+                    (0.007926464080810547, 0.9920735359191895, 0.0),
+                    1,
+                ),
+            )
+        elif case_name == "same_segment_endpoint_author":
+            # Production segment (56,57): author parameters are exactly 1 and
+            # 0.9379666 while the physical face parameter is 0.9693246.
+            face_center_m = (
+                0.000375000003259629,
+                0.009023437276482582,
+                0.05000000074505806,
+            )
+            dy_m = 7.8124925494194e-05
+            dz_m = 0.0003124997019767761
+            region_id = 101
+            marker_positions_m = (
+                (0.001500000013038516, 0.008865741081535816, 0.049810655415058136),
+                (0.001500000013038516, 0.009022136218845844, 0.049805741757154465),
+            )
+            marker_velocities_mps = (
+                (8.59934679020569e-10, 0.025367803871631622, -0.12640249729156494),
+                (6.95789759141974e-10, 0.02545979619026184, -0.1294480711221695),
+            )
+            marker_normal = (0.0, 0.03140277788043022, 0.9995068907737732)
+            author_payloads = (
+                (
+                    (0.000375000003259629, 0.009022136218845844, 0.049805741757154465),
+                    (0.000375000003259629, 0.009058658964931965, 0.05096819996833801),
+                    (0.0, 0.03140304982662201, 0.9995068311691284),
+                    (6.95789759141974e-10, 0.02545979619026184, -0.1294480711221695),
+                    (0, 1, -1),
+                    (0.0, 1.0, 0.0),
+                    1,
+                ),
+                (
+                    (0.000375000003259629, 0.009012434631586075, 0.04980604723095894),
+                    (0.000375000003259629, 0.009058765135705471, 0.05128069594502449),
+                    (0.0, 0.031402502208948135, 0.9995068907737732),
+                    (7.05972225123475e-10, 0.025454089045524597, -0.1292591392993927),
+                    (0, 1, -1),
+                    (0.06203341484069824, 0.9379665851593018, 0.0),
+                    1,
+                ),
+            )
+        elif case_name == "terminal_endpoint_clamp":
+            # Production terminal segment (127,129): raw t=1.03868758 and
+            # clamp overrun/local dual support is about 0.073, not extrapolation.
+            face_center_m = (
+                0.000375000003259629,
+                0.009960937313735485,
+                0.046562500298023224,
+            )
+            dy_m = 7.8124925494194e-05
+            dz_m = 0.0003124997019767761
+            region_id = 202
+            marker_positions_m = (
+                (0.001500000013038516, 0.009883272461593151, 0.0467824749648571),
+                (0.001500000013038516, 0.009961388073861599, 0.046781234443187714),
+            )
+            marker_velocities_mps = (
+                (3.35948699414779e-11, -0.022780701518058777, -0.14448581635951996),
+                (3.6318132529134e-11, -0.02278713881969452, -0.14526715874671936),
+            )
+            marker_normal = (0.0, -0.015878512524068356, -0.9998739361763)
+            author_payloads = (
+                (
+                    (0.000375000003259629, 0.009961388073861599, 0.046781234443187714),
+                    (0.000375000003259629, 0.009937571361660957, 0.04528148099780083),
+                    (0.0, -0.01587841659784317, -0.9998739361763),
+                    (3.6318132529134e-11, -0.02278713881969452, -0.14526715874671936),
+                    (0, 1, -1),
+                    (0.0, 1.0, 0.0),
+                    1,
+                ),
+                (
+                    (0.000375000003259629, 0.009961388073861599, 0.046781234443187714),
+                    (0.000375000003259629, 0.009942532517015934, 0.045593902468681335),
+                    (0.0, -0.01587860845029354, -0.9998738765716553),
+                    (3.6318132529134e-11, -0.02278713881969452, -0.14526715874671936),
+                    (0, 1, -1),
+                    (0.0, 1.0, 0.0),
+                    1,
+                ),
+            )
+        else:
+            raise ValueError(f"unknown captured finite-segment case: {case_name}")
+
+        y_faces = np.asarray(
+            [face_center_m[1] + offset * dy_m for offset in (-1.5, -0.5, 0.5, 1.5, 2.5)],
+            dtype=np.float32,
+        )
+        z_faces = np.asarray(
+            [face_center_m[2] + offset * dz_m for offset in (-8.0, -1.0, 0.0, 1.0, 8.0)],
+            dtype=np.float32,
+        )
+        cls.fluid.cell_face_y_m.from_numpy(y_faces)
+        cls.fluid.cell_center_y_m.from_numpy(
+            (0.5 * (y_faces[:-1] + y_faces[1:])).astype(np.float32)
+        )
+        cls.fluid.cell_face_z_m.from_numpy(z_faces)
+        cls.fluid.cell_center_z_m.from_numpy(
+            (0.5 * (z_faces[:-1] + z_faces[1:])).astype(np.float32)
+        )
+
+        ordered_payloads = (
+            tuple(reversed(author_payloads)) if reverse_authors else author_payloads
+        )
+        cls._load_component_face_claims(
+            tuple(
+                _ComponentFaceClaim(
+                    source_row=source_row,
+                    boundary_point_m=payload[0],
+                    interior_point_m=payload[1],
+                    normal=payload[2],
+                    target_velocity_mps=payload[3],
+                    region_id=region_id,
+                )
+                for source_row, payload in zip(
+                    source_rows,
+                    ordered_payloads,
+                    strict=True,
+                )
+            ),
+            use_segment_fixture=True,
+        )
+        markers = cls.segment_component_face_markers
+        search = cls.segment_component_face_search
+        markers.load_markers(
+            positions_m=marker_positions_m,
+            velocities_mps=marker_velocities_mps,
+            normals=(marker_normal,) * len(marker_positions_m),
+            areas_m2=(1.0 / len(marker_positions_m),) * len(marker_positions_m),
+            region_ids=(region_id,) * len(marker_positions_m),
+        )
+        projection_segments = tuple(
+            dict.fromkeys(
+                tuple(sorted((int(payload[4][0]), int(payload[4][1]))))
+                for payload in author_payloads
+            )
+        )
+        markers.set_projection_segments(projection_segments)
+        for source_row, payload in zip(
+            source_rows,
+            ordered_payloads,
+            strict=True,
+        ):
+            search.node_projection_marker_indices[source_row] = payload[4]
+            search.node_projection_marker_weights[source_row] = payload[5]
+            search.nearest_marker[source_row] = payload[6]
+        return {
+            "source_rows": source_rows,
+            "target": target,
+            "face_center_m": face_center_m,
+            "dy_m": dy_m,
+            "dz_m": dz_m,
+            "region_id": region_id,
+            "marker_positions_m": marker_positions_m,
+            "author_payloads": ordered_payloads,
+        }
+
+    @classmethod
     def _load_projection_only_seam_conflict_fixture(
         cls,
         *,
@@ -2667,6 +3193,94 @@ class CanonicalComponentFaceLedgerContractMixin:
         search.nearest_marker[source_rows[1]] = 2
         search.node_projection_marker_indices[source_rows[1]] = (2, 3, -1)
         search.node_projection_marker_weights[source_rows[1]] = (0.75, 0.25, 0.0)
+
+    @classmethod
+    def _load_interpolated_projection_only_seam_fixture(
+        cls,
+        *,
+        reverse_authors: bool = False,
+        cap_component_normal_strength: float | None = None,
+    ) -> None:
+        """Load a side/cap corner whose two sampled z targets differ."""
+
+        source_rows = ((1, 1, 0), (1, 1, 1))
+        cap_normal = (
+            (0.0, 1.0, 0.0)
+            if cap_component_normal_strength is None
+            else (0.0, 0.0, float(cap_component_normal_strength))
+        )
+        author_payloads = (
+            (
+                (0.375, 0.35, 0.30),
+                (0.375, 0.35, 0.05),
+                (0.0, 0.0, -1.0),
+                101,
+                1,
+                (0, 1, -1),
+                (0.0, 1.0, 0.0),
+            ),
+            (
+                (0.375, 0.35, 0.35),
+                (0.375, 0.85, 0.35),
+                cap_normal,
+                303,
+                2,
+                (2, 3, -1),
+                (0.75, 0.25, 0.0),
+            ),
+        )
+        if reverse_authors:
+            author_payloads = tuple(reversed(author_payloads))
+        cls._load_component_face_claims(
+            tuple(
+                _ComponentFaceClaim(
+                    source_row=source_row,
+                    boundary_point_m=payload[0],
+                    interior_point_m=payload[1],
+                    normal=payload[2],
+                    target_velocity_mps=(0.0, 0.0, 0.0),
+                    region_id=payload[3],
+                )
+                for source_row, payload in zip(
+                    source_rows,
+                    author_payloads,
+                    strict=True,
+                )
+            ),
+            use_segment_fixture=True,
+        )
+        markers = cls.segment_component_face_markers
+        search = cls.segment_component_face_search
+        markers.load_markers(
+            positions_m=((0.375, 0.25, 0.30),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, -1.0),),
+            areas_m2=(0.5,),
+            region_ids=(101,),
+        )
+        for marker_index, position, normal, region_id, pressure_owner in (
+            (1, (0.375, 0.35, 0.30), (0.0, 0.0, -1.0), 101, 0),
+            (2, (0.375, 0.35, 0.30), cap_normal, 303, 2),
+            (3, (0.375, 0.35, 0.50), cap_normal, 303, 3),
+        ):
+            markers.x_gamma_m[marker_index] = position
+            markers.v_gamma_mps[marker_index] = (0.0, 0.0, 0.0)
+            markers.n_gamma[marker_index] = normal
+            markers.A_gamma_m2[marker_index] = 0.0
+            markers.region_id[marker_index] = region_id
+            markers.projection_vertex_pressure_owner_index[marker_index] = (
+                pressure_owner
+            )
+        markers.projection_vertex_count = 4
+
+        for source_row, payload in zip(
+            source_rows,
+            author_payloads,
+            strict=True,
+        ):
+            search.nearest_marker[source_row] = payload[4]
+            search.node_projection_marker_indices[source_row] = payload[5]
+            search.node_projection_marker_weights[source_row] = payload[6]
 
     @classmethod
     def _load_adjacent_shared_vertex_roundoff_fixture(
@@ -3236,6 +3850,29 @@ class CanonicalComponentFaceLedgerContractMixin:
             )
             for name in cls._CANONICAL_LEDGER_FIELDS
         )
+
+    @classmethod
+    def _canonical_component_axis_ledger_bytes(
+        cls,
+        component_axis: int,
+    ) -> tuple[tuple[str, bytes], ...]:
+        """Snapshot one physical velocity component over the whole ledger."""
+
+        component_bit = 1 << component_axis
+        snapshots: list[tuple[str, bytes]] = []
+        for name in cls._CANONICAL_LEDGER_FIELDS:
+            values = getattr(cls.fluid, name).to_numpy()
+            if name in cls._CANONICAL_VECTOR_FIELDS:
+                component_values = values[..., component_axis]
+            else:
+                component_values = np.bitwise_and(values, component_bit)
+            snapshots.append(
+                (
+                    name,
+                    np.ascontiguousarray(component_values).tobytes(order="C"),
+                )
+            )
+        return tuple(snapshots)
 
     @classmethod
     def _exclusive_legacy_row_ledger_bytes(cls) -> tuple[tuple[str, bytes], ...]:
@@ -6213,6 +6850,285 @@ class CanonicalComponentFaceLedgerContractMixin:
             self.assertTrue(state["owned"])
             self.assertAlmostEqual(state["value_mps"], 0.30, places=6)
 
+    def test_interpolated_side_cap_seam_uses_unique_component_normal_authority(
+        self,
+    ) -> None:
+        """A staggered component lane has one normal-aligned corner owner."""
+
+        observed = []
+        for reverse_authors in (False, True):
+            with self.subTest(reverse_authors=reverse_authors):
+                self._load_interpolated_projection_only_seam_fixture(
+                    reverse_authors=reverse_authors,
+                )
+                self.fluid.velocity.fill((0.0, 0.0, -10.0))
+                boundary = self.segment_component_face_boundary
+                closure_method_name = (
+                    "_close_owned_hard_targets_to_marker_constraints"
+                )
+                boundary.__dict__[closure_method_name] = lambda **_kwargs: {}
+                try:
+                    report = self._assemble_component_face_ledger(
+                        interpolate_interior_velocity=True,
+                        close_marker_constraints=True,
+                        use_marker_geometry=True,
+                        use_segment_fixture=True,
+                        surface_projection_inactive_axis=0,
+                        primary_region_id=101,
+                        secondary_region_id=303,
+                    )["canonical_velocity_dirichlet_report"]
+                finally:
+                    boundary.__dict__.pop(closure_method_name, None)
+
+                state = self._canonical_component_state((1, 1, 1), self._Z_AXIS)
+                self.assertTrue(state["active"])
+                self.assertTrue(state["owned"])
+                self.assertAlmostEqual(float(state["value_mps"]), -2.0, places=5)
+                self.assertEqual(int(state["region_id"]), 101)
+                self.assertEqual(int(report["target_conflict_count"]), 0)
+                self.assertEqual(int(report["region_conflict_count"]), 0)
+                self.assertEqual(
+                    int(report["projection_only_region_seam_merged_count"]),
+                    1,
+                )
+                observed.append(
+                    (
+                        float(state["value_mps"]),
+                        int(state["region_id"]),
+                        int(report["target_conflict_count"]),
+                        int(report["region_conflict_count"]),
+                        int(report["alpha_conflict_count"]),
+                        int(report["projection_only_region_seam_merged_count"]),
+                    )
+                )
+
+        self.assertEqual(
+            observed[0],
+            observed[1],
+            msg=(
+                "the shared z component-face seam depends on source-author "
+                "enumeration order; unrelated x/y lanes are intentionally "
+                "outside this component-local contract"
+            ),
+        )
+
+    def test_interpolated_side_cap_seam_component_normal_tie_fails_atomically(
+        self,
+    ) -> None:
+        boundary = self.segment_component_face_boundary
+        closure_method_name = "_close_owned_hard_targets_to_marker_constraints"
+        for tie_name, cap_component_normal_strength in (
+            ("exact", 1.0),
+            ("near_f32", 1.0 - 5.0e-8),
+        ):
+            for reverse_authors in (False, True):
+                with self.subTest(
+                    tie_name=tie_name,
+                    reverse_authors=reverse_authors,
+                ):
+                    self._load_interpolated_projection_only_seam_fixture(
+                        reverse_authors=reverse_authors,
+                        cap_component_normal_strength=(
+                            cap_component_normal_strength
+                        ),
+                    )
+                    self.fluid.velocity.fill((0.0, 0.0, -10.0))
+                    ledger_before = self._canonical_ledger_bytes()
+                    boundary.__dict__[closure_method_name] = lambda **_kwargs: {}
+                    try:
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            r"conflicting canonical component-face claims "
+                            r"\(target\): count=1",
+                        ):
+                            self._assemble_component_face_ledger(
+                                interpolate_interior_velocity=True,
+                                close_marker_constraints=True,
+                                use_marker_geometry=True,
+                                use_segment_fixture=True,
+                                surface_projection_inactive_axis=0,
+                                primary_region_id=101,
+                                secondary_region_id=303,
+                            )
+                    finally:
+                        boundary.__dict__.pop(closure_method_name, None)
+
+                    self.assertEqual(
+                        self._canonical_ledger_bytes(),
+                        ledger_before,
+                        msg=(
+                            f"{tie_name} component-normal tie committed a "
+                            "partial canonical ledger"
+                        ),
+                    )
+                    self.assertEqual(
+                        int(
+                            boundary.report_velocity_dirichlet_component_face_conflict_count[
+                                None
+                            ]
+                        ),
+                        1,
+                    )
+                    self.assertEqual(
+                        int(
+                            boundary.report_velocity_dirichlet_component_face_target_conflict_count[
+                                None
+                            ]
+                        ),
+                        1,
+                    )
+                    self.assertEqual(
+                        int(
+                            boundary.report_velocity_dirichlet_component_face_projection_only_region_seam_merged_count[
+                                None
+                            ]
+                        ),
+                        0,
+                    )
+
+    def test_interpolated_side_cap_seam_rejects_invalid_topology_and_extra_author_atomically(
+        self,
+    ) -> None:
+        """The interpolated seam exception remains topology- and pair-local."""
+
+        boundary = self.segment_component_face_boundary
+        search = self.segment_component_face_search
+        markers = self.segment_component_face_markers
+        closure_method_name = "_close_owned_hard_targets_to_marker_constraints"
+        materialize_method_name = (
+            "_materialize_canonical_velocity_dirichlet_relocation_winners_kernel"
+        )
+
+        for invalid_case in ("bad_cap_pressure_owner", "third_relocation_author"):
+            with self.subTest(invalid_case=invalid_case):
+                self._load_interpolated_projection_only_seam_fixture()
+                self.fluid.velocity.fill((0.0, 0.0, -10.0))
+                original_materialize = None
+
+                if invalid_case == "bad_cap_pressure_owner":
+                    # The cap tail must be self-owned.  Borrowing the physical
+                    # side owner makes this an arbitrary cross-region pair,
+                    # not the unique open-ribbon side/cap seam.
+                    markers.projection_vertex_pressure_owner_index[3] = 0
+                else:
+                    # Publish one deterministic relocation shadow into the
+                    # cap source slot.  This isolates the prepare transaction's
+                    # raw three-author cohort without depending on a grid walk
+                    # to manufacture the shadow.  The first two direct authors
+                    # still form the otherwise legal interpolated seam.
+                    relocation_source = (0, 0, 0)
+                    relocation_destination = (1, 1, 1)
+                    boundary.velocity_dirichlet_mps_field[relocation_source] = (
+                        0.0,
+                        0.0,
+                        0.0,
+                    )
+                    boundary.pressure_neumann_normal_field[relocation_source] = (
+                        0.0,
+                        1.0,
+                        0.0,
+                    )
+                    search.node_boundary_point_m[relocation_source] = (
+                        0.375,
+                        0.35,
+                        0.35,
+                    )
+                    search.node_interior_fluid_point_m[relocation_source] = (
+                        0.375,
+                        0.85,
+                        0.35,
+                    )
+                    search.nearest_marker[relocation_source] = 2
+                    search.node_projection_marker_indices[relocation_source] = (
+                        2,
+                        3,
+                        -1,
+                    )
+                    search.node_projection_marker_weights[relocation_source] = (
+                        0.75,
+                        0.25,
+                        0.0,
+                    )
+                    original_materialize = getattr(
+                        boundary,
+                        materialize_method_name,
+                    )
+
+                    def materialize_then_publish_third_author(
+                        *args: object,
+                        **kwargs: object,
+                    ) -> None:
+                        assert original_materialize is not None
+                        original_materialize(*args, **kwargs)
+                        boundary.velocity_dirichlet_relocation_shadow_source_row[
+                            relocation_destination
+                        ] = relocation_source
+                        boundary.velocity_dirichlet_relocation_shadow_storage_base_row[
+                            relocation_destination
+                        ] = relocation_destination
+                        boundary.velocity_dirichlet_relocation_shadow_sample_point_m[
+                            relocation_destination
+                        ] = (0.375, 0.85, 0.35)
+                        boundary.velocity_dirichlet_relocation_shadow_sample_velocity_mps[
+                            relocation_destination
+                        ] = (0.0, 0.0, -10.0)
+                        boundary.velocity_dirichlet_relocation_shadow_reconstruction_alpha[
+                            relocation_destination
+                        ] = 0.05
+                        # Publish only after the complete relocation payload.
+                        boundary.velocity_dirichlet_relocation_shadow_claim_valid[
+                            relocation_destination
+                        ] = 1
+
+                    boundary.__dict__[materialize_method_name] = (
+                        materialize_then_publish_third_author
+                    )
+
+                ledger_before = self._canonical_ledger_bytes()
+                boundary.__dict__[closure_method_name] = lambda **_kwargs: {}
+                try:
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        r"conflicting canonical component-face claims \(target\)",
+                    ):
+                        self._assemble_component_face_ledger(
+                            interpolate_interior_velocity=True,
+                            close_marker_constraints=True,
+                            use_marker_geometry=True,
+                            use_segment_fixture=True,
+                            surface_projection_inactive_axis=0,
+                            primary_region_id=101,
+                            secondary_region_id=303,
+                        )
+                finally:
+                    boundary.__dict__.pop(closure_method_name, None)
+                    if original_materialize is not None:
+                        boundary.__dict__.pop(materialize_method_name, None)
+
+                self.assertGreaterEqual(
+                    int(
+                        boundary.report_velocity_dirichlet_component_face_target_conflict_count[
+                            None
+                        ]
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    int(
+                        boundary.report_velocity_dirichlet_component_face_projection_only_region_seam_merged_count[
+                            None
+                        ]
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    self._canonical_ledger_bytes(),
+                    ledger_before,
+                    msg=(
+                        f"{invalid_case} committed a partial canonical ledger"
+                    ),
+                )
+
     def test_moving_side_cap_seam_physical_author_requires_owned_edge_atomically(
         self,
     ) -> None:
@@ -7032,6 +7948,214 @@ class CanonicalComponentFaceLedgerContractMixin:
         self.assertGreater(
             abs(expected_target - marker_velocities_f64[1, self._Z_AXIS]),
             1.0e-6,
+            msg="fixture accidentally collapsed to shared-vertex ownership",
+        )
+
+    def test_vf48i_strict_interior_owner_survives_ledger_reconstruction(
+        self,
+    ) -> None:
+        """The vf48i interior owner must survive both canonical ledger passes."""
+
+        component_axis = 1
+        source_rows = ((0, 0, 1), (0, 1, 1))
+        target = (0, 1, 1)
+        face_center_m = (
+            0.000375000003259629,
+            0.0072656250558793545,
+            0.04671875014901161,
+        )
+        marker_positions = (
+            (
+                0.001500000013038516,
+                0.007109076250344515,
+                0.04698074236512184,
+            ),
+            (
+                0.001500000013038516,
+                0.0072654546238482,
+                0.04698072373867035,
+            ),
+            (
+                0.001500000013038516,
+                0.00742181995883584,
+                0.04698073863983154,
+            ),
+        )
+        marker_velocities = (
+            (0.0, -0.0005975029780529439, -0.038512006402015686),
+            (0.0, -0.00034041042090393603, -0.038546670228242874),
+            (0.0, -0.00011021857790183276, -0.038520630449056625),
+        )
+        boundaries = (
+            (
+                face_center_m[0],
+                0.007226593792438507,
+                0.04698072746396065,
+            ),
+            (
+                face_center_m[0],
+                0.007304662372916937,
+                0.04698072746396065,
+            ),
+        )
+        author_payloads = (
+            (
+                boundaries[0],
+                (boundaries[0][0], boundaries[0][1], boundaries[0][2] - 0.001125),
+                (0.0, -0.0004042992368340492, -0.03853805735707283),
+                (0, 1, -1),
+                (0.2485051155090332, 0.7514948844909668, 0.0),
+            ),
+            (
+                boundaries[1],
+                (boundaries[1][0], boundaries[1][1], boundaries[1][2] - 0.001125),
+                (0.0, -0.0002826908021233976, -0.03854013979434967),
+                (1, 2, -1),
+                (0.7492543458938599, 0.2507456839084625, 0.0),
+            ),
+        )
+        dy_m = 7.8125e-5
+        dz_m = 3.125e-4
+        y_faces = np.asarray(
+            [face_center_m[1] + offset * dy_m for offset in (-1, 0, 1, 2, 3)],
+            dtype=np.float32,
+        )
+        z_faces = np.asarray(
+            [
+                face_center_m[2] + offset * dz_m
+                for offset in (-1.5, -0.5, 0.5, 1.5, 2.5)
+            ],
+            dtype=np.float32,
+        )
+        y_centers = (0.5 * (y_faces[:-1] + y_faces[1:])).astype(np.float32)
+        z_centers = (0.5 * (z_faces[:-1] + z_faces[1:])).astype(np.float32)
+
+        positions_f64 = np.asarray(marker_positions, dtype=np.float32).astype(
+            np.float64
+        )
+        velocities_f64 = np.asarray(marker_velocities, dtype=np.float32).astype(
+            np.float64
+        )
+        active_face = np.asarray(
+            (y_faces[1], z_centers[1]),
+            dtype=np.float64,
+        )
+        raw_parameters = []
+        distance_squared = []
+        for marker_a, marker_b in ((0, 1), (1, 2)):
+            segment = positions_f64[marker_b, 1:] - positions_f64[marker_a, 1:]
+            raw_parameter = float(
+                np.dot(active_face - positions_f64[marker_a, 1:], segment)
+                / np.dot(segment, segment)
+            )
+            raw_parameters.append(raw_parameter)
+            closest = positions_f64[marker_a, 1:] + np.clip(
+                raw_parameter, 0.0, 1.0
+            ) * segment
+            residual = active_face - closest
+            distance_squared.append(float(np.dot(residual, residual)))
+        old_tie_band = (
+            4.0
+            * float(np.finfo(np.float32).eps)
+            * max(*distance_squared, dy_m**2, dz_m**2)
+        )
+        self.assertGreater(raw_parameters[0], 1.0 + 2.0e-6)
+        self.assertGreater(raw_parameters[1], 2.0e-6)
+        self.assertLess(raw_parameters[1], 1.0 - 2.0e-6)
+        self.assertGreater(distance_squared[0] - distance_squared[1], 0.0)
+        self.assertLessEqual(distance_squared[0] - distance_squared[1], old_tie_band)
+        expected_target = float(
+            velocities_f64[1, component_axis]
+            + raw_parameters[1]
+            * (
+                velocities_f64[2, component_axis]
+                - velocities_f64[1, component_axis]
+            )
+        )
+
+        fluid = self.fluid
+        original_axis_fields = {
+            "cell_face_y_m": fluid.cell_face_y_m.to_numpy().copy(),
+            "cell_face_z_m": fluid.cell_face_z_m.to_numpy().copy(),
+            "cell_center_y_m": fluid.cell_center_y_m.to_numpy().copy(),
+            "cell_center_z_m": fluid.cell_center_z_m.to_numpy().copy(),
+        }
+        observations = []
+        try:
+            fluid.cell_face_y_m.from_numpy(y_faces)
+            fluid.cell_face_z_m.from_numpy(z_faces)
+            fluid.cell_center_y_m.from_numpy(y_centers)
+            fluid.cell_center_z_m.from_numpy(z_centers)
+            for reverse_authors in (False, True):
+                with self.subTest(reverse_authors=reverse_authors):
+                    ordered_payloads = (
+                        tuple(reversed(author_payloads))
+                        if reverse_authors
+                        else author_payloads
+                    )
+                    self._load_component_face_claims(
+                        tuple(
+                            _ComponentFaceClaim(
+                                source_row=source_row,
+                                boundary_point_m=payload[0],
+                                interior_point_m=payload[1],
+                                normal=(0.0, 0.0, -1.0),
+                                target_velocity_mps=payload[2],
+                                region_id=202,
+                            )
+                            for source_row, payload in zip(
+                                source_rows,
+                                ordered_payloads,
+                                strict=True,
+                            )
+                        ),
+                        use_segment_fixture=True,
+                    )
+                    markers = self.segment_component_face_markers
+                    search = self.segment_component_face_search
+                    markers.load_markers(
+                        positions_m=marker_positions,
+                        velocities_mps=marker_velocities,
+                        normals=((0.0, 0.0, -1.0),) * 3,
+                        areas_m2=(1.0 / 3.0,) * 3,
+                        region_ids=(202, 202, 202),
+                    )
+                    markers.set_projection_segments(((0, 1), (1, 2)))
+                    for source_row, payload in zip(
+                        source_rows,
+                        ordered_payloads,
+                        strict=True,
+                    ):
+                        search.node_projection_marker_indices[source_row] = payload[3]
+                        search.node_projection_marker_weights[source_row] = payload[4]
+                        search.nearest_marker[source_row] = 1
+
+                    report = self._assemble_component_face_ledger(
+                        use_marker_geometry=True,
+                        use_segment_fixture=True,
+                        surface_projection_inactive_axis=0,
+                        primary_region_id=101,
+                        secondary_region_id=202,
+                    )["canonical_velocity_dirichlet_report"]
+                    state = self._canonical_component_state(target, component_axis)
+                    self.assertEqual(int(report["target_conflict_count"]), 0)
+                    self.assertEqual(
+                        int(report["direct_geometry_reconstructed_component_count"]),
+                        1,
+                    )
+                    self.assertAlmostEqual(
+                        float(state["value_mps"]), expected_target, places=9
+                    )
+                    observations.append(float(state["value_mps"]))
+        finally:
+            for field_name, values in original_axis_fields.items():
+                getattr(fluid, field_name).from_numpy(values)
+
+        self.assertEqual(len(observations), 2)
+        self.assertAlmostEqual(observations[0], observations[1], places=10)
+        self.assertGreater(
+            abs(expected_target - velocities_f64[1, component_axis]),
+            1.0e-7,
             msg="fixture accidentally collapsed to shared-vertex ownership",
         )
 
@@ -8500,6 +9624,1436 @@ class CanonicalComponentFaceLedgerContractMixin:
         self.assertEqual(int(report["nominal_direct_claim_count"]), 0)
         self.assertEqual(int(report["relocated_claim_count"]), 0)
         self._assert_component_face_relocation_transient_neutral()
+
+    def _assert_vf48c_captured_pair_geometry(
+        self,
+        case_name: str,
+        fixture: dict[str, object],
+    ) -> None:
+        """Prove the compact fixture still has the captured ownership shape."""
+
+        marker_positions = np.asarray(
+            fixture["marker_positions_m"],
+            dtype=np.float32,
+        ).astype(np.float64)
+        face_center = np.asarray(
+            (
+                float(fixture["face_center_m"][0]),
+                float(self.fluid.cell_center_y_m[1]),
+                float(self.fluid.cell_face_z_m[2]),
+            ),
+            dtype=np.float64,
+        )
+
+        def projection(marker_a: int, marker_b: int):
+            segment = marker_positions[marker_b, 1:] - marker_positions[marker_a, 1:]
+            raw_weight = float(
+                np.dot(face_center[1:] - marker_positions[marker_a, 1:], segment)
+                / np.dot(segment, segment)
+            )
+            weight = min(max(raw_weight, 0.0), 1.0)
+            closest = marker_positions[marker_a, 1:] + weight * segment
+            distance_squared = float(np.dot(face_center[1:] - closest, face_center[1:] - closest))
+            return raw_weight, weight, distance_squared, closest, segment
+
+        source_rows = fixture["source_rows"]
+        search = self.segment_component_face_search
+        boundary = self.segment_component_face_boundary
+        if case_name == "adjacent_strict_nearest":
+            projections = tuple(projection(*segment) for segment in ((0, 1), (1, 2)))
+            endpoint_clamped = tuple(raw < 0.0 or raw > 1.0 for raw, *_ in projections)
+            self.assertEqual(sum(endpoint_clamped), 1)
+            self.assertEqual(
+                sum(0.0 < raw < 1.0 for raw, *_ in projections),
+                1,
+            )
+            distances = tuple(item[2] for item in projections)
+            local_width_squared = max(
+                float(fixture["dy_m"]) ** 2,
+                float(fixture["dz_m"]) ** 2,
+            )
+            tie_tolerance_squared = (
+                4.0
+                * float(np.finfo(np.float32).eps)
+                * max(*distances, local_width_squared)
+            )
+            self.assertGreater(
+                abs(distances[0] - distances[1]),
+                tie_tolerance_squared,
+                msg="captured strict-nearest owner collapsed into a tie",
+            )
+        elif case_name == "same_segment_endpoint_author":
+            raw_weight, *_ = projection(0, 1)
+            author_weights = tuple(
+                float(search.node_projection_marker_weights[row][1])
+                for row in source_rows
+            )
+            self.assertIn(1.0, author_weights)
+            self.assertLess(min(author_weights), raw_weight)
+            self.assertLess(raw_weight, max(author_weights))
+            self.assertAlmostEqual(raw_weight, 0.9693246236356111, places=6)
+        else:
+            raw_weight, _, _, _, segment = projection(0, 1)
+            self.assertGreater(raw_weight, 1.0)
+            segment_length_m = float(np.linalg.norm(segment))
+            outward_tangent = segment / segment_length_m
+            overrun_m = (raw_weight - 1.0) * segment_length_m
+            dual_support_m = 0.5 * (
+                abs(float(outward_tangent[0])) * float(fixture["dy_m"])
+                + abs(float(outward_tangent[1])) * float(fixture["dz_m"])
+            )
+            support_ratio = overrun_m / dual_support_m
+            self.assertLess(support_ratio, 1.0)
+            self.assertAlmostEqual(support_ratio, 0.07276335, delta=0.01)
+            chord_normal = np.asarray((-segment[1], segment[0]), dtype=np.float64)
+            chord_normal /= np.linalg.norm(chord_normal)
+            if chord_normal[1] > 0.0:
+                chord_normal = -chord_normal
+            endpoint = marker_positions[1, 1:]
+            endpoint_to_face = face_center[1:] - endpoint
+            canonical_ray = endpoint_to_face / np.linalg.norm(endpoint_to_face)
+            beta_m = float(np.dot(endpoint_to_face, outward_tangent))
+            alpha_m = float(np.dot(endpoint_to_face, chord_normal))
+            self.assertGreaterEqual(beta_m, 0.0)
+            self.assertLessEqual(beta_m, dual_support_m)
+            self.assertGreater(alpha_m, 0.0)
+            probe_margins = []
+            for source_row in source_rows:
+                normal = np.asarray(
+                    boundary.pressure_neumann_normal_field[source_row],
+                    dtype=np.float64,
+                )[1:]
+                normal /= np.linalg.norm(normal)
+                self.assertGreater(float(np.dot(normal, chord_normal)), 0.999999)
+                self.assertGreater(float(np.dot(endpoint_to_face, normal)), 0.0)
+                probe = np.asarray(
+                    search.node_interior_fluid_point_m[source_row],
+                    dtype=np.float64,
+                )[1:]
+                source_center = np.asarray(
+                    (
+                        float(self.fluid.cell_center_y_m[source_row[1]]),
+                        float(self.fluid.cell_center_z_m[source_row[2]]),
+                    ),
+                    dtype=np.float64,
+                )
+                margin_m = float(
+                    np.dot(probe - endpoint, normal)
+                    - np.dot(source_center - endpoint, normal)
+                )
+                self.assertGreater(margin_m, 0.0)
+                probe_margins.append(margin_m)
+            self.assertLess(max(probe_margins) - min(probe_margins), 1.0e-8)
+            canonical_probe = endpoint + (
+                np.linalg.norm(endpoint_to_face) + min(probe_margins)
+            ) * canonical_ray
+            self.assertGreater(
+                float(np.dot(canonical_probe - face_center[1:], canonical_ray)),
+                0.0,
+            )
+
+    def _assert_vf48c_captured_interpolated_pair_reconstructs(
+        self,
+        case_name: str,
+    ) -> None:
+        """Require reconstruction for the captured, fixed source-row geometry.
+
+        Reversing only the serialized payloads would move each captured probe
+        to the other physical cell while leaving its grid-derived source centre
+        fixed.  That is not a complete author-record swap.  Argument-order
+        independence is covered by the direct helper contract, which reverses
+        source centres together with every author-owned payload field.
+        """
+
+        fluid = self.fluid
+        original_axis_fields = {
+            name: getattr(fluid, name).to_numpy().copy()
+            for name in (
+                "cell_face_y_m",
+                "cell_center_y_m",
+                "cell_face_z_m",
+                "cell_center_z_m",
+            )
+        }
+        try:
+            fixture = self._load_vf48c_captured_interpolated_segment_pair_fixture(
+                case_name,
+                reverse_authors=False,
+            )
+            self._assert_vf48c_captured_pair_geometry(case_name, fixture)
+            fluid.velocity.fill((0.25, -0.5, 1.0))
+
+            report = self._assemble_component_face_ledger(
+                interpolate_interior_velocity=True,
+                use_marker_geometry=True,
+                use_segment_fixture=True,
+                surface_projection_inactive_axis=0,
+                primary_region_id=101,
+                secondary_region_id=202,
+            )["canonical_velocity_dirichlet_report"]
+            target = fixture["target"]
+            state = self._canonical_component_state(target, self._Z_AXIS)
+
+            self.assertTrue(state["active"])
+            self.assertTrue(state["owned"])
+            self.assertEqual(int(state["region_id"]), fixture["region_id"])
+            self.assertEqual(int(report["target_conflict_count"]), 0)
+            self.assertEqual(int(report["region_conflict_count"]), 0)
+            self.assertEqual(int(report["alpha_conflict_count"]), 0)
+            self.assertEqual(
+                int(
+                    self.segment_component_face_boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                        None
+                    ]
+                ),
+                1,
+            )
+        finally:
+            for field_name, values in original_axis_fields.items():
+                getattr(fluid, field_name).from_numpy(values)
+
+    def test_vf48c_adjacent_strict_nearest_interpolated_pair_reconstructs(
+        self,
+    ) -> None:
+        self._assert_vf48c_captured_interpolated_pair_reconstructs(
+            "adjacent_strict_nearest"
+        )
+
+    def test_vf48c_same_segment_endpoint_author_interpolated_pair_reconstructs(
+        self,
+    ) -> None:
+        self._assert_vf48c_captured_interpolated_pair_reconstructs(
+            "same_segment_endpoint_author"
+        )
+
+    def test_vf48c_terminal_endpoint_clamp_interpolated_pair_reconstructs(
+        self,
+    ) -> None:
+        self._assert_vf48c_captured_interpolated_pair_reconstructs(
+            "terminal_endpoint_clamp"
+        )
+
+    def test_interpolation_reconstructs_continuous_segment_pair_at_shared_mac_face(
+        self,
+    ) -> None:
+        """Two C0 row samples reconstruct at their shared MAC face."""
+
+        # The two accepted rays have alpha=1/3 and 1/2 at sample z=0.125
+        # and z=0.25.  Their boundary y coordinates are 0.25 and 0.375,
+        # while the shared y-face is exactly 0.25.  The canonical value must
+        # therefore be the first physical row target, not an author midpoint.
+        for scenario, first_target_mps, second_target_mps in (
+            ("equal_nonzero", 1.0, 1.0),
+            ("distinct", 0.75, 1.50),
+        ):
+            expected_target_mps = first_target_mps
+            observations = []
+            for reverse_authors in (False, True):
+                with self.subTest(
+                    scenario=scenario,
+                    reverse_authors=reverse_authors,
+                ):
+                    self._load_interpolated_continuous_segment_pair_fixture(
+                        reverse_authors=reverse_authors,
+                    )
+                    velocity = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
+                    z_centers_m = self.fluid.cell_center_z_m.to_numpy()
+                    first_sample_z_m = 0.125
+                    second_sample_z_m = 0.25
+                    first_sample_velocity_mps = 3.0 * first_target_mps
+                    second_sample_velocity_mps = 2.0 * second_target_mps
+                    sample_slope = (
+                        second_sample_velocity_mps - first_sample_velocity_mps
+                    ) / (second_sample_z_m - first_sample_z_m)
+                    sample_intercept = (
+                        first_sample_velocity_mps
+                        - sample_slope * first_sample_z_m
+                    )
+                    velocity[..., 1] = sample_intercept + sample_slope * (
+                        z_centers_m[: self._GRID_NODES[2]][
+                            np.newaxis,
+                            np.newaxis,
+                            :
+                        ]
+                    )
+                    self.fluid.velocity.from_numpy(velocity)
+
+                    report = self._assemble_component_face_ledger(
+                        interpolate_interior_velocity=True,
+                        use_marker_geometry=True,
+                        use_segment_fixture=True,
+                        surface_projection_inactive_axis=0,
+                    )["canonical_velocity_dirichlet_report"]
+                    shared_face_state = self._canonical_component_state(
+                        (0, 1, 1),
+                        1,
+                    )
+
+                    self.assertTrue(shared_face_state["active"])
+                    self.assertAlmostEqual(
+                        float(shared_face_state["value_mps"]),
+                        expected_target_mps,
+                        delta=max(
+                            5.0e-11,
+                            5.0e-6 * abs(expected_target_mps),
+                        ),
+                    )
+                    self.assertEqual(int(report["target_conflict_count"]), 0)
+                    self.assertEqual(int(report["region_conflict_count"]), 0)
+                    self.assertEqual(int(report["alpha_conflict_count"]), 0)
+                    self.assertEqual(shared_face_state["region_id"], 202)
+                    self.assertEqual(
+                        int(
+                            report[
+                                "direct_geometry_reconstructed_component_count"
+                            ]
+                        ),
+                        0,
+                    )
+                    self.assertEqual(
+                        float(
+                            report[
+                                "max_compatible_direct_target_spread_mps"
+                            ]
+                        ),
+                        0.0,
+                    )
+                    self.assertEqual(
+                        int(
+                            self.segment_component_face_boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                                None
+                            ]
+                        ),
+                        1,
+                    )
+                    self.assertEqual(
+                        int(report["direct_geometry_one_sided_component_count"]),
+                        0,
+                    )
+                    observations.append(self._canonical_ledger_bytes())
+
+            if len(observations) == 2:
+                self.assertEqual(
+                    observations[0],
+                    observations[1],
+                    msg=(
+                        f"{scenario} interpolated face reconstruction depends on "
+                        "source-author enumeration order"
+                    ),
+                )
+
+    def test_interpolation_reconstructs_adjacent_segment_pair_at_shared_mac_face(
+        self,
+    ) -> None:
+        """Adjacent C0 segments use face-coordinate, not midpoint, weights."""
+
+        observations = []
+        for reverse_authors in (False, True):
+            with self.subTest(reverse_authors=reverse_authors):
+                self._load_interpolated_continuous_segment_pair_fixture(
+                    reverse_authors=reverse_authors,
+                    adjacent_segments=True,
+                )
+                velocity = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
+                z_centers_m = self.fluid.cell_center_z_m.to_numpy()
+                # The two normal rays sample z=0.125 and z=0.25 with alpha
+                # 1/3 and 1/2.  This affine field therefore gives effective
+                # row targets 0.75 and 1.50 m/s without relying on the
+                # staggered sampler's transverse y support selection.
+                velocity[..., 1] = 1.5 + 6.0 * z_centers_m[
+                    : self._GRID_NODES[2]
+                ][
+                    np.newaxis,
+                    np.newaxis,
+                    :,
+                ]
+                self.fluid.velocity.from_numpy(velocity)
+
+                report = self._assemble_component_face_ledger(
+                    interpolate_interior_velocity=True,
+                    use_marker_geometry=True,
+                    use_segment_fixture=True,
+                    surface_projection_inactive_axis=0,
+                )["canonical_velocity_dirichlet_report"]
+                shared_face_state = self._canonical_component_state(
+                    (0, 1, 1),
+                    1,
+                )
+
+                # Row targets are 0.75 and 1.50 m/s.  The face y=0.25 is
+                # one third of the way from boundary y=0.225 to y=0.30.
+                self.assertAlmostEqual(
+                    float(shared_face_state["value_mps"]),
+                    1.0,
+                    places=6,
+                )
+                self.assertNotAlmostEqual(
+                    float(shared_face_state["value_mps"]),
+                    1.125,
+                    places=6,
+                )
+                self.assertEqual(shared_face_state["region_id"], 202)
+                self.assertEqual(int(report["target_conflict_count"]), 0)
+                self.assertEqual(int(report["region_conflict_count"]), 0)
+                self.assertEqual(int(report["alpha_conflict_count"]), 0)
+                self.assertEqual(
+                    int(report["direct_geometry_reconstructed_component_count"]),
+                    0,
+                )
+                self.assertEqual(
+                    float(report["max_compatible_direct_target_spread_mps"]),
+                    0.0,
+                )
+                self.assertEqual(
+                    int(
+                        self.segment_component_face_boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                            None
+                        ]
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    int(report["direct_geometry_one_sided_component_count"]),
+                    0,
+                )
+                observations.append(self._canonical_ledger_bytes())
+
+        if len(observations) == 2:
+            self.assertEqual(
+                observations[0],
+                observations[1],
+                msg="adjacent interpolated C0 reconstruction depends on author order",
+            )
+
+    def test_interpolation_reconstructs_coincident_same_segment_nominal_probes(
+        self,
+    ) -> None:
+        """Coincident anchors reconstruct one shared-y-face sample from probes."""
+
+        observations = []
+        for reverse_authors in (False, True):
+            with self.subTest(reverse_authors=reverse_authors):
+                self._load_coincident_boundary_same_segment_probe_pair_fixture(
+                    reverse_authors=reverse_authors,
+                )
+                velocity = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
+                y_faces_m = self.fluid.cell_face_y_m.to_numpy()
+                velocity[..., 1] = 0.25 + 4.0 * y_faces_m[
+                    : self._GRID_NODES[1]
+                ][
+                    np.newaxis,
+                    :,
+                    np.newaxis,
+                ]
+                self.fluid.velocity.from_numpy(velocity)
+
+                report = self._assemble_component_face_ledger(
+                    interpolate_interior_velocity=True,
+                    use_marker_geometry=True,
+                    use_segment_fixture=True,
+                    surface_projection_inactive_axis=0,
+                )["canonical_velocity_dirichlet_report"]
+                shared_face_state = self._canonical_component_state(
+                    (0, 1, 1),
+                    1,
+                )
+
+                self.assertTrue(shared_face_state["active"])
+                self.assertAlmostEqual(
+                    float(shared_face_state["value_mps"]),
+                    1.25,
+                    places=6,
+                )
+                self.assertEqual(shared_face_state["region_id"], 202)
+                self.assertEqual(int(report["target_conflict_count"]), 0)
+                self.assertEqual(int(report["region_conflict_count"]), 0)
+                self.assertEqual(int(report["alpha_conflict_count"]), 0)
+                self.assertEqual(int(report["actual_sample_evaluation_count"]), 3)
+                self.assertEqual(
+                    int(
+                        self.segment_component_face_boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                            None
+                        ]
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    int(report["direct_geometry_one_sided_component_count"]),
+                    0,
+                )
+                observations.append(
+                    (
+                        bool(shared_face_state["active"]),
+                        float(shared_face_state["value_mps"]),
+                        int(shared_face_state["region_id"]),
+                        int(report["target_conflict_count"]),
+                        int(report["region_conflict_count"]),
+                        int(report["alpha_conflict_count"]),
+                        int(report["actual_sample_evaluation_count"]),
+                        int(
+                            self.segment_component_face_boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                                None
+                            ]
+                        ),
+                    )
+                )
+
+        self.assertEqual(
+            observations[0],
+            observations[1],
+            msg="canonical shared-face state depends on author assignment",
+        )
+
+    def test_interpolation_reconstructs_distinct_same_segment_face_projection(
+        self,
+    ) -> None:
+        """A segment-bracketed face is canonical when y anchors cannot bracket."""
+
+        source_rows = ((0, 0, 1), (0, 1, 1))
+        target = (0, 1, 1)
+        component_axis = 1
+        assigned_payload_observations = []
+        ledger_observations = []
+        for reverse_authors in (False, True):
+            with self.subTest(reverse_authors=reverse_authors):
+                self._load_distinct_anchor_same_segment_face_projection_fixture(
+                    reverse_authors=reverse_authors,
+                )
+                boundary = self.segment_component_face_boundary
+                search = self.segment_component_face_search
+                markers = self.segment_component_face_markers
+
+                marker_positions = np.asarray(
+                    [markers.x_gamma_m[index] for index in (0, 1)],
+                    dtype=np.float64,
+                )
+                marker_velocities = np.asarray(
+                    [markers.v_gamma_mps[index] for index in (0, 1)],
+                    dtype=np.float64,
+                )
+                face_center = np.asarray(
+                    (
+                        float(self.fluid.cell_center_x_m[target[0]]),
+                        float(self.fluid.cell_face_y_m[target[1]]),
+                        float(self.fluid.cell_center_z_m[target[2]]),
+                    ),
+                    dtype=np.float64,
+                )
+                active_axes = np.asarray((False, True, True))
+                segment = (
+                    marker_positions[1, active_axes]
+                    - marker_positions[0, active_axes]
+                )
+                face_offset = (
+                    face_center[active_axes]
+                    - marker_positions[0, active_axes]
+                )
+                face_parameter = float(
+                    np.dot(face_offset, segment) / np.dot(segment, segment)
+                )
+                author_parameters = tuple(
+                    float(search.node_projection_marker_weights[source_row][1])
+                    for source_row in source_rows
+                )
+                boundary_points = tuple(
+                    np.asarray(
+                        search.node_boundary_point_m[source_row],
+                        dtype=np.float64,
+                    )
+                    for source_row in source_rows
+                )
+                expected_boundary_point = (
+                    marker_positions[0]
+                    + face_parameter * (marker_positions[1] - marker_positions[0])
+                )
+                expected_boundary_velocity = (
+                    marker_velocities[0]
+                    + face_parameter * (
+                        marker_velocities[1] - marker_velocities[0]
+                    )
+                )
+
+                self.assertEqual(
+                    tuple(
+                        tuple(
+                            int(value)
+                            for value in search.node_projection_marker_indices[
+                                source_row
+                            ]
+                        )
+                        for source_row in source_rows
+                    ),
+                    ((0, 1, -1), (0, 1, -1)),
+                )
+                self.assertEqual(
+                    tuple(
+                        int(markers.region_id[index]) for index in (0, 1)
+                    ),
+                    (202, 202),
+                )
+                for source_row, boundary_point in zip(
+                    source_rows,
+                    boundary_points,
+                    strict=True,
+                ):
+                    self.assertEqual(
+                        tuple(
+                            float(value)
+                            for value in boundary.pressure_neumann_normal_field[
+                                source_row
+                            ]
+                        ),
+                        (0.0, 1.0, 0.0),
+                    )
+                    probe_ray = (
+                        np.asarray(
+                            search.node_interior_fluid_point_m[source_row],
+                            dtype=np.float64,
+                        )
+                        - boundary_point
+                    )
+                    self.assertGreater(float(probe_ray[component_axis]), 0.0)
+                    np.testing.assert_array_equal(
+                        probe_ray[[0, 2]],
+                        np.zeros(2, dtype=np.float64),
+                    )
+                self.assertGreater(
+                    float(np.linalg.norm(boundary_points[1] - boundary_points[0])),
+                    1.0e-3,
+                )
+                self.assertLess(min(author_parameters), face_parameter)
+                self.assertLess(face_parameter, max(author_parameters))
+                self.assertFalse(
+                    min(point[component_axis] for point in boundary_points)
+                    <= face_center[component_axis]
+                    <= max(point[component_axis] for point in boundary_points)
+                )
+                np.testing.assert_allclose(
+                    expected_boundary_point,
+                    (0.125, 0.125, 0.375),
+                    rtol=0.0,
+                    atol=1.0e-7,
+                )
+                np.testing.assert_allclose(
+                    expected_boundary_velocity,
+                    (0.0, 1.0, 0.0),
+                    rtol=0.0,
+                    atol=1.0e-7,
+                )
+
+                assigned_payload_observations.append(
+                    tuple(
+                        (
+                            tuple(
+                                float(value)
+                                for value in search.node_boundary_point_m[source_row]
+                            ),
+                            tuple(
+                                float(value)
+                                for value in search.node_interior_fluid_point_m[
+                                    source_row
+                                ]
+                            ),
+                            tuple(
+                                float(value)
+                                for value in boundary.velocity_dirichlet_mps_field[
+                                    source_row
+                                ]
+                            ),
+                            tuple(
+                                float(value)
+                                for value in search.node_projection_marker_weights[
+                                    source_row
+                                ]
+                            ),
+                            int(search.nearest_marker[source_row]),
+                        )
+                        for source_row in source_rows
+                    )
+                )
+                velocity = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
+                z_centers_m = self.fluid.cell_center_z_m.to_numpy()
+                # A non-affine tent profile separates one canonical face
+                # re-sample from every interpolation of the two authors'
+                # already reconstructed targets.  At the two author probes
+                # z=(0.325, 0.400) the sampled y velocities are (3.2, 3.6),
+                # while the canonical face-projected probe at z=0.375 samples
+                # 4.0 m/s exactly.
+                velocity[..., 1] = np.maximum(
+                    0.0,
+                    4.0
+                    - 16.0
+                    * np.abs(
+                        z_centers_m[: self._GRID_NODES[2]] - 0.375
+                    ),
+                )[np.newaxis, np.newaxis, :]
+                self.fluid.velocity.from_numpy(velocity)
+
+                report = self._assemble_component_face_ledger(
+                    interpolate_interior_velocity=True,
+                    use_marker_geometry=True,
+                    use_segment_fixture=True,
+                    surface_projection_inactive_axis=0,
+                )["canonical_velocity_dirichlet_report"]
+                shared_face_state = self._canonical_component_state(
+                    target,
+                    component_axis,
+                )
+
+                self.assertTrue(shared_face_state["active"])
+                self.assertTrue(shared_face_state["owned"])
+                self.assertEqual(int(shared_face_state["region_id"]), 202)
+                self.assertAlmostEqual(
+                    float(shared_face_state["value_mps"]),
+                    2.5,
+                    places=6,
+                )
+                author_effective_targets = (1.9, 2.4)
+                author_face_weight = (
+                    face_parameter - min(author_parameters)
+                ) / (max(author_parameters) - min(author_parameters))
+                interpolated_author_effective_target = (
+                    author_effective_targets[0]
+                    + author_face_weight
+                    * (
+                        author_effective_targets[1]
+                        - author_effective_targets[0]
+                    )
+                )
+                self.assertNotAlmostEqual(
+                    float(shared_face_state["value_mps"]),
+                    interpolated_author_effective_target,
+                    places=6,
+                    msg="canonical result was interpolated from author targets",
+                )
+                self.assertNotAlmostEqual(
+                    float(shared_face_state["value_mps"]),
+                    float(np.mean(author_effective_targets)),
+                    places=6,
+                    msg="canonical result was averaged from author targets",
+                )
+                self.assertEqual(int(report["target_conflict_count"]), 0)
+                self.assertEqual(int(report["region_conflict_count"]), 0)
+                self.assertEqual(int(report["alpha_conflict_count"]), 0)
+                self.assertEqual(
+                    int(
+                        boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                            None
+                        ]
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    int(report["direct_geometry_one_sided_component_count"]),
+                    0,
+                )
+                # The contract is author invariance of the reconstructed
+                # component axis over the complete canonical ledger.  The
+                # swapped payloads intentionally carry different z anchors;
+                # source-row ownership of that independent z no-slip component
+                # is therefore not part of this y-face reconstruction result.
+                ledger_observations.append(
+                    self._canonical_component_axis_ledger_bytes(component_axis)
+                )
+
+        self.assertEqual(
+            assigned_payload_observations[0],
+            tuple(reversed(assigned_payload_observations[1])),
+            msg="the test did not swap complete source-to-payload assignments",
+        )
+        if len(ledger_observations) == 2:
+            self.assertEqual(
+                ledger_observations[0],
+                ledger_observations[1],
+                msg="canonical ledger bytes depend on source-to-payload assignment",
+            )
+
+    def test_interpolation_accepts_short_f32_segment_when_physical_anchor_matches(
+        self,
+    ) -> None:
+        """F32 parameter noise cannot reject a physically matching anchor."""
+
+        source_rows = ((0, 0, 1), (0, 1, 1))
+        target = (0, 1, 1)
+        component_axis = 1
+        assigned_payload_observations = []
+        ledger_observations = []
+        for reverse_authors in (False, True):
+            with self.subTest(reverse_authors=reverse_authors):
+                self._load_short_f32_segment_physical_anchor_fixture(
+                    reverse_authors=reverse_authors,
+                )
+                boundary = self.segment_component_face_boundary
+                search = self.segment_component_face_search
+                markers = self.segment_component_face_markers
+                marker_positions = np.asarray(
+                    [markers.x_gamma_m[index] for index in (0, 1)],
+                    dtype=np.float64,
+                )
+                segment = marker_positions[1] - marker_positions[0]
+                segment[0] = 0.0
+                segment_length_squared = float(np.dot(segment, segment))
+                parameter_errors = []
+                physical_anchor_errors_m = []
+                author_parameters = []
+                for source_row in source_rows:
+                    parameter = float(
+                        search.node_projection_marker_weights[source_row][1]
+                    )
+                    boundary_point = np.asarray(
+                        search.node_boundary_point_m[source_row],
+                        dtype=np.float64,
+                    )
+                    anchor_offset = boundary_point - marker_positions[0]
+                    anchor_offset[0] = 0.0
+                    geometric_parameter = float(
+                        np.dot(anchor_offset, segment) / segment_length_squared
+                    )
+                    reconstructed_anchor = marker_positions[0] + parameter * (
+                        marker_positions[1] - marker_positions[0]
+                    )
+                    reconstructed_anchor[0] = boundary_point[0]
+                    parameter_errors.append(abs(geometric_parameter - parameter))
+                    physical_anchor_errors_m.append(
+                        float(np.linalg.norm(boundary_point - reconstructed_anchor))
+                    )
+                    author_parameters.append(parameter)
+                face_center = np.asarray(
+                    (
+                        float(self.fluid.cell_center_x_m[target[0]]),
+                        float(self.fluid.cell_face_y_m[target[1]]),
+                        float(self.fluid.cell_center_z_m[target[2]]),
+                    ),
+                    dtype=np.float64,
+                )
+                face_offset = face_center - marker_positions[0]
+                face_offset[0] = 0.0
+                face_parameter = float(
+                    np.dot(face_offset, segment) / segment_length_squared
+                )
+                geometry_tolerance_m = (
+                    2.0
+                    * np.finfo(np.float32).eps
+                    * max(float(np.max(np.abs(marker_positions))), 0.375)
+                )
+
+                self.assertGreater(min(parameter_errors), 2.0e-6)
+                self.assertLess(
+                    max(physical_anchor_errors_m),
+                    geometry_tolerance_m,
+                )
+                self.assertLess(min(author_parameters), face_parameter)
+                self.assertLess(face_parameter, max(author_parameters))
+                self.assertFalse(
+                    min(
+                        float(search.node_boundary_point_m[row][component_axis])
+                        for row in source_rows
+                    )
+                    <= face_center[component_axis]
+                    <= max(
+                        float(search.node_boundary_point_m[row][component_axis])
+                        for row in source_rows
+                    )
+                )
+
+                assigned_payload_observations.append(
+                    tuple(
+                        (
+                            tuple(
+                                float(value)
+                                for value in search.node_boundary_point_m[source_row]
+                            ),
+                            tuple(
+                                float(value)
+                                for value in search.node_projection_marker_weights[
+                                    source_row
+                                ]
+                            ),
+                        )
+                        for source_row in source_rows
+                    )
+                )
+                self.fluid.velocity.fill((0.0, 1.0, 0.0))
+                report = self._assemble_component_face_ledger(
+                    interpolate_interior_velocity=True,
+                    use_marker_geometry=True,
+                    use_segment_fixture=True,
+                    surface_projection_inactive_axis=0,
+                )["canonical_velocity_dirichlet_report"]
+                shared_face_state = self._canonical_component_state(
+                    target,
+                    component_axis,
+                )
+
+                self.assertTrue(shared_face_state["active"])
+                self.assertTrue(shared_face_state["owned"])
+                self.assertEqual(int(shared_face_state["region_id"]), 202)
+                self.assertAlmostEqual(
+                    float(shared_face_state["value_mps"]),
+                    1.0,
+                    places=6,
+                )
+                self.assertEqual(int(report["target_conflict_count"]), 0)
+                self.assertEqual(int(report["region_conflict_count"]), 0)
+                self.assertEqual(int(report["alpha_conflict_count"]), 0)
+                self.assertEqual(
+                    int(
+                        boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                            None
+                        ]
+                    ),
+                    1,
+                )
+                ledger_observations.append(
+                    self._canonical_component_axis_ledger_bytes(component_axis)
+                )
+
+        self.assertEqual(
+            assigned_payload_observations[0],
+            tuple(reversed(assigned_payload_observations[1])),
+            msg="the test did not swap complete source-to-payload assignments",
+        )
+        if len(ledger_observations) == 2:
+            self.assertEqual(
+                ledger_observations[0],
+                ledger_observations[1],
+                msg="short-segment reconstruction depends on author assignment",
+            )
+
+    def test_interpolation_rejects_short_f32_segment_physical_anchor_drift(
+        self,
+    ) -> None:
+        """A metric anchor error above geometry tolerance remains atomic."""
+
+        self._load_short_f32_segment_physical_anchor_fixture(
+            corrupt_second_anchor=True,
+        )
+        markers = self.segment_component_face_markers
+        search = self.segment_component_face_search
+        second_source = (0, 1, 1)
+        marker_positions = np.asarray(
+            [markers.x_gamma_m[index] for index in (0, 1)],
+            dtype=np.float64,
+        )
+        parameter = float(search.node_projection_marker_weights[second_source][1])
+        reconstructed_anchor = marker_positions[0] + parameter * (
+            marker_positions[1] - marker_positions[0]
+        )
+        reconstructed_anchor[0] = float(
+            search.node_boundary_point_m[second_source][0]
+        )
+        physical_anchor_error_m = float(
+            np.linalg.norm(
+                np.asarray(
+                    search.node_boundary_point_m[second_source],
+                    dtype=np.float64,
+                )
+                - reconstructed_anchor
+            )
+        )
+        geometry_tolerance_m = (
+            2.0
+            * np.finfo(np.float32).eps
+            * max(float(np.max(np.abs(marker_positions))), 0.375)
+        )
+        self.assertGreater(physical_anchor_error_m, geometry_tolerance_m)
+
+        self.fluid.velocity.fill((0.0, 1.0, 0.0))
+        self._assert_distinct_anchor_same_segment_projection_fails_closed(
+            expected_conflict_source="prepare_pair_arbitration",
+        )
+
+    def test_distinct_anchor_pair_with_third_relocation_author_fails_atomically(
+        self,
+    ) -> None:
+        """A relocation author cannot inherit a compatibility granted to a pair."""
+
+        self._load_distinct_anchor_same_segment_face_projection_fixture()
+        boundary = self.segment_component_face_boundary
+        search = self.segment_component_face_search
+        markers = self.segment_component_face_markers
+        first_direct_source = (0, 0, 1)
+        second_direct_source = (0, 1, 1)
+        relocation_source = (0, 2, 1)
+        relocation_slot = second_direct_source
+        component_axis = 1
+
+        boundary.velocity_dirichlet_mps_field[relocation_source] = tuple(
+            float(value)
+            for value in boundary.velocity_dirichlet_mps_field[
+                second_direct_source
+            ]
+        )
+        boundary.pressure_neumann_normal_field[relocation_source] = tuple(
+            float(value)
+            for value in boundary.pressure_neumann_normal_field[
+                second_direct_source
+            ]
+        )
+        search.node_boundary_point_m[relocation_source] = tuple(
+            float(value)
+            for value in search.node_boundary_point_m[second_direct_source]
+        )
+        search.node_interior_fluid_point_m[relocation_source] = tuple(
+            float(value)
+            for value in search.node_interior_fluid_point_m[second_direct_source]
+        )
+        search.nearest_marker[relocation_source] = int(
+            search.nearest_marker[second_direct_source]
+        )
+        search.node_projection_marker_indices[relocation_source] = tuple(
+            int(value)
+            for value in search.node_projection_marker_indices[
+                second_direct_source
+            ]
+        )
+        search.node_projection_marker_weights[relocation_source] = tuple(
+            float(value)
+            for value in search.node_projection_marker_weights[
+                second_direct_source
+            ]
+        )
+        self.assertEqual(
+            int(markers.region_id[search.nearest_marker[relocation_source]]),
+            202,
+        )
+        for field in (
+            boundary.velocity_dirichlet_mps_field,
+            boundary.pressure_neumann_normal_field,
+            search.node_boundary_point_m,
+            search.node_interior_fluid_point_m,
+            search.node_projection_marker_indices,
+            search.node_projection_marker_weights,
+        ):
+            self.assertEqual(
+                tuple(field[relocation_source]),
+                tuple(field[second_direct_source]),
+            )
+        self.assertEqual(
+            int(search.nearest_marker[relocation_source]),
+            int(search.nearest_marker[second_direct_source]),
+        )
+
+        self.fluid.velocity.fill((0.0, 1.0, 0.0))
+        materialize_method_name = (
+            "_materialize_canonical_velocity_dirichlet_relocation_winners_kernel"
+        )
+        validate_method_name = (
+            "_validate_canonical_velocity_dirichlet_target_conflict_precommit"
+        )
+        original_materialize = getattr(boundary, materialize_method_name)
+        original_validate = getattr(boundary, validate_method_name)
+        observed_claim_count = -1
+
+        def materialize_then_publish_third_author(
+            *args: object,
+            **kwargs: object,
+        ) -> None:
+            original_materialize(*args, **kwargs)
+            boundary.velocity_dirichlet_relocation_shadow_source_row[
+                relocation_slot
+            ] = relocation_source
+            boundary.velocity_dirichlet_relocation_shadow_storage_base_row[
+                relocation_slot
+            ] = relocation_slot
+            boundary.velocity_dirichlet_relocation_shadow_sample_point_m[
+                relocation_slot
+            ] = tuple(
+                float(value)
+                for value in search.node_interior_fluid_point_m[
+                    second_direct_source
+                ]
+            )
+            boundary.velocity_dirichlet_relocation_shadow_sample_velocity_mps[
+                relocation_slot
+            ] = (0.0, 1.0, 0.0)
+            boundary.velocity_dirichlet_relocation_shadow_reconstruction_alpha[
+                relocation_slot
+            ] = 0.5
+            # Publish only after the complete third-author payload.
+            boundary.velocity_dirichlet_relocation_shadow_claim_valid[
+                relocation_slot
+            ] = 1
+
+        def capture_claim_count_then_validate() -> None:
+            nonlocal observed_claim_count
+            observed_claim_count = int(
+                boundary.velocity_dirichlet_component_face_claim_count[
+                    relocation_slot
+                ][component_axis]
+            )
+            original_validate()
+
+        ledger_before = self._canonical_ledger_bytes()
+        self._assert_component_is_neutral(relocation_slot, component_axis)
+        boundary.__dict__[materialize_method_name] = (
+            materialize_then_publish_third_author
+        )
+        boundary.__dict__[validate_method_name] = capture_claim_count_then_validate
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"conflicting canonical component-face claims \(target\): count=3",
+            ) as raised:
+                self._assemble_component_face_ledger(
+                    interpolate_interior_velocity=True,
+                    use_marker_geometry=True,
+                    use_segment_fixture=True,
+                    surface_projection_inactive_axis=0,
+                )
+        finally:
+            boundary.__dict__.pop(materialize_method_name, None)
+            boundary.__dict__.pop(validate_method_name, None)
+
+        ny = int(self._GRID_NODES[1])
+        nz = int(self._GRID_NODES[2])
+        expected_author_linear_keys = tuple(
+            (source[0] * ny + source[1]) * nz + source[2]
+            for source in (
+                first_direct_source,
+                second_direct_source,
+                relocation_source,
+            )
+        )
+        failure_message = str(raised.exception)
+        self.assertEqual(observed_claim_count, 3)
+        self.assertIn(
+            "'conflict_source': 'prepare_author_cardinality'",
+            failure_message,
+        )
+        self.assertIn(f"'component_face': {relocation_slot}", failure_message)
+        self.assertIn("'component_axis': 1", failure_message)
+        self.assertIn("'conflict_path_code': 1", failure_message)
+        self.assertIn("'claim_count': 3", failure_message)
+        self.assertIn(
+            f"'author_linear_keys': {expected_author_linear_keys}",
+            failure_message,
+        )
+        self.assertIn("'author_witness_linear_keys':", failure_message)
+        for source_row in (
+            first_direct_source,
+            second_direct_source,
+            relocation_source,
+        ):
+            self.assertIn(f"'source_row': {source_row}", failure_message)
+        self.assertEqual(failure_message.count("'source_row':"), 3)
+        # One relocation-shadow row publishes the complete no-slip vector, so
+        # the global report contains the y cardinality failure plus independent
+        # x/z pair collisions.  The selected witness above is the finite-segment
+        # y component under test; its cardinality failure is still counted once.
+        self.assertEqual(
+            int(
+                boundary.report_velocity_dirichlet_component_face_conflict_count[
+                    None
+                ]
+            ),
+            3,
+        )
+        self.assertEqual(
+            int(
+                boundary.report_velocity_dirichlet_component_face_target_conflict_count[
+                    None
+                ]
+            ),
+            3,
+        )
+        self.assertEqual(
+            int(
+                boundary.report_velocity_dirichlet_component_face_region_conflict_count[
+                    None
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(
+            int(
+                boundary.report_velocity_dirichlet_component_face_alpha_conflict_count[
+                    None
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(
+            int(
+                boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                    None
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(
+            self._canonical_ledger_bytes(),
+            ledger_before,
+            msg="three-author cardinality failure partially committed the ledger",
+        )
+        self._assert_component_is_neutral(relocation_slot, component_axis)
+        self._assert_component_face_relocation_transient_neutral(
+            use_segment_fixture=True
+        )
+
+    def _assert_distinct_anchor_same_segment_projection_fails_closed(
+        self,
+        *,
+        expected_conflict_source: str,
+    ) -> None:
+        target = (0, 1, 1)
+        component_axis = 1
+        boundary = self.segment_component_face_boundary
+        ledger_before = self._canonical_ledger_bytes()
+        self._assert_component_is_neutral(target, component_axis)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"conflicting canonical component-face claims \(target\): count=1",
+        ) as raised:
+            self._assemble_component_face_ledger(
+                interpolate_interior_velocity=True,
+                use_marker_geometry=True,
+                use_segment_fixture=True,
+                surface_projection_inactive_axis=0,
+            )
+
+        self.assertIn(
+            f"'conflict_source': '{expected_conflict_source}'",
+            str(raised.exception),
+        )
+        self.assertEqual(
+            int(
+                boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                    None
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(
+            self._canonical_ledger_bytes(),
+            ledger_before,
+            msg="rejected distinct-anchor pair partially committed the ledger",
+        )
+        self._assert_component_is_neutral(target, component_axis)
+
+    def test_interpolation_rejects_distinct_anchor_transverse_probe_rays_atomically(
+        self,
+    ) -> None:
+        """A probe ray with tangential residue cannot authorize the shared face."""
+
+        self._load_distinct_anchor_same_segment_face_projection_fixture()
+        boundary = self.segment_component_face_boundary
+        search = self.segment_component_face_search
+        source_rows = ((0, 0, 1), (0, 1, 1))
+        for source_row in source_rows:
+            boundary_point = np.asarray(
+                search.node_boundary_point_m[source_row],
+                dtype=np.float64,
+            )
+            search.node_interior_fluid_point_m[source_row] = tuple(
+                boundary_point + np.asarray((0.0, 0.25, 0.025))
+            )
+            probe_ray = (
+                np.asarray(
+                    search.node_interior_fluid_point_m[source_row],
+                    dtype=np.float64,
+                )
+                - boundary_point
+            )
+            normal = np.asarray(
+                boundary.pressure_neumann_normal_field[source_row],
+                dtype=np.float64,
+            )
+            normal /= np.linalg.norm(normal)
+            normal_progress = float(np.dot(probe_ray, normal))
+            tangential_residual = probe_ray - normal_progress * normal
+            self.assertGreater(normal_progress, 0.0)
+            self.assertGreater(
+                float(np.linalg.norm(tangential_residual)),
+                1.0e-3,
+            )
+            self.assertLess(
+                normal_progress / float(np.linalg.norm(probe_ray)),
+                0.999999,
+            )
+
+        self.fluid.velocity.fill((0.0, 1.0, 0.0))
+        self._assert_distinct_anchor_same_segment_projection_fails_closed(
+            expected_conflict_source="segment_reconstruction_invalid",
+        )
+
+    def test_interpolation_requires_distinct_anchor_strict_author_bracket_atomically(
+        self,
+    ) -> None:
+        """The canonical face parameter cannot equal an author endpoint."""
+
+        self._load_distinct_anchor_same_segment_face_projection_fixture()
+        boundary = self.segment_component_face_boundary
+        search = self.segment_component_face_search
+        markers = self.segment_component_face_markers
+        first_source = (0, 0, 1)
+        source_rows = (first_source, (0, 1, 1))
+        target = (0, 1, 1)
+        search.node_boundary_point_m[first_source] = (0.125, 0.125, 0.375)
+        search.node_interior_fluid_point_m[first_source] = (0.125, 0.375, 0.375)
+        search.node_projection_marker_weights[first_source] = (0.5, 0.5, 0.0)
+        boundary.velocity_dirichlet_mps_field[first_source] = (0.0, 1.0, 0.0)
+
+        marker_positions = np.asarray(
+            [markers.x_gamma_m[index] for index in (0, 1)],
+            dtype=np.float64,
+        )
+        face_center = np.asarray(
+            (
+                float(self.fluid.cell_center_x_m[target[0]]),
+                float(self.fluid.cell_face_y_m[target[1]]),
+                float(self.fluid.cell_center_z_m[target[2]]),
+            ),
+            dtype=np.float64,
+        )
+        active_axes = np.asarray((False, True, True))
+        segment = marker_positions[1, active_axes] - marker_positions[0, active_axes]
+        face_parameter = float(
+            np.dot(
+                face_center[active_axes] - marker_positions[0, active_axes],
+                segment,
+            )
+            / np.dot(segment, segment)
+        )
+        author_parameters = tuple(
+            float(search.node_projection_marker_weights[source_row][1])
+            for source_row in source_rows
+        )
+        self.assertAlmostEqual(face_parameter, min(author_parameters), places=7)
+        self.assertFalse(
+            min(author_parameters) < face_parameter < max(author_parameters)
+        )
+        self.assertGreater(
+            float(
+                np.linalg.norm(
+                    np.asarray(
+                        search.node_boundary_point_m[source_rows[1]],
+                        dtype=np.float64,
+                    )
+                    - np.asarray(
+                        search.node_boundary_point_m[first_source],
+                        dtype=np.float64,
+                    )
+                )
+            ),
+            1.0e-3,
+        )
+
+        self.fluid.velocity.fill((0.0, 1.0, 0.0))
+        self._assert_distinct_anchor_same_segment_projection_fails_closed(
+            expected_conflict_source="prepare_pair_arbitration",
+        )
+
+    def test_interpolation_keeps_zero_progress_coincident_pair_fail_closed(
+        self,
+    ) -> None:
+        """A surface already on the shared MAC face grants no probe progress."""
+
+        self._load_coincident_boundary_same_segment_probe_pair_fixture()
+        search = self.segment_component_face_search
+        markers = self.segment_component_face_markers
+        source_rows = ((0, 0, 1), (0, 1, 1))
+        for source_row in source_rows:
+            boundary_point = search.node_boundary_point_m[source_row]
+            boundary_point.y = 0.25
+            search.node_boundary_point_m[source_row] = boundary_point
+        for marker_index in (0, 1):
+            marker_position = markers.x_gamma_m[marker_index]
+            marker_position.y = 0.25
+            markers.x_gamma_m[marker_index] = marker_position
+
+        velocity = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
+        y_faces_m = self.fluid.cell_face_y_m.to_numpy()
+        velocity[..., 1] = 0.25 + 4.0 * y_faces_m[
+            : self._GRID_NODES[1]
+        ][np.newaxis, :, np.newaxis]
+        self.fluid.velocity.from_numpy(velocity)
+        ledger_before = self._canonical_ledger_bytes()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"conflicting canonical component-face claims \(target\): count=1",
+        ):
+            self._assemble_component_face_ledger(
+                interpolate_interior_velocity=True,
+                use_marker_geometry=True,
+                use_segment_fixture=True,
+                surface_projection_inactive_axis=0,
+            )
+
+        self.assertEqual(
+            int(
+                self.segment_component_face_boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                    None
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+
+    def test_interpolation_keeps_degenerate_same_segment_pair_fail_closed(
+        self,
+    ) -> None:
+        self._load_interpolated_continuous_segment_pair_fixture()
+        search = self.segment_component_face_search
+        second_source = (0, 1, 1)
+        search.node_boundary_point_m[second_source] = (0.125, 0.25, 0.50)
+        search.node_interior_fluid_point_m[second_source] = (0.125, 0.25, 0.25)
+        search.node_projection_marker_weights[second_source] = (1.0, 0.0, 0.0)
+        velocity = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
+        z_centers_m = self.fluid.cell_center_z_m.to_numpy()
+        velocity[..., 1] = 12.0 * z_centers_m[: self._GRID_NODES[2]][
+            np.newaxis,
+            np.newaxis,
+            :,
+        ]
+        self.fluid.velocity.from_numpy(velocity)
+        ledger_before = self._canonical_ledger_bytes()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"conflicting canonical component-face claims \(target\): count=1",
+        ):
+            self._assemble_component_face_ledger(
+                interpolate_interior_velocity=True,
+                use_marker_geometry=True,
+                use_segment_fixture=True,
+                surface_projection_inactive_axis=0,
+            )
+
+        self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+
+    def test_interpolation_keeps_one_sided_same_segment_pair_fail_closed(
+        self,
+    ) -> None:
+        self._load_interpolated_continuous_segment_pair_fixture()
+        search = self.segment_component_face_search
+        first_source = (0, 0, 1)
+        search.node_boundary_point_m[first_source] = (0.125, 0.30, 0.50)
+        search.node_interior_fluid_point_m[first_source] = (0.125, 0.30, 0.125)
+        search.node_projection_marker_weights[first_source] = (0.8, 0.2, 0.0)
+        velocity = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
+        y_faces_m = self.fluid.cell_face_y_m.to_numpy()
+        velocity[..., 1] = (
+            10.0
+            * y_faces_m[: self._GRID_NODES[1]][np.newaxis, :, np.newaxis]
+        )
+        self.fluid.velocity.from_numpy(velocity)
+        ledger_before = self._canonical_ledger_bytes()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"conflicting canonical component-face claims \(target\): count=1",
+        ):
+            self._assemble_component_face_ledger(
+                interpolate_interior_velocity=True,
+                use_marker_geometry=True,
+                use_segment_fixture=True,
+                surface_projection_inactive_axis=0,
+            )
+
+        self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
 
     def test_interpolation_samples_only_legal_fluid_fluid_component_faces(
         self,

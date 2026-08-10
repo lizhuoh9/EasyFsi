@@ -452,6 +452,34 @@ def _validate_run_contracts(
     config = our_manifest.get("config")
     if not isinstance(config, Mapping):
         raise NativeFineComparisonError("our run manifest has no config mapping")
+    if config.get("flow_hibm_sharp_interpolate_velocity_rows") is not True:
+        raise NativeFineComparisonError(
+            "native-fine comparison requires "
+            "flow_hibm_sharp_interpolate_velocity_rows=true; disabling the "
+            "reconstructed row velocity creates a nonphysical hard no-slip halo"
+        )
+    probe_distance_xyz = config.get(
+        "flow_hibm_sharp_interior_probe_distance_xyz_m"
+    )
+    if not isinstance(probe_distance_xyz, (list, tuple)) or len(
+        probe_distance_xyz
+    ) != 3:
+        raise NativeFineComparisonError(
+            "native-fine comparison requires a three-axis "
+            "flow_hibm_sharp_interior_probe_distance_xyz_m"
+        )
+    for axis, value in enumerate(probe_distance_xyz):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise NativeFineComparisonError(
+                "flow_hibm_sharp_interior_probe_distance_xyz_m must contain "
+                f"finite positive numbers; axis={axis}, value={value!r}"
+            )
+        distance = float(value)
+        if not math.isfinite(distance) or distance <= 0.0:
+            raise NativeFineComparisonError(
+                "flow_hibm_sharp_interior_probe_distance_xyz_m must contain "
+                f"finite positive numbers; axis={axis}, value={value!r}"
+            )
     if expected_steps == DEFAULT_EXPECTED_STEPS:
         _validate_final_run_identity(our_manifest, our_summary)
     dt_s = _finite_float(config.get("dt_s", DEFAULT_DT_S), "our run dt")

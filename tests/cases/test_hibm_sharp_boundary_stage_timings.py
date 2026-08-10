@@ -134,6 +134,23 @@ class HibmSharpBoundaryStageTimingTests(unittest.TestCase):
             0.125,
         )
 
+    def test_measurement_excludes_nested_observer_wall_time(self):
+        clock_values = iter((10.0, 10.5))
+        excluded_values = iter((2.0, 2.2))
+        stage_times = runner._empty_hibm_sharp_boundary_stage_wall_times()
+
+        result = runner._measure_hibm_sharp_boundary_stage(
+            stage_times,
+            "canonical_ledger_build",
+            lambda: "result",
+            clock=lambda: next(clock_values),
+            synchronize=lambda: None,
+            excluded_wall_time=lambda: next(excluded_values),
+        )
+
+        self.assertEqual(result, "result")
+        self.assertAlmostEqual(stage_times["canonical_ledger_build"], 0.3)
+
     def test_invalid_clock_samples_cannot_publish_negative_or_nonfinite_values(self):
         stage_times = runner._empty_hibm_sharp_boundary_stage_wall_times()
 

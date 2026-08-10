@@ -104,6 +104,20 @@ class HibmMarkerPressureNullspaceDeviceOnlyApiTests(unittest.TestCase):
         self.assertIn("dependent_constraint_count", report_fields)
         self.assertIn("unactuated_constraint_count", report_fields)
 
+    def test_schur_shared_support_requires_nonzero_algebraic_weights(self) -> None:
+        source = inspect.getsource(
+            HibmMpmMarkerMacConstraintOperator._assemble_pressure_nullspace_schur_kernel
+        )
+        self.assertIn(
+            "self._stencil_weight[first_row, first_support] != 0.0",
+            source,
+        )
+        self.assertIn(
+            "self._stencil_weight[second_row, second_support] != 0.0",
+            source,
+        )
+        self.assertIn("first_inverse_mass != second_inverse_mass", source)
+
 
 class HibmMarkerPressureNullspaceOperatorTests(unittest.TestCase):
     PRESSURE_ACTUATION_GENERATION = 53
@@ -643,6 +657,55 @@ class HibmMarkerPressureNullspaceOperatorTests(unittest.TestCase):
             2.0e-12,
         )
         self.assertTrue(self.operator._pressure_nullspace_poisoned)
+
+    def test_zero_weight_slot_is_not_a_shared_pressure_algebraic_support(
+        self,
+    ) -> None:
+        """A geometric slot with zero interpolation weight is not in J."""
+
+        fixture = self.fixture()
+        operator = HibmMpmMarkerMacConstraintOperator(
+            grid_nodes=fixture.GRID_NODES,
+            marker_capacity=2,
+        )
+        # These are the same x-component slot at grid index (2, 2, 2) for
+        # markers at (0.25, 0.375, 0.375) and (0.26, 0.385, 0.385).  The first
+        # lies exactly on its MAC coordinate and therefore has zero weight in
+        # support 7; the offset marker has positive weight 0.04**3 there.
+        operator._row_active.fill(0)
+        operator._stencil_index.fill((-1, -1, -1))
+        operator._stencil_weight.fill(0.0)
+        operator._stencil_free.fill(0)
+        operator._support_hard_mask_snapshot.fill(0)
+        operator._support_external_mask_snapshot.fill(0)
+        operator._row_active[0] = 1
+        operator._row_active[3] = 1
+        operator._stencil_index[0, 7] = (2, 2, 2)
+        operator._stencil_index[3, 7] = (2, 2, 2)
+        operator._stencil_weight[0, 7] = 0.0
+        operator._stencil_weight[3, 7] = 0.04**3
+        operator._stencil_free[0, 7] = 1
+        operator._stencil_free[3, 7] = 1
+        operator._prepared = True
+        operator._fluid = fixture.fluid
+        operator._component_face_valid_mask = fixture.component_face_valid_mask
+        operator._prepared_topology_generation = fixture.TOPOLOGY_GENERATION
+        operator._prepared_component_face_valid_mask_generation = (
+            fixture.VALID_MASK_GENERATION
+        )
+        mobility = ti.Vector.field(3, dtype=ti.f64, shape=fixture.GRID_NODES)
+        mobility.fill((1.0, 1.0, 1.0))
+
+        operator.prepare_pressure_constraint_nullspace(
+            pressure_actuation_weight=mobility,
+            component_face_valid_mask=fixture.component_face_valid_mask,
+        )
+
+        report = operator.pressure_nullspace_report()
+        self.assertTrue(report.prepared)
+        self.assertEqual(report.active_constraint_count, 2)
+        self.assertEqual(report.independent_constraint_count, 1)
+        self.assertEqual(report.unactuated_constraint_count, 1)
 
     def test_duplicate_marker_rows_use_the_same_independent_constraint_space(
         self,

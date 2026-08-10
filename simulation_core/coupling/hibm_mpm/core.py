@@ -34,11 +34,6 @@ from .constants import (
     STRESS_INVALID_REASON_TWO_SIDED_PRESSURE_MISSING,
     STRESS_INVALID_REASON_VISCOUS_GRADIENT_MISSING,
 )
-from .modes import (
-    FSI_COUPLING_MODE_CHOICES,
-    FSI_COUPLING_MODE_HIBM_MPM_SHARP,
-    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
-)
 from .reports import (
     HibmMpmExternalForceClearReport,
     HibmMpmFluidStressSampleReport,
@@ -82,6 +77,7 @@ HIBM_COMPONENT_FACE_TARGET_CONFLICT_SOURCE_NAMES = (
 )
 HIBM_COMPONENT_FACE_SEGMENT_MODE_PROJECTION_ONLY_SEAM = 1
 HIBM_COMPONENT_FACE_SEGMENT_MODE_EXACT_AUTHOR_COHORT = 2
+HIBM_COMPONENT_FACE_SEGMENT_MODE_FACE_FIRST_FINITE_SEGMENT_PAIR = 4
 
 HIBM_NO_SLIP_SAMPLE_INVALID_REASON_NONE = 0
 HIBM_NO_SLIP_SAMPLE_INVALID_REASON_OUTSIDE_HALF_OPEN_DOMAIN = 1
@@ -2315,48 +2311,6 @@ class HibmMpmSurfaceMarkers:
         return value, fluid_weight
 
     @ti.func
-    def _axis_face_grid_coordinate_device(
-        self,
-        value: ti.f32,
-        faces: ti.template(),
-        count: ti.i32,
-    ):
-        """Map a physical coordinate onto stored backward MAC faces.
-
-        A component field with ``count`` storage rows uses ``faces[0:count]``;
-        ``faces[count]`` is the unstored forward domain face.  Searching the
-        actual face locations keeps the mapping valid on graded grids.
-        """
-
-        coordinate = 0.0
-        if value <= faces[0]:
-            spacing = ti.max(faces[1] - faces[0], 1.0e-18)
-            coordinate = (value - faces[0]) / spacing
-        elif value >= faces[count - 1]:
-            spacing = ti.max(
-                faces[count - 1] - faces[count - 2],
-                1.0e-18,
-            )
-            coordinate = ti.cast(count - 1, ti.f32) + (
-                value - faces[count - 1]
-            ) / spacing
-        else:
-            lower = 0
-            upper = count - 1
-            while upper - lower > 1:
-                middle = (lower + upper) // 2
-                if value >= faces[middle]:
-                    lower = middle
-                else:
-                    upper = middle
-            upper = ti.min(lower + 1, count - 1)
-            spacing = ti.max(faces[upper] - faces[lower], 1.0e-18)
-            coordinate = ti.cast(lower, ti.f32) + (
-                value - faces[lower]
-            ) / spacing
-        return coordinate
-
-    @ti.func
     def _axis_cell_index_from_faces_device(
         self,
         value: ti.f32,
@@ -2746,6 +2700,73 @@ class HibmMpmSurfaceMarkers:
                 cell_center_z_m,
             )
         return gradient, gradient_valid
+
+    @ti.func
+    def _probe_path_crossed_obstacle_sampling_view(
+        self,
+        obstacle_field: ti.template(),
+        sampling_obstacle_field: ti.template(),
+        use_sampling_obstacle: ti.i32,
+        marker_grid_coordinate,
+        rung_grid_coordinate,
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+    ):
+        """Return whether a marker-to-rung walk re-enters solid after fluid.
+
+        The marker may start inside its own connected discrete obstacle band.
+        That initial band is left without declaring a crossing; after the walk
+        first enters fluid, any later obstacle is a foreign/base barrier and
+        the rung must not tunnel through it.  The same effective obstacle view
+        used by pressure/gradient sampling is authoritative for every path
+        cell, so converted sealed water is fluid when the sampling view is on.
+        Half-cell L-infinity spacing prevents a one-cell barrier from being
+        skipped on an oblique walk.
+        """
+        delta = rung_grid_coordinate - marker_grid_coordinate
+        max_cell_delta = ti.max(
+            ti.abs(delta.x),
+            ti.max(ti.abs(delta.y), ti.abs(delta.z)),
+        )
+        path_step_count = ti.max(
+            ti.cast(ti.ceil(2.0 * max_cell_delta), ti.i32),
+            1,
+        )
+        entered_fluid = 0
+        crossed_obstacle = 0
+        path_step = 0
+        while path_step <= path_step_count and crossed_obstacle == 0:
+            alpha = ti.cast(path_step, ti.f32) / ti.cast(
+                path_step_count,
+                ti.f32,
+            )
+            coordinate = marker_grid_coordinate + delta * alpha
+            i = ti.min(
+                ti.max(ti.floor(coordinate.x + 0.5, ti.i32), 0),
+                nx - 1,
+            )
+            j = ti.min(
+                ti.max(ti.floor(coordinate.y + 0.5, ti.i32), 0),
+                ny - 1,
+            )
+            k = ti.min(
+                ti.max(ti.floor(coordinate.z + 0.5, ti.i32), 0),
+                nz - 1,
+            )
+            cell_is_obstacle = 0
+            if use_sampling_obstacle != 0:
+                if sampling_obstacle_field[i, j, k] != 0:
+                    cell_is_obstacle = 1
+            else:
+                if obstacle_field[i, j, k] != 0:
+                    cell_is_obstacle = 1
+            if cell_is_obstacle == 0:
+                entered_fluid = 1
+            elif entered_fluid != 0:
+                crossed_obstacle = 1
+            path_step += 1
+        return crossed_obstacle
 
     @ti.kernel
     def _sample_fluid_stress_to_marker_tractions_kernel(
@@ -3360,38 +3381,26 @@ class HibmMpmSurfaceMarkers:
                 # same
                 # 5-candidate ladder spacing, the same sampling view and
                 # the S2-A4 decoupled acceptance the closure extension
-                # uses. H1-type crossing guard, applied per side: an
-                # extension rung whose nearest cell is a projection-view
-                # obstacle has crossed foreign solid - water beyond it
-                # belongs to the opposite side / another compartment and
-                # is never accepted (the closure extension's
-                # outside_found gate carries the same do-not-tunnel
-                # semantics; here both sides walk, so the guard is per
-                # side). The marker's own sub-envelope feature (<= 3.0x,
-                # e.g. the fin's own thickness) can never set the flag:
-                # only extension rungs are tested. Both sides share one
+                # uses. The H1 crossing guard is applied per side over the
+                # complete discrete marker-to-rung path in the effective
+                # sampling view. The walk may leave its initial connected
+                # self-obstacle band; after it first enters fluid, re-entering
+                # base/foreign solid rejects the rung. Thus sampling-view
+                # sealed water remains fluid without permitting tunneling to
+                # another compartment. Both sides share one
                 # fused runtime rung loop (S2-A5 single-copy style: the
                 # trilinear / gradient sampling bodies are inlined once,
                 # not once per side; even rung indices walk +n, odd walk
                 # -n, preserving the standard walk's outside-then-inside
                 # serial order and its carried-flag determinism).
                 extended_probe_max_multiplier = two_sided_probe_max_multiplier
-                if (
-                    one_sided_region_marker == 1
-                    and one_sided_probe_max_multiplier
-                    > extended_probe_max_multiplier
-                ):
+                if one_sided_region_marker == 1:
                     extended_probe_max_multiplier = one_sided_probe_max_multiplier
                 if (
                     closure_region_marker == 0
                     and (inside_pressure_found == 0 or outside_pressure_found == 0)
                     and extended_probe_max_multiplier > 3.0
                 ):
-                    marker_near_is_obstacle = 0
-                    if obstacle_field[i_near, j_near, k_near] != 0:
-                        marker_near_is_obstacle = 1
-                    outside_crossed_solid = 0
-                    inside_crossed_solid = 0
                     for extension_index in range(10):
                         rung_distance = probe_distance_m * (
                             3.0
@@ -3401,15 +3410,13 @@ class HibmMpmSurfaceMarkers:
                         )
                         side_is_inside = extension_index % 2
                         side_sign = 1.0
-                        side_crossed = outside_crossed_solid
                         side_pressure_found = outside_pressure_found
                         side_gradient_found = outside_gradient_found
                         if side_is_inside == 1:
                             side_sign = -1.0
-                            side_crossed = inside_crossed_solid
                             side_pressure_found = inside_pressure_found
                             side_gradient_found = inside_gradient_found
-                        if side_crossed == 0 and (
+                        if (
                             side_pressure_found == 0 or side_gradient_found == 0
                         ):
                             extension_position = probe_origin + normal * (
@@ -3448,20 +3455,17 @@ class HibmMpmSurfaceMarkers:
                                 ),
                                 nz - 1,
                             )
-                            if (
-                                obstacle_field[
-                                    near_extension_i,
-                                    near_extension_j,
-                                    near_extension_k,
-                                ]
-                                != 0
-                            ):
-                                if marker_near_is_obstacle == 0:
-                                    if side_is_inside == 1:
-                                        inside_crossed_solid = 1
-                                    else:
-                                        outside_crossed_solid = 1
-                            else:
+                            side_crossed = self._probe_path_crossed_obstacle_sampling_view(
+                                obstacle_field,
+                                sampling_obstacle_field,
+                                use_sampling_obstacle,
+                                grid_coordinate,
+                                extension_coordinate,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            if side_crossed == 0:
                                 sample_pressure, sample_weight = self._sample_pressure_trilinear_sampling_view(
                                     pressure_field,
                                     obstacle_field,
@@ -5460,20 +5464,11 @@ class HibmMpmSurfaceMarkers:
                         or mode_filter == 6
                     ):
                         extended_probe_max_multiplier = two_sided_probe_max_multiplier
-                        if (
-                            ti.static(mode_filter == 5 or mode_filter == 6)
-                            and one_sided_probe_max_multiplier
-                            > extended_probe_max_multiplier
-                        ):
+                        if ti.static(mode_filter == 5 or mode_filter == 6):
                             extended_probe_max_multiplier = (
                                 one_sided_probe_max_multiplier
                             )
                         if extended_probe_max_multiplier > 3.0:
-                            marker_near_is_obstacle = 0
-                            if obstacle_field[i_near, j_near, k_near] != 0:
-                                marker_near_is_obstacle = 1
-                            outside_crossed_solid = 0
-                            inside_crossed_solid = 0
                             for extension_index in range(10):
                                 rung_distance = probe_distance_m * (
                                     3.0
@@ -5483,13 +5478,11 @@ class HibmMpmSurfaceMarkers:
                                 )
                                 side_is_inside = extension_index % 2
                                 side_sign = 1.0
-                                side_crossed = outside_crossed_solid
                                 side_found = outside_gradient_found
                                 if side_is_inside == 1:
                                     side_sign = -1.0
-                                    side_crossed = inside_crossed_solid
                                     side_found = inside_gradient_found
-                                if side_crossed == 0 and side_found == 0:
+                                if side_found == 0:
                                     extension_position = position + normal * (
                                         side_sign * rung_distance
                                     )
@@ -5507,43 +5500,17 @@ class HibmMpmSurfaceMarkers:
                                             nz,
                                         )
                                     )
-                                    near_i = ti.min(
-                                        ti.max(
-                                            ti.floor(
-                                                extension_coordinate.x + 0.5,
-                                                ti.i32,
-                                            ),
-                                            0,
-                                        ),
-                                        nx - 1,
+                                    side_crossed = self._probe_path_crossed_obstacle_sampling_view(
+                                        obstacle_field,
+                                        sampling_obstacle_field,
+                                        use_sampling_obstacle,
+                                        grid_coordinate,
+                                        extension_coordinate,
+                                        nx,
+                                        ny,
+                                        nz,
                                     )
-                                    near_j = ti.min(
-                                        ti.max(
-                                            ti.floor(
-                                                extension_coordinate.y + 0.5,
-                                                ti.i32,
-                                            ),
-                                            0,
-                                        ),
-                                        ny - 1,
-                                    )
-                                    near_k = ti.min(
-                                        ti.max(
-                                            ti.floor(
-                                                extension_coordinate.z + 0.5,
-                                                ti.i32,
-                                            ),
-                                            0,
-                                        ),
-                                        nz - 1,
-                                    )
-                                    if obstacle_field[near_i, near_j, near_k] != 0:
-                                        if marker_near_is_obstacle == 0:
-                                            if side_is_inside == 1:
-                                                inside_crossed_solid = 1
-                                            else:
-                                                outside_crossed_solid = 1
-                                    else:
+                                    if side_crossed == 0:
                                         sample_gradient, sample_gradient_valid = (
                                             self._sample_velocity_gradient_sampling_view(
                                                 velocity_field,
@@ -9558,6 +9525,10 @@ class HibmMpmIbNodeSearch:
         )
         self.marker_capacity = int(marker_capacity)
         self._last_search_inactive_axis = -1
+        self._last_search_support_radius_xyz_m: tuple[float, float, float] | None = (
+            None
+        )
+        self._last_search_support_anisotropic: bool | None = None
         self._uniform_cell_width_x_m = ti.field(dtype=ti.f32, shape=nodes[0])
         self._uniform_cell_width_y_m = ti.field(dtype=ti.f32, shape=nodes[1])
         self._uniform_cell_width_z_m = ti.field(dtype=ti.f32, shape=nodes[2])
@@ -9828,14 +9799,17 @@ class HibmMpmIbNodeSearch:
         return accepted
 
     @ti.func
-    def _interpolated_segment_normal(
+    def _segment_search_normal(
         self,
+        marker_positions_m,
         marker_normals,
         ia,
         ib,
         fraction,
         inactive_axis,
     ):
+        """Return the normal owned by the same discrete segment geometry."""
+
         normal_a, normal_a_valid = self._active_search_normal(
             marker_normals[ia],
             inactive_axis,
@@ -9855,6 +9829,33 @@ class HibmMpmIbNodeSearch:
         )
         if normal_norm > 1.0e-12:
             normal = normal / normal_norm
+        if valid != 0 and inactive_axis >= 0:
+            chord = marker_positions_m[ib] - marker_positions_m[ia]
+            geometric_normal = ti.Vector([0.0, 0.0, 0.0])
+            if inactive_axis == 0:
+                geometric_normal = ti.Vector([0.0, -chord.z, chord.y])
+            elif inactive_axis == 1:
+                geometric_normal = ti.Vector([chord.z, 0.0, -chord.x])
+            elif inactive_axis == 2:
+                geometric_normal = ti.Vector([-chord.y, chord.x, 0.0])
+            geometric_normal_norm = geometric_normal.norm()
+            if geometric_normal_norm <= 1.0e-12:
+                valid = 0
+            else:
+                geometric_normal /= geometric_normal_norm
+                alignment_a = geometric_normal.dot(normal_a)
+                alignment_b = geometric_normal.dot(normal_b)
+                orientation_tolerance = 1.0e-6
+                if (
+                    ti.abs(alignment_a) <= orientation_tolerance
+                    or ti.abs(alignment_b) <= orientation_tolerance
+                    or alignment_a * alignment_b <= 0.0
+                ):
+                    valid = 0
+                else:
+                    if alignment_a + alignment_b < 0.0:
+                        geometric_normal = -geometric_normal
+                    normal = geometric_normal
         return normal, valid
 
     @ti.func
@@ -9965,12 +9966,21 @@ class HibmMpmIbNodeSearch:
                     search_inactive_axis,
                 )
                 normal_sum = active_normal_a + active_normal_b
+                _, segment_search_normal_valid = self._segment_search_normal(
+                    marker_positions_m,
+                    marker_normals,
+                    ia,
+                    ib,
+                    0.5,
+                    search_inactive_axis,
+                )
                 if (
                     finite_geometry == 0
                     or delta.dot(delta) <= 1.0e-30
                     or active_normal_a_valid == 0
                     or active_normal_b_valid == 0
                     or normal_sum.dot(normal_sum) <= 1.0e-12
+                    or segment_search_normal_valid == 0
                     or marker_region_ids[ia] < 0
                     or marker_region_ids[ia] != marker_region_ids[ib]
                 ):
@@ -10070,13 +10080,6 @@ class HibmMpmIbNodeSearch:
             nearest_normal = ti.Vector([0.0, 0.0, 1.0])
             nearest_projection_indices = ti.Vector([-1, -1, -1])
             nearest_projection_weights = ti.Vector([0.0, 0.0, 0.0])
-            nearest_external = -1
-            nearest_external_distance = 1.0e30
-            nearest_external_signed_distance = 0.0
-            nearest_external_boundary_point = ti.Vector([0.0, 0.0, 0.0])
-            nearest_external_normal = ti.Vector([0.0, 0.0, 1.0])
-            nearest_external_projection_indices = ti.Vector([-1, -1, -1])
-            nearest_external_projection_weights = ti.Vector([0.0, 0.0, 0.0])
             nearest_global = -1
             nearest_global_distance = 1.0e30
             nearest_global_signed_distance = 0.0
@@ -10084,8 +10087,6 @@ class HibmMpmIbNodeSearch:
             nearest_global_normal = ti.Vector([0.0, 0.0, 1.0])
             nearest_global_projection_indices = ti.Vector([-1, -1, -1])
             nearest_global_projection_weights = ti.Vector([0.0, 0.0, 0.0])
-            external_seen = 0
-            global_external_seen = 0
             if projection_triangle_count > 0:
                 for triangle_index in range(projection_triangle_count):
                     triangle = projection_triangle_indices[triangle_index]
@@ -10133,8 +10134,6 @@ class HibmMpmIbNodeSearch:
                             ic,
                         )
                         if classify_far_internal_nodes != 0:
-                            if signed_distance > sign_tolerance_m:
-                                global_external_seen = 1
                             if distance < nearest_global_distance:
                                 nearest_global_distance = distance
                                 nearest_global = marker
@@ -10151,20 +10150,6 @@ class HibmMpmIbNodeSearch:
                                 and ti.abs(offset.z) < search_radius_z_m
                             )
                         if accept_search:
-                            if signed_distance > sign_tolerance_m:
-                                external_seen = 1
-                                if distance < nearest_external_distance:
-                                    nearest_external_distance = distance
-                                    nearest_external = marker
-                                    nearest_external_signed_distance = signed_distance
-                                    nearest_external_boundary_point = boundary_point
-                                    nearest_external_normal = normal
-                                    nearest_external_projection_indices = (
-                                        projection_indices
-                                    )
-                                    nearest_external_projection_weights = (
-                                        projection_weights
-                                    )
                             if distance < nearest_distance:
                                 nearest_distance = distance
                                 nearest = marker
@@ -10202,7 +10187,8 @@ class HibmMpmIbNodeSearch:
                         spacing_z_m,
                     ) == 0:
                         valid = 0
-                    normal, normal_valid = self._interpolated_segment_normal(
+                    normal, normal_valid = self._segment_search_normal(
+                        marker_positions_m,
                         marker_normals,
                         ia,
                         ib,
@@ -10229,8 +10215,6 @@ class HibmMpmIbNodeSearch:
                         if segment_fraction > 0.5:
                             marker = ib
                         if classify_far_internal_nodes != 0:
-                            if signed_distance > sign_tolerance_m:
-                                global_external_seen = 1
                             if distance < nearest_global_distance:
                                 nearest_global_distance = distance
                                 nearest_global = marker
@@ -10247,20 +10231,6 @@ class HibmMpmIbNodeSearch:
                                 and ti.abs(offset.z) < search_radius_z_m
                             )
                         if accept_search:
-                            if signed_distance > sign_tolerance_m:
-                                external_seen = 1
-                                if distance < nearest_external_distance:
-                                    nearest_external_distance = distance
-                                    nearest_external = marker
-                                    nearest_external_signed_distance = signed_distance
-                                    nearest_external_boundary_point = boundary_point
-                                    nearest_external_normal = normal
-                                    nearest_external_projection_indices = (
-                                        projection_indices
-                                    )
-                                    nearest_external_projection_weights = (
-                                        projection_weights
-                                    )
                             if distance < nearest_distance:
                                 nearest_distance = distance
                                 nearest = marker
@@ -10285,8 +10255,6 @@ class HibmMpmIbNodeSearch:
                     distance = offset.norm()
                     signed_distance = offset.dot(normal)
                     if classify_far_internal_nodes != 0:
-                        if signed_distance > sign_tolerance_m:
-                            global_external_seen = 1
                         if distance < nearest_global_distance:
                             nearest_global_distance = distance
                             nearest_global = marker
@@ -10307,20 +10275,6 @@ class HibmMpmIbNodeSearch:
                             and ti.abs(offset.z) < search_radius_z_m
                         )
                     if accept_search:
-                        if signed_distance > sign_tolerance_m:
-                            external_seen = 1
-                            if distance < nearest_external_distance:
-                                nearest_external_distance = distance
-                                nearest_external = marker
-                                nearest_external_signed_distance = signed_distance
-                                nearest_external_boundary_point = boundary_point
-                                nearest_external_normal = normal
-                                nearest_external_projection_indices = ti.Vector(
-                                    [marker, -1, -1]
-                                )
-                                nearest_external_projection_weights = ti.Vector(
-                                    [1.0, 0.0, 0.0]
-                                )
                         if distance < nearest_distance:
                             nearest_distance = distance
                             nearest = marker
@@ -10505,13 +10459,6 @@ class HibmMpmIbNodeSearch:
             nearest_normal = ti.Vector([0.0, 0.0, 1.0])
             nearest_projection_indices = ti.Vector([-1, -1, -1])
             nearest_projection_weights = ti.Vector([0.0, 0.0, 0.0])
-            nearest_external = -1
-            nearest_external_distance = 1.0e30
-            nearest_external_signed_distance = 0.0
-            nearest_external_boundary_point = ti.Vector([0.0, 0.0, 0.0])
-            nearest_external_normal = ti.Vector([0.0, 0.0, 1.0])
-            nearest_external_projection_indices = ti.Vector([-1, -1, -1])
-            nearest_external_projection_weights = ti.Vector([0.0, 0.0, 0.0])
             nearest_global = -1
             nearest_global_distance = 1.0e30
             nearest_global_signed_distance = 0.0
@@ -10519,8 +10466,6 @@ class HibmMpmIbNodeSearch:
             nearest_global_normal = ti.Vector([0.0, 0.0, 1.0])
             nearest_global_projection_indices = ti.Vector([-1, -1, -1])
             nearest_global_projection_weights = ti.Vector([0.0, 0.0, 0.0])
-            external_seen = 0
-            global_external_seen = 0
             if projection_segment_count > 0:
                 for segment_index in range(projection_segment_count):
                     segment = projection_triangle_indices[segment_index]
@@ -10550,7 +10495,8 @@ class HibmMpmIbNodeSearch:
                         cell_width_z_m[node[2]],
                     ) == 0:
                         valid = 0
-                    normal, normal_valid = self._interpolated_segment_normal(
+                    normal, normal_valid = self._segment_search_normal(
+                        marker_positions_m,
                         marker_normals,
                         ia,
                         ib,
@@ -10577,8 +10523,6 @@ class HibmMpmIbNodeSearch:
                         if segment_fraction > 0.5:
                             marker = ib
                         if classify_far_internal_nodes != 0:
-                            if signed_distance > sign_tolerance_m:
-                                global_external_seen = 1
                             if distance < nearest_global_distance:
                                 nearest_global_distance = distance
                                 nearest_global = marker
@@ -10595,20 +10539,6 @@ class HibmMpmIbNodeSearch:
                                 and ti.abs(offset.z) < search_radius_z_m
                             )
                         if accept_search:
-                            if signed_distance > sign_tolerance_m:
-                                external_seen = 1
-                                if distance < nearest_external_distance:
-                                    nearest_external_distance = distance
-                                    nearest_external = marker
-                                    nearest_external_signed_distance = signed_distance
-                                    nearest_external_boundary_point = boundary_point
-                                    nearest_external_normal = normal
-                                    nearest_external_projection_indices = (
-                                        projection_indices
-                                    )
-                                    nearest_external_projection_weights = (
-                                        projection_weights
-                                    )
                             if distance < nearest_distance:
                                 nearest_distance = distance
                                 nearest = marker
@@ -10664,8 +10594,6 @@ class HibmMpmIbNodeSearch:
                             ic,
                         )
                         if classify_far_internal_nodes != 0:
-                            if signed_distance > sign_tolerance_m:
-                                global_external_seen = 1
                             if distance < nearest_global_distance:
                                 nearest_global_distance = distance
                                 nearest_global = marker
@@ -10682,20 +10610,6 @@ class HibmMpmIbNodeSearch:
                                 and ti.abs(offset.z) < search_radius_z_m
                             )
                         if accept_search:
-                            if signed_distance > sign_tolerance_m:
-                                external_seen = 1
-                                if distance < nearest_external_distance:
-                                    nearest_external_distance = distance
-                                    nearest_external = marker
-                                    nearest_external_signed_distance = signed_distance
-                                    nearest_external_boundary_point = boundary_point
-                                    nearest_external_normal = normal
-                                    nearest_external_projection_indices = (
-                                        projection_indices
-                                    )
-                                    nearest_external_projection_weights = (
-                                        projection_weights
-                                    )
                             if distance < nearest_distance:
                                 nearest_distance = distance
                                 nearest = marker
@@ -10720,8 +10634,6 @@ class HibmMpmIbNodeSearch:
                     distance = offset.norm()
                     signed_distance = offset.dot(normal)
                     if classify_far_internal_nodes != 0:
-                        if signed_distance > sign_tolerance_m:
-                            global_external_seen = 1
                         if distance < nearest_global_distance:
                             nearest_global_distance = distance
                             nearest_global = marker
@@ -10742,20 +10654,6 @@ class HibmMpmIbNodeSearch:
                             and ti.abs(offset.z) < search_radius_z_m
                         )
                     if accept_search:
-                        if signed_distance > sign_tolerance_m:
-                            external_seen = 1
-                            if distance < nearest_external_distance:
-                                nearest_external_distance = distance
-                                nearest_external = marker
-                                nearest_external_signed_distance = signed_distance
-                                nearest_external_boundary_point = boundary_point
-                                nearest_external_normal = normal
-                                nearest_external_projection_indices = ti.Vector(
-                                    [marker, -1, -1]
-                                )
-                                nearest_external_projection_weights = ti.Vector(
-                                    [1.0, 0.0, 0.0]
-                                )
                         if distance < nearest_distance:
                             nearest_distance = distance
                             nearest = marker
@@ -10917,6 +10815,9 @@ class HibmMpmIbNodeSearch:
         search_radius_xyz_m: tuple[float, float, float] | None = None,
         search_inactive_axis: int | None = None,
     ) -> HibmMpmIbNodeSearchReport:
+        self._last_search_inactive_axis = -1
+        self._last_search_support_radius_xyz_m = None
+        self._last_search_support_anisotropic = None
         (
             search_radius,
             probe_distance,
@@ -10975,6 +10876,12 @@ class HibmMpmIbNodeSearch:
             int(inactive_axis),
         )
         self._last_search_inactive_axis = int(inactive_axis)
+        self._last_search_support_radius_xyz_m = (
+            float(radius_x),
+            float(radius_y),
+            float(radius_z),
+        )
+        self._last_search_support_anisotropic = anisotropic_radius is not None
         return HibmMpmIbNodeSearchReport(
             near_boundary_node_count=int(self.report_near_boundary_node_count[None]),
             external_ib_node_count=int(self.report_external_ib_node_count[None]),
@@ -10999,6 +10906,9 @@ class HibmMpmIbNodeSearch:
         search_radius_xyz_m: tuple[float, float, float] | None = None,
         search_inactive_axis: int | None = None,
     ) -> HibmMpmIbNodeSearchReport:
+        self._last_search_inactive_axis = -1
+        self._last_search_support_radius_xyz_m = None
+        self._last_search_support_anisotropic = None
         (
             search_radius,
             probe_distance,
@@ -11085,6 +10995,12 @@ class HibmMpmIbNodeSearch:
             int(inactive_axis),
         )
         self._last_search_inactive_axis = int(inactive_axis)
+        self._last_search_support_radius_xyz_m = (
+            float(radius_x),
+            float(radius_y),
+            float(radius_z),
+        )
+        self._last_search_support_anisotropic = anisotropic_radius is not None
         return HibmMpmIbNodeSearchReport(
             near_boundary_node_count=int(self.report_near_boundary_node_count[None]),
             external_ib_node_count=int(self.report_external_ib_node_count[None]),
@@ -11167,6 +11083,15 @@ class HibmMpmIbBoundaryConditions:
         init_taichi(runtime)
         self.grid_nodes = nodes
         self.marker_capacity = int(marker_capacity)
+        # Field-only component-face assembly has no authoritative projection
+        # segment connectivity.  Keep a correctly typed zero-count template so
+        # endpoint ownership can fail closed without inventing topology from
+        # the two local author records.
+        self._unavailable_projection_segment_indices = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=1,
+        )
 
         self.active_ib_node = ti.field(dtype=ti.i32, shape=nodes)
         self.velocity_dirichlet_owned_row = ti.field(dtype=ti.i32, shape=nodes)
@@ -11249,6 +11174,53 @@ class HibmMpmIbBoundaryConditions:
         # 3/4-author exact slab cohort.  Reusing this transaction-local i32
         # avoids another grid-sized provenance field.
         self.velocity_dirichlet_component_face_segment_projection_only_seam = (
+            ti.field(dtype=ti.i32, shape=component_face_shape)
+        )
+        # The finite-segment-union owner routine is deliberately cold-JIT:
+        # evaluate it once for the fixed direct pair before the claim pass,
+        # then let prepare/reconstruct consume this transaction-local payload.
+        # The author keys and kinds bind the payload to that exact direct pair;
+        # a later relocation or author-order change is fail-closed.
+        self.velocity_dirichlet_component_face_segment_pair_admission_valid = (
+            ti.field(dtype=ti.i32, shape=component_face_shape)
+        )
+        self.velocity_dirichlet_component_face_segment_pair_full_valid = ti.field(
+            dtype=ti.i32,
+            shape=component_face_shape,
+        )
+        self.velocity_dirichlet_component_face_segment_pair_endpoint_clamped = (
+            ti.field(dtype=ti.i32, shape=component_face_shape)
+        )
+        self.velocity_dirichlet_component_face_segment_pair_boundary_point_m = (
+            ti.Vector.field(3, dtype=ti.f32, shape=component_face_shape)
+        )
+        self.velocity_dirichlet_component_face_segment_pair_normal = ti.Vector.field(
+            3,
+            dtype=ti.f32,
+            shape=component_face_shape,
+        )
+        self.velocity_dirichlet_component_face_segment_pair_nominal_probe_m = (
+            ti.Vector.field(3, dtype=ti.f32, shape=component_face_shape)
+        )
+        self.velocity_dirichlet_component_face_segment_pair_boundary_target_mps = (
+            ti.field(dtype=ti.f32, shape=component_face_shape)
+        )
+        self.velocity_dirichlet_component_face_segment_pair_clamp_support_ratio = (
+            ti.field(dtype=ti.f32, shape=component_face_shape)
+        )
+        self.velocity_dirichlet_component_face_segment_pair_geometry_tolerance = (
+            ti.field(dtype=ti.f32, shape=component_face_shape)
+        )
+        self.velocity_dirichlet_component_face_segment_pair_first_author_linear_key = (
+            ti.field(dtype=ti.i64, shape=component_face_shape)
+        )
+        self.velocity_dirichlet_component_face_segment_pair_second_author_linear_key = (
+            ti.field(dtype=ti.i64, shape=component_face_shape)
+        )
+        self.velocity_dirichlet_component_face_segment_pair_first_author_kind = (
+            ti.field(dtype=ti.i32, shape=component_face_shape)
+        )
+        self.velocity_dirichlet_component_face_segment_pair_second_author_kind = (
             ti.field(dtype=ti.i32, shape=component_face_shape)
         )
         # Reusable private workspace for marker-target closure.  Every active
@@ -11393,6 +11365,9 @@ class HibmMpmIbBoundaryConditions:
             ti.field(dtype=ti.i32, shape=())
         )
         self.report_velocity_dirichlet_component_face_direct_geometry_reconstructed_count = (
+            ti.field(dtype=ti.i32, shape=())
+        )
+        self.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count = (
             ti.field(dtype=ti.i32, shape=())
         )
         self.report_velocity_dirichlet_component_face_direct_geometry_one_sided_count = (
@@ -12837,6 +12812,7 @@ class HibmMpmIbBoundaryConditions:
             or projection_indices.z != -1
         ):
             valid = 0
+
         if (
             not self._canonical_component_face_vector_is_finite(
                 projection_weights
@@ -12903,6 +12879,7 @@ class HibmMpmIbBoundaryConditions:
         marker_b,
         claim_region,
         inactive_axis,
+        enforce_endpoint_support: ti.i32,
         marker_position_m: ti.template(),
         marker_velocity_mps: ti.template(),
         marker_region_id: ti.template(),
@@ -13085,7 +13062,10 @@ class HibmMpmIbBoundaryConditions:
                     dual_ray_support_m,
                     1.0e-12,
                 )
-                if overrun_m > dual_ray_support_m + support_tolerance_m:
+                if (
+                    enforce_endpoint_support != 0
+                    and overrun_m > dual_ray_support_m + support_tolerance_m
+                ):
                     valid = 0
             if valid != 0:
                 closest_point = position_a + interpolation_weight * (
@@ -13118,6 +13098,1643 @@ class HibmMpmIbBoundaryConditions:
             closest_point,
             endpoint_clamped,
             ti.cast(clamp_overrun_support_ratio, ti.f32),
+        )
+
+    @ti.func
+    def _canonical_component_face_distinct_finite_segment_pair_geometry(
+        self,
+        target,
+        face_center,
+        first_boundary_point,
+        second_boundary_point,
+        first_nominal_sample_point,
+        second_nominal_sample_point,
+        first_actual_sample_point,
+        second_actual_sample_point,
+        first_normal,
+        second_normal,
+        projection_indices,
+        first_projection_weights,
+        second_projection_weights,
+        surface_projection_inactive_axis: ti.i32,
+        marker_position_m: ti.template(),
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+    ):
+        """Build one strict, order-independent face ray on a finite segment."""
+
+        valid = 1
+        admission_valid = 0
+        canonical_boundary_point = ti.Vector([0.0, 0.0, 0.0])
+        canonical_normal = ti.Vector([0.0, 0.0, 0.0])
+        canonical_nominal_probe = ti.Vector([0.0, 0.0, 0.0])
+        face_segment_parameter = ti.cast(0.0, ti.f64)
+        author_interpolation_weight = ti.cast(0.0, ti.f64)
+        maximum_geometry_tolerance = ti.cast(0.0, ti.f64)
+        parameter_tolerance = ti.cast(2.0e-6, ti.f64)
+        alignment_residual_ratio_squared = ti.cast(2.0e-6, ti.f64)
+
+        marker_a = projection_indices.x
+        marker_b = projection_indices.y
+        stored_position_a = marker_position_m[marker_a]
+        stored_position_b = marker_position_m[marker_b]
+        position_a = ti.Vector(
+            [
+                ti.cast(stored_position_a.x, ti.f64),
+                ti.cast(stored_position_a.y, ti.f64),
+                ti.cast(stored_position_a.z, ti.f64),
+            ]
+        )
+        position_b = ti.Vector(
+            [
+                ti.cast(stored_position_b.x, ti.f64),
+                ti.cast(stored_position_b.y, ti.f64),
+                ti.cast(stored_position_b.z, ti.f64),
+            ]
+        )
+        face = ti.Vector(
+            [
+                ti.cast(face_center.x, ti.f64),
+                ti.cast(face_center.y, ti.f64),
+                ti.cast(face_center.z, ti.f64),
+            ]
+        )
+        first_boundary = ti.Vector(
+            [
+                ti.cast(first_boundary_point.x, ti.f64),
+                ti.cast(first_boundary_point.y, ti.f64),
+                ti.cast(first_boundary_point.z, ti.f64),
+            ]
+        )
+        second_boundary = ti.Vector(
+            [
+                ti.cast(second_boundary_point.x, ti.f64),
+                ti.cast(second_boundary_point.y, ti.f64),
+                ti.cast(second_boundary_point.z, ti.f64),
+            ]
+        )
+        first_nominal = ti.Vector(
+            [
+                ti.cast(first_nominal_sample_point.x, ti.f64),
+                ti.cast(first_nominal_sample_point.y, ti.f64),
+                ti.cast(first_nominal_sample_point.z, ti.f64),
+            ]
+        )
+        second_nominal = ti.Vector(
+            [
+                ti.cast(second_nominal_sample_point.x, ti.f64),
+                ti.cast(second_nominal_sample_point.y, ti.f64),
+                ti.cast(second_nominal_sample_point.z, ti.f64),
+            ]
+        )
+        first_actual = ti.Vector(
+            [
+                ti.cast(first_actual_sample_point.x, ti.f64),
+                ti.cast(first_actual_sample_point.y, ti.f64),
+                ti.cast(first_actual_sample_point.z, ti.f64),
+            ]
+        )
+        second_actual = ti.Vector(
+            [
+                ti.cast(second_actual_sample_point.x, ti.f64),
+                ti.cast(second_actual_sample_point.y, ti.f64),
+                ti.cast(second_actual_sample_point.z, ti.f64),
+            ]
+        )
+        normal_a = ti.Vector(
+            [
+                ti.cast(first_normal.x, ti.f64),
+                ti.cast(first_normal.y, ti.f64),
+                ti.cast(first_normal.z, ti.f64),
+            ]
+        )
+        normal_b = ti.Vector(
+            [
+                ti.cast(second_normal.x, ti.f64),
+                ti.cast(second_normal.y, ti.f64),
+                ti.cast(second_normal.z, ti.f64),
+            ]
+        )
+        segment = position_b - position_a
+        face_offset = face - position_a
+        first_anchor_offset = first_boundary - position_a
+        second_anchor_offset = second_boundary - position_a
+        if surface_projection_inactive_axis >= 0:
+            segment[surface_projection_inactive_axis] = 0.0
+            face_offset[surface_projection_inactive_axis] = 0.0
+            first_anchor_offset[surface_projection_inactive_axis] = 0.0
+            second_anchor_offset[surface_projection_inactive_axis] = 0.0
+            normal_a[surface_projection_inactive_axis] = 0.0
+            normal_b[surface_projection_inactive_axis] = 0.0
+
+        local_width = ti.Vector(
+            [
+                ti.cast(
+                    ti.abs(
+                        cell_face_x_m[target.x + 1]
+                        - cell_face_x_m[target.x]
+                    ),
+                    ti.f64,
+                ),
+                ti.cast(
+                    ti.abs(
+                        cell_face_y_m[target.y + 1]
+                        - cell_face_y_m[target.y]
+                    ),
+                    ti.f64,
+                ),
+                ti.cast(
+                    ti.abs(
+                        cell_face_z_m[target.z + 1]
+                        - cell_face_z_m[target.z]
+                    ),
+                    ti.f64,
+                ),
+            ]
+        )
+        if surface_projection_inactive_axis >= 0:
+            local_width[surface_projection_inactive_axis] = 0.0
+        f32_epsilon = ti.cast(1.1920928955078125e-7, ti.f64)
+        for geometry_axis in ti.static(range(3)):
+            if geometry_axis != surface_projection_inactive_axis:
+                coordinate_scale = ti.max(
+                    ti.abs(face[geometry_axis]),
+                    ti.max(
+                        ti.abs(first_boundary[geometry_axis]),
+                        ti.max(
+                            ti.abs(second_boundary[geometry_axis]),
+                            ti.max(
+                                ti.abs(position_a[geometry_axis]),
+                                ti.abs(position_b[geometry_axis]),
+                            ),
+                        ),
+                    ),
+                )
+                geometry_tolerance = ti.max(
+                    ti.cast(1.0e-12, ti.f64),
+                    2.0
+                    * f32_epsilon
+                    * ti.max(coordinate_scale, local_width[geometry_axis]),
+                )
+                maximum_geometry_tolerance = ti.max(
+                    maximum_geometry_tolerance,
+                    geometry_tolerance,
+                )
+
+        segment_length_squared = segment.dot(segment)
+        if (
+            ti.math.isnan(segment_length_squared)
+            or ti.math.isinf(segment_length_squared)
+            or segment_length_squared <= 1.0e-20
+        ):
+            valid = 0
+        first_parameter = ti.cast(first_projection_weights.y, ti.f64)
+        second_parameter = ti.cast(second_projection_weights.y, ti.f64)
+        lower_parameter = ti.min(first_parameter, second_parameter)
+        upper_parameter = ti.max(first_parameter, second_parameter)
+        if (
+            first_projection_weights.x <= 1.0e-6
+            or first_projection_weights.y <= 1.0e-6
+            or second_projection_weights.x <= 1.0e-6
+            or second_projection_weights.y <= 1.0e-6
+            or ti.abs(second_parameter - first_parameter)
+            <= parameter_tolerance
+        ):
+            valid = 0
+
+        if valid != 0:
+            face_segment_parameter = (
+                face_offset.dot(segment) / segment_length_squared
+            )
+            first_serialized_anchor_residual = (
+                first_anchor_offset - first_parameter * segment
+            )
+            second_serialized_anchor_residual = (
+                second_anchor_offset - second_parameter * segment
+            )
+            closest_face_offset = face_offset - face_segment_parameter * segment
+            local_support_squared = local_width.dot(local_width)
+            bracket_margin = ti.min(
+                face_segment_parameter
+                - ti.min(first_parameter, second_parameter),
+                ti.max(first_parameter, second_parameter)
+                - face_segment_parameter,
+            )
+            if (
+                ti.math.isnan(face_segment_parameter)
+                or ti.math.isinf(face_segment_parameter)
+                or first_serialized_anchor_residual.dot(
+                    first_serialized_anchor_residual
+                )
+                > maximum_geometry_tolerance * maximum_geometry_tolerance
+                or second_serialized_anchor_residual.dot(
+                    second_serialized_anchor_residual
+                )
+                > maximum_geometry_tolerance * maximum_geometry_tolerance
+                or face_segment_parameter < -parameter_tolerance
+                or face_segment_parameter > 1.0 + parameter_tolerance
+                or bracket_margin <= parameter_tolerance
+                or closest_face_offset.dot(closest_face_offset)
+                > local_support_squared * (1.0 + 2.0e-6)
+            ):
+                valid = 0
+            else:
+                author_interpolation_weight = (
+                    (face_segment_parameter - lower_parameter)
+                    / (upper_parameter - lower_parameter)
+                )
+                if (
+                    author_interpolation_weight <= 0.0
+                    or author_interpolation_weight >= 1.0
+                ):
+                    valid = 0
+
+        if valid != 0:
+            # Prepare owns topology/finite-support admission.  Normal-ray,
+            # lateral, and sampling failures are deliberately deferred to the
+            # topology reconstruction pass so their witness remains path 2.
+            admission_valid = 1
+
+        if valid != 0:
+            first_normal_length_squared = normal_a.dot(normal_a)
+            second_normal_length_squared = normal_b.dot(normal_b)
+            if (
+                first_normal_length_squared <= 1.0e-24
+                or second_normal_length_squared <= 1.0e-24
+                or ti.math.isnan(first_normal_length_squared)
+                or ti.math.isinf(first_normal_length_squared)
+                or ti.math.isnan(second_normal_length_squared)
+                or ti.math.isinf(second_normal_length_squared)
+            ):
+                valid = 0
+            else:
+                normal_a /= ti.sqrt(first_normal_length_squared)
+                normal_b /= ti.sqrt(second_normal_length_squared)
+                if normal_a.dot(normal_b) < 0.999999:
+                    valid = 0
+
+        canonical_boundary_f64 = position_a + face_segment_parameter * (
+            position_b - position_a
+        )
+        if surface_projection_inactive_axis >= 0:
+            canonical_boundary_f64[surface_projection_inactive_axis] = face[
+                surface_projection_inactive_axis
+            ]
+        lower_normal = normal_a
+        upper_normal = normal_b
+        if second_parameter < first_parameter:
+            lower_normal = normal_b
+            upper_normal = normal_a
+        canonical_normal_f64 = (
+            (1.0 - author_interpolation_weight) * lower_normal
+            + author_interpolation_weight * upper_normal
+        )
+        canonical_normal_length_squared = canonical_normal_f64.dot(
+            canonical_normal_f64
+        )
+        if valid != 0:
+            if (
+                canonical_normal_length_squared <= 1.0e-24
+                or ti.math.isnan(canonical_normal_length_squared)
+                or ti.math.isinf(canonical_normal_length_squared)
+            ):
+                valid = 0
+            else:
+                canonical_normal_f64 /= ti.sqrt(canonical_normal_length_squared)
+
+        if valid != 0:
+            first_actual_ray = first_actual - first_boundary
+            second_actual_ray = second_actual - second_boundary
+            if surface_projection_inactive_axis >= 0:
+                first_actual_ray[surface_projection_inactive_axis] = 0.0
+                second_actual_ray[surface_projection_inactive_axis] = 0.0
+            first_actual_length_squared = first_actual_ray.dot(first_actual_ray)
+            second_actual_length_squared = second_actual_ray.dot(second_actual_ray)
+            if (
+                first_actual_length_squared <= 1.0e-24
+                or second_actual_length_squared <= 1.0e-24
+                or ti.math.isnan(first_actual_length_squared)
+                or ti.math.isinf(first_actual_length_squared)
+                or ti.math.isnan(second_actual_length_squared)
+                or ti.math.isinf(second_actual_length_squared)
+            ):
+                valid = 0
+            else:
+                first_ray_progress = first_actual_ray.dot(normal_a)
+                second_ray_progress = second_actual_ray.dot(normal_b)
+                first_ray_lateral = first_actual_ray - first_ray_progress * normal_a
+                second_ray_lateral = (
+                    second_actual_ray - second_ray_progress * normal_b
+                )
+                first_face_progress = (
+                    (face - first_boundary).dot(first_actual_ray)
+                    / first_actual_length_squared
+                )
+                second_face_progress = (
+                    (face - second_boundary).dot(second_actual_ray)
+                    / second_actual_length_squared
+                )
+                if (
+                    first_ray_progress <= 0.0
+                    or second_ray_progress <= 0.0
+                    or first_ray_lateral.dot(first_ray_lateral)
+                    > alignment_residual_ratio_squared
+                    * first_actual_length_squared
+                    + maximum_geometry_tolerance * maximum_geometry_tolerance
+                    or second_ray_lateral.dot(second_ray_lateral)
+                    > alignment_residual_ratio_squared
+                    * second_actual_length_squared
+                    + maximum_geometry_tolerance * maximum_geometry_tolerance
+                    or first_face_progress <= 1.0e-6
+                    or first_face_progress > 1.0 + 1.0e-6
+                    or second_face_progress <= 1.0e-6
+                    or second_face_progress > 1.0 + 1.0e-6
+                ):
+                    valid = 0
+
+        lower_nominal = first_nominal
+        upper_nominal = second_nominal
+        if second_parameter < first_parameter:
+            lower_nominal = second_nominal
+            upper_nominal = first_nominal
+        canonical_nominal_affine = (
+            (1.0 - author_interpolation_weight) * lower_nominal
+            + author_interpolation_weight * upper_nominal
+        )
+        canonical_nominal_ray = (
+            canonical_nominal_affine - canonical_boundary_f64
+        )
+        if surface_projection_inactive_axis >= 0:
+            canonical_nominal_ray[surface_projection_inactive_axis] = 0.0
+        canonical_probe_length = canonical_nominal_ray.dot(canonical_normal_f64)
+        canonical_probe_lateral = (
+            canonical_nominal_ray
+            - canonical_probe_length * canonical_normal_f64
+        )
+        canonical_probe_length_squared = canonical_nominal_ray.dot(
+            canonical_nominal_ray
+        )
+        canonical_face_offset = face - canonical_boundary_f64
+        if surface_projection_inactive_axis >= 0:
+            canonical_face_offset[surface_projection_inactive_axis] = 0.0
+        canonical_face_progress = ti.cast(-1.0, ti.f64)
+        canonical_face_lateral_squared = ti.cast(1.0e30, ti.f64)
+        if canonical_probe_length_squared > 1.0e-24:
+            canonical_face_progress = canonical_face_offset.dot(
+                canonical_nominal_ray
+            ) / canonical_probe_length_squared
+            canonical_face_lateral = (
+                canonical_face_offset
+                - canonical_face_progress * canonical_nominal_ray
+            )
+            canonical_face_lateral_squared = canonical_face_lateral.dot(
+                canonical_face_lateral
+            )
+        if valid != 0:
+            if (
+                canonical_probe_length <= 0.0
+                or canonical_probe_length_squared <= 1.0e-24
+                or canonical_probe_lateral.dot(canonical_probe_lateral)
+                > alignment_residual_ratio_squared
+                * canonical_probe_length_squared
+                + maximum_geometry_tolerance * maximum_geometry_tolerance
+                or canonical_face_progress <= 1.0e-6
+                or canonical_face_progress > 1.0 + 1.0e-6
+                or canonical_face_lateral_squared
+                > alignment_residual_ratio_squared
+                * canonical_face_offset.dot(canonical_face_offset)
+                + maximum_geometry_tolerance * maximum_geometry_tolerance
+            ):
+                valid = 0
+
+        canonical_nominal_f64 = (
+            canonical_boundary_f64
+            + canonical_probe_length * canonical_normal_f64
+        )
+        canonical_boundary_point = ti.Vector(
+            [
+                ti.cast(canonical_boundary_f64.x, ti.f32),
+                ti.cast(canonical_boundary_f64.y, ti.f32),
+                ti.cast(canonical_boundary_f64.z, ti.f32),
+            ]
+        )
+        canonical_normal = ti.Vector(
+            [
+                ti.cast(canonical_normal_f64.x, ti.f32),
+                ti.cast(canonical_normal_f64.y, ti.f32),
+                ti.cast(canonical_normal_f64.z, ti.f32),
+            ]
+        )
+        canonical_nominal_probe = ti.Vector(
+            [
+                ti.cast(canonical_nominal_f64.x, ti.f32),
+                ti.cast(canonical_nominal_f64.y, ti.f32),
+                ti.cast(canonical_nominal_f64.z, ti.f32),
+            ]
+        )
+        return (
+            admission_valid,
+            valid,
+            canonical_boundary_point,
+            canonical_normal,
+            canonical_nominal_probe,
+            face_segment_parameter,
+            author_interpolation_weight,
+            ti.cast(maximum_geometry_tolerance, ti.f32),
+        )
+
+    @ti.func
+    def _canonical_component_face_finite_segment_union_owner_geometry(
+        self,
+        target,
+        component_axis,
+        face_center,
+        first_source_center,
+        second_source_center,
+        first_boundary_point,
+        second_boundary_point,
+        first_nominal_sample_point,
+        second_nominal_sample_point,
+        first_actual_sample_point,
+        second_actual_sample_point,
+        first_normal,
+        second_normal,
+        first_projection_indices,
+        second_projection_indices,
+        first_projection_weights,
+        second_projection_weights,
+        first_nearest_marker_index,
+        second_nearest_marker_index,
+        claim_region,
+        source_search_support_available: ti.i32,
+        source_search_support_anisotropic: ti.i32,
+        source_search_support_xyz_m,
+        projection_segment_indices: ti.template(),
+        projection_segment_count: ti.i32,
+        projection_segment_topology_available: ti.i32,
+        surface_projection_inactive_axis: ti.i32,
+        marker_position_m: ti.template(),
+        marker_velocity_mps: ti.template(),
+        marker_region_id: ti.template(),
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+    ):
+        """Own one interpolated MAC face by a finite-segment union.
+
+        The physical face, rather than either source row, selects the unique
+        primitive.  Same segments are deduplicated; adjacent segments must
+        have a strict F64 nearest owner unless both primitives prove the same
+        physical state at one internal degree-two C0 vertex.  Both source rows must remain inside
+        the authoritative search envelope that created them; the shared MAC
+        face is then proven by row geometry rather than a third search query.
+        A clamped endpoint remains a closed finite-segment
+        boundary and is admitted only inside its local tangential dual-cell
+        support and outward proximal normal cone.
+        """
+
+        valid = 1
+        admission_valid = 0
+        full_valid = 0
+        canonical_boundary_point = ti.Vector([0.0, 0.0, 0.0])
+        canonical_normal = ti.Vector([0.0, 0.0, 0.0])
+        canonical_nominal_probe = ti.Vector([0.0, 0.0, 0.0])
+        canonical_boundary_target = 0.0
+        owner_endpoint_clamped = 0
+        owner_exact_closed_endpoint = 0
+        owner_clamp_support_ratio = 0.0
+        maximum_geometry_tolerance = ti.cast(0.0, ti.f64)
+        adjacent_distance_tie = 0
+        internal_shared_vertex_coownership = 0
+        shared_vertex_index = -1
+        parameter_tolerance = ti.cast(2.0e-6, ti.f64)
+
+        same_segment = (
+            first_projection_indices.x == second_projection_indices.x
+            and first_projection_indices.y == second_projection_indices.y
+        )
+        shared_endpoint_count = 0
+        if first_projection_indices.x == second_projection_indices.x:
+            shared_endpoint_count += 1
+            shared_vertex_index = first_projection_indices.x
+        if first_projection_indices.x == second_projection_indices.y:
+            shared_endpoint_count += 1
+            shared_vertex_index = first_projection_indices.x
+        if first_projection_indices.y == second_projection_indices.x:
+            shared_endpoint_count += 1
+            shared_vertex_index = first_projection_indices.y
+        if first_projection_indices.y == second_projection_indices.y:
+            shared_endpoint_count += 1
+            shared_vertex_index = first_projection_indices.y
+        adjacent_segments = not same_segment and shared_endpoint_count == 1
+        if (
+            surface_projection_inactive_axis < 0
+            or surface_projection_inactive_axis == component_axis
+            or (not same_segment and not adjacent_segments)
+            or self._canonical_component_face_vector_is_finite(face_center) == 0
+            or self._canonical_component_face_vector_is_finite(
+                first_source_center
+            )
+            == 0
+            or self._canonical_component_face_vector_is_finite(
+                second_source_center
+            )
+            == 0
+            or self._canonical_component_face_vector_is_finite(
+                first_boundary_point
+            )
+            == 0
+            or self._canonical_component_face_vector_is_finite(
+                second_boundary_point
+            )
+            == 0
+            or self._canonical_component_face_vector_is_finite(
+                first_nominal_sample_point
+            )
+            == 0
+            or self._canonical_component_face_vector_is_finite(
+                second_nominal_sample_point
+            )
+            == 0
+            or self._canonical_component_face_vector_is_finite(
+                first_actual_sample_point
+            )
+            == 0
+            or self._canonical_component_face_vector_is_finite(
+                second_actual_sample_point
+            )
+            == 0
+            or self._canonical_component_face_vector_is_finite(first_normal) == 0
+            or self._canonical_component_face_vector_is_finite(second_normal) == 0
+            or self._canonical_component_face_vector_is_finite(
+                first_projection_weights
+            )
+            == 0
+            or self._canonical_component_face_vector_is_finite(
+                second_projection_weights
+            )
+            == 0
+            or first_projection_weights.x < -1.0e-6
+            or first_projection_weights.x > 1.0 + 1.0e-6
+            or first_projection_weights.y < -1.0e-6
+            or first_projection_weights.y > 1.0 + 1.0e-6
+            or second_projection_weights.x < -1.0e-6
+            or second_projection_weights.x > 1.0 + 1.0e-6
+            or second_projection_weights.y < -1.0e-6
+            or second_projection_weights.y > 1.0 + 1.0e-6
+            or ti.abs(first_projection_weights.z) > 1.0e-6
+            or ti.abs(second_projection_weights.z) > 1.0e-6
+            or ti.abs(
+                first_projection_weights.x + first_projection_weights.y - 1.0
+            )
+            > 1.0e-6
+            or ti.abs(
+                second_projection_weights.x + second_projection_weights.y - 1.0
+            )
+            > 1.0e-6
+            or source_search_support_available == 0
+            or self._canonical_component_face_vector_is_finite(
+                source_search_support_xyz_m
+            )
+            == 0
+        ):
+            valid = 0
+
+        # Match node-search admission exactly: source coordinates, boundary
+        # anchors, and configured radii are f32, and the envelope is open.
+        # Isotropic search uses a Euclidean ball; anisotropic search uses the
+        # configured per-axis box.  The physical face is authorized by the
+        # shared-row geometry below, not by inventing a second search query.
+        first_search_offset = first_source_center - first_boundary_point
+        second_search_offset = second_source_center - second_boundary_point
+        if surface_projection_inactive_axis >= 0:
+            first_search_offset[surface_projection_inactive_axis] = 0.0
+            second_search_offset[surface_projection_inactive_axis] = 0.0
+        if source_search_support_anisotropic != 0:
+            for geometry_axis in ti.static(range(3)):
+                if geometry_axis != surface_projection_inactive_axis:
+                    support_radius = source_search_support_xyz_m[geometry_axis]
+                    if (
+                        support_radius <= 0.0
+                        or ti.abs(first_search_offset[geometry_axis])
+                        >= support_radius
+                        or ti.abs(second_search_offset[geometry_axis])
+                        >= support_radius
+                    ):
+                        valid = 0
+        else:
+            support_radius = source_search_support_xyz_m.x
+            if (
+                support_radius <= 0.0
+                or first_search_offset.norm() >= support_radius
+                or second_search_offset.norm() >= support_radius
+            ):
+                valid = 0
+
+        (
+            first_segment_valid,
+            first_segment_target,
+            first_segment_distance_squared,
+            first_segment_closest_point,
+            first_segment_endpoint_clamped,
+            first_segment_clamp_support_ratio,
+        ) = self._canonical_component_face_segment_projection_target(
+            target,
+            component_axis,
+            face_center,
+            first_projection_indices.x,
+            first_projection_indices.y,
+            claim_region,
+            surface_projection_inactive_axis,
+            0,
+            marker_position_m,
+            marker_velocity_mps,
+            marker_region_id,
+            cell_face_x_m,
+            cell_face_y_m,
+            cell_face_z_m,
+        )
+        (
+            second_segment_valid,
+            second_segment_target,
+            second_segment_distance_squared,
+            second_segment_closest_point,
+            second_segment_endpoint_clamped,
+            second_segment_clamp_support_ratio,
+        ) = self._canonical_component_face_segment_projection_target(
+            target,
+            component_axis,
+            face_center,
+            second_projection_indices.x,
+            second_projection_indices.y,
+            claim_region,
+            surface_projection_inactive_axis,
+            0,
+            marker_position_m,
+            marker_velocity_mps,
+            marker_region_id,
+            cell_face_x_m,
+            cell_face_y_m,
+            cell_face_z_m,
+        )
+        if first_segment_valid == 0 or second_segment_valid == 0:
+            valid = 0
+
+        local_width = ti.Vector(
+            [
+                ti.cast(
+                    ti.abs(cell_face_x_m[target.x + 1] - cell_face_x_m[target.x]),
+                    ti.f64,
+                ),
+                ti.cast(
+                    ti.abs(cell_face_y_m[target.y + 1] - cell_face_y_m[target.y]),
+                    ti.f64,
+                ),
+                ti.cast(
+                    ti.abs(cell_face_z_m[target.z + 1] - cell_face_z_m[target.z]),
+                    ti.f64,
+                ),
+            ]
+        )
+        if surface_projection_inactive_axis >= 0:
+            local_width[surface_projection_inactive_axis] = 0.0
+        local_width_squared = ti.max(
+            ti.max(local_width.x * local_width.x, local_width.y * local_width.y),
+            local_width.z * local_width.z,
+        )
+        f32_epsilon = ti.cast(1.1920928955078125e-7, ti.f64)
+        distance_tie_scale = ti.max(
+            ti.max(first_segment_distance_squared, second_segment_distance_squared),
+            ti.max(local_width_squared, ti.cast(1.0e-24, ti.f64)),
+        )
+        tie_tolerance_squared = 4.0 * f32_epsilon * distance_tie_scale
+
+        # A common normal offset can dominate both squared distances and make
+        # a strict finite-union owner fall inside the conservative f32 tie
+        # band.  Authoritative degree-two topology still proves a unique
+        # owner when one adjacent primitive has a decisively interior
+        # projection and the other reaches its minimum only by clamping past
+        # their shared endpoint.  This is an active-plane Voronoi fact; it
+        # does not consume either author target or depend on author order.
+        first_segment_seen_count = 0
+        second_segment_seen_count = 0
+        shared_incident_segment_count = 0
+        if (
+            adjacent_segments
+            and shared_vertex_index >= 0
+            and projection_segment_topology_available != 0
+            and projection_segment_count > 0
+        ):
+            for segment_index in range(projection_segment_count):
+                incident_segment = projection_segment_indices[segment_index]
+                if (
+                    (
+                        incident_segment.x == first_projection_indices.x
+                        and incident_segment.y == first_projection_indices.y
+                    )
+                    or (
+                        incident_segment.x == first_projection_indices.y
+                        and incident_segment.y == first_projection_indices.x
+                    )
+                ):
+                    first_segment_seen_count += 1
+                if (
+                    (
+                        incident_segment.x == second_projection_indices.x
+                        and incident_segment.y == second_projection_indices.y
+                    )
+                    or (
+                        incident_segment.x == second_projection_indices.y
+                        and incident_segment.y == second_projection_indices.x
+                    )
+                ):
+                    second_segment_seen_count += 1
+                if (
+                    incident_segment.x == shared_vertex_index
+                    or incident_segment.y == shared_vertex_index
+                ):
+                    shared_incident_segment_count += 1
+
+        stored_face_for_owner = face_center
+        stored_first_owner_a = marker_position_m[first_projection_indices.x]
+        stored_first_owner_b = marker_position_m[first_projection_indices.y]
+        stored_second_owner_a = marker_position_m[second_projection_indices.x]
+        stored_second_owner_b = marker_position_m[second_projection_indices.y]
+        face_for_owner = ti.Vector(
+            [
+                ti.cast(stored_face_for_owner.x, ti.f64),
+                ti.cast(stored_face_for_owner.y, ti.f64),
+                ti.cast(stored_face_for_owner.z, ti.f64),
+            ]
+        )
+        first_owner_a = ti.Vector(
+            [
+                ti.cast(stored_first_owner_a.x, ti.f64),
+                ti.cast(stored_first_owner_a.y, ti.f64),
+                ti.cast(stored_first_owner_a.z, ti.f64),
+            ]
+        )
+        first_owner_b = ti.Vector(
+            [
+                ti.cast(stored_first_owner_b.x, ti.f64),
+                ti.cast(stored_first_owner_b.y, ti.f64),
+                ti.cast(stored_first_owner_b.z, ti.f64),
+            ]
+        )
+        second_owner_a = ti.Vector(
+            [
+                ti.cast(stored_second_owner_a.x, ti.f64),
+                ti.cast(stored_second_owner_a.y, ti.f64),
+                ti.cast(stored_second_owner_a.z, ti.f64),
+            ]
+        )
+        second_owner_b = ti.Vector(
+            [
+                ti.cast(stored_second_owner_b.x, ti.f64),
+                ti.cast(stored_second_owner_b.y, ti.f64),
+                ti.cast(stored_second_owner_b.z, ti.f64),
+            ]
+        )
+        if surface_projection_inactive_axis >= 0:
+            face_for_owner[surface_projection_inactive_axis] = 0.0
+            first_owner_a[surface_projection_inactive_axis] = 0.0
+            first_owner_b[surface_projection_inactive_axis] = 0.0
+            second_owner_a[surface_projection_inactive_axis] = 0.0
+            second_owner_b[surface_projection_inactive_axis] = 0.0
+        first_owner_segment = first_owner_b - first_owner_a
+        second_owner_segment = second_owner_b - second_owner_a
+        first_owner_length_squared = first_owner_segment.dot(first_owner_segment)
+        second_owner_length_squared = second_owner_segment.dot(second_owner_segment)
+        first_raw_parameter = ti.cast(0.0, ti.f64)
+        second_raw_parameter = ti.cast(0.0, ti.f64)
+        if first_owner_length_squared > 1.0e-24:
+            first_raw_parameter = (
+                (face_for_owner - first_owner_a).dot(first_owner_segment)
+                / first_owner_length_squared
+            )
+        if second_owner_length_squared > 1.0e-24:
+            second_raw_parameter = (
+                (face_for_owner - second_owner_a).dot(second_owner_segment)
+                / second_owner_length_squared
+            )
+        first_strictly_interior = (
+            first_raw_parameter > parameter_tolerance
+            and first_raw_parameter < 1.0 - parameter_tolerance
+        )
+        second_strictly_interior = (
+            second_raw_parameter > parameter_tolerance
+            and second_raw_parameter < 1.0 - parameter_tolerance
+        )
+        first_beyond_shared_endpoint = 0
+        second_beyond_shared_endpoint = 0
+        if first_projection_indices.x == shared_vertex_index:
+            if first_raw_parameter < -parameter_tolerance:
+                first_beyond_shared_endpoint = 1
+        elif first_projection_indices.y == shared_vertex_index:
+            if first_raw_parameter > 1.0 + parameter_tolerance:
+                first_beyond_shared_endpoint = 1
+        if second_projection_indices.x == shared_vertex_index:
+            if second_raw_parameter < -parameter_tolerance:
+                second_beyond_shared_endpoint = 1
+        elif second_projection_indices.y == shared_vertex_index:
+            if second_raw_parameter > 1.0 + parameter_tolerance:
+                second_beyond_shared_endpoint = 1
+
+        authoritative_degree_two_pair = (
+            projection_segment_topology_available != 0
+            and first_projection_indices.x < first_projection_indices.y
+            and second_projection_indices.x < second_projection_indices.y
+            and first_segment_seen_count == 1
+            and second_segment_seen_count == 1
+            and shared_incident_segment_count == 2
+        )
+
+        owner_is_second = 0
+        if adjacent_segments:
+            distance_difference = ti.abs(
+                first_segment_distance_squared - second_segment_distance_squared
+            )
+            if distance_difference <= tie_tolerance_squared:
+                if (
+                    authoritative_degree_two_pair
+                    and first_strictly_interior
+                    and second_beyond_shared_endpoint != 0
+                ):
+                    owner_is_second = 0
+                elif (
+                    authoritative_degree_two_pair
+                    and second_strictly_interior
+                    and first_beyond_shared_endpoint != 0
+                ):
+                    owner_is_second = 1
+                else:
+                    adjacent_distance_tie = 1
+            elif second_segment_distance_squared < first_segment_distance_squared:
+                owner_is_second = 1
+
+        owner_indices = first_projection_indices
+        owner_closest_point = first_segment_closest_point
+        owner_target = first_segment_target
+        owner_endpoint_clamped = first_segment_endpoint_clamped
+        owner_clamp_support_ratio = first_segment_clamp_support_ratio
+        if owner_is_second != 0:
+            owner_indices = second_projection_indices
+            owner_closest_point = second_segment_closest_point
+            owner_target = second_segment_target
+            owner_endpoint_clamped = second_segment_endpoint_clamped
+            owner_clamp_support_ratio = second_segment_clamp_support_ratio
+
+        stored_face = face_center
+        stored_owner_a = marker_position_m[owner_indices.x]
+        stored_owner_b = marker_position_m[owner_indices.y]
+        face = ti.Vector(
+            [
+                ti.cast(stored_face.x, ti.f64),
+                ti.cast(stored_face.y, ti.f64),
+                ti.cast(stored_face.z, ti.f64),
+            ]
+        )
+        owner_a = ti.Vector(
+            [
+                ti.cast(stored_owner_a.x, ti.f64),
+                ti.cast(stored_owner_a.y, ti.f64),
+                ti.cast(stored_owner_a.z, ti.f64),
+            ]
+        )
+        owner_b = ti.Vector(
+            [
+                ti.cast(stored_owner_b.x, ti.f64),
+                ti.cast(stored_owner_b.y, ti.f64),
+                ti.cast(stored_owner_b.z, ti.f64),
+            ]
+        )
+        boundary_f64 = ti.Vector(
+            [
+                owner_closest_point.x,
+                owner_closest_point.y,
+                owner_closest_point.z,
+            ]
+        )
+        first_boundary = ti.Vector(
+            [
+                ti.cast(first_boundary_point.x, ti.f64),
+                ti.cast(first_boundary_point.y, ti.f64),
+                ti.cast(first_boundary_point.z, ti.f64),
+            ]
+        )
+        second_boundary = ti.Vector(
+            [
+                ti.cast(second_boundary_point.x, ti.f64),
+                ti.cast(second_boundary_point.y, ti.f64),
+                ti.cast(second_boundary_point.z, ti.f64),
+            ]
+        )
+        first_source = ti.Vector(
+            [
+                ti.cast(first_source_center.x, ti.f64),
+                ti.cast(first_source_center.y, ti.f64),
+                ti.cast(first_source_center.z, ti.f64),
+            ]
+        )
+        second_source = ti.Vector(
+            [
+                ti.cast(second_source_center.x, ti.f64),
+                ti.cast(second_source_center.y, ti.f64),
+                ti.cast(second_source_center.z, ti.f64),
+            ]
+        )
+        first_nominal = ti.Vector(
+            [
+                ti.cast(first_nominal_sample_point.x, ti.f64),
+                ti.cast(first_nominal_sample_point.y, ti.f64),
+                ti.cast(first_nominal_sample_point.z, ti.f64),
+            ]
+        )
+        second_nominal = ti.Vector(
+            [
+                ti.cast(second_nominal_sample_point.x, ti.f64),
+                ti.cast(second_nominal_sample_point.y, ti.f64),
+                ti.cast(second_nominal_sample_point.z, ti.f64),
+            ]
+        )
+        first_actual = ti.Vector(
+            [
+                ti.cast(first_actual_sample_point.x, ti.f64),
+                ti.cast(first_actual_sample_point.y, ti.f64),
+                ti.cast(first_actual_sample_point.z, ti.f64),
+            ]
+        )
+        second_actual = ti.Vector(
+            [
+                ti.cast(second_actual_sample_point.x, ti.f64),
+                ti.cast(second_actual_sample_point.y, ti.f64),
+                ti.cast(second_actual_sample_point.z, ti.f64),
+            ]
+        )
+        normal_a = ti.Vector(
+            [
+                ti.cast(first_normal.x, ti.f64),
+                ti.cast(first_normal.y, ti.f64),
+                ti.cast(first_normal.z, ti.f64),
+            ]
+        )
+        normal_b = ti.Vector(
+            [
+                ti.cast(second_normal.x, ti.f64),
+                ti.cast(second_normal.y, ti.f64),
+                ti.cast(second_normal.z, ti.f64),
+            ]
+        )
+        first_marker_a = marker_position_m[first_projection_indices.x]
+        first_marker_b = marker_position_m[first_projection_indices.y]
+        second_marker_a = marker_position_m[second_projection_indices.x]
+        second_marker_b = marker_position_m[second_projection_indices.y]
+        first_marker_a_f64 = ti.Vector(
+            [
+                ti.cast(first_marker_a.x, ti.f64),
+                ti.cast(first_marker_a.y, ti.f64),
+                ti.cast(first_marker_a.z, ti.f64),
+            ]
+        )
+        first_marker_b_f64 = ti.Vector(
+            [
+                ti.cast(first_marker_b.x, ti.f64),
+                ti.cast(first_marker_b.y, ti.f64),
+                ti.cast(first_marker_b.z, ti.f64),
+            ]
+        )
+        second_marker_a_f64 = ti.Vector(
+            [
+                ti.cast(second_marker_a.x, ti.f64),
+                ti.cast(second_marker_a.y, ti.f64),
+                ti.cast(second_marker_a.z, ti.f64),
+            ]
+        )
+        second_marker_b_f64 = ti.Vector(
+            [
+                ti.cast(second_marker_b.x, ti.f64),
+                ti.cast(second_marker_b.y, ti.f64),
+                ti.cast(second_marker_b.z, ti.f64),
+            ]
+        )
+        if surface_projection_inactive_axis >= 0:
+            face[surface_projection_inactive_axis] = 0.0
+            owner_a[surface_projection_inactive_axis] = 0.0
+            owner_b[surface_projection_inactive_axis] = 0.0
+            boundary_f64[surface_projection_inactive_axis] = 0.0
+            first_boundary[surface_projection_inactive_axis] = 0.0
+            second_boundary[surface_projection_inactive_axis] = 0.0
+            first_source[surface_projection_inactive_axis] = 0.0
+            second_source[surface_projection_inactive_axis] = 0.0
+            first_nominal[surface_projection_inactive_axis] = 0.0
+            second_nominal[surface_projection_inactive_axis] = 0.0
+            first_actual[surface_projection_inactive_axis] = 0.0
+            second_actual[surface_projection_inactive_axis] = 0.0
+            normal_a[surface_projection_inactive_axis] = 0.0
+            normal_b[surface_projection_inactive_axis] = 0.0
+            first_marker_a_f64[surface_projection_inactive_axis] = 0.0
+            first_marker_b_f64[surface_projection_inactive_axis] = 0.0
+            second_marker_a_f64[surface_projection_inactive_axis] = 0.0
+            second_marker_b_f64[surface_projection_inactive_axis] = 0.0
+
+        for geometry_axis in ti.static(range(3)):
+            if geometry_axis != surface_projection_inactive_axis:
+                coordinate_scale = ti.max(
+                    ti.abs(face[geometry_axis]),
+                    ti.max(
+                        ti.abs(first_boundary[geometry_axis]),
+                        ti.max(
+                            ti.abs(second_boundary[geometry_axis]),
+                            ti.max(
+                                ti.max(
+                                    ti.abs(first_marker_a_f64[geometry_axis]),
+                                    ti.abs(first_marker_b_f64[geometry_axis]),
+                                ),
+                                ti.max(
+                                    ti.abs(second_marker_a_f64[geometry_axis]),
+                                    ti.abs(second_marker_b_f64[geometry_axis]),
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+                maximum_geometry_tolerance = ti.max(
+                    maximum_geometry_tolerance,
+                    ti.max(
+                        ti.cast(1.0e-12, ti.f64),
+                        2.0
+                        * f32_epsilon
+                        * ti.max(coordinate_scale, local_width[geometry_axis]),
+                    ),
+                )
+
+        # The two search-admitted rows must actually share this component MAC
+        # face.  Search support alone cannot authorize a non-pair or a face-axis
+        # extrapolation.
+        for geometry_axis in ti.static(range(3)):
+            if geometry_axis != surface_projection_inactive_axis:
+                if geometry_axis == component_axis:
+                    if (
+                        ti.abs(
+                            second_source[geometry_axis] - first_source[geometry_axis]
+                        )
+                        <= maximum_geometry_tolerance
+                        or face[geometry_axis]
+                        <= ti.min(
+                            first_source[geometry_axis],
+                            second_source[geometry_axis],
+                        )
+                        + maximum_geometry_tolerance
+                        or face[geometry_axis]
+                        >= ti.max(
+                            first_source[geometry_axis],
+                            second_source[geometry_axis],
+                        )
+                        - maximum_geometry_tolerance
+                    ):
+                        valid = 0
+                elif (
+                    ti.abs(
+                        second_source[geometry_axis] - first_source[geometry_axis]
+                    )
+                    > maximum_geometry_tolerance
+                    or ti.abs(face[geometry_axis] - first_source[geometry_axis])
+                    > maximum_geometry_tolerance
+                    or ti.abs(face[geometry_axis] - second_source[geometry_axis])
+                    > maximum_geometry_tolerance
+                ):
+                    valid = 0
+
+        first_expected_anchor = ti.Vector(
+            [
+                ti.cast(first_marker_a.x, ti.f64),
+                ti.cast(first_marker_a.y, ti.f64),
+                ti.cast(first_marker_a.z, ti.f64),
+            ]
+        ) + ti.cast(first_projection_weights.y, ti.f64) * ti.Vector(
+            [
+                ti.cast(first_marker_b.x - first_marker_a.x, ti.f64),
+                ti.cast(first_marker_b.y - first_marker_a.y, ti.f64),
+                ti.cast(first_marker_b.z - first_marker_a.z, ti.f64),
+            ]
+        )
+        second_expected_anchor = ti.Vector(
+            [
+                ti.cast(second_marker_a.x, ti.f64),
+                ti.cast(second_marker_a.y, ti.f64),
+                ti.cast(second_marker_a.z, ti.f64),
+            ]
+        ) + ti.cast(second_projection_weights.y, ti.f64) * ti.Vector(
+            [
+                ti.cast(second_marker_b.x - second_marker_a.x, ti.f64),
+                ti.cast(second_marker_b.y - second_marker_a.y, ti.f64),
+                ti.cast(second_marker_b.z - second_marker_a.z, ti.f64),
+            ]
+        )
+        if surface_projection_inactive_axis >= 0:
+            first_expected_anchor[surface_projection_inactive_axis] = 0.0
+            second_expected_anchor[surface_projection_inactive_axis] = 0.0
+        first_anchor_residual = first_boundary - first_expected_anchor
+        second_anchor_residual = second_boundary - second_expected_anchor
+        if (
+            first_anchor_residual.dot(first_anchor_residual)
+            > maximum_geometry_tolerance * maximum_geometry_tolerance
+            or second_anchor_residual.dot(second_anchor_residual)
+            > maximum_geometry_tolerance * maximum_geometry_tolerance
+        ):
+            valid = 0
+
+        # A near-distance tie is not sufficient to merge adjacent primitives.
+        # The only legal co-ownership is a single physical state at an
+        # authoritative, internal degree-two C0 vertex.  This branch proves
+        # that state directly and remains fail-closed for corners, seams,
+        # T-junctions, missing topology, and order-dependent author choices.
+        if adjacent_distance_tie != 0 and shared_vertex_index >= 0:
+            first_shared_weight = ti.cast(-1.0, ti.f64)
+            second_shared_weight = ti.cast(-1.0, ti.f64)
+            first_other_marker_index = first_projection_indices.x
+            second_other_marker_index = second_projection_indices.x
+            if first_projection_indices.x == shared_vertex_index:
+                first_shared_weight = ti.cast(first_projection_weights.x, ti.f64)
+                first_other_marker_index = first_projection_indices.y
+            elif first_projection_indices.y == shared_vertex_index:
+                first_shared_weight = ti.cast(first_projection_weights.y, ti.f64)
+            if second_projection_indices.x == shared_vertex_index:
+                second_shared_weight = ti.cast(second_projection_weights.x, ti.f64)
+                second_other_marker_index = second_projection_indices.y
+            elif second_projection_indices.y == shared_vertex_index:
+                second_shared_weight = ti.cast(second_projection_weights.y, ti.f64)
+
+            stored_shared_vertex = marker_position_m[shared_vertex_index]
+            stored_shared_velocity = marker_velocity_mps[shared_vertex_index]
+            stored_first_other = marker_position_m[first_other_marker_index]
+            stored_second_other = marker_position_m[second_other_marker_index]
+            shared_vertex = ti.Vector(
+                [
+                    ti.cast(stored_shared_vertex.x, ti.f64),
+                    ti.cast(stored_shared_vertex.y, ti.f64),
+                    ti.cast(stored_shared_vertex.z, ti.f64),
+                ]
+            )
+            first_outward_ray = ti.Vector(
+                [
+                    ti.cast(stored_first_other.x, ti.f64),
+                    ti.cast(stored_first_other.y, ti.f64),
+                    ti.cast(stored_first_other.z, ti.f64),
+                ]
+            ) - shared_vertex
+            second_outward_ray = ti.Vector(
+                [
+                    ti.cast(stored_second_other.x, ti.f64),
+                    ti.cast(stored_second_other.y, ti.f64),
+                    ti.cast(stored_second_other.z, ti.f64),
+                ]
+            ) - shared_vertex
+            first_closest = ti.Vector(
+                [
+                    first_segment_closest_point.x,
+                    first_segment_closest_point.y,
+                    first_segment_closest_point.z,
+                ]
+            )
+            second_closest = ti.Vector(
+                [
+                    second_segment_closest_point.x,
+                    second_segment_closest_point.y,
+                    second_segment_closest_point.z,
+                ]
+            )
+            if surface_projection_inactive_axis >= 0:
+                shared_vertex[surface_projection_inactive_axis] = 0.0
+                first_outward_ray[surface_projection_inactive_axis] = 0.0
+                second_outward_ray[surface_projection_inactive_axis] = 0.0
+                first_closest[surface_projection_inactive_axis] = 0.0
+                second_closest[surface_projection_inactive_axis] = 0.0
+            first_outward_length = first_outward_ray.norm()
+            second_outward_length = second_outward_ray.norm()
+            first_shared_delta = first_closest - shared_vertex
+            second_shared_delta = second_closest - shared_vertex
+            closest_pair_delta = first_closest - second_closest
+            c0_tangent_continuity = ti.cast(-2.0, ti.f64)
+            if first_outward_length > 1.0e-12 and second_outward_length > 1.0e-12:
+                c0_tangent_continuity = first_outward_ray.dot(
+                    second_outward_ray
+                ) / (first_outward_length * second_outward_length)
+
+            if (
+                projection_segment_topology_available != 0
+                and first_projection_indices.x < first_projection_indices.y
+                and second_projection_indices.x < second_projection_indices.y
+                and first_segment_seen_count == 1
+                and second_segment_seen_count == 1
+                and shared_incident_segment_count == 2
+                and marker_region_id[shared_vertex_index] == claim_region
+                and first_nearest_marker_index == shared_vertex_index
+                and second_nearest_marker_index == shared_vertex_index
+                and first_shared_weight > 0.5
+                and second_shared_weight > 0.5
+                and self._canonical_component_face_vector_is_finite(
+                    stored_shared_vertex
+                )
+                != 0
+                and self._canonical_component_face_vector_is_finite(
+                    stored_shared_velocity
+                )
+                != 0
+                and first_shared_delta.dot(first_shared_delta)
+                <= maximum_geometry_tolerance * maximum_geometry_tolerance
+                and second_shared_delta.dot(second_shared_delta)
+                <= maximum_geometry_tolerance * maximum_geometry_tolerance
+                and closest_pair_delta.dot(closest_pair_delta)
+                <= maximum_geometry_tolerance * maximum_geometry_tolerance
+                and c0_tangent_continuity <= -0.999999
+            ):
+                internal_shared_vertex_coownership = 1
+                boundary_f64 = shared_vertex
+                owner_target = stored_shared_velocity[component_axis]
+                owner_endpoint_clamped = 0
+                owner_clamp_support_ratio = 0.0
+
+        if adjacent_distance_tie != 0 and internal_shared_vertex_coownership == 0:
+            valid = 0
+
+        owner_segment = owner_b - owner_a
+        owner_segment_length_squared = owner_segment.dot(owner_segment)
+        owner_segment_length = ti.cast(0.0, ti.f64)
+        raw_owner_parameter = ti.cast(0.0, ti.f64)
+        if owner_segment_length_squared <= 1.0e-24:
+            valid = 0
+        else:
+            owner_segment_length = ti.sqrt(owner_segment_length_squared)
+            raw_owner_parameter = (
+                (face - owner_a).dot(owner_segment) / owner_segment_length_squared
+            )
+        owner_tangent = owner_segment / ti.max(owner_segment_length, 1.0e-30)
+        chord_normal = ti.Vector(
+            [
+                ti.cast(0.0, ti.f64),
+                ti.cast(0.0, ti.f64),
+                ti.cast(0.0, ti.f64),
+            ]
+        )
+        if surface_projection_inactive_axis == 0:
+            chord_normal = ti.Vector([0.0, -owner_segment.z, owner_segment.y])
+        elif surface_projection_inactive_axis == 1:
+            chord_normal = ti.Vector([owner_segment.z, 0.0, -owner_segment.x])
+        elif surface_projection_inactive_axis == 2:
+            chord_normal = ti.Vector([-owner_segment.y, owner_segment.x, 0.0])
+        chord_normal_length = chord_normal.norm()
+        first_segment_geometry = first_marker_b_f64 - first_marker_a_f64
+        second_segment_geometry = second_marker_b_f64 - second_marker_a_f64
+        first_chord_normal = ti.Vector(
+            [
+                ti.cast(0.0, ti.f64),
+                ti.cast(0.0, ti.f64),
+                ti.cast(0.0, ti.f64),
+            ]
+        )
+        second_chord_normal = ti.Vector(
+            [
+                ti.cast(0.0, ti.f64),
+                ti.cast(0.0, ti.f64),
+                ti.cast(0.0, ti.f64),
+            ]
+        )
+        if surface_projection_inactive_axis == 0:
+            first_chord_normal = ti.Vector(
+                [0.0, -first_segment_geometry.z, first_segment_geometry.y]
+            )
+            second_chord_normal = ti.Vector(
+                [0.0, -second_segment_geometry.z, second_segment_geometry.y]
+            )
+        elif surface_projection_inactive_axis == 1:
+            first_chord_normal = ti.Vector(
+                [first_segment_geometry.z, 0.0, -first_segment_geometry.x]
+            )
+            second_chord_normal = ti.Vector(
+                [second_segment_geometry.z, 0.0, -second_segment_geometry.x]
+            )
+        elif surface_projection_inactive_axis == 2:
+            first_chord_normal = ti.Vector(
+                [-first_segment_geometry.y, first_segment_geometry.x, 0.0]
+            )
+            second_chord_normal = ti.Vector(
+                [-second_segment_geometry.y, second_segment_geometry.x, 0.0]
+            )
+        first_chord_normal_length = first_chord_normal.norm()
+        second_chord_normal_length = second_chord_normal.norm()
+        normal_a_length = normal_a.norm()
+        normal_b_length = normal_b.norm()
+        if (
+            chord_normal_length <= 1.0e-12
+            or normal_a_length <= 1.0e-12
+            or normal_b_length <= 1.0e-12
+        ):
+            valid = 0
+        else:
+            chord_normal /= chord_normal_length
+            normal_a /= normal_a_length
+            normal_b /= normal_b_length
+            if internal_shared_vertex_coownership != 0:
+                if (
+                    first_chord_normal_length <= 1.0e-12
+                    or second_chord_normal_length <= 1.0e-12
+                ):
+                    valid = 0
+                else:
+                    first_chord_normal /= first_chord_normal_length
+                    second_chord_normal /= second_chord_normal_length
+                    common_author_normal = normal_a + normal_b
+                    if first_chord_normal.dot(common_author_normal) < 0.0:
+                        first_chord_normal = -first_chord_normal
+                    if second_chord_normal.dot(common_author_normal) < 0.0:
+                        second_chord_normal = -second_chord_normal
+                    symmetric_chord_normal = (
+                        first_chord_normal + second_chord_normal
+                    )
+                    symmetric_chord_normal_length = symmetric_chord_normal.norm()
+                    if (
+                        normal_a.dot(normal_b) < 0.999999
+                        or first_chord_normal.dot(second_chord_normal) < 0.999999
+                        or first_chord_normal.dot(normal_a) < 0.999999
+                        or first_chord_normal.dot(normal_b) < 0.999999
+                        or second_chord_normal.dot(normal_a) < 0.999999
+                        or second_chord_normal.dot(normal_b) < 0.999999
+                        or symmetric_chord_normal_length <= 1.0e-12
+                    ):
+                        valid = 0
+                    else:
+                        chord_normal = (
+                            symmetric_chord_normal
+                            / symmetric_chord_normal_length
+                        )
+            else:
+                if chord_normal.dot(normal_a + normal_b) < 0.0:
+                    chord_normal = -chord_normal
+                if (
+                    normal_a.dot(normal_b) < 0.999999
+                    or chord_normal.dot(normal_a) < 0.999999
+                    or chord_normal.dot(normal_b) < 0.999999
+                ):
+                    valid = 0
+
+        face_ray = face - boundary_f64
+        face_ray_length_squared = face_ray.dot(face_ray)
+        face_ray_length = ti.cast(0.0, ti.f64)
+        canonical_normal_f64 = ti.Vector(
+            [
+                ti.cast(0.0, ti.f64),
+                ti.cast(0.0, ti.f64),
+                ti.cast(0.0, ti.f64),
+            ]
+        )
+        if face_ray_length_squared <= 1.0e-24:
+            valid = 0
+        else:
+            face_ray_length = ti.sqrt(face_ray_length_squared)
+            canonical_normal_f64 = face_ray / face_ray_length
+
+        if (
+            owner_endpoint_clamped == 0
+            and internal_shared_vertex_coownership == 0
+        ):
+            if (
+                raw_owner_parameter == 0.0
+                or raw_owner_parameter == 1.0
+            ):
+                owner_exact_closed_endpoint = 1
+
+        endpoint_marker = owner_indices.y
+        outward_tangent = owner_tangent
+        if owner_endpoint_clamped != 0 or owner_exact_closed_endpoint != 0:
+            if raw_owner_parameter <= 0.5:
+                endpoint_marker = owner_indices.x
+                outward_tangent = -owner_tangent
+        terminal_endpoint_proven = 0
+        if (
+            (owner_endpoint_clamped != 0 or owner_exact_closed_endpoint != 0)
+            and projection_segment_topology_available != 0
+            and projection_segment_count > 0
+        ):
+            owner_segment_seen_count = 0
+            endpoint_incident_segment_count = 0
+            for segment_index in range(projection_segment_count):
+                incident_segment = projection_segment_indices[segment_index]
+                same_owner_segment = (
+                    (
+                        incident_segment.x == owner_indices.x
+                        and incident_segment.y == owner_indices.y
+                    )
+                    or (
+                        incident_segment.x == owner_indices.y
+                        and incident_segment.y == owner_indices.x
+                    )
+                )
+                if same_owner_segment:
+                    owner_segment_seen_count += 1
+                if (
+                    incident_segment.x == endpoint_marker
+                    or incident_segment.y == endpoint_marker
+                ):
+                    endpoint_incident_segment_count += 1
+            if (
+                owner_segment_seen_count == 1
+                and endpoint_incident_segment_count == 1
+            ):
+                terminal_endpoint_proven = 1
+
+        if owner_exact_closed_endpoint != 0:
+            first_parameter = ti.cast(first_projection_weights.y, ti.f64)
+            second_parameter = ti.cast(second_projection_weights.y, ti.f64)
+            closed_author_bracket = (
+                raw_owner_parameter
+                >= ti.min(first_parameter, second_parameter) - parameter_tolerance
+                and raw_owner_parameter
+                <= ti.max(first_parameter, second_parameter) + parameter_tolerance
+            )
+            endpoint_tangential_offset = face_ray.dot(outward_tangent)
+            endpoint_normal_offset = face_ray.dot(chord_normal)
+            if (
+                not same_segment
+                or terminal_endpoint_proven == 0
+                or not closed_author_bracket
+                or ti.abs(endpoint_tangential_offset) > maximum_geometry_tolerance
+                or endpoint_normal_offset <= maximum_geometry_tolerance
+            ):
+                valid = 0
+        if owner_endpoint_clamped != 0:
+            # Endpoint ownership is intentionally narrower than the general
+            # adjacent-segment case.  Both authors must name the same closed
+            # endpoint; otherwise an unobserved incident primitive could own
+            # the face and the reconstruction remains fail-closed.
+            endpoint_weights_match = 0
+            if raw_owner_parameter < 0.0:
+                if (
+                    same_segment
+                    and first_projection_weights.x >= 1.0 - parameter_tolerance
+                    and second_projection_weights.x >= 1.0 - parameter_tolerance
+                ):
+                    endpoint_weights_match = 1
+            elif raw_owner_parameter > 1.0:
+                if (
+                    same_segment
+                    and first_projection_weights.y >= 1.0 - parameter_tolerance
+                    and second_projection_weights.y >= 1.0 - parameter_tolerance
+                ):
+                    endpoint_weights_match = 1
+            beta = face_ray.dot(outward_tangent)
+            alpha = face_ray.dot(chord_normal)
+            first_endpoint_delta = first_boundary - boundary_f64
+            second_endpoint_delta = second_boundary - boundary_f64
+            if (
+                endpoint_weights_match == 0
+                or terminal_endpoint_proven == 0
+                or first_endpoint_delta.dot(first_endpoint_delta)
+                > maximum_geometry_tolerance * maximum_geometry_tolerance
+                or second_endpoint_delta.dot(second_endpoint_delta)
+                > maximum_geometry_tolerance * maximum_geometry_tolerance
+                or beta < -maximum_geometry_tolerance
+                or alpha <= maximum_geometry_tolerance
+                or owner_clamp_support_ratio > 1.0 + 1.0e-5
+            ):
+                valid = 0
+        elif canonical_normal_f64.dot(chord_normal) < 0.999999:
+            valid = 0
+
+        if internal_shared_vertex_coownership != 0:
+            # The face ray contains the one-ULP tangential displacement that
+            # created this equivalence class.  It must align with the common
+            # interface normal above, but it must not become the canonical
+            # normal itself.
+            canonical_normal_f64 = chord_normal
+
+        if (
+            same_segment
+            and owner_endpoint_clamped == 0
+            and owner_exact_closed_endpoint == 0
+        ):
+            first_parameter = ti.cast(first_projection_weights.y, ti.f64)
+            second_parameter = ti.cast(second_projection_weights.y, ti.f64)
+            parameter_separation = ti.abs(first_parameter - second_parameter)
+            if parameter_separation > parameter_tolerance:
+                bracket_margin = ti.min(
+                    raw_owner_parameter - ti.min(first_parameter, second_parameter),
+                    ti.max(first_parameter, second_parameter) - raw_owner_parameter,
+                )
+                if bracket_margin <= parameter_tolerance:
+                    valid = 0
+            else:
+                first_coincident_delta = first_boundary - boundary_f64
+                second_coincident_delta = second_boundary - boundary_f64
+                if (
+                    first_coincident_delta.dot(first_coincident_delta)
+                    > maximum_geometry_tolerance * maximum_geometry_tolerance
+                    or second_coincident_delta.dot(second_coincident_delta)
+                    > maximum_geometry_tolerance * maximum_geometry_tolerance
+                ):
+                    valid = 0
+
+        if valid != 0:
+            admission_valid = 1
+
+        first_nominal_ray = first_nominal - first_boundary
+        second_nominal_ray = second_nominal - second_boundary
+        first_actual_ray = first_actual - first_boundary
+        second_actual_ray = second_actual - second_boundary
+        first_nominal_progress = first_nominal_ray.dot(normal_a)
+        second_nominal_progress = second_nominal_ray.dot(normal_b)
+        first_actual_progress = first_actual_ray.dot(normal_a)
+        second_actual_progress = second_actual_ray.dot(normal_b)
+        first_nominal_lateral = (
+            first_nominal_ray - first_nominal_progress * normal_a
+        )
+        second_nominal_lateral = (
+            second_nominal_ray - second_nominal_progress * normal_b
+        )
+        first_actual_lateral = first_actual_ray - first_actual_progress * normal_a
+        second_actual_lateral = second_actual_ray - second_actual_progress * normal_b
+        alignment_residual_ratio_squared = ti.cast(2.0e-6, ti.f64)
+        probe_margin_a = (first_nominal - first_source).dot(normal_a)
+        probe_margin_b = (second_nominal - second_source).dot(normal_b)
+        probe_margin = ti.min(probe_margin_a, probe_margin_b)
+        if admission_valid != 0:
+            if (
+                first_nominal_progress <= 0.0
+                or second_nominal_progress <= 0.0
+                or first_actual_progress <= 0.0
+                or second_actual_progress <= 0.0
+                or first_nominal_lateral.dot(first_nominal_lateral)
+                > alignment_residual_ratio_squared
+                * first_nominal_ray.dot(first_nominal_ray)
+                + maximum_geometry_tolerance * maximum_geometry_tolerance
+                or second_nominal_lateral.dot(second_nominal_lateral)
+                > alignment_residual_ratio_squared
+                * second_nominal_ray.dot(second_nominal_ray)
+                + maximum_geometry_tolerance * maximum_geometry_tolerance
+                or first_actual_lateral.dot(first_actual_lateral)
+                > alignment_residual_ratio_squared
+                * first_actual_ray.dot(first_actual_ray)
+                + maximum_geometry_tolerance * maximum_geometry_tolerance
+                or second_actual_lateral.dot(second_actual_lateral)
+                > alignment_residual_ratio_squared
+                * second_actual_ray.dot(second_actual_ray)
+                + maximum_geometry_tolerance * maximum_geometry_tolerance
+                or probe_margin <= maximum_geometry_tolerance
+                or ti.math.isnan(probe_margin_a)
+                or ti.math.isinf(probe_margin_a)
+                or ti.math.isnan(probe_margin_b)
+                or ti.math.isinf(probe_margin_b)
+                or ti.abs(probe_margin_a - probe_margin_b)
+                > maximum_geometry_tolerance
+            ):
+                valid = 0
+
+        canonical_probe_f64 = boundary_f64 + (
+            face_ray_length + probe_margin
+        ) * canonical_normal_f64
+        if valid != 0:
+            full_valid = 1
+            canonical_boundary_target = owner_target
+            canonical_boundary_point = ti.Vector(
+                [
+                    ti.cast(boundary_f64.x, ti.f32),
+                    ti.cast(boundary_f64.y, ti.f32),
+                    ti.cast(boundary_f64.z, ti.f32),
+                ]
+            )
+            canonical_normal = ti.Vector(
+                [
+                    ti.cast(canonical_normal_f64.x, ti.f32),
+                    ti.cast(canonical_normal_f64.y, ti.f32),
+                    ti.cast(canonical_normal_f64.z, ti.f32),
+                ]
+            )
+            canonical_nominal_probe = ti.Vector(
+                [
+                    ti.cast(canonical_probe_f64.x, ti.f32),
+                    ti.cast(canonical_probe_f64.y, ti.f32),
+                    ti.cast(canonical_probe_f64.z, ti.f32),
+                ]
+            )
+            if surface_projection_inactive_axis >= 0:
+                canonical_boundary_point[surface_projection_inactive_axis] = (
+                    face_center[surface_projection_inactive_axis]
+                )
+                canonical_nominal_probe[surface_projection_inactive_axis] = (
+                    face_center[surface_projection_inactive_axis]
+                )
+
+        return (
+            admission_valid,
+            full_valid,
+            canonical_boundary_point,
+            canonical_normal,
+            canonical_nominal_probe,
+            canonical_boundary_target,
+            owner_endpoint_clamped,
+            owner_clamp_support_ratio,
+            ti.cast(maximum_geometry_tolerance, ti.f32),
         )
 
     @ti.func
@@ -13553,6 +15170,248 @@ class HibmMpmIbBoundaryConditions:
         )
 
     @ti.kernel
+    def _precompute_velocity_dirichlet_component_face_segment_pair_geometry_kernel(
+        self,
+        obstacle_field: ti.template(),
+        node_boundary_point_m: ti.template(),
+        node_interior_fluid_point_m: ti.template(),
+        node_projection_marker_indices: ti.template(),
+        node_projection_marker_weights: ti.template(),
+        nearest_marker: ti.template(),
+        marker_position_m: ti.template(),
+        marker_velocity_mps: ti.template(),
+        marker_region_id: ti.template(),
+        projection_segment_indices: ti.template(),
+        projection_segment_count: ti.i32,
+        projection_segment_topology_available: ti.i32,
+        source_search_support_available: ti.i32,
+        source_search_support_anisotropic: ti.i32,
+        source_search_support_radius_x_m: ti.f32,
+        source_search_support_radius_y_m: ti.f32,
+        source_search_support_radius_z_m: ti.f32,
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+        marker_capacity: ti.i32,
+        surface_projection_inactive_axis: ti.i32,
+    ):
+        """Cold-JIT the owner geometry for each fixed direct MAC-face pair."""
+
+        for i, j, k, component_axis in (
+            self.velocity_dirichlet_component_face_segment_pair_admission_valid
+        ):
+            target = ti.Vector([i, j, k])
+            first_author = ti.Vector([i, j, k])
+            first_author[component_axis] -= 1
+            second_author = target
+            pair_index = (i, j, k, component_axis)
+            self.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                pair_index
+            ] = 0
+            self.velocity_dirichlet_component_face_segment_pair_full_valid[pair_index] = 0
+            self.velocity_dirichlet_component_face_segment_pair_endpoint_clamped[
+                pair_index
+            ] = 0
+            self.velocity_dirichlet_component_face_segment_pair_boundary_point_m[
+                pair_index
+            ] = ti.Vector([0.0, 0.0, 0.0])
+            self.velocity_dirichlet_component_face_segment_pair_normal[pair_index] = (
+                ti.Vector([0.0, 0.0, 0.0])
+            )
+            self.velocity_dirichlet_component_face_segment_pair_nominal_probe_m[
+                pair_index
+            ] = ti.Vector([0.0, 0.0, 0.0])
+            self.velocity_dirichlet_component_face_segment_pair_boundary_target_mps[
+                pair_index
+            ] = 0.0
+            self.velocity_dirichlet_component_face_segment_pair_clamp_support_ratio[
+                pair_index
+            ] = 0.0
+            self.velocity_dirichlet_component_face_segment_pair_geometry_tolerance[
+                pair_index
+            ] = 0.0
+            self.velocity_dirichlet_component_face_segment_pair_first_author_linear_key[
+                pair_index
+            ] = -1
+            self.velocity_dirichlet_component_face_segment_pair_second_author_linear_key[
+                pair_index
+            ] = -1
+            self.velocity_dirichlet_component_face_segment_pair_first_author_kind[
+                pair_index
+            ] = -1
+            self.velocity_dirichlet_component_face_segment_pair_second_author_kind[
+                pair_index
+            ] = -1
+
+            first_in_bounds = (
+                first_author.x >= 0
+                and first_author.x < nx
+                and first_author.y >= 0
+                and first_author.y < ny
+                and first_author.z >= 0
+                and first_author.z < nz
+            )
+            second_in_bounds = (
+                second_author.x >= 0
+                and second_author.x < nx
+                and second_author.y >= 0
+                and second_author.y < ny
+                and second_author.z >= 0
+                and second_author.z < nz
+            )
+            if (
+                first_in_bounds
+                and second_in_bounds
+                and self.active_ib_node[first_author] != 0
+                and self.active_ib_node[second_author] != 0
+                and obstacle_field[first_author] == 0
+                and obstacle_field[second_author] == 0
+                and self.velocity_dirichlet_component_face_actual_sample_valid[
+                    first_author
+                ]
+                != 0
+                and self.velocity_dirichlet_component_face_actual_sample_valid[
+                    second_author
+                ]
+                != 0
+            ):
+                first_marker = nearest_marker[first_author]
+                claim_region = -1
+                if first_marker >= 0 and first_marker < marker_capacity:
+                    claim_region = marker_region_id[first_marker]
+                face_center = ti.Vector(
+                    [
+                        cell_center_x_m[i],
+                        cell_center_y_m[j],
+                        cell_center_z_m[k],
+                    ]
+                )
+                if component_axis == 0:
+                    face_center.x = cell_face_x_m[i]
+                elif component_axis == 1:
+                    face_center.y = cell_face_y_m[j]
+                else:
+                    face_center.z = cell_face_z_m[k]
+                (
+                    admission_valid,
+                    full_valid,
+                    boundary_point,
+                    normal,
+                    nominal_probe,
+                    boundary_target,
+                    endpoint_clamped,
+                    clamp_support_ratio,
+                    geometry_tolerance,
+                ) = self._canonical_component_face_finite_segment_union_owner_geometry(
+                    target,
+                    component_axis,
+                    face_center,
+                    ti.Vector(
+                        [
+                            cell_center_x_m[first_author.x],
+                            cell_center_y_m[first_author.y],
+                            cell_center_z_m[first_author.z],
+                        ]
+                    ),
+                    ti.Vector(
+                        [
+                            cell_center_x_m[second_author.x],
+                            cell_center_y_m[second_author.y],
+                            cell_center_z_m[second_author.z],
+                        ]
+                    ),
+                    node_boundary_point_m[first_author],
+                    node_boundary_point_m[second_author],
+                    node_interior_fluid_point_m[first_author],
+                    node_interior_fluid_point_m[second_author],
+                    self.velocity_dirichlet_component_face_actual_sample_point_m[
+                        first_author
+                    ],
+                    self.velocity_dirichlet_component_face_actual_sample_point_m[
+                        second_author
+                    ],
+                    self.pressure_neumann_normal_field[first_author],
+                    self.pressure_neumann_normal_field[second_author],
+                    node_projection_marker_indices[first_author],
+                    node_projection_marker_indices[second_author],
+                    node_projection_marker_weights[first_author],
+                    node_projection_marker_weights[second_author],
+                    first_marker,
+                    nearest_marker[second_author],
+                    claim_region,
+                    source_search_support_available,
+                    source_search_support_anisotropic,
+                    ti.Vector(
+                        [
+                            source_search_support_radius_x_m,
+                            source_search_support_radius_y_m,
+                            source_search_support_radius_z_m,
+                        ]
+                    ),
+                    projection_segment_indices,
+                    projection_segment_count,
+                    projection_segment_topology_available,
+                    surface_projection_inactive_axis,
+                    marker_position_m,
+                    marker_velocity_mps,
+                    marker_region_id,
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                )
+                self.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                    pair_index
+                ] = admission_valid
+                self.velocity_dirichlet_component_face_segment_pair_full_valid[
+                    pair_index
+                ] = full_valid
+                self.velocity_dirichlet_component_face_segment_pair_endpoint_clamped[
+                    pair_index
+                ] = endpoint_clamped
+                self.velocity_dirichlet_component_face_segment_pair_boundary_point_m[
+                    pair_index
+                ] = boundary_point
+                self.velocity_dirichlet_component_face_segment_pair_normal[pair_index] = (
+                    normal
+                )
+                self.velocity_dirichlet_component_face_segment_pair_nominal_probe_m[
+                    pair_index
+                ] = nominal_probe
+                self.velocity_dirichlet_component_face_segment_pair_boundary_target_mps[
+                    pair_index
+                ] = boundary_target
+                self.velocity_dirichlet_component_face_segment_pair_clamp_support_ratio[
+                    pair_index
+                ] = clamp_support_ratio
+                self.velocity_dirichlet_component_face_segment_pair_geometry_tolerance[
+                    pair_index
+                ] = geometry_tolerance
+                self.velocity_dirichlet_component_face_segment_pair_first_author_linear_key[
+                    pair_index
+                ] = ti.cast(
+                    (first_author.x * ny + first_author.y) * nz + first_author.z,
+                    ti.i64,
+                )
+                self.velocity_dirichlet_component_face_segment_pair_second_author_linear_key[
+                    pair_index
+                ] = ti.cast(
+                    (second_author.x * ny + second_author.y) * nz + second_author.z,
+                    ti.i64,
+                )
+                self.velocity_dirichlet_component_face_segment_pair_first_author_kind[
+                    pair_index
+                ] = 0
+                self.velocity_dirichlet_component_face_segment_pair_second_author_kind[
+                    pair_index
+                ] = 0
+
+    @ti.kernel
     def _prepare_velocity_dirichlet_component_face_claims_kernel(
         self,
         velocity_dirichlet_external_exact_component_mask: ti.template(),
@@ -13567,6 +15426,14 @@ class HibmMpmIbBoundaryConditions:
         marker_velocity_mps: ti.template(),
         marker_pressure_owner_index: ti.template(),
         marker_region_id: ti.template(),
+        projection_segment_indices: ti.template(),
+        projection_segment_count: ti.i32,
+        projection_segment_topology_available: ti.i32,
+        source_search_support_available: ti.i32,
+        source_search_support_anisotropic: ti.i32,
+        source_search_support_radius_x_m: ti.f32,
+        source_search_support_radius_y_m: ti.f32,
+        source_search_support_radius_z_m: ti.f32,
         cell_face_x_m: ti.template(),
         cell_face_y_m: ti.template(),
         cell_face_z_m: ti.template(),
@@ -13623,6 +15490,9 @@ class HibmMpmIbBoundaryConditions:
         self.report_velocity_dirichlet_component_face_direct_geometry_reconstructed_count[
             None
         ] = 0
+        self.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+            None
+        ] = 0
         self.report_velocity_dirichlet_component_face_direct_geometry_one_sided_count[
             None
         ] = 0
@@ -13655,7 +15525,7 @@ class HibmMpmIbBoundaryConditions:
             )
             external_mask = velocity_dirichlet_external_exact_component_mask[target]
             owned_mask = velocity_dirichlet_owned_component_mask[target]
-            for axis in ti.static(range(3)):
+            for axis in range(3):
                 self.velocity_dirichlet_component_face_segment_first_author_linear_key[
                     target.x, target.y, target.z, axis
                 ] = -1
@@ -13695,6 +15565,8 @@ class HibmMpmIbBoundaryConditions:
                 second_alpha = 0.0
                 second_boundary_axis_coordinate = 0.0
                 reconstruct_distinct_direct_geometry = 0
+                reconstruct_interpolated_surface_pair_geometry = 0
+                reconstruct_face_first_finite_segment_pair_geometry = 0
                 reconstruct_surface_segment_geometry = 0
                 all_surface_claims_same_projection_segment = 1
                 all_surface_claims_exact_first_provenance = 1
@@ -13717,8 +15589,16 @@ class HibmMpmIbBoundaryConditions:
                 second_surface_segment_serialized_target = ti.Vector(
                     [0.0, 0.0, 0.0]
                 )
+                interpolated_projection_only_region_seam_candidate = 0
                 direct_source_slot_mask = 0
                 actual_claim_count = 0
+                component_face_axis_coordinate = 0.0
+                if axis == 0:
+                    component_face_axis_coordinate = cell_face_x_m[target.x]
+                elif axis == 1:
+                    component_face_axis_coordinate = cell_face_y_m[target.y]
+                else:
+                    component_face_axis_coordinate = cell_face_z_m[target.z]
                 # A backward-face component at ``target`` can be authored
                 # only by target-e_axis (its forward face) or target itself.
                 # Runtime enumeration keeps the axis-specialized kernel small
@@ -14003,7 +15883,7 @@ class HibmMpmIbBoundaryConditions:
                                                     - first_boundary_point
                                                 )
                                                 transverse_separation_sq = 0.0
-                                                if ti.static(axis != 0):
+                                                if axis != 0:
                                                     width_x = ti.max(
                                                         ti.abs(
                                                             cell_face_x_m[target.x + 1]
@@ -14014,7 +15894,7 @@ class HibmMpmIbBoundaryConditions:
                                                     transverse_separation_sq += (
                                                         boundary_delta.x / width_x
                                                     ) ** 2
-                                                if ti.static(axis != 1):
+                                                if axis != 1:
                                                     width_y = ti.max(
                                                         ti.abs(
                                                             cell_face_y_m[target.y + 1]
@@ -14025,7 +15905,7 @@ class HibmMpmIbBoundaryConditions:
                                                     transverse_separation_sq += (
                                                         boundary_delta.y / width_y
                                                     ) ** 2
-                                                if ti.static(axis != 2):
+                                                if axis != 2:
                                                     width_z = ti.max(
                                                         ti.abs(
                                                             cell_face_z_m[target.z + 1]
@@ -14235,11 +16115,32 @@ class HibmMpmIbBoundaryConditions:
                                                     and first_declares_segment
                                                     and author_declares_segment
                                                 ):
+                                                    # Interpolation changes the committed
+                                                    # component target by sampling along
+                                                    # each author's interior ray.  Segment
+                                                    # provenance remains a statement about
+                                                    # the serialized boundary target, so do
+                                                    # not reject an otherwise valid marker
+                                                    # segment because those two concepts
+                                                    # differ.
+                                                    first_segment_validation_target = (
+                                                        first_target
+                                                    )
+                                                    current_segment_validation_target = (
+                                                        component_target
+                                                    )
+                                                    if interpolate_interior_velocity != 0:
+                                                        first_segment_validation_target = (
+                                                            first_serialized_target[axis]
+                                                        )
+                                                        current_segment_validation_target = (
+                                                            serialized_target[axis]
+                                                        )
                                                     first_segment_author_valid = self._canonical_component_face_segment_author_is_valid(
                                                         first_projection_indices,
                                                         first_projection_weights,
                                                         first_marker,
-                                                        first_target,
+                                                        first_segment_validation_target,
                                                         axis,
                                                         first_region,
                                                         marker_position_m,
@@ -14251,7 +16152,7 @@ class HibmMpmIbBoundaryConditions:
                                                         projection_indices,
                                                         projection_weights,
                                                         marker,
-                                                        component_target,
+                                                        current_segment_validation_target,
                                                         axis,
                                                         region,
                                                         marker_position_m,
@@ -14324,6 +16225,246 @@ class HibmMpmIbBoundaryConditions:
                                                     and author_declares_segment
                                                     and adjacent_projection_segments
                                                 )
+                                                interpolated_surface_segment_pair_topology = (
+                                                    marker_geometry_available != 0
+                                                    and interpolate_interior_velocity != 0
+                                                    and claim_count == 1
+                                                    and first_author_kind == 0
+                                                    and author_kind == 0
+                                                    and first_actual != 0
+                                                    and actual_geometry != 0
+                                                    and first_region >= 0
+                                                    and region == first_region
+                                                    and normal_alignment >= 0.999999
+                                                    and first_declares_segment
+                                                    and author_declares_segment
+                                                    and surface_segment_authors_valid
+                                                    != 0
+                                                    and (
+                                                        same_projection_segment
+                                                        or adjacent_projection_segments
+                                                    )
+                                                    and (
+                                                        direct_source_slot_mask
+                                                        | (1 << source_slot)
+                                                    )
+                                                    == 3
+                                                )
+                                                interpolated_axis_coordinate_scale = ti.max(
+                                                    ti.abs(
+                                                        component_face_axis_coordinate
+                                                    ),
+                                                    ti.max(
+                                                        ti.abs(
+                                                            first_boundary_axis_coordinate
+                                                        ),
+                                                        ti.abs(boundary_point[axis]),
+                                                    ),
+                                                )
+                                                interpolated_axis_coordinate_tolerance = ti.max(
+                                                    1.0e-9,
+                                                    1.0e-6
+                                                    * interpolated_axis_coordinate_scale,
+                                                )
+                                                interpolated_axis_denominator = (
+                                                    boundary_point[axis]
+                                                    - first_boundary_axis_coordinate
+                                                )
+                                                compatible_interpolated_surface_segment_pair = (
+                                                    interpolated_surface_segment_pair_topology
+                                                    and (
+                                                        surface_projection_inactive_axis
+                                                        < 0
+                                                        or surface_projection_inactive_axis
+                                                        == axis
+                                                    )
+                                                    and not ti.math.isnan(
+                                                        component_face_axis_coordinate
+                                                    )
+                                                    and not ti.math.isinf(
+                                                        component_face_axis_coordinate
+                                                    )
+                                                    and not ti.math.isnan(
+                                                        first_boundary_axis_coordinate
+                                                    )
+                                                    and not ti.math.isinf(
+                                                        first_boundary_axis_coordinate
+                                                    )
+                                                    and not ti.math.isnan(
+                                                        boundary_point[axis]
+                                                    )
+                                                    and not ti.math.isinf(
+                                                        boundary_point[axis]
+                                                    )
+                                                    and ti.abs(
+                                                        interpolated_axis_denominator
+                                                    )
+                                                    > interpolated_axis_coordinate_tolerance
+                                                    and component_face_axis_coordinate
+                                                    >= ti.min(
+                                                        first_boundary_axis_coordinate,
+                                                        boundary_point[axis],
+                                                    )
+                                                    and component_face_axis_coordinate
+                                                    <= ti.max(
+                                                        first_boundary_axis_coordinate,
+                                                        boundary_point[axis],
+                                                    )
+                                                  )
+                                                compatible_interpolated_distinct_finite_segment_pair = (
+                                                    0
+                                                )
+                                                finite_segment_face_center = ti.Vector(
+                                                    [
+                                                        cell_center_x_m[target.x],
+                                                        cell_center_y_m[target.y],
+                                                        cell_center_z_m[target.z],
+                                                    ]
+                                                )
+                                                if axis == 0:
+                                                    finite_segment_face_center.x = (
+                                                        cell_face_x_m[target.x]
+                                                    )
+                                                elif axis == 1:
+                                                    finite_segment_face_center.y = (
+                                                        cell_face_y_m[target.y]
+                                                    )
+                                                else:
+                                                    finite_segment_face_center.z = (
+                                                        cell_face_z_m[target.z]
+                                                    )
+                                                if (
+                                                    interpolated_surface_segment_pair_topology
+                                                    and surface_projection_inactive_axis
+                                                    >= 0
+                                                    and surface_projection_inactive_axis
+                                                    != axis
+                                                ):
+                                                    pair_index = (
+                                                        target.x,
+                                                        target.y,
+                                                        target.z,
+                                                        axis,
+                                                    )
+                                                    pair_author_match = (
+                                                        self.velocity_dirichlet_component_face_segment_pair_first_author_linear_key[
+                                                            pair_index
+                                                        ]
+                                                        == ti.cast(
+                                                            first_author_linear_key,
+                                                            ti.i64,
+                                                        )
+                                                        and self.velocity_dirichlet_component_face_segment_pair_second_author_linear_key[
+                                                            pair_index
+                                                        ]
+                                                        == ti.cast(author_linear_key, ti.i64)
+                                                        and self.velocity_dirichlet_component_face_segment_pair_first_author_kind[
+                                                            pair_index
+                                                        ]
+                                                        == first_author_kind
+                                                        and self.velocity_dirichlet_component_face_segment_pair_second_author_kind[
+                                                            pair_index
+                                                        ]
+                                                        == author_kind
+                                                    )
+                                                    distinct_pair_admission_valid = 0
+                                                    if pair_author_match:
+                                                        distinct_pair_admission_valid = self.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                                                            pair_index
+                                                        ]
+                                                    compatible_interpolated_distinct_finite_segment_pair = (
+                                                        distinct_pair_admission_valid
+                                                    )
+                                                compatible_interpolated_face_first_finite_segment_pair = (
+                                                    compatible_interpolated_distinct_finite_segment_pair
+                                                    != 0
+                                                )
+                                                interpolated_projection_only_region_seam = (
+                                                    marker_geometry_available != 0
+                                                    and interpolate_interior_velocity
+                                                    != 0
+                                                    and claim_count == 1
+                                                    and first_author_kind == 0
+                                                    and author_kind == 0
+                                                    and first_actual != 0
+                                                    and actual_geometry != 0
+                                                    and first_region >= 0
+                                                    and region >= 0
+                                                    and region != first_region
+                                                    and first_declares_segment
+                                                    and author_declares_segment
+                                                    and surface_segment_authors_valid
+                                                    != 0
+                                                    and self._canonical_component_face_vector_is_finite(
+                                                        first_normal
+                                                    )
+                                                    != 0
+                                                    and self._canonical_component_face_vector_is_finite(
+                                                        claim_normal
+                                                    )
+                                                    != 0
+                                                    and first_normal_norm_sq
+                                                    > 1.0e-12
+                                                    and claim_normal_norm_sq
+                                                    > 1.0e-12
+                                                    and self._projection_only_segments_form_coincident_moving_seam(
+                                                        first_marker,
+                                                        marker,
+                                                        first_projection_indices,
+                                                        projection_indices,
+                                                        marker_position_m,
+                                                        marker_velocity_mps,
+                                                        marker_pressure_owner_index,
+                                                        marker_region_id,
+                                                        physical_marker_count,
+                                                        marker_capacity,
+                                                    )
+                                                    != 0
+                                                )
+                                                interpolated_seam_has_unique_component_authority = (
+                                                    0
+                                                )
+                                                current_author_has_component_authority = (
+                                                    0
+                                                )
+                                                if interpolated_projection_only_region_seam:
+                                                    first_component_authority = ti.abs(
+                                                        first_normal[axis]
+                                                    )
+                                                    current_component_authority = ti.abs(
+                                                        claim_normal[axis]
+                                                    )
+                                                    authority_scale = ti.max(
+                                                        first_component_authority,
+                                                        current_component_authority,
+                                                    )
+                                                    authority_tolerance = ti.max(
+                                                        1.0e-12,
+                                                        1.0e-6 * authority_scale,
+                                                    )
+                                                    if (
+                                                        authority_scale > 1.0e-6
+                                                        and
+                                                        first_component_authority
+                                                        > current_component_authority
+                                                        + authority_tolerance
+                                                    ):
+                                                        interpolated_seam_has_unique_component_authority = (
+                                                            1
+                                                        )
+                                                    elif (
+                                                        authority_scale > 1.0e-6
+                                                        and
+                                                        current_component_authority
+                                                        > first_component_authority
+                                                        + authority_tolerance
+                                                    ):
+                                                        interpolated_seam_has_unique_component_authority = (
+                                                            1
+                                                        )
+                                                        current_author_has_component_authority = (
+                                                            1
+                                                        )
                                                 current_starts_second_surface_segment = (
                                                     compatible_adjacent_surface_segment_geometry
                                                     and second_surface_segment_seen == 0
@@ -14352,6 +16493,121 @@ class HibmMpmIbBoundaryConditions:
                                                 )
                                                 if segment_provenance_present:
                                                     if (
+                                                        interpolated_seam_has_unique_component_authority
+                                                        != 0
+                                                    ):
+                                                        # At a legal side/cap corner, one
+                                                        # staggered component lane belongs to
+                                                        # the surface whose search ray has the
+                                                        # strictly strongest component-normal
+                                                        # authority.  The two interpolated
+                                                        # targets came from different interior
+                                                        # rays and must never be averaged.  A
+                                                        # numerical tie remains a conflict.
+                                                        if (
+                                                            current_author_has_component_authority
+                                                            != 0
+                                                        ):
+                                                            first_target = component_target
+                                                            first_region = region
+                                                            first_marker = marker
+                                                            first_alpha = alpha
+                                                            first_actual = actual_geometry
+                                                            first_author_kind = author_kind
+                                                            first_boundary_axis_coordinate = (
+                                                                boundary_point[axis]
+                                                            )
+                                                            first_boundary_point = (
+                                                                boundary_point
+                                                            )
+                                                            first_sample_point = sample_point
+                                                            first_normal = claim_normal
+                                                            first_serialized_target = (
+                                                                serialized_target
+                                                            )
+                                                            first_projection_indices = (
+                                                                projection_indices
+                                                            )
+                                                            first_projection_weights = (
+                                                                projection_weights
+                                                            )
+                                                            first_author_linear_key = (
+                                                                author_linear_key
+                                                            )
+                                                        # Defer the report commit until the
+                                                        # complete raw cohort has been scanned.
+                                                        # A later third author must invalidate
+                                                        # the pair-local seam merge rather than
+                                                        # leave a misleading success count.
+                                                        interpolated_projection_only_region_seam_candidate = (
+                                                            1
+                                                        )
+                                                    elif compatible_interpolated_face_first_finite_segment_pair:
+                                                        # Two adjacent direct rows may discover
+                                                        # one physical MAC face either at one
+                                                        # coincident anchor or between two strict
+                                                        # finite-segment anchors.  Author-local
+                                                        # accepted samples, targets, and alphas are
+                                                        # not authority for that shared face.
+                                                        # Defer one canonical face-ray sample to
+                                                        # the topology pass.
+                                                        reconstruct_surface_segment_geometry = 1
+                                                        reconstruct_face_first_finite_segment_pair_geometry = (
+                                                            1
+                                                        )
+                                                        if (
+                                                            self.velocity_dirichlet_component_face_segment_first_author_linear_key[
+                                                                target.x,
+                                                                target.y,
+                                                                target.z,
+                                                                axis,
+                                                            ]
+                                                            >= -1
+                                                        ):
+                                                            self.velocity_dirichlet_component_face_segment_first_author_linear_key[
+                                                                target.x,
+                                                                target.y,
+                                                                target.z,
+                                                                axis,
+                                                            ] = first_author_linear_key
+                                                            self.velocity_dirichlet_component_face_segment_second_author_linear_key[
+                                                                target.x,
+                                                                target.y,
+                                                                target.z,
+                                                                axis,
+                                                            ] = author_linear_key
+                                                            self.velocity_dirichlet_component_face_segment_projection_only_seam[
+                                                                target.x,
+                                                                target.y,
+                                                                target.z,
+                                                                axis,
+                                                            ] = (
+                                                                self.velocity_dirichlet_component_face_segment_projection_only_seam[
+                                                                    target.x,
+                                                                    target.y,
+                                                                    target.z,
+                                                                    axis,
+                                                                ]
+                                                                | HIBM_COMPONENT_FACE_SEGMENT_MODE_FACE_FIRST_FINITE_SEGMENT_PAIR
+                                                            )
+                                                    elif compatible_interpolated_surface_segment_pair:
+                                                        # Each row has already reconstructed
+                                                        # its effective target along its own
+                                                        # accepted normal ray.  The two rows
+                                                        # are transverse support values for
+                                                        # one staggered face, so reconstruct
+                                                        # target and alpha at the physical MAC
+                                                        # coordinate.  This path is admitted
+                                                        # only for a finite, nondegenerate,
+                                                        # bracketed C0 pair; it never grants
+                                                        # one-sided extrapolation authority.
+                                                        reconstruct_distinct_direct_geometry = (
+                                                            1
+                                                        )
+                                                        reconstruct_interpolated_surface_pair_geometry = (
+                                                            1
+                                                        )
+                                                    elif (
                                                         projection_only_region_seam
                                                         or compatible_surface_segment_geometry
                                                     ):
@@ -14530,6 +16786,21 @@ class HibmMpmIbBoundaryConditions:
                                                     > 1.0e-6
                                                 ):
                                                     conflict_kind = 3
+                                                if (
+                                                    reconstruct_face_first_finite_segment_pair_geometry
+                                                    != 0
+                                                    and claim_count >= 2
+                                                ):
+                                                    # Once the first two raw authors have
+                                                    # established face-first pair authority,
+                                                    # every later raw author is a cohort-shape
+                                                    # failure.  Do not publish a pair-local
+                                                    # target/region/alpha conflict here: the
+                                                    # end-of-scan cardinality gate owns the sole
+                                                    # conflict count and its complete 3/4-author
+                                                    # witness.  The second author still follows
+                                                    # the ordinary pair arbitration above.
+                                                    conflict_kind = 0
                                                 if conflict_kind != 0:
                                                     ti.atomic_add(
                                                         self.report_velocity_dirichlet_component_face_conflict_count[
@@ -14632,8 +16903,19 @@ class HibmMpmIbBoundaryConditions:
                                                         ],
                                                         1,
                                                      )
+                if (
+                    interpolated_projection_only_region_seam_candidate != 0
+                    and claim_count == 2
+                ):
+                    ti.atomic_add(
+                        self.report_velocity_dirichlet_component_face_projection_only_region_seam_merged_count[
+                            None
+                        ],
+                        1,
+                    )
                 pair_only_reconstruction = (
                     reconstruct_distinct_direct_geometry != 0
+                    or reconstruct_face_first_finite_segment_pair_geometry != 0
                     or (
                         reconstruct_surface_segment_geometry != 0
                         and all_surface_claims_same_projection_segment == 0
@@ -14719,6 +17001,8 @@ class HibmMpmIbBoundaryConditions:
                             nz,
                         )
                     reconstruct_distinct_direct_geometry = 0
+                    reconstruct_interpolated_surface_pair_geometry = 0
+                    reconstruct_face_first_finite_segment_pair_geometry = 0
                     self.velocity_dirichlet_component_face_segment_projection_only_seam[
                         target.x, target.y, target.z, axis
                     ] = 0
@@ -14778,12 +17062,25 @@ class HibmMpmIbBoundaryConditions:
                         first_alpha = first_alpha + (
                             second_alpha - first_alpha
                         ) * interpolation_weight
-                        ti.atomic_add(
-                            self.report_velocity_dirichlet_component_face_direct_geometry_reconstructed_count[
-                                None
-                            ],
-                            1,
-                        )
+                        if reconstruct_interpolated_surface_pair_geometry != 0:
+                            # Keep the public direct-geometry counter scoped to
+                            # hard/nominal claims.  Production health checks use
+                            # that counter together with nominal-direct claim
+                            # cardinality, whereas this C0 interpolation path
+                            # consists exclusively of actual-sampled authors.
+                            ti.atomic_add(
+                                self.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                                    None
+                                ],
+                                1,
+                            )
+                        else:
+                            ti.atomic_add(
+                                self.report_velocity_dirichlet_component_face_direct_geometry_reconstructed_count[
+                                    None
+                                ],
+                                1,
+                            )
                         if raw_weight < 0.0 or raw_weight > 1.0:
                             ti.atomic_add(
                                 self.report_velocity_dirichlet_component_face_direct_geometry_one_sided_count[
@@ -14828,6 +17125,10 @@ class HibmMpmIbBoundaryConditions:
     @ti.kernel
     def _reconstruct_velocity_dirichlet_component_face_segment_claims_kernel(
         self,
+        obstacle_field: ti.template(),
+        velocity_field: ti.template(),
+        node_boundary_point_m: ti.template(),
+        node_interior_fluid_point_m: ti.template(),
         node_projection_marker_indices: ti.template(),
         node_projection_marker_weights: ti.template(),
         nearest_marker: ti.template(),
@@ -14835,6 +17136,14 @@ class HibmMpmIbBoundaryConditions:
         marker_velocity_mps: ti.template(),
         marker_pressure_owner_index: ti.template(),
         marker_region_id: ti.template(),
+        projection_segment_indices: ti.template(),
+        projection_segment_count: ti.i32,
+        projection_segment_topology_available: ti.i32,
+        source_search_support_available: ti.i32,
+        source_search_support_anisotropic: ti.i32,
+        source_search_support_radius_x_m: ti.f32,
+        source_search_support_radius_y_m: ti.f32,
+        source_search_support_radius_z_m: ti.f32,
         cell_face_x_m: ti.template(),
         cell_face_y_m: ti.template(),
         cell_face_z_m: ti.template(),
@@ -14866,6 +17175,8 @@ class HibmMpmIbBoundaryConditions:
                     ]
                 )
                 target = ti.Vector([i, j, k])
+                minus_face_author = ti.Vector([target.x, target.y, target.z])
+                minus_face_author[component_axis] -= 1
                 reconstruction_valid = 1
                 if (
                     second_linear_key < 0
@@ -14906,6 +17217,10 @@ class HibmMpmIbBoundaryConditions:
                     segment_reconstruction_mode
                     & HIBM_COMPONENT_FACE_SEGMENT_MODE_EXACT_AUTHOR_COHORT
                 ) != 0
+                face_first_finite_segment_pair = (
+                    segment_reconstruction_mode
+                    & HIBM_COMPONENT_FACE_SEGMENT_MODE_FACE_FIRST_FINITE_SEGMENT_PAIR
+                ) != 0
                 first_indices = ti.Vector([-1, -1, -1])
                 second_indices = ti.Vector([-1, -1, -1])
                 first_weights = ti.Vector([0.0, 0.0, 0.0])
@@ -14915,6 +17230,7 @@ class HibmMpmIbBoundaryConditions:
                 first_segment_region = claim_region
                 second_segment_region = claim_region
                 identical_projection_provenance = 0
+                authors_are_component_axis_pair = 0
                 shared_endpoint_count = 0
                 shared_endpoint_marker = -1
                 if reconstruction_valid != 0:
@@ -15031,6 +17347,24 @@ class HibmMpmIbBoundaryConditions:
                                 and first_author.y == second_author.y
                             ):
                                 authors_are_inactive_axis_pair = 1
+                    authors_are_component_axis_pair = (
+                        (
+                            first_author.x == minus_face_author.x
+                            and first_author.y == minus_face_author.y
+                            and first_author.z == minus_face_author.z
+                            and second_author.x == target.x
+                            and second_author.y == target.y
+                            and second_author.z == target.z
+                        )
+                        or (
+                            second_author.x == minus_face_author.x
+                            and second_author.y == minus_face_author.y
+                            and second_author.z == minus_face_author.z
+                            and first_author.x == target.x
+                            and first_author.y == target.y
+                            and first_author.z == target.z
+                        )
+                    )
                     pair_has_identical_projection_provenance = (
                         self.velocity_dirichlet_component_face_claim_count[target][
                             component_axis
@@ -15075,6 +17409,25 @@ class HibmMpmIbBoundaryConditions:
                         )
                     ):
                         reconstruction_valid = 0
+                    if (
+                        face_first_finite_segment_pair
+                        and (
+                            self.velocity_dirichlet_component_face_claim_count[
+                                target
+                            ][component_axis]
+                            != 2
+                            or not authors_are_component_axis_pair
+                            or (
+                                same_segment
+                                and segment_is_non_degenerate == 0
+                            )
+                            or (
+                                not same_segment
+                                and shared_endpoint_count != 1
+                            )
+                        )
+                    ):
+                        reconstruction_valid = 0
 
                 face_center = ti.Vector(
                     [
@@ -15092,6 +17445,7 @@ class HibmMpmIbBoundaryConditions:
 
                 reconstructed_target = 0.0
                 reconstructed_region = claim_region
+                reconstructed_alpha = 0.0
                 endpoint_support_failure = 0
                 accepted_endpoint_clamped = 0
                 accepted_clamp_overrun_support_ratio = 0.0
@@ -15112,6 +17466,7 @@ class HibmMpmIbBoundaryConditions:
                         first_indices.y,
                         first_segment_region,
                         surface_projection_inactive_axis,
+                        1,
                         marker_position_m,
                         marker_velocity_mps,
                         marker_region_id,
@@ -15123,7 +17478,286 @@ class HibmMpmIbBoundaryConditions:
                         first_indices.x == second_indices.x
                         and first_indices.y == second_indices.y
                     )
-                    if same_segment:
+                    if (
+                        face_first_finite_segment_pair
+                        and authors_are_component_axis_pair
+                    ):
+                        first_boundary_anchor = node_boundary_point_m[first_author]
+                        second_boundary_anchor = node_boundary_point_m[second_author]
+                        first_nominal_probe = node_interior_fluid_point_m[
+                            first_author
+                        ]
+                        second_nominal_probe = node_interior_fluid_point_m[
+                            second_author
+                        ]
+                        first_normal = self.pressure_neumann_normal_field[
+                            first_author
+                        ]
+                        second_normal = self.pressure_neumann_normal_field[
+                            second_author
+                        ]
+                        pair_index = (i, j, k, component_axis)
+                        pair_author_match = (
+                            self.velocity_dirichlet_component_face_segment_pair_first_author_linear_key[
+                                pair_index
+                            ]
+                            == first_linear_key
+                            and self.velocity_dirichlet_component_face_segment_pair_second_author_linear_key[
+                                pair_index
+                            ]
+                            == second_linear_key
+                            and self.velocity_dirichlet_component_face_segment_pair_first_author_kind[
+                                pair_index
+                            ]
+                            == 0
+                            and self.velocity_dirichlet_component_face_segment_pair_second_author_kind[
+                                pair_index
+                            ]
+                            == 0
+                        )
+                        distinct_pair_admission_valid = 0
+                        distinct_pair_full_valid = 0
+                        distinct_pair_boundary_point = ti.Vector([0.0, 0.0, 0.0])
+                        distinct_pair_normal = ti.Vector([0.0, 0.0, 0.0])
+                        distinct_pair_nominal_probe = ti.Vector([0.0, 0.0, 0.0])
+                        distinct_pair_boundary_target = 0.0
+                        distinct_pair_endpoint_clamped = 0
+                        distinct_pair_clamp_support_ratio = 0.0
+                        distinct_pair_geometry_tolerance = 0.0
+                        if pair_author_match:
+                            distinct_pair_admission_valid = self.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                                pair_index
+                            ]
+                            distinct_pair_full_valid = self.velocity_dirichlet_component_face_segment_pair_full_valid[
+                                pair_index
+                            ]
+                            distinct_pair_boundary_point = self.velocity_dirichlet_component_face_segment_pair_boundary_point_m[
+                                pair_index
+                            ]
+                            distinct_pair_normal = self.velocity_dirichlet_component_face_segment_pair_normal[
+                                pair_index
+                            ]
+                            distinct_pair_nominal_probe = self.velocity_dirichlet_component_face_segment_pair_nominal_probe_m[
+                                pair_index
+                            ]
+                            distinct_pair_boundary_target = self.velocity_dirichlet_component_face_segment_pair_boundary_target_mps[
+                                pair_index
+                            ]
+                            distinct_pair_endpoint_clamped = self.velocity_dirichlet_component_face_segment_pair_endpoint_clamped[
+                                pair_index
+                            ]
+                            distinct_pair_clamp_support_ratio = self.velocity_dirichlet_component_face_segment_pair_clamp_support_ratio[
+                                pair_index
+                            ]
+                            distinct_pair_geometry_tolerance = self.velocity_dirichlet_component_face_segment_pair_geometry_tolerance[
+                                pair_index
+                            ]
+                        canonical_boundary_point = distinct_pair_boundary_point
+                        canonical_boundary_target = ti.cast(
+                            distinct_pair_boundary_target,
+                            ti.f32,
+                        )
+                        canonical_nominal_probe = distinct_pair_nominal_probe
+                        first_normal_norm_sq = first_normal.dot(first_normal)
+                        second_normal_norm_sq = second_normal.dot(second_normal)
+                        normal_alignment = -1.0
+                        if (
+                            self._canonical_component_face_vector_is_finite(
+                                first_normal
+                            )
+                            != 0
+                            and self._canonical_component_face_vector_is_finite(
+                                second_normal
+                            )
+                            != 0
+                            and first_normal_norm_sq > 1.0e-12
+                            and second_normal_norm_sq > 1.0e-12
+                        ):
+                            normal_alignment = first_normal.dot(
+                                second_normal
+                            ) / ti.sqrt(
+                                first_normal_norm_sq * second_normal_norm_sq
+                            )
+                        if (
+                            distinct_pair_admission_valid == 0
+                            or distinct_pair_full_valid == 0
+                            or self._canonical_component_face_vector_is_finite(
+                                canonical_boundary_point
+                            )
+                            == 0
+                            or self._canonical_component_face_vector_is_finite(
+                                first_boundary_anchor
+                            )
+                            == 0
+                            or self._canonical_component_face_vector_is_finite(
+                                second_boundary_anchor
+                            )
+                            == 0
+                            or self._canonical_component_face_vector_is_finite(
+                                first_nominal_probe
+                            )
+                            == 0
+                            or self._canonical_component_face_vector_is_finite(
+                                second_nominal_probe
+                            )
+                            == 0
+                            or normal_alignment < 0.999999
+                            or ti.math.isnan(canonical_boundary_target)
+                            or ti.math.isinf(canonical_boundary_target)
+                            or self.velocity_dirichlet_component_face_actual_sample_valid[
+                                first_author
+                            ]
+                            == 0
+                            or self.velocity_dirichlet_component_face_actual_sample_valid[
+                                second_author
+                            ]
+                            == 0
+                        ):
+                            reconstruction_valid = 0
+                        maximum_geometry_tolerance = (
+                            distinct_pair_geometry_tolerance
+                        )
+
+                        canonical_ray = (
+                            canonical_nominal_probe - canonical_boundary_point
+                        )
+                        canonical_ray_length_squared = canonical_ray.dot(
+                            canonical_ray
+                        )
+                        face_offset = face_center - canonical_boundary_point
+                        face_progress = -1.0
+                        face_tangential_distance_squared = 1.0e30
+                        if (
+                            self._canonical_component_face_vector_is_finite(
+                                canonical_nominal_probe
+                            )
+                            != 0
+                            and not ti.math.isnan(canonical_ray_length_squared)
+                            and not ti.math.isinf(canonical_ray_length_squared)
+                            and canonical_ray_length_squared > 1.0e-24
+                        ):
+                            face_progress = face_offset.dot(
+                                canonical_ray
+                            ) / canonical_ray_length_squared
+                            face_tangential_offset = (
+                                face_offset - face_progress * canonical_ray
+                            )
+                            face_tangential_distance_squared = (
+                                face_tangential_offset.dot(face_tangential_offset)
+                            )
+                        if (
+                            ti.math.isnan(face_progress)
+                            or ti.math.isinf(face_progress)
+                            or face_progress <= 1.0e-6
+                            or face_progress > 1.0
+                            or face_tangential_distance_squared
+                            > 3.0
+                            * maximum_geometry_tolerance
+                            * maximum_geometry_tolerance
+                        ):
+                            reconstruction_valid = 0
+
+                        if reconstruction_valid != 0:
+                            ti.atomic_add(
+                                self.report_velocity_dirichlet_component_face_actual_sample_evaluation_count[
+                                    None
+                                ],
+                                1,
+                            )
+                            (
+                                sample_found,
+                                canonical_sample_velocity,
+                                canonical_accepted_sample_point,
+                            ) = self._canonical_component_face_actual_interior_sample(
+                                velocity_field,
+                                obstacle_field,
+                                minus_face_author,
+                                canonical_boundary_point,
+                                canonical_nominal_probe,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            if sample_found == 0:
+                                ti.atomic_add(
+                                    self.report_velocity_dirichlet_component_face_missing_actual_sample_count[
+                                        None
+                                    ],
+                                    3,
+                                )
+                                reconstruction_valid = 0
+                            else:
+                                allow_obstacle_fluid_interface = 0
+                                if (
+                                    ti.abs(distinct_pair_normal[component_axis])
+                                    > 1.0e-6
+                                ):
+                                    allow_obstacle_fluid_interface = 1
+                                (
+                                    canonical_storage_valid,
+                                    canonical_storage,
+                                    canonical_alpha,
+                                    canonical_geometry_error,
+                                ) = self._select_canonical_component_face_storage_device(
+                                    minus_face_author,
+                                    component_axis,
+                                    canonical_boundary_point,
+                                    canonical_accepted_sample_point,
+                                    obstacle_field,
+                                    allow_obstacle_fluid_interface,
+                                    cell_face_x_m,
+                                    cell_face_y_m,
+                                    cell_face_z_m,
+                                    cell_center_x_m,
+                                    cell_center_y_m,
+                                    cell_center_z_m,
+                                    nx,
+                                    ny,
+                                    nz,
+                                )
+                                reconstructed_target_candidate = (
+                                    canonical_boundary_target
+                                    + (
+                                        canonical_sample_velocity[component_axis]
+                                        - canonical_boundary_target
+                                    )
+                                    * canonical_alpha
+                                )
+                                if (
+                                    canonical_storage_valid == 0
+                                    or canonical_storage.x != target.x
+                                    or canonical_storage.y != target.y
+                                    or canonical_storage.z != target.z
+                                    or canonical_alpha <= 1.0e-6
+                                    or ti.math.isnan(canonical_alpha)
+                                    or ti.math.isinf(canonical_alpha)
+                                    or ti.math.isnan(reconstructed_target_candidate)
+                                    or ti.math.isinf(reconstructed_target_candidate)
+                                ):
+                                    reconstruction_valid = 0
+                                else:
+                                    reconstructed_target = (
+                                        reconstructed_target_candidate
+                                    )
+                                    reconstructed_alpha = canonical_alpha
+                                    accepted_endpoint_clamped = (
+                                        distinct_pair_endpoint_clamped
+                                    )
+                                    accepted_clamp_overrun_support_ratio = (
+                                        distinct_pair_clamp_support_ratio
+                                    )
+                    elif face_first_finite_segment_pair:
+                        # A face-first cohort that is not the exact two-row
+                        # component-axis pair has no alternate author-local
+                        # reconstruction path.
+                        reconstruction_valid = 0
+                    elif same_segment:
                         if identical_projection_provenance != 0:
                             reconstructed_target = first_target
                             used_identical_projection_provenance = 1
@@ -15156,6 +17790,7 @@ class HibmMpmIbBoundaryConditions:
                             second_indices.y,
                             second_segment_region,
                             surface_projection_inactive_axis,
+                            1,
                             marker_position_m,
                             marker_velocity_mps,
                             marker_region_id,
@@ -15421,6 +18056,10 @@ class HibmMpmIbBoundaryConditions:
                     self.velocity_dirichlet_component_face_claim_region_id[target][
                         component_axis
                     ] = reconstructed_region
+                    if face_first_finite_segment_pair:
+                        self.velocity_dirichlet_component_face_claim_alpha[target][
+                            component_axis
+                        ] = reconstructed_alpha
                     if projection_only_region_seam:
                         ti.atomic_add(
                             self.report_velocity_dirichlet_component_face_projection_only_region_seam_merged_count[
@@ -15428,7 +18067,14 @@ class HibmMpmIbBoundaryConditions:
                             ],
                             1,
                         )
-                    if used_identical_projection_provenance != 0:
+                    if face_first_finite_segment_pair:
+                        ti.atomic_add(
+                            self.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                                None
+                            ],
+                            1,
+                        )
+                    elif used_identical_projection_provenance != 0:
                         ti.atomic_add(
                             self.report_velocity_dirichlet_component_face_segment_identical_provenance_merged_count[
                                 None
@@ -15618,82 +18264,6 @@ class HibmMpmIbBoundaryConditions:
             self.velocity_dirichlet_relocation_winner_source_linear_key[row] = ti.i64(
                 HIBM_RELOCATION_NO_WINNER_SOURCE_LINEAR_KEY
             )
-
-    @ti.kernel
-    def _audit_prospective_velocity_dirichlet_component_face_ledger_kernel(
-        self,
-        velocity_dirichlet_active_component_mask: ti.template(),
-        velocity_dirichlet_value_mps: ti.template(),
-        velocity_dirichlet_pressure_mobility: ti.template(),
-        velocity_dirichlet_component_enforcement_weight: ti.template(),
-        velocity_dirichlet_hard_fixed_component_mask: ti.template(),
-        velocity_dirichlet_external_exact_component_mask: ti.template(),
-        velocity_dirichlet_owned_component_mask: ti.template(),
-        obstacle_field: ti.template(),
-    ):
-        """Audit the exact post-commit view without mutating the ledger."""
-
-        self.report_velocity_dirichlet_component_face_illegal_active_on_obstacle_storage_component_count[
-            None
-        ] = 0
-        for row in ti.grouped(velocity_dirichlet_active_component_mask):
-            active_mask = velocity_dirichlet_active_component_mask[row]
-            committed_value = velocity_dirichlet_value_mps[row]
-            pressure_mobility = velocity_dirichlet_pressure_mobility[row]
-            enforcement_weight = (
-                velocity_dirichlet_component_enforcement_weight[row]
-            )
-            hard_mask = velocity_dirichlet_hard_fixed_component_mask[row]
-            external_mask = velocity_dirichlet_external_exact_component_mask[row]
-            old_owned_mask = velocity_dirichlet_owned_component_mask[row]
-            for axis in ti.static(range(3)):
-                bit = 1 << axis
-                active = (active_mask & bit) != 0
-                hard = (hard_mask & bit) != 0
-                external = (external_mask & bit) != 0
-                owned = (old_owned_mask & bit) != 0
-                value = committed_value[axis]
-                mobility = pressure_mobility[axis]
-                weight = enforcement_weight[axis]
-                if owned:
-                    active = False
-                    hard = False
-                    external = False
-                    owned = False
-                    value = 0.0
-                    mobility = 1.0
-                    weight = 0.0
-                if self.velocity_dirichlet_component_face_claim_count[row][axis] > 0:
-                    active = True
-                    hard = True
-                    external = False
-                    owned = True
-                    value = self.velocity_dirichlet_component_face_claim_target_mps[
-                        row
-                    ][axis]
-                    mobility = 0.0
-                    weight = 1.0
-                _, _, illegal_obstacle_storage = (
-                    self._classify_canonical_obstacle_storage_component_device(
-                        row,
-                        axis,
-                        active,
-                        hard,
-                        external,
-                        owned,
-                        value,
-                        mobility,
-                        weight,
-                        obstacle_field,
-                    )
-                )
-                if illegal_obstacle_storage != 0:
-                    ti.atomic_add(
-                        self.report_velocity_dirichlet_component_face_illegal_active_on_obstacle_storage_component_count[
-                            None
-                        ],
-                        1,
-                    )
 
     @ti.func
     def _count_invalid_component_mask_bits_device(self, mask):
@@ -16868,7 +19438,7 @@ class HibmMpmIbBoundaryConditions:
             )
             if constrained_marker and marker_sample_valid[marker] != 0:
                 position = marker_position_m[marker]
-                for axis in ti.static(range(3)):
+                for axis in range(3):
                     base, fraction = mac_component_stencil_base_fraction(
                         position,
                         axis,
@@ -16886,7 +19456,7 @@ class HibmMpmIbBoundaryConditions:
                     valid_weight = 0.0
                     q_free_diagonal_numerator = 0.0
                     adjustable_weighted_square = 0.0
-                    for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
+                    for oi, oj, ok in ti.ndrange(2, 2, 2):
                         i = base.x + oi
                         j = base.y + oj
                         k = base.z + ok
@@ -16935,7 +19505,7 @@ class HibmMpmIbBoundaryConditions:
                             valid_weight * valid_weight
                         )
                         if ti.abs(residual) > closure_tolerance_mps:
-                            for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
+                            for oi, oj, ok in ti.ndrange(2, 2, 2):
                                 i = base.x + oi
                                 j = base.y + oj
                                 k = base.z + ok
@@ -16998,6 +19568,7 @@ class HibmMpmIbBoundaryConditions:
         cell_center_x_m,
         cell_center_y_m,
         cell_center_z_m,
+        stage_observer: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
         iterations = int(max_iterations)
         tolerance = float(absolute_tolerance_mps)
@@ -17023,6 +19594,10 @@ class HibmMpmIbBoundaryConditions:
             raise ValueError(
                 "projection_vertex_count exceeds boundary marker_capacity"
             )
+        if stage_observer is not None:
+            stage_observer(
+                "hibm_marker_closure_prospective_sampling_view_before"
+            )
         self._build_prospective_marker_target_closure_sampling_view_kernel(
             velocity_dirichlet_active_component_mask,
             velocity_dirichlet_value_mps,
@@ -17032,6 +19607,12 @@ class HibmMpmIbBoundaryConditions:
             obstacle_field,
             velocity_field,
         )
+        if stage_observer is not None:
+            stage_observer(
+                "hibm_marker_closure_prospective_sampling_view_after"
+            )
+        if stage_observer is not None:
+            stage_observer("hibm_marker_closure_direct_no_slip_identity_before")
         markers._prepare_no_slip_sampling_direct_identity_kernel(
             self.velocity_dirichlet_marker_target_closure_sample_valid,
             self.velocity_dirichlet_marker_target_closure_sample_source_code,
@@ -17052,12 +19633,18 @@ class HibmMpmIbBoundaryConditions:
             int(self.grid_nodes[1]),
             int(self.grid_nodes[2]),
         )
+        if stage_observer is not None:
+            stage_observer("hibm_marker_closure_direct_no_slip_identity_after")
         unresolved_marker_count = int(
             self.velocity_dirichlet_marker_target_closure_unresolved_marker_count[
                 None
             ]
         )
         if unresolved_marker_count > 0:
+            if stage_observer is not None:
+                stage_observer(
+                    "hibm_marker_closure_fallback_no_slip_identity_before"
+                )
             markers._prepare_no_slip_sampling_fallback_identity_kernel(
                 self.velocity_dirichlet_marker_target_closure_sample_valid,
                 self.velocity_dirichlet_marker_target_closure_sample_source_code,
@@ -17078,6 +19665,10 @@ class HibmMpmIbBoundaryConditions:
                 int(self.grid_nodes[1]),
                 int(self.grid_nodes[2]),
             )
+            if stage_observer is not None:
+                stage_observer(
+                    "hibm_marker_closure_fallback_no_slip_identity_after"
+                )
         measurement_arguments = (
             self.velocity_dirichlet_marker_target_closure_sample_position_m,
             self.velocity_dirichlet_marker_target_closure_sample_valid,
@@ -17095,7 +19686,11 @@ class HibmMpmIbBoundaryConditions:
             cell_center_z_m,
             density,
         )
+        if stage_observer is not None:
+            stage_observer("hibm_marker_closure_initial_measure_before")
         self._measure_marker_target_closure_kernel(*measurement_arguments, tolerance)
+        if stage_observer is not None:
+            stage_observer("hibm_marker_closure_initial_measure_after")
         initial_max_residual = float(
             self.report_velocity_dirichlet_marker_target_closure_max_residual_mps[
                 None
@@ -17122,13 +19717,21 @@ class HibmMpmIbBoundaryConditions:
         iterations_used = 0
         if initial_adjustable_max_residual > closure_tolerance:
             sweep_arguments = measurement_arguments
+            if stage_observer is not None:
+                stage_observer("hibm_marker_closure_kaczmarz_sweeps_before")
             for _ in range(iterations):
                 self._marker_target_closure_kaczmarz_sweep_kernel(
                     *sweep_arguments,
                     closure_tolerance,
                 )
+            if stage_observer is not None:
+                stage_observer("hibm_marker_closure_kaczmarz_sweeps_after")
             iterations_used = iterations
+        if stage_observer is not None:
+            stage_observer("hibm_marker_closure_final_measure_before")
         self._measure_marker_target_closure_kernel(*measurement_arguments, tolerance)
+        if stage_observer is not None:
+            stage_observer("hibm_marker_closure_final_measure_after")
         constraint_count = int(
             self.report_velocity_dirichlet_marker_target_closure_constraint_count[None]
         )
@@ -17244,6 +19847,7 @@ class HibmMpmIbBoundaryConditions:
         interpolate_interior_velocity: bool = False,
         primary_region_id: int = 0,
         secondary_region_id: int = 1,
+        stage_observer: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
         """Prepare, validate, then atomically commit canonical MAC claims.
 
@@ -17387,6 +19991,34 @@ class HibmMpmIbBoundaryConditions:
             if markers is not None
             else marker_region_id
         )
+        projection_segment_indices = self._unavailable_projection_segment_indices
+        projection_segment_count = 0
+        projection_segment_topology_available = 0
+        if markers is not None and int(markers.projection_segment_count) > 0:
+            projection_segment_indices = markers.projection_triangle_indices
+            projection_segment_count = int(markers.projection_segment_count)
+            projection_segment_topology_available = 1
+
+        source_search_support_available = 0
+        source_search_support_anisotropic = 0
+        source_search_support_radius_xyz_m = (0.0, 0.0, 0.0)
+        last_search_support = search._last_search_support_radius_xyz_m
+        last_search_support_anisotropic = search._last_search_support_anisotropic
+        if (
+            last_search_support is not None
+            and last_search_support_anisotropic is not None
+            and int(search._last_search_inactive_axis) == inactive_axis
+            and len(last_search_support) == 3
+            and all(
+                math.isfinite(float(value)) and float(value) > 0.0
+                for value in last_search_support
+            )
+        ):
+            source_search_support_available = 1
+            source_search_support_anisotropic = int(last_search_support_anisotropic)
+            source_search_support_radius_xyz_m = tuple(
+                float(value) for value in last_search_support
+            )
 
         nx, ny, nz = (int(nodes[0]), int(nodes[1]), int(nodes[2]))
         interpolate_flag = 1 if bool(interpolate_interior_velocity) else 0
@@ -17407,7 +20039,13 @@ class HibmMpmIbBoundaryConditions:
             "inactive_axis": inactive_axis,
         }
         try:
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_relocation_clear_before")
             self._clear_canonical_velocity_dirichlet_relocation_transaction_kernel()
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_relocation_clear_after")
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_relocation_arbitrate_before")
             self._arbitrate_canonical_velocity_dirichlet_obstacle_relocation_kernel(
                 obstacle_field,
                 velocity_field,
@@ -17423,6 +20061,10 @@ class HibmMpmIbBoundaryConditions:
                 ny,
                 nz,
             )
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_relocation_arbitrate_after")
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_relocation_materialize_before")
             self._materialize_canonical_velocity_dirichlet_relocation_winners_kernel(
                 obstacle_field,
                 search.node_boundary_point_m,
@@ -17438,7 +20080,11 @@ class HibmMpmIbBoundaryConditions:
                 nz,
                 interpolate_flag,
             )
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_relocation_materialize_after")
             if interpolate_flag != 0:
+                if stage_observer is not None:
+                    stage_observer("hibm_velocity_row_direct_presample_before")
                 self._presample_canonical_velocity_dirichlet_direct_actual_samples_kernel(
                     obstacle_field,
                     velocity_field,
@@ -17454,6 +20100,48 @@ class HibmMpmIbBoundaryConditions:
                     ny,
                     nz,
                 )
+                if stage_observer is not None:
+                    stage_observer("hibm_velocity_row_direct_presample_after")
+                if stage_observer is not None:
+                    stage_observer(
+                        "hibm_velocity_row_segment_pair_precompute_before"
+                    )
+                self._precompute_velocity_dirichlet_component_face_segment_pair_geometry_kernel(
+                    obstacle_field,
+                    search.node_boundary_point_m,
+                    search.node_interior_fluid_point_m,
+                    search.node_projection_marker_indices,
+                    search.node_projection_marker_weights,
+                    search.nearest_marker,
+                    marker_position_m,
+                    marker_velocity_mps,
+                    marker_region_id,
+                    projection_segment_indices,
+                    projection_segment_count,
+                    projection_segment_topology_available,
+                    source_search_support_available,
+                    source_search_support_anisotropic,
+                    source_search_support_radius_xyz_m[0],
+                    source_search_support_radius_xyz_m[1],
+                    source_search_support_radius_xyz_m[2],
+                    cell_face_x_m,
+                    cell_face_y_m,
+                    cell_face_z_m,
+                    cell_center_x_m,
+                    cell_center_y_m,
+                    cell_center_z_m,
+                    nx,
+                    ny,
+                    nz,
+                    int(self.marker_capacity),
+                    inactive_axis,
+                )
+                if stage_observer is not None:
+                    stage_observer(
+                        "hibm_velocity_row_segment_pair_precompute_after"
+                    )
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_claim_prepare_before")
             self._prepare_velocity_dirichlet_component_face_claims_kernel(
                 velocity_dirichlet_external_exact_component_mask,
                 velocity_dirichlet_owned_component_mask,
@@ -17467,6 +20155,14 @@ class HibmMpmIbBoundaryConditions:
                 marker_velocity_mps,
                 marker_pressure_owner_index,
                 marker_region_id,
+                projection_segment_indices,
+                projection_segment_count,
+                projection_segment_topology_available,
+                source_search_support_available,
+                source_search_support_anisotropic,
+                source_search_support_radius_xyz_m[0],
+                source_search_support_radius_xyz_m[1],
+                source_search_support_radius_xyz_m[2],
                 cell_face_x_m,
                 cell_face_y_m,
                 cell_face_z_m,
@@ -17483,8 +20179,16 @@ class HibmMpmIbBoundaryConditions:
                 inactive_axis,
                 interpolate_flag,
             )
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_claim_prepare_after")
             if marker_geometry_available != 0:
+                if stage_observer is not None:
+                    stage_observer("hibm_velocity_row_segment_reconstruct_before")
                 self._reconstruct_velocity_dirichlet_component_face_segment_claims_kernel(
+                    obstacle_field,
+                    velocity_field,
+                    search.node_boundary_point_m,
+                    search.node_interior_fluid_point_m,
                     search.node_projection_marker_indices,
                     search.node_projection_marker_weights,
                     search.nearest_marker,
@@ -17492,6 +20196,14 @@ class HibmMpmIbBoundaryConditions:
                     marker_velocity_mps,
                     marker_pressure_owner_index,
                     marker_region_id,
+                    projection_segment_indices,
+                    projection_segment_count,
+                    projection_segment_topology_available,
+                    source_search_support_available,
+                    source_search_support_anisotropic,
+                    source_search_support_radius_xyz_m[0],
+                    source_search_support_radius_xyz_m[1],
+                    source_search_support_radius_xyz_m[2],
                     cell_face_x_m,
                     cell_face_y_m,
                     cell_face_z_m,
@@ -17506,6 +20218,10 @@ class HibmMpmIbBoundaryConditions:
                     int(self.marker_capacity),
                     inactive_axis,
                 )
+                if stage_observer is not None:
+                    stage_observer("hibm_velocity_row_segment_reconstruct_after")
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_merge_audit_before")
             self._audit_canonical_velocity_dirichlet_relocation_merges_kernel(
                 obstacle_field,
                 search.node_boundary_point_m,
@@ -17524,6 +20240,8 @@ class HibmMpmIbBoundaryConditions:
                 int(self.marker_capacity),
                 interpolate_flag,
             )
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_merge_audit_after")
             # A target conflict is already final at this point.  Fail before
             # marker closure can mutate its claim target or mask it with a
             # secondary compatibility error.  Other report-derived checks are
@@ -17554,6 +20272,8 @@ class HibmMpmIbBoundaryConditions:
                     "projection_only_max_residual_mps": 0.0,
                 }
             else:
+                if stage_observer is not None:
+                    stage_observer("hibm_velocity_row_marker_closure_before")
                 marker_target_closure_report = (
                     self._close_owned_hard_targets_to_marker_constraints(
                         markers=markers,
@@ -17588,8 +20308,13 @@ class HibmMpmIbBoundaryConditions:
                         cell_center_x_m=cell_center_x_m,
                         cell_center_y_m=cell_center_y_m,
                         cell_center_z_m=cell_center_z_m,
+                        stage_observer=stage_observer,
                     )
                 )
+                if stage_observer is not None:
+                    stage_observer("hibm_velocity_row_marker_closure_after")
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_report_before")
             self._report_velocity_dirichlet_component_face_ledger_kernel(
                 velocity_dirichlet_active_component_mask,
                 velocity_dirichlet_value_mps,
@@ -17604,6 +20329,8 @@ class HibmMpmIbBoundaryConditions:
                 int(secondary_region_id),
                 1,
             )
+            if stage_observer is not None:
+                stage_observer("hibm_velocity_row_report_after")
             self._validate_canonical_velocity_dirichlet_relocation_precommit(
                 interpolate_interior_velocity=bool(interpolate_flag)
             )
@@ -19918,7 +22645,6 @@ class HibmMpmIbBoundaryConditions:
                         if winner_in_bounds:
                             loser_velocity = self.velocity_dirichlet_mps_field[node]
                             winner_velocity = self.velocity_dirichlet_mps_field[winner]
-                            targets_match = 1
                             for axis in ti.static(range(3)):
                                 loser_target = loser_velocity[axis]
                                 winner_target = winner_velocity[axis]
@@ -19928,8 +22654,6 @@ class HibmMpmIbBoundaryConditions:
                                 winner_nonfinite = ti.math.isnan(
                                     winner_target
                                 ) or ti.math.isinf(winner_target)
-                                if loser_nonfinite or winner_nonfinite:
-                                    targets_match = 0
                                 if loser_nonfinite:
                                     # The published winner is already checked by
                                     # component preparation; this audit owns the
@@ -19944,7 +22668,6 @@ class HibmMpmIbBoundaryConditions:
                                     not winner_nonfinite
                                     and ti.abs(loser_target - winner_target) > 1.0e-6
                                 ):
-                                    targets_match = 0
                                     ti.atomic_add(
                                         self.report_velocity_dirichlet_component_face_conflict_count[
                                             None
@@ -24112,6 +26835,12 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     those rows, samples full fluid stress to marker tractions, clears any stale
     MPM external force, and scatters only marker forces into MPM particles.
     """
+    if bool(far_pressure_air_backed) and not bool(pressure_outlet_zmin):
+        raise ValueError(
+            "far_pressure_air_backed=True requires pressure_outlet_zmin=True; "
+            "the generic HIBM-MPM pressure operator has no other outlet "
+            "reference for shared closed-Neumann component labels"
+        )
     particles = int(mpm_particle_count)
     if particles <= 0:
         raise ValueError("mpm_particle_count must be positive")
@@ -26280,6 +29009,15 @@ def advance_hibm_mpm_sharp_mpm_step(
             primary_region_id=int(primary_region_id),
             secondary_region_id=int(secondary_region_id),
         )
+    if bool(far_pressure_air_backed) and int(next_air_backed_cell_count) > 0:
+        # The post-solid seed/convert pass can create a new air-cell set, and
+        # the optional kinematic-consistency project above may overwrite its
+        # pressure.  Stamp only after that final project.  Keeping this at the
+        # function-body level also covers the zero-active-row path where no
+        # post-solid project is executed.
+        _debug_stage_progress("post_solid_air_pressure_stamp:start")
+        fluid.write_hibm_air_backed_cell_pressures(float(far_pressure_pa))
+        _debug_stage_progress("post_solid_air_pressure_stamp:done")
     return HibmMpmSharpMpmStepReport(
         fluid_to_mpm_loads=load_report,
         mpm=mpm_report,

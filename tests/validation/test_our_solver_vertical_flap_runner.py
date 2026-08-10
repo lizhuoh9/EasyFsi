@@ -134,6 +134,9 @@ def test_fine_config_uses_dynamic_solid_volume_and_narrow_anisotropic_hibm_band(
     assert config.flow_hibm_sharp_interior_probe_distance_m == pytest.approx(
         1.5 * max(dx, dy, dz)
     )
+    assert config.flow_hibm_sharp_interior_probe_distance_xyz_m == pytest.approx(
+        (1.5 * dx, 1.5 * dy, 1.5 * dz)
+    )
     assert config.flow_hibm_sharp_interpolate_velocity_rows
     assert config.flow_projection_velocity_inlet_zmax is None
 
@@ -144,6 +147,19 @@ def test_fine_config_uses_dynamic_solid_volume_and_narrow_anisotropic_hibm_band(
         )
     )
     assert not boundary_velocity_only.flow_hibm_sharp_interpolate_velocity_rows
+
+    scalar_probe_override = runner._build_config(
+        SimpleNamespace(
+            **{
+                **vars(args),
+                "hibm_interior_probe_distance_m": 7.5e-4,
+            }
+        )
+    )
+    assert scalar_probe_override.flow_hibm_sharp_interior_probe_distance_m == (
+        pytest.approx(7.5e-4)
+    )
+    assert scalar_probe_override.flow_hibm_sharp_interior_probe_distance_xyz_m is None
 
 
 def test_case_core_forwards_the_step_observer() -> None:
@@ -163,8 +179,109 @@ def test_case_core_forwards_the_step_observer() -> None:
     assert run_core.call_args.kwargs["step_observer"] is observer
 
 
+def test_case_core_forwards_the_progress_observer() -> None:
+    observer = object()
+    expected = {"history": []}
+    with patch.object(
+        vertical_flap_case,
+        "run_rectangular_solid_marker_mpm_fsi_smoke",
+        return_value=expected,
+    ) as run_core:
+        actual = vertical_flap_case._run_vertical_flap_fsi_core(
+            VerticalFlapFsiConfig(),
+            progress_observer=observer,
+        )
+
+    assert actual is expected
+    assert run_core.call_args.kwargs["progress_observer"] is observer
+
+
+def test_case_core_forwards_the_wall_time_profile_switch() -> None:
+    expected = {"history": []}
+    with patch.object(
+        vertical_flap_case,
+        "run_rectangular_solid_marker_mpm_fsi_smoke",
+        return_value=expected,
+    ) as run_core:
+        actual = vertical_flap_case._run_vertical_flap_fsi_core(
+            VerticalFlapFsiConfig(),
+            profile_wall_time=True,
+        )
+
+    assert actual is expected
+    assert run_core.call_args.kwargs["profile_wall_time"] is True
+
+
+def test_run_progress_observer_writes_atomic_initialization_state(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    observer = runner._make_run_progress_observer(output_dir=tmp_path)
+
+    observer(
+        {
+            "status": "running",
+            "phase": "initialization_fluid_build",
+            "elapsed_s": 12.5,
+            "phase_wall_time_s": 8.0,
+        }
+    )
+
+    progress = runner.json.loads((tmp_path / "progress.json").read_text("utf-8"))
+    assert progress == {
+        "status": "running",
+        "phase": "initialization_fluid_build",
+        "elapsed_s": pytest.approx(12.5),
+        "phase_wall_time_s": pytest.approx(8.0),
+        "step_completed": 0,
+        "time_s": pytest.approx(0.0),
+    }
+
+
+def test_taichi_cache_configuration_is_isolated_and_reusable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner_module()
+    cache_dir = tmp_path / "taichi-cache"
+    monkeypatch.delenv("TI_OFFLINE_CACHE", raising=False)
+    monkeypatch.delenv("SIMULATION_TAICHI_OFFLINE_CACHE", raising=False)
+    monkeypatch.delenv(
+        "SIMULATION_TAICHI_OFFLINE_CACHE_FILE_PATH",
+        raising=False,
+    )
+
+    report = runner._configure_taichi_offline_cache(
+        enabled=True,
+        cache_dir=cache_dir,
+    )
+
+    assert cache_dir.is_dir()
+    assert runner.os.environ["TI_OFFLINE_CACHE"] == "1"
+    assert runner.os.environ["SIMULATION_TAICHI_OFFLINE_CACHE"] == "1"
+    assert (
+        runner.os.environ["SIMULATION_TAICHI_OFFLINE_CACHE_FILE_PATH"]
+        == str(cache_dir.resolve())
+    )
+    assert report == {
+        "configuration_state": "requested_before_taichi_init",
+        "offline_cache_enabled": True,
+        "offline_cache_file_path": str(cache_dir.resolve()),
+    }
+
+
 def test_step_observer_writes_a_frame_and_atomic_progress(tmp_path: Path) -> None:
     runner = _load_runner_module()
+    runner._write_json_atomic(
+        tmp_path / "progress.json",
+        {
+            "status": "running",
+            "phase": "preflow_completed",
+            "elapsed_s": 12.5,
+            "taichi_runtime": {"offline_cache_enabled": True},
+            "initialization_wall_time_s": 4.0,
+        },
+    )
     observer = runner._make_step_observer(
         output_dir=tmp_path,
         span_reduction="mean",
@@ -226,6 +343,10 @@ def test_step_observer_writes_a_frame_and_atomic_progress(tmp_path: Path) -> Non
     assert progress["step_completed"] == 1
     assert progress["time_s"] == pytest.approx(5.0e-4)
     assert progress["max_displacement_m"] == pytest.approx(1.25e-4)
+    assert progress["phase"] == "fsi_step"
+    assert progress["elapsed_s"] == pytest.approx(12.5)
+    assert progress["taichi_runtime"] == {"offline_cache_enabled": True}
+    assert progress["initialization_wall_time_s"] == pytest.approx(4.0)
 
 
 def test_obsolete_campaign_entrypoints_and_status_artifacts_are_absent() -> None:
@@ -346,8 +467,14 @@ def test_main_preserves_rejected_preflow_history_in_failure_artifact(
     output_dir = tmp_path / "preflow_snapshot_rejected"
     snapshot_prefix = tmp_path / "preflow_snapshot"
 
-    def reject_snapshot(config, *, step_observer=None):
-        del step_observer
+    def reject_snapshot(
+        config,
+        *,
+        step_observer=None,
+        progress_observer=None,
+        profile_wall_time=False,
+    ):
+        del step_observer, progress_observer, profile_wall_time
         expected_markers = (
             solid_mpm_fsi_runner._preflow_expected_no_slip_marker_count(config)
         )
@@ -528,7 +655,87 @@ def test_main_does_not_complete_progress_for_blocked_summary(tmp_path: Path) -> 
     progress = runner.json.loads((output_dir / "progress.json").read_text("utf-8"))
     assert summary["status"] == "blocked"
     assert progress["status"] == "blocked"
+    assert progress["phase"] == "blocked"
     assert exit_code == 1
+
+
+def test_main_records_cache_setup_failure_without_masking_it(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "cache_setup_failure"
+    primary_message = "synthetic cache setup failure"
+
+    with (
+        patch.object(
+            runner,
+            "_configure_taichi_offline_cache",
+            side_effect=RuntimeError(primary_message),
+        ),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(runner.__file__),
+                "--output-dir",
+                str(output_dir),
+                "--steps",
+                "0",
+            ],
+        ),
+    ):
+        with pytest.raises(RuntimeError, match=primary_message):
+            runner.main()
+
+    failure = runner.json.loads((output_dir / "failure.json").read_text("utf-8"))
+    progress = runner.json.loads((output_dir / "progress.json").read_text("utf-8"))
+    assert failure["error"] == primary_message
+    assert progress["status"] == "failed"
+    assert progress["phase"] == "failed"
+
+
+def test_failure_artifact_write_does_not_mask_solver_exception(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "failure_write_failure"
+    primary_message = "primary solver failure"
+    original_write = runner._write_json_atomic
+
+    def fail_only_failure_artifact(path: Path, payload) -> None:
+        if Path(path).name == "failure.json":
+            raise OSError("synthetic artifact write failure")
+        original_write(path, payload)
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(
+            runner,
+            "run_vertical_flap_fsi_smoke",
+            side_effect=RuntimeError(primary_message),
+        ),
+        patch.object(
+            runner,
+            "_write_json_atomic",
+            side_effect=fail_only_failure_artifact,
+        ),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(runner.__file__),
+                "--output-dir",
+                str(output_dir),
+                "--steps",
+                "0",
+            ],
+        ),
+    ):
+        with pytest.raises(RuntimeError, match=primary_message):
+            runner.main()
+
+    progress = runner.json.loads((output_dir / "progress.json").read_text("utf-8"))
+    assert progress["error"] == primary_message
 
 
 def test_main_records_keyboard_interrupt_without_marking_failure(

@@ -64,13 +64,17 @@ runner 现在会在创建任何输出目录/写 `run_process.json` **之前**报
 
 ## Repository layout
 
-- `simulation_core/`: reusable solver package. Implementation lives under layered packages; top-level legacy modules are compatibility shims.
+For a two-minute navigation path, start with [docs/README.md](docs/README.md).
+Agents should also follow [AGENTS.md](AGENTS.md) to avoid recursively scanning
+large historical validation trees.
+
+- `simulation_core/`: reusable solver package. Implementation lives under layered packages; `simulation_core/__init__.py` is the public facade. Removed legacy module names are listed in `docs/MODULE_MAP.md`.
 - `cases/`: runnable simulation cases registered by `run_simulation.py`.
 - `benchmarks/`: official/vendor benchmark adapters and reusable benchmark runners.
 - `tools/`: diagnostics, rendering, and post-processing helpers.
 - `tests/`: tests grouped by `solvers/`, `cases/`, `benchmarks/`, `tools/`, `integration/`, and `contracts/`.
 - `docs/`: architecture, validation, and refactoring records.
-- `archive/`: historical one-shot maintenance scripts.
+- `archive/`: historical one-shot maintenance scripts and explicitly dated legacy snapshots.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for dependency direction and legacy
 compatibility policy. See [docs/VALIDATION.md](docs/VALIDATION.md) for the

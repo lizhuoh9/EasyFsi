@@ -6227,14 +6227,22 @@ END-ISO-10303-21;
             sharp_advance_call,
         )
         self.assertIn(
-            "far_pressure_inside_probe_max_multiplier=12.0", sharp_advance_call
+            "far_pressure_inside_probe_max_multiplier="
+            "far_pressure_inside_probe_max_multiplier",
+            sharp_advance_call,
         )
         self.assertIn(
             "one_sided_pressure_region_id=secondary_shell_region_id",
             sharp_advance_call,
         )
         self.assertIn("one_sided_reference_pressure_pa=0.0", sharp_advance_call)
-        self.assertIn("one_sided_probe_max_multiplier=12.0", sharp_advance_call)
+        self.assertIn(
+            "one_sided_probe_max_multiplier=one_sided_probe_max_multiplier",
+            sharp_advance_call,
+        )
+        default_args = parse_args([])
+        self.assertEqual(default_args.far_pressure_inside_probe_max_multiplier, 12.0)
+        self.assertEqual(default_args.one_sided_probe_max_multiplier, 12.0)
         sharp_pressure_setup = source.split("if sharp_case_runner_enabled:", 1)[
             1
         ].split("def advance_sharp_solid_substeps():", 1)[0]
@@ -7995,7 +8003,7 @@ class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
         loop_exit_block = step_loop_source.split(
             'partial_run_reason = "max_wall_time_s"',
             1,
-        )[1].split("return dict(locals())", 1)[0]
+        )[1].split("return StepLoopResult(", 1)[0]
         self.assertIn("break", loop_exit_block)
 
         closing_block = runner_source.split(
@@ -8006,7 +8014,7 @@ class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
         self.assertIn("sharp_coupling_state=sharp_coupling_state", closing_block)
         self.assertIn('completed_step=int(rows[-1]["step"])', closing_block)
 
-        self.assertEqual(source.count("sharp_coupling_state=sharp_coupling_state"), 4)
+        self.assertEqual(source.count("sharp_coupling_state=sharp_coupling_state"), 6)
 
 
 class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
@@ -8027,13 +8035,19 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
         self.assertIn(
-            "two_sided_probe_max_multiplier=12.0", sharp_advance_call
+            "two_sided_probe_max_multiplier=two_sided_probe_max_multiplier",
+            sharp_advance_call,
         )
         # The closure multiplier stays wired alongside it (the extension
         # complements the closure, it does not replace it).
         self.assertIn(
-            "far_pressure_inside_probe_max_multiplier=12.0", sharp_advance_call
+            "far_pressure_inside_probe_max_multiplier="
+            "far_pressure_inside_probe_max_multiplier",
+            sharp_advance_call,
         )
+        default_args = parse_args([])
+        self.assertEqual(default_args.two_sided_probe_max_multiplier, 12.0)
+        self.assertEqual(default_args.far_pressure_inside_probe_max_multiplier, 12.0)
 
     def test_sharp_case_treats_internal_nodes_as_thin_interface_not_obstacle(
         self,
@@ -8049,8 +8063,17 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
             sharp_advance_call,
         )
         self.assertIn(
-            "far_pressure_air_backed_probe_normal_sign=pressure_far_side_normal_sign",
+            "far_pressure_air_backed_probe_normal_sign="
+            "far_pressure_air_backed_probe_normal_sign",
             sharp_advance_call,
+        )
+        self.assertIn(
+            "far_pressure_side_normal_sign=pressure_far_side_normal_sign",
+            sharp_advance_call,
+        )
+        self.assertEqual(
+            parse_args([]).far_pressure_air_backed_probe_normal_sign,
+            0.0,
         )
 
 
@@ -8203,7 +8226,8 @@ class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
             "solid_mpm.initialize_layered_tri_surface(",
             1,
         )[1].split("raise ValueError", 1)[0]
-        self.assertIn("fixed_region_id=5,", neo_construction)
+        self.assertIn("fixed_region_id=fixed_rim_region_id,", neo_construction)
+        self.assertEqual(parse_args([]).fixed_rim_region_id, 5)
 
 
 class SquidNeoSolidSubsetContractTests(unittest.TestCase):
@@ -8235,7 +8259,9 @@ class SquidNeoSolidSubsetContractTests(unittest.TestCase):
         window = window.split("\n    else:", 1)[0]
         self.assertIn("solid_diagnostics", window)
         self.assertNotIn("tri_diagnostics", window)
-        self.assertIn("fixed_region_id=5", window)
+        self.assertIn("fixed_region_id=fixed_rim_region_id", window)
+        self.assertIn("fixed_rim_region_id=fixed_rim_region_id", source)
+        self.assertEqual(parse_args([]).fixed_rim_region_id, 5)
 
 
 class SquidSharpAirBackedClosureContractTests(unittest.TestCase):
@@ -8249,18 +8275,33 @@ class SquidSharpAirBackedClosureContractTests(unittest.TestCase):
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
-        self.assertIn("far_pressure_air_backed=True", sharp_advance_call)
+        self.assertIn(
+            "far_pressure_air_backed=far_pressure_air_backed",
+            sharp_advance_call,
+        )
         # The closure wiring the air zone rides on stays in place.
         self.assertIn("far_pressure_region_id=pressure_load_region_id", sharp_advance_call)
-        self.assertIn("far_pressure_barrier_region_id=5", sharp_advance_call)
+        self.assertIn(
+            "far_pressure_barrier_region_id=fixed_rim_region_id",
+            sharp_advance_call,
+        )
         self.assertIn("far_pressure_pa=pressure_pa", sharp_advance_call)
         self.assertIn(
-            "far_pressure_air_backed_probe_normal_sign=pressure_far_side_normal_sign",
+            "far_pressure_air_backed_probe_normal_sign="
+            "far_pressure_air_backed_probe_normal_sign",
             sharp_advance_call,
         )
         self.assertIn(
-            "far_pressure_inside_probe_max_multiplier=12.0", sharp_advance_call
+            "far_pressure_inside_probe_max_multiplier="
+            "far_pressure_inside_probe_max_multiplier",
+            sharp_advance_call,
         )
+        default_args = parse_args([])
+        self.assertTrue(default_args.far_pressure_air_backed)
+        self.assertEqual(default_args.fixed_rim_region_id, 5)
+        self.assertEqual(default_args.far_pressure_inside_probe_max_multiplier, 12.0)
+        self.assertEqual(default_args.far_pressure_air_backed_probe_normal_sign, 0.0)
+        self.assertFalse(parse_args(["--no-far-pressure-air-backed"]).far_pressure_air_backed)
 
 
 if __name__ == "__main__":
