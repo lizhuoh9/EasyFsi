@@ -351,4 +351,3 @@ This goal is complete only when:
 - The branch is committed and pushed.
 - The pushed GitHub Actions run is green, or any remaining red status is
   explicitly diagnosed as unrelated and reported with evidence.
-

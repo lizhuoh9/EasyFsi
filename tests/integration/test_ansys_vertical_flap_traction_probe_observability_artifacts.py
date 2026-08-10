@@ -240,4 +240,3 @@ def _truthy(value: object) -> bool:
 
 if __name__ == "__main__":
     unittest.main()
-

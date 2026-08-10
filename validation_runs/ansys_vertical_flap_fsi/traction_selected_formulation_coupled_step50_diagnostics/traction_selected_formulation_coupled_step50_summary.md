@@ -19,9 +19,9 @@ This artifact records staged requested 10/30/50-step selected-formulation couple
 
 scenario | status | completed/requested | invalid | one-sided | anchor selected | fallback | force residual | velocity growth | pressure growth | displacement growth | sign flips | first failed gate
 --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---
-selected_formulation_coupled_step10 | passed | 10/10 | 0.0 | 24 | 24 | 0.0 | 1.947857e-10 | 1.128769e+00 | 1.507373e+00 | 3.717952e+00 | 1 | 
-selected_formulation_coupled_step30 | passed | 30/30 | 0.0 | 24 | 24 | 0.0 | 1.947857e-10 | 1.128769e+00 | 1.507373e+00 | 3.714813e+00 | 2 | 
-selected_formulation_coupled_step50 | passed | 50/50 | 0.0 | 24 | 24 | 0.0 | 1.947857e-10 | 1.128769e+00 | 1.507373e+00 | 3.755496e+00 | 4 | 
+selected_formulation_coupled_step10 | passed | 10/10 | 0.0 | 24 | 24 | 0.0 | 1.947857e-10 | 1.128769e+00 | 1.507373e+00 | 3.717952e+00 | 1 |
+selected_formulation_coupled_step30 | passed | 30/30 | 0.0 | 24 | 24 | 0.0 | 1.947857e-10 | 1.128769e+00 | 1.507373e+00 | 3.714813e+00 | 2 |
+selected_formulation_coupled_step50 | passed | 50/50 | 0.0 | 24 | 24 | 0.0 | 1.947857e-10 | 1.128769e+00 | 1.507373e+00 | 3.755496e+00 | 4 |
 
 ## Active blockers
 

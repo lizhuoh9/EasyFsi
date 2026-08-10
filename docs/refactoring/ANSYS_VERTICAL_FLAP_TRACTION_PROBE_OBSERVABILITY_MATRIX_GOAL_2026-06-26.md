@@ -397,4 +397,3 @@ The task is complete only when:
 9. The new artifact tests pass.
 10. README has been checked for consistency.
 11. Changes are committed and pushed to the GitHub remote.
-
