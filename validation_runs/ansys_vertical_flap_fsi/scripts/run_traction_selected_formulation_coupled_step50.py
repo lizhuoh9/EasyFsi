@@ -980,7 +980,7 @@ def _summary_stage_rows(row_by_scenario: Mapping[str, Mapping[str, Any]]) -> lis
                     str(row["force_sign_flip_count"]),
                     str(row["first_failed_gate"]),
                 ]
-            )
+            ).rstrip()
         )
     return lines
 

@@ -1,8 +1,10 @@
 # ANSYS validation artifact checksums default to Windows text-mode outputs.
-# Keep those artifact bytes stable on CI checkouts; explicit LF writers below
-# override the default for their own checksum manifests.
+# Keep those artifact bytes stable on CI checkouts; explicit LF identities
+# below override the default when producers or provenance contracts hash LF.
 validation_runs/ansys_vertical_flap_fsi/**/*.json text eol=crlf
 validation_runs/ansys_vertical_flap_fsi/**/*.csv text eol=crlf
 validation_runs/ansys_vertical_flap_fsi/**/*.md text eol=crlf
 validation_runs/ansys_vertical_flap_fsi/**/*.sha256 text eol=crlf
 validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/*.csv text eol=lf
+validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json text eol=lf
+validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/public_tutorial_evidence_map.json text eol=lf
