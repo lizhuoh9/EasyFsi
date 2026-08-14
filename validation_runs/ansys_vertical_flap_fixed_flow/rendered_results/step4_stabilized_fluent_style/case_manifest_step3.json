@@ -27,29 +27,29 @@
   "output_root": "validation_runs/ansys_vertical_flap_fixed_flow/rendered_results/step4_stabilized_fluent_style",
   "quality": {
     "incompressibility_quality": {
-      "reason": "divergence_l2=102.47; divergence_linf=3294.59; divergence_l2_excluding_near_solid=95.3213; divergence_linf_excluding_near_solid=3294.59; poisson_residual_linf=7.81799e+09; poisson_residual_linf_relative=0.000928157",
-      "status": "pass"
+      "reason": "divergence_l2=195.312; divergence_linf=2584.41; divergence_l2_excluding_near_solid=195.469; divergence_linf_excluding_near_solid=2584.41; poisson_residual_linf=1.3645e+09; poisson_residual_linf_relative=0.000994944",
+      "status": "warn"
     },
     "mass_quality": {
-      "reason": "final mass imbalance rel = 0",
+      "reason": "final mass imbalance rel = 5.59517e-16",
       "status": "pass"
     },
     "metrics": {
-      "centerline_max_u": 28.792658303269867,
-      "divergence_l2": 102.4702818243457,
-      "divergence_l2_excluding_near_solid": 95.32129478863361,
-      "divergence_linf": 3294.5903263167083,
-      "divergence_linf_excluding_near_solid": 3294.5903263167047,
-      "mass_imbalance_rel": 0.0,
-      "mass_imbalance_rel_corrected": 0.0,
-      "mass_imbalance_rel_raw": 0.022704949795576444,
-      "max_speed": 42.24141638420523,
-      "max_u": 31.110758213440633,
-      "p99_speed": 26.14541605813142,
-      "poisson_residual_linf": 7817986904.923208,
-      "poisson_residual_linf_relative": 0.00092815698399869
+      "centerline_max_u": 18.56297638632617,
+      "divergence_l2": 195.31241821872712,
+      "divergence_l2_excluding_near_solid": 195.4693366491879,
+      "divergence_linf": 2584.4123472370597,
+      "divergence_linf_excluding_near_solid": 2584.4123472370597,
+      "mass_imbalance_rel": 5.59517159235694e-16,
+      "mass_imbalance_rel_corrected": 5.59517159235694e-16,
+      "mass_imbalance_rel_raw": -0.14389506847452857,
+      "max_speed": 26.886820588908527,
+      "max_u": 25.31802842551716,
+      "p99_speed": 21.636778460859425,
+      "poisson_residual_linf": 1364495252.221171,
+      "poisson_residual_linf_relative": 0.0009949444326195574
     },
-    "overall_status": "candidate_not_parity",
+    "overall_status": "diagnostic_only_not_parity",
     "thresholds": {
       "inlet_u": 7.0,
       "max_divergence_l2_warn": 100.0,
@@ -65,10 +65,10 @@
   },
   "scope": "Fluent-style visualization and numerical quality report for Step 4 stabilized solver output; no Fluent parity claim",
   "sources": {
-    "final_fields": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/fields/final_fields_stabilized.npz",
-    "mass_balance": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/logs/mass_balance_stabilized.csv",
-    "solver_history": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/logs/solver_history_stabilized.csv",
-    "step2_manifest": "validation_runs/ansys_vertical_flap_fixed_flow/stabilized_solver/case_manifest_step4_solver_stabilization.json"
+    "final_fields": "validation_runs/ansys_vertical_flap_fixed_flow/official_fluent_preflow/probe_cfl05_relax0p75_120/fields/final_fields_stabilized.npz",
+    "mass_balance": "validation_runs/ansys_vertical_flap_fixed_flow/official_fluent_preflow/probe_cfl05_relax0p75_120/logs/mass_balance_stabilized.csv",
+    "solver_history": "validation_runs/ansys_vertical_flap_fixed_flow/official_fluent_preflow/probe_cfl05_relax0p75_120/logs/solver_history_stabilized.csv",
+    "step2_manifest": "validation_runs/ansys_vertical_flap_fixed_flow/official_fluent_preflow/probe_cfl05_relax0p75_120/case_manifest_step4_solver_stabilization.json"
   },
   "step": "step3_fluent_style_postprocess"
 }
