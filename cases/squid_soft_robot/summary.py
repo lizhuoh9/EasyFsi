@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 
 from simulation_core import (
+    boundary_drive_compliance_report,
     checks_passed,
     finite_field_diagnostics,
     vector_norm,
@@ -16,6 +17,7 @@ from simulation_core import (
 from .coupling_common import (
     outlet_to_fsi_volume_source_gate_scope,
     physical_outlet_to_fsi_volume_source_passes,
+    pressure_outlet_source_ratio_passes,
 )
 from .history import (
     _final_row_int,
@@ -181,6 +183,31 @@ def runtime_budget_report(
     return report
 
 
+def _pressure_outlet_positive_source_ratio_gate(
+    final_row: dict[str, object],
+    *,
+    ratio_tolerance: float,
+) -> bool:
+    return pressure_outlet_source_ratio_passes(
+        source_volume_flux_m3s=_required_finite_row_number(
+            final_row,
+            "pressure_outlet_positive_source_volume_flux_m3s",
+            context="final summary row",
+        ),
+        velocity_outlet_flux_m3s=_required_finite_row_number(
+            final_row,
+            "pressure_outlet_velocity_flux_m3s",
+            context="final summary row",
+        ),
+        pressure_outlet_flux_m3s=_required_finite_row_number(
+            final_row,
+            "pressure_outlet_pressure_flux_m3s",
+            context="final summary row",
+        ),
+        ratio_tolerance=ratio_tolerance,
+    )
+
+
 def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, object]:
     adaptive_fluid_substeps_enabled = _context_value(context, "adaptive_fluid_substeps_enabled")
     args = _context_value(context, "args")
@@ -208,6 +235,10 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
     pressure_load_region_id = _context_value(context, "pressure_load_region_id")
     pressure_load_source_region_id = _context_value(context, "pressure_load_source_region_id")
     pressure_outlet_boundary_report = _context_value(context, "pressure_outlet_boundary_report")
+    pressure_outlet_source_ratio_tolerance = _context_value(
+        context,
+        "pressure_outlet_source_ratio_tolerance",
+    )
     pressure_outlet_zmin_enabled = _context_value(context, "pressure_outlet_zmin_enabled")
     pressure_schedule_input = _context_value(context, "pressure_schedule_input")
     pressure_solver_name = _context_value(context, "pressure_solver_name")
@@ -935,6 +966,20 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
         last,
         "pressure_outlet_velocity_to_abs_source_ratio",
     )
+    final_pressure_outlet_velocity_flux_m3s = _final_row_number(
+        last,
+        "pressure_outlet_velocity_flux_m3s",
+    )
+    final_pressure_outlet_pressure_flux_m3s = _final_row_number(
+        last,
+        "pressure_outlet_pressure_flux_m3s",
+    )
+    pressure_outlet_velocity_to_source_ratio_near_one = (
+        _pressure_outlet_positive_source_ratio_gate(
+            last,
+            ratio_tolerance=float(pressure_outlet_source_ratio_tolerance),
+        )
+    )
     final_outlet_to_fsi_volume_source_ratio = signed_positive_source_flux_ratio(
         outlet_negative_z_flux_m3s=final_outlet_negative_z,
         source_flux_m3s=final_fsi_volume_source_m3s,
@@ -943,6 +988,9 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
         max(float(row["main_volume_flux_to_outlet_ratio"]) for row in rows)
         if rows
         else 0.0
+    )
+    max_abs_pressure_load_pa = (
+        max(abs(float(row["pressure_load_pa"])) for row in rows) if rows else 0.0
     )
     outlet_to_fsi_gate_scope = outlet_to_fsi_volume_source_gate_scope(
         fluid_grid_resolution=fluid_grid_resolution,
@@ -975,6 +1023,11 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
         timing_summary[f"mean_{field}"] = (
             sum(values) / float(len(values)) if values else 0.0
         )
+    boundary_drive_compliance = boundary_drive_compliance_report(
+        prescribed_velocity_boundary=False,
+        prescribed_pressure_or_flow_boundary=max_abs_pressure_load_pa > 0.0,
+        nonzero_fluid_traction_scale=0.0,
+    )
     solid_mpm_force_required = bool(rows)
     checks = {
         "pressure_schedule_applied": pressure_schedule_applied_in_history(rows),
@@ -1064,6 +1117,9 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
         "finite_primary_diagnostics": len(nonfinite_diagnostics) == 0,
         "negative_z_outlet_flow_present": max_outlet_negative_z > 0.0,
         "final_negative_z_outlet_flow": final_outlet_negative_z > 0.0,
+        "pressure_outlet_velocity_to_source_ratio_near_one": (
+            pressure_outlet_velocity_to_source_ratio_near_one
+        ),
         "final_negative_z_jet_sections": final_jet_sections_negative_z,
         "section_samples_present": bool(
             rows
@@ -1118,6 +1174,9 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
         "post_constraint_divergence_not_increased": (
             max_post_constraint_to_pre_divergence_l2_ratio <= 1.0 + 1.0e-12
         ),
+        "boundary_drive_has_no_prescribed_driver": bool(
+            boundary_drive_compliance["compliant"]
+        ),
     }
     if bool(outlet_to_fsi_gate_scope["hard_gate"]):
         checks["final_outlet_to_fsi_volume_source_ratio_physical"] = (
@@ -1152,6 +1211,8 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
         "pressure_far_side_normal_sign": float(pressure_far_side_normal_sign),
         "pressure_outlet_boundary": pressure_outlet_boundary_report,
         "pressure_outlet_zmin_enabled": pressure_outlet_zmin_enabled,
+        "boundary_drive_compliance": boundary_drive_compliance,
+        "boundary_drive_compliance_gate": "diagnostic_only",
         "shell_primary_region_id": int(primary_shell_region_id),
         "shell_secondary_region_id": int(secondary_shell_region_id),
         "source_config_fluid_active_mask_requested": (
@@ -1511,6 +1572,7 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
         "max_solid_mpm_grid_out_of_bounds_particle_count": (
             max_solid_mpm_grid_out_of_bounds_particle_count
         ),
+        "max_abs_pressure_load_pa": max_abs_pressure_load_pa,
         "max_outlet_negative_z_flow_m3s": max_outlet_negative_z,
         "final_outlet_negative_z_flow_m3s": final_outlet_negative_z,
         "final_fsi_volume_source_m3s": final_fsi_volume_source_m3s,
@@ -1567,6 +1629,15 @@ def build_sharp_case_run_report(context: Mapping[str, object]) -> dict[str, obje
         ),
         "final_pressure_outlet_velocity_to_abs_source_ratio": (
             final_pressure_outlet_velocity_to_abs_source_ratio
+        ),
+        "final_pressure_outlet_velocity_flux_m3s": (
+            final_pressure_outlet_velocity_flux_m3s
+        ),
+        "final_pressure_outlet_pressure_flux_m3s": (
+            final_pressure_outlet_pressure_flux_m3s
+        ),
+        "pressure_outlet_source_ratio_tolerance": float(
+            pressure_outlet_source_ratio_tolerance
         ),
         "final_outlet_to_fsi_volume_source_ratio": (
             final_outlet_to_fsi_volume_source_ratio

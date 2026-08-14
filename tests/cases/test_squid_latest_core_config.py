@@ -140,6 +140,7 @@ from cases.squid_soft_robot.spec import (
     spec_with_membrane_thickness_scale,
 )
 from cases.squid_soft_robot.summary import (
+    _pressure_outlet_positive_source_ratio_gate,
     runtime_budget_report,
     validation_scope_report,
 )
@@ -1436,6 +1437,49 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
             )
         )
 
+    def test_sharp_summary_pressure_outlet_gate_consumes_configured_tolerance(
+        self,
+    ) -> None:
+        final_row = {
+            "pressure_outlet_source_volume_flux_m3s": 0.0,
+            "pressure_outlet_positive_source_volume_flux_m3s": 1.0e-6,
+            "pressure_outlet_velocity_flux_m3s": 1.15e-6,
+            "pressure_outlet_pressure_flux_m3s": 1.0e-12,
+        }
+
+        self.assertFalse(
+            _pressure_outlet_positive_source_ratio_gate(
+                final_row,
+                ratio_tolerance=0.1,
+            )
+        )
+        self.assertTrue(
+            _pressure_outlet_positive_source_ratio_gate(
+                final_row,
+                ratio_tolerance=0.2,
+            )
+        )
+
+    def test_sharp_runner_forwards_pressure_outlet_ratio_tolerance_to_summary(
+        self,
+    ) -> None:
+        runner_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
+        summary_source = _read_sharp_summary_source()
+
+        self.assertIn(
+            "pressure_outlet_source_ratio_tolerance = float(",
+            runner_source,
+        )
+        self.assertIn("return build_sharp_case_run_report(locals())", runner_source)
+        self.assertIn(
+            '"pressure_outlet_source_ratio_tolerance",',
+            summary_source,
+        )
+        self.assertIn(
+            '"pressure_outlet_velocity_to_source_ratio_near_one"',
+            summary_source,
+        )
+
     @staticmethod
     def _pressure_flux_history(
         *,
@@ -1585,19 +1629,33 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
 
     def test_run_rejects_nonfinite_numeric_entry_options_before_solver_start(self) -> None:
         cases = (
-            ("--fsi-coupling-tolerance-n", "nan", "--fsi-coupling-tolerance-n"),
+            (
+                "--fsi-marker-coupling-tolerance-mps",
+                "nan",
+                "--fsi-marker-coupling-tolerance-mps",
+            ),
             ("--pressure-outlet-source-ratio-tolerance", "inf", "--pressure-outlet-source-ratio-tolerance"),
             ("--max-wall-time-s", "nan", "--max-wall-time-s"),
-            ("--fsi-velocity-target-solid-mobility-ratio", "nan", "--fsi-velocity-target-solid-mobility-ratio"),
+            ("--membrane-thickness-scale", "nan", "--membrane-thickness-scale"),
         )
         for flag, value, message in cases:
             with self.subTest(flag=flag):
                 with tempfile.TemporaryDirectory() as temp_dir:
                     temp_path = Path(temp_dir)
+                    source_config = temp_path / "source.json"
+                    source_config.write_text(
+                        json.dumps(
+                            {
+                                "analysis_settings": {"time_step_s": 5.0e-4},
+                                "domains": {"fluid": {"grid_size_m": 2.5e-3}},
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
                     args = parse_args(
                         [
                             "--source-config",
-                            str(temp_path / "source.json"),
+                            str(source_config),
                             "--output-dir",
                             str(temp_path / "run"),
                             "--steps",
@@ -3434,7 +3492,7 @@ END-ISO-10303-21;
                 summary["solid_surface_mass_budget"],
             )
 
-    def test_run_process_marks_failed_when_run_raises_after_start(self) -> None:
+    def test_missing_source_config_fails_without_run_process_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             output_dir = temp_path / "failed_run"
@@ -3449,13 +3507,10 @@ END-ISO-10303-21;
                 ]
             )
 
-            with self.assertRaises(FileNotFoundError):
+            with self.assertRaisesRegex(FileNotFoundError, "source config not found"):
                 run(args)
 
-            process = json.loads((output_dir / "run_process.json").read_text(encoding="utf-8"))
-            self.assertEqual(process["status"], "failed")
-            self.assertEqual(process["error_type"], "FileNotFoundError")
-            self.assertIn("source config not found", process["error"])
+            self.assertFalse(output_dir.exists())
 
     def test_run_process_marks_failed_for_early_argument_validation_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4068,21 +4123,28 @@ END-ISO-10303-21;
 
 
     def test_validation_gates_real_fluid_flux_and_projection_divergence(self) -> None:
-        source = _read_squid_sources()
+        source = _read_sharp_summary_source()
 
         self.assertIn('"final_outlet_to_fsi_volume_source_ratio_physical"', source)
         self.assertIn("physical_outlet_to_fsi_volume_source_passes", source)
         self.assertIn("args.min_outlet_to_main_volume_flux_ratio", source)
         self.assertIn('"required_min_outlet_to_main_volume_flux_ratio"', source)
         self.assertIn('"projection_divergence_below_tolerance"', source)
-        self.assertIn('"pressure_outlet_velocity_to_source_ratio_near_one"', source)
-        self.assertIn("pressure_outlet_source_ratio_passes", source)
-        self.assertIn("args.pressure_outlet_source_ratio_tolerance", source)
         self.assertIn("args.projection_divergence_tolerance", source)
         self.assertNotIn("max_div_l2 <= float(args.projection_divergence_tolerance)", source)
         self.assertIn("max_interior_div_l2 <= float(args.projection_divergence_tolerance)", source)
         self.assertIn('"max_interior_divergence_l2"', source)
-        self.assertIn("validation uses the sampled outlet-to-FSI-volume-source flux ratio", source)
+        self.assertIn('if bool(outlet_to_fsi_gate_scope["hard_gate"]):', source)
+        self.assertIn(
+            'checks["final_outlet_to_fsi_volume_source_ratio_physical"]',
+            source,
+        )
+        self.assertIn(
+            'diagnostic_checks["final_outlet_to_fsi_volume_source_ratio_physical"]',
+            source,
+        )
+        self.assertIn('"outlet_to_fsi_volume_source_gate_scope"', source)
+        self.assertIn("hibm_mpm_sharp uses simulation_core marker fields", source)
 
 
 
@@ -4261,21 +4323,22 @@ END-ISO-10303-21;
         )
 
     def test_sharp_case_forwards_divergence_cleanup_to_core_projection(self) -> None:
-        source = _read_squid_sources()
+        source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
         sharp_call = source.split(
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
 
         self.assertIn(
-            "divergence_cleanup_iterations=projection_divergence_cleanup_iterations",
+            "settings.projection_divergence_cleanup_iterations",
             sharp_call,
         )
         self.assertIn(
-            "divergence_cleanup_relaxation=float(args.divergence_cleanup_relaxation)",
+            "divergence_cleanup_relaxation=float(",
             sharp_call,
         )
-        self.assertIn("fluid_substeps=step_fluid_substeps", sharp_call)
+        self.assertIn("args.divergence_cleanup_relaxation", sharp_call)
+        self.assertIn('fluid_substeps=int(step_state["fluid_substeps"])', sharp_call)
         self.assertIn(
             "fluid_advection_scheme=str(args.fluid_advection_scheme)",
             sharp_call,
@@ -4285,6 +4348,16 @@ END-ISO-10303-21;
             sharp_call,
         )
         self.assertNotIn("fluid_substeps=1", sharp_call)
+        runner_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
+        settings_construction = runner_source.split(
+            "settings=StepLoopSettings(",
+            1,
+        )[1].split("resources=StepLoopResources(", 1)[0]
+        self.assertIn(
+            "projection_divergence_cleanup_iterations=(\n"
+            "                projection_divergence_cleanup_iterations",
+            settings_construction,
+        )
 
     def test_pressure_schedule_is_reported_as_prescribed_boundary_drive(self) -> None:
         source = _read_squid_sources()
@@ -4792,10 +4865,10 @@ END-ISO-10303-21;
         source = _read_squid_sources()
 
         for token in (
-            'row["pressure_outlet_positive_source_volume_flux_m3s"]',
-            'row["pressure_outlet_abs_source_volume_flux_m3s"]',
-            'row["pressure_outlet_velocity_to_positive_source_ratio"]',
-            'row["pressure_outlet_velocity_to_abs_source_ratio"]',
+            '"pressure_outlet_positive_source_volume_flux_m3s": _mapping_float(',
+            '"pressure_outlet_abs_source_volume_flux_m3s": _mapping_float(',
+            '"pressure_outlet_velocity_to_positive_source_ratio": _mapping_float(',
+            '"pressure_outlet_velocity_to_abs_source_ratio": _mapping_float(',
             '"final_pressure_outlet_positive_source_volume_flux_m3s"',
             '"final_pressure_outlet_abs_source_volume_flux_m3s"',
             '"final_pressure_outlet_velocity_to_positive_source_ratio"',
@@ -4995,6 +5068,7 @@ END-ISO-10303-21;
 
     def test_runner_reports_nonuniform_spacing_without_pretending_uniform_grid(self) -> None:
         source = _read_squid_sources()
+        summary_source = _read_sharp_summary_source()
 
         self.assertIn('"fluid_grid_min_spacing_m"', source)
         self.assertIn('"fluid_grid_max_spacing_m"', source)
@@ -5004,7 +5078,12 @@ END-ISO-10303-21;
             "    )",
             source,
         )
-        self.assertIn("fluid_grid_spacing_m = (\n        None", source)
+        self.assertIn(
+            '"fluid_grid_spacing_m": (\n'
+            "            None\n"
+            "            if fluid_grid_uniform_spacing_m is None",
+            summary_source,
+        )
         self.assertIn('summary_json = result.get("summary_json")', source)
         self.assertNotIn(
             'fluid_grid_spacing_m = [\n        float(simulator.fluid.dx),',
@@ -5032,19 +5111,38 @@ END-ISO-10303-21;
         ):
             self.assertIn(field, source)
 
-    def test_runner_passes_water_viscosity_to_surface_stress_diagnostics(self) -> None:
-        source = _read_squid_sources()
+    def test_sharp_runner_uses_water_viscosity_for_full_stress_diagnostics(self) -> None:
+        case_source = _read_squid_sources()
+        hibm_source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
+        summary_source = _read_sharp_summary_source()
 
-        self.assertIn("viscosity_pa_s=spec.water_viscosity_pa_s", source)
-        self.assertIn('"viscous_traction_force_x_n"', source)
-        self.assertIn('"fluid_stress_traction_force_x_n"', source)
-        self.assertIn('"max_viscous_traction_force_n"', source)
-        self.assertIn('"max_fluid_stress_traction_force_n"', source)
-        self.assertIn('"diagnostic_checks"', source)
-        self.assertIn('"projection_pressure_traction_diagnostic_nonzero"', source)
-        self.assertNotIn('"pressure_traction_nonzero"', source)
-        self.assertIn('"fluid_stress_action_on_fluid_enabled": True', source)
-        self.assertIn("Surface force spreading adds the opposite of sampled -pI + viscous", source)
+        self.assertIn("viscosity_pa_s=spec.water_viscosity_pa_s", case_source)
+        self.assertIn(
+            "viscosity_pa_s=(\n            fluid.mu",
+            hibm_source,
+        )
+        self.assertIn("viscous_stress = viscosity_pa_s *", hibm_source)
+        self.assertIn(
+            "traction = self.t_pressure_gamma_pa[marker] + viscous_traction",
+            hibm_source,
+        )
+        self.assertIn(
+            "self.t_viscous_gamma_pa[marker] = viscous_traction",
+            hibm_source,
+        )
+        self.assertIn('"max_hibm_marker_force_n"', summary_source)
+        self.assertIn(
+            '"max_hibm_full_stress_invalid_marker_count"',
+            summary_source,
+        )
+        self.assertIn(
+            '"hibm_full_stress_invalid_marker_count_zero"',
+            summary_source,
+        )
+        self.assertIn(
+            '"fluid_stress_action_on_fluid_enabled": True',
+            summary_source,
+        )
 
 
 
@@ -5421,21 +5519,36 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
         # pressure_closure, which pins the closure 12.0 on the same call
         # slice (the case's single sharp advance site; the checkpoint-resume
         # path re-enters the same loop).
-        source = _read_squid_sources()
-        sharp_advance_call = source.split(
+        step_loop_source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
+        sharp_advance_call = step_loop_source.split(
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
         self.assertIn(
-            "two_sided_probe_max_multiplier=two_sided_probe_max_multiplier",
+            "two_sided_probe_max_multiplier=(\n"
+            "                settings.two_sided_probe_max_multiplier",
             sharp_advance_call,
         )
         # The closure multiplier stays wired alongside it (the extension
         # complements the closure, it does not replace it).
         self.assertIn(
             "far_pressure_inside_probe_max_multiplier="
-            "far_pressure_inside_probe_max_multiplier",
+            "(\n                settings.far_pressure_inside_probe_max_multiplier",
             sharp_advance_call,
+        )
+        runner_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
+        settings_construction = runner_source.split(
+            "settings=StepLoopSettings(",
+            1,
+        )[1].split("resources=StepLoopResources(", 1)[0]
+        self.assertIn(
+            "two_sided_probe_max_multiplier=two_sided_probe_max_multiplier",
+            settings_construction,
+        )
+        self.assertIn(
+            "far_pressure_inside_probe_max_multiplier=(\n"
+            "                far_pressure_inside_probe_max_multiplier",
+            settings_construction,
         )
         default_args = parse_args([])
         self.assertEqual(default_args.two_sided_probe_max_multiplier, 12.0)
@@ -5444,8 +5557,8 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
     def test_sharp_case_treats_internal_nodes_as_thin_interface_not_obstacle(
         self,
     ) -> None:
-        source = _read_squid_sources()
-        sharp_advance_call = source.split(
+        step_loop_source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
+        sharp_advance_call = step_loop_source.split(
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
@@ -5455,13 +5568,27 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
             sharp_advance_call,
         )
         self.assertIn(
-            "far_pressure_air_backed_probe_normal_sign="
-            "far_pressure_air_backed_probe_normal_sign",
+            "far_pressure_air_backed_probe_normal_sign=(\n"
+            "                settings.far_pressure_air_backed_probe_normal_sign",
             sharp_advance_call,
         )
         self.assertIn(
-            "far_pressure_side_normal_sign=pressure_far_side_normal_sign",
+            "far_pressure_side_normal_sign=settings.pressure_far_side_normal_sign",
             sharp_advance_call,
+        )
+        runner_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
+        settings_construction = runner_source.split(
+            "settings=StepLoopSettings(",
+            1,
+        )[1].split("resources=StepLoopResources(", 1)[0]
+        self.assertIn(
+            "pressure_far_side_normal_sign=pressure_far_side_normal_sign",
+            settings_construction,
+        )
+        self.assertIn(
+            "far_pressure_air_backed_probe_normal_sign=(\n"
+            "                far_pressure_air_backed_probe_normal_sign",
+            settings_construction,
         )
         self.assertEqual(
             parse_args([]).far_pressure_air_backed_probe_normal_sign,
@@ -5592,10 +5719,13 @@ class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
         source = _read_squid_sources()
         step_loop_source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
         sharp_step_tail = step_loop_source.split("def commit_trial(", 1)[1].split(
-            "runtime = SquidSharpFsiRuntime(",
+            "def publish_trial(",
             1,
         )[0]
-        sharp_guard_try = sharp_step_tail.split("state.rows.append(row)", 1)[1].split(
+        sharp_guard_try = sharp_step_tail.split(
+            "candidate_rows = [*state.rows, row]\n        try:",
+            1,
+        )[1].split(
             "except Exception as exc:",
             1,
         )[0]
@@ -5603,7 +5733,12 @@ class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
         self.assertIn("_raise_for_closure_coverage_floor(", sharp_guard_try)
         self.assertIn("args.closure_coverage_floor", sharp_guard_try)
         self.assertIn("args.closure_coverage_floor_patience", sharp_guard_try)
-        self.assertIn("_write_step_failure_artifacts(", sharp_step_tail)
+        sharp_failure_handler = sharp_step_tail.split(
+            "except Exception as exc:",
+            1,
+        )[1].split("state.rows.append(row)", 1)[0]
+        self.assertIn("_write_step_failure_artifacts(", sharp_failure_handler)
+        self.assertNotIn("state.rows.append(row)", sharp_guard_try)
         self.assertIn('"--closure-coverage-floor"', source)
         self.assertIn('"--closure-coverage-floor-patience"', source)
 
@@ -5655,38 +5790,72 @@ class SquidSharpAirBackedClosureContractTests(unittest.TestCase):
         # generic HIBM air-backed classification. The case configures the
         # closure region, pressure, and probe reach; the solver computes the
         # selected cells and resulting flow at run time.
-        source = _read_squid_sources()
-        sharp_advance_call = source.split(
+        step_loop_source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
+        sharp_advance_call = step_loop_source.split(
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
         self.assertIn(
-            "far_pressure_air_backed=far_pressure_air_backed",
+            "far_pressure_air_backed=settings.far_pressure_air_backed",
             sharp_advance_call,
         )
         # The closure wiring the air zone rides on stays in place.
-        self.assertIn("far_pressure_region_id=pressure_load_region_id", sharp_advance_call)
         self.assertIn(
-            "far_pressure_barrier_region_id=fixed_rim_region_id",
+            "far_pressure_region_id=settings.pressure_load_region_id",
             sharp_advance_call,
         )
-        self.assertIn("far_pressure_pa=pressure_pa", sharp_advance_call)
         self.assertIn(
-            "far_pressure_air_backed_probe_normal_sign="
-            "far_pressure_air_backed_probe_normal_sign",
+            "far_pressure_barrier_region_id=settings.fixed_rim_region_id",
+            sharp_advance_call,
+        )
+        self.assertIn(
+            'far_pressure_pa=float(step_state["pressure_pa"])', sharp_advance_call
+        )
+        self.assertIn(
+            "far_pressure_air_backed_probe_normal_sign=(\n"
+            "                settings.far_pressure_air_backed_probe_normal_sign",
             sharp_advance_call,
         )
         self.assertIn(
             "far_pressure_inside_probe_max_multiplier="
-            "far_pressure_inside_probe_max_multiplier",
+            "(\n                settings.far_pressure_inside_probe_max_multiplier",
             sharp_advance_call,
+        )
+        runner_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
+        settings_construction = runner_source.split(
+            "settings=StepLoopSettings(",
+            1,
+        )[1].split("resources=StepLoopResources(", 1)[0]
+        self.assertIn(
+            "far_pressure_air_backed=far_pressure_air_backed",
+            settings_construction,
+        )
+        self.assertIn(
+            "pressure_load_region_id=pressure_load_region_id",
+            settings_construction,
+        )
+        self.assertIn(
+            "fixed_rim_region_id=fixed_rim_region_id",
+            settings_construction,
+        )
+        self.assertIn(
+            "far_pressure_air_backed_probe_normal_sign=(\n"
+            "                far_pressure_air_backed_probe_normal_sign",
+            settings_construction,
+        )
+        self.assertIn(
+            "far_pressure_inside_probe_max_multiplier=(\n"
+            "                far_pressure_inside_probe_max_multiplier",
+            settings_construction,
         )
         default_args = parse_args([])
         self.assertTrue(default_args.far_pressure_air_backed)
         self.assertEqual(default_args.fixed_rim_region_id, 5)
         self.assertEqual(default_args.far_pressure_inside_probe_max_multiplier, 12.0)
         self.assertEqual(default_args.far_pressure_air_backed_probe_normal_sign, 0.0)
-        self.assertFalse(parse_args(["--no-far-pressure-air-backed"]).far_pressure_air_backed)
+        self.assertFalse(
+            parse_args(["--no-far-pressure-air-backed"]).far_pressure_air_backed
+        )
 
 
 if __name__ == "__main__":
