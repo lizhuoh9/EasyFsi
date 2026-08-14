@@ -178,6 +178,7 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
             ),
             near_wall_treatment="fluent_correlation",
             max_automatic_substeps=config.flow_sst_max_automatic_substeps,
+            defer_wall_distance=True,
         )
 
     def test_each_predictor_substep_advances_sst_before_momentum(self) -> None:

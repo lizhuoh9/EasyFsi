@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -12,6 +13,13 @@ from simulation_core import (
 
 
 RUNTIME = TaichiRuntimeConfig(arch="cuda")
+CORE_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "simulation_core"
+    / "coupling"
+    / "hibm_mpm"
+    / "core.py"
+).read_text(encoding="utf-8")
 
 
 def _solid_with_particles(positions: np.ndarray) -> NeoHookeanMpmState:
@@ -36,6 +44,25 @@ def _weights(marker: np.ndarray, particles: np.ndarray, radius: float) -> np.nda
 
 
 class HibmMpmParticleBinTests(unittest.TestCase):
+    def test_particle_bins_and_force_scatter_use_stable_gpu_order(self) -> None:
+        fill_kernel = CORE_SOURCE.split(
+            "def _fill_mpm_particle_bin_members_kernel(", 1
+        )[1].split("@ti.kernel", 1)[0]
+        scatter_kernel = CORE_SOURCE.split(
+            "def _scatter_marker_forces_to_mpm_particles_kernel(", 1
+        )[1].split("@ti.kernel", 1)[0]
+
+        self.assertIn(
+            "ti.loop_config(serialize=True)\n"
+            "        for particle in range(particle_count):",
+            fill_kernel,
+        )
+        self.assertIn(
+            "ti.loop_config(serialize=True)\n"
+            "        for source_marker in range(marker_count + tip_cap_marker_count):",
+            scatter_kernel,
+        )
+
     def test_scatter_matches_bruteforce_and_conserves_each_marker_force(self) -> None:
         marker_positions = np.asarray(
             [[-0.15, 0.0, 0.0], [0.55, 0.05, 0.0]], dtype=np.float32
@@ -81,13 +108,12 @@ class HibmMpmParticleBinTests(unittest.TestCase):
             expected_pairs += int(np.count_nonzero(weights > 0.0))
             expected += weights[:, None] / np.sum(weights) * force[None, :]
         np.testing.assert_allclose(
-            # Parallel bucket fill may change only the f32 accumulation order.
             solid.external_force_n.to_numpy(), expected, rtol=2.0e-6, atol=2.0e-6
         )
         self.assertEqual(report.active_pair_count, expected_pairs)
         self.assertLessEqual(report.action_reaction_residual_n, 3.0e-6)
 
-    def test_sparse_scatter_candidate_work_is_not_marker_particle_product(self) -> None:
+    def test_sparse_scatter_candidate_count_tracks_unique_pairs(self) -> None:
         marker_count = 32
         particle_count = 2048
         marker_positions = np.zeros((marker_count, 3), dtype=np.float32)
@@ -106,7 +132,7 @@ class HibmMpmParticleBinTests(unittest.TestCase):
         markers.compute_marker_forces()
         solid = _solid_with_particles(particle_positions)
 
-        markers.scatter_marker_forces_to_mpm_particles(
+        report = markers.scatter_marker_forces_to_mpm_particles(
             solid.external_force_n,
             solid.x,
             particle_count=particle_count,
@@ -114,6 +140,8 @@ class HibmMpmParticleBinTests(unittest.TestCase):
         )
 
         candidate_tests = int(markers.report_mpm_scatter_candidate_pair_count[None])
+        self.assertEqual(report.candidate_pair_count, marker_count)
+        self.assertEqual(candidate_tests, report.candidate_pair_count)
         self.assertLess(candidate_tests, marker_count * particle_count // 16)
 
     def test_surface_feedback_matches_bruteforce_velocity_normal_and_area(self) -> None:

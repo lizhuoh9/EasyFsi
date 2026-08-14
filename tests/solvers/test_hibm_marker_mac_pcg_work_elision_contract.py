@@ -255,8 +255,8 @@ class MarkerMacPcgWorkElisionContracts(unittest.TestCase):
             "lambda-to-correction apply must execute even after device convergence",
         )
 
-    def test_fixed_host_loop_never_polls_device_convergence(self) -> None:
-        """Elision stays device-resident instead of synchronizing every iteration."""
+    def test_host_loop_polls_terminal_state_in_bounded_batches(self) -> None:
+        """A converged solve must not dispatch the full configured iteration budget."""
 
         solve = _method("solve_device")
         iteration_loop = next(
@@ -265,24 +265,37 @@ class MarkerMacPcgWorkElisionContracts(unittest.TestCase):
             if isinstance(statement, ast.For)
             and _calls(statement, "_apply_matrix")
         )
-        self.assertEqual(
-            _self_field_subscripts(iteration_loop, "_device_converged"),
-            [],
-            "the fixed host loop must not read device convergence",
+        convergence_reads = _self_field_subscripts(
+            iteration_loop,
+            "_device_converged",
         )
-        apply_matrix = _method("_apply_matrix")
-        self.assertEqual(
-            _self_field_subscripts(apply_matrix, "_device_converged"),
-            [],
-            "the per-iteration Python wrapper must pass a flag, not poll a field",
+        failure_reads = _self_field_subscripts(
+            iteration_loop,
+            "_failure_code",
         )
-        post_loop_reads = _self_field_subscripts(solve, "_device_converged")
-        self.assertEqual(
-            len(post_loop_reads),
+        self.assertGreaterEqual(
+            len(convergence_reads),
             1,
-            "device convergence may be synchronized exactly once after the host loop",
+            "the host loop must periodically observe device convergence",
         )
-        self.assertGreater(post_loop_reads[0].lineno, iteration_loop.end_lineno)
+        self.assertGreaterEqual(
+            len(failure_reads),
+            1,
+            "the host loop must stop promptly after a device-side breakdown",
+        )
+        terminal_breaks = [
+            candidate
+            for candidate in ast.walk(iteration_loop)
+            if isinstance(candidate, ast.If)
+            and _self_field_subscripts(candidate.test, "_device_converged")
+            and _self_field_subscripts(candidate.test, "_failure_code")
+            and any(isinstance(statement, ast.Break) for statement in candidate.body)
+        ]
+        self.assertEqual(
+            len(terminal_breaks),
+            1,
+            "one bounded polling branch must stop converged or failed PCG work",
+        )
 
     def test_zero_mobility_and_breakdown_remain_fail_closed(self) -> None:
         """Work elision must not turn unsatisfiable systems into false success."""

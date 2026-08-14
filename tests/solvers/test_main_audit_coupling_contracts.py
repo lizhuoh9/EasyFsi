@@ -32,6 +32,7 @@ class _ScalarField:
 class _CountedField:
     def __init__(self, capacity: int):
         self.shape = (capacity,)
+        self.dtype = ti.i32
 
 
 def _namespace_with(value, **changes):
@@ -46,6 +47,8 @@ def _valid_load_report(marker_count: int = 10):
         total_marker_force_n=(1.0, 0.0, 0.0),
         total_mpm_external_force_n=(1.0, 0.0, 0.0),
         action_reaction_residual_n=0.0,
+        invalid_external_force_particle_count=0,
+        max_abs_external_force_component_n=1.0,
     )
     return SimpleNamespace(
         mpm_external_force_clear=SimpleNamespace(

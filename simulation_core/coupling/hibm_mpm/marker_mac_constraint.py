@@ -3176,7 +3176,11 @@ class HibmMpmMarkerMacConstraintOperator:
             )
         self._check_convergence_kernel(tolerance)
         self._compute_initial_rz_kernel()
-        for _ in range(iterations):
+        iteration_budget = (
+            0 if int(self._device_converged[None]) != 0 else iterations
+        )
+        poll_interval = 8
+        for iteration_index in range(iteration_budget):
             self._apply_matrix(
                 self._direction,
                 self._matrix_direction,
@@ -3188,6 +3192,15 @@ class HibmMpmMarkerMacConstraintOperator:
             self._check_convergence_kernel(tolerance)
             self._pcg_update_direction_device_kernel()
             self._pcg_finish_direction_device_kernel()
+            completed_iterations = iteration_index + 1
+            if (
+                completed_iterations % poll_interval == 0
+                or completed_iterations == iteration_budget
+            ) and (
+                int(self._device_converged[None]) != 0
+                or int(self._failure_code[None]) != 0
+            ):
+                break
 
         failure_code = int(self._failure_code[None])
         self._converged = bool(int(self._device_converged[None]))

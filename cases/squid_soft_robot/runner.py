@@ -4,7 +4,7 @@ import math
 import os
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import asdict, replace
 from functools import wraps
 from pathlib import Path
@@ -21,15 +21,10 @@ from simulation_core import (
     CG_PRECONDITIONER_CHOICES,
     CartesianFluidSolver,
     CflSubstepController,
-    FSI_COUPLING_MODE_HIBM_MPM_SHARP,
-    INTERFACE_REACTION_SOLVER_CHOICES,
-    InterfaceReactionRelaxationState,
     NeoHookeanMpmState,
     RefinementRegion,
     TaichiRuntimeConfig,
     TriMooneyShellMpmState,
-    advance_projected_ibm_region_pair_fluid_step,
-    require_implemented_fsi_coupling_mode,
 )
 from simulation_core.materials.hyperelastic import ecoflex_0010_material
 from simulation_core.coupling.pressure_interface import (
@@ -37,11 +32,7 @@ from simulation_core.coupling.pressure_interface import (
 )
 
 from .cli import (
-    FSI_STABILIZATION_PRESET_CONFLICT_POLICY,
-    INTERFACE_REACTION_ROBIN_TARGET_CHOICES,
-    fsi_stabilization_effective_parameters_from_args,
     parse_args,
-    raise_for_unsupported_hibm_mpm_sharp_iteration_options,
 )
 from .checkpointing import (
     checkpoint_run_fingerprint,
@@ -55,13 +46,8 @@ from .checkpointing import (
 from .coupling_common import (
     hydraulic_diagnostics,
 )
-from .coupling_legacy import (
-    legacy_projected_reduced_coupling_control,
-)
 from .coupling_sharp import (
     build_hibm_mpm_sharp_coupling_state,
-    hibm_mpm_sharp_coupling_control,
-    raise_for_unsupported_hibm_mpm_sharp_robin_options,
 )
 from .runtime_state import ReducedSquidFSI
 from .setup import (
@@ -87,17 +73,10 @@ from .setup import (
     spec_with_region14_aperture,
     tail_refinement_region_from_geometry,
 )
-from .summary import (
-    build_final_run_report,
-    build_sharp_case_run_report,
-)
+from .summary import build_sharp_case_run_report
 from .history import (
     read_csv_rows,
     write_csv,
-)
-from .fluid_step import (
-    build_projected_ibm_region_pair_step_config,
-    z_velocity_vector,
 )
 from .solid_step import build_solid_substep_plan
 from .step_context import (
@@ -110,7 +89,6 @@ from .step_context import (
 from .step_loop import run_squid_step_loop
 from .schedules import (
     PRESSURE_SCHEDULE_FIELDS,
-    pressure_schedule_pa,
     pressure_schedule_step_end_pa,
     spec_with_pressure_schedule_overrides,
 )
@@ -211,8 +189,6 @@ def _validated_probe_multiplier(value: object, *, option_name: str) -> float:
 
 
 def validate_sharp_case_cli_contract(args: argparse.Namespace) -> None:
-    if str(args.fsi_coupling_mode) != FSI_COUPLING_MODE_HIBM_MPM_SHARP:
-        return
     if bool(args.far_pressure_air_backed) and bool(args.disable_pressure_outlet_zmin):
         raise ValueError(
             "air-backed far-pressure classification requires the z-min pressure outlet; "
@@ -273,217 +249,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         args.solid_density_scale,
         option_name="--solid-density-scale",
     )
-    interface_reaction_relaxation = float(args.interface_reaction_relaxation)
-    if (
-        not math.isfinite(interface_reaction_relaxation)
-        or not 0.0 <= interface_reaction_relaxation <= 1.0
-    ):
-        raise ValueError(
-            "--interface-reaction-relaxation must be a finite number in [0, 1]"
-        )
-    fsi_constraint_force_solid_mobility_ratio = float(
-        args.fsi_constraint_force_solid_mobility_ratio
+    fsi_coupling_iterations = int(args.fsi_coupling_iterations)
+    if fsi_coupling_iterations < 2:
+        raise ValueError("--fsi-coupling-iterations must be at least 2")
+    fsi_marker_coupling_tolerance_mps = float(
+        args.fsi_marker_coupling_tolerance_mps
     )
-    if (
-        not math.isfinite(fsi_constraint_force_solid_mobility_ratio)
-        or fsi_constraint_force_solid_mobility_ratio < 0.0
-    ):
-        raise ValueError(
-            "--fsi-constraint-force-solid-mobility-ratio must be a finite non-negative number"
-        )
-    fsi_solid_response_mobility_coupling = bool(
-        args.fsi_solid_response_mobility_coupling
-    )
-    fsi_velocity_target_solid_mobility_ratio = float(
-        args.fsi_velocity_target_solid_mobility_ratio
-    )
-    if (
-        not math.isfinite(fsi_velocity_target_solid_mobility_ratio)
-        or fsi_velocity_target_solid_mobility_ratio < 0.0
-    ):
-        raise ValueError(
-            "--fsi-velocity-target-solid-mobility-ratio must be a finite "
-            "non-negative number"
-        )
-    fsi_solid_response_velocity_mobility_coupling = bool(
-        args.fsi_solid_response_velocity_mobility_coupling
-    )
-    fsi_velocity_constraint_blend = float(args.fsi_velocity_constraint_blend)
-    if (
-        not math.isfinite(fsi_velocity_constraint_blend)
-        or not 0.0 <= fsi_velocity_constraint_blend <= 1.0
-    ):
-        raise ValueError(
-            "--fsi-velocity-constraint-blend must be a finite number in [0, 1]"
-        )
-    fsi_velocity_constraint_solid_mobility_ratio = float(
-        args.fsi_velocity_constraint_solid_mobility_ratio
-    )
-    if (
-        not math.isfinite(fsi_velocity_constraint_solid_mobility_ratio)
-        or fsi_velocity_constraint_solid_mobility_ratio < 0.0
-    ):
-        raise ValueError(
-            "--fsi-velocity-constraint-solid-mobility-ratio must be a finite non-negative number"
-        )
-    fsi_coupling_iterations = max(1, int(args.fsi_coupling_iterations))
-    fsi_coupling_adaptive_iterations_max_arg = int(
-        args.fsi_coupling_adaptive_iterations_max
-    )
-    if fsi_coupling_adaptive_iterations_max_arg < 0:
-        raise ValueError("--fsi-coupling-adaptive-iterations-max must be non-negative")
-    if (
-        fsi_coupling_adaptive_iterations_max_arg > 0
-        and fsi_coupling_adaptive_iterations_max_arg < fsi_coupling_iterations
-    ):
-        raise ValueError(
-            "--fsi-coupling-adaptive-iterations-max must be 0 or at least "
-            "--fsi-coupling-iterations"
-        )
-    fsi_coupling_adaptive_iterations_max = (
-        fsi_coupling_adaptive_iterations_max_arg
-        if fsi_coupling_adaptive_iterations_max_arg > 0
-        else fsi_coupling_iterations
-    )
-    fsi_coupling_adaptive_iterations_residual_threshold_n = float(
-        args.fsi_coupling_adaptive_iterations_residual_threshold_n
-    )
-    if not (
-        math.isinf(fsi_coupling_adaptive_iterations_residual_threshold_n)
-        or (
-            math.isfinite(fsi_coupling_adaptive_iterations_residual_threshold_n)
-            and fsi_coupling_adaptive_iterations_residual_threshold_n >= 0.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-adaptive-iterations-residual-threshold-n must be "
-            "non-negative or infinity"
-        )
-    fsi_coupling_adaptive_iterations_cfl_threshold = float(
-        args.fsi_coupling_adaptive_iterations_cfl_threshold
-    )
-    if not (
-        math.isinf(fsi_coupling_adaptive_iterations_cfl_threshold)
-        or (
-            math.isfinite(fsi_coupling_adaptive_iterations_cfl_threshold)
-            and fsi_coupling_adaptive_iterations_cfl_threshold >= 0.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-adaptive-iterations-cfl-threshold must be "
-            "non-negative or infinity"
-        )
-    fsi_coupling_same_step_rerun_iterations_max_arg = int(
-        args.fsi_coupling_same_step_rerun_iterations_max
-    )
-    if fsi_coupling_same_step_rerun_iterations_max_arg < 0:
-        raise ValueError(
-            "--fsi-coupling-same-step-rerun-iterations-max must be non-negative"
-        )
-    if (
-        fsi_coupling_same_step_rerun_iterations_max_arg > 0
-        and fsi_coupling_same_step_rerun_iterations_max_arg < fsi_coupling_iterations
-    ):
-        raise ValueError(
-            "--fsi-coupling-same-step-rerun-iterations-max must be 0 or at least "
-            "--fsi-coupling-iterations"
-        )
-    fsi_coupling_same_step_rerun_iterations_max = (
-        fsi_coupling_same_step_rerun_iterations_max_arg
-        if fsi_coupling_same_step_rerun_iterations_max_arg > 0
-        else fsi_coupling_iterations
-    )
-    fsi_coupling_same_step_rerun_residual_threshold_n = float(
-        args.fsi_coupling_same_step_rerun_residual_threshold_n
-    )
-    if not (
-        math.isinf(fsi_coupling_same_step_rerun_residual_threshold_n)
-        or (
-            math.isfinite(fsi_coupling_same_step_rerun_residual_threshold_n)
-            and fsi_coupling_same_step_rerun_residual_threshold_n >= 0.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-same-step-rerun-residual-threshold-n must be "
-            "non-negative or infinity"
-        )
-    fsi_coupling_same_step_rerun_fluid_substep_factor = float(
-        args.fsi_coupling_same_step_rerun_fluid_substep_factor
-    )
-    if (
-        not math.isfinite(fsi_coupling_same_step_rerun_fluid_substep_factor)
-        or fsi_coupling_same_step_rerun_fluid_substep_factor < 1.0
-    ):
-        raise ValueError(
-            "--fsi-coupling-same-step-rerun-fluid-substep-factor must be "
-            "finite and at least 1"
-        )
-    fsi_coupling_residual_continuation_iterations_max = int(
-        args.fsi_coupling_residual_continuation_iterations_max
-    )
-    if fsi_coupling_residual_continuation_iterations_max < 0:
-        raise ValueError(
-            "--fsi-coupling-residual-continuation-iterations-max must be non-negative"
-        )
-    fsi_coupling_residual_continuation_threshold_n = float(
-        args.fsi_coupling_residual_continuation_threshold_n
-    )
-    if not (
-        math.isinf(fsi_coupling_residual_continuation_threshold_n)
-        or (
-            math.isfinite(fsi_coupling_residual_continuation_threshold_n)
-            and fsi_coupling_residual_continuation_threshold_n >= 0.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-residual-continuation-threshold-n must be "
-            "non-negative or infinity"
-        )
-    fsi_coupling_residual_continuation_rebound_secant_from_best = bool(
-        args.fsi_coupling_residual_continuation_rebound_secant_from_best
-    )
-    fsi_coupling_residual_continuation_rebound_secant_factor = float(
-        args.fsi_coupling_residual_continuation_rebound_secant_factor
-    )
-    if not (
-        math.isinf(fsi_coupling_residual_continuation_rebound_secant_factor)
-        or (
-            math.isfinite(fsi_coupling_residual_continuation_rebound_secant_factor)
-            and fsi_coupling_residual_continuation_rebound_secant_factor >= 1.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-residual-continuation-rebound-secant-factor must "
-            "be >= 1 or infinity"
-        )
-    fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max = int(
-        args.fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max
-    )
-    if fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max < 0:
-        raise ValueError(
-            "--fsi-coupling-residual-continuation-rebound-secant-evaluation-"
-            "extensions-max must be non-negative"
-        )
-    fsi_coupling_trial_interior_divergence_tolerance = float(
-        args.fsi_coupling_trial_interior_divergence_tolerance
-    )
-    if not (
-        math.isinf(fsi_coupling_trial_interior_divergence_tolerance)
-        or (
-            math.isfinite(fsi_coupling_trial_interior_divergence_tolerance)
-            and fsi_coupling_trial_interior_divergence_tolerance >= 0.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-trial-interior-divergence-tolerance must be "
-            "non-negative or infinity"
-        )
-    fsi_coupling_tolerance_n = float(args.fsi_coupling_tolerance_n)
-    if not math.isfinite(fsi_coupling_tolerance_n) or fsi_coupling_tolerance_n < 0.0:
-        raise ValueError(
-            "--fsi-coupling-tolerance-n must be a finite non-negative number"
-        )
-    fsi_marker_coupling_tolerance_mps = float(args.fsi_marker_coupling_tolerance_mps)
     if (
         not math.isfinite(fsi_marker_coupling_tolerance_mps)
         or fsi_marker_coupling_tolerance_mps < 0.0
@@ -491,156 +262,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(
             "--fsi-marker-coupling-tolerance-mps must be a finite non-negative number"
         )
-    fsi_coupling_target_map_relaxation = float(args.fsi_coupling_target_map_relaxation)
-    if (
-        not math.isfinite(fsi_coupling_target_map_relaxation)
-        or not 0.0 < fsi_coupling_target_map_relaxation <= 1.0
-    ):
-        raise ValueError(
-            "--fsi-coupling-target-map-relaxation must be a finite number in (0, 1]"
-        )
-    fsi_coupling_solver = str(args.fsi_coupling_solver)
-    if fsi_coupling_solver not in INTERFACE_REACTION_SOLVER_CHOICES:
-        choices = ", ".join(INTERFACE_REACTION_SOLVER_CHOICES)
-        raise ValueError(f"--fsi-coupling-solver must be one of: {choices}")
-    fsi_coupling_rejected_trial_backtrack = float(
-        args.fsi_coupling_rejected_trial_backtrack
-    )
-    if (
-        not math.isfinite(fsi_coupling_rejected_trial_backtrack)
-        or not 0.0 < fsi_coupling_rejected_trial_backtrack <= 1.0
-    ):
-        raise ValueError(
-            "--fsi-coupling-rejected-trial-backtrack must be a finite number in (0, 1]"
-        )
-    fsi_coupling_residual_growth_rejection_factor = float(
-        args.fsi_coupling_residual_growth_rejection_factor
-    )
-    if not (
-        math.isinf(fsi_coupling_residual_growth_rejection_factor)
-        or (
-            math.isfinite(fsi_coupling_residual_growth_rejection_factor)
-            and fsi_coupling_residual_growth_rejection_factor >= 1.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-residual-growth-rejection-factor must be >= 1 or infinity"
-        )
-    fsi_coupling_max_accepted_residual_n = float(
-        args.fsi_coupling_max_accepted_residual_n
-    )
-    if not (
-        math.isinf(fsi_coupling_max_accepted_residual_n)
-        or (
-            math.isfinite(fsi_coupling_max_accepted_residual_n)
-            and fsi_coupling_max_accepted_residual_n >= 0.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-max-accepted-residual-n must be non-negative or infinity"
-        )
-    fsi_coupling_trust_region_force_increment_n = float(
-        args.fsi_coupling_trust_region_force_increment_n
-    )
-    if not (
-        math.isinf(fsi_coupling_trust_region_force_increment_n)
-        or (
-            math.isfinite(fsi_coupling_trust_region_force_increment_n)
-            and fsi_coupling_trust_region_force_increment_n > 0.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-trust-region-force-increment-n must be positive or infinity"
-        )
-    fsi_coupling_trust_region_adaptive = bool(args.fsi_coupling_trust_region_adaptive)
-    fsi_coupling_trust_region_shrink_factor = float(
-        args.fsi_coupling_trust_region_shrink_factor
-    )
-    if not (
-        math.isfinite(fsi_coupling_trust_region_shrink_factor)
-        and 0.0 < fsi_coupling_trust_region_shrink_factor <= 1.0
-    ):
-        raise ValueError(
-            "--fsi-coupling-trust-region-shrink-factor must be finite and in (0, 1]"
-        )
-    fsi_coupling_trust_region_growth_factor = float(
-        args.fsi_coupling_trust_region_growth_factor
-    )
-    if not (
-        math.isfinite(fsi_coupling_trust_region_growth_factor)
-        and fsi_coupling_trust_region_growth_factor >= 1.0
-    ):
-        raise ValueError(
-            "--fsi-coupling-trust-region-growth-factor must be finite and >= 1"
-        )
-    fsi_coupling_trust_region_rebound_factor = float(
-        args.fsi_coupling_trust_region_rebound_factor
-    )
-    if not (
-        math.isinf(fsi_coupling_trust_region_rebound_factor)
-        or (
-            math.isfinite(fsi_coupling_trust_region_rebound_factor)
-            and fsi_coupling_trust_region_rebound_factor >= 1.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-trust-region-rebound-factor must be >= 1 or infinity"
-        )
-    fsi_coupling_trust_region_rebound_backtrack = float(
-        args.fsi_coupling_trust_region_rebound_backtrack
-    )
-    if not (
-        math.isfinite(fsi_coupling_trust_region_rebound_backtrack)
-        and 0.0 < fsi_coupling_trust_region_rebound_backtrack < 1.0
-    ):
-        raise ValueError(
-            "--fsi-coupling-trust-region-rebound-backtrack must be finite and in (0, 1)"
-        )
-    fsi_coupling_trust_region_rebound_stop_factor = float(
-        args.fsi_coupling_trust_region_rebound_stop_factor
-    )
-    if not (
-        math.isinf(fsi_coupling_trust_region_rebound_stop_factor)
-        or (
-            math.isfinite(fsi_coupling_trust_region_rebound_stop_factor)
-            and fsi_coupling_trust_region_rebound_stop_factor >= 1.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-trust-region-rebound-stop-factor must be >= 1 or infinity"
-        )
-    fsi_coupling_trust_region_rebound_stop_max_residual_n = float(
-        args.fsi_coupling_trust_region_rebound_stop_max_residual_n
-    )
-    if not (
-        math.isinf(fsi_coupling_trust_region_rebound_stop_max_residual_n)
-        or (
-            math.isfinite(fsi_coupling_trust_region_rebound_stop_max_residual_n)
-            and fsi_coupling_trust_region_rebound_stop_max_residual_n >= 0.0
-        )
-    ):
-        raise ValueError(
-            "--fsi-coupling-trust-region-rebound-stop-max-residual-n must be "
-            "non-negative or infinity"
-        )
-    if fsi_coupling_trust_region_adaptive and math.isinf(
-        fsi_coupling_trust_region_force_increment_n
-    ):
-        raise ValueError(
-            "--fsi-coupling-trust-region-adaptive requires a finite "
-            "--fsi-coupling-trust-region-force-increment-n"
-        )
-    fsi_stabilization_preset = str(args.fsi_stabilization_preset)
-    fsi_stabilization_effective_parameters = (
-        fsi_stabilization_effective_parameters_from_args(args)
-    )
-    fsi_coupling_mode = str(args.fsi_coupling_mode)
-    fsi_coupling_mode_report = require_implemented_fsi_coupling_mode(fsi_coupling_mode)
-    sharp_coupling_control = hibm_mpm_sharp_coupling_control(
-        fsi_coupling_mode=fsi_coupling_mode,
-    )
-    sharp_case_runner_enabled = sharp_coupling_control.enabled
-    reuse_accepted_fsi_trial_state = bool(args.reuse_accepted_fsi_trial_state)
     pressure_outlet_source_ratio_tolerance = float(
         args.pressure_outlet_source_ratio_tolerance
     )
@@ -658,77 +279,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if cg_preconditioner not in CG_PRECONDITIONER_CHOICES:
         choices = ", ".join(CG_PRECONDITIONER_CHOICES)
         raise ValueError(f"--cg-preconditioner must be one of: {choices}")
-    interface_reaction_passivity_limit = bool(args.interface_reaction_passivity_limit)
-    interface_reaction_robin_impedance_ns_m = float(
-        args.interface_reaction_robin_impedance_ns_m
-    )
-    if (
-        not math.isfinite(interface_reaction_robin_impedance_ns_m)
-        or interface_reaction_robin_impedance_ns_m < 0.0
-    ):
-        raise ValueError(
-            "--interface-reaction-robin-impedance-ns-m must be a finite "
-            "non-negative number"
-        )
-    interface_reaction_robin_matrix_impedance_ns_m = float(
-        args.interface_reaction_robin_matrix_impedance_ns_m
-    )
-    if (
-        not math.isfinite(interface_reaction_robin_matrix_impedance_ns_m)
-        or interface_reaction_robin_matrix_impedance_ns_m < 0.0
-    ):
-        raise ValueError(
-            "--interface-reaction-robin-matrix-impedance-ns-m must be a "
-            "finite non-negative number"
-        )
-    interface_reaction_robin_target_mode = str(
-        args.interface_reaction_robin_target_mode
-    )
-    if (
-        interface_reaction_robin_target_mode
-        not in INTERFACE_REACTION_ROBIN_TARGET_CHOICES
-    ):
-        choices = ", ".join(INTERFACE_REACTION_ROBIN_TARGET_CHOICES)
-        raise ValueError(
-            f"--interface-reaction-robin-target-mode must be one of: {choices}"
-        )
-    raise_for_unsupported_hibm_mpm_sharp_robin_options(
-        fsi_coupling_mode=fsi_coupling_mode,
-        interface_reaction_robin_impedance_ns_m=(
-            interface_reaction_robin_impedance_ns_m
-        ),
-        interface_reaction_robin_matrix_impedance_ns_m=(
-            interface_reaction_robin_matrix_impedance_ns_m
-        ),
-    )
-    raise_for_unsupported_hibm_mpm_sharp_iteration_options(
-        fsi_coupling_mode=fsi_coupling_mode,
-        fsi_coupling_iterations=fsi_coupling_iterations,
-    )
-    interface_reaction_aitken = bool(args.interface_reaction_aitken)
-    interface_reaction_aitken_lower_bound = float(
-        args.interface_reaction_aitken_lower_bound
-    )
-    if (
-        not math.isfinite(interface_reaction_aitken_lower_bound)
-        or not 0.0 <= interface_reaction_aitken_lower_bound <= 1.5
-    ):
-        raise ValueError(
-            "--interface-reaction-aitken-lower-bound must be a finite number in [0, 1.5]"
-        )
-    interface_reaction_aitken_upper_bound = float(
-        args.interface_reaction_aitken_upper_bound
-    )
-    if (
-        not math.isfinite(interface_reaction_aitken_upper_bound)
-        or not interface_reaction_aitken_lower_bound
-        <= interface_reaction_aitken_upper_bound
-        <= 1.5
-    ):
-        raise ValueError(
-            "--interface-reaction-aitken-upper-bound must be finite and satisfy "
-            "interface_reaction_aitken_lower_bound <= upper <= 1.5"
-        )
     max_wall_time_s = float(args.max_wall_time_s)
     if not math.isfinite(max_wall_time_s) or max_wall_time_s < 0.0:
         raise ValueError("--max-wall-time-s must be a finite non-negative number")
@@ -918,17 +468,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     pressure_solver_name = resolve_pressure_solver(
         args.pressure_solver,
         graded_grid_enabled=graded_grid_enabled,
-        fsi_coupling_mode=fsi_coupling_mode,
     )
-    if (
-        interface_reaction_robin_matrix_impedance_ns_m > 0.0
-        and pressure_solver_name != "fv_cg"
-    ):
-        raise ValueError(
-            "--interface-reaction-robin-matrix-impedance-ns-m requires "
-            "--pressure-solver fv_cg so the interface impedance enters the "
-            "pressure matrix"
-        )
     projection_divergence_cleanup_iterations = resolve_divergence_cleanup_iterations(
         args.divergence_cleanup_iterations,
         graded_grid_enabled=graded_grid_enabled,
@@ -971,17 +511,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         else None
     )
     fluid_grid_resolution = fluid_grid_resolution_report(spec)
-    legacy_coupling_control = legacy_projected_reduced_coupling_control(
-        fsi_coupling_mode=fsi_coupling_mode,
-        solid_model=args.solid_model,
-        fsi_coupling_iterations=fsi_coupling_iterations,
-    )
     pressure_projection_budget = pressure_projection_budget_report(
         fluid_substeps=effective_fluid_substeps,
         ibm_correction_iterations=max(1, int(args.ibm_correction_iterations)),
         fsi_coupling_iterations=fsi_coupling_iterations,
         projection_iterations=int(args.projection_iterations),
-        fsi_coupling_enabled=legacy_coupling_control.enabled,
+        fsi_coupling_enabled=True,
     )
     if args.preflight_only:
         grid = cartesian_grid_for_spec(spec)
@@ -1017,15 +552,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "multigrid_cycles": multigrid_cycles,
             "effective_multigrid_cycles": effective_multigrid_cycles,
             "divergence_cleanup_iterations": projection_divergence_cleanup_iterations,
-            "fsi_coupling_mode": fsi_coupling_mode,
-            "fsi_coupling_mode_report": fsi_coupling_mode_report,
-            "fsi_stabilization_preset": fsi_stabilization_preset,
-            "fsi_stabilization_preset_conflict_policy": (
-                FSI_STABILIZATION_PRESET_CONFLICT_POLICY
-            ),
-            "fsi_stabilization_effective_parameters": (
-                fsi_stabilization_effective_parameters
-            ),
             "steps": step_count,
             "full_pressure_waveform_steps": full_pressure_waveform_steps,
             "steps_explicit": bool(getattr(args, "steps_explicit", True)),
@@ -1044,93 +570,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 args.adaptive_fluid_substeps_safety
             ),
             "pressure_projection_budget": pressure_projection_budget,
-            "interface_reaction_passivity_limit": interface_reaction_passivity_limit,
-            "interface_reaction_robin_impedance_ns_m": (
-                interface_reaction_robin_impedance_ns_m
+            "fsi_coupling_iterations": fsi_coupling_iterations,
+            "fsi_marker_coupling_tolerance_mps": (
+                fsi_marker_coupling_tolerance_mps
             ),
-            "interface_reaction_robin_matrix_impedance_ns_m": (
-                interface_reaction_robin_matrix_impedance_ns_m
-            ),
-            "interface_reaction_robin_target_mode": (
-                interface_reaction_robin_target_mode
-            ),
-            "fsi_coupling_target_map_relaxation": (fsi_coupling_target_map_relaxation),
-            "fsi_coupling_iterations_base": fsi_coupling_iterations,
-            "fsi_coupling_adaptive_iterations_max": (
-                fsi_coupling_adaptive_iterations_max
-            ),
-            "fsi_coupling_adaptive_iterations_residual_threshold_n": (
-                fsi_coupling_adaptive_iterations_residual_threshold_n
-            ),
-            "fsi_coupling_adaptive_iterations_cfl_threshold": (
-                fsi_coupling_adaptive_iterations_cfl_threshold
-            ),
-            "fsi_coupling_same_step_rerun_iterations_max": (
-                fsi_coupling_same_step_rerun_iterations_max
-            ),
-            "fsi_coupling_same_step_rerun_residual_threshold_n": (
-                fsi_coupling_same_step_rerun_residual_threshold_n
-            ),
-            "fsi_coupling_same_step_rerun_fluid_substep_factor": (
-                fsi_coupling_same_step_rerun_fluid_substep_factor
-            ),
-            "fsi_coupling_residual_continuation_iterations_max": (
-                fsi_coupling_residual_continuation_iterations_max
-            ),
-            "fsi_coupling_residual_continuation_threshold_n": (
-                fsi_coupling_residual_continuation_threshold_n
-            ),
-            "fsi_coupling_residual_continuation_rebound_secant_from_best": (
-                fsi_coupling_residual_continuation_rebound_secant_from_best
-            ),
-            "fsi_coupling_residual_continuation_rebound_secant_factor": (
-                fsi_coupling_residual_continuation_rebound_secant_factor
-            ),
-            "fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max": (
-                fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max
-            ),
-            "fsi_coupling_trial_interior_divergence_tolerance": (
-                fsi_coupling_trial_interior_divergence_tolerance
-            ),
-            "fsi_coupling_rejected_trial_backtrack": (
-                fsi_coupling_rejected_trial_backtrack
-            ),
-            "fsi_coupling_residual_growth_rejection_factor": (
-                fsi_coupling_residual_growth_rejection_factor
-            ),
-            "fsi_coupling_max_accepted_residual_n": (
-                fsi_coupling_max_accepted_residual_n
-            ),
-            "fsi_coupling_trust_region_force_increment_n": (
-                fsi_coupling_trust_region_force_increment_n
-            ),
-            "fsi_coupling_trust_region_adaptive": (fsi_coupling_trust_region_adaptive),
-            "fsi_coupling_trust_region_shrink_factor": (
-                fsi_coupling_trust_region_shrink_factor
-            ),
-            "fsi_coupling_trust_region_growth_factor": (
-                fsi_coupling_trust_region_growth_factor
-            ),
-            "fsi_coupling_trust_region_rebound_factor": (
-                fsi_coupling_trust_region_rebound_factor
-            ),
-            "fsi_coupling_trust_region_rebound_backtrack": (
-                fsi_coupling_trust_region_rebound_backtrack
-            ),
-            "fsi_coupling_trust_region_rebound_stop_factor": (
-                fsi_coupling_trust_region_rebound_stop_factor
-            ),
-            "fsi_coupling_trust_region_rebound_stop_max_residual_n": (
-                fsi_coupling_trust_region_rebound_stop_max_residual_n
-            ),
-            "interface_reaction_aitken": interface_reaction_aitken,
-            "interface_reaction_aitken_lower_bound": (
-                interface_reaction_aitken_lower_bound
-            ),
-            "interface_reaction_aitken_upper_bound": (
-                interface_reaction_aitken_upper_bound
-            ),
-            "interface_reaction_relaxation": interface_reaction_relaxation,
             "fluid_grid_spacing_m": (
                 None
                 if uniform_spacing_m is None
@@ -1541,14 +984,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     else:
         raise ValueError(f"Unsupported solid model: {args.solid_model}")
 
-    sharp_coupling_state = (
-        build_hibm_mpm_sharp_coupling_state(
-            fluid=simulator.fluid,
-            solid_mpm=solid_mpm,
-            runtime=runtime,
-        )
-        if sharp_case_runner_enabled
-        else None
+    sharp_coupling_state = build_hibm_mpm_sharp_coupling_state(
+        fluid=simulator.fluid,
+        solid_mpm=solid_mpm,
+        runtime=runtime,
     )
 
     def publish_solid_report_to_reduced_state(current_time_s: float, report) -> None:
@@ -1570,182 +1009,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             nozzle_velocity_z_mps=nozzle_velocity_z_mps,
         )
 
-    def advance_physical_solid_step(
-        current_time_s: float,
-        primary_reaction_n: Sequence[float],
-        secondary_reaction_n: Sequence[float],
-    ):
-        primary_reaction = _vector3(primary_reaction_n, name="primary_reaction_n")
-        secondary_reaction = _vector3(secondary_reaction_n, name="secondary_reaction_n")
-        simulator.set_interface_reaction(
-            primary_force_n=primary_reaction,
-            secondary_force_n=secondary_reaction,
-        )
-        if args.solid_model == "tri_mooney_shell_mpm":
-            report = None
-            for substep in range(solid_mpm_substeps):
-                sub_time_s = current_time_s + float(substep) * solid_sub_dt_s
-                pressure_pa = pressure_schedule_pa(sub_time_s, spec)
-                pressure_area_load_npm2 = tuple(
-                    float(pressure_pa) * float(component)
-                    for component in pressure_load_direction
-                )
-                report = solid_mpm.advance_region_loads(
-                    dt_s=solid_sub_dt_s,
-                    primary_region_id=primary_shell_region_id,
-                    secondary_region_id=secondary_shell_region_id,
-                    primary_area_load_npm2=pressure_area_load_npm2,
-                    primary_interface_reaction_n=primary_reaction,
-                    secondary_interface_reaction_n=secondary_reaction,
-                    primary_area_load_region_id=pressure_load_region_id,
-                    velocity_damping=solid_substep_velocity_damping,
-                    flip_blend=solid_mpm_flip_blend,
-                    read_report=False,
-                )
-            report = solid_mpm.report()
-        elif args.solid_model == "neo_hookean_mpm":
-            report = None
-            for substep in range(solid_mpm_substeps):
-                sub_time_s = current_time_s + float(substep) * solid_sub_dt_s
-                pressure_pa = pressure_schedule_pa(sub_time_s, spec)
-                pressure_area_load_npm2 = tuple(
-                    float(pressure_pa) * float(component)
-                    for component in pressure_load_direction
-                )
-                solid_mpm.set_layered_region_loads(
-                    primary_region_id=primary_shell_region_id,
-                    secondary_region_id=secondary_shell_region_id,
-                    primary_area_load_npm2=pressure_area_load_npm2,
-                    primary_interface_reaction_n=primary_reaction,
-                    secondary_interface_reaction_n=secondary_reaction,
-                )
-                report = solid_mpm.step(
-                    dt_s=solid_sub_dt_s,
-                    mu_pa=material.shear_modulus_pa,
-                    lambda_pa=material.lame_lambda_pa,
-                    velocity_damping=solid_substep_velocity_damping,
-                    primary_region_id=primary_shell_region_id,
-                    secondary_region_id=secondary_shell_region_id,
-                    fixed_node_lock_policy=neo_fixed_node_lock_policy,
-                    read_report=False,
-                )
-            report = solid_mpm.report()
-        else:
-            raise ValueError(f"Unsupported solid model: {args.solid_model}")
-
-        publish_solid_report_to_reduced_state(current_time_s, report)
-        return report
-
-    def advance_fluid_step(
-        *,
-        primary_velocity_mps: tuple[float, float, float] | None = None,
-        secondary_velocity_mps: tuple[float, float, float] | None = None,
-        primary_constraint_force_solid_mobility_ratio: float | None = None,
-        secondary_constraint_force_solid_mobility_ratio: float | None = None,
-        primary_velocity_target_solid_mobility_ratio: float | None = None,
-        secondary_velocity_target_solid_mobility_ratio: float | None = None,
-        primary_interface_impedance_force_n: tuple[float, float, float] = (
-            0.0,
-            0.0,
-            0.0,
-        ),
-        secondary_interface_impedance_force_n: tuple[float, float, float] = (
-            0.0,
-            0.0,
-            0.0,
-        ),
-        fluid_substeps: int | None = None,
-        read_full_report: bool = True,
-    ):
-        step_substeps = (
-            effective_fluid_substeps if fluid_substeps is None else int(fluid_substeps)
-        )
-        primary_velocity = (
-            z_velocity_vector(float(simulator.main_v_mps[None]))
-            if primary_velocity_mps is None
-            else _vector3(primary_velocity_mps, name="primary_velocity_mps")
-        )
-        secondary_velocity = (
-            z_velocity_vector(float(simulator.tail_v_mps[None]))
-            if secondary_velocity_mps is None
-            else _vector3(secondary_velocity_mps, name="secondary_velocity_mps")
-        )
-        return advance_projected_ibm_region_pair_fluid_step(
-            simulator.fluid,
-            tri_diagnostics,
-            build_projected_ibm_region_pair_step_config(
-                primary_region_id=primary_shell_region_id,
-                secondary_region_id=secondary_shell_region_id,
-                primary_velocity_mps=primary_velocity,
-                secondary_velocity_mps=secondary_velocity,
-                dt_s=spec.dt_s,
-                fluid_substeps=step_substeps,
-                ibm_correction_iterations=max(1, int(args.ibm_correction_iterations)),
-                projection_iterations=int(args.projection_iterations),
-                divergence_cleanup_iterations=projection_divergence_cleanup_iterations,
-                divergence_cleanup_relaxation=float(args.divergence_cleanup_relaxation),
-                pressure_outlet_zmin=pressure_outlet_zmin_enabled,
-                pressure_solver=pressure_solver_name,
-                fluid_advection_scheme=str(args.fluid_advection_scheme),
-                multigrid_cycles=effective_multigrid_cycles,
-                cg_tolerance=cg_tolerance,
-                cg_preconditioner=cg_preconditioner,
-                velocity_constraint_blend=fsi_velocity_constraint_blend,
-                velocity_constraint_solid_mobility_ratio=fsi_velocity_constraint_solid_mobility_ratio,
-                constraint_force_scale=float(args.constraint_force_scale),
-                constraint_force_solid_mobility_ratio=fsi_constraint_force_solid_mobility_ratio,
-                primary_constraint_force_solid_mobility_ratio=(
-                    primary_constraint_force_solid_mobility_ratio
-                ),
-                secondary_constraint_force_solid_mobility_ratio=(
-                    secondary_constraint_force_solid_mobility_ratio
-                ),
-                velocity_target_solid_mobility_ratio=(
-                    fsi_velocity_target_solid_mobility_ratio
-                ),
-                primary_velocity_target_solid_mobility_ratio=(
-                    primary_velocity_target_solid_mobility_ratio
-                ),
-                secondary_velocity_target_solid_mobility_ratio=(
-                    secondary_velocity_target_solid_mobility_ratio
-                ),
-                primary_interface_impedance_force_n=primary_interface_impedance_force_n,
-                secondary_interface_impedance_force_n=secondary_interface_impedance_force_n,
-                primary_pressure_robin_impedance_ns_m=(
-                    interface_reaction_robin_matrix_impedance_ns_m
-                ),
-                secondary_pressure_robin_impedance_ns_m=(
-                    interface_reaction_robin_matrix_impedance_ns_m
-                ),
-                primary_interface_area_m2=primary_fsi_face_area_m2,
-                secondary_interface_area_m2=secondary_fsi_face_area_m2,
-                density_kgm3=spec.water_density_kgm3,
-                viscosity_pa_s=spec.water_viscosity_pa_s,
-                bounds_min_m=spec.fluid_bounds_min_m,
-                bounds_max_m=spec.fluid_bounds_max_m,
-                grid_nodes=spec.grid_nodes,
-                read_full_report=read_full_report,
-            ),
-        )
-
-    def diagnose_interface_reaction_target(row: dict[str, object], fluid_report):
-        tri_report = tri_diagnostics.diagnose_from_fields(
-            simulator.fluid.velocity,
-            simulator.fluid.pressure,
-            grid_fields=simulator.fluid,
-            primary_region_id=primary_shell_region_id,
-            secondary_region_id=secondary_shell_region_id,
-            primary_velocity_mps=z_velocity_vector(float(row["main_velocity_z_mps"])),
-            secondary_velocity_mps=z_velocity_vector(float(row["tail_velocity_z_mps"])),
-            probe_distance_m=fluid_probe_distance_m,
-            bounds_min_m=spec.fluid_bounds_min_m,
-            bounds_max_m=spec.fluid_bounds_max_m,
-            spacing_m=fluid_grid_axis_min_spacing_m,
-            grid_nodes=spec.grid_nodes,
-            viscosity_pa_s=spec.water_viscosity_pa_s,
-        )
-        return tri_report
-
     validate_frozen_checkpoint_run_fingerprint(
         frozen_run_fingerprint,
         args=args,
@@ -1757,12 +1020,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     rows: list[dict[str, object]] = []
     partial_run_stopped = False
     partial_run_reason = ""
-    interface_reaction_state = InterfaceReactionRelaxationState(
-        relaxation=float(interface_reaction_relaxation),
-    )
     first_step = 1
     if args.resume_from_checkpoint:
-        completed_step, interface_reaction_state = load_run_checkpoint(
+        completed_step = load_run_checkpoint(
             run_checkpoint_path,
             args=args,
             simulator=simulator,
@@ -1791,19 +1051,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         first_step = completed_step + 1
 
     previous_step_cfl = None
-    previous_step_fsi_coupling_residual_norm_n = None
     previous_step_fluid_substeps = effective_fluid_substeps
     if rows:
         try:
             previous_step_cfl = float(rows[-1]["cfl"])
         except (KeyError, TypeError, ValueError):
             previous_step_cfl = None
-        try:
-            previous_step_fsi_coupling_residual_norm_n = float(
-                rows[-1]["fsi_coupling_residual_norm_n"]
-            )
-        except (KeyError, TypeError, ValueError):
-            previous_step_fsi_coupling_residual_norm_n = None
         try:
             previous_step_fluid_substeps = max(
                 effective_fluid_substeps,
@@ -1830,107 +1083,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             fixed_rim_region_id=fixed_rim_region_id,
             fluid_grid_axis_min_spacing_m=fluid_grid_axis_min_spacing_m,
             fluid_probe_distance_m=fluid_probe_distance_m,
-            fsi_constraint_force_solid_mobility_ratio=(
-                fsi_constraint_force_solid_mobility_ratio
-            ),
-            fsi_coupling_adaptive_iterations_cfl_threshold=(
-                fsi_coupling_adaptive_iterations_cfl_threshold
-            ),
-            fsi_coupling_adaptive_iterations_max=(fsi_coupling_adaptive_iterations_max),
-            fsi_coupling_adaptive_iterations_residual_threshold_n=(
-                fsi_coupling_adaptive_iterations_residual_threshold_n
-            ),
             fsi_coupling_iterations=fsi_coupling_iterations,
-            fsi_coupling_max_accepted_residual_n=(fsi_coupling_max_accepted_residual_n),
-            fsi_coupling_mode=fsi_coupling_mode,
-            fsi_coupling_rejected_trial_backtrack=(
-                fsi_coupling_rejected_trial_backtrack
-            ),
-            fsi_coupling_residual_continuation_iterations_max=(
-                fsi_coupling_residual_continuation_iterations_max
-            ),
-            fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max=(
-                fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max
-            ),
-            fsi_coupling_residual_continuation_rebound_secant_factor=(
-                fsi_coupling_residual_continuation_rebound_secant_factor
-            ),
-            fsi_coupling_residual_continuation_rebound_secant_from_best=(
-                fsi_coupling_residual_continuation_rebound_secant_from_best
-            ),
-            fsi_coupling_residual_continuation_threshold_n=(
-                fsi_coupling_residual_continuation_threshold_n
-            ),
-            fsi_coupling_residual_growth_rejection_factor=(
-                fsi_coupling_residual_growth_rejection_factor
-            ),
-            fsi_coupling_same_step_rerun_fluid_substep_factor=(
-                fsi_coupling_same_step_rerun_fluid_substep_factor
-            ),
-            fsi_coupling_same_step_rerun_iterations_max=(
-                fsi_coupling_same_step_rerun_iterations_max
-            ),
-            fsi_coupling_same_step_rerun_residual_threshold_n=(
-                fsi_coupling_same_step_rerun_residual_threshold_n
-            ),
-            fsi_coupling_solver=fsi_coupling_solver,
-            fsi_coupling_target_map_relaxation=fsi_coupling_target_map_relaxation,
-            fsi_coupling_tolerance_n=fsi_coupling_tolerance_n,
-            fsi_coupling_trial_interior_divergence_tolerance=(
-                fsi_coupling_trial_interior_divergence_tolerance
-            ),
-            fsi_coupling_trust_region_adaptive=fsi_coupling_trust_region_adaptive,
-            fsi_coupling_trust_region_force_increment_n=(
-                fsi_coupling_trust_region_force_increment_n
-            ),
-            fsi_coupling_trust_region_growth_factor=(
-                fsi_coupling_trust_region_growth_factor
-            ),
-            fsi_coupling_trust_region_rebound_backtrack=(
-                fsi_coupling_trust_region_rebound_backtrack
-            ),
-            fsi_coupling_trust_region_rebound_factor=(
-                fsi_coupling_trust_region_rebound_factor
-            ),
-            fsi_coupling_trust_region_rebound_stop_factor=(
-                fsi_coupling_trust_region_rebound_stop_factor
-            ),
-            fsi_coupling_trust_region_rebound_stop_max_residual_n=(
-                fsi_coupling_trust_region_rebound_stop_max_residual_n
-            ),
-            fsi_coupling_trust_region_shrink_factor=(
-                fsi_coupling_trust_region_shrink_factor
-            ),
             fsi_marker_coupling_tolerance_mps=fsi_marker_coupling_tolerance_mps,
-            fsi_solid_response_dt_s=fsi_solid_response_dt_s,
-            fsi_solid_response_mobility_coupling=(fsi_solid_response_mobility_coupling),
-            fsi_solid_response_velocity_mobility_coupling=(
-                fsi_solid_response_velocity_mobility_coupling
-            ),
-            fsi_velocity_constraint_blend=fsi_velocity_constraint_blend,
-            fsi_velocity_constraint_solid_mobility_ratio=(
-                fsi_velocity_constraint_solid_mobility_ratio
-            ),
-            fsi_velocity_target_solid_mobility_ratio=(
-                fsi_velocity_target_solid_mobility_ratio
-            ),
             full_pressure_waveform_steps=full_pressure_waveform_steps,
-            interface_reaction_aitken=interface_reaction_aitken,
-            interface_reaction_aitken_lower_bound=(
-                interface_reaction_aitken_lower_bound
-            ),
-            interface_reaction_aitken_upper_bound=(
-                interface_reaction_aitken_upper_bound
-            ),
-            interface_reaction_passivity_limit=interface_reaction_passivity_limit,
-            interface_reaction_relaxation=interface_reaction_relaxation,
-            interface_reaction_robin_impedance_ns_m=(
-                interface_reaction_robin_impedance_ns_m
-            ),
-            interface_reaction_robin_matrix_impedance_ns_m=(
-                interface_reaction_robin_matrix_impedance_ns_m
-            ),
-            interface_reaction_robin_target_mode=interface_reaction_robin_target_mode,
             max_wall_time_s=max_wall_time_s,
             neo_fixed_node_lock_policy=neo_fixed_node_lock_policy,
             one_sided_probe_max_multiplier=one_sided_probe_max_multiplier,
@@ -1938,18 +1093,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             pressure_load_region_id=pressure_load_region_id,
             pressure_outlet_zmin_enabled=pressure_outlet_zmin_enabled,
             pressure_solver_name=pressure_solver_name,
-            primary_fsi_face_area_m2=primary_fsi_face_area_m2,
             primary_shell_region_id=primary_shell_region_id,
             projection_divergence_cleanup_iterations=(
                 projection_divergence_cleanup_iterations
             ),
-            reuse_accepted_fsi_trial_state=reuse_accepted_fsi_trial_state,
-            secondary_fsi_face_area_m2=secondary_fsi_face_area_m2,
             secondary_shell_region_id=secondary_shell_region_id,
-            sharp_case_runner_enabled=sharp_case_runner_enabled,
             solid_mpm_flip_blend=solid_mpm_flip_blend,
             solid_mpm_substeps=solid_mpm_substeps,
-            solid_response_dt_s=solid_response_dt_s,
             solid_sub_dt_s=solid_sub_dt_s,
             solid_substep_velocity_damping=solid_substep_velocity_damping,
             step_count=step_count,
@@ -1958,7 +1108,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         resources=StepLoopResources(
             args=args,
             fluid_substep_controller=fluid_substep_controller,
-            fsi_coupling_mode_report=fsi_coupling_mode_report,
             history_path=history_path,
             material=material,
             output_dir=output_dir,
@@ -1971,8 +1120,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             tri_diagnostics=tri_diagnostics,
         ),
         callbacks=StepLoopCallbacks(
-            advance_fluid_step=advance_fluid_step,
-            advance_physical_solid_step=advance_physical_solid_step,
             publish_solid_report_to_reduced_state=(
                 publish_solid_report_to_reduced_state
             ),
@@ -1980,21 +1127,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         state=StepLoopMutableState(
             first_step=first_step,
             rows=rows,
-            run_started_at_perf=run_started_at_perf,
             sharp_coupling_state=sharp_coupling_state,
-            interface_reaction_state=interface_reaction_state,
             partial_run_reason=partial_run_reason,
             partial_run_stopped=partial_run_stopped,
             previous_step_cfl=previous_step_cfl,
             previous_step_fluid_substeps=previous_step_fluid_substeps,
-            previous_step_fsi_coupling_residual_norm_n=(
-                previous_step_fsi_coupling_residual_norm_n
-            ),
         ),
     )
     step_loop_result = run_squid_step_loop(step_loop_context)
     rows = step_loop_result.rows
-    interface_reaction_state = step_loop_result.interface_reaction_state
     sharp_coupling_state = step_loop_result.sharp_coupling_state
     partial_run_stopped = step_loop_result.partial_run_stopped
     partial_run_reason = step_loop_result.partial_run_reason
@@ -2013,15 +1154,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             args=args,
             simulator=simulator,
             solid_mpm=solid_mpm,
-            interface_reaction_state=interface_reaction_state,
             sharp_coupling_state=sharp_coupling_state,
             frozen_run_fingerprint=frozen_run_fingerprint,
         )
 
-    if sharp_case_runner_enabled:
-        return build_sharp_case_run_report(locals())
-
-    return build_final_run_report(locals())
+    return build_sharp_case_run_report(locals())
 
 
 def main(argv: list[str] | None = None) -> dict[str, object]:

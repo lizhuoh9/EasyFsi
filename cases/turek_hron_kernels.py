@@ -12,37 +12,31 @@ import taichi as ti
 
 
 @ti.kernel
-def th_channel_boundary_rows_kernel(
-    active: ti.template(),
-    values: ti.template(),
-    weights: ti.template(),
-    region: ti.template(),
+def th_channel_external_velocity_faces_kernel(
+    y_face_active_component_mask: ti.template(),
+    y_face_value_mps: ti.template(),
+    z_face_active_component_mask: ti.template(),
+    z_face_value_mps: ti.template(),
+    nx: ti.i32,
     ny: ti.i32,
-    inlet_k: ti.i32,
     dy: ti.f32,
     height_m: ti.f32,
     peak_scale: ti.f32,
 ):
-    # In-place, GPU-resident rewrite of the static channel Dirichlet rows: the
-    # parabolic zmax inlet plane (velocity toward -z) and the two no-slip walls
-    # (y = 0 and y = channel_height). Only wall/inlet cells are touched, so any
-    # marker Dirichlet rows on interior cells are preserved. Replaces a per-step
-    # 4x to_numpy + 4x from_numpy round-trip of the whole boundary fields.
-    for i, j, k in active:
-        if k == inlet_k:
-            y = (ti.cast(j, ti.f32) + 0.5) * dy
-            parabola = 4.0 * y * (height_m - y) / (height_m * height_m)
-            active[i, j, k] = 1
-            weights[i, j, k] = 1.0
-            region[i, j, k] = -1
-            values[i, j, k] = ti.Vector([0.0, 0.0, -peak_scale * parabola])
+    # Physical walls live on the two directed y faces, not on compact MAC rows.
+    for side, i, k in y_face_active_component_mask:
+        y_face_active_component_mask[side, i, k] = 7
+        y_face_value_mps[side, i, k] = ti.Vector([0.0, 0.0, 0.0])
+
+    # The parabolic inlet is the directed zmax face. Wall corners remain zero.
+    for i, j in ti.ndrange(nx, ny):
+        y = (ti.cast(j, ti.f32) + 0.5) * dy
+        parabola = 4.0 * y * (height_m - y) / (height_m * height_m)
+        target_z = -peak_scale * parabola
         if j == 0 or j == ny - 1:
-            # walls win at the inlet/wall corner cells (matches the prior numpy
-            # order: inlet written first, then walls overwrite)
-            active[i, j, k] = 1
-            weights[i, j, k] = 1.0
-            region[i, j, k] = -1
-            values[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            target_z = 0.0
+        z_face_active_component_mask[1, i, j] = 7
+        z_face_value_mps[1, i, j] = ti.Vector([0.0, 0.0, target_z])
 
 
 @ti.kernel

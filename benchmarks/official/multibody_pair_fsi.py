@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass
 
-from simulation_core.coupling.fsi_coupling import action_reaction_balance
+from simulation_core.coupling.interface_forces import action_reaction_balance
 from simulation_core.coupling.interface_pair import InterfacePairMap, PairMapEntry
 from simulation_core.coupling.moving_boundary import MovingBoundaryCondition
 from benchmarks.official.rigid_multibody import EqualOppositeHingePair

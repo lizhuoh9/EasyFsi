@@ -10325,28 +10325,37 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
     @staticmethod
     def _solver_with_two_band_candidates():
         # (2, 2, 2): zero-correctable candidate sealed by velocity-
-        # Dirichlet rows on all six stencil faces (same construction as
-        # the legacy band test). (0, 0, 0): zero-correctable candidate
+        # Dirichlet components on all six stencil faces. (0, 0, 0):
+        # zero-correctable candidate
         # sealed by the domain boundary on the minus faces and Dirichlet
-        # rows on the plus faces. No other cell loses every correctable
+        # components on the plus faces. No other cell loses every correctable
         # face.
         solver = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
             runtime=TaichiRuntimeConfig(arch="cuda"),
         )
-        solver.velocity_dirichlet_boundary_active[2, 2, 2] = 1
-        solver.velocity_dirichlet_boundary_active[3, 2, 2] = 1
-        solver.velocity_dirichlet_boundary_active[2, 3, 2] = 1
-        solver.velocity_dirichlet_boundary_active[2, 2, 3] = 1
+        solver.set_velocity_dirichlet_boundary_authority("canonical")
+        solver.velocity_dirichlet_boundary_active_component_mask[2, 2, 2] = 7
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask[2, 2, 2] = 7
+        solver.velocity_dirichlet_boundary_active_component_mask[3, 2, 2] = 1
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask[3, 2, 2] = 1
+        solver.velocity_dirichlet_boundary_active_component_mask[2, 3, 2] = 2
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask[2, 3, 2] = 2
+        solver.velocity_dirichlet_boundary_active_component_mask[2, 2, 3] = 4
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask[2, 2, 3] = 4
         solver.velocity[2, 2, 2] = (1.0, -2.0, 3.0)
         solver.velocity_prev[2, 2, 2] = (4.0, -5.0, 6.0)
         solver.volume_source_s[2, 2, 2] = 7.0
-        solver.velocity_dirichlet_boundary_active[1, 0, 0] = 1
-        solver.velocity_dirichlet_boundary_active[0, 1, 0] = 1
-        solver.velocity_dirichlet_boundary_active[0, 0, 1] = 1
+        solver.velocity_dirichlet_boundary_active_component_mask[1, 0, 0] = 1
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask[1, 0, 0] = 1
+        solver.velocity_dirichlet_boundary_active_component_mask[0, 1, 0] = 2
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask[0, 1, 0] = 2
+        solver.velocity_dirichlet_boundary_active_component_mask[0, 0, 1] = 4
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask[0, 0, 1] = 4
         solver.velocity[0, 0, 0] = (1.0, -2.0, 3.0)
         solver.velocity_prev[0, 0, 0] = (4.0, -5.0, 6.0)
         solver.volume_source_s[0, 0, 0] = 7.0
+        solver.prepare_and_seal_velocity_dirichlet_component_ledger()
         node_kind_code = ti.field(dtype=ti.i32, shape=(5, 5, 5))
         # The sliver candidate sits inside the search-classified band
         # around the marker surface; the enclosed-water candidate keeps
@@ -10503,15 +10512,21 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
         self.assertEqual(int(solver.last_hibm_solid_band_interior_cells), 1)
         self.assertEqual(int(solver.last_hibm_solid_band_enclosed_water_cells), 1)
 
-    def test_band_split_can_protect_classified_no_slip_row_neighborhood(
+    def test_band_split_can_protect_classified_no_slip_component_neighborhood(
         self,
     ) -> None:
         import os
         from unittest import mock
 
         solver, node_kind_code = self._solver_with_two_band_candidates()
-        solver.velocity_dirichlet_boundary_marker_region_id.fill(-1)
-        solver.velocity_dirichlet_boundary_marker_region_id[2, 2, 2] = 7
+        solver.velocity_dirichlet_boundary_active_component_mask[2, 2, 2] = 7
+        solver.velocity_dirichlet_boundary_component_region_id[2, 2, 2] = (
+            7,
+            7,
+            7,
+        )
+        solver._invalidate_velocity_dirichlet_component_ledger()
+        solver.prepare_and_seal_velocity_dirichlet_component_ledger()
         with mock.patch.dict(os.environ):
             os.environ.pop("HIBM_BAND_COUNT_ONLY", None)
             os.environ.pop("HIBM_BAND_INTERIOR_ONLY", None)
@@ -10520,7 +10535,7 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
                 node_kind_code=node_kind_code,
                 unclassified_node_code=self._NODE_NONE,
                 protect_velocity_dirichlet_radius_cells=0,
-                protect_velocity_dirichlet_marker_region_id=7,
+                protect_velocity_dirichlet_component_region_id=7,
             )
 
         self.assertEqual(marked, 0)
@@ -10538,13 +10553,19 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
         )
         self.assertAlmostEqual(float(solver.volume_source_s[2, 2, 2]), 7.0)
 
-    def test_band_split_protection_respects_marker_region_filter(self) -> None:
+    def test_band_split_protection_respects_component_region_filter(self) -> None:
         import os
         from unittest import mock
 
         solver, node_kind_code = self._solver_with_two_band_candidates()
-        solver.velocity_dirichlet_boundary_marker_region_id.fill(-1)
-        solver.velocity_dirichlet_boundary_marker_region_id[2, 2, 2] = 7
+        solver.velocity_dirichlet_boundary_active_component_mask[2, 2, 2] = 7
+        solver.velocity_dirichlet_boundary_component_region_id[2, 2, 2] = (
+            7,
+            7,
+            7,
+        )
+        solver._invalidate_velocity_dirichlet_component_ledger()
+        solver.prepare_and_seal_velocity_dirichlet_component_ledger()
         with mock.patch.dict(os.environ):
             os.environ.pop("HIBM_BAND_COUNT_ONLY", None)
             os.environ.pop("HIBM_BAND_INTERIOR_ONLY", None)
@@ -10553,7 +10574,7 @@ class HibmSolidBandPopulationSplitTests(unittest.TestCase):
                 node_kind_code=node_kind_code,
                 unclassified_node_code=self._NODE_NONE,
                 protect_velocity_dirichlet_radius_cells=0,
-                protect_velocity_dirichlet_marker_region_id=8,
+                protect_velocity_dirichlet_component_region_id=8,
             )
 
         self.assertEqual(marked, 1)

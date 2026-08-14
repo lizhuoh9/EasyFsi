@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import contextlib
 import inspect
+import io
 import json
 import os
 import tempfile
@@ -18,7 +20,9 @@ from cases.squid_soft_robot import (
     source_config,
 )
 from cases.squid_soft_robot.cli import parse_args
-from cases.squid_soft_robot.step_loop import run_squid_step_loop
+from cases.squid_soft_robot.step_loop import (
+    _run_squid_sharp_runtime,
+)
 
 
 @dataclass(frozen=True)
@@ -78,16 +82,12 @@ class SquidSharpCliContractTests(unittest.TestCase):
         )
         runner.validate_sharp_case_cli_contract(compatible)
 
-    def test_legacy_mode_does_not_apply_sharp_only_air_backing_validation(self) -> None:
-        legacy = parse_args(
-            [
-                "--fsi-coupling-mode",
-                "legacy_projected_reduced",
-                "--disable-pressure-outlet-zmin",
-            ]
-        )
-
-        runner.validate_sharp_case_cli_contract(legacy)
+    def test_coupling_mode_selector_is_not_a_cli_option(self) -> None:
+        for removed_value in ("hibm_mpm_sharp", "legacy_projected_reduced"):
+            with self.subTest(removed_value=removed_value):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parse_args(["--fsi-coupling-mode", removed_value])
 
     def test_probe_and_seed_sign_options_fail_closed_at_case_startup(self) -> None:
         args = parse_args([])
@@ -341,7 +341,7 @@ class SquidSharpCliContractTests(unittest.TestCase):
         self.assertEqual(default_fingerprint, explicit_fingerprint)
 
     def test_sharp_step_uses_named_values_instead_of_case_magic_constants(self) -> None:
-        source = inspect.getsource(run_squid_step_loop)
+        source = inspect.getsource(_run_squid_sharp_runtime)
         call = source.split("sharp_coupling_state.advance_mpm_step(", 1)[1].split(
             "fluid_dt_s=", 1
         )[0]
@@ -365,7 +365,7 @@ class SquidSharpCliContractTests(unittest.TestCase):
 
     def test_neo_step_receives_the_resolved_lock_policy(self) -> None:
         runner_source = inspect.getsource(runner.run)
-        step_loop_source = inspect.getsource(run_squid_step_loop)
+        step_loop_source = inspect.getsource(_run_squid_sharp_runtime)
         self.assertIn(
             "fixed_node_lock_policy=neo_fixed_node_lock_policy",
             runner_source,

@@ -157,6 +157,10 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+ATOMIC_REPLACE_ATTEMPTS = 20
+ATOMIC_REPLACE_BACKOFF_S = 0.25
+
+
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -165,17 +169,30 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         suffix=".tmp",
     )
     temporary = Path(temporary_name)
+    owned_descriptor: int | None = descriptor
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        owned_descriptor = None
+        with handle:
             handle.write(json.dumps(_json_safe(payload), indent=2, sort_keys=True))
             handle.flush()
             os.fsync(handle.fileno())
-        temporary.replace(path)
+        last_error: PermissionError | None = None
+        for attempt in range(ATOMIC_REPLACE_ATTEMPTS):
+            try:
+                temporary.replace(path)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                if attempt + 1 < ATOMIC_REPLACE_ATTEMPTS:
+                    time.sleep(ATOMIC_REPLACE_BACKOFF_S)
+        raise last_error
     except BaseException:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
+        if owned_descriptor is not None:
+            try:
+                os.close(owned_descriptor)
+            except OSError:
+                pass
         temporary.unlink(missing_ok=True)
         raise
 

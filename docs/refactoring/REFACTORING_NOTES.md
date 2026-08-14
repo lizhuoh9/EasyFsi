@@ -136,7 +136,7 @@ FV 算子与 CG（3134–3504）、多重网格（3690–3871）、出口通量�
 - `_finalize_copy.py` 重跑：40 个文件全部已就位（copied 0 / skipped 40），
   `simulation_core/` 13 个 .py、`tests/` 16 个 .py，树完整。
 - 补齐 2 个被 `tests/test_simulation_core_package.py` 钉死的文档契约：
-  `SIMULATION_CORE_USAGE.md`、`HIBM_MPM_PAPER_VS_CODE.md`（首跑第 3 组时 3 个
+  `docs/SIMULATION_CORE_USAGE.md`、`docs/validation/HIBM_MPM_PAPER_VS_CODE.md`（首跑第 3 组时 3 个
   `FileNotFoundError`，从原目录原样复制后修复）。两文件已加入
   `_finalize_copy.py::UNCHANGED_FILES` 清单。
 

@@ -84,6 +84,8 @@ def _captured_finite_segment_union_admission_probe(
     cell_face_y_m: ti.template(),
     cell_face_z_m: ti.template(),
     claim_region: ti.i32,
+    allow_inactive_axis_extrusion_direct_pair: ti.i32,
+    allow_inactive_axis_double_relocation_face_transport: ti.i32,
     result_i32: ti.template(),
     result_f64: ti.template(),
 ):
@@ -180,10 +182,13 @@ def _captured_finite_segment_union_admission_probe(
         pair_endpoint_clamped,
         pair_clamp_support_ratio,
         pair_geometry_tolerance,
+        _pair_direct_face_owner_shadow,
     ) = boundary._canonical_component_face_finite_segment_union_owner_geometry(
         target,
         component_axis,
         face_center,
+        author_source_center_m[0],
+        author_source_center_m[1],
         author_source_center_m[0],
         author_source_center_m[1],
         author_boundary_point_m[0],
@@ -208,6 +213,9 @@ def _captured_finite_segment_union_admission_probe(
         projection_segment_count,
         projection_segment_count > 0,
         0,
+        allow_inactive_axis_extrusion_direct_pair,
+        allow_inactive_axis_double_relocation_face_transport,
+        -1,
         marker_position_m,
         marker_velocity_mps,
         marker_region_id,
@@ -235,7 +243,303 @@ def _captured_finite_segment_union_admission_probe(
         result_f64[13 + axis] = ti.cast(pair_nominal_probe[axis], ti.f64)
 
 
+@ti.kernel
+def _same_storage_direct_relocation_geometry_probe(
+    boundary: ti.template(),
+    marker_position_m: ti.template(),
+    marker_velocity_mps: ti.template(),
+    marker_region_id: ti.template(),
+    target_index: ti.template(),
+    face_center_m: ti.template(),
+    component_axis: ti.i32,
+    surface_projection_inactive_axis: ti.i32,
+    author_source_center_m: ti.template(),
+    author_boundary_point_m: ti.template(),
+    author_nominal_probe_m: ti.template(),
+    author_actual_probe_m: ti.template(),
+    author_normal: ti.template(),
+    author_projection_indices: ti.template(),
+    author_projection_weights: ti.template(),
+    projection_segment_indices: ti.template(),
+    projection_segment_count: ti.i32,
+    configured_source_support_xyz_m: ti.template(),
+    cell_face_x_m: ti.template(),
+    cell_face_y_m: ti.template(),
+    cell_face_z_m: ti.template(),
+    claim_region: ti.i32,
+    marker_capacity: ti.i32,
+    result_i32: ti.template(),
+    result_f64: ti.template(),
+):
+    target = target_index[None]
+    direct_indices = ti.Vector(
+        [
+            author_projection_indices[0].x,
+            author_projection_indices[0].y,
+            -1,
+        ]
+    )
+    relocation_indices = ti.Vector(
+        [
+            author_projection_indices[1].x,
+            author_projection_indices[1].y,
+            -1,
+        ]
+    )
+    direct_nearest = ti.select(
+        author_projection_weights[0].y > author_projection_weights[0].x,
+        direct_indices.y,
+        direct_indices.x,
+    )
+    relocation_nearest = ti.select(
+        author_projection_weights[1].y > author_projection_weights[1].x,
+        relocation_indices.y,
+        relocation_indices.x,
+    )
+    if author_projection_indices[0].z >= 0:
+        direct_nearest = author_projection_indices[0].z
+    if author_projection_indices[1].z >= 0:
+        relocation_nearest = author_projection_indices[1].z
+    direct_target = (
+        author_projection_weights[0].x
+        * marker_velocity_mps[direct_indices.x][component_axis]
+        + author_projection_weights[0].y
+        * marker_velocity_mps[direct_indices.y][component_axis]
+    )
+    relocation_target = (
+        author_projection_weights[1].x
+        * marker_velocity_mps[relocation_indices.x][component_axis]
+        + author_projection_weights[1].y
+        * marker_velocity_mps[relocation_indices.y][component_axis]
+    )
+    (
+        admission_valid,
+        full_valid,
+        canonical_boundary,
+        canonical_normal,
+        canonical_probe,
+        canonical_target,
+        geometry_tolerance,
+    ) = boundary._canonical_component_face_same_storage_direct_relocation_geometry(
+        target,
+        component_axis,
+        face_center_m[None],
+        author_source_center_m[0],
+        author_source_center_m[1],
+        author_boundary_point_m[0],
+        author_nominal_probe_m[0],
+        author_actual_probe_m[0],
+        author_boundary_point_m[1],
+        author_actual_probe_m[1],
+        author_normal[0],
+        author_normal[1],
+        direct_indices,
+        relocation_indices,
+        author_projection_weights[0],
+        author_projection_weights[1],
+        direct_nearest,
+        relocation_nearest,
+        direct_target,
+        relocation_target,
+        claim_region,
+        1,
+        1,
+        configured_source_support_xyz_m[None],
+        projection_segment_indices,
+        projection_segment_count,
+        projection_segment_count > 0,
+        marker_position_m,
+        marker_velocity_mps,
+        marker_region_id,
+        marker_capacity,
+        surface_projection_inactive_axis,
+        cell_face_x_m,
+        cell_face_y_m,
+        cell_face_z_m,
+    )
+    result_i32[0] = admission_valid
+    result_i32[1] = full_valid
+    result_f64[5] = ti.cast(geometry_tolerance, ti.f64)
+    result_f64[6] = ti.cast(canonical_target, ti.f64)
+    for axis in ti.static(range(3)):
+        result_f64[7 + axis] = ti.cast(canonical_boundary[axis], ti.f64)
+        result_f64[10 + axis] = ti.cast(canonical_normal[axis], ti.f64)
+        result_f64[13 + axis] = ti.cast(canonical_probe[axis], ti.f64)
+
+
+@ti.kernel
+def _same_storage_segment_mode_validation_probe(
+    boundary: ti.template(),
+    result: ti.template(),
+):
+    result[0] = boundary._canonical_component_face_same_storage_segment_mode_is_valid(
+        12
+    )
+    result[1] = boundary._canonical_component_face_same_storage_segment_mode_is_valid(
+        12 | 16
+    )
+    result[2] = boundary._canonical_component_face_same_storage_segment_mode_is_valid(
+        12 | 64
+    )
+    result[3] = boundary._canonical_component_face_same_storage_segment_mode_is_valid(
+        4
+    )
+    result[4] = boundary._canonical_component_face_same_storage_segment_mode_is_valid(
+        8
+    )
+    result[5] = boundary._canonical_component_face_same_storage_segment_mode_is_valid(
+        0
+    )
+
+
 class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
+    def test_same_storage_segment_mode_accepts_only_exact_bit8_pair(self) -> None:
+        runtime = TaichiRuntimeConfig(arch="cuda", default_fp="f32")
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(4, 4, 4),
+            marker_capacity=2,
+            runtime=runtime,
+        )
+        result = ti.field(dtype=ti.i32, shape=6)
+
+        _same_storage_segment_mode_validation_probe(boundary, result)
+
+        self.assertEqual(
+            tuple(int(result[index]) for index in range(6)),
+            (1, 0, 0, 0, 0, 0),
+        )
+
+    def test_storage_classifier_caches_direct_and_shadow_component_offsets(
+        self,
+    ) -> None:
+        runtime = TaichiRuntimeConfig(arch="cuda", default_fp="f32")
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=(4, 4, 4),
+            marker_capacity=2,
+            runtime=runtime,
+        )
+        obstacle = ti.field(dtype=ti.i32, shape=(4, 4, 4))
+        node_boundary = ti.Vector.field(3, dtype=ti.f32, shape=(4, 4, 4))
+        cell_face_x = ti.field(dtype=ti.f32, shape=5)
+        cell_face_y = ti.field(dtype=ti.f32, shape=5)
+        cell_face_z = ti.field(dtype=ti.f32, shape=5)
+        cell_center_x = ti.field(dtype=ti.f32, shape=4)
+        cell_center_y = ti.field(dtype=ti.f32, shape=4)
+        cell_center_z = ti.field(dtype=ti.f32, shape=4)
+        cell_face_x.from_numpy(
+            np.asarray((0.0, 0.1, 0.4, 0.7, 1.0), dtype=np.float32)
+        )
+        cell_center_x.from_numpy(
+            np.asarray((0.05, 0.25, 0.55, 0.85), dtype=np.float32)
+        )
+        for face_field in (cell_face_y, cell_face_z):
+            face_field.from_numpy(
+                np.asarray((0.0, 0.25, 0.5, 0.75, 1.0), dtype=np.float32)
+            )
+        for center_field in (cell_center_y, cell_center_z):
+            center_field.from_numpy(
+                np.asarray((0.125, 0.375, 0.625, 0.875), dtype=np.float32)
+            )
+
+        lower_direct = (1, 1, 1)
+        target_direct = (2, 2, 2)
+        shadow_source = (2, 1, 2)
+        boundary.active_ib_node[lower_direct] = 1
+        boundary.velocity_dirichlet_component_face_actual_sample_valid[
+            lower_direct
+        ] = 1
+        node_boundary[lower_direct] = (0.25, 0.375, 0.375)
+        boundary.velocity_dirichlet_component_face_actual_sample_point_m[
+            lower_direct
+        ] = (0.75, 0.375, 0.375)
+
+        boundary.active_ib_node[target_direct] = 1
+        boundary.velocity_dirichlet_component_face_actual_sample_valid[
+            target_direct
+        ] = 1
+        node_boundary[target_direct] = (0.54, 0.375, 0.625)
+        boundary.velocity_dirichlet_component_face_actual_sample_point_m[
+            target_direct
+        ] = (0.54, 0.75, 0.625)
+        boundary.active_ib_node[shadow_source] = 1
+        obstacle[shadow_source] = 1
+        node_boundary[shadow_source] = (0.54, 0.375, 0.625)
+        boundary.velocity_dirichlet_relocation_shadow_claim_valid[target_direct] = 1
+        boundary.velocity_dirichlet_relocation_shadow_source_row[target_direct] = (
+            shadow_source
+        )
+        boundary.velocity_dirichlet_relocation_shadow_storage_base_row[
+            target_direct
+        ] = target_direct
+        boundary.velocity_dirichlet_relocation_shadow_sample_point_m[
+            target_direct
+        ] = (0.54, 0.75, 0.625)
+
+        boundary._classify_canonical_component_face_storage_kernel(
+            obstacle,
+            node_boundary,
+            cell_face_x,
+            cell_face_y,
+            cell_face_z,
+            cell_center_x,
+            cell_center_y,
+            cell_center_z,
+            4,
+            4,
+            4,
+        )
+
+        self.assertEqual(
+            tuple(
+                int(value)
+                for value in
+                boundary.velocity_dirichlet_component_face_direct_selected_storage_offset[
+                    lower_direct
+                ]
+            ),
+            (1, 0, 0),
+        )
+        self.assertEqual(
+            tuple(
+                int(value)
+                for value in
+                boundary.velocity_dirichlet_component_face_direct_selected_storage_offset[
+                    target_direct
+                ]
+            ),
+            (0, 1, 0),
+        )
+        self.assertEqual(
+            tuple(
+                int(value)
+                for value in
+                boundary.velocity_dirichlet_relocation_shadow_selected_storage_offset[
+                    target_direct
+                ]
+            ),
+            (0, 1, 0),
+        )
+        self.assertEqual(
+            tuple(
+                int(value)
+                for value in
+                boundary.velocity_dirichlet_component_face_direct_selected_storage_offset[
+                    (3, 3, 3)
+                ]
+            ),
+            (-1, -1, -1),
+        )
+        self.assertEqual(
+            tuple(
+                int(value)
+                for value in
+                boundary.velocity_dirichlet_relocation_shadow_selected_storage_offset[
+                    (3, 3, 3)
+                ]
+            ),
+            (-1, -1, -1),
+        )
+
     @staticmethod
     def _run_direct_finite_segment_union_case(
         case: dict[str, object],
@@ -287,6 +591,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             else:
                 markers.set_projection_segments(projection_segments)
 
+        target_index = ti.Vector.field(3, dtype=ti.i32, shape=())
         face_center_m = ti.Vector.field(3, dtype=ti.f32, shape=())
         author_source_center_m = ti.Vector.field(3, dtype=ti.f32, shape=2)
         author_boundary_point_m = ti.Vector.field(3, dtype=ti.f32, shape=2)
@@ -302,6 +607,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
         result_i32 = ti.field(dtype=ti.i32, shape=7)
         result_f64 = ti.field(dtype=ti.f64, shape=16)
 
+        target_index[None] = case.get("target", (0, 1, 2))
         face_center_m[None] = case["face"]
         author_source_center_m.from_numpy(
             np.asarray(case["source_centers"], dtype=np.float32)
@@ -342,32 +648,68 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
         result_i32.fill(-1)
         result_f64.fill(np.nan)
 
-        _captured_finite_segment_union_admission_probe(
-            boundary,
-            markers.x_gamma_m,
-            markers.v_gamma_mps,
-            markers.region_id,
-            face_center_m,
-            int(case.get("component_axis", 2)),
-            author_source_center_m,
-            author_boundary_point_m,
-            author_nominal_probe_m,
-            author_actual_probe_m,
-            author_normal,
-            author_projection_indices,
-            author_projection_weights,
-            markers.projection_triangle_indices,
-            int(markers.projection_segment_count),
-            configured_source_support_xyz_m,
-            int(case.get("configured_source_support_available", 1)),
-            int(case.get("configured_source_support_anisotropic", 1)),
-            cell_face_x_m,
-            cell_face_y_m,
-            cell_face_z_m,
-            int(case["region"]),
-            result_i32,
-            result_f64,
-        )
+        if case.get("same_storage_direct_relocation", False):
+            _same_storage_direct_relocation_geometry_probe(
+                boundary,
+                markers.x_gamma_m,
+                markers.v_gamma_mps,
+                markers.region_id,
+                target_index,
+                face_center_m,
+                int(case.get("component_axis", 2)),
+                int(case.get("surface_projection_inactive_axis", 0)),
+                author_source_center_m,
+                author_boundary_point_m,
+                author_nominal_probe_m,
+                author_actual_probe_m,
+                author_normal,
+                author_projection_indices,
+                author_projection_weights,
+                markers.projection_triangle_indices,
+                int(markers.projection_segment_count),
+                configured_source_support_xyz_m,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                int(case["region"]),
+                marker_count,
+                result_i32,
+                result_f64,
+            )
+        else:
+            _captured_finite_segment_union_admission_probe(
+                boundary,
+                markers.x_gamma_m,
+                markers.v_gamma_mps,
+                markers.region_id,
+                face_center_m,
+                int(case.get("component_axis", 2)),
+                author_source_center_m,
+                author_boundary_point_m,
+                author_nominal_probe_m,
+                author_actual_probe_m,
+                author_normal,
+                author_projection_indices,
+                author_projection_weights,
+                markers.projection_triangle_indices,
+                int(markers.projection_segment_count),
+                configured_source_support_xyz_m,
+                int(case.get("configured_source_support_available", 1)),
+                int(case.get("configured_source_support_anisotropic", 1)),
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                int(case["region"]),
+                int(case.get("allow_inactive_axis_extrusion_direct_pair", 0)),
+                int(
+                    case.get(
+                        "allow_inactive_axis_double_relocation_face_transport",
+                        0,
+                    )
+                ),
+                result_i32,
+                result_f64,
+            )
         installed_segment_array = markers.projection_triangle_indices.to_numpy()
         installed_segments = tuple(
             tuple(int(value) for value in installed_segment_array[index, :2])
@@ -378,6 +720,268 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             tuple(float(result_f64[index]) for index in range(16)),
             installed_segments,
         )
+
+    @staticmethod
+    def _inactive_axis_offset_anchor_transport_case(
+        *,
+        allow_double_relocation_transport: bool,
+    ) -> dict[str, object]:
+        """Return one equal-author anchor offset from its canonical face point."""
+
+        return {
+            "component_axis": 0,
+            "face": (0.1, 0.625, 0.375),
+            "region": 303,
+            "positions": ((0.1, 0.375, 0.125), (0.1, 0.875, 0.125)),
+            "velocities": ((2.0, 0.0, 0.0), (4.0, 0.0, 0.0)),
+            "projection_segments": ((0, 1),),
+            "source_centers": ((0.05, 0.625, 0.375), (0.15, 0.625, 0.375)),
+            "boundaries": ((0.05, 0.635, 0.125), (0.15, 0.635, 0.125)),
+            "probes": ((0.05, 0.635, 0.625), (0.15, 0.635, 0.625)),
+            "normals": ((0.0, 0.0, 1.0),) * 2,
+            "indices": ((0, 1, -1),) * 2,
+            "weights": ((0.48, 0.52, 0.0),) * 2,
+            "cell_face_x_m": (0.1, 0.2, 0.5, 0.8, 1.1),
+            "cell_face_y_m": (0.0, 0.5, 0.75, 1.0, 1.25),
+            "cell_face_z_m": (-0.25, 0.0, 0.25, 0.5, 0.75),
+            "allow_inactive_axis_extrusion_direct_pair": 1,
+            "allow_inactive_axis_double_relocation_face_transport": int(
+                allow_double_relocation_transport
+            ),
+        }
+
+    def test_inactive_axis_direct_pair_cannot_transport_offset_anchor(self) -> None:
+        """Bit16's direct proof cannot consume bit64-only anchor transport."""
+
+        case = self._inactive_axis_offset_anchor_transport_case(
+            allow_double_relocation_transport=False
+        )
+        integer_result, _, _ = self._run_direct_finite_segment_union_case(case)
+
+        self.assertEqual(integer_result[0:2], (1, 1))
+        self.assertEqual(integer_result[4:6], (0, 0))
+
+    def test_inactive_axis_double_relocation_transports_offset_anchor(self) -> None:
+        """The bit64 proof reconstructs canonical geometry at the MAC face."""
+
+        case = self._inactive_axis_offset_anchor_transport_case(
+            allow_double_relocation_transport=True
+        )
+        integer_result, floating_result, installed_segments = (
+            self._run_direct_finite_segment_union_case(case)
+        )
+
+        self.assertEqual(integer_result, (1, 1, 0, 0, 1, 1, 0))
+        self.assertEqual(installed_segments, ((0, 1),))
+        self.assertAlmostEqual(floating_result[6], 3.0, places=6)
+        for start, expected in (
+            (7, (0.1, 0.625, 0.125)),
+            (10, (0.0, 0.0, 1.0)),
+            (13, (0.1, 0.625, 0.625)),
+        ):
+            for actual, expected_component in zip(
+                floating_result[start : start + 3],
+                expected,
+                strict=True,
+            ):
+                self.assertAlmostEqual(actual, expected_component, places=6)
+
+    @staticmethod
+    def _same_storage_component_axis_case(
+        *,
+        component_axis: int,
+        shadow_anchor_delta_m: float = 0.0,
+    ) -> dict[str, object]:
+        """Return the compact kind0/kind1 witness from production replay Z."""
+
+        marker_z = (0.0498947069626969, 0.0471474417218531)
+        direct_t = 0.3598177433013916
+        production_shadow_t = 0.35980960726737976
+        direct_anchor_z = marker_z[0] + direct_t * (marker_z[1] - marker_z[0])
+        shadow_anchor_z = marker_z[0] + production_shadow_t * (
+            marker_z[1] - marker_z[0]
+        )
+        if shadow_anchor_delta_m:
+            shadow_anchor_z = direct_anchor_z + shadow_anchor_delta_m
+            production_shadow_t = (shadow_anchor_z - marker_z[0]) / (
+                marker_z[1] - marker_z[0]
+            )
+
+        x_faces = (0.0, 0.00075, 0.0015, 0.00225, 0.003)
+        y_faces = (
+            0.010000000,
+            0.010078125,
+            0.010156250,
+            0.010234375,
+            0.010312500,
+        )
+        if component_axis == 0:
+            z_faces = (
+                0.0,
+                0.025,
+                direct_anchor_z - 0.00015625,
+                direct_anchor_z + 0.00015625,
+                0.1,
+            )
+            source_z = direct_anchor_z
+            face = (x_faces[2], 0.0101953125, source_z)
+        elif component_axis == 2:
+            z_faces = (
+                0.0,
+                0.025,
+                direct_anchor_z,
+                direct_anchor_z + 0.0003125,
+                0.1,
+            )
+            source_z = direct_anchor_z + 0.00015625
+            face = (0.5 * (x_faces[2] + x_faces[3]), 0.0101953125, z_faces[2])
+        else:
+            raise ValueError("component_axis must be zero or two")
+        direct_source = (0.001875, 0.0101953125, source_z)
+        relocation_source = (0.001875, 0.0101171875, source_z)
+        direct_boundary = (0.001875, 0.01, direct_anchor_z)
+        relocation_boundary = (0.001875, 0.01, shadow_anchor_z)
+        direct_probe = (0.001875, 0.0103125, direct_anchor_z)
+        relocation_probe = (0.001875, 0.010234375, shadow_anchor_z)
+        marker_velocities = ((0.0, 0.0, 0.0),) * 2
+        if component_axis == 0 and shadow_anchor_delta_m == 0.0:
+            marker_velocities = ((2.0, 0.0, 0.0), (4.0, 0.0, 0.0))
+        return {
+            "same_storage_direct_relocation": True,
+            "target": (2, 2, 2),
+            "component_axis": component_axis,
+            "surface_projection_inactive_axis": 0,
+            "face": face,
+            "region": 303,
+            "positions": (
+                (0.0015, 0.01, marker_z[0]),
+                (0.0015, 0.01, marker_z[1]),
+            ),
+            "velocities": marker_velocities,
+            "projection_segments": ((0, 1),),
+            "source_centers": (direct_source, relocation_source),
+            "boundaries": (direct_boundary, relocation_boundary),
+            "probes": (direct_probe, relocation_probe),
+            "normals": ((0.0, 1.0, 0.0),) * 2,
+            "indices": ((0, 1, -1),) * 2,
+            "weights": (
+                (1.0 - direct_t, direct_t, 0.0),
+                (1.0 - production_shadow_t, production_shadow_t, 0.0),
+            ),
+            "nearest_markers": (0, 0),
+            "configured_source_support_xyz_m": (
+                0.0012,
+                0.000390625,
+                0.00046875,
+            ),
+            "cell_face_x_m": x_faces,
+            "cell_face_y_m": y_faces,
+            "cell_face_z_m": z_faces,
+        }
+
+    def test_same_storage_direct_relocation_transverse_axis_remains_admitted(
+        self,
+    ) -> None:
+        case = self._same_storage_component_axis_case(component_axis=2)
+        integer_result, floating_result, installed_segments = (
+            self._run_direct_finite_segment_union_case(case)
+        )
+
+        self.assertEqual(integer_result[0:2], (1, 1))
+        self.assertEqual(installed_segments, ((0, 1),))
+        self.assertAlmostEqual(floating_result[6], 0.0, places=12)
+
+    def test_same_storage_direct_relocation_component_axis_is_admitted(
+        self,
+    ) -> None:
+        case = self._same_storage_component_axis_case(component_axis=0)
+        anchor_delta = abs(case["boundaries"][1][2] - case["boundaries"][0][2])
+        coordinate_scale = float(
+            np.max(np.abs(np.asarray(case["positions"], dtype=np.float32)))
+        )
+        geometry_tolerance = (
+            2.0 * float(np.finfo(np.float32).eps) * coordinate_scale
+        )
+        self.assertGreater(anchor_delta, geometry_tolerance)
+        self.assertLessEqual(anchor_delta, 4.0 * geometry_tolerance)
+        marker_component_velocities = tuple(
+            velocity[0] for velocity in case["velocities"]
+        )
+        direct_serialized_target = sum(
+            weight * velocity
+            for weight, velocity in zip(
+                case["weights"][0][:2],
+                marker_component_velocities,
+                strict=True,
+            )
+        )
+        relocation_serialized_target = sum(
+            weight * velocity
+            for weight, velocity in zip(
+                case["weights"][1][:2],
+                marker_component_velocities,
+                strict=True,
+            )
+        )
+        self.assertNotEqual(direct_serialized_target, relocation_serialized_target)
+        integer_result, floating_result, installed_segments = (
+            self._run_direct_finite_segment_union_case(case)
+        )
+
+        self.assertEqual(integer_result[0:2], (1, 1))
+        self.assertEqual(installed_segments, ((0, 1),))
+        stored_marker_z = np.asarray(
+            [position[2] for position in case["positions"]],
+            dtype=np.float32,
+        ).astype(np.float64)
+        stored_face_z = float(np.float32(case["face"][2]))
+        face_interpolation_weight = (
+            stored_face_z - stored_marker_z[0]
+        ) / (stored_marker_z[1] - stored_marker_z[0])
+        stored_marker_component_velocities = np.asarray(
+            marker_component_velocities,
+            dtype=np.float32,
+        ).astype(np.float64)
+        expected_face_target = float(
+            np.float32(
+                (1.0 - face_interpolation_weight)
+                * stored_marker_component_velocities[0]
+                + face_interpolation_weight
+                * stored_marker_component_velocities[1]
+            )
+        )
+        self.assertEqual(floating_result[6], expected_face_target)
+        for start, expected in (
+            (7, (0.0015, 0.01, case["face"][2])),
+            (10, (0.0, 1.0, 0.0)),
+            (13, (0.0015, 0.0103125, case["face"][2])),
+        ):
+            for actual, expected_component in zip(
+                floating_result[start : start + 3],
+                expected,
+                strict=True,
+            ):
+                self.assertAlmostEqual(actual, expected_component, places=8)
+
+    def test_same_storage_component_axis_rejects_anchor_beyond_four_tolerances(
+        self,
+    ) -> None:
+        case = self._same_storage_component_axis_case(
+            component_axis=0,
+            shadow_anchor_delta_m=8.0e-8,
+        )
+        anchor_delta = abs(case["boundaries"][1][2] - case["boundaries"][0][2])
+        coordinate_scale = float(
+            np.max(np.abs(np.asarray(case["positions"], dtype=np.float32)))
+        )
+        geometry_tolerance = (
+            2.0 * float(np.finfo(np.float32).eps) * coordinate_scale
+        )
+        self.assertGreater(anchor_delta, 4.0 * geometry_tolerance)
+        self.assertEqual(case["velocities"], ((0.0, 0.0, 0.0),) * 2)
+        integer_result, _, _ = self._run_direct_finite_segment_union_case(case)
+
+        self.assertEqual(integer_result[0:2], (0, 0))
 
     @staticmethod
     def _vf48g_internal_c0_vertex_case() -> dict[str, object]:

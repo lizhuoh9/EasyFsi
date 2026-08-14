@@ -61,6 +61,13 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="New output directory; existing paths are refused",
     )
+    parser.add_argument(
+        "--fluent-force-history",
+        help=(
+            "Explicit native Fluent fsi_production/history.csv; otherwise resolved "
+            "strictly from the locked postprocess input manifest run_dir"
+        ),
+    )
     parser.add_argument("--gif-duration-ms", type=int, default=120)
     parser.add_argument("--gif-max-width", type=int, default=1600)
     return parser
@@ -78,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
             gif_duration_ms=args.gif_duration_ms,
             gif_max_width_px=args.gif_max_width,
             pressure_semantics_mode="strict",
+            fluent_force_history_path=args.fluent_force_history,
         )
     except NativeFineComparisonError as exc:
         print(f"VALIDATION FAILED: {exc}", file=sys.stderr)
@@ -86,6 +94,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"POSTPROCESS FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(report, indent=2, sort_keys=True))
+    five_percent_gate = report.get("five_percent_diagnostic_gate")
+    if not isinstance(five_percent_gate, dict) or (
+        five_percent_gate.get("all_metrics_within_tolerance") is not True
+    ):
+        print(
+            "VALIDATION FAILED: one or more required diagnostics exceed 5%",
+            file=sys.stderr,
+        )
+        return 3
     return 0
 
 

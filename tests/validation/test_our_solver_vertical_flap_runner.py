@@ -349,6 +349,65 @@ def test_step_observer_writes_a_frame_and_atomic_progress(tmp_path: Path) -> Non
     assert progress["initialization_wall_time_s"] == pytest.approx(4.0)
 
 
+def test_atomic_json_retries_transient_windows_replace_denial(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner_module()
+    path = tmp_path / "progress.json"
+    original_replace = runner.Path.replace
+    attempts = 0
+
+    def flaky_replace(temporary: Path, target: Path) -> Path:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(5, "synthetic Windows sharing violation")
+        return original_replace(temporary, target)
+
+    monkeypatch.setattr(runner.Path, "replace", flaky_replace)
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+
+    runner._write_json_atomic(path, {"status": "running", "step": 63})
+
+    assert attempts == 3
+    assert runner.json.loads(path.read_text("utf-8")) == {
+        "status": "running",
+        "step": 63,
+    }
+    assert list(tmp_path.glob(".progress.json.*.tmp")) == []
+
+
+def test_atomic_json_replace_exhaustion_preserves_target_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner_module()
+    path = tmp_path / "progress.json"
+    path.write_text('{"status":"old"}', encoding="utf-8")
+    attempts = 0
+    sleeps: list[float] = []
+    close_calls: list[int] = []
+
+    def denied_replace(_temporary: Path, _target: Path) -> Path:
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError(5, f"synthetic denial {attempts}")
+
+    monkeypatch.setattr(runner.Path, "replace", denied_replace)
+    monkeypatch.setattr(runner.time, "sleep", sleeps.append)
+    monkeypatch.setattr(runner.os, "close", close_calls.append)
+
+    with pytest.raises(PermissionError, match="synthetic denial 20"):
+        runner._write_json_atomic(path, {"status": "new"})
+
+    assert attempts == runner.ATOMIC_REPLACE_ATTEMPTS
+    assert sleeps == [runner.ATOMIC_REPLACE_BACKOFF_S] * 19
+    assert close_calls == []
+    assert runner.json.loads(path.read_text("utf-8")) == {"status": "old"}
+    assert list(tmp_path.glob(".progress.json.*.tmp")) == []
+
+
 def test_obsolete_campaign_entrypoints_and_status_artifacts_are_absent() -> None:
     assert RUNNER_PATH.is_file()
     assert CAMPAIGN_README.is_file()
@@ -478,11 +537,21 @@ def test_main_preserves_rejected_preflow_history_in_failure_artifact(
         expected_markers = (
             solid_mpm_fsi_runner._preflow_expected_no_slip_marker_count(config)
         )
+        expected_tip_cap_markers = (
+            solid_mpm_fsi_runner._preflow_expected_tip_cap_traction_marker_count(
+                config
+            )
+        )
         history = [
             {
                 "preflow_step": step,
-                "stress_valid_marker_count": expected_markers,
+                "stress_valid_marker_count": (
+                    expected_markers + expected_tip_cap_markers
+                ),
                 "stress_invalid_marker_count": 0,
+                "tip_cap_marker_count": expected_tip_cap_markers,
+                "tip_cap_valid_marker_count": expected_tip_cap_markers,
+                "tip_cap_invalid_marker_count": 0,
                 "hibm_no_slip_valid_marker_count": expected_markers,
                 "hibm_no_slip_invalid_marker_count": 0,
                 "hibm_no_slip_max_residual_mps": (

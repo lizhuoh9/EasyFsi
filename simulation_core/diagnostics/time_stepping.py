@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from numbers import Integral
 
 
 @dataclass(frozen=True)
@@ -14,8 +15,17 @@ class CflSubstepController:
     growth_safety: float = 1.25
 
     def __post_init__(self) -> None:
-        if self.base_substeps <= 0:
-            raise ValueError("base_substeps must be positive")
+        for name, value in (
+            ("base_substeps", self.base_substeps),
+            ("max_substeps", self.max_substeps),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, Integral)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive non-boolean integer")
+            object.__setattr__(self, name, int(value))
         if self.max_substeps < self.base_substeps:
             raise ValueError("max_substeps must be >= base_substeps")
         if not math.isfinite(self.target_cfl) or self.target_cfl <= 0.0:
@@ -45,11 +55,23 @@ class CflSubstepController:
                 "a non-physical CFL diagnostic (the old fallback silently "
                 "continued at minimum substeps)"
             )
-        if cfl <= 0.0:
+        if cfl < 0.0:
+            raise ValueError("previous_cfl must be non-negative")
+        if cfl == 0.0:
             return self.base_substeps
+        if previous_substeps is not None and (
+            isinstance(previous_substeps, bool)
+            or not isinstance(previous_substeps, Integral)
+            or previous_substeps <= 0
+        ):
+            raise ValueError(
+                "previous_substeps must be a positive non-boolean integer"
+            )
         reference_substeps = max(
             self.base_substeps,
-            int(previous_substeps or self.base_substeps),
+            self.base_substeps
+            if previous_substeps is None
+            else int(previous_substeps),
         )
         requested = math.ceil(
             reference_substeps * cfl / self.target_cfl * self.growth_safety

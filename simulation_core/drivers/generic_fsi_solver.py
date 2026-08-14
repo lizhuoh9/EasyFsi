@@ -4,12 +4,14 @@ import math
 import operator
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
+
+import numpy as np
 
 
-RuntimeExecutor = Callable[
+RuntimeFactory = Callable[
     ["FsiProblem", "FsiSolverConfig", "DiagnosticsConfig"],
-    Mapping[str, Any],
+    "FsiRuntime",
 ]
 
 
@@ -183,20 +185,118 @@ class TractionConfig:
 
 
 @dataclass(frozen=True)
+class FsiCouplingConfig:
+    max_iterations: int = 16
+    relative_tolerance: float = 1.0e-3
+    absolute_tolerance_mps: float = 0.0
+    initial_relaxation: float = 0.5
+    history_limit: int = 8
+
+    def __post_init__(self) -> None:
+        iterations = _strict_positive_integer(
+            self.max_iterations,
+            name="max_iterations",
+        )
+        if iterations < 2:
+            raise ValueError("max_iterations must be at least 2")
+        _finite_positive_float(
+            self.relative_tolerance,
+            name="relative_tolerance",
+        )
+        absolute_tolerance = _finite_float(
+            self.absolute_tolerance_mps,
+            name="absolute_tolerance_mps",
+        )
+        if absolute_tolerance < 0.0:
+            raise ValueError("absolute_tolerance_mps must be non-negative")
+        relaxation = _finite_float(
+            self.initial_relaxation,
+            name="initial_relaxation",
+        )
+        if not 0.0 < relaxation <= 1.0:
+            raise ValueError("initial_relaxation must be in (0, 1]")
+        _strict_positive_integer(self.history_limit, name="history_limit")
+
+
+@dataclass(frozen=True)
 class FsiSolverConfig:
     step_count: int
     time_step_s: float
-    solver_name: str = "generic-fsi-solver"
+    coupling: FsiCouplingConfig = field(default_factory=FsiCouplingConfig)
+    completed_step_offset: int = 0
 
     def __post_init__(self) -> None:
         _strict_positive_integer(self.step_count, name="step_count")
-        # `nan <= 0.0` is False (every ordinary comparison against NaN is
-        # False under IEEE-754), so the previous `<= 0.0` check silently let
-        # a NaN time_step_s through instead of rejecting it. Require
-        # finiteness explicitly so NaN/inf are always caught here, not deep
-        # inside a solver loop.
         _finite_positive_float(self.time_step_s, name="time_step_s")
-        _require_non_empty(self.solver_name, name="solver_name")
+        _strict_non_negative_integer(
+            self.completed_step_offset,
+            name="completed_step_offset",
+        )
+
+
+@dataclass(frozen=True)
+class FsiStepContext:
+    step: int
+    step_index: int
+    time_s: float
+    dt_s: float
+
+
+@dataclass(frozen=True)
+class FsiTrialResult:
+    marker_velocity_mps: Any
+    payload: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FsiCouplingReport:
+    iterations: int
+    converged: bool
+    relative_residual: float
+    absolute_residual_mps: float
+    max_marker_residual_mps: float
+    relative_residual_history: tuple[float, ...]
+    absolute_residual_history_mps: tuple[float, ...]
+    update_modes: tuple[str, ...]
+
+
+class FsiCouplingConvergenceError(RuntimeError):
+    def __init__(self, context: FsiStepContext, report: FsiCouplingReport) -> None:
+        super().__init__(
+            "FSI marker-velocity coupling did not converge at step "
+            f"{context.step}: iterations={report.iterations}, "
+            f"relative_residual={report.relative_residual:.6e}, "
+            f"absolute_residual_mps={report.absolute_residual_mps:.6e}"
+        )
+        self.context = context
+        self.report = report
+
+
+class FsiRuntime(Protocol):
+    def begin_step(self, context: FsiStepContext) -> Any:
+        """Capture rollback state before any mutating step preparation."""
+        ...
+
+    def evaluate_trial(
+        self,
+        context: FsiStepContext,
+        marker_velocity_guess_mps: np.ndarray,
+    ) -> FsiTrialResult:
+        ...
+
+    def commit_step(
+        self,
+        context: FsiStepContext,
+        trial: FsiTrialResult,
+        coupling: FsiCouplingReport,
+    ) -> Mapping[str, Any]:
+        ...
+
+    def rollback_step(self, context: FsiStepContext) -> None:
+        ...
+
+    def finalize_run(self) -> Mapping[str, Any]:
+        ...
 
 
 @dataclass(frozen=True)
@@ -216,7 +316,7 @@ class FsiProblem:
     solid_bodies: tuple[SolidBody, ...]
     interface_surfaces: tuple[InterfaceSurface, ...]
     traction_config: TractionConfig
-    runtime_executor: RuntimeExecutor
+    runtime_factory: RuntimeFactory
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -225,6 +325,8 @@ class FsiProblem:
             raise ValueError("solid_bodies must contain at least one body")
         if not self.interface_surfaces:
             raise ValueError("interface_surfaces must contain at least one surface")
+        if not callable(self.runtime_factory):
+            raise ValueError("runtime_factory must be callable")
 
     def as_diagnostics(self) -> dict[str, Any]:
         return {
@@ -259,40 +361,40 @@ class FsiRunResult:
     raw_report: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class FsiRuntimeRun:
+    history: tuple[Mapping[str, Any], ...]
+    finalization: Mapping[str, Any]
+
+
 def solve_fsi(
     problem: FsiProblem,
     solver_config: FsiSolverConfig,
     diagnostics_config: DiagnosticsConfig,
 ) -> FsiRunResult:
-    raw = dict(problem.runtime_executor(problem, solver_config, diagnostics_config))
-    history = tuple(dict(row) for row in raw.get("history", ()))
-    requested_step_count = int(solver_config.step_count)
-    completed_step_count = _completed_history_step_count(history)
-    run_status, run_status_overridden_reason = _resolve_run_status(
-        raw.get("run_status"),
-        requested_step_count=requested_step_count,
-        completed_step_count=completed_step_count,
-    )
-    diagnostics = dict(raw.get("diagnostics", {}))
-    diagnostics.setdefault("generic_api_invoked", True)
-    diagnostics.setdefault("problem", problem.as_diagnostics())
-    diagnostics.setdefault(
-        "pressure_pair_policy",
-        problem.traction_config.pressure_sampling.pair_provider.as_diagnostics(),
-    )
-    diagnostics.setdefault(
-        "one_sided_pressure_policy",
-        problem.traction_config.one_sided_pressure.as_diagnostics(),
-    )
-    if run_status_overridden_reason is not None:
-        diagnostics.setdefault(
-            "run_status_overridden_reason", run_status_overridden_reason
-        )
+    runtime = problem.runtime_factory(problem, solver_config, diagnostics_config)
+    runtime_run = solve_fsi_runtime(runtime, solver_config)
+    history = runtime_run.history
+    raw = dict(runtime_run.finalization)
+    diagnostics = {
+        **dict(raw.get("diagnostics", {})),
+        "generic_api_invoked": True,
+        "problem": problem.as_diagnostics(),
+        "pressure_pair_policy": (
+            problem.traction_config.pressure_sampling.pair_provider.as_diagnostics()
+        ),
+        "one_sided_pressure_policy": (
+            problem.traction_config.one_sided_pressure.as_diagnostics()
+        ),
+        "interface_unknown": "marker_velocity_mps",
+        "coupling_accelerator": "iqn_ils",
+        "coupling_max_iterations": int(solver_config.coupling.max_iterations),
+    }
     return FsiRunResult(
         problem_id=problem.problem_id,
-        run_status=run_status,
-        requested_step_count=requested_step_count,
-        completed_step_count=completed_step_count,
+        run_status="completed",
+        requested_step_count=int(solver_config.step_count),
+        completed_step_count=len(history),
         history=history,
         diagnostics=diagnostics,
         artifacts={
@@ -303,45 +405,263 @@ def solve_fsi(
     )
 
 
-def _resolve_run_status(
-    executor_run_status: Any,
-    *,
-    requested_step_count: int,
-    completed_step_count: int,
-) -> tuple[str, str | None]:
-    """Return an honest ``run_status`` plus an optional override reason.
+def solve_fsi_runtime(
+    runtime: FsiRuntime,
+    solver_config: FsiSolverConfig,
+) -> FsiRuntimeRun:
+    """Run the sole physical-step loop for an initialized FSI runtime."""
 
-    The executor's own ``run_status`` (if any) is trusted for every value
-    except "completed": a previous default of `"completed" if history else
-    "unknown"` reported "completed" whenever *any* history rows came back,
-    even when `completed_step_count` was far short of `requested_step_count`
-    (e.g. 1 of 10 requested steps). That silently hid partial/aborted runs
-    behind a status that reads as success. "completed" is now only trusted
-    when the executor did not claim it, or when the step counts actually
-    match; a short "completed" claim is downgraded to "partial" (or
-    "unknown" when literally zero steps ran) with the reason recorded in
-    diagnostics. Any other executor-provided status (e.g. "failed") is
-    passed through unchanged -- this function never invents a failure the
-    executor did not report.
-    """
-    if executor_run_status is None:
-        if completed_step_count == 0:
-            return "unknown", None
-        if completed_step_count == requested_step_count:
-            return "completed", None
-        return "partial", None
-
-    run_status = str(executor_run_status)
-    if run_status == "completed" and completed_step_count != requested_step_count:
-        corrected_status = "unknown" if completed_step_count == 0 else "partial"
-        reason = (
-            "executor reported run_status='completed' but completed_step_count "
-            f"({completed_step_count}) != requested_step_count "
-            f"({requested_step_count}); downgraded to "
-            f"{corrected_status!r}"
+    history_rows: list[dict[str, Any]] = []
+    completed_step_offset = int(solver_config.completed_step_offset)
+    for local_step_index in range(int(solver_config.step_count)):
+        step_index = completed_step_offset + local_step_index
+        context = FsiStepContext(
+            step=step_index + 1,
+            step_index=step_index,
+            time_s=float(step_index + 1) * float(solver_config.time_step_s),
+            dt_s=float(solver_config.time_step_s),
         )
-        return corrected_status, reason
-    return run_status, None
+        trial, coupling = solve_fsi_step(
+            runtime,
+            context,
+            solver_config.coupling,
+        )
+        try:
+            runtime_row = dict(runtime.commit_step(context, trial, coupling))
+        except Exception as failure:
+            _rollback_after_failure(runtime, context, failure)
+            raise
+        committed_row = {
+            **runtime_row,
+            "step": context.step,
+            "time_s": context.time_s,
+            "fsi_coupling_iterations": coupling.iterations,
+            "fsi_coupling_converged": coupling.converged,
+            "fsi_coupling_relative_residual": coupling.relative_residual,
+            "fsi_coupling_absolute_residual_mps": (
+                coupling.absolute_residual_mps
+            ),
+            "fsi_coupling_max_marker_residual_mps": (
+                coupling.max_marker_residual_mps
+            ),
+        }
+        history_rows.append(committed_row)
+        publish_step = getattr(runtime, "publish_step", None)
+        if publish_step is not None:
+            # Publication observes an already committed physical state. A file
+            # or observer failure stops the run but must not roll that state
+            # back and leave persisted evidence ahead of the solver.
+            publish_step(context, committed_row)
+
+    return FsiRuntimeRun(
+        history=tuple(history_rows),
+        finalization=dict(runtime.finalize_run()),
+    )
+
+
+def solve_fsi_step(
+    runtime: FsiRuntime,
+    context: FsiStepContext,
+    coupling_config: FsiCouplingConfig,
+) -> tuple[FsiTrialResult, FsiCouplingReport]:
+    """Solve one physical step with the canonical marker-velocity fixed point."""
+
+    return _solve_marker_velocity_step(runtime, context, coupling_config)
+
+
+def _solve_marker_velocity_step(
+    runtime: FsiRuntime,
+    context: FsiStepContext,
+    config: FsiCouplingConfig,
+) -> tuple[FsiTrialResult, FsiCouplingReport]:
+    try:
+        initial_marker_velocity = runtime.begin_step(context)
+        guess = _marker_velocity_array(
+            initial_marker_velocity,
+            name="initial marker velocity",
+        )
+    except Exception as failure:
+        _rollback_after_failure(runtime, context, failure)
+        raise
+    guesses: list[np.ndarray] = []
+    candidates: list[np.ndarray] = []
+    residuals: list[np.ndarray] = []
+    relative_history: list[float] = []
+    absolute_history: list[float] = []
+    max_marker_history: list[float] = []
+    update_modes: list[str] = []
+    last_trial: FsiTrialResult | None = None
+
+    try:
+        for _iteration_index in range(int(config.max_iterations)):
+            trial = runtime.evaluate_trial(context, guess.copy())
+            candidate = _marker_velocity_array(
+                trial.marker_velocity_mps,
+                name="candidate marker velocity",
+            )
+            if candidate.shape != guess.shape:
+                raise ValueError(
+                    "candidate marker velocity shape changed within one FSI step: "
+                    f"{candidate.shape} != {guess.shape}"
+                )
+            residual = candidate - guess
+            metrics = _marker_velocity_residual_metrics(candidate, residual)
+            guesses.append(guess.reshape(-1).copy())
+            candidates.append(candidate.reshape(-1).copy())
+            residuals.append(residual.reshape(-1).copy())
+            relative_history.append(metrics["relative_residual"])
+            absolute_history.append(metrics["absolute_residual_mps"])
+            max_marker_history.append(metrics["max_marker_residual_mps"])
+            last_trial = trial
+
+            absolute_hit = bool(
+                float(config.absolute_tolerance_mps) > 0.0
+                and metrics["absolute_residual_mps"]
+                <= float(config.absolute_tolerance_mps)
+            )
+            relative_hit = bool(
+                metrics["relative_residual"] <= float(config.relative_tolerance)
+            )
+            if relative_hit or absolute_hit:
+                report = _coupling_report(
+                    converged=True,
+                    relative_history=relative_history,
+                    absolute_history=absolute_history,
+                    max_marker_history=max_marker_history,
+                    update_modes=update_modes,
+                )
+                return last_trial, report
+
+            if _iteration_index + 1 == int(config.max_iterations):
+                break
+            guess, update_mode = _next_marker_velocity_guess(
+                guesses=guesses,
+                candidates=candidates,
+                residuals=residuals,
+                shape=guess.shape,
+                initial_relaxation=float(config.initial_relaxation),
+                history_limit=int(config.history_limit),
+            )
+            update_modes.append(update_mode)
+    except Exception as failure:
+        _rollback_after_failure(runtime, context, failure)
+        raise
+
+    report = _coupling_report(
+        converged=False,
+        relative_history=relative_history,
+        absolute_history=absolute_history,
+        max_marker_history=max_marker_history,
+        update_modes=update_modes,
+    )
+    failure = FsiCouplingConvergenceError(context, report)
+    _rollback_after_failure(runtime, context, failure)
+    raise failure
+
+
+def _rollback_after_failure(
+    runtime: FsiRuntime,
+    context: FsiStepContext,
+    failure: Exception,
+) -> None:
+    try:
+        runtime.rollback_step(context)
+    except Exception as rollback_failure:
+        raise failure from rollback_failure
+
+
+def _coupling_report(
+    *,
+    converged: bool,
+    relative_history: Sequence[float],
+    absolute_history: Sequence[float],
+    max_marker_history: Sequence[float],
+    update_modes: Sequence[str],
+) -> FsiCouplingReport:
+    return FsiCouplingReport(
+        iterations=len(relative_history),
+        converged=bool(converged),
+        relative_residual=float(relative_history[-1]),
+        absolute_residual_mps=float(absolute_history[-1]),
+        max_marker_residual_mps=float(max_marker_history[-1]),
+        relative_residual_history=tuple(float(value) for value in relative_history),
+        absolute_residual_history_mps=tuple(
+            float(value) for value in absolute_history
+        ),
+        update_modes=tuple(str(value) for value in update_modes),
+    )
+
+
+def _next_marker_velocity_guess(
+    *,
+    guesses: Sequence[np.ndarray],
+    candidates: Sequence[np.ndarray],
+    residuals: Sequence[np.ndarray],
+    shape: tuple[int, ...],
+    initial_relaxation: float,
+    history_limit: int,
+) -> tuple[np.ndarray, str]:
+    current_guess = guesses[-1]
+    current_candidate = candidates[-1]
+    current_residual = residuals[-1]
+    if len(residuals) < 2:
+        return (
+            current_guess + initial_relaxation * current_residual
+        ).reshape(shape), "picard"
+
+    pair_count = min(int(history_limit), len(residuals) - 1)
+    start = len(residuals) - pair_count - 1
+    residual_differences = np.column_stack(
+        [
+            residuals[index + 1] - residuals[index]
+            for index in range(start, len(residuals) - 1)
+        ]
+    )
+    candidate_differences = np.column_stack(
+        [
+            candidates[index + 1] - candidates[index]
+            for index in range(start, len(candidates) - 1)
+        ]
+    )
+    coefficients, _, rank, _ = np.linalg.lstsq(
+        residual_differences,
+        current_residual,
+        rcond=None,
+    )
+    if int(rank) == 0:
+        return (
+            current_guess + initial_relaxation * current_residual
+        ).reshape(shape), "picard"
+    proposal = current_candidate - candidate_differences @ coefficients
+    if not bool(np.all(np.isfinite(proposal))):
+        raise FloatingPointError("IQN-ILS produced a non-finite marker velocity")
+    return proposal.reshape(shape), "iqn_ils"
+
+
+def _marker_velocity_residual_metrics(
+    candidate: np.ndarray,
+    residual: np.ndarray,
+) -> dict[str, float]:
+    squared_marker_residual = np.sum(residual * residual, axis=1)
+    squared_marker_velocity = np.sum(candidate * candidate, axis=1)
+    absolute_residual = float(np.sqrt(np.mean(squared_marker_residual)))
+    velocity_scale = float(np.sqrt(np.mean(squared_marker_velocity)))
+    return {
+        "absolute_residual_mps": absolute_residual,
+        "max_marker_residual_mps": float(
+            np.sqrt(squared_marker_residual).max(initial=0.0)
+        ),
+        "relative_residual": absolute_residual / max(velocity_scale, 1.0e-30),
+    }
+
+
+def _marker_velocity_array(values: Any, *, name: str) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim != 2 or array.shape[0] == 0 or array.shape[1] != 3:
+        raise ValueError(f"{name} must have shape (marker_count, 3)")
+    if not bool(np.all(np.isfinite(array))):
+        raise ValueError(f"{name} must be finite")
+    return array.copy()
 
 
 def _require_non_empty(value: str, *, name: str) -> None:
@@ -389,33 +709,6 @@ def _finite_positive_float(value: Any, *, name: str) -> float:
     if finite_value <= 0.0:
         raise ValueError(f"{name} must be a finite positive number")
     return finite_value
-
-
-def _completed_history_step_count(history: Sequence[Mapping[str, Any]]) -> int:
-    """Count a contiguous 1-based step prefix when rows expose step metadata.
-
-    Older runtime executors may return metric-only history rows. Preserve their
-    historical row-count contract when no row exposes ``step``. Once an
-    executor does expose ``step``, however, only the strict sequence ``1..N``
-    is completion evidence; duplicate, missing, fractional, or reordered step
-    values stop the completed prefix at the last trustworthy row.
-    """
-    if not history:
-        return 0
-    if not any("step" in row for row in history):
-        return len(history)
-    completed_step_count = 0
-    for expected_step, row in enumerate(history, start=1):
-        if "step" not in row:
-            break
-        try:
-            actual_step = _strict_integer(row["step"], name="history step")
-        except ValueError:
-            break
-        if actual_step != expected_step:
-            break
-        completed_step_count = expected_step
-    return completed_step_count
 
 
 def _vector3(values: Sequence[float], *, name: str) -> tuple[float, float, float]:

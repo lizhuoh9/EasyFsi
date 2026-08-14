@@ -32,7 +32,7 @@ def _import_roots(path: Path) -> set[str]:
 
 PACKAGE_IMPLEMENTATIONS = {
     ("fluids", "solver.py"): "class CartesianFluidSolver",
-    ("coupling", "fsi_coupling.py"): "class InterfaceReactionFixedPointResult",
+    ("coupling", "interface_forces.py"): "class ForceBalanceReport",
     ("coupling", "hibm.py"): "def classify_hibm_near_boundary_nodes",
     ("coupling", "hibm_mpm", "core.py"): "class HibmMpmSharpCouplingState",
     ("coupling", "interface_pair.py"): "class InterfacePairMap",
@@ -42,7 +42,7 @@ PACKAGE_IMPLEMENTATIONS = {
     ("coupling", "projected_ibm.py"): "class ProjectedIbmRegionPairStepConfig",
     ("coupling", "tri_surface.py"): "class TriSurfaceRegionDiagnostics",
     ("diagnostics", "runtime.py"): "class TaichiRuntimeConfig",
-    ("drivers", "fsi_driver.py"): "class FsiDriver",
+    ("drivers", "case_spec.py"): "class FsiCaseSpec",
     ("drivers", "generic_fsi_solver.py"): "class FsiProblem",
     ("solids", "neo_hookean_mpm.py"): "class NeoHookeanMpmState",
     ("solids", "mooney_shell", "core.py"): "class TriMooneyShellMpmState",
@@ -186,7 +186,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
     def test_hibm_mpm_support_modules_do_not_import_core(self) -> None:
         for name in (
             "constants.py",
-            "modes.py",
             "paper_requirements.py",
             "reports.py",
         ):
@@ -275,12 +274,13 @@ class ArchitectureBoundaryTests(unittest.TestCase):
 
         self.assertNotIn("for step in range(first_step, step_count + 1):", source)
 
-    def test_squid_step_loop_module_owns_main_step_loop_after_step5_split(self) -> None:
+    def test_squid_step_loop_delegates_main_step_loop_to_generic_solver(self) -> None:
         source = (
             REPO_ROOT / "cases" / "squid_soft_robot" / "step_loop.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("for step in range(", source)
+        self.assertNotIn("for step in range(", source)
+        self.assertIn("solve_fsi_runtime(runtime, solver_config)", source)
 
     def test_squid_runner_does_not_define_sharp_trial_closure_after_step5_split(self) -> None:
         source = (

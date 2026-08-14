@@ -144,6 +144,7 @@ class FluidTopologyInvalidationContracts(unittest.TestCase):
         solver._hibm_base_obstacle_initialized = True
         solver._sst_wall_distance_valid = True
         solver._sst_wall_distance_cache_key = ("stale",)
+        solver._sst_wall_distance_base_cache_key = ("stale-base",)
         solver._invalidator_calls = []
 
         def invalidate_reachability() -> None:
@@ -164,6 +165,60 @@ class FluidTopologyInvalidationContracts(unittest.TestCase):
         self.assertEqual(solver._invalidator_calls, ["reachability", "ledger"])
         self.assertFalse(solver._sst_wall_distance_valid)
         self.assertIsNone(solver._sst_wall_distance_cache_key)
+        self.assertIsNone(solver._sst_wall_distance_base_cache_key)
+
+    def test_dynamic_obstacle_noop_preserves_sst_base_cache(self) -> None:
+        solver = self._bare_solver()
+        base_key = ("obstacle-domain-base",)
+        solver._sst_wall_distance_base_cache_key = base_key
+        solver.hibm_external_obstacle_topology_revision = 7
+        solver.hibm_dynamic_solid_volume_enabled = False
+        solver.report_hibm_fresh_fluid_cells = _ScalarField()
+        solver.report_dynamic_obstacle_cell_count = _ScalarField(4)
+        solver.report_dynamic_obstacle_added_cell_count = _ScalarField()
+        solver.report_dynamic_obstacle_removed_cell_count = _ScalarField()
+        solver.reduction_count = _ScalarField()
+        solver._store_hibm_dynamic_solid_volume_candidate_kernel = lambda: None
+        solver._reconstruct_fresh_fluid_cells = lambda: None
+
+        solver._commit_hibm_dynamic_solid_volume_candidate()
+
+        self.assertEqual(solver.hibm_external_obstacle_topology_revision, 7)
+        self.assertEqual(solver._sst_wall_distance_base_cache_key, base_key)
+        self.assertFalse(solver._sst_wall_distance_valid)
+
+    def test_generic_dynamic_obstacle_noop_preserves_sst_base_cache(self) -> None:
+        solver = self._bare_solver()
+        base_key = ("obstacle-domain-base",)
+        solver._sst_wall_distance_base_cache_key = base_key
+        solver.hibm_external_obstacle_topology_revision = 7
+        solver.report_hibm_fresh_fluid_cells = _ScalarField()
+        solver.report_dynamic_obstacle_cell_count = _ScalarField(4)
+        solver.report_dynamic_obstacle_added_cell_count = _ScalarField()
+        solver.report_dynamic_obstacle_removed_cell_count = _ScalarField()
+        solver.reduction_count = _ScalarField()
+        solver._count_nonfinite_dynamic_solid_particle_positions_kernel = (
+            lambda *_args: None
+        )
+        solver._reset_dynamic_solid_obstacle_candidate_kernel = lambda: None
+        solver._ensure_hibm_base_obstacle = lambda: None
+        solver._invalidate_external_obstacle_topology_derived_state = lambda: setattr(
+            solver,
+            "_sst_wall_distance_base_cache_key",
+            None,
+        )
+        solver._apply_dynamic_solid_obstacle_candidate_kernel = lambda: None
+        solver._reconstruct_fresh_fluid_cells = lambda: None
+
+        solver.update_dynamic_solid_obstacle_from_particles(
+            _VectorField(np.empty((0, 3), dtype=np.float32)),
+            particle_count=0,
+            particle_support_size_m=(1.0, 1.0, 1.0),
+            store_as_hibm_dynamic_solid_volume=False,
+        )
+
+        self.assertEqual(solver.hibm_external_obstacle_topology_revision, 7)
+        self.assertEqual(solver._sst_wall_distance_base_cache_key, base_key)
 
     def test_hibm_obstacle_writers_use_unified_invalidation_before_device_write(
         self,
@@ -174,9 +229,6 @@ class FluidTopologyInvalidationContracts(unittest.TestCase):
             ),
             lambda solver: solver.mark_hibm_solid_band_nonprojectable_cells(),
             lambda solver: solver.convert_hibm_air_backed_cells(),
-            lambda solver: solver.convert_hibm_row_cloud_orphan_components(
-                max_component_cells=1
-            ),
         )
         for invoke in invocations:
             with self.subTest(invoke=invoke):
@@ -210,6 +262,11 @@ class FluidTopologyInvalidationContracts(unittest.TestCase):
                     invoke(solver)
                 self.assertEqual(unified_calls, ["all"])
 
+        # Row-cloud cleanup deliberately performs a selection-only device pass
+        # before invalidation so a no-op preserves the current topology-derived
+        # contracts.  Its dedicated regression verifies that a non-empty
+        # selection invalidates immediately before the commit pass.
+
 
 class FluidSnapshotContracts(unittest.TestCase):
     def test_rollback_restores_sst_wall_generation_sources(self) -> None:
@@ -231,6 +288,7 @@ class FluidSnapshotContracts(unittest.TestCase):
         solver.sst_no_slip_domain_wall_mask[None] = 0
         solver._sst_wall_distance_valid = False
         solver._sst_wall_distance_cache_key = None
+        solver._sst_wall_distance_base_cache_key = None
         solver.restore_state()
 
         self.assertEqual(
@@ -300,7 +358,9 @@ class SSTCountAndCacheContracts(unittest.TestCase):
         solver._sst_no_slip_domain_walls = (False,) * 6
         solver._sst_wall_distance_valid = False
         solver._sst_wall_distance_cache_key = None
+        solver._sst_wall_distance_base_cache_key = None
         solver.sst_no_slip_domain_wall_mask = _ScalarField()
+        solver.reduction_count = _ScalarField()
         solver._wall_distance_kernel_calls = []
 
         def record(name: str):
@@ -310,6 +370,7 @@ class SSTCountAndCacheContracts(unittest.TestCase):
             return call
 
         solver._initialize_sst_wall_distance_kernel = record("initialize")
+        solver._restore_sst_base_wall_distance_kernel = record("restore_base")
         solver._include_sst_marker_wall_distance_kernel = record("marker")
         solver._include_sst_projection_segment_wall_distance_kernel = record(
             "segment"
@@ -430,6 +491,61 @@ class SSTCountAndCacheContracts(unittest.TestCase):
         solver.prepare_sst_wall_distance(**arguments)
 
         self.assertEqual(solver._wall_distance_kernel_calls.count("segment"), 5)
+
+    def test_moving_marker_reuses_obstacle_base_and_matches_full_rebuild(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4)),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        marker = ti.Vector.field(3, dtype=ti.f32, shape=2)
+        segment = ti.Vector.field(3, dtype=ti.i32, shape=1)
+        marker.from_numpy(
+            np.asarray(((0.25, 0.4, 0.5), (0.75, 0.4, 0.5)), dtype=np.float32)
+        )
+        segment.from_numpy(np.asarray(((0, 1, -1),), dtype=np.int32))
+        calls = {"initialize": 0, "overlay": 0}
+        initialize = solver._initialize_sst_wall_distance_kernel
+        overlay = solver._include_sst_projection_segment_wall_distance_kernel
+
+        def counted_initialize(*args: object) -> None:
+            calls["initialize"] += 1
+            initialize(*args)
+
+        def counted_overlay(*args: object) -> None:
+            calls["overlay"] += 1
+            overlay(*args)
+
+        solver._initialize_sst_wall_distance_kernel = counted_initialize
+        solver._include_sst_projection_segment_wall_distance_kernel = counted_overlay
+        arguments = {
+            "marker_position_m": marker,
+            "marker_count": 2,
+            "projection_segment_indices": segment,
+            "projection_segment_count": 1,
+            "inactive_axis": 2,
+        }
+
+        solver.prepare_sst_wall_distance(**arguments)
+        moved = marker.to_numpy()
+        moved[:, 1] += 0.1
+        marker.from_numpy(moved)
+        solver.prepare_sst_wall_distance(**arguments)
+        cached_result = solver.sst_wall_distance_m.to_numpy()
+
+        self.assertEqual(calls, {"initialize": 1, "overlay": 2})
+
+        solver._sst_wall_distance_valid = False
+        solver._sst_wall_distance_cache_key = None
+        solver._sst_wall_distance_base_cache_key = None
+        solver.prepare_sst_wall_distance(**arguments)
+
+        self.assertEqual(calls, {"initialize": 2, "overlay": 3})
+        np.testing.assert_allclose(
+            cached_result,
+            solver.sst_wall_distance_m.to_numpy(),
+            rtol=0.0,
+            atol=0.0,
+        )
 
 
 if __name__ == "__main__":

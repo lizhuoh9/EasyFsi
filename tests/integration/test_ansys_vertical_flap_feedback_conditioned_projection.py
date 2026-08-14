@@ -2,13 +2,8 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
-from benchmarks.official.solid_mpm_fsi_runner import (
-    FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS,
-    _apply_marker_feedback_to_fluid,
-    _combine_flow_projection_reports,
-)
+from benchmarks.official.solid_mpm_fsi_runner import _combine_flow_projection_reports
 
 
 RUNNER_SOURCE = Path("benchmarks") / "official" / "solid_mpm_fsi_runner.py"
@@ -116,57 +111,6 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
             6.25,
         )
 
-    def test_sharp_feedback_does_not_stamp_legacy_collocated_constraints(self) -> None:
-        calls: list[dict[str, object]] = []
-
-        class FakeFluid:
-            def apply_marker_feedback_constraints(self, *args, **kwargs):
-                calls.append(dict(kwargs))
-                return {
-                    "fluid_projection_consumed_feedback": False,
-                    "fluid_feedback_constraint_marker_count": 0,
-                    "fluid_feedback_constraint_active_cell_count": 0,
-                    "fluid_feedback_constraint_cleared_cell_count": 3,
-                    "fluid_feedback_constraint_obstacle_cell_count": 0,
-                    "fluid_feedback_constraint_non_obstacle_cell_count": 0,
-                    "fluid_feedback_constraint_projection_participating_cell_count": 0,
-                    "fluid_marker_velocity_constraints_enabled": False,
-                    "fluid_marker_velocity_constraint_active_cell_count": 0,
-                    "no_slip_residual_before_mps": "",
-                    "no_slip_residual_after_mps": "",
-                    "no_slip_target_residual_after_assembly_mps": "",
-                    "no_slip_projected_residual_after_projection_mps": 0.0,
-                }
-
-        markers = SimpleNamespace(
-            x_gamma_m=object(),
-            v_gamma_mps=object(),
-            region_id=object(),
-            marker_count=8,
-        )
-        config = SimpleNamespace(
-            flow_solid_boundary_mode=FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS,
-            preserve_marker_velocity_constraints=True,
-        )
-
-        report = _apply_marker_feedback_to_fluid(
-            markers,
-            FakeFluid(),
-            config,
-            feedback_available=True,
-            previous_feedback_constraint_cells=set(),
-        )
-
-        self.assertEqual(len(calls), 1)
-        self.assertIs(calls[0]["feedback_available"], False)
-        self.assertIs(calls[0]["preserve_velocity_constraints"], False)
-        self.assertEqual(
-            report["fluid_marker_feedback_enforcement_mode"],
-            "hibm_sharp_reconstructed_rows",
-        )
-        self.assertEqual(report["legacy_constraint_active_cell_count"], 0)
-        self.assertTrue(report["fluid_projection_consumed_feedback"])
-
     def test_sharp_flow_adds_accumulating_consistency_projection(self) -> None:
         body = _function_body(_runner_source(), "def _flow_advance_current_step(")
 
@@ -191,7 +135,7 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
     def test_post_solid_observer_refresh_rebuilds_current_sharp_rows(self) -> None:
         body = _function_body(
             _runner_source(),
-            "def run_rectangular_solid_marker_mpm_fsi_smoke(",
+            "def prepare_rectangular_solid_marker_mpm_fsi_runtime(",
         )
         solid_update = body.index(
             "latest_feedback_report = markers.update_surface_feedback_from_mpm_surface_particles("
@@ -200,11 +144,11 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
             "latest_observer_topology_report = (",
             solid_update,
         )
-        feedback_ready = body.index(
-            "feedback_available_for_projection = True",
+        trial_return = body.index(
+            "return FsiTrialResult(",
             observer_refresh,
         )
-        refresh_body = body[observer_refresh:feedback_ready]
+        refresh_body = body[observer_refresh:trial_return]
 
         self.assertIn("topology_only=False", refresh_body)
 
@@ -245,21 +189,11 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
         ):
             self.assertIn(field, history_body)
 
-    def test_runner_carries_feedback_owned_cells_between_steps(self) -> None:
-        loop_body = _fsi_loop_body(_runner_source())
+    def test_runner_keeps_feedback_ownership_on_the_solver(self) -> None:
+        source = _runner_source()
 
-        self.assertIn(
-            "feedback_constraint_cells: set[tuple[int, int, int]] = set()",
-            _runner_source(),
-        )
-        self.assertIn(
-            "previous_feedback_constraint_cells=feedback_constraint_cells",
-            loop_body,
-        )
-        self.assertIn(
-            'feedback_constraint_cells = latest_feedback_constraint_report["_feedback_constraint_cells"]',
-            loop_body,
-        )
+        self.assertNotIn("previous_feedback_constraint_cells", source)
+        self.assertNotIn('"_feedback_constraint_cells"', source)
 
     def test_adapter_reads_marker_feedback_and_updates_fluid_constraints(self) -> None:
         source = _runner_source()
@@ -269,44 +203,18 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
         # apply_marker_feedback_constraints() kernel dispatch, which reads
         # marker positions/velocities on-device and writes the fluid's
         # velocity-Dirichlet constraint fields without a host round-trip.
-        self.assertIn("apply_device = getattr(fluid, \"apply_marker_feedback_constraints\", None)", adapter_body)
+        self.assertIn("report = fluid.apply_marker_feedback_constraints(", adapter_body)
         self.assertIn("markers.x_gamma_m,", adapter_body)
         self.assertIn("markers.v_gamma_mps,", adapter_body)
-        self.assertIn("report = apply_device(", adapter_body)
+        self.assertIn("markers.region_id,", adapter_body)
+        self.assertNotIn("getattr(fluid,", adapter_body)
+        self.assertNotIn("_host_fallback", source)
+        self.assertNotIn(".to_numpy(", adapter_body)
 
-        host_fallback_body = _function_body(
-            source, "def _apply_marker_feedback_to_fluid_host_fallback("
-        )
-        self.assertIn("markers.x_gamma_m.to_numpy()", host_fallback_body)
-        self.assertIn("markers.v_gamma_mps.to_numpy()", host_fallback_body)
-        self.assertIn('active_field = ledger_fields["velocity_dirichlet_boundary_active"]', host_fallback_body)
-        self.assertIn('value_field = ledger_fields["velocity_dirichlet_boundary_value_mps"]', host_fallback_body)
-        self.assertIn("active = active_field.to_numpy()", host_fallback_body)
-        self.assertIn("values = value_field.to_numpy()", host_fallback_body)
-        self.assertIn(
-            'projection_weight_field = ledger_fields[\n        "velocity_dirichlet_boundary_projection_weight"\n    ]',
-            host_fallback_body,
-        )
-        self.assertIn("weights = projection_weight_field.to_numpy()", host_fallback_body)
-        self.assertIn("active_field.from_numpy(active)", host_fallback_body)
-        self.assertIn("value_field.from_numpy(values)", host_fallback_body)
-        self.assertIn(
-            "projection_weight_field.from_numpy(weights)",
-            host_fallback_body,
-        )
-
-    def test_adapter_clears_only_previous_feedback_owned_constraints(self) -> None:
-        source = _runner_source()
-        adapter_body = _function_body(source, "def _apply_marker_feedback_to_fluid(")
-
-        # Device path: clearing of previously-owned cells happens inside
+    def test_solver_clears_only_device_owned_feedback_constraints(self) -> None:
+        # Clearing of previously-owned cells happens inside
         # _clear_marker_feedback_constraints_kernel(), gated on the
-        # per-cell marker_feedback_owned flag (only cells this adapter
-        # itself claimed last step get reset).
-        self.assertIn("apply_device = getattr(fluid, \"apply_marker_feedback_constraints\", None)", adapter_body)
-        self.assertIn("report = apply_device(", adapter_body)
-        self.assertIn("previous_feedback_constraint_cells", adapter_body)
-
+        # per-cell marker_feedback_owned flag.
         solver_source = _fluid_solver_source()
         clear_kernel_body = _method_body(
             solver_source, "def _clear_marker_feedback_constraints_kernel(self):"
@@ -317,19 +225,6 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
         self.assertIn("self.velocity_dirichlet_boundary_projection_weight[i, j, k] = 0.0", clear_kernel_body)
         self.assertIn("self.marker_feedback_owned[i, j, k] = 0", clear_kernel_body)
         self.assertIn("self.report_marker_feedback_cleared_cell_count[None]", clear_kernel_body)
-
-        # Host fallback path (used when the device kernel is unavailable)
-        # still clears only the caller-supplied previously-owned cells.
-        host_fallback_body = _function_body(
-            source, "def _apply_marker_feedback_to_fluid_host_fallback("
-        )
-        self.assertIn("cleared_cell_count = 0", host_fallback_body)
-        self.assertIn("for i, j, k in previous_feedback_constraint_cells:", host_fallback_body)
-        self.assertIn("active[i, j, k] = 0", host_fallback_body)
-        self.assertIn("values[i, j, k] = 0.0", host_fallback_body)
-        self.assertIn("weights[i, j, k] = 0.0", host_fallback_body)
-        self.assertIn("cleared_cell_count += 1", host_fallback_body)
-        self.assertIn('"fluid_feedback_constraint_cleared_cell_count"', host_fallback_body)
 
     def test_runner_computes_post_projection_no_slip_residual(self) -> None:
         loop_body = _fsi_loop_body(_runner_source())
@@ -357,16 +252,18 @@ def _fluid_solver_source() -> str:
 
 
 def _fsi_loop_body(source: str) -> str:
-    loop_start = source.index("for step_index in range(config.step_count):")
-    loop_end = source.index("    if (\n        latest_stress_report is None", loop_start)
-    return source[loop_start:loop_end]
+    trial_start = source.index("    def evaluate_trial(")
+    trial_end = source.index("    def commit_step(", trial_start)
+    return source[trial_start:trial_end]
 
 
 def _history_append_body(source: str) -> str:
-    loop_body = _fsi_loop_body(source)
-    append_start = loop_body.index("history.append(")
-    append_end = loop_body.index("\n        )", append_start) + len("\n        )")
-    return loop_body[append_start:append_end]
+    commit_start = source.index("    def commit_step(")
+    commit_end = source.index("    class RectangularMarkerVelocityRuntime", commit_start)
+    commit_body = source[commit_start:commit_end]
+    append_start = commit_body.index("history.append(")
+    append_end = commit_body.index("\n        )", append_start) + len("\n        )")
+    return commit_body[append_start:append_end]
 
 
 def _function_body(source: str, signature: str) -> str:

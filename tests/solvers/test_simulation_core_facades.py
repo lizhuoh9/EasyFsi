@@ -30,6 +30,29 @@ LEGACY_TOP_LEVEL_MODULES = (
     "time_stepping",
 )
 
+INTERFACE_FORCE_EXPORTS = (
+    "ForceBalanceReport",
+    "RegionPairInterfaceReactionTarget",
+    "action_reaction_balance",
+    "region_pair_interface_reaction_forces",
+)
+
+REMOVED_FORCE_FIXED_POINT_EXPORTS = (
+    "INTERFACE_REACTION_SOLVER_CHOICES",
+    "InterfaceReactionFixedPointResult",
+    "InterfaceReactionRelaxationState",
+    "InterfaceReactionStepUpdate",
+    "InterfaceReactionTargetEvaluation",
+    "InterfaceReactionUpdate",
+    "aitken_relaxation_factor",
+    "interface_reaction_force",
+    "relax_interface_reaction_forces",
+    "robin_neumann_impedance_force",
+    "solve_and_apply_interface_reaction_step",
+    "solve_interface_reaction_fixed_point",
+    "update_interface_reaction_for_next_step",
+)
+
 
 class SimulationCoreFacadeTests(unittest.TestCase):
     def test_fluid_facade_exports_existing_fluid_api(self) -> None:
@@ -93,6 +116,9 @@ class SimulationCoreFacadeTests(unittest.TestCase):
 
         fluids = importlib.import_module("simulation_core.fluids")
         coupling = importlib.import_module("simulation_core.coupling")
+        interface_forces = importlib.import_module(
+            "simulation_core.coupling.interface_forces"
+        )
         solids = importlib.import_module("simulation_core.solids")
         geometry_tools = importlib.import_module("simulation_core.geometry_tools")
         materials = importlib.import_module("simulation_core.materials")
@@ -103,22 +129,27 @@ class SimulationCoreFacadeTests(unittest.TestCase):
             simulation_core.HibmMpmSharpCouplingState,
             coupling.HibmMpmSharpCouplingState,
         )
+        for name in INTERFACE_FORCE_EXPORTS:
+            with self.subTest(name=name):
+                self.assertIs(getattr(simulation_core, name), getattr(coupling, name))
+                self.assertIs(getattr(coupling, name), getattr(interface_forces, name))
         self.assertIs(simulation_core.NeoHookeanMpmState, solids.NeoHookeanMpmState)
         self.assertIs(simulation_core.SurfaceMesh, geometry_tools.SurfaceMesh)
         self.assertIs(simulation_core.NeoHookeanMaterial, materials.NeoHookeanMaterial)
         self.assertIs(simulation_core.vector_norm, diagnostics.vector_norm)
 
-    def test_coupling_facade_exports_existing_coupling_api(self) -> None:
+    def test_coupling_facade_exports_stateless_interface_force_api(self) -> None:
         coupling = importlib.import_module("simulation_core.coupling")
-        fsi = importlib.import_module("simulation_core.coupling.fsi_coupling")
+        interface_forces = importlib.import_module(
+            "simulation_core.coupling.interface_forces"
+        )
         projected = importlib.import_module("simulation_core.coupling.projected_ibm")
         hibm = importlib.import_module("simulation_core.coupling.hibm_mpm")
         tri_surface = importlib.import_module("simulation_core.coupling.tri_surface")
 
-        self.assertIs(
-            coupling.InterfaceReactionFixedPointResult,
-            fsi.InterfaceReactionFixedPointResult,
-        )
+        for name in INTERFACE_FORCE_EXPORTS:
+            with self.subTest(name=name):
+                self.assertIs(getattr(coupling, name), getattr(interface_forces, name))
         self.assertIs(
             coupling.ProjectedIbmRegionPairStepConfig,
             projected.ProjectedIbmRegionPairStepConfig,
@@ -132,13 +163,22 @@ class SimulationCoreFacadeTests(unittest.TestCase):
             tri_surface.TriSurfaceForcePairReport,
         )
 
+    def test_coupling_facade_removes_force_fixed_point_api(self) -> None:
+        coupling = importlib.import_module("simulation_core.coupling")
+
+        for name in REMOVED_FORCE_FIXED_POINT_EXPORTS:
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(coupling, name), name)
+        with self.assertRaises(ModuleNotFoundError):
+            importlib.import_module("simulation_core.coupling.fsi_coupling")
+
     def test_driver_facade_exports_existing_driver_api(self) -> None:
         drivers = importlib.import_module("simulation_core.drivers")
-        fsi_driver = importlib.import_module("simulation_core.drivers.fsi_driver")
+        case_spec = importlib.import_module("simulation_core.drivers.case_spec")
         generic = importlib.import_module("simulation_core.drivers.generic_fsi_solver")
 
-        self.assertIs(drivers.FsiCaseSpec, fsi_driver.FsiCaseSpec)
-        self.assertIs(drivers.FsiDriver, fsi_driver.FsiDriver)
+        self.assertIs(drivers.FsiCaseSpec, case_spec.FsiCaseSpec)
+        self.assertFalse(hasattr(drivers, "FsiDriver"))
         self.assertIs(drivers.FsiProblem, generic.FsiProblem)
         self.assertIs(drivers.solve_fsi, generic.solve_fsi)
 

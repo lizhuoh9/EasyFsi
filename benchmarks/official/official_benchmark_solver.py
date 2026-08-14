@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from simulation_core.drivers.fsi_driver import FsiCaseSpec
+from simulation_core.drivers.case_spec import FsiCaseSpec
 
 
 BenchmarkRunner = Callable[[Any], Mapping[str, object]]
@@ -28,24 +28,21 @@ def run_official_fsi_benchmark(spec: OfficialBenchmarkRunSpec) -> dict[str, obje
     """Run one official FSI benchmark through the shared case-agnostic entrypoint."""
 
     raw_report = dict(spec.runner(spec.config))
-    report = {
-        **raw_report,
-        "case": raw_report.get("case", spec.case_spec.case_id),
+    authoritative = {
+        "case": spec.case_spec.case_id,
         "solver_family": spec.solver_family,
-        "case_metadata": raw_report.get("case_metadata", dict(spec.case_metadata)),
-        "boundary_conditions": raw_report.get(
-            "boundary_conditions",
-            dict(spec.boundary_conditions),
-        ),
-        "acceptance_tolerance": raw_report.get(
-            "acceptance_tolerance",
-            spec.case_spec.acceptance_tolerance,
-        ),
-        "reference_results": raw_report.get(
-            "reference_results",
-            dict(spec.case_spec.reference_results),
-        ),
+        "case_metadata": dict(spec.case_metadata),
+        "boundary_conditions": dict(spec.boundary_conditions),
+        "acceptance_tolerance": spec.case_spec.acceptance_tolerance,
+        "reference_results": dict(spec.case_spec.reference_results),
     }
+    for field, expected in authoritative.items():
+        if field in raw_report and raw_report[field] != expected:
+            raise ValueError(
+                f"benchmark runner cannot override authoritative {field}: "
+                f"{raw_report[field]!r} != {expected!r}"
+            )
+    report = {**raw_report, **authoritative}
     _validate_report(report, spec)
     return report
 
@@ -59,5 +56,8 @@ def _validate_report(
             f"benchmark runner returned case={report['case']!r}; "
             f"expected {spec.case_spec.case_id!r}"
         )
-    if "computed_result_sources" not in report:
-        raise ValueError("benchmark report must include computed_result_sources")
+    sources = report.get("computed_result_sources")
+    if not isinstance(sources, Mapping) or not sources:
+        raise ValueError(
+            "benchmark report computed_result_sources must be a non-empty mapping"
+        )

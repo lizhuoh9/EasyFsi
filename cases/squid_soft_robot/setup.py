@@ -10,7 +10,6 @@ import numpy as np
 
 from simulation_core import (
     CartesianGrid,
-    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
     GradedGridSpec,
     RefinementRegion,
     SurfaceMesh,
@@ -1807,12 +1806,9 @@ def resolve_pressure_solver(
     pressure_solver: str,
     *,
     graded_grid_enabled: bool,
-    fsi_coupling_mode: str | None = None,
 ) -> str:
     solver_name = str(pressure_solver)
     if solver_name == "auto":
-        if str(fsi_coupling_mode) == FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED:
-            return "fv_cg"
         return "fv_cg" if graded_grid_enabled else "fv_multigrid"
     if solver_name not in PRESSURE_SOLVER_CHOICES:
         raise ValueError(f"unsupported pressure solver: {pressure_solver!r}")

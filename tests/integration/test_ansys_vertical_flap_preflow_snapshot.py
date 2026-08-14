@@ -221,33 +221,70 @@ def _healthy_hibm_velocity_report(
     active_rows: int = 1,
     boundary_velocity_only_rows: int = 1,
 ) -> dict[str, object]:
-    projection_weight = 0.5 if active_rows > 0 else 0.0
+    del boundary_velocity_only_rows
+    active_components = int(active_rows)
+    active_scalar = 1.0 if active_components > 0 else 0.0
+    device_report = {
+        key: 0
+        for key in (
+            solid_mpm_fsi_runner.CANONICAL_HIBM_VELOCITY_DIRICHLET_DEVICE_REPORT_KEYS
+        )
+    }
+    device_report.update(
+        {
+            "schema_version": 5,
+            "authority": "canonical_component_face",
+            "new_owned_claim_component_count": active_components,
+            "final_active_component_count": active_components,
+            "final_owned_component_count": active_components,
+            "final_soft_component_count": active_components,
+            "final_active_storage_row_count": active_components,
+            "final_active_x_component_count": active_components,
+            "primary_region_active_component_count": active_components,
+            "min_active_pressure_mobility": active_scalar,
+            "max_active_pressure_mobility": active_scalar,
+            "min_active_enforcement_weight": active_scalar,
+            "max_active_enforcement_weight": active_scalar,
+            "marker_target_closure": {
+                "enabled": True,
+                "constraint_count": 0,
+                "adjustable_constraint_count": 0,
+                "immutable_constraint_count": 0,
+                "solver": "weighted_minimum_norm_lstsq",
+                "solve_count": 0,
+                "matrix_rank": 0,
+                "adjustable_dof_count": 0,
+                "least_squares_max_residual_mps": 0.0,
+                "materialized_max_residual_mps": 0.0,
+                "max_abs_correction_mps": 0.0,
+                "initial_max_residual_mps": 0.0,
+                "final_max_residual_mps": 0.0,
+                "final_max_adjustable_residual_mps": 0.0,
+                "final_max_immutable_residual_mps": 0.0,
+                "absolute_tolerance_mps": 1.0e-4,
+                "closure_tolerance_mps": 1.0e-6,
+                "density_kgm3": 1.225,
+                "projection_only_marker_count": 0,
+                "projection_only_evaluated_axis_count": 0,
+                "projection_only_invalid_axis_count": 0,
+                "projection_only_constraint_count": 0,
+                "projection_only_max_residual_mps": 0.0,
+            },
+        }
+    )
     return {
         "hibm_sharp_marker_boundary_enabled": True,
         "hibm_sharp_marker_boundary_topology_reused": True,
         "hibm_preassembly_cleanup_reused": False,
         "hibm_preassembly_topology_mutated": False,
-        "hibm_velocity_dirichlet_active_rows": active_rows,
-        "hibm_velocity_dirichlet_primary_region_active_rows": active_rows,
-        "hibm_velocity_dirichlet_secondary_region_active_rows": 0,
-        "hibm_velocity_dirichlet_other_region_active_rows": 0,
-        "hibm_velocity_dirichlet_unassigned_region_active_rows": 0,
-        "hibm_velocity_dirichlet_max_abs_velocity_mps": 0.25,
-        "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": 0.5,
-        "hibm_velocity_dirichlet_boundary_velocity_only_rows": (
-            boundary_velocity_only_rows
-        ),
-        "hibm_velocity_dirichlet_invalid_reconstruction_count": 0,
-        "hibm_velocity_dirichlet_invalid_no_fluid_sample_count": 0,
-        "hibm_velocity_dirichlet_invalid_nonpositive_gap_count": 0,
-        "hibm_velocity_dirichlet_invalid_node_behind_boundary_count": 0,
-        "hibm_velocity_dirichlet_invalid_node_beyond_interior_count": 0,
-        "hibm_velocity_dirichlet_narrow_gap_count": 0,
-        "hibm_velocity_dirichlet_relocated_rows": 0,
-        "hibm_velocity_dirichlet_relocation_merged_rows": 0,
-        "hibm_velocity_dirichlet_relocation_blocked_rows": 0,
-        "hibm_velocity_dirichlet_min_projection_weight": projection_weight,
-        "hibm_velocity_dirichlet_max_projection_weight": projection_weight,
+        "hibm_velocity_dirichlet_authority": "canonical",
+        "hibm_velocity_dirichlet_ledger_generation": 1,
+        "hibm_velocity_dirichlet_authority_registered": True,
+        "hibm_velocity_dirichlet_authority_sealed": True,
+        "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count": 0,
+        "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count": 0,
+        "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio": 0.0,
+        "canonical_velocity_dirichlet_report": device_report,
         "hibm_velocity_dirichlet_row_ledger_snapshot_generation": 1,
         "hibm_velocity_dirichlet_row_ledger_matches_reference": True,
         "hibm_velocity_dirichlet_row_ledger_mismatch_rows": 0,
@@ -974,20 +1011,14 @@ def test_snapshot_accepts_reused_saturated_cleanup_provenance():
     assert terminal["hibm_preassembly_overflow_singleton_cleanup_cell_count"] == 1
 
 
-def test_preflow_snapshot_accepts_legacy_canonical_schema_two_history():
+def test_preflow_snapshot_rejects_removed_canonical_schema_two_history():
     report = _healthy_preflow_report()
     terminal_row = report["preflow_history"][-1]
-    extension_keys = {
-        "direct_geometry_reconstructed_component_count",
-        "direct_geometry_one_sided_component_count",
-        "max_compatible_direct_target_spread_mps",
-        "marker_target_closure",
-    }
     legacy_device_report = {
         key: 0
         for key in (
             solid_mpm_fsi_runner
-            .CANONICAL_HIBM_VELOCITY_DIRICHLET_LEGACY_SCHEMA_TWO_DEVICE_REPORT_KEYS
+            .CANONICAL_HIBM_VELOCITY_DIRICHLET_NUMERIC_DEVICE_REPORT_KEYS
         )
     }
     legacy_device_report.update(
@@ -1027,16 +1058,11 @@ def test_preflow_snapshot_accepts_legacy_canonical_schema_two_history():
         }
     )
 
-    payload = solid_mpm_fsi_runner._preflow_report_snapshot_payload(
-        report,
-        _snapshot_health_config(),
-    )
-
-    restored_device_report = payload["preflow_history"][-1][
-        "canonical_velocity_dirichlet_report"
-    ]
-    assert restored_device_report["schema_version"] == 2
-    assert extension_keys.isdisjoint(restored_device_report)
+    with pytest.raises(ValueError, match="numerical health gate"):
+        solid_mpm_fsi_runner._preflow_report_snapshot_payload(
+            report,
+            _snapshot_health_config(),
+        )
 
 
 def _with_interface_covered_cartesian_pockets(
@@ -1269,67 +1295,19 @@ def test_snapshot_outlet_components_require_exact_componentwise_projection():
         )
 
 
-def test_velocity_dirichlet_report_fields_preserve_reconstruction_diagnostics():
-    report = SimpleNamespace(
-        active_velocity_dirichlet_rows=17,
-        primary_region_active_rows=8,
-        secondary_region_active_rows=7,
-        other_region_active_rows=1,
-        unassigned_region_active_rows=1,
-        max_abs_velocity_mps=3.0,
-        raw_reconstructed_max_abs_velocity_mps=4.0,
-        boundary_velocity_only_row_count=5,
-        invalid_reconstruction_row_count=2,
-        invalid_no_fluid_sample_row_count=1,
-        invalid_nonpositive_gap_row_count=1,
-        invalid_node_behind_boundary_row_count=0,
-        invalid_node_beyond_interior_row_count=0,
-        narrow_gap_boundary_velocity_row_count=3,
-        relocated_row_count=4,
-        relocation_merged_row_count=2,
-        relocation_blocked_row_count=1,
-        min_projection_weight=0.125,
-        max_projection_weight=1.0,
-    )
-
-    fields = solid_mpm_fsi_runner._hibm_velocity_dirichlet_report_fields(report)
-
-    assert fields == {
-        "hibm_velocity_dirichlet_active_rows": 17,
-        "hibm_velocity_dirichlet_primary_region_active_rows": 8,
-        "hibm_velocity_dirichlet_secondary_region_active_rows": 7,
-        "hibm_velocity_dirichlet_other_region_active_rows": 1,
-        "hibm_velocity_dirichlet_unassigned_region_active_rows": 1,
-        "hibm_velocity_dirichlet_max_abs_velocity_mps": 3.0,
-        "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": 4.0,
-        "hibm_velocity_dirichlet_boundary_velocity_only_rows": 5,
-        "hibm_velocity_dirichlet_invalid_reconstruction_count": 2,
-        "hibm_velocity_dirichlet_invalid_no_fluid_sample_count": 1,
-        "hibm_velocity_dirichlet_invalid_nonpositive_gap_count": 1,
-        "hibm_velocity_dirichlet_invalid_node_behind_boundary_count": 0,
-        "hibm_velocity_dirichlet_invalid_node_beyond_interior_count": 0,
-        "hibm_velocity_dirichlet_narrow_gap_count": 3,
-        "hibm_velocity_dirichlet_relocated_rows": 4,
-        "hibm_velocity_dirichlet_relocation_merged_rows": 2,
-        "hibm_velocity_dirichlet_relocation_blocked_rows": 1,
-        "hibm_velocity_dirichlet_min_projection_weight": 0.125,
-        "hibm_velocity_dirichlet_max_projection_weight": 1.0,
-    }
-
-
 def test_flow_advance_publishes_terminal_consistency_velocity_diagnostics():
     project_soft_row_flags: list[bool] = []
     pre_predictor_report = _healthy_hibm_velocity_report(active_rows=1)
-    main_projection_report = {
-        **_healthy_hibm_velocity_report(active_rows=3),
-        "hibm_velocity_dirichlet_relocated_rows": 1,
-    }
-    terminal_consistency_report = {
-        **_healthy_hibm_velocity_report(active_rows=3),
-        "hibm_velocity_dirichlet_max_abs_velocity_mps": 0.75,
-        "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": 1.0,
-        "hibm_velocity_dirichlet_relocated_rows": 1,
-    }
+    main_projection_report = _healthy_hibm_velocity_report(active_rows=3)
+    terminal_consistency_report = _healthy_hibm_velocity_report(active_rows=3)
+    for boundary_report in (main_projection_report, terminal_consistency_report):
+        boundary_report["canonical_velocity_dirichlet_report"].update(
+            {
+                "max_abs_claim_target_mps": 1.0,
+                "max_abs_committed_target_mps": 0.75,
+                "relocated_claim_count": 1,
+            }
+        )
     boundary_reports = iter(
         (
             pre_predictor_report,
@@ -1417,13 +1395,11 @@ def test_flow_advance_publishes_terminal_consistency_velocity_diagnostics():
             reset_pressure=False,
         )
 
-    assert report["hibm_velocity_dirichlet_active_rows"] == 3
-    assert report["hibm_velocity_dirichlet_max_abs_velocity_mps"] == 0.75
-    assert (
-        report["hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps"]
-        == 1.0
-    )
-    assert report["hibm_velocity_dirichlet_relocated_rows"] == 1
+    device_report = report["canonical_velocity_dirichlet_report"]
+    assert device_report["final_active_component_count"] == 3
+    assert device_report["max_abs_committed_target_mps"] == 0.75
+    assert device_report["max_abs_claim_target_mps"] == 1.0
+    assert device_report["relocated_claim_count"] == 1
     assert project_soft_row_flags == [False, True]
 
 
@@ -1601,94 +1577,28 @@ def test_sustained_boundary_predictor_requires_explicit_topology_reuse_before_ma
 
 
 @pytest.mark.parametrize(
-    "missing_field",
+    ("device_override", "reason_fragment"),
     (
-        "velocity_dirichlet_boundary_enforcement_weight",
-        "velocity_dirichlet_boundary_marker_region_id",
-        "velocity_dirichlet_boundary_hard_fixed_component_mask",
-        "velocity_dirichlet_boundary_external_exact_component_mask",
-        "velocity_dirichlet_boundary_owned_row",
-    ),
-)
-def test_host_feedback_fallback_requires_complete_boundary_ledger_before_clearing(
-    missing_field,
-):
-    fluid = _fake_fluid()
-    clear_calls: list[bool] = []
-    fluid.clear_velocity_constraints = lambda: clear_calls.append(True)
-    delattr(fluid, missing_field)
-
-    with pytest.raises(RuntimeError, match=missing_field):
-        solid_mpm_fsi_runner._apply_marker_feedback_to_fluid_host_fallback(
-            SimpleNamespace(marker_count=0),
-            fluid,
-            SimpleNamespace(preserve_marker_velocity_constraints=True),
-            feedback_available=False,
-            previous_feedback_constraint_cells=set(),
-        )
-
-    assert clear_calls == []
-
-
-def test_host_feedback_fallback_writes_back_every_boundary_ledger_field():
-    fluid = _fake_fluid()
-    fluid.clear_velocity_constraints = lambda: None
-    ledger_field_names = (
-        "velocity_dirichlet_boundary_active",
-        "velocity_dirichlet_boundary_value_mps",
-        "velocity_dirichlet_boundary_projection_weight",
-        "velocity_dirichlet_boundary_enforcement_weight",
-        "velocity_dirichlet_boundary_marker_region_id",
-        "velocity_dirichlet_boundary_hard_fixed_component_mask",
-        "velocity_dirichlet_boundary_external_exact_component_mask",
-        "velocity_dirichlet_boundary_owned_row",
-    )
-
-    solid_mpm_fsi_runner._apply_marker_feedback_to_fluid_host_fallback(
-        SimpleNamespace(marker_count=0),
-        fluid,
-        SimpleNamespace(preserve_marker_velocity_constraints=True),
-        feedback_available=False,
-        previous_feedback_constraint_cells={(0, 0, 0)},
-    )
-
-    assert {
-        name: getattr(fluid, name).from_numpy_calls for name in ledger_field_names
-    } == {name: 1 for name in ledger_field_names}
-
-
-@pytest.mark.parametrize(
-    ("override", "reason_fragment"),
-    (
-        ({"hibm_velocity_dirichlet_invalid_reconstruction_count": 1}, "invalid"),
-        ({"hibm_velocity_dirichlet_narrow_gap_count": 1}, "narrow"),
-        ({"hibm_velocity_dirichlet_min_projection_weight": np.nan}, "weight"),
-        ({"hibm_velocity_dirichlet_max_projection_weight": 1.01}, "weight"),
+        ({"invalid_mask_bits_count": 1}, "invariant"),
+        ({"nonfinite_active_value_count": 1}, "invariant"),
+        ({"min_active_pressure_mobility": np.nan}, "non-finite"),
+        ({"max_active_pressure_mobility": 1.01}, "range"),
         (
             {
-                "hibm_velocity_dirichlet_min_projection_weight": 0.75,
-                "hibm_velocity_dirichlet_max_projection_weight": 0.5,
+                "min_active_enforcement_weight": 0.75,
+                "max_active_enforcement_weight": 0.5,
             },
-            "weight",
+            "range",
         ),
-        ({"hibm_velocity_dirichlet_boundary_velocity_only_rows": 18}, "row count"),
-        ({"hibm_velocity_dirichlet_relocation_merged_rows": 1}, "relocation"),
-        ({"hibm_velocity_dirichlet_relocation_blocked_rows": 1}, "relocation"),
+        ({"relocation_blocked_count": 1}, "invariant"),
     ),
 )
 def test_velocity_dirichlet_health_failure_rejects_unphysical_reports(
-    override,
+    device_override,
     reason_fragment,
 ):
-    report = {
-        **_healthy_hibm_velocity_report(
-            active_rows=17,
-            boundary_velocity_only_rows=5,
-        ),
-        "hibm_velocity_dirichlet_min_projection_weight": 0.125,
-        "hibm_velocity_dirichlet_max_projection_weight": 1.0,
-        **override,
-    }
+    report = _healthy_hibm_velocity_report(active_rows=17)
+    report["canonical_velocity_dirichlet_report"].update(device_override)
 
     failure = solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(report)
 
@@ -1704,11 +1614,6 @@ def test_velocity_only_consistency_reuse_rejects_changed_row_topology():
             "not reused",
         ),
         ({"hibm_preassembly_topology_mutated": True}, "mutated"),
-        ({"hibm_velocity_dirichlet_active_rows": 4}, "active_rows"),
-        (
-            {"hibm_velocity_dirichlet_min_projection_weight": 0.25},
-            "min_projection_weight",
-        ),
     )
 
     for override, reason in cases:
@@ -1723,11 +1628,10 @@ def test_velocity_only_consistency_reuse_rejects_changed_row_topology():
 @pytest.mark.parametrize(
     "mismatch_field",
     (
-        "active_indices",
-        "projection_weight",
-        "enforcement_weight",
-        "target_velocity_mps",
-        "owned_row",
+        "active_component_mask",
+        "component_enforcement_weight",
+        "value_mps",
+        "owned_component_mask",
         "hard_fixed_component_mask",
         "external_exact_component_mask",
     ),
@@ -1803,7 +1707,7 @@ def test_velocity_only_consistency_reuse_requires_complete_row_ledger_diagnostic
         )
 
 
-def test_velocity_dirichlet_health_allows_disabled_or_boundary_only_soft_rows():
+def test_velocity_dirichlet_health_allows_disabled_or_canonical_components():
     assert (
         solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
             {"hibm_sharp_marker_boundary_enabled": False}
@@ -1812,10 +1716,7 @@ def test_velocity_dirichlet_health_allows_disabled_or_boundary_only_soft_rows():
     )
     assert (
         solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
-            _healthy_hibm_velocity_report(
-                active_rows=17,
-                boundary_velocity_only_rows=17,
-            )
+            _healthy_hibm_velocity_report(active_rows=17)
         )
         is None
     )
@@ -1823,7 +1724,7 @@ def test_velocity_dirichlet_health_allows_disabled_or_boundary_only_soft_rows():
 
 @pytest.mark.parametrize(
     "missing_key",
-    solid_mpm_fsi_runner.HIBM_VELOCITY_DIRICHLET_REPORT_KEYS,
+    solid_mpm_fsi_runner.CANONICAL_HIBM_VELOCITY_DIRICHLET_RUNNER_REPORT_KEYS,
 )
 def test_strict_velocity_health_requires_complete_report_keys(missing_key):
     report = _healthy_hibm_velocity_report()
@@ -1836,37 +1737,21 @@ def test_strict_velocity_health_requires_complete_report_keys(missing_key):
 
 
 @pytest.mark.parametrize(
-    ("override", "reason_fragment"),
+    ("device_override", "reason_fragment"),
     (
-        ({"hibm_velocity_dirichlet_primary_region_active_rows": 0}, "region"),
-        ({"hibm_velocity_dirichlet_relocated_rows": -1}, "relocat"),
-        ({"hibm_velocity_dirichlet_relocation_merged_rows": -1}, "relocat"),
-        ({"hibm_velocity_dirichlet_relocation_blocked_rows": -1}, "relocat"),
-        ({"hibm_velocity_dirichlet_max_abs_velocity_mps": np.nan}, "velocity"),
-        ({"hibm_velocity_dirichlet_max_abs_velocity_mps": -1.0}, "velocity"),
-        (
-            {
-                "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": (
-                    np.inf
-                )
-            },
-            "velocity",
-        ),
-        (
-            {
-                "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": (
-                    -1.0
-                )
-            },
-            "velocity",
-        ),
+        ({"primary_region_active_component_count": 0}, "region partition"),
+        ({"relocated_claim_count": -1}, "negative"),
+        ({"relocation_merged_count": -1}, "negative"),
+        ({"max_abs_committed_target_mps": np.nan}, "non-finite"),
+        ({"max_abs_committed_target_mps": -1.0}, "negative"),
     ),
 )
-def test_strict_velocity_health_validates_region_relocation_and_velocity_extrema(
-    override,
+def test_strict_velocity_health_validates_component_report(
+    device_override,
     reason_fragment,
 ):
-    report = {**_healthy_hibm_velocity_report(), **override}
+    report = _healthy_hibm_velocity_report()
+    report["canonical_velocity_dirichlet_report"].update(device_override)
 
     failure = solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(report)
 
@@ -1877,7 +1762,7 @@ def test_strict_velocity_health_validates_region_relocation_and_velocity_extrema
 def test_snapshot_and_stationary_certificate_require_complete_velocity_diagnostics():
     snapshot_report = _healthy_preflow_report()
     del snapshot_report["preflow_history"][-1][
-        "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps"
+        "canonical_velocity_dirichlet_report"
     ]
     with pytest.raises(ValueError, match="numerical health gate"):
         solid_mpm_fsi_runner._preflow_report_snapshot_payload(
@@ -1887,7 +1772,7 @@ def test_snapshot_and_stationary_certificate_require_complete_velocity_diagnosti
 
     stationary_report = _windowed_stationary_report()
     del stationary_report["preflow_history"][-1][
-        "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps"
+        "canonical_velocity_dirichlet_report"
     ]
     certificate = solid_mpm_fsi_runner._preflow_windowed_stationary_report(
         stationary_report["preflow_history"],
@@ -1901,13 +1786,15 @@ def test_snapshot_and_stationary_certificate_require_complete_velocity_diagnosti
 @pytest.mark.parametrize(
     "field_name",
     (
-        "hibm_velocity_dirichlet_invalid_reconstruction_count",
-        "hibm_velocity_dirichlet_narrow_gap_count",
+        "nonfinite_geometry_count",
+        "degenerate_geometry_count",
     ),
 )
-def test_preflow_snapshot_rejects_unhealthy_velocity_reconstruction(field_name):
+def test_preflow_snapshot_rejects_unhealthy_component_geometry(field_name):
     report = _healthy_preflow_report()
-    report["preflow_history"][-1][field_name] = 1
+    report["preflow_history"][-1]["canonical_velocity_dirichlet_report"][
+        field_name
+    ] = 1
 
     with pytest.raises(ValueError, match="numerical health gate"):
         solid_mpm_fsi_runner._preflow_report_snapshot_payload(

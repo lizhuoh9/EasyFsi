@@ -12,6 +12,10 @@ from simulation_core import (
     TaichiRuntimeConfig,
 )
 from simulation_core.solids.neo_hookean_mpm import NeoHookeanMpmState
+from simulation_core.coupling.hibm_mpm.interface_state import (
+    capture_marker_interface_state,
+    restore_marker_interface_state,
+)
 
 
 RUNTIME = TaichiRuntimeConfig(arch="cuda")
@@ -116,6 +120,36 @@ class HibmMpmTractionProbeOriginDecouplingTests(unittest.TestCase):
             atol=1.0e-6,
         )
         np.testing.assert_allclose(origin, (0.51, 0.4, 0.5), atol=1.0e-6)
+
+    def test_trial_snapshot_restores_explicit_probe_and_retired_geometry(self):
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1, runtime=RUNTIME)
+        markers.load_markers(
+            positions_m=((0.5, 0.5, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(0.25,),
+            region_ids=(101,),
+            pressure_probe_origins_m=((0.5, 0.5, 0.4),),
+        )
+        step_base = capture_marker_interface_state(markers)
+
+        markers.x_gamma_m[0] = (0.6, 0.5, 0.5)
+        markers.pressure_probe_origin_m[0] = (0.6, 0.5, 0.4)
+        markers._retire_active_marker_geometry()
+        restore_marker_interface_state(markers, step_base)
+
+        self.assertEqual(markers.marker_count, 1)
+        self.assertEqual(markers.projection_vertex_count, 1)
+        np.testing.assert_allclose(
+            markers.x_gamma_m.to_numpy()[0],
+            (0.5, 0.5, 0.5),
+            atol=1.0e-6,
+        )
+        np.testing.assert_allclose(
+            markers.pressure_probe_origin_m.to_numpy()[0],
+            (0.5, 0.5, 0.4),
+            atol=1.0e-6,
+        )
 
     def test_invalid_probe_origins_fail_fast(self):
         markers, _ = _single_marker_fixture()

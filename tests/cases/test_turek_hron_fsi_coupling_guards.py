@@ -37,8 +37,8 @@ class TurekHronFsiCouplingControlGuardTests(unittest.TestCase):
 
     # -- fsi_coupling_iterations -------------------------------------------
 
-    def test_coupling_iterations_accepts_one_and_many(self) -> None:
-        _validate_fsi_coupling_controls(_config(fsi_coupling_iterations=1))
+    def test_coupling_iterations_accepts_two_and_many(self) -> None:
+        _validate_fsi_coupling_controls(_config(fsi_coupling_iterations=2))
         _validate_fsi_coupling_controls(_config(fsi_coupling_iterations=12))
 
     def test_coupling_iterations_rejects_zero_instead_of_silent_clamp(self) -> None:
@@ -68,44 +68,23 @@ class TurekHronFsiCouplingControlGuardTests(unittest.TestCase):
                         _config(fsi_coupling_tolerance=bad)
                     )
 
-    # -- fsi_aitken_initial_relaxation -------------------------------------
+    # -- fsi_coupling_initial_relaxation -----------------------------------
 
-    def test_aitken_relaxation_accepts_full_valid_range(self) -> None:
-        for good in (0.0, 0.5, 1.5):
+    def test_initial_relaxation_accepts_valid_range(self) -> None:
+        for good in (0.1, 0.5, 1.0):
             with self.subTest(value=good):
                 _validate_fsi_coupling_controls(
-                    _config(fsi_aitken_initial_relaxation=good)
+                    _config(fsi_coupling_initial_relaxation=good)
                 )
 
-    def test_aitken_relaxation_rejects_out_of_range_and_non_finite(self) -> None:
-        for bad in (-0.1, 1.6, float("nan"), float("-inf"), "half"):
+    def test_initial_relaxation_rejects_out_of_range_and_non_finite(self) -> None:
+        for bad in (0.0, -0.1, 1.1, float("nan"), float("-inf"), "half"):
             with self.subTest(value=bad):
                 with self.assertRaisesRegex(
-                    ValueError, "fsi_aitken_initial_relaxation"
+                    ValueError, "fsi_coupling_initial_relaxation"
                 ):
                     _validate_fsi_coupling_controls(
-                        _config(fsi_aitken_initial_relaxation=bad)
-                    )
-
-    # -- fsi_coupling_accelerator ------------------------------------------
-
-    def test_accelerator_accepts_known_names_with_normalization(self) -> None:
-        for good in ("aitken", "iqn_ils", " AITKEN ", "IQN_ILS"):
-            with self.subTest(value=good):
-                _validate_fsi_coupling_controls(
-                    _config(fsi_coupling_accelerator=good)
-                )
-
-    def test_accelerator_rejects_unknown_names_instead_of_silent_fallback(
-        self,
-    ) -> None:
-        for bad in ("iqn-ils", "newton", ""):
-            with self.subTest(value=bad):
-                with self.assertRaisesRegex(
-                    ValueError, "fsi_coupling_accelerator"
-                ):
-                    _validate_fsi_coupling_controls(
-                        _config(fsi_coupling_accelerator=bad)
+                        _config(fsi_coupling_initial_relaxation=bad)
                     )
 
     # -- marker_reseed_interval_steps --------------------------------------

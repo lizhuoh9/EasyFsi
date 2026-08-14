@@ -9,10 +9,14 @@ from benchmarks.official import solid_mpm_fsi_runner
 
 def _velocity_dirichlet_report(seed: int) -> dict[str, object]:
     return {
-        key: float(seed) + 0.25
-        if key.endswith("_mps") or key.endswith("_projection_weight")
-        else seed
-        for key in solid_mpm_fsi_runner.HIBM_VELOCITY_DIRICHLET_REPORT_KEYS
+        "hibm_velocity_dirichlet_authority": "canonical",
+        "hibm_velocity_dirichlet_ledger_generation": seed,
+        "hibm_velocity_dirichlet_authority_registered": True,
+        "hibm_velocity_dirichlet_authority_sealed": True,
+        "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count": seed,
+        "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count": seed,
+        "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio": 0.25,
+        "canonical_velocity_dirichlet_report": {"schema_version": 5},
     }
 
 
@@ -25,10 +29,14 @@ def test_velocity_dirichlet_mapping_can_qualify_post_solid_observer_stage() -> N
     )
 
     expected = {
-        key.replace(
-            "hibm_velocity_dirichlet_",
-            "hibm_observer_velocity_dirichlet_",
-            1,
+        (
+            "hibm_observer_canonical_velocity_dirichlet_report"
+            if key == "canonical_velocity_dirichlet_report"
+            else key.replace(
+                "hibm_velocity_dirichlet_",
+                "hibm_observer_velocity_dirichlet_",
+                1,
+            )
         ): value
         for key, value in observer_report.items()
     }
@@ -40,9 +48,9 @@ def test_fsi_step_history_keeps_flow_and_observer_stage_diagnostics() -> None:
     """The saved history must describe the same post-solid state as its snapshot."""
 
     function_source = textwrap.dedent(
-        inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
-        )
+            inspect.getsource(
+                solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
+            )
     )
     tree = ast.parse(function_source)
     mapping_calls: set[tuple[str, str | None]] = set()

@@ -1,24 +1,19 @@
 from __future__ import annotations
 
 import inspect
-import json
 import unittest
 from pathlib import Path
 
 import numpy as np
+import simulation_core
 
 from simulation_core import (
     AxisAlignedBoundary,
     CartesianGrid,
-    FSI_COUPLING_MODE_HIBM_MPM_SHARP,
-    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
     FluidDomainSpec,
-    FluidDomain,
+    ForceBalanceReport,
     GradedGridSpec,
     HibmMpmSurfaceMarkers,
-    InterfaceReactionFixedPointResult,
-    InterfaceReactionTargetEvaluation,
-    InterfaceReactionUpdate,
     NeoHookeanMaterial,
     RefinementRegion,
     RegionPairInterfaceReactionTarget,
@@ -32,15 +27,11 @@ from simulation_core import (
     advance_hibm_mpm_sharp_mpm_step,
     advance_hibm_mpm_sharp_neo_hookean_step,
     assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
+    action_reaction_balance,
     build_graded_grid,
-    fsi_coupling_mode_report,
     hibm_mpm_sharp_step_summary,
     hibm_mpm_paper_requirements,
     region_pair_interface_reaction_forces,
-    relax_interface_reaction_forces,
-    require_implemented_fsi_coupling_mode,
-    solve_and_apply_interface_reaction_step,
-    solve_interface_reaction_fixed_point,
 )
 from simulation_core.geometry_tools import (
     infer_uv_sphere_resolution,
@@ -152,30 +143,45 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertNotIn(".to_numpy(", source)
         self.assertNotIn(".from_numpy(", source)
 
-    def test_hibm_no_slip_dirichlet_uses_fluid_boundary_rows_not_legacy_constraints(
+    def test_hibm_no_slip_uses_the_canonical_component_face_ledger(
         self,
     ) -> None:
         hibm_source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
         fluid_source = FLUID_SOLVER_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("assemble_velocity_dirichlet_boundary_rows", hibm_source)
-        self.assertIn("velocity_dirichlet_boundary_active", fluid_source)
-        self.assertIn("_apply_velocity_dirichlet_boundary_rows_kernel(", fluid_source)
-        self.assertIn("preserve_projected_rows: bool = False", fluid_source)
-        self.assertIn("1 if preserve_projected_rows else 0", fluid_source)
+        self.assertIn(
+            "_assemble_and_seal_hibm_velocity_component_face_ledger",
+            hibm_source,
+        )
+        self.assertIn(
+            "assemble_velocity_dirichlet_component_face_ledger",
+            hibm_source,
+        )
+        self.assertIn("velocity_dirichlet_boundary_active_component_mask", fluid_source)
+        self.assertIn(
+            "prepare_and_seal_velocity_dirichlet_component_ledger",
+            fluid_source,
+        )
+        self.assertNotIn("assemble_velocity_dirichlet_boundary_rows", hibm_source)
         self.assertNotIn("velocity_constraint_blend", hibm_source)
         self.assertNotIn("solid_mobility_ratio", hibm_source)
 
     def test_hibm_surface_feedback_is_marker_to_mpm_taichi_field_path(self) -> None:
+        feedback_methods = (
+            HibmMpmSurfaceMarkers.update_surface_feedback_from_mpm_particles,
+            HibmMpmSurfaceMarkers.update_surface_feedback_from_mpm_surface_particles,
+        )
         source = "\n".join(
             inspect.getsource(method)
             for method in (
                 HibmMpmSurfaceMarkers._load_markers_from_surface_fields_kernel,
                 HibmMpmSurfaceMarkers._load_markers_from_surface_velocity_fields_kernel,
                 HibmMpmSurfaceMarkers.load_markers_from_surface_fields,
-                HibmMpmSurfaceMarkers.update_surface_feedback_from_mpm_particles,
-                HibmMpmSurfaceMarkers.update_surface_feedback_from_mpm_surface_particles,
+                *feedback_methods,
             )
+        )
+        feedback_source = "\n".join(
+            inspect.getsource(method) for method in feedback_methods
         )
 
         self.assertIn("load_markers_from_surface_fields", source)
@@ -194,8 +200,8 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertIn("particle_area_m2", source)
         self.assertIn("report_surface_feedback_invalid_marker_count", source)
         self.assertIn("geometry_updated_marker_count", source)
-        self.assertNotIn(".to_numpy(", source)
-        self.assertNotIn(".from_numpy(", source)
+        self.assertNotIn(".to_numpy(", feedback_source)
+        self.assertNotIn(".from_numpy(", feedback_source)
 
     def test_hibm_sharp_load_assembly_is_core_marker_to_mpm_path(self) -> None:
         source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
@@ -259,50 +265,23 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertNotIn('"classify_hibm_near_boundary_nodes"', init_source)
         self.assertNotIn('"compute_hibm_surface_tractions"', init_source)
 
-    def test_hibm_mpm_mode_report_does_not_relabel_legacy_coupling(self) -> None:
-        legacy_report = fsi_coupling_mode_report(FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED)
-        sharp_report = fsi_coupling_mode_report(FSI_COUPLING_MODE_HIBM_MPM_SHARP)
-
-        self.assertTrue(legacy_report["legacy"])
-        self.assertTrue(legacy_report["implemented"])
-        self.assertFalse(legacy_report["paper_hibm_mpm"])
-        self.assertTrue(legacy_report["region_pair_reaction_diagnostic_only"])
-        self.assertNotIn("main/tail", legacy_report["primary_coupling_variable"])
-        self.assertNotIn("main_tail", json.dumps(legacy_report))
-        self.assertEqual(legacy_report["solver_layer"], "simulation_core")
-
-        self.assertFalse(sharp_report["legacy"])
-        self.assertTrue(sharp_report["implemented"])
-        self.assertTrue(sharp_report["paper_hibm_mpm"])
-        self.assertTrue(sharp_report["core_runner_available"])
-        self.assertTrue(sharp_report["case_runner_available"])
-        self.assertFalse(sharp_report["phase5_validation_complete"])
-        self.assertEqual(sharp_report["missing"], ["long-run validation"])
-        self.assertNotIn("nozzle", json.dumps(sharp_report).lower())
-        self.assertNotIn("surface markers", sharp_report["missing"])
-        self.assertNotIn("pressure Neumann matrix rows", sharp_report["missing"])
-
-    def test_hibm_mpm_sharp_mode_is_runnable_but_not_phase5_validated(self) -> None:
-        report = require_implemented_fsi_coupling_mode(FSI_COUPLING_MODE_HIBM_MPM_SHARP)
-
-        self.assertEqual(report["mode"], FSI_COUPLING_MODE_HIBM_MPM_SHARP)
-        self.assertTrue(report["implemented"])
-        self.assertTrue(report["core_runner_available"])
-        self.assertTrue(report["case_runner_available"])
-        self.assertTrue(report["paper_hibm_mpm"])
-        self.assertFalse(report["phase5_validation_complete"])
-        self.assertEqual(report["missing"], ["long-run validation"])
-
-        legacy_report = require_implemented_fsi_coupling_mode(
-            FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED
+    def test_hibm_mpm_mode_selector_api_is_deleted(self) -> None:
+        self.assertFalse(
+            Path("simulation_core/coupling/hibm_mpm/modes.py").exists()
         )
-        self.assertEqual(
-            legacy_report["mode"],
-            FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
-        )
+        for name in (
+            "FSI_COUPLING_MODE_CHOICES",
+            "FSI_COUPLING_MODE_HIBM_MPM_SHARP",
+            "fsi_coupling_mode_report",
+            "require_implemented_fsi_coupling_mode",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(simulation_core, name))
 
     def test_phase0_paper_vs_code_table_lists_missing_hibm_mpm_requirements(self) -> None:
-        table = Path("HIBM_MPM_PAPER_VS_CODE.md").read_text(encoding="utf-8")
+        table = Path("docs/validation/HIBM_MPM_PAPER_VS_CODE.md").read_text(
+            encoding="utf-8"
+        )
 
         required_terms = (
             "IB node search",
@@ -363,28 +342,53 @@ class SimulationCorePackageTests(unittest.TestCase):
         for name in obsolete_public_names:
             self.assertFalse(hasattr(simulation_core, name), name)
 
-    def test_core_package_exports_no_old_feedback_api(self) -> None:
-        exported_primitives = (
-            InterfaceReactionFixedPointResult,
-            InterfaceReactionTargetEvaluation,
-            InterfaceReactionUpdate,
-            RegionPairInterfaceReactionTarget,
-            region_pair_interface_reaction_forces,
-            relax_interface_reaction_forces,
-            solve_and_apply_interface_reaction_step,
-            solve_interface_reaction_fixed_point,
-        )
-        for primitive in exported_primitives:
-            self.assertTrue(callable(primitive), primitive)
-
+    def test_core_package_exports_only_stateless_interface_force_api(self) -> None:
         import simulation_core
 
-        self.assertFalse(hasattr(simulation_core, "FeedbackUpdate"))
-        self.assertFalse(hasattr(simulation_core, "FeedbackTargetEvaluation"))
-        self.assertFalse(hasattr(simulation_core, "FeedbackFixedPointResult"))
-        self.assertFalse(hasattr(simulation_core, "relax_feedback_forces"))
-        self.assertFalse(hasattr(simulation_core, "solve_feedback_fixed_point"))
-        self.assertFalse(hasattr(simulation_core, "solve_interface_reaction_step"))
+        report = action_reaction_balance((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0))
+        target = region_pair_interface_reaction_forces(
+            primary_fluid_force_n=(1.0, 2.0, 3.0),
+            secondary_fluid_force_n=(-4.0, -5.0, -6.0),
+        )
+
+        self.assertIsInstance(report, ForceBalanceReport)
+        self.assertIsInstance(target, RegionPairInterfaceReactionTarget)
+        expected_exports = {
+            "ForceBalanceReport": ForceBalanceReport,
+            "RegionPairInterfaceReactionTarget": RegionPairInterfaceReactionTarget,
+            "action_reaction_balance": action_reaction_balance,
+            "region_pair_interface_reaction_forces": (
+                region_pair_interface_reaction_forces
+            ),
+        }
+        for name, exported_object in expected_exports.items():
+            with self.subTest(name=name):
+                self.assertIs(getattr(simulation_core, name), exported_object)
+
+        obsolete_public_names = (
+            "FeedbackUpdate",
+            "FeedbackTargetEvaluation",
+            "FeedbackFixedPointResult",
+            "relax_feedback_forces",
+            "solve_feedback_fixed_point",
+            "solve_interface_reaction_step",
+            "INTERFACE_REACTION_SOLVER_CHOICES",
+            "InterfaceReactionFixedPointResult",
+            "InterfaceReactionRelaxationState",
+            "InterfaceReactionStepUpdate",
+            "InterfaceReactionTargetEvaluation",
+            "InterfaceReactionUpdate",
+            "aitken_relaxation_factor",
+            "interface_reaction_force",
+            "relax_interface_reaction_forces",
+            "robin_neumann_impedance_force",
+            "solve_and_apply_interface_reaction_step",
+            "solve_interface_reaction_fixed_point",
+            "update_interface_reaction_for_next_step",
+        )
+        for name in obsolete_public_names:
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(simulation_core, name), name)
 
     def test_orient_faces_outward_uses_mesh_center_for_translated_meshes(self) -> None:
         vertices = np.array(
@@ -559,7 +563,7 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertEqual(root_squid_directories, [])
 
     def test_core_usage_doc_has_no_deleted_module_or_case_rendering_paths(self) -> None:
-        source = Path("SIMULATION_CORE_USAGE.md").read_text(encoding="utf-8")
+        source = Path("docs/SIMULATION_CORE_USAGE.md").read_text(encoding="utf-8")
         forbidden_tokens = (
             "device_immersed_boundary.py",
             "surface_coupling.py",
@@ -576,7 +580,7 @@ class SimulationCorePackageTests(unittest.TestCase):
             self.assertNotIn(token, source)
 
     def test_core_usage_doc_describes_velocity_damping_as_nonconservative(self) -> None:
-        source = Path("SIMULATION_CORE_USAGE.md").read_text(encoding="utf-8")
+        source = Path("docs/SIMULATION_CORE_USAGE.md").read_text(encoding="utf-8")
 
         self.assertIn("velocity_damping` defaults to `1.0`", source)
         self.assertIn("velocity_damping < 1", source)

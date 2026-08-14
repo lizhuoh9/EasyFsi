@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
+from numbers import Integral
 
 import taichi as ti
 
@@ -23,6 +24,7 @@ class TaichiRuntimeConfig:
 _INITIALIZED = False
 _INITIALIZED_ARCH: str | None = None
 _INITIALIZED_FP: str | None = None
+_INITIALIZED_RANDOM_SEED: int | None = None
 _INITIALIZED_OFFLINE_CACHE: bool | None = None
 _INITIALIZED_OFFLINE_CACHE_FILE_PATH: str | None = None
 _INIT_LOCK = threading.RLock()
@@ -30,7 +32,7 @@ _INIT_LOCK = threading.RLock()
 
 def _environment_flag(name: str) -> bool | None:
     value = os.environ.get(name)
-    if value is None:
+    if value is None or value == "":
         return None
     normalized = value.strip().lower()
     if normalized in {"1", "true", "yes", "on"}:
@@ -42,24 +44,55 @@ def _environment_flag(name: str) -> bool | None:
     )
 
 
+def _normalized_cache_path(value: object, source: str) -> str:
+    try:
+        path = os.fspath(value)
+    except TypeError as exc:
+        raise ValueError(f"{source} must be a filesystem path") from exc
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError(f"{source} must be a non-blank filesystem path")
+    return os.path.normcase(
+        os.path.abspath(os.path.expanduser(path))
+    )
+
+
 def _requested_offline_cache(
     config: TaichiRuntimeConfig,
-) -> tuple[bool | None, str | None]:
+) -> tuple[bool, str | None]:
     offline_cache = config.offline_cache
+    if offline_cache is not None and not isinstance(offline_cache, bool):
+        raise ValueError("offline_cache must be a bool or None")
     if offline_cache is None:
         offline_cache = _environment_flag(
             "SIMULATION_TAICHI_OFFLINE_CACHE"
         )
-    offline_cache_file_path = config.offline_cache_file_path
-    if offline_cache_file_path is None:
+    if offline_cache is None:
+        offline_cache = _environment_flag("TI_OFFLINE_CACHE")
+    if offline_cache is None:
+        # Match Taichi's frontend default and make it explicit to ti.init.
+        offline_cache = True
+
+    if config.offline_cache_file_path is not None:
+        normalized_path = _normalized_cache_path(
+            config.offline_cache_file_path,
+            "offline_cache_file_path",
+        )
+    else:
         offline_cache_file_path = os.environ.get(
             "SIMULATION_TAICHI_OFFLINE_CACHE_FILE_PATH"
         )
-    normalized_path = (
-        os.path.abspath(os.path.expanduser(str(offline_cache_file_path)))
-        if offline_cache_file_path
-        else None
-    )
+        path_source = "SIMULATION_TAICHI_OFFLINE_CACHE_FILE_PATH"
+        if offline_cache_file_path in (None, ""):
+            offline_cache_file_path = os.environ.get(
+                "TI_OFFLINE_CACHE_FILE_PATH"
+            )
+            path_source = "TI_OFFLINE_CACHE_FILE_PATH"
+        normalized_path = None
+        if offline_cache_file_path not in (None, ""):
+            normalized_path = _normalized_cache_path(
+                offline_cache_file_path,
+                path_source,
+            )
     return offline_cache, normalized_path
 
 
@@ -67,7 +100,8 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
     """Initialize Taichi once for the simulation core.
 
     The first call wins; later calls are no-ops only when they request the
-    same architecture, floating-point mode, and offline-cache identity.
+    same architecture, floating-point mode, random seed, and offline-cache
+    identity.
     Conflicting requests fail instead of producing misleading provenance.
     """
 
@@ -82,10 +116,16 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
         raise ValueError(
             f"unsupported Taichi default_fp: {cfg.default_fp!r}; expected one of {_SUPPORTED_FPS}"
         )
+    if isinstance(cfg.random_seed, bool) or not isinstance(
+        cfg.random_seed, Integral
+    ):
+        raise ValueError("random_seed must be an integer")
+    requested_random_seed = int(cfg.random_seed)
 
     offline_cache, offline_cache_file_path = _requested_offline_cache(cfg)
 
     global _INITIALIZED, _INITIALIZED_ARCH, _INITIALIZED_FP
+    global _INITIALIZED_RANDOM_SEED
     global _INITIALIZED_OFFLINE_CACHE
     global _INITIALIZED_OFFLINE_CACHE_FILE_PATH
     with _INIT_LOCK:
@@ -101,6 +141,12 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
                     "Taichi is already initialized with "
                     f"default_fp={_INITIALIZED_FP!r}; cannot re-initialize with "
                     f"default_fp={requested_fp!r}"
+                )
+            if requested_random_seed != _INITIALIZED_RANDOM_SEED:
+                raise ValueError(
+                    "Taichi is already initialized with "
+                    f"random_seed={_INITIALIZED_RANDOM_SEED!r}; cannot "
+                    f"re-initialize with random_seed={requested_random_seed!r}"
                 )
             initialized_cache_identity = (
                 _INITIALIZED_OFFLINE_CACHE,
@@ -130,11 +176,12 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
         ti.init(
             arch=arch,
             default_fp=default_fp,
-            random_seed=cfg.random_seed,
+            random_seed=requested_random_seed,
             **taichi_kwargs,
         )
         _INITIALIZED = True
         _INITIALIZED_ARCH = requested_arch
         _INITIALIZED_FP = requested_fp
+        _INITIALIZED_RANDOM_SEED = requested_random_seed
         _INITIALIZED_OFFLINE_CACHE = offline_cache
         _INITIALIZED_OFFLINE_CACHE_FILE_PATH = offline_cache_file_path

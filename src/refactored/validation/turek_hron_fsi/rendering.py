@@ -40,10 +40,11 @@ REQUIRED_FLOW_SNAPSHOT_FIELDS = (
     "beam_marker_displacement_xyz_m",
     "time_s",
 )
-_SEQUENCE_ARRAY_FIELDS = (
+_SEQUENCE_FIELDS = (
     ("physical x grid", "physical_x_centers_m"),
     ("y grid", "y_centers_m"),
     ("grid_nodes", "grid_nodes"),
+    ("span_index", "span_index"),
     ("cell_spacing_m", "cell_spacing_m"),
     ("beam rest geometry", "beam_rest_xyz_m"),
 )
@@ -361,8 +362,8 @@ def _sequence_reference(
     frame: FlowSnapshotFrame,
 ) -> tuple[tuple[str, np.ndarray], ...]:
     return tuple(
-        (label, getattr(frame, attribute))
-        for label, attribute in _SEQUENCE_ARRAY_FIELDS
+        (label, np.asarray(getattr(frame, attribute)))
+        for label, attribute in _SEQUENCE_FIELDS
     )
 
 
@@ -378,9 +379,9 @@ def _validate_frame_against_reference(
         )
     for (label, expected), (_, attribute) in zip(
         reference,
-        _SEQUENCE_ARRAY_FIELDS,
+        _SEQUENCE_FIELDS,
     ):
-        actual = getattr(frame, attribute)
+        actual = np.asarray(getattr(frame, attribute))
         if actual.shape != expected.shape or not np.allclose(
             actual,
             expected,

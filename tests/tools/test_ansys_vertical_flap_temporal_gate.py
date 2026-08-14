@@ -230,6 +230,28 @@ class AnsysVerticalFlapTemporalGateTests(unittest.TestCase):
             report["flow_temporal_fail_reasons"],
         )
 
+    def test_strict_gate_requires_the_complete_post_warmup_sequence(self):
+        history = _history(step_count=5)
+        for item, step in zip(history, range(96, 101), strict=True):
+            item["step"] = step
+
+        flow_report = gates.classify_flow_temporal(_row(), history)
+        combined_report = gates.classify_combined_temporal(_row(), history)
+
+        self.assertEqual(flow_report["flow_temporal_status"], "flow_temporal_failed")
+        self.assertEqual(
+            combined_report["temporal_candidate_status"],
+            "temporal_failed",
+        )
+        self.assertIn(
+            "post_warmup_starts_at_96_expected_6",
+            flow_report["flow_temporal_fail_reasons"],
+        )
+        self.assertIn(
+            "post_warmup_starts_at_96_expected_6",
+            combined_report["temporal_fail_reasons"],
+        )
+
     def test_missing_history_is_not_applicable(self):
         flow_report = gates.classify_flow_temporal(_row(), [])
         coupling_report = gates.classify_coupling_settling(_row(), [])

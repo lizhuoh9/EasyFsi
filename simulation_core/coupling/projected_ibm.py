@@ -9,7 +9,7 @@ from simulation_core.fluids import (
     FluidImpulseReport,
     VelocityConstraintReport,
 )
-from simulation_core.coupling.fsi_coupling import (
+from simulation_core.coupling.interface_forces import (
     ForceBalanceReport,
     RegionPairInterfaceReactionTarget,
     action_reaction_balance,

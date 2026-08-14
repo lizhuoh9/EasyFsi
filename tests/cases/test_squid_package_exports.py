@@ -33,19 +33,10 @@ class SquidPackageExportTests(unittest.TestCase):
             "cases.squid_soft_robot.solid_step",
             "cases.squid_soft_robot.fluid_step",
             "cases.squid_soft_robot.coupling_common",
-            "cases.squid_soft_robot.coupling_legacy",
             "cases.squid_soft_robot.coupling_sharp",
         ):
             module = importlib.import_module(module_name)
             self.assertIsNotNone(module)
-
-    def test_runtime_state_is_reexported_for_legacy_imports(self) -> None:
-        module = importlib.import_module("cases.squid_soft_robot")
-        self.assertTrue(hasattr(module, "ReducedSquidFSI"))
-
-    def test_legacy_private_helpers_remain_importable_during_split(self) -> None:
-        module = importlib.import_module("cases.squid_soft_robot")
-        self.assertTrue(callable(module._cell_indices_for_points))
 
 
 if __name__ == "__main__":

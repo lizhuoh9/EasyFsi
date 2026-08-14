@@ -27,19 +27,20 @@ from .core import (
     advance_hibm_mpm_sharp_neo_hookean_step,
     assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
     hibm_mpm_external_force_fresh_for_solid_step,
+    hibm_mpm_external_force_parts_fresh_for_solid_step,
     hibm_mpm_pressure_disconnected_region_report,
     hibm_mpm_sharp_step_summary,
-)
-from .modes import (
-    FSI_COUPLING_MODE_CHOICES,
-    FSI_COUPLING_MODE_HIBM_MPM_SHARP,
-    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
-    fsi_coupling_mode_report,
-    require_implemented_fsi_coupling_mode,
 )
 from .marker_mac_constraint import (
     HibmMpmMarkerMacConstraintOperator,
     HibmMpmMarkerMacConstraintReport,
+)
+from .interface_state import (
+    MARKER_INTERFACE_STATE_FIELDS,
+    capture_marker_interface_state,
+    marker_trial_state,
+    marker_velocity_state,
+    restore_marker_interface_state,
 )
 from .paper_requirements import (
     HibmMpmPaperRequirement,
@@ -60,13 +61,9 @@ from .reports import (
     HibmMpmSharpNeoHookeanStepReport,
     HibmMpmSurfaceMarkerForceReport,
     HibmMpmSurfaceUpdateReport,
-    HibmMpmVelocityDirichletBoundaryReport,
 )
 
 __all__ = [
-    "FSI_COUPLING_MODE_CHOICES",
-    "FSI_COUPLING_MODE_HIBM_MPM_SHARP",
-    "FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED",
     "HIBM_NO_SLIP_NEAREST_FLUID_FALLBACK_RADIUS_CELLS",
     "HIBM_OVERFLOW_SINGLETON_NO_SLIP_PROTECTION_RADIUS_CELLS",
     "HIBM_OWNER_RELOCATION_WALK_STEPS",
@@ -106,14 +103,17 @@ __all__ = [
     "HibmMpmSurfaceMarkerForceReport",
     "HibmMpmSurfaceMarkers",
     "HibmMpmSurfaceUpdateReport",
-    "HibmMpmVelocityDirichletBoundaryReport",
+    "MARKER_INTERFACE_STATE_FIELDS",
     "advance_hibm_mpm_sharp_mpm_step",
     "advance_hibm_mpm_sharp_neo_hookean_step",
     "assemble_hibm_mpm_sharp_fluid_to_mpm_loads",
-    "fsi_coupling_mode_report",
+    "capture_marker_interface_state",
     "hibm_mpm_external_force_fresh_for_solid_step",
+    "hibm_mpm_external_force_parts_fresh_for_solid_step",
     "hibm_mpm_paper_requirements",
     "hibm_mpm_pressure_disconnected_region_report",
     "hibm_mpm_sharp_step_summary",
-    "require_implemented_fsi_coupling_mode",
+    "marker_trial_state",
+    "marker_velocity_state",
+    "restore_marker_interface_state",
 ]

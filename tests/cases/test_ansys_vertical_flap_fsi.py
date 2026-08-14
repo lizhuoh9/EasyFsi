@@ -138,6 +138,21 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(reference["local_velocity_peak_mps"], 20.0)
         self.assertLessEqual(reference["local_velocity_peak_mps"], 29.0)
 
+    def test_core_uses_the_case_spec_authoritative_reference_subset(self):
+        with patch.object(
+            vertical_flap_case,
+            "run_rectangular_solid_marker_mpm_fsi_smoke",
+            return_value={},
+        ) as run:
+            vertical_flap_case._run_vertical_flap_fsi_core(
+                VerticalFlapFsiConfig(step_count=0, preflow_steps=0)
+            )
+
+        self.assertEqual(
+            run.call_args.kwargs["reference_results"],
+            vertical_flap_case.CASE_SPEC.reference_results,
+        )
+
     def test_config_uses_official_air_density_and_preserves_marker_area_feedback(
         self,
     ):
@@ -169,7 +184,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(config.flow_obstacle_normal_velocity_policy, "face_clamp")
 
         run_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
         )
         run_source += inspect.getsource(
             solid_mpm_fsi_runner._advance_solid_substeps_batched
@@ -231,7 +246,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
 
         run_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
         )
         self.assertIn("_enforce_solid_seeding_limit", run_source)
 
@@ -397,6 +412,11 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             surface_force_support_radius_m(config),
         )
         self.assertLess(config.mpm_support_radius_m, 0.5 * config.flap_height_m)
+
+    def test_selected_official_config_uses_bounded_marker_mac_failure_ceiling(self):
+        config = selected_formulation_solver_config(step_count=50)
+
+        self.assertEqual(config.flow_hibm_marker_mac_constraint_iterations, 64)
 
     def test_selected_official_config_keeps_boundary_markers_on_physical_faces(self):
         class FakeMarkers:
@@ -960,7 +980,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
     def test_observer_boundary_rows_refresh_after_solid_volume_commit(self):
         source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
         )
 
         volume_commit = source.index("_update_fluid_obstacle_from_solid(")
@@ -985,30 +1005,44 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         first_velocity_rows = boundary_source.index(
             "velocity_report = assemble_velocity_rows()"
         )
-        cleanup_loop = boundary_source.index(
-            "for _topology_cleanup_pass in range(8):"
+        reachability_helper = boundary_source.index(
+            "def refresh_pressure_reachability"
         )
         reachability = boundary_source.index(
             "mark_hibm_pressure_outlet_disconnected_nonprojectable_cells",
+            reachability_helper,
+        )
+        rebuild_helper = boundary_source.index(
+            "def rebuild_velocity_rows_after_topology_mutation",
+            reachability,
+        )
+        cleanup_loop = boundary_source.index(
+            "for _topology_cleanup_pass in range(8):",
+            rebuild_helper,
+        )
+        reachability_call = boundary_source.index(
+            "refresh_pressure_reachability()",
             cleanup_loop,
+        )
+        rebuild_call = boundary_source.index(
+            "rebuild_velocity_rows_after_topology_mutation()",
+            reachability_call,
         )
         cleanup = boundary_source.index(
             "cleanup_hibm_pressure_outlet_tiny_unreached_components",
-            reachability,
-        )
-        rebuilt_velocity_rows = boundary_source.index(
-            "velocity_report = assemble_velocity_rows()",
-            cleanup,
+            rebuild_call,
         )
         pressure_rows = boundary_source.index(
             "assemble_pressure_neumann_matrix_rows"
         )
 
-        self.assertLess(first_velocity_rows, cleanup_loop)
-        self.assertLess(cleanup_loop, reachability)
-        self.assertLess(reachability, cleanup)
-        self.assertLess(cleanup, rebuilt_velocity_rows)
-        self.assertLess(rebuilt_velocity_rows, pressure_rows)
+        self.assertLess(first_velocity_rows, reachability_helper)
+        self.assertLess(reachability, rebuild_helper)
+        self.assertLess(rebuild_helper, cleanup_loop)
+        self.assertLess(cleanup_loop, reachability_call)
+        self.assertLess(reachability_call, rebuild_call)
+        self.assertLess(rebuild_call, cleanup)
+        self.assertLess(cleanup, pressure_rows)
         self.assertIn("reuse_topology_from_previous_assembly=True", advance_source)
 
     def test_formal_runner_maps_official_streamwise_flap_box_to_solver_z(self):
@@ -1104,7 +1138,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(boundary_report["marker_projection_vertex_count"], 10)
         self.assertEqual(boundary_report["marker_boundary_only_vertex_count"], 4)
         self.assertTrue(boundary_report["tip_cap_boundary_enabled"])
-        self.assertFalse(boundary_report["tip_cap_force_included"])
+        self.assertTrue(boundary_report["tip_cap_force_included"])
         self.assertFalse(boundary_report["tip_cap_no_slip_closure_included"])
         self.assertEqual(
             boundary_report["tip_cap_no_slip_health_policy"],
@@ -1119,7 +1153,13 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                         "constraint_count": 0,
                         "adjustable_constraint_count": 0,
                         "immutable_constraint_count": 0,
-                        "iterations": 0,
+                        "solver": "weighted_minimum_norm_lstsq",
+                        "solve_count": 0,
+                        "matrix_rank": 0,
+                        "adjustable_dof_count": 0,
+                        "least_squares_max_residual_mps": 0.0,
+                        "materialized_max_residual_mps": 0.0,
+                        "max_abs_correction_mps": 0.0,
                         "initial_max_residual_mps": 0.0,
                         "final_max_residual_mps": 0.0,
                         "final_max_adjustable_residual_mps": 0.0,
@@ -1151,7 +1191,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             boundary_report["tip_cap_traction_policy"],
-            "excluded_boundary_only",
+            "one_sided_gauge_pressure_outward_normal",
         )
         self.assertEqual(markers.normals[:3], [(0.0, 0.0, 1.0)] * 3)
         self.assertEqual(markers.normals[3:], [(0.0, 0.0, -1.0)] * 3)
@@ -1786,10 +1826,14 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             )
 
         run_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
         )
         self.assertIn("config.step_count == 0 and preflow_history", run_source)
         self.assertIn("_preflow_only_report", run_source)
+        self.assertLess(
+            run_source.index("if config.step_count == 0 and preflow_history"),
+            run_source.index("_require_preflow_ready_for_fsi(preflow_report)"),
+        )
 
     def test_diagnostic_flow_controls_are_explicit_and_default_safe(self):
         config = VerticalFlapFsiConfig()
@@ -1811,7 +1855,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(config.traction_viscosity_pa_s, 0.0)
 
         run_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
         )
         self.assertIn("apply_marker_feedback_to_fluid", run_source)
         self.assertIn("flow_reset_pressure_each_step", run_source)
@@ -2408,10 +2452,17 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             runtime=TaichiRuntimeConfig(arch="cuda"),
         )
         fluid.velocity_dirichlet_boundary_active.fill(0)
+        fluid.external_velocity_boundary_z_face_active_component_mask.fill(0)
         fluid.obstacle.fill(0)
         fluid.velocity_dirichlet_boundary_active[0, 0, 3] = 1
         fluid.velocity_dirichlet_boundary_active[1, 1, 3] = 1
         fluid.velocity_dirichlet_boundary_active[2, 2, 2] = 1
+        fluid.external_velocity_boundary_z_face_active_component_mask[
+            1, 0, 0
+        ] = 0b111
+        fluid.external_velocity_boundary_z_face_active_component_mask[
+            1, 1, 1
+        ] = 0b111
         fluid.obstacle[1, 1, 3] = 1
 
         report = solid_mpm_fsi_runner._zmax_inlet_boundary_report(fluid)
@@ -2426,6 +2477,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
         class _DeviceRefreshFluid:
             def __init__(self):
+                self.velocity_dirichlet_boundary_authority = "legacy"
                 self.velocity_dirichlet_boundary_active = _NoDownloadField()
                 self.velocity_dirichlet_boundary_value_mps = _NoDownloadField()
                 self.velocity_dirichlet_boundary_projection_weight = _NoDownloadField()
@@ -2531,26 +2583,34 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         refreshed_external_exact_masks = (
             fluid.velocity_dirichlet_boundary_external_exact_component_mask.to_numpy()
         )
+        refreshed_external_face_masks = (
+            fluid.external_velocity_boundary_z_face_active_component_mask.to_numpy()
+        )
+        refreshed_external_face_values = (
+            fluid.external_velocity_boundary_z_face_value_mps.to_numpy()
+        )
         self.assertEqual(report["flow_inlet_boundary_active_cell_count"], 15)
-        self.assertEqual(report["flow_inlet_boundary_obstacle_cell_count"], 0)
+        self.assertEqual(report["flow_inlet_boundary_obstacle_cell_count"], 1)
         self.assertEqual(int(refreshed_active[1, 1, 3]), 0)
-        self.assertEqual(int(refreshed_active[0, 0, 3]), 1)
+        self.assertEqual(int(refreshed_active[0, 0, 3]), 0)
         self.assertEqual(int(refreshed_active[0, 0, 2]), 1)
-        np.testing.assert_allclose(refreshed_values[0, 0, 3], (0.0, 0.0, -4.5))
+        np.testing.assert_allclose(refreshed_values[0, 0, 3], (0.0, 0.0, 0.0))
         np.testing.assert_allclose(refreshed_values[1, 1, 3], (0.0, 0.0, 0.0))
         np.testing.assert_allclose(refreshed_values[0, 0, 2], (0.25, 0.5, 0.75))
-        self.assertEqual(float(refreshed_weights[0, 0, 3]), 1.0)
+        self.assertEqual(float(refreshed_weights[0, 0, 3]), 0.0)
         self.assertEqual(float(refreshed_weights[1, 1, 3]), 0.0)
         self.assertEqual(float(refreshed_weights[0, 0, 2]), 0.5)
-        self.assertEqual(float(refreshed_enforcement_weights[0, 0, 3]), 1.0)
-        self.assertEqual(float(refreshed_enforcement_weights[1, 1, 3]), 0.0)
+        self.assertEqual(float(refreshed_enforcement_weights[0, 0, 3]), 0.375)
+        self.assertEqual(float(refreshed_enforcement_weights[1, 1, 3]), 0.375)
         self.assertEqual(float(refreshed_enforcement_weights[0, 0, 2]), 0.375)
-        self.assertEqual(
-            int(refreshed_external_exact_masks[0, 0, 3]),
-            0b010 | 0b100,
-        )
+        self.assertEqual(int(refreshed_external_exact_masks[0, 0, 3]), 0b010)
         self.assertEqual(int(refreshed_external_exact_masks[1, 1, 3]), 0)
         self.assertEqual(int(refreshed_external_exact_masks[0, 0, 2]), 0)
+        self.assertTrue(np.all(refreshed_external_face_masks[1] == 0b111))
+        np.testing.assert_allclose(
+            refreshed_external_face_values[1],
+            np.broadcast_to((0.0, 0.0, -4.5), (4, 4, 3)),
+        )
 
     def test_initial_inlet_flow_registers_external_pressure_face_provenance(self):
         config = replace(VerticalFlapFsiConfig(), grid_nodes=(4, 4, 8))
@@ -2714,23 +2774,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
         self.assertEqual(negative_report["pressure_min_pa"], -33.0)
         self.assertEqual(negative_report["pressure_max_pa"], -12.0)
-
-    def test_marker_feedback_default_path_uses_solver_device_api(self):
-        feedback_source = inspect.getsource(
-            solid_mpm_fsi_runner._apply_marker_feedback_to_fluid
-        )
-        fallback_source = inspect.getsource(
-            solid_mpm_fsi_runner._apply_marker_feedback_to_fluid_host_fallback
-        )
-        residual_source = inspect.getsource(
-            solid_mpm_fsi_runner._measure_projected_no_slip_residual
-        )
-
-        self.assertIn("apply_marker_feedback_constraints", feedback_source)
-        self.assertNotIn(".to_numpy(", feedback_source)
-        self.assertNotIn(".from_numpy(", feedback_source)
-        self.assertIn(".to_numpy(", fallback_source)
-        self.assertIn("marker_feedback_projected_residual_mps", residual_source)
 
     def test_flow_projection_report_fields_flatten_solver_diagnostics(self):
         fields = solid_mpm_fsi_runner._flow_projection_report_fields(
@@ -2899,7 +2942,9 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
         class FakeFluid:
             def __init__(self):
+                self.velocity_dirichlet_boundary_authority = "legacy"
                 shape = (1, 2, 3)
+                self.velocity_dirichlet_boundary_authority = "legacy"
                 self.obstacle = Field(np.zeros(shape, dtype=np.int32))
                 self.velocity_dirichlet_boundary_active = Field(
                     np.zeros(shape, dtype=np.int32)
@@ -3009,6 +3054,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
         class FakeFluid:
             def __init__(self):
+                self.velocity_dirichlet_boundary_authority = "legacy"
                 shape = (1, 2, 3)
                 self.obstacle = Field(np.zeros(shape, dtype=np.int32))
                 self.velocity_dirichlet_boundary_active = Field(
@@ -3244,7 +3290,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
     def test_full_domain_runner_persists_solid_substeps_in_process_updates(self):
         runner_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
         )
 
         self.assertIn(

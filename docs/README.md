@@ -6,6 +6,7 @@
 ## 代码结构
 
 - [`../ARCHITECTURE.md`](../ARCHITECTURE.md)：依赖方向和兼容策略。
+- [`SIMULATION_CORE_USAGE.md`](SIMULATION_CORE_USAGE.md)：可复用求解核心的使用边界与入口。
 - [`MODULE_MAP.md`](MODULE_MAP.md)：`simulation_core` 各功能包的职责和修改位置。
 - [`VALIDATION.md`](VALIDATION.md)：当前验证命令与 ANSYS vertical-flap 验证矩阵。
 - [`POST_REFACTOR_BASELINE.md`](POST_REFACTOR_BASELINE.md)：重构后的结构基线。
@@ -52,7 +53,9 @@ runner 中使用同样方式搜索 `preflow`、`prepare_sst_wall_distance`、
 - [`TUREK_HRON_VALIDATION.md`](TUREK_HRON_VALIDATION.md)：Turek-Hron FSI。
 - [`ANSYS_VERTICAL_FLAP_2D_TO_3D_SLAB_EQUIVALENCE.md`](ANSYS_VERTICAL_FLAP_2D_TO_3D_SLAB_EQUIVALENCE.md)：2D/3D slab 等价性。
 - `validation/`：可复核的验证说明和报告。
+- [`validation/HIBM_MPM_PAPER_VS_CODE.md`](validation/HIBM_MPM_PAPER_VS_CODE.md)：论文要求与当前实现的对照表。
 - `refactoring/`：按日期保留的目标、审计和线程交接记录。
+- [`refactoring/REFACTORING_NOTES.md`](refactoring/REFACTORING_NOTES.md)：重构阶段记录与风险说明。
 - `refactoring/FSI_AUDIT_*_GOAL_2026-07-02.md`：已归档的完整审计修复目标；根目录同名文件仅保留旧链接转发。
 
 ## 文档命名约定

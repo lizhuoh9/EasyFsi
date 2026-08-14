@@ -5,15 +5,14 @@ import copy
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
-import textwrap
 import unittest
+from unittest import mock
 
 from benchmarks.official import solid_mpm_fsi_runner
 from simulation_core.coupling.hibm_mpm.core import HibmMpmIbBoundaryConditions
 from simulation_core.fluids.solver import CartesianFluidSolver
 from tests.solvers.test_canonical_velocity_boundary_component_report import (
     CANONICAL_REPORT_KEYS,
-    CANONICAL_SCHEMA_THREE_REPORT_KEYS,
 )
 
 
@@ -45,13 +44,6 @@ EXPECTED_PREPARE_METHODS = (
     "prepare_velocity_dirichlet_component_ledger_reference",
     "prepare_velocity_dirichlet_component_ledger_snapshot",
 )
-DIRECT_GEOMETRY_REPORT_KEYS = (
-    "direct_geometry_reconstructed_component_count",
-    "direct_geometry_one_sided_component_count",
-    "max_compatible_direct_target_spread_mps",
-)
-
-
 def _module_ast() -> ast.Module:
     return ast.parse(RUNNER_PATH.read_text(encoding="utf-8"), filename=str(RUNNER_PATH))
 
@@ -101,7 +93,7 @@ def _healthy_canonical_device_report() -> dict[str, object]:
     report: dict[str, object] = {key: 0 for key in CANONICAL_REPORT_KEYS}
     report.update(
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "authority": "canonical_component_face",
             "new_owned_claim_component_count": 3,
             "final_active_component_count": 5,
@@ -129,7 +121,13 @@ def _healthy_canonical_device_report() -> dict[str, object]:
                 "constraint_count": 3,
                 "adjustable_constraint_count": 2,
                 "immutable_constraint_count": 1,
-                "iterations": 64,
+                "solver": "weighted_minimum_norm_lstsq",
+                "solve_count": 1,
+                "matrix_rank": 2,
+                "adjustable_dof_count": 4,
+                "least_squares_max_residual_mps": 2.0e-8,
+                "materialized_max_residual_mps": 4.0e-8,
+                "max_abs_correction_mps": 3.0e-4,
                 "initial_max_residual_mps": 2.0e-4,
                 "final_max_residual_mps": 5.0e-5,
                 "final_max_adjustable_residual_mps": 5.0e-7,
@@ -145,24 +143,6 @@ def _healthy_canonical_device_report() -> dict[str, object]:
             },
         }
     )
-    return report
-
-
-def _healthy_legacy_schema_two_device_report() -> dict[str, object]:
-    report = _healthy_canonical_device_report()
-    report["schema_version"] = 2
-    for key in DIRECT_GEOMETRY_REPORT_KEYS:
-        report.pop(key)
-    report.pop("projection_only_region_seam_merged_count")
-    report.pop("marker_target_closure")
-    return report
-
-
-def _healthy_legacy_schema_three_device_report() -> dict[str, object]:
-    report = _healthy_canonical_device_report()
-    report["schema_version"] = 3
-    report.pop("projection_only_region_seam_merged_count")
-    report.pop("marker_target_closure")
     return report
 
 
@@ -225,6 +205,41 @@ for _method_name in EXPECTED_PREPARE_METHODS:
 
 
 class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
+    def test_windowed_preflow_must_converge_before_fsi(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "did not reach stationary"):
+            solid_mpm_fsi_runner._require_preflow_ready_for_fsi(
+                {
+                    "preflow_convergence_mode": "windowed_stationary",
+                    "preflow_converged": False,
+                    "preflow_status": "max_steps",
+                    "preflow_steps_completed": 200,
+                }
+            )
+
+    def test_official_runner_requires_a_fresh_complete_load_before_solid(self) -> None:
+        with mock.patch.object(
+            solid_mpm_fsi_runner,
+            "hibm_mpm_external_force_parts_fresh_for_solid_step",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "external force transaction"):
+                solid_mpm_fsi_runner._require_fresh_external_force_for_solid_step(
+                    clear=object(),
+                    scatter=object(),
+                    marker_forces=object(),
+                    stress=object(),
+                    no_slip={},
+                    projection={},
+                )
+
+        run_source = inspect.getsource(
+            solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
+        )
+        self.assertLess(
+            run_source.index("_require_fresh_external_force_for_solid_step("),
+            run_source.index("_advance_solid_substeps_batched("),
+        )
+
     def test_preflow_cold_jit_stage_progress_contract_is_host_only(self) -> None:
         """Preflow must expose fine-grained runner stages without timing I/O."""
 
@@ -494,9 +509,9 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         )
         self.assertEqual(
             set(
-                solid_mpm_fsi_runner.CANONICAL_HIBM_VELOCITY_DIRICHLET_SCHEMA_THREE_DEVICE_REPORT_KEYS
+                solid_mpm_fsi_runner.CANONICAL_HIBM_VELOCITY_DIRICHLET_NUMERIC_DEVICE_REPORT_KEYS
             ),
-            set(CANONICAL_SCHEMA_THREE_REPORT_KEYS),
+            set(CANONICAL_REPORT_KEYS) - {"marker_target_closure"},
         )
 
     def test_build_fluid_selects_canonical_only_for_sharp_component_face_hibm(
@@ -525,7 +540,7 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             source.index("return fluid"),
         )
 
-    def test_non_sharp_runner_retains_legacy_authority_and_collocated_feedback(
+    def test_non_sharp_runner_uses_legacy_authority_device_feedback(
         self,
     ) -> None:
         function = _function_node("_build_fluid")
@@ -535,8 +550,9 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         feedback_source = inspect.getsource(
             solid_mpm_fsi_runner._apply_marker_feedback_to_fluid
         )
-        self.assertIn('authority == "canonical"', feedback_source)
-        self.assertIn("apply_marker_feedback_constraints", feedback_source)
+        self.assertIn('authority != "legacy"', feedback_source)
+        self.assertIn("fluid.apply_marker_feedback_constraints", feedback_source)
+        self.assertNotIn("_host_fallback", feedback_source)
 
     def test_initialize_inlet_flow_writes_all_eight_canonical_fields(self) -> None:
         function = _function_node("_initialize_inlet_flow")
@@ -560,7 +576,7 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         self.assertGreater(source.index(prepare), source.index(last_ledger_write))
         self.assertLess(source.index(directed_zmax_writer), source.index(prepare))
 
-    def test_hibm_assembly_dispatches_by_authority_and_seals_canonical_write(self) -> None:
+    def test_hibm_assembly_requires_canonical_authority_and_seals_write(self) -> None:
         function = _function_node("_apply_hibm_sharp_marker_boundary_to_fluid")
         nested = next(
             node
@@ -569,18 +585,20 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         )
         source = ast.unparse(nested)
         canonical_builder = "assemble_velocity_dirichlet_component_face_ledger"
-        legacy_builder = "assemble_velocity_dirichlet_reconstructed_boundary_rows"
         invalidate = "_invalidate_velocity_dirichlet_component_ledger"
         prepare = "_prepare_and_seal_canonical_velocity_dirichlet_component_ledger"
         for required in (
             "velocity_dirichlet_boundary_authority",
             canonical_builder,
-            legacy_builder,
             invalidate,
             prepare,
         ):
             with self.subTest(required=required):
                 self.assertIn(required, source)
+        self.assertNotIn(
+            "assemble_velocity_dirichlet_reconstructed_boundary_rows",
+            source,
+        )
         self.assertLess(source.index(invalidate), source.index(canonical_builder))
         self.assertLess(source.index(canonical_builder), source.index(prepare))
         canonical_call = next(
@@ -596,9 +614,6 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         compatibility_keywords = {
             "markers": "markers",
             "surface_projection_inactive_axis": "OUT_OF_PLANE_AXIS_INDEX",
-            "marker_compatibility_max_iterations": (
-                "marker_mac_constraint_iterations"
-            ),
             "marker_compatibility_absolute_tolerance_mps": (
                 "marker_mac_constraint_absolute_tolerance_mps"
             ),
@@ -653,68 +668,30 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             )
         )
 
-    def test_canonical_health_accepts_complete_legacy_schema_two_report(
-        self,
-    ) -> None:
-        report = _healthy_canonical_runner_report()
-        report["canonical_velocity_dirichlet_report"] = (
-            _healthy_legacy_schema_two_device_report()
-        )
+    def test_canonical_health_rejects_removed_schema_versions(self) -> None:
+        for schema_version in (2, 3, 4):
+            with self.subTest(schema_version=schema_version):
+                report = _healthy_canonical_runner_report()
+                report["canonical_velocity_dirichlet_report"][
+                    "schema_version"
+                ] = schema_version
+                failure = (
+                    solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+                        report
+                    )
+                )
+                self.assertIsNotNone(failure)
+                self.assertIn("schema version", failure.lower())
 
-        self.assertIsNone(
-            solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(report)
-        )
-
-    def test_canonical_health_accepts_complete_legacy_schema_three_report(
-        self,
-    ) -> None:
-        report = _healthy_canonical_runner_report()
-        report["canonical_velocity_dirichlet_report"] = (
-            _healthy_legacy_schema_three_device_report()
-        )
-
-        self.assertIsNone(
-            solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(report)
-        )
-
-    def test_canonical_health_keeps_exact_keys_for_each_supported_schema(
-        self,
-    ) -> None:
-        legacy_missing = _healthy_canonical_runner_report()
-        legacy_missing["canonical_velocity_dirichlet_report"] = (
-            _healthy_legacy_schema_two_device_report()
-        )
-        legacy_missing["canonical_velocity_dirichlet_report"].pop(
-            "final_active_component_count"
-        )
-
-        legacy_partial_extension = _healthy_canonical_runner_report()
-        legacy_partial_extension["canonical_velocity_dirichlet_report"] = (
-            _healthy_legacy_schema_two_device_report()
-        )
-        legacy_partial_extension["canonical_velocity_dirichlet_report"][
-            DIRECT_GEOMETRY_REPORT_KEYS[0]
-        ] = 0
-
-        current_missing_extension = _healthy_canonical_runner_report()
-        current_missing_extension["canonical_velocity_dirichlet_report"].pop(
+    def test_canonical_health_requires_exact_schema_five_keys(self) -> None:
+        missing = _healthy_canonical_runner_report()
+        missing["canonical_velocity_dirichlet_report"].pop(
             "marker_target_closure"
         )
+        unexpected = _healthy_canonical_runner_report()
+        unexpected["canonical_velocity_dirichlet_report"]["legacy_row_count"] = 0
 
-        schema_three_partial_extension = _healthy_canonical_runner_report()
-        schema_three_partial_extension["canonical_velocity_dirichlet_report"] = (
-            _healthy_legacy_schema_three_device_report()
-        )
-        schema_three_partial_extension["canonical_velocity_dirichlet_report"][
-            "marker_target_closure"
-        ] = _healthy_canonical_device_report()["marker_target_closure"]
-
-        for label, report in (
-            ("legacy missing published key", legacy_missing),
-            ("legacy partial extension", legacy_partial_extension),
-            ("schema three partial extension", schema_three_partial_extension),
-            ("current missing extension", current_missing_extension),
-        ):
+        for label, report in (("missing", missing), ("unexpected", unexpected)):
             with self.subTest(label=label):
                 failure = (
                     solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
@@ -759,6 +736,13 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                 "adjustable residual",
                 lambda closure: closure.__setitem__(
                     "final_max_adjustable_residual_mps",
+                    2.0e-6,
+                ),
+            ),
+            (
+                "materialized residual",
+                lambda closure: closure.__setitem__(
+                    "materialized_max_residual_mps",
                     2.0e-6,
                 ),
             ),
@@ -1114,18 +1098,64 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                 self.assertIsNotNone(failure)
                 self.assertIn("endpoint-clamp", failure.lower())
 
-        exceeds_reconstruction = _healthy_canonical_runner_report()
-        exceeds_reconstruction[
+        exceeds_duplicate_components = _healthy_canonical_runner_report()
+        exceeds_duplicate_components[
             "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count"
         ] = 1
-        exceeds_reconstruction[
+        exceeds_duplicate_components[
             "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio"
         ] = 0.5
         failure = solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
-            exceeds_reconstruction
+            exceeds_duplicate_components
         )
         self.assertIsNotNone(failure)
-        self.assertIn("exceeds reconstructed", failure.lower())
+        self.assertIn("exceed", failure.lower())
+
+        endpoint_plus_identical_exceeds_duplicates = (
+            _healthy_canonical_runner_report()
+        )
+        endpoint_plus_identical_exceeds_duplicates.update(
+            {
+                "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count": 1,
+                "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count": 10,
+                "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio": 0.4,
+            }
+        )
+        endpoint_plus_identical_exceeds_duplicates[
+            "canonical_velocity_dirichlet_report"
+        ].update(
+            {
+                "duplicate_claim_component_count": 10,
+                "direct_geometry_reconstructed_component_count": 0,
+            }
+        )
+        failure = solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+            endpoint_plus_identical_exceeds_duplicates
+        )
+        self.assertIsNotNone(failure)
+        self.assertIn("duplicate", failure.lower())
+
+    def test_canonical_health_accepts_face_first_endpoint_clamp_accounting(
+        self,
+    ) -> None:
+        report = _healthy_canonical_runner_report()
+        report.update(
+            {
+                "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count": 0,
+                "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count": 10,
+                "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio": 0.4,
+            }
+        )
+        report["canonical_velocity_dirichlet_report"].update(
+            {
+                "duplicate_claim_component_count": 10,
+                "direct_geometry_reconstructed_component_count": 0,
+            }
+        )
+
+        self.assertIsNone(
+            solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(report)
+        )
 
     def test_canonical_health_rejects_identical_segment_provenance_drift(
         self,
@@ -1158,39 +1188,24 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         self.assertIsNotNone(failure)
         self.assertIn("exceed duplicate", failure.lower())
 
-    def test_historical_schema_four_defaults_missing_segment_diagnostics(
-        self,
-    ) -> None:
-        report = _healthy_canonical_runner_report()
+    def test_schema_five_requires_segment_diagnostics(self) -> None:
         for key in (
             solid_mpm_fsi_runner.CANONICAL_HIBM_VELOCITY_DIRICHLET_SEGMENT_RUNNER_REPORT_KEYS
         ):
-            report.pop(key)
-
-        self.assertIsNone(
-            solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(report)
-        )
-        mapped = solid_mpm_fsi_runner._hibm_velocity_dirichlet_mapping_fields(
-            report
-        )
-        self.assertEqual(
-            mapped[
-                "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count"
-            ],
-            0,
-        )
-        self.assertEqual(
-            mapped[
-                "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count"
-            ],
-            0,
-        )
-        self.assertEqual(
-            mapped[
-                "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio"
-            ],
-            0.0,
-        )
+            with self.subTest(missing_segment_diagnostic=key):
+                report = _healthy_canonical_runner_report()
+                report.pop(key)
+                failure = (
+                    solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+                        report
+                    )
+                )
+                self.assertIsNotNone(failure)
+                self.assertIn(key, failure)
+                with self.assertRaises(KeyError):
+                    solid_mpm_fsi_runner._hibm_velocity_dirichlet_mapping_fields(
+                        report
+                    )
 
     def test_canonical_mapper_preserves_endpoint_diagnostic_types_for_health_check(
         self,
@@ -1268,11 +1283,6 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                 for key in solid_mpm_fsi_runner.CANONICAL_HIBM_VELOCITY_DIRICHLET_RUNNER_REPORT_KEYS
             },
         )
-        self.assertTrue(
-            set(fields).isdisjoint(
-                solid_mpm_fsi_runner.HIBM_VELOCITY_DIRICHLET_REPORT_KEYS
-            )
-        )
         staged_fields = (
             solid_mpm_fsi_runner._hibm_velocity_dirichlet_mapping_fields(
                 report,
@@ -1284,11 +1294,6 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             staged_fields,
         )
         self.assertNotIn("canonical_velocity_dirichlet_report", staged_fields)
-        self.assertTrue(
-            set(staged_fields).isdisjoint(
-                solid_mpm_fsi_runner.HIBM_VELOCITY_DIRICHLET_REPORT_KEYS
-            )
-        )
 
     def test_canonical_consistency_reuse_compares_nested_component_report(self) -> None:
         reference = _healthy_canonical_runner_report()
@@ -1612,24 +1617,16 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                 self.assertIsNotNone(failure)
                 self.assertIn("canonical", failure.lower())
 
-    def test_legacy_health_contract_remains_unchanged(self) -> None:
+    def test_removed_legacy_health_contract_is_rejected(self) -> None:
         report = {
             "hibm_sharp_marker_boundary_enabled": True,
-            **solid_mpm_fsi_runner._empty_hibm_velocity_dirichlet_report_fields(),
+            "hibm_velocity_dirichlet_active_rows": 1,
         }
-        report.update(
-            {
-                "hibm_velocity_dirichlet_active_rows": 1,
-                "hibm_velocity_dirichlet_primary_region_active_rows": 1,
-                "hibm_velocity_dirichlet_max_abs_velocity_mps": 2.0,
-                "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": 2.0,
-                "hibm_velocity_dirichlet_min_projection_weight": 0.5,
-                "hibm_velocity_dirichlet_max_projection_weight": 0.5,
-            }
+        failure = solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+            report
         )
-        self.assertIsNone(
-            solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(report)
-        )
+        self.assertIsNotNone(failure)
+        self.assertIn("canonical", failure.lower())
 
     def test_solver_has_a_canonical_zmax_directed_face_writer_without_compact_alias(
         self,
@@ -1666,24 +1663,6 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                     ),
                 )
 
-    def test_runner_canonical_zmax_never_falls_back_to_legacy_host_rows(self) -> None:
-        class _CanonicalFluidWithoutWriter:
-            velocity_dirichlet_boundary_authority = "canonical"
-
-            def refresh_zmax_inlet_boundary(self, **_kwargs):
-                raise AssertionError("legacy zmax writer must not be called")
-
-        config = SimpleNamespace(
-            flow_solid_boundary_mode="hibm_sharp_marker_rows",
-            flow_ymin_no_slip_rows=0,
-            inlet_velocity_mps=1.0,
-        )
-        with self.assertRaisesRegex(RuntimeError, "canonical.*zmax.*device writer"):
-            solid_mpm_fsi_runner._refresh_zmax_inlet_boundary(
-                _CanonicalFluidWithoutWriter(),
-                config,
-            )
-
     def test_runner_canonical_zmax_reprepares_and_reseals_after_device_write(self) -> None:
         source = inspect.getsource(solid_mpm_fsi_runner._refresh_zmax_inlet_boundary)
         writer = "refresh_zmax_inlet_boundary_canonical"
@@ -1715,7 +1694,6 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             _CanonicalFluid(),
             config,
             feedback_available=True,
-            previous_feedback_constraint_cells=set(),
         )
         self.assertFalse(report["fluid_marker_feedback_collocated_writer_used"])
         self.assertFalse(report["fluid_marker_velocity_constraints_enabled"])

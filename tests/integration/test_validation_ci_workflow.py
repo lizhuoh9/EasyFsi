@@ -49,7 +49,7 @@ class ValidationCiWorkflowTests(unittest.TestCase):
             "test_step_part_entity_tag_expands_all_part_surfaces_on_tag_collision",
             "test_sharp_mpm_step_requires_fresh_external_force_before_solid_advance",
             "test_f32_kernel_parameters_reject_f64_overflow_before_launch",
-            "test_run_checkpoint_version_is_4",
+            "test_run_checkpoint_version_is_7",
             "test_full_domain_runner_passes_full_step_neumann_dt_once",
             "test_full_domain_runner_uses_full_span_flaps",
             "test_canonical_runner_rejects_underresolved_solid_particles_for_fine_grid",

@@ -11,9 +11,66 @@ import numpy as np
 
 from .history import write_csv
 
+
+def _vtk_point_data_values(values: np.ndarray) -> np.ndarray:
+    """Flatten structured point data using VTK's x-fastest ordering."""
+
+    array = np.asarray(values)
+    if array.ndim == 3:
+        return array.transpose(2, 1, 0).reshape(-1)
+    if array.ndim == 4:
+        return array.transpose(2, 1, 0, 3).reshape(-1)
+    if array.ndim == 1:
+        return array.reshape(-1)
+    raise ValueError("VTK point data must have 1, 3, or 4 dimensions")
+
+
 def _ascii_vtk_numbers(values: np.ndarray, *, precision: int = 9) -> str:
-    flat = np.asarray(values).reshape(-1)
+    flat = _vtk_point_data_values(values)
     return " ".join(f"{float(value):.{precision}g}" for value in flat)
+
+
+def _ascii_vtk_integers(values: np.ndarray) -> str:
+    return " ".join(str(int(value)) for value in _vtk_point_data_values(values))
+
+
+def _is_uniform_axis(centers: np.ndarray, widths: np.ndarray) -> bool:
+    spacing = float(widths[0])
+    expected_centers = float(centers[0]) + spacing * np.arange(centers.size)
+    return bool(
+        np.allclose(widths, spacing, rtol=1.0e-6, atol=1.0e-12)
+        and np.allclose(centers, expected_centers, rtol=1.0e-6, atol=1.0e-12)
+    )
+
+
+def _vtk_point_data_xml(
+    *,
+    velocity: np.ndarray,
+    speed: np.ndarray,
+    obstacle: np.ndarray,
+    active_fluid: np.ndarray,
+    divergence: np.ndarray,
+) -> str:
+    return (
+        '      <PointData Scalars="speed_mps" Vectors="velocity_mps">\n'
+        '        <DataArray type="Float32" Name="velocity_mps" '
+        'NumberOfComponents="3" format="ascii">\n'
+        f'          {_ascii_vtk_numbers(velocity)}\n'
+        '        </DataArray>\n'
+        '        <DataArray type="Float32" Name="speed_mps" format="ascii">\n'
+        f'          {_ascii_vtk_numbers(speed)}\n'
+        '        </DataArray>\n'
+        '        <DataArray type="Int32" Name="obstacle" format="ascii">\n'
+        f'          {_ascii_vtk_integers(obstacle)}\n'
+        '        </DataArray>\n'
+        '        <DataArray type="Int32" Name="active_fluid" format="ascii">\n'
+        f'          {_ascii_vtk_integers(active_fluid)}\n'
+        '        </DataArray>\n'
+        '        <DataArray type="Float32" Name="divergence" format="ascii">\n'
+        f'          {_ascii_vtk_numbers(divergence)}\n'
+        '        </DataArray>\n'
+        '      </PointData>\n'
+    )
 
 def _write_fluid_snapshot_npz(
     *,
@@ -84,50 +141,68 @@ def _write_minimal_fluid_vti(
         width_x = np.asarray(fluid.cell_width_x_m.to_numpy(), dtype=np.float64)
         width_y = np.asarray(fluid.cell_width_y_m.to_numpy(), dtype=np.float64)
         width_z = np.asarray(fluid.cell_width_z_m.to_numpy(), dtype=np.float64)
-        spacing = (
-            float(np.mean(width_x)) if width_x.size else 1.0,
-            float(np.mean(width_y)) if width_y.size else 1.0,
-            float(np.mean(width_z)) if width_z.size else 1.0,
+        axes = (
+            ("x", x_centers, width_x, nx),
+            ("y", y_centers, width_y, ny),
+            ("z", z_centers, width_z, nz),
         )
-        origin = (
-            float(x_centers[0]) if x_centers.size else 0.0,
-            float(y_centers[0]) if y_centers.size else 0.0,
-            float(z_centers[0]) if z_centers.size else 0.0,
-        )
+        for _name, centers, widths, size in axes:
+            if (
+                centers.shape != (size,)
+                or widths.shape != (size,)
+                or not np.all(np.isfinite(centers))
+                or not np.all(np.isfinite(widths))
+                or np.any(widths <= 0.0)
+                or (size > 1 and np.any(np.diff(centers) <= 0.0))
+            ):
+                return None
         speed = np.linalg.norm(velocity, axis=3).astype(np.float32)
         active_fluid = (obstacle == 0).astype(np.int32)
-        path = output_dir / f"sharp_failure_step_{int(step):06d}_fluid.vti"
         extent = f"0 {nx - 1} 0 {ny - 1} 0 {nz - 1}"
-        text = (
-            '<?xml version="1.0"?>\n'
-            '<VTKFile type="ImageData" version="0.1" byte_order="LittleEndian">\n'
-            f'  <ImageData WholeExtent="{extent}" '
-            f'Origin="{origin[0]:.9g} {origin[1]:.9g} {origin[2]:.9g}" '
-            f'Spacing="{spacing[0]:.9g} {spacing[1]:.9g} {spacing[2]:.9g}">\n'
-            f'    <Piece Extent="{extent}">\n'
-            '      <PointData Scalars="speed_mps" Vectors="velocity_mps">\n'
-            '        <DataArray type="Float32" Name="velocity_mps" '
-            'NumberOfComponents="3" format="ascii">\n'
-            f'          {_ascii_vtk_numbers(velocity)}\n'
-            '        </DataArray>\n'
-            '        <DataArray type="Float32" Name="speed_mps" format="ascii">\n'
-            f'          {_ascii_vtk_numbers(speed)}\n'
-            '        </DataArray>\n'
-            '        <DataArray type="Int32" Name="obstacle" format="ascii">\n'
-            f'          {" ".join(str(int(value)) for value in obstacle.reshape(-1))}\n'
-            '        </DataArray>\n'
-            '        <DataArray type="Int32" Name="active_fluid" format="ascii">\n'
-            f'          {" ".join(str(int(value)) for value in active_fluid.reshape(-1))}\n'
-            '        </DataArray>\n'
-            '        <DataArray type="Float32" Name="divergence" format="ascii">\n'
-            f'          {_ascii_vtk_numbers(divergence)}\n'
-            '        </DataArray>\n'
-            '      </PointData>\n'
-            '      <CellData/>\n'
-            '    </Piece>\n'
-            '  </ImageData>\n'
-            '</VTKFile>\n'
+        point_data = _vtk_point_data_xml(
+            velocity=velocity,
+            speed=speed,
+            obstacle=obstacle,
+            active_fluid=active_fluid,
+            divergence=divergence,
         )
+        if all(_is_uniform_axis(centers, widths) for _, centers, widths, _ in axes):
+            origin = tuple(float(centers[0]) for _, centers, _, _ in axes)
+            spacing = tuple(float(widths[0]) for _, _, widths, _ in axes)
+            path = output_dir / f"sharp_failure_step_{int(step):06d}_fluid.vti"
+            text = (
+                '<?xml version="1.0"?>\n'
+                '<VTKFile type="ImageData" version="0.1" byte_order="LittleEndian">\n'
+                f'  <ImageData WholeExtent="{extent}" '
+                f'Origin="{origin[0]:.9g} {origin[1]:.9g} {origin[2]:.9g}" '
+                f'Spacing="{spacing[0]:.9g} {spacing[1]:.9g} {spacing[2]:.9g}">\n'
+                f'    <Piece Extent="{extent}">\n{point_data}'
+                '      <CellData/>\n'
+                '    </Piece>\n'
+                '  </ImageData>\n'
+                '</VTKFile>\n'
+            )
+        else:
+            path = output_dir / f"sharp_failure_step_{int(step):06d}_fluid.vtr"
+            coordinates = "".join(
+                '        <DataArray type="Float64" '
+                f'Name="{name}_coordinates_m" format="ascii">\n'
+                f'          {_ascii_vtk_numbers(centers, precision=17)}\n'
+                '        </DataArray>\n'
+                for name, centers, _, _ in axes
+            )
+            text = (
+                '<?xml version="1.0"?>\n'
+                '<VTKFile type="RectilinearGrid" version="0.1" '
+                'byte_order="LittleEndian">\n'
+                f'  <RectilinearGrid WholeExtent="{extent}">\n'
+                f'    <Piece Extent="{extent}">\n{point_data}'
+                '      <CellData/>\n'
+                f'      <Coordinates>\n{coordinates}      </Coordinates>\n'
+                '    </Piece>\n'
+                '  </RectilinearGrid>\n'
+                '</VTKFile>\n'
+            )
         path.write_text(text, encoding="utf-8")
         return path
     except (AttributeError, OSError, ValueError, TypeError):
@@ -146,7 +221,7 @@ def _write_step_failure_artifacts(
 ) -> Path:
     partial_history_path = output_dir / "history.csv"
     write_csv(partial_history_path, rows)
-    failure_fluid_vti = (
+    failure_fluid_vtk = (
         _write_minimal_fluid_vti(output_dir=output_dir, step=step, fluid=fluid)
         if fluid is not None
         else None
@@ -189,8 +264,10 @@ def _write_step_failure_artifacts(
             "history_csv": str(partial_history_path),
         }
     )
-    if failure_fluid_vti is not None:
-        process_payload["failure_fluid_vti"] = str(failure_fluid_vti)
+    if failure_fluid_vtk is not None:
+        process_payload[f"failure_fluid_{failure_fluid_vtk.suffix[1:]}"] = str(
+            failure_fluid_vtk
+        )
     if high_residual_summary is not None:
         process_payload["failure_high_residual_cells"] = high_residual_summary
     if pressure_interface_matrix_report is not None:
@@ -206,11 +283,11 @@ def _write_step_failure_artifacts(
 def _pressure_correctable_mask_from_host_fields(
     *,
     obstacle: np.ndarray,
-    velocity_dirichlet_active: np.ndarray,
+    velocity_dirichlet_hard_fixed_component_mask: np.ndarray,
     pressure_outlet_zmin: bool,
 ) -> np.ndarray:
     obstacle_mask = obstacle != 0
-    fixed = velocity_dirichlet_active != 0
+    fixed = velocity_dirichlet_hard_fixed_component_mask
     nx, ny, nz = obstacle_mask.shape
     correctable = np.zeros(obstacle_mask.shape, dtype=bool)
     for i in range(nx):
@@ -218,31 +295,43 @@ def _pressure_correctable_mask_from_host_fields(
             for k in range(nz):
                 if obstacle_mask[i, j, k]:
                     continue
-                if i > 0 and not obstacle_mask[i - 1, j, k] and not fixed[i, j, k]:
+                if (
+                    i > 0
+                    and not obstacle_mask[i - 1, j, k]
+                    and (fixed[i, j, k] & 1) == 0
+                ):
                     correctable[i, j, k] = True
                 if (
                     i < nx - 1
                     and not obstacle_mask[i + 1, j, k]
-                    and not fixed[i + 1, j, k]
+                    and (fixed[i + 1, j, k] & 1) == 0
                 ):
                     correctable[i, j, k] = True
-                if j > 0 and not obstacle_mask[i, j - 1, k] and not fixed[i, j, k]:
+                if (
+                    j > 0
+                    and not obstacle_mask[i, j - 1, k]
+                    and (fixed[i, j, k] & 2) == 0
+                ):
                     correctable[i, j, k] = True
                 if (
                     j < ny - 1
                     and not obstacle_mask[i, j + 1, k]
-                    and not fixed[i, j + 1, k]
+                    and (fixed[i, j + 1, k] & 2) == 0
                 ):
                     correctable[i, j, k] = True
-                if k > 0 and not obstacle_mask[i, j, k - 1] and not fixed[i, j, k]:
+                if (
+                    k > 0
+                    and not obstacle_mask[i, j, k - 1]
+                    and (fixed[i, j, k] & 4) == 0
+                ):
                     correctable[i, j, k] = True
                 if (
                     k < nz - 1
                     and not obstacle_mask[i, j, k + 1]
-                    and not fixed[i, j, k + 1]
+                    and (fixed[i, j, k + 1] & 4) == 0
                 ):
                     correctable[i, j, k] = True
-                if pressure_outlet_zmin and k == 0 and not fixed[i, j, k]:
+                if pressure_outlet_zmin and k == 0 and (fixed[i, j, k] & 4) == 0:
                     correctable[i, j, k] = True
     return correctable
 
@@ -255,10 +344,14 @@ def _write_hibm_zero_correctable_cell_dump(
     pressure_outlet_zmin: bool,
 ) -> dict[str, object]:
     obstacle = fluid.obstacle.to_numpy()
-    velocity_dirichlet_active = fluid.velocity_dirichlet_boundary_active.to_numpy()
+    velocity_dirichlet_hard_fixed_component_mask = (
+        fluid.velocity_dirichlet_pressure_hard_fixed_component_mask.to_numpy()
+    )
     correctable = _pressure_correctable_mask_from_host_fields(
         obstacle=obstacle,
-        velocity_dirichlet_active=velocity_dirichlet_active,
+        velocity_dirichlet_hard_fixed_component_mask=(
+            velocity_dirichlet_hard_fixed_component_mask
+        ),
         pressure_outlet_zmin=pressure_outlet_zmin,
     )
     active_fluid = obstacle == 0
@@ -521,14 +614,24 @@ def _write_hibm_high_residual_cell_dump(
     limit: int = 256,
 ) -> dict[str, object]:
     obstacle = fluid.obstacle.to_numpy()
-    velocity_dirichlet_active = fluid.velocity_dirichlet_boundary_active.to_numpy()
+    velocity_dirichlet_active_component_mask = (
+        fluid.velocity_dirichlet_boundary_active_component_mask.to_numpy()
+    )
     velocity_dirichlet_value = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
-    velocity_dirichlet_projection_weight = (
-        fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
+    velocity_dirichlet_component_enforcement_weight = (
+        fluid.velocity_dirichlet_boundary_component_enforcement_weight.to_numpy()
+    )
+    velocity_dirichlet_component_region_id = (
+        fluid.velocity_dirichlet_boundary_component_region_id.to_numpy()
+    )
+    velocity_dirichlet_hard_fixed_component_mask = (
+        fluid.velocity_dirichlet_pressure_hard_fixed_component_mask.to_numpy()
     )
     correctable = _pressure_correctable_mask_from_host_fields(
         obstacle=obstacle,
-        velocity_dirichlet_active=velocity_dirichlet_active,
+        velocity_dirichlet_hard_fixed_component_mask=(
+            velocity_dirichlet_hard_fixed_component_mask
+        ),
         pressure_outlet_zmin=pressure_outlet_zmin,
     )
     active_fluid = obstacle == 0
@@ -566,22 +669,6 @@ def _write_hibm_high_residual_cell_dump(
     pressure_unreached_component_label = (
         fluid.hibm_pressure_unreached_component_label.to_numpy()
     )
-    velocity_dirichlet_marker_region = getattr(
-        fluid,
-        "velocity_dirichlet_boundary_marker_region_id",
-        None,
-    )
-    if velocity_dirichlet_marker_region is None:
-        velocity_dirichlet_marker_region_id = np.full(
-            obstacle.shape,
-            -1,
-            dtype=np.int32,
-        )
-    else:
-        velocity_dirichlet_marker_region_id = (
-            velocity_dirichlet_marker_region.to_numpy()
-        )
-
     marker_count = 0 if markers is None else int(markers.marker_count)
     nearest_index = np.full(indices.shape[0], -1, dtype=np.int64)
     nearest_distance = np.full(indices.shape[0], math.nan, dtype=np.float64)
@@ -638,9 +725,13 @@ def _write_hibm_high_residual_cell_dump(
         "pressure_outlet_reachable",
         "pressure_unreached_component_label",
         "pressure_correctable",
-        "velocity_dirichlet_active",
-        "velocity_dirichlet_marker_region_id",
-        "velocity_dirichlet_projection_weight",
+        "velocity_dirichlet_active_component_mask",
+        "velocity_dirichlet_region_id_x",
+        "velocity_dirichlet_region_id_y",
+        "velocity_dirichlet_region_id_z",
+        "velocity_dirichlet_enforcement_weight_x",
+        "velocity_dirichlet_enforcement_weight_y",
+        "velocity_dirichlet_enforcement_weight_z",
         "velocity_dirichlet_value_x_mps",
         "velocity_dirichlet_value_y_mps",
         "velocity_dirichlet_value_z_mps",
@@ -665,6 +756,10 @@ def _write_hibm_high_residual_cell_dump(
             k = int(k)
             cell_residual = float(residual[i, j, k])
             velocity_target = velocity_dirichlet_value[i, j, k]
+            component_region = velocity_dirichlet_component_region_id[i, j, k]
+            component_weight = velocity_dirichlet_component_enforcement_weight[
+                i, j, k
+            ]
             writer.writerow(
                 {
                     "rank": int(rank),
@@ -688,36 +783,62 @@ def _write_hibm_high_residual_cell_dump(
                         pressure_unreached_component_label[i, j, k]
                     ),
                     "pressure_correctable": int(correctable[i, j, k]),
-                    "velocity_dirichlet_active": int(velocity_dirichlet_active[i, j, k]),
-                    "velocity_dirichlet_marker_region_id": int(
-                        velocity_dirichlet_marker_region_id[i, j, k]
+                    "velocity_dirichlet_active_component_mask": int(
+                        velocity_dirichlet_active_component_mask[i, j, k]
                     ),
-                    "velocity_dirichlet_projection_weight": float(
-                        velocity_dirichlet_projection_weight[i, j, k]
+                    "velocity_dirichlet_region_id_x": int(component_region[0]),
+                    "velocity_dirichlet_region_id_y": int(component_region[1]),
+                    "velocity_dirichlet_region_id_z": int(component_region[2]),
+                    "velocity_dirichlet_enforcement_weight_x": float(
+                        component_weight[0]
+                    ),
+                    "velocity_dirichlet_enforcement_weight_y": float(
+                        component_weight[1]
+                    ),
+                    "velocity_dirichlet_enforcement_weight_z": float(
+                        component_weight[2]
                     ),
                     "velocity_dirichlet_value_x_mps": float(velocity_target[0]),
                     "velocity_dirichlet_value_y_mps": float(velocity_target[1]),
                     "velocity_dirichlet_value_z_mps": float(velocity_target[2]),
                     "x_left_dirichlet": int(
-                        i > 0 and velocity_dirichlet_active[i, j, k] != 0
+                        i > 0
+                        and (velocity_dirichlet_hard_fixed_component_mask[i, j, k] & 1)
+                        != 0
                     ),
                     "x_right_dirichlet": int(
-                        i < velocity_dirichlet_active.shape[0] - 1
-                        and velocity_dirichlet_active[i + 1, j, k] != 0
+                        i < velocity_dirichlet_active_component_mask.shape[0] - 1
+                        and (
+                            velocity_dirichlet_hard_fixed_component_mask[i + 1, j, k]
+                            & 1
+                        )
+                        != 0
                     ),
                     "y_back_dirichlet": int(
-                        j > 0 and velocity_dirichlet_active[i, j, k] != 0
+                        j > 0
+                        and (velocity_dirichlet_hard_fixed_component_mask[i, j, k] & 2)
+                        != 0
                     ),
                     "y_front_dirichlet": int(
-                        j < velocity_dirichlet_active.shape[1] - 1
-                        and velocity_dirichlet_active[i, j + 1, k] != 0
+                        j < velocity_dirichlet_active_component_mask.shape[1] - 1
+                        and (
+                            velocity_dirichlet_hard_fixed_component_mask[i, j + 1, k]
+                            & 2
+                        )
+                        != 0
                     ),
                     "z_bottom_dirichlet": int(
-                        k > 0 and velocity_dirichlet_active[i, j, k] != 0
+                        k > 0
+                        and (velocity_dirichlet_hard_fixed_component_mask[i, j, k] & 4)
+                        != 0
                     ),
                     "z_top_dirichlet": int(
-                        k < velocity_dirichlet_active.shape[2] - 1
-                        and velocity_dirichlet_active[i, j, k + 1] != 0
+                        k < velocity_dirichlet_active_component_mask.shape[2] - 1
+                        and (
+                            velocity_dirichlet_hard_fixed_component_mask[i, j, k + 1]
+                            & 4
+                        )
+                        != 0
                     ),
                     "nearest_marker_index": int(nearest_index[rank - 1]),
                     "nearest_marker_region_id": int(nearest_region[rank - 1]),
@@ -742,7 +863,7 @@ def _write_hibm_high_residual_cell_dump(
         correctable[tuple(indices.T)] if len(indices) else np.array([], dtype=bool)
     )
     selected_dirichlet = (
-        velocity_dirichlet_active[tuple(indices.T)] != 0
+        velocity_dirichlet_active_component_mask[tuple(indices.T)] != 0
         if len(indices)
         else np.array([], dtype=bool)
     )
@@ -762,17 +883,24 @@ def _write_hibm_high_residual_cell_dump(
         if len(indices)
         else np.array([], dtype=np.int32)
     )
-    selected_dirichlet_regions = (
-        velocity_dirichlet_marker_region_id[tuple(indices.T)]
+    selected_component_masks = (
+        velocity_dirichlet_active_component_mask[tuple(indices.T)]
         if len(indices)
         else np.array([], dtype=np.int32)
     )
-    selected_dirichlet_region_counts: dict[str, int] = {}
-    for region in selected_dirichlet_regions:
-        key = str(int(region))
-        selected_dirichlet_region_counts[key] = (
-            selected_dirichlet_region_counts.get(key, 0) + 1
-        )
+    selected_component_regions = (
+        velocity_dirichlet_component_region_id[tuple(indices.T)]
+        if len(indices)
+        else np.empty((0, 3), dtype=np.int32)
+    )
+    selected_component_region_counts: dict[str, int] = {}
+    for mask, regions in zip(selected_component_masks, selected_component_regions):
+        for axis, bit in enumerate((1, 2, 4)):
+            if int(mask) & bit:
+                key = str(int(regions[axis]))
+                selected_component_region_counts[key] = (
+                    selected_component_region_counts.get(key, 0) + 1
+                )
     summary = {
         "step": int(step),
         "pressure_outlet_zmin": bool(pressure_outlet_zmin),
@@ -803,7 +931,9 @@ def _write_hibm_high_residual_cell_dump(
         ),
         "nearest_marker_count": int(marker_count),
         "nearest_marker_region_counts": selected_regions,
-        "velocity_dirichlet_marker_region_counts": selected_dirichlet_region_counts,
+        "velocity_dirichlet_component_region_counts": (
+            selected_component_region_counts
+        ),
         "csv_path": str(csv_path),
     }
     if len(indices) > 0:

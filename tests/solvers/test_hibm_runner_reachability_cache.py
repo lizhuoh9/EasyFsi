@@ -7,7 +7,7 @@ from benchmarks.official import solid_mpm_fsi_runner
 
 class HibmRunnerReachabilityCacheTests(unittest.TestCase):
     def test_reused_cleanup_refreshes_reachability_after_interface_clear(self) -> None:
-        assembled_projection_ledgers: list[tuple[object | None, ...]] = []
+        assembled_component_ledgers: list[tuple[object | None, ...]] = []
 
         class _FakeIbSearch:
             _NODE_INTERNAL = 1
@@ -34,42 +34,25 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
             ) -> None:
                 return None
 
-            def assemble_velocity_dirichlet_reconstructed_boundary_rows(
+            def assemble_velocity_dirichlet_component_face_ledger(
                 self, *_args: object, **_kwargs: object
-            ) -> SimpleNamespace:
-                assembled_projection_ledgers.append(
+            ) -> dict[str, object]:
+                fluid.velocity_component_ledger_current = True
+                assembled_component_ledgers.append(
                     (
                         _kwargs.get(
                             "velocity_dirichlet_hard_fixed_component_mask"
                         ),
-                        _kwargs.get("velocity_dirichlet_owned_row"),
-                        _kwargs.get("velocity_dirichlet_enforcement_weight"),
+                        _kwargs.get("velocity_dirichlet_owned_component_mask"),
+                        _kwargs.get(
+                            "velocity_dirichlet_component_enforcement_weight"
+                        ),
                         _kwargs.get(
                             "velocity_dirichlet_external_exact_component_mask"
                         ),
                     )
                 )
-                return SimpleNamespace(
-                    active_velocity_dirichlet_rows=1,
-                    primary_region_active_rows=1,
-                    secondary_region_active_rows=0,
-                    other_region_active_rows=0,
-                    unassigned_region_active_rows=0,
-                    max_abs_velocity_mps=0.0,
-                    raw_reconstructed_max_abs_velocity_mps=0.0,
-                    boundary_velocity_only_row_count=0,
-                    invalid_reconstruction_row_count=0,
-                    invalid_no_fluid_sample_row_count=0,
-                    invalid_nonpositive_gap_row_count=0,
-                    invalid_node_behind_boundary_row_count=0,
-                    invalid_node_beyond_interior_row_count=0,
-                    narrow_gap_boundary_velocity_row_count=0,
-                    relocated_row_count=0,
-                    relocation_merged_row_count=0,
-                    relocation_blocked_row_count=0,
-                    min_projection_weight=1.0,
-                    max_projection_weight=1.0,
-                )
+                return {}
 
             def assemble_pressure_neumann_matrix_rows(
                 self, *_args: object, **_kwargs: object
@@ -96,7 +79,8 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
         class _FakeFluid:
             def __init__(self) -> None:
                 self.grid = SimpleNamespace(grid_nodes=(2, 2, 2))
-                self.velocity_dirichlet_boundary_authority = "legacy"
+                self.velocity_dirichlet_boundary_authority = "canonical"
+                self.rho = 1.0
                 for field_name in (
                     "cell_center_x_m",
                     "cell_center_y_m",
@@ -109,14 +93,14 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
                     "cell_width_z_m",
                     "obstacle",
                     "velocity",
-                    "velocity_dirichlet_boundary_active",
                     "velocity_dirichlet_boundary_value_mps",
-                    "velocity_dirichlet_boundary_projection_weight",
-                    "velocity_dirichlet_boundary_enforcement_weight",
-                    "velocity_dirichlet_boundary_marker_region_id",
                     "velocity_dirichlet_boundary_hard_fixed_component_mask",
                     "velocity_dirichlet_boundary_external_exact_component_mask",
-                    "velocity_dirichlet_boundary_owned_row",
+                    "velocity_dirichlet_boundary_active_component_mask",
+                    "velocity_dirichlet_boundary_pressure_mobility",
+                    "velocity_dirichlet_boundary_component_enforcement_weight",
+                    "velocity_dirichlet_boundary_component_region_id",
+                    "velocity_dirichlet_boundary_owned_component_mask",
                     "pressure_interface_matrix_diagonal",
                     "pressure_interface_matrix_rhs",
                     "pressure_interface_coupling_active",
@@ -136,6 +120,10 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
                 self.last_hibm_row_cloud_orphan_component_count = 0
                 self.reachability_mark_count = 0
                 self.row_cloud_cleanup_count = 0
+                self.velocity_component_ledger_current = False
+
+            def _invalidate_velocity_dirichlet_component_ledger(self) -> None:
+                return None
 
             def apply_hibm_internal_obstacles(
                 self, *_args: object, **_kwargs: object
@@ -148,6 +136,10 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
             def mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
                 self, **_kwargs: object
             ) -> int:
+                if not self.velocity_component_ledger_current:
+                    raise RuntimeError(
+                        "reachability reflood preceded component-ledger rebuild"
+                    )
                 self.reachability_mark_count += 1
                 self.last_hibm_reachability_valid = True
                 self.last_hibm_pressure_unreached_cell_count = 0
@@ -158,6 +150,7 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
             ) -> int:
                 self.row_cloud_cleanup_count += 1
                 if self.row_cloud_cleanup_count == 1:
+                    self.velocity_component_ledger_current = False
                     self.last_hibm_row_cloud_orphan_component_count = 1
                     return 1
                 self.last_hibm_row_cloud_orphan_component_count = 0
@@ -189,6 +182,18 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
         markers = SimpleNamespace(marker_capacity=1, marker_count=1, region_id=object())
         fluid = _FakeFluid()
         boundary_cache: dict[str, object] = {}
+        velocity_report = {
+            "hibm_velocity_dirichlet_authority": "canonical",
+            "canonical_velocity_dirichlet_report": {
+                "schema_version": 5,
+                "authority": "canonical_component_face",
+                "final_active_storage_row_count": 1,
+                "final_active_component_count": 3,
+            },
+            "hibm_velocity_dirichlet_ledger_generation": 1,
+            "hibm_velocity_dirichlet_authority_registered": True,
+            "hibm_velocity_dirichlet_authority_sealed": True,
+        }
 
         with patch.object(
             solid_mpm_fsi_runner, "HibmMpmIbNodeSearch", _FakeIbSearch
@@ -202,6 +207,18 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
             solid_mpm_fsi_runner,
             "_synchronize_hibm_sharp_boundary_stage_timing",
             lambda: None,
+        ), patch.object(
+            solid_mpm_fsi_runner,
+            "_prepare_and_seal_canonical_velocity_dirichlet_component_ledger",
+            lambda _fluid: None,
+        ), patch.object(
+            solid_mpm_fsi_runner,
+            "_canonical_hibm_velocity_dirichlet_report_fields",
+            lambda _result, *, fluid: dict(velocity_report),
+        ), patch.object(
+            solid_mpm_fsi_runner,
+            "_hibm_velocity_dirichlet_mapping_fields",
+            lambda report, **_kwargs: dict(report),
         ):
             first_report = solid_mpm_fsi_runner._apply_hibm_sharp_marker_boundary_to_fluid(
                 markers,
@@ -251,33 +268,32 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
             report["hibm_preassembly_overflow_singleton_cleanup_cell_count"],
             1,
         )
-        self.assertTrue(assembled_projection_ledgers)
+        self.assertTrue(assembled_component_ledgers)
         self.assertTrue(
             all(
                 hard
                 is fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-                and owned is fluid.velocity_dirichlet_boundary_owned_row
+                and owned
+                is fluid.velocity_dirichlet_boundary_owned_component_mask
                 and enforcement
-                is fluid.velocity_dirichlet_boundary_enforcement_weight
+                is fluid.velocity_dirichlet_boundary_component_enforcement_weight
                 and external_exact
                 is fluid.velocity_dirichlet_boundary_external_exact_component_mask
                 for hard, owned, enforcement, external_exact in (
-                    assembled_projection_ledgers
+                    assembled_component_ledgers
                 )
             )
         )
         self.assertGreater(fluid.reachability_mark_count, first_mark_count)
         self.assertTrue(fluid.last_hibm_reachability_valid)
-        self.assertEqual(report["hibm_velocity_dirichlet_active_rows"], 1)
         self.assertEqual(
-            report["hibm_velocity_dirichlet_invalid_reconstruction_count"], 0
+            report["canonical_velocity_dirichlet_report"][
+                "final_active_storage_row_count"
+            ],
+            1,
         )
-        self.assertEqual(
-            report["hibm_velocity_dirichlet_narrow_gap_count"], 0
-        )
-        self.assertEqual(
-            report["hibm_velocity_dirichlet_min_projection_weight"], 1.0
-        )
+        self.assertTrue(report["hibm_velocity_dirichlet_authority_registered"])
+        self.assertTrue(report["hibm_velocity_dirichlet_authority_sealed"])
 
 
 if __name__ == "__main__":

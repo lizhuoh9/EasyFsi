@@ -23,6 +23,10 @@ class HibmMpmSurfaceMarkerForceReport:
     primary_marker_force_norm_max_n: float = 0.0
     secondary_marker_force_norm_max_n: float = 0.0
     total_marker_force_norm_max_n: float = 0.0
+    tip_cap_marker_force_n: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    tip_cap_marker_count: int = 0
+    tip_cap_stress_valid_marker_count: int = 0
+    tip_cap_stress_invalid_marker_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,9 @@ class HibmMpmFluidStressSampleReport:
     one_sided_pressure_marker_count: int = 0
     one_sided_extended_marker_count: int = 0
     one_sided_gradient_missing_marker_count: int = 0
+    tip_cap_marker_count: int = 0
+    tip_cap_valid_marker_count: int = 0
+    tip_cap_invalid_marker_count: int = 0
     marker_diagnostics: tuple[dict[str, Any], ...] = ()
 
 
@@ -80,6 +87,8 @@ class HibmMpmMpmForceScatterReport:
     total_mpm_external_force_n: tuple[float, float, float]
     action_reaction_residual_n: float
     candidate_pair_count: int = 0
+    invalid_external_force_particle_count: int = -1
+    max_abs_external_force_component_n: float = float("nan")
 
 
 @dataclass(frozen=True)
@@ -115,30 +124,6 @@ class HibmMpmIbBoundaryConditionReport:
     pressure_neumann_count: int
     inactive_internal_node_count: int
     max_abs_velocity_mps: float = 0.0
-
-
-@dataclass(frozen=True)
-class HibmMpmVelocityDirichletBoundaryReport:
-    active_velocity_dirichlet_rows: int
-    inactive_obstacle_rows: int
-    max_abs_velocity_mps: float
-    raw_reconstructed_max_abs_velocity_mps: float = 0.0
-    boundary_velocity_only_row_count: int = 0
-    primary_region_active_rows: int = 0
-    secondary_region_active_rows: int = 0
-    other_region_active_rows: int = 0
-    unassigned_region_active_rows: int = 0
-    invalid_reconstruction_row_count: int = 0
-    invalid_no_fluid_sample_row_count: int = 0
-    invalid_nonpositive_gap_row_count: int = 0
-    invalid_node_behind_boundary_row_count: int = 0
-    invalid_node_beyond_interior_row_count: int = 0
-    narrow_gap_boundary_velocity_row_count: int = 0
-    relocated_row_count: int = 0
-    relocation_merged_row_count: int = 0
-    relocation_blocked_row_count: int = 0
-    min_projection_weight: float = 0.0
-    max_projection_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -218,7 +203,7 @@ class HibmMpmSharpFluidToMpmLoadReport:
     pressure_disconnected_region: HibmMpmPressureDisconnectedRegionReport
     boundary_conditions: HibmMpmIbBoundaryConditionReport
     pressure_neumann_gradient: HibmMpmPressureNeumannGradientReport | None
-    velocity_dirichlet: HibmMpmVelocityDirichletBoundaryReport
+    velocity_dirichlet: dict[str, object]
     pressure_neumann: HibmMpmPressureNeumannMatrixReport
     fluid_predictor_applied: bool
     fluid_projection: dict[str, Any]
@@ -262,7 +247,7 @@ class HibmMpmSharpMpmStepReport:
     next_pressure_disconnected_nonprojectable_cell_count: int
     next_pressure_disconnected_region: HibmMpmPressureDisconnectedRegionReport
     next_boundary_conditions: HibmMpmIbBoundaryConditionReport
-    next_velocity_dirichlet: HibmMpmVelocityDirichletBoundaryReport
+    next_velocity_dirichlet: dict[str, object]
     next_pressure_neumann: HibmMpmPressureNeumannMatrixReport
     next_pressure_neumann_gradient: HibmMpmPressureNeumannGradientReport | None = None
     next_pressure_neumann_invalid_diagnostic_rows: tuple[dict[str, Any], ...] = ()

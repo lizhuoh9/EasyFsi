@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import math
+import struct
 
 import taichi as ti
 
@@ -59,26 +60,52 @@ def _validate_fixed_region_contract(
     return fixed
 
 
-def _vector3(value: tuple[float, float, float], name: str) -> tuple[float, float, float]:
-    if len(value) != 3:
-        raise ValueError(f"{name} must contain exactly 3 components")
-    result = (float(value[0]), float(value[1]), float(value[2]))
-    if not all(math.isfinite(component) for component in result):
-        raise ValueError(f"{name} must contain only finite values")
+def _finite_f32(value: float, name: str) -> float:
+    try:
+        source = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be numeric") from exc
+    if not math.isfinite(source):
+        raise ValueError(f"{name} must be finite")
+    try:
+        result = struct.unpack("=f", struct.pack("=f", source))[0]
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be representable as ti.f32") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be representable as ti.f32")
+    if source != 0.0 and result == 0.0:
+        raise ValueError(f"{name} must not underflow ti.f32")
     return result
 
 
+def _vector3(value: tuple[float, float, float], name: str) -> tuple[float, float, float]:
+    if len(value) != 3:
+        raise ValueError(f"{name} must contain exactly 3 components")
+    return (
+        _finite_f32(value[0], f"{name}[0]"),
+        _finite_f32(value[1], f"{name}[1]"),
+        _finite_f32(value[2], f"{name}[2]"),
+    )
+
+
 def _positive_float(value: float, name: str) -> float:
-    result = float(value)
-    if not math.isfinite(result) or result <= 0.0:
+    result = _finite_f32(value, name)
+    if result <= 0.0:
         raise ValueError(f"{name} must be a finite positive number")
     return result
 
 
 def _non_negative_float(value: float, name: str) -> float:
-    result = float(value)
-    if not math.isfinite(result) or result < 0.0:
+    result = _finite_f32(value, name)
+    if result < 0.0:
         raise ValueError(f"{name} must be a finite non-negative number")
+    return result
+
+
+def _unit_interval_float(value: float, name: str) -> float:
+    result = _finite_f32(value, name)
+    if not 0.0 <= float(value) <= 1.0:
+        raise ValueError(f"{name} must be in [0, 1]")
     return result
 
 
@@ -581,10 +608,11 @@ class NeoHookeanMpmState:
     ) -> None:
         if self.particle_count <= 0:
             raise ValueError("initialize particles before setting loads")
+        pressure = _finite_f32(pressure_pa, "pressure_pa")
         self._set_region_normal_pressure_kernel(
             int(self.particle_count),
             int(region_id),
-            float(pressure_pa),
+            pressure,
         )
 
     @ti.kernel
@@ -608,10 +636,11 @@ class NeoHookeanMpmState:
     ) -> None:
         if self.particle_count <= 0:
             raise ValueError("initialize particles before setting loads")
+        pressure = _finite_f32(pressure_pa, "pressure_pa")
         self._add_region_normal_pressure_kernel(
             int(self.particle_count),
             int(region_id),
-            float(pressure_pa),
+            pressure,
         )
 
     @ti.kernel
@@ -655,10 +684,11 @@ class NeoHookeanMpmState:
                 self.v[p] = velocity
 
     def set_uniform_velocity(self, velocity_mps: tuple[float, float, float]) -> None:
+        velocity = _vector3(velocity_mps, "velocity_mps")
         self._set_uniform_velocity_kernel(
-            float(velocity_mps[0]),
-            float(velocity_mps[1]),
-            float(velocity_mps[2]),
+            velocity[0],
+            velocity[1],
+            velocity[2],
             int(self.particle_count),
         )
 
@@ -670,10 +700,11 @@ class NeoHookeanMpmState:
                 self.external_force_n[p] = force
 
     def set_uniform_external_force(self, force_n: tuple[float, float, float]) -> None:
+        force = _vector3(force_n, "force_n")
         self._set_uniform_external_force_kernel(
-            float(force_n[0]),
-            float(force_n[1]),
-            float(force_n[2]),
+            force[0],
+            force[1],
+            force[2],
             int(self.particle_count),
         )
 
@@ -1287,9 +1318,10 @@ class NeoHookeanMpmState:
                 f"constitutive_model must be one of {choices}; "
                 f"got {constitutive_model!r}"
             )
-        flip_blend = float(velocity_transfer_flip_blend)
-        if not math.isfinite(flip_blend) or not 0.0 <= flip_blend <= 1.0:
-            raise ValueError("velocity_transfer_flip_blend must be in [0, 1]")
+        flip_blend = _unit_interval_float(
+            velocity_transfer_flip_blend,
+            "velocity_transfer_flip_blend",
+        )
         if self._out_of_bounds_guard_batch_active and read_report:
             raise ValueError(
                 "read_report must be False inside an out-of-bounds guard batch; "

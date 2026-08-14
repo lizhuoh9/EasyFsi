@@ -8,3 +8,7 @@ validation_runs/ansys_vertical_flap_fsi/**/*.sha256 text eol=crlf
 validation_runs/ansys_vertical_flap_fsi/generic_solver_selected_formulation_diagnostics/*.csv text eol=lf
 validation_runs/ansys_vertical_flap_fsi/fluent_reference/fluent_reference_contract_2026-06-27.json text eol=lf
 validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/public_tutorial_evidence_map.json text eol=lf
+
+# This legacy validation bundle hashes canonical LF bytes.  Pin the checkout
+# form so Git archives, Linux clones, and Windows clones materialize identically.
+validation/ansys-fluent-official-half-domain-hibm-mpm-2026-06-25/** text=auto eol=lf

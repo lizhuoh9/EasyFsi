@@ -248,6 +248,10 @@ def _run_real_cartesian_project_to_first_pressure(
 
     fluid = object.__new__(CartesianFluidSolver)
     fluid.grid = SimpleNamespace(is_uniform=True)
+    fluid.rho = 1.0
+    fluid.dx = 1.0
+    fluid.dy = 1.0
+    fluid.dz = 1.0
     fluid._pressure_warmstart_slots = ()
     # project() now performs an unconditional interface-operator preflight
     # before Q.  Model the valid empty-row state explicitly so this lifecycle

@@ -113,6 +113,18 @@ _smoke_equivalence/
 validation_runs/.taichi_cache/
 validation_runs/**/pytest_tmp_*/
 
+# The complete local evidence workspace is preserved outside normal source
+# commits. Reviewed lightweight runners can still be added explicitly with
+# `git add -f`; files already tracked by Git remain tracked.
+validation_runs/**
+
+# Local third-party LS-DYNA/ICFD reference material has unverified
+# redistribution terms and is not part of the EasyFsi source tree.
+ICFD_example_aerofsi1/
+
+# Renderers may emit machine-local JSON sidecars next to committed figures.
+validation/**/figures/*.json
+
 *.visit
 *.vti
 *.vtp

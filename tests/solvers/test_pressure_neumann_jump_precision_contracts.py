@@ -85,7 +85,6 @@ def _assemble_single_pressure_neumann_row(
         fluid.pressure_interface_coupling_neighbor,
         fluid.pressure_interface_coupling_coefficient,
         fluid.obstacle,
-        fluid.velocity_dirichlet_boundary_active,
         fluid.cell_width_x_m,
         fluid.cell_width_y_m,
         fluid.cell_width_z_m,

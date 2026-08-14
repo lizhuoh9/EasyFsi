@@ -348,7 +348,9 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertNotIn("(position.x - bounds_min_x) / dx - 0.5", source)
         self.assertNotIn("(probe.x - bounds_min_x) / dx - 0.5", source)
         self.assertIn("grid_fields=fluid", projected_ibm_source)
-        self.assertIn("grid_fields=simulator.fluid", squid_source)
+        self.assertIn("sharp_coupling_state.advance_mpm_step(", squid_source)
+        self.assertIn("fluid=simulator.fluid", squid_source)
+        self.assertNotIn("grid_fields=simulator.fluid", squid_source)
         self.assertIn("cell_center_x_m[i]", squid_source)
         self.assertIn("cell_width_x_m[i] * cell_width_y_m[j]", squid_source)
         self.assertIn("outlet_radius_m: ti.f32", squid_source)
@@ -410,8 +412,14 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertIn('"final_outlet_to_fsi_volume_source_ratio_physical"', source)
         self.assertIn("physical_outlet_to_fsi_volume_source_passes(", source)
         self.assertIn('"pressure_outlet_velocity_to_source_ratio"', source)
-        self.assertIn('"final_pressure_outlet_velocity_to_source_ratio"', source)
-        self.assertIn('"final_pressure_outlet_pressure_to_source_ratio"', source)
+        self.assertIn(
+            '"final_pressure_outlet_velocity_to_positive_source_ratio"', source
+        )
+        self.assertIn(
+            '"final_pressure_outlet_velocity_to_abs_source_ratio"', source
+        )
+        self.assertNotIn('"final_pressure_outlet_velocity_to_source_ratio"', source)
+        self.assertNotIn('"final_pressure_outlet_pressure_to_source_ratio"', source)
         self.assertNotIn("abs(final_outlet_flux_ratio) >= float(args.min_outlet_to_main_volume_flux_ratio)", source)
         self.assertIn('"projection_divergence_below_tolerance"', source)
         self.assertNotIn("max_div_l2 <= float(args.projection_divergence_tolerance)", source)
@@ -428,8 +436,11 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertIn("max_cells=args.graded_grid_max_cells", source)
         self.assertIn("--graded-grid-max-cells", source)
         self.assertIn("--use-graded-grid", source)
-        self.assertIn("pressure_schedule_pa(sub_time_s, spec)", source)
         self.assertIn("pressure_schedule_step_end_pa(current_time_s, spec.dt_s, spec)", source)
+        self.assertIn(
+            "return pressure_schedule_pa(float(current_time_s) + float(dt_s), spec)",
+            source,
+        )
         self.assertIn("if time <= t0_s:\n        return p0_pa", source)
         self.assertIn("def resolve_step_count(", source)
         self.assertIn("target_time_s = max(float(spec.pressure_t2_s), float(spec.dt_s))", source)
@@ -438,18 +449,16 @@ class SourceStaticContractTests(unittest.TestCase):
         self.assertIn("default=None", source)
         self.assertNotIn('parser.add_argument("--steps", type=int, default=8)', source)
         self.assertIn("not nozzle velocity, pressure, or flow", source)
-        self.assertIn(
-            "prescribed_velocity_boundary=fsi_velocity_constraint_blend > 0.0",
-            source,
-        )
-        self.assertNotIn("prescribed_velocity_boundary=False", source)
+        self.assertNotIn("fsi_velocity_constraint_blend", source)
         self.assertIn('return "fv_cg" if graded_grid_enabled else "fv_multigrid"', source)
         self.assertIn("auto uses fv_multigrid on uniform FV grids", source)
         self.assertIn("fv_cg on graded FV grids", source)
         self.assertIn('"fv_cg"', source)
         self.assertNotIn('return "fv_multigrid" if graded_grid_enabled else "jacobi"', source)
-        self.assertIn("pressure_solver=pressure_solver_name", source)
-        self.assertIn("multigrid_cycles=effective_multigrid_cycles", source)
+        self.assertIn("pressure_solver=settings.pressure_solver_name", source)
+        self.assertIn(
+            "multigrid_cycles=settings.effective_multigrid_cycles", source
+        )
         self.assertIn("--multigrid-cycles", source)
 
 

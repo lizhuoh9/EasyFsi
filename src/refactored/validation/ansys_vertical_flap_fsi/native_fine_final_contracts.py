@@ -18,7 +18,7 @@ FINAL_FINE_CONFIG_IDENTITY = {
     "solid_density_kgm3": 1600.0,
     "young_modulus_pa": 1.0e6,
     "poisson_ratio": 0.47,
-    "velocity_damping": 0.995,
+    "velocity_damping": 1.0,
     "solid_constitutive_model": "plane_stress_linear_elastic",
     "flow_advection_scheme": "muscl_tvd",
     "flow_turbulence_model": "sst_2003",
@@ -51,7 +51,19 @@ FINAL_FINE_CONFIG_IDENTITY = {
     "flow_cg_preconditioner": "fv_multigrid",
     "flow_cg_tolerance": 1.0e-6,
     "flow_pressure_solve_failure_policy": "raise",
+    "flow_post_solid_kinematic_projection_enabled": True,
+    "traction_tip_cap_pressure_enabled": True,
     "traction_pressure_pair_runtime_provider_mode": "runtime_anchored_cell_pair",
+}
+FINAL_FINE_DAMPING_IDENTITY = {
+    "native_fluent_structure_damping_enabled": False,
+    "solver_net_velocity_damping_per_physical_step": 1.0,
+}
+FINAL_FINE_TIME_LAYER_IDENTITY = {
+    "scheme": "explicit_loose",
+    "step_end_flow_stage": "post_solid_kinematic_projection",
+    "transport_advanced_by_step_end_projection": False,
+    "fluent_strong_coupling_equivalent": False,
 }
 FINAL_FINE_EXPORT_IDENTITY = {
     "span_reduction": "mean",
@@ -104,9 +116,11 @@ def validate_final_run_identity(
                 f"{key}: expected={expected!r}, actual={actual!r}"
             )
     return {
-        "schema": "our_solver_final_native_fine_identity_v2",
+        "schema": "our_solver_final_native_fine_identity_v3",
         "status": "passed",
         "config": dict(FINAL_FINE_CONFIG_IDENTITY),
+        "structure_damping": dict(FINAL_FINE_DAMPING_IDENTITY),
+        "coupling_time_layer": dict(FINAL_FINE_TIME_LAYER_IDENTITY),
         "export": dict(FINAL_FINE_EXPORT_IDENTITY),
     }
 

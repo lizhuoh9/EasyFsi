@@ -54,8 +54,6 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
             "_arbitrate_canonical_velocity_dirichlet_obstacle_relocation_kernel",
             "_materialize_canonical_velocity_dirichlet_relocation_winners_kernel",
             "_audit_canonical_velocity_dirichlet_relocation_merges_kernel",
-            "_relocate_masked_velocity_dirichlet_rows_kernel",
-            "_materialize_velocity_dirichlet_relocation_winners_kernel",
         )
         for stage_name in relocation_stages:
             with self.subTest(relocation_stage=stage_name):
@@ -64,102 +62,7 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                 self.assertNotEqual(stage_end, -1)
                 stage_source = self.source[stage_start:stage_end]
                 self.assertEqual(stage_source.count(source_key_call), 1)
-        self.assertEqual(self.source.count(source_key_call), 5)
-
-    def test_rollback_restores_shadow_ledger_and_reports_before_claiming_success(
-        self,
-    ) -> None:
-        for field_name in (
-            "_velocity_dirichlet_transaction_shadow_face_storage_index",
-            "_velocity_dirichlet_transaction_shadow_face_valid",
-            "_velocity_dirichlet_transaction_shadow_face_alpha",
-            "_velocity_dirichlet_transaction_shadow_face_boundary_distance_m",
-            "_velocity_dirichlet_transaction_shadow_face_sample_distance_m",
-        ):
-            self.assertIn(field_name, self.source)
-        for method_name in (
-            "_snapshot_velocity_dirichlet_shadow_transaction_kernel",
-            "_restore_velocity_dirichlet_shadow_transaction_kernel",
-        ):
-            self.assertIn(f"def {method_name}(", self.source)
-
-        wrapper_start = self.source.index(
-            "def assemble_velocity_dirichlet_reconstructed_boundary_rows("
-        )
-        wrapper_end = self.source.index(
-            "def _assemble_velocity_dirichlet_reconstructed_boundary_rows_impl(",
-            wrapper_start,
-        )
-        wrapper = self.source[wrapper_start:wrapper_end]
-        snapshot_call = wrapper.index(
-            "self._snapshot_velocity_dirichlet_shadow_transaction_kernel()"
-        )
-        assembly_call = wrapper.index(
-            "self._assemble_velocity_dirichlet_reconstructed_boundary_rows_impl("
-        )
-        restore_call = wrapper.index(
-            "self._restore_velocity_dirichlet_shadow_transaction_kernel()"
-        )
-        rollback_success = wrapper.index("rolled_back = True", restore_call)
-        self.assertLess(snapshot_call, assembly_call)
-        self.assertLess(restore_call, rollback_success)
-
-    def test_transaction_backup_fields_are_lazy_and_diagnostics_gated(self) -> None:
-        """Normal production assembly must not reserve the rollback image."""
-
-        init_start = self.source.index("class HibmMpmIbBoundaryConditions:")
-        init_end = self.source.index(
-            "    @ti.kernel\n    def _build_from_search_kernel(",
-            init_start,
-        )
-        initializer = self.source[init_start:init_end]
-        transaction_field_names = (
-            "_velocity_dirichlet_transaction_active",
-            "_velocity_dirichlet_transaction_value_mps",
-            "_velocity_dirichlet_transaction_projection_weight",
-            "_velocity_dirichlet_transaction_enforcement_weight",
-            "_velocity_dirichlet_transaction_hard_fixed_component_mask",
-            "_velocity_dirichlet_transaction_external_exact_component_mask",
-            "_velocity_dirichlet_transaction_external_owned_row",
-            "_velocity_dirichlet_transaction_marker_region_id",
-            "_velocity_dirichlet_transaction_internal_owned_row",
-            "_velocity_dirichlet_transaction_exact_reconstructed_row",
-            "_velocity_dirichlet_transaction_node_anchor_cell",
-            "_velocity_dirichlet_transaction_shadow_face_storage_index",
-            "_velocity_dirichlet_transaction_shadow_face_valid",
-            "_velocity_dirichlet_transaction_shadow_face_alpha",
-            "_velocity_dirichlet_transaction_shadow_face_boundary_distance_m",
-            "_velocity_dirichlet_transaction_shadow_face_sample_distance_m",
-            "_velocity_dirichlet_transaction_shadow_report_counts",
-        )
-        for field_name in transaction_field_names:
-            self.assertIn(f"self.{field_name} = None", initializer)
-            self.assertNotRegex(
-                initializer,
-                rf"self\.{re.escape(field_name)}\s*=\s*(?:ti\.|\()",
-            )
-
-        self.assertIn(
-            "def _ensure_velocity_dirichlet_transaction_fields(self) -> None:",
-            self.source,
-        )
-        wrapper_start = self.source.index(
-            "def assemble_velocity_dirichlet_reconstructed_boundary_rows("
-        )
-        wrapper_end = self.source.index(
-            "def _assemble_velocity_dirichlet_reconstructed_boundary_rows_impl(",
-            wrapper_start,
-        )
-        wrapper = self.source[wrapper_start:wrapper_end]
-        diagnostics_branch = wrapper.index("if diagnostics_enabled:")
-        ensure_call = wrapper.index(
-            "self._ensure_velocity_dirichlet_transaction_fields()"
-        )
-        snapshot_call = wrapper.index(
-            "self._snapshot_velocity_dirichlet_row_transaction_kernel("
-        )
-        self.assertLess(diagnostics_branch, ensure_call)
-        self.assertLess(ensure_call, snapshot_call)
+        self.assertEqual(self.source.count(source_key_call), 3)
 
     def test_grid_product_guard_precedes_taichi_initialization(self) -> None:
         init_start = self.source.index("class HibmMpmIbBoundaryConditions:")
@@ -174,48 +77,6 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
         taichi_init = initializer.index("init_taichi(runtime)")
         self.assertLess(product_guard, taichi_init)
 
-    def test_relocation_boundary_point_is_rebuilt_from_checked_authority(self) -> None:
-        """Do not spend another per-node vec3 SNode on derivable geometry."""
-
-        removed_field = (
-            "velocity_dirichlet_relocation_shadow_boundary_point_m"
-        )
-        self.assertNotIn(removed_field, self.source)
-
-        prepare_start = self.source.index(
-            "    def _prepare_velocity_dirichlet_component_face_claims_kernel("
-        )
-        prepare_end = self.source.index("\n    @ti.kernel", prepare_start + 1)
-        prepare = self.source[prepare_start:prepare_end]
-        shadow_source = prepare.index(
-            "self.velocity_dirichlet_relocation_shadow_source_row["
-        )
-        relocation_start = prepare.rindex("elif (", 0, shadow_source)
-        relocation_end = prepare.index(
-            "if source_active != 0:", relocation_start
-        )
-        relocation = prepare[relocation_start:relocation_end]
-        author_assignment = relocation.index("author = (")
-        boundary_rebuild = relocation.index(
-            "boundary_point = node_boundary_point_m[author]"
-        )
-        self.assertLess(author_assignment, boundary_rebuild)
-
-        materialize_start = self.source.index(
-            "    def _materialize_relocated_shadow_component_faces_kernel("
-        )
-        materialize_end = self.source.index(
-            "\n    @ti.kernel", materialize_start + 1
-        )
-        materialize = self.source[materialize_start:materialize_end]
-        bounds_check = materialize.index("source.x < 0")
-        bounds_else = materialize.index("else:", bounds_check)
-        boundary_rebuild = materialize.index(
-            "boundary_point = node_boundary_point_m[source]", bounds_else
-        )
-        self.assertLess(bounds_check, bounds_else)
-        self.assertLess(bounds_else, boundary_rebuild)
-
     def test_component_claim_scratch_has_no_write_only_geometry_vectors(self) -> None:
         """Per-target geometry summaries must have an observable reader."""
 
@@ -225,22 +86,6 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
         ):
             with self.subTest(dead_field=dead_field):
                 self.assertNotIn(dead_field, self.source)
-
-    def test_boundary_constructor_commits_its_own_snode_tree(self) -> None:
-        """A later fluid object must not inherit this object's SNode budget."""
-
-        init_start = self.source.index("class HibmMpmIbBoundaryConditions:")
-        init_end = self.source.index(
-            "    @ti.kernel\n    def _build_from_search_kernel(", init_start
-        )
-        initializer = self.source[init_start:init_end]
-        last_field = initializer.index(
-            "self.report_velocity_dirichlet_shadow_face_degenerate_components"
-        )
-        materialization_barrier = initializer.index(
-            "self._clear_velocity_dirichlet_relocation_shadow_claims_kernel()"
-        )
-        self.assertLess(last_field, materialization_barrier)
 
     def test_component_face_ledger_exposes_host_only_fine_stage_observer(self) -> None:
         """Cold-JIT timing boundaries remain outside every Taichi kernel."""
@@ -411,8 +256,8 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                 "_measure_marker_target_closure_kernel",
             ),
             (
-                "hibm_marker_closure_kaczmarz_sweeps",
-                "_marker_target_closure_kaczmarz_sweep_kernel",
+                "hibm_marker_closure_weighted_solve",
+                "_commit_marker_target_closure_candidate",
             ),
             (
                 "hibm_marker_closure_final_measure",
@@ -456,8 +301,8 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                 "unresolved_marker_count > 0",
             ),
             (
-                "hibm_marker_closure_kaczmarz_sweeps",
-                "_marker_target_closure_kaczmarz_sweep_kernel",
+                "hibm_marker_closure_weighted_solve",
+                "_commit_marker_target_closure_candidate",
                 "initial_adjustable_max_residual > closure_tolerance",
             ),
         ):
@@ -490,6 +335,65 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                         for statement in guard.body
                     )
                 )
+
+    def test_marker_closure_uses_one_atomic_weighted_solve_before_commit(self) -> None:
+        module = ast.parse(self.source)
+        closure = next(
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_close_owned_hard_targets_to_marker_constraints"
+        )
+        weighted_solve_calls = [
+            node
+            for node in ast.walk(closure)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "solve_weighted_marker_target_closure"
+        ]
+        self.assertEqual(len(weighted_solve_calls), 1)
+        private_candidate_writes = [
+            node
+            for node in ast.walk(closure)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_commit_marker_target_closure_candidate"
+        ]
+        self.assertEqual(len(private_candidate_writes), 1)
+        self.assertNotIn(
+            "_marker_target_closure_kaczmarz_sweeps_kernel",
+            ast.unparse(closure),
+        )
+
+    def test_marker_closure_candidate_transfer_is_packed_by_adjustable_dof(
+        self,
+    ) -> None:
+        module = ast.parse(self.source)
+        commit = next(
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_commit_marker_target_closure_candidate"
+        )
+        source = ast.unparse(commit)
+        self.assertNotIn(
+            "velocity_dirichlet_marker_target_closure_value_mps.to_numpy",
+            source,
+        )
+        self.assertNotIn(
+            "velocity_dirichlet_component_face_claim_target_mps.to_numpy",
+            source,
+        )
+        self.assertNotIn(
+            "velocity_dirichlet_marker_target_closure_value_mps.from_numpy",
+            source,
+        )
+        self.assertNotIn(
+            "velocity_dirichlet_component_face_claim_target_mps.from_numpy",
+            source,
+        )
+        self.assertIn("_gather_marker_target_closure_candidate_kernel", source)
+        self.assertIn("_commit_marker_target_closure_candidate_kernel", source)
 
     @staticmethod
     def _statement_lists(node: ast.AST) -> list[list[ast.stmt]]:

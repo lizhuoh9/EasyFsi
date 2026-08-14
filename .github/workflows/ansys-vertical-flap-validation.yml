@@ -58,7 +58,7 @@ jobs:
             tests.solvers.test_cad_tessellation.CadTessellationTests.test_step_part_entity_tag_expands_all_part_surfaces_on_tag_collision \
             tests.solvers.test_hibm.HibmMpmSharpPathFailFastTests.test_sharp_mpm_step_requires_fresh_external_force_before_solid_advance \
             tests.solvers.test_tri_surface.TriSurfaceRegionDiagnosticsTests.test_f32_kernel_parameters_reject_f64_overflow_before_launch \
-            tests.cases.test_squid_latest_core_config.SquidRunCheckpointMarkerStateTests.test_run_checkpoint_version_is_4 \
+            tests.cases.test_squid_latest_core_config.SquidRunCheckpointMarkerStateTests.test_run_checkpoint_version_is_7 \
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_full_domain_runner_passes_full_step_neumann_dt_once \
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_full_domain_runner_uses_full_span_flaps \
             tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_canonical_runner_rejects_underresolved_solid_particles_for_fine_grid \
@@ -69,6 +69,9 @@ jobs:
             tests.tools.test_validation_artifact_hygiene
 
           python -m pytest -q \
+            tests/validation/test_native_fine_comparison.py \
+            tests/validation/test_native_fine_contract_hardening.py::test_postprocess_cli_default_tracks_latest_fresh50_bundle \
+            tests/validation/test_native_fine_contract_hardening.py::test_postprocess_cli_returns_nonzero_when_five_percent_gate_fails \
             tests/validation/test_turek_hron_rendering.py::test_two_synthetic_snapshots_render_with_one_fixed_scale_and_make_gif
 
   contracts:

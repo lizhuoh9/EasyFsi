@@ -8,10 +8,7 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from simulation_core import (
-    FSI_COUPLING_MODE_HIBM_MPM_SHARP,
-    vector_norm,
-)
+from simulation_core import vector_norm
 
 FINITE_REQUIRED_ROW_FIELDS = (
     "main_displacement_z_m",
@@ -237,18 +234,31 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_ib_invalid_projection_count",
     "hibm_boundary_no_slip_count",
     "hibm_boundary_pressure_neumann_count",
-    "hibm_velocity_dirichlet_active_rows",
-    "hibm_velocity_dirichlet_invalid_reconstruction_count",
-    "hibm_velocity_dirichlet_invalid_no_fluid_sample_count",
-    "hibm_velocity_dirichlet_invalid_nonpositive_gap_count",
-    "hibm_velocity_dirichlet_invalid_node_behind_boundary_count",
-    "hibm_velocity_dirichlet_invalid_node_beyond_interior_count",
-    "hibm_velocity_dirichlet_narrow_gap_count",
-    "hibm_velocity_dirichlet_relocated_rows",
-    "hibm_velocity_dirichlet_relocation_merged_rows",
-    "hibm_velocity_dirichlet_relocation_blocked_rows",
-    "hibm_velocity_dirichlet_min_projection_weight",
-    "hibm_velocity_dirichlet_max_projection_weight",
+    "hibm_velocity_dirichlet_schema_version",
+    "hibm_velocity_dirichlet_invariant_violation_count",
+    "hibm_velocity_dirichlet_final_active_component_count",
+    "hibm_velocity_dirichlet_final_active_storage_row_count",
+    "hibm_velocity_dirichlet_primary_region_active_component_count",
+    "hibm_velocity_dirichlet_secondary_region_active_component_count",
+    "hibm_velocity_dirichlet_other_region_active_component_count",
+    "hibm_velocity_dirichlet_unassigned_region_active_component_count",
+    "hibm_velocity_dirichlet_max_abs_committed_target_mps",
+    "hibm_velocity_dirichlet_min_active_pressure_mobility",
+    "hibm_velocity_dirichlet_max_active_pressure_mobility",
+    "hibm_velocity_dirichlet_min_active_enforcement_weight",
+    "hibm_velocity_dirichlet_max_active_enforcement_weight",
+    "hibm_velocity_dirichlet_relocated_claim_count",
+    "hibm_velocity_dirichlet_relocation_merged_count",
+    "hibm_velocity_dirichlet_relocation_blocked_count",
+    "hibm_velocity_dirichlet_relocation_unavailable_count",
+    "hibm_velocity_dirichlet_claim_conflict_count",
+    "hibm_velocity_dirichlet_target_conflict_count",
+    "hibm_velocity_dirichlet_region_conflict_count",
+    "hibm_velocity_dirichlet_alpha_conflict_count",
+    "hibm_velocity_dirichlet_nonfinite_claim_target_count",
+    "hibm_velocity_dirichlet_nonfinite_geometry_count",
+    "hibm_velocity_dirichlet_degenerate_geometry_count",
+    "hibm_velocity_dirichlet_missing_actual_sample_count",
     "hibm_pressure_neumann_active_rows",
     "hibm_pressure_neumann_skipped_velocity_dirichlet_count",
     "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count",
@@ -268,9 +278,6 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_pressure_neumann_gradient_available",
     "hibm_pressure_neumann_gradient_active_marker_count",
     "hibm_pressure_neumann_gradient_max_abs_pa_per_m",
-    "hibm_added_mass_stability_measured",
-    "hibm_semi_implicit_coupling_enabled",
-    "hibm_semi_implicit_coupling_matrix_active",
     "hibm_pressure_correctable_divergence_l2",
     "hibm_pressure_correctable_divergence_max_abs",
     "hibm_pressure_correctable_divergence_cell_count",
@@ -385,9 +392,6 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "hibm_projection_tiny_unreached_cleanup_component_count",
     "hibm_unreached_component_rhs_mean_max_abs",
     "hibm_unreached_component_rhs_integral_max_abs",
-    "fsi_added_mass_stability_measured",
-    "fsi_semi_implicit_coupling_enabled",
-    "fsi_semi_implicit_coupling_matrix_active",
     "fsi_action_reaction_residual_abs_n",
     "fsi_coupling_residual_norm_mps",
     "fsi_coupling_residual_max_mps",
@@ -431,19 +435,7 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
 )
 
 def finite_required_row_fields_for_solid_model(solid_model: str) -> tuple[str, ...]:
-    if solid_model == "neo_hookean_mpm":
-        return FINITE_REQUIRED_ROW_FIELDS + NEO_HOOKEAN_REQUIRED_ROW_FIELDS
-    return FINITE_REQUIRED_ROW_FIELDS
-
-def finite_required_row_fields_for_mode(
-    fsi_coupling_mode: str,
-    *,
-    solid_model: str,
-) -> tuple[str, ...]:
-    if str(fsi_coupling_mode) == FSI_COUPLING_MODE_HIBM_MPM_SHARP:
-        fields = HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS
-    else:
-        fields = finite_required_row_fields_for_solid_model(solid_model)
+    fields = HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS
     if solid_model == "neo_hookean_mpm":
         return fields + tuple(
             field for field in NEO_HOOKEAN_REQUIRED_ROW_FIELDS if field not in fields

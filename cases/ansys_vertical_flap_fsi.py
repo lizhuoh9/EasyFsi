@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -20,12 +21,14 @@ from simulation_core.drivers.generic_fsi_solver import (
     SurfaceRegionPolicy,
     TractionConfig,
 )
-from simulation_core.drivers.fsi_driver import FsiCaseSpec
+from simulation_core.drivers.case_spec import FsiCaseSpec
 from benchmarks.official.official_benchmark_solver import (
     OfficialBenchmarkRunSpec,
     run_official_fsi_benchmark,
 )
 from benchmarks.official.solid_mpm_fsi_runner import (
+    PreparedFsiRuntime,
+    prepare_rectangular_solid_marker_mpm_fsi_runtime,
     run_rectangular_solid_marker_mpm_fsi_smoke,
     slab_equivalence_diagnostics,
 )
@@ -71,6 +74,15 @@ ANSYS_VERTICAL_FLAP_THIN_WALL_PRESSURE_SAMPLING: dict[str, float | str] = {
 }
 
 
+ANSYS_VERTICAL_FLAP_DEFAULT_CLI_PRESET: dict[str, str] = {
+    "name": "smoke",
+    "flow_driver_mode": "projection_only",
+    "flow_advection_scheme": "euler",
+    "flow_turbulence_model": "laminar",
+    "flow_sst_near_wall_treatment": "resolved",
+}
+
+
 ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
     "source": {
         "name": "ANSYS Fluent v251 two-way intrinsic FSI vertical-flap tutorial",
@@ -102,6 +114,10 @@ ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
         "constitutive_model": "linear-elastic",
         "stress_state": "plane-stress",
     },
+    "structure_damping": {
+        "native_fluent_structure_damping_enabled": False,
+        "solver_net_velocity_damping_per_physical_step": 1.0,
+    },
     "solid_boundary": {
         "flap_attach": "fixed x/y displacement",
     },
@@ -115,6 +131,15 @@ ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
         "step_count": 50,
         "total_time_s": 0.025,
     },
+    "coupling_time_layer": {
+        "scheme": "partitioned_marker_velocity_iqn_ils",
+        "interface_unknown": "marker_velocity_mps",
+        "physical_step_owner": "simulation_core.drivers.solve_fsi_runtime",
+        "step_end_flow_stage": "post_solid_kinematic_projection",
+        "transport_advanced_by_step_end_projection": False,
+        "fail_closed_on_nonconvergence": True,
+    },
+    "default_cli_preset": ANSYS_VERTICAL_FLAP_DEFAULT_CLI_PRESET,
     "reference_results": ANSYS_VERTICAL_FLAP_REFERENCE_RESULTS,
     "boundary_conditions": ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
 }
@@ -158,6 +183,11 @@ class VerticalFlapFsiConfig:
     solid_constitutive_model: str = "plane_stress_linear_elastic"
     dt_s: float = 5.0e-4
     step_count: int = 50
+    fsi_coupling_iterations: int = 8
+    fsi_coupling_relative_tolerance: float = 1.0e-3
+    fsi_coupling_absolute_tolerance_mps: float = 1.0e-5
+    fsi_coupling_initial_relaxation: float = 0.5
+    fsi_coupling_history_limit: int = 8
     grid_nodes: tuple[int, int, int] = (4, 32, 64)
     solid_particle_counts: tuple[int, int, int] = (1, 12, 4)
     marker_count: int = 12
@@ -171,13 +201,17 @@ class VerticalFlapFsiConfig:
     flow_post_dirichlet_consistency_projection_iterations: int = 1
     flow_reprojection_iterations: int | None = None
     flow_reprojection_cg_tolerance: float | None = None
+    # Reproject the current velocity after moving the solid so exported flow,
+    # boundary rows, and structure geometry share one step-end time layer.
+    flow_post_solid_kinematic_projection_enabled: bool = True
     flow_pressure_solve_failure_policy: str = "raise"
     flow_divergence_cleanup_iterations: int = 0
     # None delegates external-face topology to the exact velocity-boundary
     # ledger. True/False remain explicit legacy assertions for callers that
     # deliberately need them.
     flow_projection_velocity_inlet_zmax: bool | None = None
-    velocity_damping: float = 0.995
+    # Fluent disables structure damping; this is the net physical-step factor.
+    velocity_damping: float = 1.0
     solid_velocity_transfer_flip_blend: float = 0.0
     solid_substeps: int = 1600
     solid_cfl_target: float = 0.5
@@ -205,12 +239,7 @@ class VerticalFlapFsiConfig:
     flow_advection_scheme: str = "euler"
     flow_predictor_substeps: int = 8
     flow_predictor_kinematic_viscosity_multiplier: float = 1.0
-    # The native Fluent reference solves SST k-omega throughout preflow and
-    # transient FSI.  These are physical inlet/backflow declarations, not
-    # pressure or displacement calibration factors.
-    # Base smoke configurations remain laminar for backward-compatible unit
-    # fixtures.  selected_formulation_solver_config() explicitly enables SST
-    # for the official Fluent-comparison production path.
+    # The selected Fluent-comparison formulation enables SST explicitly.
     flow_turbulence_model: str = "laminar"
     flow_turbulence_intensity: float = 0.05
     flow_turbulent_viscosity_ratio: float = 10.0
@@ -237,6 +266,7 @@ class VerticalFlapFsiConfig:
         tuple[float, float, float] | None
     ) = None
     flow_hibm_sharp_interpolate_velocity_rows: bool = True
+    flow_hibm_marker_mac_constraint_iterations: int = 64
     # Keep the moving physical flap volume independent of the narrow HIBM
     # interface-row search.  Validation launchers enable this together with
     # update_fluid_obstacle_from_solid after selecting a mesh-scaled envelope.
@@ -262,6 +292,7 @@ class VerticalFlapFsiConfig:
     traction_marker_layout: str = "dual_physical_faces"
     traction_pressure_sampling_mode: str = "two_sided_pressure_jump"
     traction_include_viscous: bool = False
+    traction_tip_cap_pressure_enabled: bool = True
     traction_marker_face_offset_cells: float = 0.51
     traction_pressure_probe_origin_mode: str = "marker_position"
     traction_pressure_probe_origin_offset_cells: float | None = None
@@ -472,7 +503,7 @@ class AnsysVerticalFlapProblem:
                 ),
             ),
             traction_config=traction_config,
-            runtime_executor=_run_ansys_vertical_flap_generic_runtime,
+            runtime_factory=_prepare_ansys_vertical_flap_runtime,
             metadata={
                 "adapter": "AnsysVerticalFlapProblem",
                 "case_name": "ansys_vertical_flap_fsi",
@@ -586,11 +617,11 @@ def selected_formulation_solver_config(
     return with_local_surface_force_support(config)
 
 
-def _run_ansys_vertical_flap_generic_runtime(
+def _prepare_ansys_vertical_flap_runtime(
     problem: FsiProblem,
     solver_config: FsiSolverConfig,
     diagnostics_config: DiagnosticsConfig,
-) -> dict[str, Any]:
+) -> Any:
     pressure_pair_provider_mode = str(
         problem.metadata["pressure_pair_provider_mode"]
     )
@@ -602,33 +633,39 @@ def _run_ansys_vertical_flap_generic_runtime(
             None if selected_anchor_markers_json is None else str(selected_anchor_markers_json)
         ),
     )
-    report = run_vertical_flap_fsi_smoke(config)
-    history = list(report.get("history", []))
-    pressure_policy = problem.traction_config.pressure_sampling.pair_provider
-    return {
-        "run_status": (
-            "completed"
-            if len(history) == int(solver_config.step_count)
-            else "blocked"
+    config = replace(
+        config,
+        fsi_coupling_iterations=int(solver_config.coupling.max_iterations),
+        fsi_coupling_relative_tolerance=float(
+            solver_config.coupling.relative_tolerance
         ),
-        "history": history,
-        "report": report,
-        "diagnostics": {
-            "adapter": "AnsysVerticalFlapProblem",
-            "diagnostics_output_root": diagnostics_config.output_root,
-            "selected_formulation_preset": ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET,
-            "selected_anchor_markers_json": selected_anchor_markers_json or "",
-            "pressure_pair_runtime_generation_status": (
-                pressure_policy.pair_source_status
-            ),
-            "pressure_pair_runtime_generation_complete": (
-                not pressure_policy.transition_backed
-            ),
-            "transition_artifact_dependency": pressure_policy.transition_backed,
-            "fluent_parity_claimed": False,
-        },
-        "artifacts": {},
-    }
+        fsi_coupling_absolute_tolerance_mps=float(
+            solver_config.coupling.absolute_tolerance_mps
+        ),
+        fsi_coupling_initial_relaxation=float(
+            solver_config.coupling.initial_relaxation
+        ),
+        fsi_coupling_history_limit=int(solver_config.coupling.history_limit),
+    )
+    if not math.isclose(
+        float(solver_config.time_step_s),
+        float(config.dt_s),
+        rel_tol=0.0,
+        abs_tol=1.0e-15,
+    ):
+        raise ValueError(
+            "ANSYS vertical-flap solver time_step_s must equal the case dt_s"
+        )
+    prepared = prepare_rectangular_solid_marker_mpm_fsi_runtime(
+        case_id=CASE_SPEC.case_id,
+        case_metadata=ANSYS_VERTICAL_FLAP_CASE_METADATA,
+        boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
+        reference_results=CASE_SPEC.reference_results,
+        config=config,
+    )
+    if not isinstance(prepared, PreparedFsiRuntime):
+        raise RuntimeError("ANSYS FSI runtime cannot be preflow-only")
+    return prepared.runtime
 
 
 def run_vertical_flap_fsi_smoke(
@@ -676,7 +713,7 @@ def _run_vertical_flap_fsi_core(
         case_id=CASE_SPEC.case_id,
         case_metadata=ANSYS_VERTICAL_FLAP_CASE_METADATA,
         boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
-        reference_results=ANSYS_VERTICAL_FLAP_REFERENCE_RESULTS,
+        reference_results=CASE_SPEC.reference_results,
         config=config,
         step_observer=step_observer,
         progress_observer=progress_observer,
@@ -788,7 +825,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--flow-turbulence-model",
-        default="sst_2003",
+        default=VerticalFlapFsiConfig.flow_turbulence_model,
         choices=("laminar", "sst_2003"),
         help="Core momentum/turbulence closure used by predictor-style flow drivers.",
     )

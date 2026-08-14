@@ -31,6 +31,22 @@ $compileTargets += Get-ChildItem -Path `
 & $python -m unittest tests.cases.test_squid_latest_core_config tests.cases.test_squid_package_exports -v
 ```
 
+The focused unified-FSI architecture gate is:
+
+```powershell
+& $python -m pytest -q -p no:cacheprovider `
+  tests\contracts\test_unified_fsi_solver_core.py `
+  tests\contracts\test_generic_fsi_solver_architecture.py `
+  tests\contracts\test_turek_generic_fsi_step_migration.py `
+  tests\cases\test_squid_unified_marker_velocity_coupling.py
+```
+
+This gate requires one physical-step loop and one marker-velocity IQN-ILS loop
+under `simulation_core/drivers/generic_fsi_solver.py`. Case adapters may execute
+component-local fluid, solid, and HIBM substeps inside one trial, but may not
+own a physical-step scheduler, a second interface unknown, or a case-local
+fixed-point loop.
+
 ## Optional Light Solver Checks
 
 ```powershell

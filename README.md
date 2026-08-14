@@ -5,16 +5,16 @@
 > 当前同步说明：本仓库已经包含 refactored 副本之后继续推进的 sharp HIBM-MPM / squid FSI 收敛修复与验证工作。最新目标和审查记录见
 > [SHARP_HIBM_MPM_CONVERGENCE_FIX_GOAL_2026-06-18.md](docs/refactoring/SHARP_HIBM_MPM_CONVERGENCE_FIX_GOAL_2026-06-18.md)、
 > [SQUID_2S_SIMULATION_GOAL_2026-06-17.md](docs/refactoring/SQUID_2S_SIMULATION_GOAL_2026-06-17.md) 和
-> [SQUID_JET_FSI_COUPLING_REVIEW.md](SQUID_JET_FSI_COUPLING_REVIEW.md)。
+> [SQUID_JET_FSI_COUPLING_REVIEW.md](docs/refactoring/SQUID_JET_FSI_COUPLING_REVIEW.md)。
 
 ## 目录性质
 
 - 这是一份**保守、可验证**的重构：所有修改都以"行为不变"为第一原则，逐条列在
-  [REFACTORING_NOTES.md](REFACTORING_NOTES.md) 中，并按风险分级。
+  [REFACTORING_NOTES.md](docs/refactoring/REFACTORING_NOTES.md) 中，并按风险分级。
 - 大文件（`fluid.py`、`hibm_mpm.py`、`tri_surface.py`、`mooney_shell_mpm.py`、
   `cases/squid_soft_robot/runner.py`）**未做结构性大改**——对 3.5 万行的数值代码做整体改写
   无法在不跑长仿真验证的情况下保证功能不变。对它们的重构按
-  [REFACTORING_NOTES.md](REFACTORING_NOTES.md) 中的分阶段蓝图执行。
+  [REFACTORING_NOTES.md](docs/refactoring/REFACTORING_NOTES.md) 中的分阶段蓝图执行。
 - 一次性调试脚本（`tools_*.py`、`run_phase0_raw_map_scaling.py`）按审计结论归档到
   `archive/tools/`，不参与测试。
 

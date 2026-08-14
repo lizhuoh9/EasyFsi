@@ -337,6 +337,83 @@ def test_postprocess_cli_default_tracks_latest_fresh50_bundle() -> None:
     )
 
 
+def test_postprocess_cli_returns_nonzero_when_five_percent_gate_fails(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    script_path = (
+        repo_root
+        / "validation_runs"
+        / "ansys_vertical_flap_fsi"
+        / "our_solver_vs_native_fluent_fine_2026-07-10"
+        / "scripts"
+        / "postprocess_our_solver_vs_native_fluent.py"
+    )
+    namespace = runpy.run_path(str(script_path))
+    main = namespace["main"]
+    main.__globals__["postprocess_native_fine_comparison"] = lambda *_args, **_kwargs: {
+        "five_percent_diagnostic_gate": {
+            "status": "failed",
+            "all_metrics_within_tolerance": False,
+        }
+    }
+
+    exit_code = main(
+        [
+            "--our-run-dir",
+            str(tmp_path / "solver"),
+            "--fluent-postprocess-dir",
+            str(tmp_path / "fluent"),
+            "--output-dir",
+            str(tmp_path / "comparison"),
+        ]
+    )
+
+    assert exit_code != 0
+
+
+def test_postprocess_cli_forwards_explicit_fluent_force_history(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    script_path = (
+        repo_root
+        / "validation_runs"
+        / "ansys_vertical_flap_fsi"
+        / "our_solver_vs_native_fluent_fine_2026-07-10"
+        / "scripts"
+        / "postprocess_our_solver_vs_native_fluent.py"
+    )
+    namespace = runpy.run_path(str(script_path))
+    main = namespace["main"]
+    captured: dict[str, object] = {}
+
+    def _postprocess(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "five_percent_diagnostic_gate": {
+                "status": "passed",
+                "all_metrics_within_tolerance": True,
+            }
+        }
+
+    main.__globals__["postprocess_native_fine_comparison"] = _postprocess
+    force_history = tmp_path / "history.csv"
+    exit_code = main(
+        [
+            "--our-run-dir",
+            str(tmp_path / "solver"),
+            "--fluent-postprocess-dir",
+            str(tmp_path / "fluent"),
+            "--fluent-force-history",
+            str(force_history),
+            "--output-dir",
+            str(tmp_path / "comparison"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["fluent_force_history_path"] == str(force_history)
+
+
 @pytest.mark.parametrize(
     ("section", "key", "bad_value"),
     [

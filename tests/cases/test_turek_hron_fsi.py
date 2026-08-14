@@ -33,7 +33,6 @@ from cases.turek_hron_fsi import (
     build_turek_hron_final_fields_snapshot,
     _build_parser,
     _flush_history_csv,
-    _fsi_coupling_convergence_certificate,
     _write_final_fields_contour_png,
     cylinder_center_solver_m,
     fluid_cell_spacing_m,
@@ -51,13 +50,13 @@ from cases.turek_hron_fsi import (
     _resample_marker_group_arrays,
 )
 from benchmarks.official.solid_mpm_fsi_runner import (
-    SECONDARY_UNUSED_REGION_ID,
     SOLID_CONSTITUTIVE_MODELS,
 )
 from simulation_core.coupling.hibm_mpm import (
     advance_hibm_mpm_sharp_mpm_step,
     assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
 )
+from simulation_core.drivers.generic_fsi_solver import FsiCouplingReport
 
 
 class TurekHronCliTests(unittest.TestCase):
@@ -106,9 +105,8 @@ class TurekHronCliTests(unittest.TestCase):
                 "6",
                 "--fsi-coupling-absolute-tolerance-mps",
                 "1e-4",
-                "--fsi-coupling-accelerator",
-                "iqn_ils",
-                "--require-coupling-convergence",
+                "--fsi-coupling-initial-relaxation",
+                "0.4",
             ]
         )
 
@@ -118,8 +116,8 @@ class TurekHronCliTests(unittest.TestCase):
         self.assertEqual(args.flow_cg_preconditioner, "fv_multigrid")
         self.assertEqual(args.fsi_coupling_iterations, 6)
         self.assertAlmostEqual(args.fsi_coupling_absolute_tolerance_mps, 1.0e-4)
-        self.assertEqual(args.fsi_coupling_accelerator, "iqn_ils")
-        self.assertTrue(args.require_coupling_convergence)
+        self.assertAlmostEqual(args.fsi_coupling_initial_relaxation, 0.4)
+        self.assertFalse(hasattr(args, "require_coupling_convergence"))
 
     def test_cli_dt_override_reaches_the_run_config(self):
         summary = {
@@ -669,7 +667,10 @@ class TurekHronSolverContractTests(unittest.TestCase):
         source = inspect.getsource(run_turek_hron_fsi)
         self.assertIn("velocity_inlet_zmax=True", source)
         self.assertIn("pressure_outlet_zmin=True", source)
-        self.assertIn("_write_channel_boundary_rows(fluid, config, t_s)", source)
+        self.assertIn(
+            "_write_channel_external_velocity_faces(fluid, config, context.time_s)",
+            source,
+        )
         self.assertIn(
             "fluid.apply_velocity_dirichlet_boundary_rows(read_report=False)",
             source,
@@ -687,7 +688,7 @@ class TurekHronSolverContractTests(unittest.TestCase):
             "solid.begin_out_of_bounds_guard_batch()"
         )
         loop_index = solid_step_source.index(
-            "for substep_index in range(solid_substep_count):"
+            "for _solid_substep_index in range(solid_substep_count):"
         )
         end_index = solid_step_source.index(
             "report = solid.end_out_of_bounds_guard_batch()"
@@ -700,7 +701,7 @@ class TurekHronSolverContractTests(unittest.TestCase):
         self.assertEqual(solid_step_source.count("read_report=False"), 1)
         self.assertNotIn("read_report=True", solid_step_source)
         self.assertNotIn(
-            "read_report=(substep_index == solid_substep_count - 1)",
+            "read_report=(_solid_substep_index == solid_substep_count - 1)",
             solid_step_source,
         )
         self.assertIn("except BaseException:", solid_step_source)
@@ -708,38 +709,55 @@ class TurekHronSolverContractTests(unittest.TestCase):
         self.assertIn("\n            raise", solid_step_source)
 
 
+def _generic_coupling_fields(
+    *,
+    relative_residual: float,
+    absolute_residual_mps: float,
+    converged: bool,
+    relative_tolerance: float = 1.0e-3,
+    absolute_tolerance_mps: float = 1.0e-4,
+) -> dict[str, object]:
+    report = FsiCouplingReport(
+        iterations=2,
+        converged=converged,
+        relative_residual=relative_residual,
+        absolute_residual_mps=absolute_residual_mps,
+        max_marker_residual_mps=absolute_residual_mps,
+        relative_residual_history=(0.5, relative_residual),
+        absolute_residual_history_mps=(0.05, absolute_residual_mps),
+        update_modes=("picard",),
+    )
+    return turek_hron_case._turek_hron_coupling_report_fields(
+        report,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance_mps=absolute_tolerance_mps,
+        initial_relaxation=0.5,
+    )
+
+
 class TurekHronCouplingConvergenceCertificateTests(unittest.TestCase):
-    """Machine-readable convergence must not confuse an unmeasured pass with 0."""
+    """Turek exports the generic core's measured convergence report."""
 
-    def test_single_pass_is_explicitly_unmeasured_and_json_safe(self):
-        certificate = _fsi_coupling_convergence_certificate(
-            residual_measured=False,
-            relative_residual=0.0,
-            relative_tolerance=1.0e-3,
-            absolute_residual_mps=None,
-            absolute_tolerance_mps=0.0,
+    def test_nonconvergence_remains_measured_and_json_safe(self):
+        certificate = _generic_coupling_fields(
+            relative_residual=0.25,
+            absolute_residual_mps=2.0e-3,
+            converged=False,
         )
 
+        self.assertTrue(certificate["fsi_coupling_residual_measured"])
+        self.assertFalse(certificate["fsi_coupling_converged"])
         self.assertEqual(
-            certificate,
-            {
-                "fsi_coupling_residual_measured": False,
-                "fsi_coupling_converged": False,
-                "fsi_coupling_convergence_reason": "unmeasured_single_pass",
-                "fsi_coupling_absolute_residual_mps": None,
-            },
+            certificate["fsi_coupling_convergence_reason"],
+            "iteration_budget_exhausted",
         )
-        # None serializes as strict JSON null; no NaN sentinel leaks into the
-        # persisted summary and downstream tools cannot mistake 0.0 for proof.
         json.dumps(certificate, allow_nan=False)
 
     def test_relative_tolerance_hit_has_distinct_reason(self):
-        certificate = _fsi_coupling_convergence_certificate(
-            residual_measured=True,
+        certificate = _generic_coupling_fields(
             relative_residual=5.0e-4,
-            relative_tolerance=1.0e-3,
             absolute_residual_mps=2.0e-5,
-            absolute_tolerance_mps=1.0e-4,
+            converged=True,
         )
 
         self.assertTrue(certificate["fsi_coupling_residual_measured"])
@@ -753,12 +771,10 @@ class TurekHronCouplingConvergenceCertificateTests(unittest.TestCase):
         )
 
     def test_absolute_tolerance_hit_has_distinct_reason(self):
-        certificate = _fsi_coupling_convergence_certificate(
-            residual_measured=True,
+        certificate = _generic_coupling_fields(
             relative_residual=0.25,
-            relative_tolerance=1.0e-3,
             absolute_residual_mps=2.0e-5,
-            absolute_tolerance_mps=1.0e-4,
+            converged=True,
         )
 
         self.assertTrue(certificate["fsi_coupling_converged"])
@@ -768,12 +784,10 @@ class TurekHronCouplingConvergenceCertificateTests(unittest.TestCase):
         )
 
     def test_iteration_budget_exhaustion_is_not_convergence(self):
-        certificate = _fsi_coupling_convergence_certificate(
-            residual_measured=True,
+        certificate = _generic_coupling_fields(
             relative_residual=0.25,
-            relative_tolerance=1.0e-3,
             absolute_residual_mps=2.0e-3,
-            absolute_tolerance_mps=1.0e-4,
+            converged=False,
         )
 
         self.assertFalse(certificate["fsi_coupling_converged"])
@@ -782,16 +796,17 @@ class TurekHronCouplingConvergenceCertificateTests(unittest.TestCase):
             "iteration_budget_exhausted",
         )
 
-    def test_history_schema_appends_certificate_without_reordering_legacy_fields(self):
-        legacy_start = HISTORY_FIELDS.index("fsi_coupling_iterations_used")
+    def test_history_schema_uses_generic_coupling_names(self):
+        coupling_start = HISTORY_FIELDS.index("fsi_coupling_iterations_used")
         self.assertEqual(
-            HISTORY_FIELDS[legacy_start : legacy_start + 3],
+            HISTORY_FIELDS[coupling_start : coupling_start + 3],
             (
                 "fsi_coupling_iterations_used",
                 "fsi_coupling_residual",
-                "fsi_aitken_relaxation",
+                "fsi_coupling_initial_relaxation",
             ),
         )
+        self.assertNotIn("fsi_aitken_relaxation", HISTORY_FIELDS)
         certificate_start = HISTORY_FIELDS.index(
             "fsi_coupling_residual_measured"
         )
@@ -813,7 +828,7 @@ class TurekHronCouplingConvergenceCertificateTests(unittest.TestCase):
             "hibm_next_external_ib_node_count",
             "hibm_next_internal_node_count",
             "hibm_next_internal_obstacle_cell_count",
-            "hibm_next_velocity_dirichlet_active_rows",
+            "hibm_next_velocity_dirichlet_active_components",
             "hibm_next_pressure_neumann_active_rows",
             "hibm_next_solid_band_nonprojectable_cell_count",
             "hibm_stress_two_sided_extended_marker_count",
@@ -828,13 +843,11 @@ class TurekHronCouplingConvergenceCertificateTests(unittest.TestCase):
         for field in diagnostic_fields:
             self.assertIn(f'"{field}"', row_source)
 
-    def test_csv_flush_persists_unmeasured_certificate_without_nan(self):
-        certificate = _fsi_coupling_convergence_certificate(
-            residual_measured=False,
-            relative_residual=0.0,
-            relative_tolerance=1.0e-3,
-            absolute_residual_mps=None,
-            absolute_tolerance_mps=0.0,
+    def test_csv_flush_persists_generic_nonconvergence_without_nan(self):
+        certificate = _generic_coupling_fields(
+            relative_residual=0.25,
+            absolute_residual_mps=2.0e-3,
+            converged=False,
         )
         row = {
             **{field: 0 for field in HISTORY_FIELDS},
@@ -847,39 +860,37 @@ class TurekHronCouplingConvergenceCertificateTests(unittest.TestCase):
             with path.open(newline="", encoding="utf-8") as handle:
                 persisted = next(csv.DictReader(handle))
 
-        self.assertEqual(persisted["fsi_coupling_residual_measured"], "False")
+        self.assertEqual(persisted["fsi_coupling_residual_measured"], "True")
         self.assertEqual(persisted["fsi_coupling_converged"], "False")
         self.assertEqual(
             persisted["fsi_coupling_convergence_reason"],
-            "unmeasured_single_pass",
+            "iteration_budget_exhausted",
         )
-        self.assertEqual(persisted["fsi_coupling_absolute_residual_mps"], "")
+        self.assertEqual(persisted["fsi_coupling_absolute_residual_mps"], "0.002")
 
     def test_run_history_wires_certificate_and_absolute_residual_history(self):
         source = inspect.getsource(run_turek_hron_fsi)
         row_start = source.index('row: dict[str, Any] = {')
         row_end = source.index("history.append(row)")
         row_source = source[row_start:row_end]
-
-        self.assertIn("**fsi_coupling_certificate", row_source)
-        self.assertIn(
-            '"fsi_coupling_absolute_residual_history_mps"', row_source
-        )
-        self.assertIn(
-            "fsi_absolute_residual_history.append(float(absolute_residual_mps))",
-            source,
+        report_source = inspect.getsource(
+            turek_hron_case._turek_hron_coupling_report_fields
         )
 
-    def test_certificate_is_observability_only_after_existing_coupling_gate(self):
+        self.assertIn("**coupling_fields", row_source)
+        self.assertIn(
+            '"fsi_coupling_absolute_residual_history_mps"', report_source
+        )
+        self.assertIn(
+            "report.absolute_residual_history_mps",
+            report_source,
+        )
+
+    def test_generic_core_owns_the_coupling_gate(self):
         source = inspect.getsource(run_turek_hron_fsi)
-        gate = "if fsi_coupling_residual < fsi_tolerance or ("
-        certificate_call = (
-            "fsi_coupling_certificate = "
-            "_fsi_coupling_convergence_certificate("
-        )
-
-        self.assertEqual(source.count(gate), 1)
-        self.assertGreater(source.index(certificate_call), source.index(gate))
+        self.assertIn("solve_fsi_runtime(case_runtime, solver_config)", source)
+        self.assertNotIn("_fsi_coupling_convergence_certificate", source)
+        self.assertNotIn("unmeasured_single_pass", source)
 
 
 class TurekHronPressureTopologyGuardTests(unittest.TestCase):
@@ -925,7 +936,7 @@ class TurekHronPressureTopologyGuardTests(unittest.TestCase):
         self.assertNotIn("max(fluid_cell_spacing_m(config))", source)
         self.assertIn("plane_spacing_m = max(plane_dy_m, plane_dz_m)", source)
         self.assertIn("search_radius_m = 1.5 * plane_spacing_m", source)
-        self.assertIn("interior_probe_distance_m = 1.0 * plane_spacing_m", source)
+        self.assertIn("interior_probe_distance_m = plane_spacing_m", source)
         self.assertIn("search_radius_m=search_radius_m", source)
         self.assertIn(
             "interior_probe_distance_m=interior_probe_distance_m", source
@@ -1004,8 +1015,9 @@ class TurekHronOneSidedPressureSamplingTests(unittest.TestCase):
         # two regions exist for anchor-pair bookkeeping between two
         # physically distinct faces, not because the sign differs).
         self.assertIn(
-            "one_sided_pressure_primary_region_id=PRIMARY_REGION_ID", source
+            "one_sided_pressure_primary_region_id", source
         )
+        self.assertIn("PRIMARY_REGION_ID", source)
         self.assertIn("one_sided_primary_fluid_side_normal_sign=1.0", source)
         # The legacy single-slot one_sided_pressure_region_id and the
         # per-face primary/secondary slots are mutually exclusive at the
@@ -1018,7 +1030,7 @@ class TurekHronOneSidedPressureSamplingTests(unittest.TestCase):
         # The core supports a split pressure+viscous path, so the case must use
         # fluid.mu rather than forcing the stress sampler to zero viscosity.
         self.assertNotIn("stress_viscosity_pa_s_override=0.0", source)
-        self.assertIn("physical viscous traction", source)
+        self.assertNotIn("stress_viscosity_pa_s_override=0", source)
         self.assertIn("0 if config.enforce_plane_strain_x else None", source)
         assembly_source = inspect.getsource(
             assemble_hibm_mpm_sharp_fluid_to_mpm_loads
@@ -1111,9 +1123,8 @@ class TurekHronDiscreteStateObservabilityTests(unittest.TestCase):
             "hibm_next_internal_obstacle_cell_count": (
                 "latest_report.next_internal_obstacle_cell_count"
             ),
-            "hibm_next_velocity_dirichlet_active_rows": (
-                "latest_report.next_velocity_dirichlet."
-                "active_velocity_dirichlet_rows"
+            "hibm_next_velocity_dirichlet_active_components": (
+                '"final_active_component_count"'
             ),
             "hibm_next_pressure_neumann_active_rows": (
                 "latest_report.next_pressure_neumann."
@@ -1187,9 +1198,7 @@ class TurekHronObservabilityExportTests(unittest.TestCase):
     def test_run_loop_calls_snapshot_export_and_savez_when_enabled(self):
         source = inspect.getsource(run_turek_hron_fsi)
         self.assertIn("if export_final_flow_snapshot:", source)
-        self.assertIn(
-            "build_turek_hron_final_fields_snapshot(fluid, solid, config)", source
-        )
+        self.assertIn("build_turek_hron_final_fields_snapshot", source)
         self.assertIn('"turek_hron_final_fields.npz"', source)
         self.assertIn("np.savez(npz_path, **snapshot)", source)
         self.assertIn('"turek_hron_final_fields.png"', source)
@@ -1402,9 +1411,9 @@ class TurekHronMarkerReseedRunLoopWiringTests(unittest.TestCase):
         self.assertIn(
             "config.marker_reseed_interval_steps is not None", source
         )
-        self.assertIn("step_index > 0", source)
+        self.assertIn("context.step_index > 0", source)
         self.assertIn(
-            "step_index % int(config.marker_reseed_interval_steps) == 0",
+            "context.step_index",
             source,
         )
         self.assertIn("_reseed_turek_hron_markers(markers, config)", source)
@@ -1414,27 +1423,31 @@ class TurekHronMarkerReseedRunLoopWiringTests(unittest.TestCase):
         reseed_index = source.index(
             "_reseed_turek_hron_markers(markers, config)"
         )
-        # First occurrence of each: the top-of-step boundary-row write and
-        # the strong-coupling per-step base snapshot (fluid.save_state()
-        # only appears on the gated strong-coupling path).
+        # First occurrence of each: the top-of-step external-face write and
+        # the strong-coupling transaction snapshot (fluid.save_state() only
+        # appears on the generic runtime path).
         boundary_index = source.index(
-            "_write_channel_boundary_rows(fluid, config, t_s)"
+            "_write_channel_external_velocity_faces(fluid, config, context.time_s)"
         )
-        save_state_index = source.index("fluid.save_state()")
+        runtime_source = inspect.getsource(turek_hron_case._TurekHronFsiRuntime)
+        save_state_index = runtime_source.index("self.fluid.save_state()")
         self.assertLess(reseed_index, boundary_index)
-        self.assertLess(reseed_index, save_state_index)
+        self.assertGreaterEqual(save_state_index, 0)
 
-    def test_reseed_call_is_the_first_statement_in_the_step_loop(self):
+    def test_reseed_is_prepared_before_each_generic_trial_base_snapshot(self):
         source = inspect.getsource(run_turek_hron_fsi)
-        loop_index = source.index(
-            "for step_index in step_indices:"
-        )
+        prepare_start = source.index("def prepare_step(")
+        prepare_end = source.index("def restore_case_boundaries(", prepare_start)
+        prepare_source = source[prepare_start:prepare_end]
         reseed_index = source.index(
             "_reseed_turek_hron_markers(markers, config)"
         )
-        t_s_index = source.index("t_s = (step_index + 1) * float(config.dt_s)")
-        self.assertLess(loop_index, reseed_index)
-        self.assertLess(reseed_index, t_s_index)
+        boundary_index = source.index(
+            "_write_channel_external_velocity_faces(fluid, config, context.time_s)",
+            prepare_start,
+        )
+        self.assertIn("_reseed_turek_hron_markers", prepare_source)
+        self.assertLess(reseed_index, boundary_index)
 
 
 class TurekHronMarkerGroupResampleTests(unittest.TestCase):

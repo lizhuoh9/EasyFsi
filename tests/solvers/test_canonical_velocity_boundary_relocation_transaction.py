@@ -195,32 +195,14 @@ class CanonicalVelocityBoundaryRelocationTransactionContracts(unittest.TestCase)
             "boundary_point = node_boundary_point_m[author]",
             canonical_source,
         )
-
-        legacy_method_name = (
-            "_materialize_relocated_shadow_component_faces_kernel"
-        )
-        legacy_method = _method_node(legacy_method_name)
-        legacy_source = ast.unparse(legacy_method)
-        self.assertIn(
-            "node_boundary_point_m",
-            {argument.arg for argument in legacy_method.args.args},
-        )
-        bounds_index = legacy_source.index("source.x < 0")
-        rebuild_index = legacy_source.index(
-            "boundary_point = node_boundary_point_m[source]"
-        )
-        self.assertLess(bounds_index, rebuild_index)
-        self.assertIn("else:", legacy_source[bounds_index:rebuild_index])
-
-        legacy_wrapper = _method_node(
-            "_assemble_velocity_dirichlet_reconstructed_boundary_rows_impl"
-        )
-        materialize_calls = _calls(legacy_wrapper, legacy_method_name)
-        self.assertEqual(len(materialize_calls), 1)
-        self.assertIn(
-            "search.node_boundary_point_m",
-            ast.unparse(materialize_calls[0]),
-        )
+        method_names = {
+            statement.name
+            for statement in _class_node().body
+            if isinstance(statement, ast.FunctionDef)
+        }
+        for legacy_method_name in LEGACY_RELOCATION_WRITERS:
+            with self.subTest(removed_legacy_writer=legacy_method_name):
+                self.assertNotIn(legacy_method_name, method_names)
 
     def test_builder_orders_relocation_before_the_single_component_commit(
         self,

@@ -1,6 +1,7 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from numbers import Integral
 
 
 @dataclass(frozen=True)
@@ -18,17 +19,25 @@ class CartesianGrid:
         bounds_max_m: tuple[float, float, float],
         grid_nodes: tuple[int, int, int],
     ) -> "CartesianGrid":
-        if any(n <= 0 for n in grid_nodes):
-            raise ValueError("grid_nodes must be positive in every dimension")
+        if len(grid_nodes) != 3 or any(
+            isinstance(value, bool)
+            or not isinstance(value, Integral)
+            or value <= 0
+            for value in grid_nodes
+        ):
+            raise ValueError(
+                "grid_nodes must contain three positive non-boolean integers"
+            )
+        counts = tuple(int(value) for value in grid_nodes)
         widths = tuple(
             (hi - lo) / n
-            for lo, hi, n in zip(bounds_min_m, bounds_max_m, grid_nodes, strict=True)
+            for lo, hi, n in zip(bounds_min_m, bounds_max_m, counts, strict=True)
         )
         return cls(
             bounds_min_m=tuple(float(v) for v in bounds_min_m),
-            cell_widths_x_m=(float(widths[0]),) * int(grid_nodes[0]),
-            cell_widths_y_m=(float(widths[1]),) * int(grid_nodes[1]),
-            cell_widths_z_m=(float(widths[2]),) * int(grid_nodes[2]),
+            cell_widths_x_m=(float(widths[0]),) * counts[0],
+            cell_widths_y_m=(float(widths[1]),) * counts[1],
+            cell_widths_z_m=(float(widths[2]),) * counts[2],
         )
 
     def __post_init__(self) -> None:

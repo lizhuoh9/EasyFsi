@@ -16,7 +16,6 @@ from cases.squid_soft_robot.checkpointing import (
     load_run_checkpoint,
     write_run_checkpoint,
 )
-from simulation_core import InterfaceReactionRelaxationState
 
 
 class _ScalarField:
@@ -88,6 +87,9 @@ def _fixture():
         v=_ArrayField(np.ones((1, 3), dtype=np.float32) * 2.0),
         C=_ArrayField(np.ones((1, 3, 3), dtype=np.float32) * 3.0),
         F=_ArrayField(np.ones((1, 3, 3), dtype=np.float32) * 4.0),
+        position_increment_residual_m=_ArrayField(
+            np.asarray([[0.125, -0.25, 0.5]], dtype=np.float64)
+        ),
     )
     return simulator, solid
 
@@ -105,8 +107,95 @@ def _rewrite_checkpoint_metadata(path: Path, **updates: object) -> None:
 
 
 class SquidCheckpointAtomicityTests(unittest.TestCase):
-    def test_checkpoint_format_version_is_4(self):
-        self.assertEqual(RUN_CHECKPOINT_VERSION, 4)
+    def test_checkpoint_format_version_is_7(self):
+        self.assertEqual(RUN_CHECKPOINT_VERSION, 7)
+
+    def test_neo_position_increment_residual_round_trips(self):
+        simulator, solid = _fixture()
+        args = SimpleNamespace(solid_model="neo_hookean_mpm")
+        expected = solid.position_increment_residual_m.to_numpy()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "restart.npz"
+            write_run_checkpoint(
+                path,
+                completed_step=1,
+                step_count=2,
+                full_pressure_waveform_steps=2,
+                args=args,
+                simulator=simulator,
+                solid_mpm=solid,
+            )
+            solid.position_increment_residual_m.from_numpy(
+                np.zeros_like(expected)
+            )
+
+            load_run_checkpoint(
+                path,
+                args=args,
+                simulator=simulator,
+                solid_mpm=solid,
+                step_count=2,
+                full_pressure_waveform_steps=2,
+            )
+
+        np.testing.assert_array_equal(
+            solid.position_increment_residual_m.to_numpy(),
+            expected,
+        )
+
+    def test_nonfinite_live_state_does_not_replace_a_valid_checkpoint(self):
+        simulator, solid = _fixture()
+        args = SimpleNamespace(solid_model="neo_hookean_mpm")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "restart.npz"
+            write_run_checkpoint(
+                path,
+                completed_step=1,
+                step_count=2,
+                full_pressure_waveform_steps=2,
+                args=args,
+                simulator=simulator,
+                solid_mpm=solid,
+            )
+            valid_bytes = path.read_bytes()
+            solid.position_increment_residual_m.from_numpy(
+                np.asarray([[np.nan, 0.0, 0.0]], dtype=np.float64)
+            )
+
+            with self.assertRaisesRegex(ValueError, "must be finite"):
+                write_run_checkpoint(
+                    path,
+                    completed_step=1,
+                    step_count=2,
+                    full_pressure_waveform_steps=2,
+                    args=args,
+                    simulator=simulator,
+                    solid_mpm=solid,
+                )
+
+            self.assertEqual(path.read_bytes(), valid_bytes)
+
+    def test_resume_history_requires_every_integer_step_in_order(self):
+        rows = [
+            {"step": 99, "time_s": 0.5},
+            {"step": 2, "time_s": 1.0},
+        ]
+        with self.assertRaisesRegex(ValueError, "row 1 step"):
+            checkpointing_module.validate_resume_history_checkpoint_alignment(
+                rows,
+                completed_step=2,
+                checkpoint_time_s=1.0,
+                dt_s=0.5,
+            )
+
+        rows[0]["step"] = 1.9
+        with self.assertRaisesRegex(ValueError, "row 1 step"):
+            checkpointing_module.validate_resume_history_checkpoint_alignment(
+                rows,
+                completed_step=2,
+                checkpoint_time_s=1.0,
+                dt_s=0.5,
+            )
 
     def test_missing_marker_payload_does_not_partially_restore_other_state(self):
         simulator, solid = _fixture()
@@ -121,7 +210,6 @@ class SquidCheckpointAtomicityTests(unittest.TestCase):
                 args=args,
                 simulator=simulator,
                 solid_mpm=solid,
-                interface_reaction_state=InterfaceReactionRelaxationState(),
             )
             simulator.time_s[None] = 999.0
             simulator.fluid.velocity.from_numpy(
@@ -165,7 +253,6 @@ class SquidCheckpointAtomicityTests(unittest.TestCase):
                         args=args,
                         simulator=simulator,
                         solid_mpm=solid,
-                        interface_reaction_state=InterfaceReactionRelaxationState(),
                     )
                     _rewrite_checkpoint_metadata(
                         path,
@@ -195,7 +282,7 @@ class SquidCheckpointAtomicityTests(unittest.TestCase):
         simulator, solid = _fixture()
         args = SimpleNamespace(solid_model="neo_hookean_mpm")
         invalid_metadata = (
-            ("version", 4.5),
+            ("version", 5.5),
             ("grid_nodes", [2.5, 2, 2]),
             ("particle_count", True),
             ("requested_steps", 2.5),
@@ -214,7 +301,6 @@ class SquidCheckpointAtomicityTests(unittest.TestCase):
                         args=args,
                         simulator=simulator,
                         solid_mpm=solid,
-                        interface_reaction_state=InterfaceReactionRelaxationState(),
                     )
                     _rewrite_checkpoint_metadata(path, **{field: value})
                     simulator.time_s[None] = 999.0
@@ -265,7 +351,6 @@ class SquidCheckpointAtomicityTests(unittest.TestCase):
                 args=args,
                 simulator=simulator,
                 solid_mpm=solid,
-                interface_reaction_state=InterfaceReactionRelaxationState(),
                 frozen_run_fingerprint=frozen_fingerprint,
             )
 
@@ -325,9 +410,9 @@ class SquidCheckpointAtomicityTests(unittest.TestCase):
         )
         self.assertEqual(
             step_loop_source.count(
-                "frozen_run_fingerprint=frozen_run_fingerprint"
+                "frozen_run_fingerprint=resources.frozen_run_fingerprint"
             ),
-            2,
+            1,
         )
 
 

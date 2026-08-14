@@ -4,6 +4,14 @@ Status as of 2026-07-07. Solver: HIBM-MPM (sharp immersed boundary + Material
 Point Method), Python + Taichi, CUDA. Commands use `python` from the active
 environment. Case: `cases/turek_hron_fsi.py`.
 
+Architecture update (2026-08-13): Turek-Hron FSI1/2/3 no longer owns a
+case-local Picard/Aitken/IQN state machine or an explicit single-pass mode. All
+presets now use the shared marker-velocity IQN-ILS loop in
+`simulation_core/drivers/generic_fsi_solver.py`; the case retains only its
+physics adapter and component-local fluid/solid substeps. Numerical results in
+this report predate that migration and must be rerun before they are treated as
+evidence for the unified core.
+
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It
 deliberately separates confirmed results from confounded comparisons. Every
@@ -104,10 +112,14 @@ $PY -c "from dataclasses import replace; import cases.turek_hron_fsi as t; \
     preset='fsi3', output_dir='out_fsi3')"
 ```
 
-Key config knobs (all default to legacy/off so other cases are unchanged):
-`fsi_coupling_iterations` (1 = explicit single pass), `fsi_coupling_tolerance`,
+Key config knobs:
+`fsi_coupling_iterations` (minimum 2), `fsi_coupling_tolerance`,
+`fsi_coupling_absolute_tolerance_mps`, `fsi_coupling_initial_relaxation`,
 `accumulate_reprojection_pressure`, `flow_reprojection_iterations`,
-`velocity_dirichlet_face_symmetric` (case sets mode 2).
+and the flow/solid substep controls. Turek-Hron now uses the canonical
+component-face ledger: y-min/y-max no-slip walls and the z-max parabolic inlet are
+directed external component faces, and the ledger is prepared and sealed before
+each solve.
 
 ## 6. Open frontiers (if FSI3 flutter is pursued later)
 

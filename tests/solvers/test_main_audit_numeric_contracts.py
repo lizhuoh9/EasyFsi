@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 import unittest
 
-from simulation_core.coupling.fsi_coupling import _least_squares_coefficients
 from simulation_core.diagnostics.validation import (
     ReferenceCurve,
     force_nonzero_when_loaded,
@@ -19,17 +18,6 @@ from simulation_core.solids.mooney_shell.core import (
 
 
 class MainAuditNumericContractTests(unittest.TestCase):
-    def test_iqn_least_squares_is_scale_invariant_for_large_finite_values(self) -> None:
-        coefficients = _least_squares_coefficients(
-            ((1.0e200, 0.0), (0.0, 1.0e200)),
-            (1.0e200, 1.0e200),
-        )
-
-        self.assertIsNotNone(coefficients)
-        assert coefficients is not None
-        self.assertAlmostEqual(coefficients[0], 1.0)
-        self.assertAlmostEqual(coefficients[1], 1.0)
-
     def test_validation_helpers_reject_nonfinite_queries_and_negative_tolerance(self) -> None:
         curve = ReferenceCurve(
             name="force",

@@ -97,6 +97,9 @@ def classify_flow_temporal(
 
     last_window = history[-profile.last_window_steps :]
     window_covered, coverage_fail_reason = _last_window_coverage(last_window, profile)
+    post_warmup_covered, post_warmup_coverage_fail_reason = (
+        _post_warmup_coverage(history, evaluation_start_step)
+    )
     post_failures = flow_temporal_failures(
         post_warmup,
         profile=profile,
@@ -120,7 +123,7 @@ def classify_flow_temporal(
         )
         if value is not None
     ]
-    if not window_covered:
+    if not window_covered or not post_warmup_covered:
         status = FLOW_TEMPORAL_FAILED
     elif len(post_failures) == 0 and len(last_failures) == 0:
         status = FLOW_TEMPORAL_STRICT
@@ -135,6 +138,11 @@ def classify_flow_temporal(
     fail_reasons = _unique_reasons(post_failures + last_failures)
     if not window_covered and coverage_fail_reason not in fail_reasons:
         fail_reasons = [coverage_fail_reason, *fail_reasons]
+    if (
+        not post_warmup_covered
+        and post_warmup_coverage_fail_reason not in fail_reasons
+    ):
+        fail_reasons = [post_warmup_coverage_fail_reason, *fail_reasons]
     return {
         **base,
         "flow_temporal_status": status,
@@ -188,6 +196,9 @@ def classify_combined_temporal(
 
     last_window = history[-profile.last_window_steps :]
     window_covered, coverage_fail_reason = _last_window_coverage(last_window, profile)
+    post_warmup_covered, post_warmup_coverage_fail_reason = (
+        _post_warmup_coverage(history, evaluation_start_step)
+    )
     post_failures = combined_temporal_failures(
         post_warmup,
         profile=profile,
@@ -215,7 +226,7 @@ def classify_combined_temporal(
         _negative_value(item.get("marker_force_z_N")) for item in last_window
     )
     last_tip_sign_ok = all(_negative_value(item.get("tip_dz_m")) for item in last_window)
-    if not window_covered:
+    if not window_covered or not post_warmup_covered:
         status = TEMPORAL_FAILED
     elif len(post_failures) == 0 and len(last_failures) == 0:
         status = TEMPORAL_STRICT
@@ -229,6 +240,11 @@ def classify_combined_temporal(
     fail_reasons = _unique_reasons(post_failures + last_failures)
     if not window_covered and coverage_fail_reason not in fail_reasons:
         fail_reasons = [coverage_fail_reason, *fail_reasons]
+    if (
+        not post_warmup_covered
+        and post_warmup_coverage_fail_reason not in fail_reasons
+    ):
+        fail_reasons = [post_warmup_coverage_fail_reason, *fail_reasons]
     return {
         **base,
         "temporal_candidate_status": status,
@@ -274,6 +290,9 @@ def classify_coupling_settling(
 
     last_window = history[-profile.last_window_steps :]
     window_covered, _coverage_fail_reason = _last_window_coverage(last_window, profile)
+    post_warmup_covered, _post_warmup_coverage_fail_reason = (
+        _post_warmup_coverage(history, evaluation_start_step)
+    )
     force_first = first_permanently_negative_step(history, "marker_force_z_N")
     tip_first = first_permanently_negative_step(history, "tip_dz_m")
     valid_first = first_permanently_valid_coupling_step(history)
@@ -283,7 +302,7 @@ def classify_coupling_settling(
     post_warmup = [
         item for item in history if int(item.get("step") or 0) >= evaluation_start_step
     ]
-    if not window_covered:
+    if not window_covered or not post_warmup_covered:
         status = COUPLING_UNSETTLED
     elif post_warmup and all(coupling_step_passes(item) for item in post_warmup):
         status = COUPLING_SETTLED
@@ -570,4 +589,29 @@ def _last_window_coverage(
     steps = [int(step) for step in parsed_steps if step is not None]
     if any(current != previous + 1 for previous, current in zip(steps, steps[1:])):
         return False, "last_window_step_noncontiguous"
+    return True, ""
+
+
+def _post_warmup_coverage(
+    history: list[dict[str, Any]],
+    evaluation_start_step: int,
+) -> tuple[bool, str]:
+    parsed_steps = [_float_or_none(item.get("step")) for item in history]
+    if any(step is None for step in parsed_steps):
+        return False, "post_warmup_step_missing"
+    if any(not step.is_integer() for step in parsed_steps if step is not None):
+        return False, "post_warmup_step_nonintegral"
+    steps = [
+        int(step)
+        for step in parsed_steps
+        if step is not None and step >= evaluation_start_step
+    ]
+    if not steps:
+        return False, "missing_post_warmup_history"
+    if steps[0] != evaluation_start_step:
+        return False, (
+            f"post_warmup_starts_at_{steps[0]}_expected_{evaluation_start_step}"
+        )
+    if any(current != previous + 1 for previous, current in zip(steps, steps[1:])):
+        return False, "post_warmup_step_noncontiguous"
     return True, ""

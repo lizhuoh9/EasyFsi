@@ -11,6 +11,8 @@ from PIL import Image
 
 from src.refactored.validation.ansys_vertical_flap_fsi.native_fine_comparison import (
     NativeFineComparisonError,
+    compare_interface_force_histories,
+    evaluate_five_percent_diagnostic_gate,
     postprocess_native_fine_comparison,
 )
 from src.refactored.validation.ansys_vertical_flap_fsi.native_fine_rendering import (
@@ -29,6 +31,220 @@ FLUENT_CHECKSUM_RELATIVE_PATHS = [
     "histories/structure_displacement_history.csv",
     "histories/velocity_history.csv",
 ]
+
+
+def _five_percent_metric_fixture(*, field_error: float) -> tuple[dict, dict, dict]:
+    field_comparison = {
+        "direct_errors": {
+            key: {"nrmse_by_reference_max_abs": field_error}
+            for key in ("u", "v", "speed", "p")
+        },
+        "pressure_reference_diagnostic": {
+            "zero_mean_pressure_difference_rmse_pa": 4.0,
+            "raw_pressure_difference_rmse_pa": 4.0,
+            "sampled_mean_offset_our_minus_fluent_pa": 0.0,
+            "native_fluent_sampled_pressure_range_pa": 100.0,
+        },
+    }
+    series = {
+        "nrmse_by_reference_peak": 0.04,
+        "our_peak_m": 1.04,
+        "fluent_peak_m": 1.0,
+        "our_peak_step": 21,
+        "fluent_peak_step": 20,
+        "our_final_m": 0.52,
+        "fluent_final_m": 0.50,
+    }
+    displacement_comparison = {
+        "tip_streamwise": dict(series),
+        "tip_transverse": dict(series),
+        "tip_mean_vector": dict(series),
+        "solid_max": dict(series),
+    }
+    force_series = {
+        "nrmse_by_reference_peak": 0.04,
+        "our_peak_n_per_m": 1.04,
+        "fluent_peak_n_per_m": 1.0,
+        "our_peak_step": 21,
+        "fluent_peak_step": 20,
+        "our_final_n_per_m": 0.52,
+        "fluent_final_n_per_m": 0.50,
+    }
+    force_comparison = {
+        "streamwise": dict(force_series),
+        "transverse": dict(force_series),
+        "out_of_plane_leakage_by_reference_streamwise_peak": 0.01,
+    }
+    return field_comparison, displacement_comparison, force_comparison
+
+
+def test_five_percent_diagnostic_gate_is_explicit_and_fail_closed() -> None:
+    fields, displacement, force = _five_percent_metric_fixture(field_error=0.049)
+    passed = evaluate_five_percent_diagnostic_gate(
+        fields,
+        displacement,
+        force,
+        expected_steps=50,
+    )
+    assert passed["status"] == "passed"
+    assert passed["all_metrics_within_tolerance"] is True
+    assert passed["parity_claimed"] is False
+
+    failing_fields, failing_displacement, failing_force = _five_percent_metric_fixture(
+        field_error=0.051
+    )
+    failed = evaluate_five_percent_diagnostic_gate(
+        failing_fields,
+        failing_displacement,
+        failing_force,
+        expected_steps=50,
+    )
+    assert failed["status"] == "failed"
+    assert failed["all_metrics_within_tolerance"] is False
+    assert failed["metrics"]["field_u_nrmse"]["passed"] is False
+
+
+def test_five_percent_gate_includes_signed_tip_components() -> None:
+    fields, displacement, force = _five_percent_metric_fixture(field_error=0.01)
+    displacement["tip_transverse"]["nrmse_by_reference_peak"] = 0.051
+
+    result = evaluate_five_percent_diagnostic_gate(
+        fields,
+        displacement,
+        force,
+        expected_steps=50,
+    )
+
+    assert result["status"] == "failed"
+    assert result["metrics"]["tip_transverse_waveform_nrmse"]["passed"] is False
+
+
+def test_five_percent_gate_does_not_hide_constant_pressure_offset() -> None:
+    fields, displacement, force = _five_percent_metric_fixture(field_error=0.01)
+    pressure = fields["pressure_reference_diagnostic"]
+    pressure["zero_mean_pressure_difference_rmse_pa"] = 0.0
+    pressure["raw_pressure_difference_rmse_pa"] = 6.0
+    pressure["sampled_mean_offset_our_minus_fluent_pa"] = 6.0
+
+    result = evaluate_five_percent_diagnostic_gate(
+        fields,
+        displacement,
+        force,
+        expected_steps=50,
+    )
+
+    assert result["status"] == "failed"
+    assert result["metrics"]["pressure_raw_nrmse"]["passed"] is False
+    assert result["metrics"]["pressure_mean_offset_fraction"]["passed"] is False
+
+
+def test_five_percent_gate_includes_interface_force_components_and_leakage() -> None:
+    fields, displacement, force = _five_percent_metric_fixture(field_error=0.01)
+    force["transverse"]["nrmse_by_reference_peak"] = 0.051
+    force["out_of_plane_leakage_by_reference_streamwise_peak"] = 0.052
+
+    result = evaluate_five_percent_diagnostic_gate(
+        fields,
+        displacement,
+        force,
+        expected_steps=50,
+    )
+
+    assert result["status"] == "failed"
+    assert result["metrics"]["force_transverse_waveform_nrmse"]["passed"] is False
+    assert result["metrics"]["force_out_of_plane_leakage"]["passed"] is False
+
+
+def test_interface_force_history_maps_axes_and_normalizes_by_span() -> None:
+    solver_rows = [
+        {
+            "step": step,
+            "time_s": 5.0e-4 * step,
+            "total_marker_force_n": json.dumps(
+                [3.0e-4 * step, 6.0e-4 * step, -1.5e-3 * step]
+            ),
+        }
+        for step in range(1, 4)
+    ]
+    fluent_rows = [
+        {
+            "step": step,
+            "time_s": 5.0e-4 * step,
+            "flap_fluid_force_x_n": 0.5 * step,
+            "flap_fluid_force_y_n": 0.2 * step,
+            "flap_fluid_force_z_n": 0.0,
+        }
+        for step in range(1, 4)
+    ]
+
+    rows, comparison = compare_interface_force_histories(
+        solver_rows,
+        fluent_rows,
+        span_m=0.003,
+        expected_steps=3,
+        dt_s=5.0e-4,
+    )
+
+    assert comparison["schema"] == "native_fine_interface_force_comparison_v1"
+    assert comparison["units"] == "N/m"
+    assert comparison["streamwise"]["nrmse_by_reference_peak"] == pytest.approx(0.0)
+    assert comparison["transverse"]["nrmse_by_reference_peak"] == pytest.approx(0.0)
+    assert comparison["out_of_plane_leakage_by_reference_streamwise_peak"] == pytest.approx(0.2)
+    assert rows[0]["our_streamwise_force_n_per_m"] == pytest.approx(0.5)
+    assert rows[0]["our_transverse_force_n_per_m"] == pytest.approx(0.2)
+    assert rows[0]["our_out_of_plane_force_n_per_m"] == pytest.approx(0.1)
+
+
+def test_interface_force_history_rejects_nonfinite_solver_force() -> None:
+    solver_rows = [
+        {
+            "step": 1,
+            "time_s": 5.0e-4,
+            "total_marker_force_n": [0.0, float("nan"), -1.0],
+        }
+    ]
+    fluent_rows = [
+        {
+            "step": 1,
+            "time_s": 5.0e-4,
+            "flap_fluid_force_x_n": 1.0,
+            "flap_fluid_force_y_n": 0.0,
+            "flap_fluid_force_z_n": 0.0,
+        }
+    ]
+
+    with pytest.raises(NativeFineComparisonError, match="finite interface force"):
+        compare_interface_force_histories(
+            solver_rows,
+            fluent_rows,
+            span_m=0.003,
+            expected_steps=1,
+            dt_s=5.0e-4,
+        )
+
+
+def test_interface_force_history_rejects_fluent_time_mismatch() -> None:
+    solver_rows = [
+        {"step": 1, "time_s": 5.0e-4, "total_marker_force_n": [0.0, 0.3, -1.0]}
+    ]
+    fluent_rows = [
+        {
+            "step": 1,
+            "time_s": 9.0e-4,
+            "flap_fluid_force_x_n": 1.0,
+            "flap_fluid_force_y_n": 0.3,
+            "flap_fluid_force_z_n": 0.0,
+        }
+    ]
+
+    with pytest.raises(NativeFineComparisonError, match="force history time mismatch"):
+        compare_interface_force_histories(
+            solver_rows,
+            fluent_rows,
+            span_m=1.0,
+            expected_steps=1,
+            dt_s=5.0e-4,
+        )
 
 
 def test_velocity_overlay_renders_only_deformed_solid_by_default() -> None:
@@ -75,6 +291,7 @@ def test_display_mask_restores_boundary_surrogate_without_opening_obstacle() -> 
 def _fine_solver_config(steps: int) -> dict[str, object]:
     return {
         "dt_s": 5.0e-4,
+        "span_m": 0.003,
         "duct_length_m": 0.1,
         "step_count": steps,
         "grid_nodes": [4, 256, 320],
@@ -85,7 +302,7 @@ def _fine_solver_config(steps: int) -> dict[str, object]:
         "solid_density_kgm3": 1600.0,
         "young_modulus_pa": 1.0e6,
         "poisson_ratio": 0.47,
-        "velocity_damping": 0.995,
+        "velocity_damping": 1.0,
         "solid_constitutive_model": "plane_stress_linear_elastic",
         "flow_advection_scheme": "muscl_tvd",
         "flow_turbulence_model": "sst_2003",
@@ -118,6 +335,8 @@ def _fine_solver_config(steps: int) -> dict[str, object]:
         "flow_cg_preconditioner": "fv_multigrid",
         "flow_cg_tolerance": 1.0e-6,
         "flow_pressure_solve_failure_policy": "raise",
+        "flow_post_solid_kinematic_projection_enabled": True,
+        "traction_tip_cap_pressure_enabled": True,
         "traction_pressure_pair_runtime_provider_mode": (
             "runtime_anchored_cell_pair"
         ),
@@ -195,6 +414,16 @@ def _solver_field(
         "fluid_mask": np.ones_like(u, dtype=bool),
         "solid_mask": np.zeros_like(u, dtype=bool),
         "boundary_surrogate_mask": np.zeros_like(u, dtype=bool),
+        "flow_solution_stage": np.asarray(
+            "post_solid_kinematic_projection"
+        ),
+        "boundary_topology_stage": np.asarray(
+            "post_solid_kinematic_projection"
+        ),
+        "flow_boundary_state_synchronized": np.asarray(True),
+        "structure_geometry_stage": np.asarray(
+            "post_solid_kinematic_projection"
+        ),
     }
     if not include_deformed_geometry:
         return fields
@@ -311,9 +540,11 @@ def _synthetic_inputs(tmp_path: Path, *, steps: int = 3) -> tuple[Path, Path]:
     fluent_pressure: list[dict[str, object]] = []
     fluent_residual: list[dict[str, object]] = []
     fluent_residual_summary: list[dict[str, object]] = []
+    fluent_force: list[dict[str, object]] = []
     for step in range(1, steps + 1):
         _write_solver_frame(our_dir / "step_fields" / f"step_{step:04d}.npz", step)
-        vector = [0.0, 1.0e-5 * step, 2.0e-5 * step]
+        # Solver streamwise is -z while Fluent streamwise displacement is +x.
+        vector = [0.0, 1.0e-5 * step, -2.0e-5 * step]
         vector_norm = float(np.linalg.norm(vector))
         solid_max = 3.0e-5 * step
         our_history.append(
@@ -324,6 +555,9 @@ def _synthetic_inputs(tmp_path: Path, *, steps: int = 3) -> tuple[Path, Path]:
                 "tip_displacement_norm_m": vector_norm,
                 "max_displacement_m": solid_max,
                 "local_velocity_peak_mps": float(np.max(_solver_field(step)["speed"])),
+                "total_marker_force_n": json.dumps(
+                    [0.0, 6.0e-4 * step, -1.5e-3 * step]
+                ),
             }
         )
         _write_json(
@@ -401,6 +635,15 @@ def _synthetic_inputs(tmp_path: Path, *, steps: int = 3) -> tuple[Path, Path]:
                 "pressure_max": float(np.max(_solver_field(step)["p"])),
             }
         )
+        fluent_force.append(
+            {
+                "step": step,
+                "time_s": step * dt_s,
+                "flap_fluid_force_x_n": 0.5 * step,
+                "flap_fluid_force_y_n": 0.2 * step,
+                "flap_fluid_force_z_n": 0.0,
+            }
+        )
         residual_values = (1.0 / (step + 1.0), 1.0 / (step + 2.0))
         data_path = str(tmp_path / f"native_step_{step:04d}.dat.h5")
         for equation, equation_values in (
@@ -451,6 +694,8 @@ def _synthetic_inputs(tmp_path: Path, *, steps: int = 3) -> tuple[Path, Path]:
         fluent_dir / "histories" / "residual_snapshot_summary.csv",
         fluent_residual_summary,
     )
+    fluent_run_dir = tmp_path / "native_fluent_fsi_production"
+    _write_csv(fluent_run_dir / "history.csv", fluent_force)
     _write_fluent_final_fields(fluent_dir / "fields" / "final_fields.npz", steps)
     _write_json(
         fluent_dir / "summary.json",
@@ -485,7 +730,7 @@ def _synthetic_inputs(tmp_path: Path, *, steps: int = 3) -> tuple[Path, Path]:
         {
             "schema": "fluent_fine_fsi_input_pairs_v1",
             "step_count": steps,
-            "run_dir": str(tmp_path / "native_fluent_fsi_production"),
+            "run_dir": str(fluent_run_dir),
             "pairs": [
                 _write_native_source_pair(tmp_path, step)
                 for step in range(1, steps + 1)
@@ -517,8 +762,16 @@ def test_postprocess_generates_native_only_diagnostic_bundle(tmp_path: Path) -> 
     assert report["legacy_puma_reference_used"] is False
     assert report["step_count"] == 3
     assert report["displacement_comparison"]["sample_count"] == 3
+    assert report["displacement_comparison"]["tip_streamwise"]["rmse_m"] == pytest.approx(0.0)
+    assert report["displacement_comparison"]["tip_transverse"]["rmse_m"] == pytest.approx(0.0)
     assert report["displacement_comparison"]["tip_mean_vector"]["rmse_m"] == pytest.approx(0.0)
     assert report["displacement_comparison"]["solid_max"]["rmse_m"] == pytest.approx(0.0)
+    assert report["interface_force_comparison"]["streamwise"][
+        "nrmse_by_reference_peak"
+    ] == pytest.approx(0.0)
+    assert report["interface_force_comparison"]["transverse"][
+        "nrmse_by_reference_peak"
+    ] == pytest.approx(0.0)
     assert report["final_field_comparison"]["sample_count"] == 12
     assert report["final_field_comparison"]["diagnostic_only"] is True
     assert report["deformed_geometry_contract"]["frame_count"] == 3
@@ -549,10 +802,12 @@ def test_postprocess_generates_native_only_diagnostic_bundle(tmp_path: Path) -> 
     assert len(report["diagnostic_model_blockers"]) >= 4
 
     displacement_csv = output_dir / "histories" / "displacement_comparison_50point.csv"
+    force_csv = output_dir / "histories" / "interface_force_comparison_50point.csv"
     with displacement_csv.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert [int(row["step"]) for row in rows] == [1, 2, 3]
     assert all(row["definition_alignment"] == "diagnostic_analog_not_identical" for row in rows)
+    assert force_csv.is_file()
 
     gif_path = output_dir / "our_velocity_magnitude_fixed_0_31.gif"
     with Image.open(gif_path) as image:
@@ -572,6 +827,7 @@ def test_postprocess_generates_native_only_diagnostic_bundle(tmp_path: Path) -> 
     input_paths = [entry["path"].replace("\\", "/") for entry in input_manifest["inputs"]]
     assert sum("/step_history/step_" in path for path in input_paths) == 3
     assert any(path.endswith("/histories/residual_history.csv") for path in input_paths)
+    assert any(path.endswith("/history.csv") for path in input_paths)
     assert any(
         path.endswith("/histories/residual_snapshot_summary.csv")
         for path in input_paths
@@ -611,6 +867,29 @@ def test_postprocess_rejects_frame_without_true_deformed_geometry(tmp_path: Path
             fluent_dir,
             tmp_path / "comparison_output",
             expected_steps=3,
+        )
+
+
+def test_postprocess_rejects_mixed_flow_and_structure_time_layer(
+    tmp_path: Path,
+) -> None:
+    our_dir, fluent_dir = _synthetic_inputs(tmp_path)
+    frame_path = our_dir / "step_fields" / "step_0002.npz"
+    with np.load(frame_path, allow_pickle=False) as archive:
+        frame = {key: np.asarray(archive[key]) for key in archive.files}
+    frame["flow_solution_stage"] = np.asarray("pre_solid_projection")
+    np.savez_compressed(frame_path, **frame)
+
+    with pytest.raises(
+        NativeFineComparisonError,
+        match="synchronized time layer",
+    ):
+        postprocess_native_fine_comparison(
+            our_dir,
+            fluent_dir,
+            tmp_path / "comparison_output",
+            expected_steps=3,
+            gif_duration_ms=10,
         )
     assert not (tmp_path / "comparison_output").exists()
 

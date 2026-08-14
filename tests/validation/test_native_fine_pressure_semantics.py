@@ -287,7 +287,13 @@ def test_official_postprocess_cli_requests_strict_pressure_semantics(
 
     def fake_postprocess(*args: object, **kwargs: object) -> dict[str, object]:
         captured.update(kwargs)
-        return {"status": "diagnostic_complete"}
+        return {
+            "status": "diagnostic_complete",
+            "five_percent_diagnostic_gate": {
+                "status": "passed",
+                "all_metrics_within_tolerance": True,
+            },
+        }
 
     module.postprocess_native_fine_comparison = fake_postprocess
     exit_code = module.main(

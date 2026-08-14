@@ -93,7 +93,6 @@ def run() -> dict[str, Any]:
     solver_config = FsiSolverConfig(
         step_count=REQUESTED_STEP_COUNT,
         time_step_s=TIME_STEP_S,
-        solver_name="easyfsi-generic-selected-formulation",
     )
     diagnostics_config = DiagnosticsConfig(output_root=OUTPUT_DIR.as_posix())
     result = solve_fsi(problem, solver_config, diagnostics_config)

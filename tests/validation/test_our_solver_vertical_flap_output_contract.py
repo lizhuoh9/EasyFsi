@@ -93,10 +93,14 @@ def _snapshot() -> dict[str, np.ndarray]:
         "velocity_dirichlet_boundary_marker_region_id": np.full(
             shape, -1, dtype=np.int32
         ),
-        "flow_solution_stage": np.asarray("pre_solid_projection"),
-        "boundary_topology_stage": np.asarray("pre_solid_projection"),
+        "flow_solution_stage": np.asarray("post_solid_kinematic_projection"),
+        "boundary_topology_stage": np.asarray(
+            "post_solid_kinematic_projection"
+        ),
         "flow_boundary_state_synchronized": np.asarray(True),
-        "structure_geometry_stage": np.asarray("post_solid_observer"),
+        "structure_geometry_stage": np.asarray(
+            "post_solid_kinematic_projection"
+        ),
         "cell_center_y_m": np.asarray([0.005, 0.015], dtype=np.float32),
         "cell_center_z_m": np.asarray([0.02, 0.05, 0.08], dtype=np.float32),
         "solid_position_m": np.asarray(
@@ -148,6 +152,13 @@ def test_core_step_snapshot_exports_active_solid_and_marker_geometry() -> None:
     flow_stage_snapshot = {
         "pressure": np.zeros((1, 1, 1), dtype=np.float32),
         "obstacle": np.zeros((1, 1, 1), dtype=np.int32),
+        "flow_solution_stage": np.asarray(
+            "post_solid_kinematic_projection"
+        ),
+        "boundary_topology_stage": np.asarray(
+            "post_solid_kinematic_projection"
+        ),
+        "flow_boundary_state_synchronized": np.asarray(True),
         "velocity_dirichlet_boundary_active": np.ones(
             (1, 1, 1), dtype=np.int32
         ),
@@ -168,10 +179,16 @@ def test_core_step_snapshot_exports_active_solid_and_marker_geometry() -> None:
     assert snapshot["marker_position_m"].shape == (1, 3)
     assert snapshot["marker_area_m2"] == pytest.approx([4.0])
     assert snapshot["marker_region_id"].tolist() == [5]
-    assert snapshot["flow_solution_stage"].item() == "pre_solid_projection"
-    assert snapshot["boundary_topology_stage"].item() == "pre_solid_projection"
+    assert snapshot["flow_solution_stage"].item() == (
+        "post_solid_kinematic_projection"
+    )
+    assert snapshot["boundary_topology_stage"].item() == (
+        "post_solid_kinematic_projection"
+    )
     assert bool(snapshot["flow_boundary_state_synchronized"].item())
-    assert snapshot["structure_geometry_stage"].item() == "post_solid_observer"
+    assert snapshot["structure_geometry_stage"].item() == (
+        "post_solid_kinematic_projection"
+    )
     assert snapshot["obstacle"].item() == 0
     assert snapshot["velocity_dirichlet_boundary_active"].item() == 1
 

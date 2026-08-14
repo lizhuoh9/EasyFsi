@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -59,8 +58,9 @@ from .native_fine_rendering import (
 )
 
 
-REPORT_SCHEMA = "our_solver_vs_native_fluent_fine_diagnostic_v1"
+REPORT_SCHEMA = "our_solver_vs_native_fluent_fine_diagnostic_v2"
 PRESSURE_SEMANTICS_MODES = frozenset(("legacy_compatible", "strict"))
+SYNCHRONIZED_STEP_END_STAGE = "post_solid_kinematic_projection"
 
 
 DIAGNOSTIC_MODEL_BLOCKERS: tuple[dict[str, str], ...] = (
@@ -103,6 +103,68 @@ DIAGNOSTIC_MODEL_BLOCKERS: tuple[dict[str, str], ...] = (
         ),
     },
 )
+
+
+def validate_synchronized_solver_time_layer(
+    frame_paths: Sequence[str | Path],
+) -> dict[str, Any]:
+    """Require every comparison frame to use one synchronized step-end state."""
+
+    stage_keys = (
+        "flow_solution_stage",
+        "boundary_topology_stage",
+        "structure_geometry_stage",
+    )
+    for raw_path in frame_paths:
+        path = Path(raw_path)
+        try:
+            with np.load(path, allow_pickle=False) as frame:
+                missing = sorted(
+                    ({*stage_keys, "flow_boundary_state_synchronized"})
+                    - set(frame.files)
+                )
+                if missing:
+                    raise NativeFineComparisonError(
+                        "synchronized time layer metadata is missing from "
+                        f"{path.name}: {missing}"
+                    )
+                for key in stage_keys:
+                    value = np.asarray(frame[key])
+                    actual = value.item() if value.shape == () else None
+                    if (
+                        not isinstance(actual, str)
+                        or actual != SYNCHRONIZED_STEP_END_STAGE
+                    ):
+                        raise NativeFineComparisonError(
+                            "synchronized time layer mismatch in "
+                            f"{path.name}: {key}={actual!r}, expected "
+                            f"{SYNCHRONIZED_STEP_END_STAGE!r}"
+                        )
+                synchronized = np.asarray(
+                    frame["flow_boundary_state_synchronized"]
+                )
+                synchronized_value = (
+                    synchronized.item() if synchronized.shape == () else None
+                )
+                if (
+                    not isinstance(synchronized_value, (bool, np.bool_))
+                    or not bool(synchronized_value)
+                ):
+                    raise NativeFineComparisonError(
+                        "synchronized time layer flag is not true in "
+                        f"{path.name}"
+                    )
+        except NativeFineComparisonError:
+            raise
+        except (KeyError, OSError, ValueError) as exc:
+            raise NativeFineComparisonError(
+                f"could not validate synchronized time layer in {path}: {exc}"
+            ) from exc
+    return {
+        "status": "passed",
+        "stage": SYNCHRONIZED_STEP_END_STAGE,
+        "frame_count": len(frame_paths),
+    }
 
 
 def _validate_pressure_semantics_contract(
@@ -166,6 +228,29 @@ def _validate_pressure_semantics_contract(
     }
 
 
+def _resolve_fluent_force_history_path(
+    fluent_input_manifest: Mapping[str, Any],
+    *,
+    explicit_path: str | Path | None,
+) -> Path:
+    if explicit_path is None:
+        run_dir = fluent_input_manifest.get("run_dir")
+        if not isinstance(run_dir, str) or not run_dir.strip():
+            raise NativeFineComparisonError(
+                "native Fluent input manifest is missing run_dir for force history"
+            )
+        path = Path(run_dir) / "history.csv"
+    else:
+        path = Path(explicit_path)
+    path = path.resolve()
+    _reject_legacy_reference_path(path)
+    if path.name != "history.csv" or not path.is_file():
+        raise NativeFineComparisonError(
+            f"native Fluent force history must be an existing history.csv: {path}"
+        )
+    return path
+
+
 def postprocess_native_fine_comparison(
     our_run_dir: str | Path,
     fluent_postprocess_dir: str | Path,
@@ -176,6 +261,7 @@ def postprocess_native_fine_comparison(
     gif_duration_ms: int = 120,
     gif_max_width_px: int = 1600,
     pressure_semantics_mode: str = "legacy_compatible",
+    fluent_force_history_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Generate a native-only, offline diagnostic comparison bundle."""
 
@@ -201,6 +287,10 @@ def postprocess_native_fine_comparison(
     fluent_summary = _read_json(fluent_postprocess_dir / "summary.json")
     fluent_input_manifest_path = fluent_postprocess_dir / "input_manifest.json"
     fluent_input_manifest = _read_json(fluent_input_manifest_path)
+    fluent_force_history_path = _resolve_fluent_force_history_path(
+        fluent_input_manifest,
+        explicit_path=fluent_force_history_path,
+    )
     dt_s = _validate_run_contracts(
         our_manifest,
         our_summary,
@@ -216,6 +306,9 @@ def postprocess_native_fine_comparison(
     )
 
     frame_paths = discover_solver_frames(our_run_dir, expected_steps=expected_steps)
+    synchronized_time_layer_contract = validate_synchronized_solver_time_layer(
+        frame_paths
+    )
     fluent_fields_path = fluent_postprocess_dir / "fields" / "final_fields.npz"
     pressure_semantics_contract = _validate_pressure_semantics_contract(
         our_solver_fields_path=frame_paths[-1],
@@ -240,6 +333,7 @@ def postprocess_native_fine_comparison(
     fluent_structure_rows = read_typed_csv(fluent_structure_path)
     fluent_velocity_rows = read_typed_csv(fluent_velocity_path)
     fluent_pressure_rows = read_typed_csv(fluent_pressure_path)
+    fluent_force_rows = read_typed_csv(fluent_force_history_path)
     _validate_exact_history(
         our_rows, "our-solver history", expected_steps, dt_s,
         allow_missing_time=True,
@@ -323,6 +417,20 @@ def postprocess_native_fine_comparison(
         expected_steps=expected_steps,
         dt_s=dt_s,
     )
+    span_m = _finite_float(our_config.get("span_m"), "solver span_m")
+    force_rows, interface_force_comparison = compare_interface_force_histories(
+        our_rows,
+        fluent_force_rows,
+        span_m=span_m,
+        expected_steps=expected_steps,
+        dt_s=dt_s,
+    )
+    five_percent_diagnostic_gate = evaluate_five_percent_diagnostic_gate(
+        field_comparison,
+        displacement_comparison,
+        interface_force_comparison,
+        expected_steps=expected_steps,
+    )
 
     prepare_new_output_dir(output_dir)
     frames_dir = output_dir / "figures" / "our_velocity_frames"
@@ -355,6 +463,8 @@ def postprocess_native_fine_comparison(
 
     displacement_csv = output_dir / "histories" / "displacement_comparison_50point.csv"
     write_csv(displacement_csv, displacement_rows)
+    force_csv = output_dir / "histories" / "interface_force_comparison_50point.csv"
+    write_csv(force_csv, force_rows)
     input_manifest = _input_manifest(
         our_run_dir=our_run_dir,
         fluent_postprocess_dir=fluent_postprocess_dir,
@@ -370,6 +480,7 @@ def postprocess_native_fine_comparison(
             fluent_residual_path,
             fluent_residual_summary_path,
             fluent_fields_path,
+            fluent_force_history_path,
         ),
         expected_steps=expected_steps,
         dt_s=dt_s,
@@ -384,6 +495,7 @@ def postprocess_native_fine_comparison(
         "final_pressure_comparison": _relative(pressure_figure, output_dir),
         "displacement_comparison_figure": _relative(displacement_figure, output_dir),
         "displacement_comparison_csv": _relative(displacement_csv, output_dir),
+        "interface_force_comparison_csv": _relative(force_csv, output_dir),
         "input_manifest": _relative(input_manifest_path, output_dir),
         "comparison_report_json": "comparison_report.json",
         "comparison_report_markdown": "comparison_report.md",
@@ -412,9 +524,12 @@ def postprocess_native_fine_comparison(
         "final_run_identity_contract": final_run_identity_contract,
         "fluent_residual_history_contract": fluent_residual_history_contract,
         "deformed_geometry_contract": deformed_geometry_contract,
+        "synchronized_time_layer_contract": synchronized_time_layer_contract,
         "pressure_semantics_contract": pressure_semantics_contract,
         "final_field_comparison": field_comparison,
         "displacement_comparison": displacement_comparison,
+        "interface_force_comparison": interface_force_comparison,
+        "five_percent_diagnostic_gate": five_percent_diagnostic_gate,
         "diagnostic_model_blockers": [dict(item) for item in DIAGNOSTIC_MODEL_BLOCKERS],
         "outputs": outputs,
     }
@@ -425,6 +540,263 @@ def postprocess_native_fine_comparison(
     checksum_path = write_checksums(output_dir)
     verify_checksums(checksum_path, output_dir)
     return report
+
+
+def evaluate_five_percent_diagnostic_gate(
+    field_comparison: Mapping[str, Any],
+    displacement_comparison: Mapping[str, Any],
+    interface_force_comparison: Mapping[str, Any],
+    *,
+    expected_steps: int,
+    relative_tolerance: float = 0.05,
+) -> dict[str, Any]:
+    """Evaluate the requested 5% numerical target without claiming model parity."""
+
+    if isinstance(expected_steps, bool) or not isinstance(expected_steps, int):
+        raise TypeError("expected_steps must be a non-bool integer")
+    if expected_steps <= 0:
+        raise ValueError("expected_steps must be positive")
+    tolerance = float(relative_tolerance)
+    if not np.isfinite(tolerance) or not 0.0 < tolerance < 1.0:
+        raise ValueError("relative_tolerance must be finite and in (0, 1)")
+
+    try:
+        direct_errors = field_comparison["direct_errors"]
+        pressure = field_comparison["pressure_reference_diagnostic"]
+        pressure_range_pa = float(
+            pressure["native_fluent_sampled_pressure_range_pa"]
+        )
+        pressure_rmse_pa = float(
+            pressure["zero_mean_pressure_difference_rmse_pa"]
+        )
+        pressure_raw_rmse_pa = float(
+            pressure["raw_pressure_difference_rmse_pa"]
+        )
+        pressure_mean_offset_pa = float(
+            pressure["sampled_mean_offset_our_minus_fluent_pa"]
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise NativeFineComparisonError(
+            "five-percent field gate requires complete finite comparison metrics"
+        ) from exc
+    if not np.isfinite(pressure_range_pa) or pressure_range_pa <= 0.0:
+        raise NativeFineComparisonError(
+            "native Fluent sampled pressure range must be positive and finite"
+        )
+
+    values: dict[str, float] = {}
+    try:
+        for field_name in ("u", "v", "speed"):
+            values[f"field_{field_name}_nrmse"] = float(
+                direct_errors[field_name]["nrmse_by_reference_max_abs"]
+            )
+        values["pressure_gauge_nrmse"] = pressure_rmse_pa / pressure_range_pa
+        values["pressure_raw_nrmse"] = pressure_raw_rmse_pa / pressure_range_pa
+        values["pressure_mean_offset_fraction"] = (
+            abs(pressure_mean_offset_pa) / pressure_range_pa
+        )
+        for series_name, prefix in (
+            ("tip_streamwise", "tip_streamwise"),
+            ("tip_transverse", "tip_transverse"),
+            ("tip_mean_vector", "tip_norm"),
+            ("solid_max", "solid_max"),
+        ):
+            series = displacement_comparison[series_name]
+            reference_peak = abs(float(series["fluent_peak_m"]))
+            if not np.isfinite(reference_peak) or reference_peak <= 0.0:
+                raise NativeFineComparisonError(
+                    f"{series_name} Fluent peak must be positive and finite"
+                )
+            values[f"{prefix}_waveform_nrmse"] = float(
+                series["nrmse_by_reference_peak"]
+            )
+            values[f"{prefix}_peak_amplitude_relative_error"] = (
+                abs(
+                    abs(float(series["our_peak_m"]))
+                    - abs(float(series["fluent_peak_m"]))
+                )
+                / reference_peak
+            )
+            values[f"{prefix}_peak_phase_fraction"] = (
+                abs(int(series["our_peak_step"]) - int(series["fluent_peak_step"]))
+                / float(expected_steps)
+            )
+            values[f"{prefix}_final_error_by_reference_peak"] = (
+                abs(float(series["our_final_m"]) - float(series["fluent_final_m"]))
+                / reference_peak
+            )
+        for series_name, prefix in (
+            ("streamwise", "force_streamwise"),
+            ("transverse", "force_transverse"),
+        ):
+            series = interface_force_comparison[series_name]
+            reference_peak = abs(float(series["fluent_peak_n_per_m"]))
+            if not np.isfinite(reference_peak) or reference_peak <= 0.0:
+                raise NativeFineComparisonError(
+                    f"{series_name} Fluent force peak must be positive and finite"
+                )
+            values[f"{prefix}_waveform_nrmse"] = float(
+                series["nrmse_by_reference_peak"]
+            )
+            values[f"{prefix}_peak_amplitude_relative_error"] = (
+                abs(
+                    abs(float(series["our_peak_n_per_m"]))
+                    - abs(float(series["fluent_peak_n_per_m"]))
+                )
+                / reference_peak
+            )
+            values[f"{prefix}_peak_phase_fraction"] = (
+                abs(int(series["our_peak_step"]) - int(series["fluent_peak_step"]))
+                / float(expected_steps)
+            )
+            values[f"{prefix}_final_error_by_reference_peak"] = (
+                abs(
+                    float(series["our_final_n_per_m"])
+                    - float(series["fluent_final_n_per_m"])
+                )
+                / reference_peak
+            )
+        values["force_out_of_plane_leakage"] = float(
+            interface_force_comparison[
+                "out_of_plane_leakage_by_reference_streamwise_peak"
+            ]
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        if isinstance(exc, NativeFineComparisonError):
+            raise
+        raise NativeFineComparisonError(
+            "five-percent displacement and force gate requires complete finite metrics"
+        ) from exc
+
+    metrics = {
+        name: {
+            "value": value,
+            "tolerance": tolerance,
+            "passed": bool(np.isfinite(value) and 0.0 <= value <= tolerance),
+        }
+        for name, value in values.items()
+    }
+    passed = all(metric["passed"] for metric in metrics.values())
+    return {
+        "schema": "native_fine_five_percent_diagnostic_gate_v2",
+        "status": "passed" if passed else "failed",
+        "all_metrics_within_tolerance": passed,
+        "relative_tolerance": tolerance,
+        "parity_claimed": False,
+        "metrics": metrics,
+    }
+
+
+def compare_interface_force_histories(
+    our_rows: Sequence[Mapping[str, Any]],
+    fluent_rows: Sequence[Mapping[str, Any]],
+    *,
+    span_m: float,
+    expected_steps: int,
+    dt_s: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Compare the 3-D slab load with Fluent's 2-D unit-depth wall force."""
+
+    _validate_exact_history(
+        our_rows,
+        "our-solver interface force history",
+        expected_steps,
+        dt_s,
+        allow_missing_time=True,
+    )
+    _validate_exact_history(
+        fluent_rows,
+        "native Fluent interface force history",
+        expected_steps,
+        dt_s,
+    )
+    span = _finite_float(span_m, "solver span_m")
+    if span <= 0.0:
+        raise NativeFineComparisonError("solver span_m must be positive")
+
+    comparison_rows: list[dict[str, Any]] = []
+    our_streamwise: list[float] = []
+    fluent_streamwise: list[float] = []
+    our_transverse: list[float] = []
+    fluent_transverse: list[float] = []
+    our_out_of_plane: list[float] = []
+    for our_row, fluent_row in zip(our_rows, fluent_rows, strict=True):
+        step = int(our_row["step"])
+        vector = _vector(our_row.get("total_marker_force_n"))
+        if len(vector) != 3:
+            raise NativeFineComparisonError(
+                f"our-solver step {step} lacks finite interface force: "
+                "total_marker_force_n must have 3 components"
+            )
+        try:
+            solver_force = tuple(
+                _finite_float(value, f"solver interface force step {step}")
+                for value in vector
+            )
+            fluent_x = _finite_float(
+                fluent_row.get("flap_fluid_force_x_n"),
+                f"Fluent streamwise interface force step {step}",
+            )
+            fluent_y = _finite_float(
+                fluent_row.get("flap_fluid_force_y_n"),
+                f"Fluent transverse interface force step {step}",
+            )
+            _finite_float(
+                fluent_row.get("flap_fluid_force_z_n"),
+                f"Fluent out-of-plane interface force step {step}",
+            )
+        except (NativeFineComparisonError, TypeError, ValueError, OverflowError) as exc:
+            raise NativeFineComparisonError(
+                f"interface force history must contain finite interface force values: {exc}"
+            ) from exc
+        mapped_streamwise = -solver_force[2] / span
+        mapped_transverse = solver_force[1] / span
+        mapped_out_of_plane = solver_force[0] / span
+        our_streamwise.append(mapped_streamwise)
+        fluent_streamwise.append(fluent_x)
+        our_transverse.append(mapped_transverse)
+        fluent_transverse.append(fluent_y)
+        our_out_of_plane.append(mapped_out_of_plane)
+        comparison_rows.append(
+            {
+                "step": step,
+                "time_s": float(step * dt_s),
+                "our_streamwise_force_n_per_m": mapped_streamwise,
+                "fluent_streamwise_force_n_per_m": fluent_x,
+                "streamwise_signed_error_n_per_m": mapped_streamwise - fluent_x,
+                "our_transverse_force_n_per_m": mapped_transverse,
+                "fluent_transverse_force_n_per_m": fluent_y,
+                "transverse_signed_error_n_per_m": mapped_transverse - fluent_y,
+                "our_out_of_plane_force_n_per_m": mapped_out_of_plane,
+            }
+        )
+
+    streamwise_metrics = _force_series_error_metrics(
+        our_streamwise, fluent_streamwise
+    )
+    transverse_metrics = _force_series_error_metrics(
+        our_transverse, fluent_transverse
+    )
+    streamwise_peak = abs(float(streamwise_metrics["fluent_peak_n_per_m"]))
+    if streamwise_peak <= 0.0:
+        raise NativeFineComparisonError(
+            "native Fluent streamwise interface force peak must be positive"
+        )
+    leakage = max(abs(value) for value in our_out_of_plane) / streamwise_peak
+    return comparison_rows, {
+        "schema": "native_fine_interface_force_comparison_v1",
+        "sample_count": expected_steps,
+        "units": "N/m",
+        "solver_span_m": span,
+        "axis_mapping": {
+            "streamwise": "-solver_z/span_m",
+            "transverse": "+solver_y/span_m",
+            "out_of_plane": "+solver_x/span_m",
+        },
+        "streamwise": streamwise_metrics,
+        "transverse": transverse_metrics,
+        "out_of_plane_leakage_by_reference_streamwise_peak": leakage,
+    }
 
 
 def compare_displacement_histories(
@@ -445,6 +817,10 @@ def compare_displacement_histories(
         dt_s,
     )
     comparison_rows: list[dict[str, Any]] = []
+    solver_tip_streamwise: list[float] = []
+    fluent_tip_streamwise: list[float] = []
+    solver_tip_transverse: list[float] = []
+    fluent_tip_transverse: list[float] = []
     solver_tip: list[float] = []
     fluent_tip: list[float] = []
     solver_solid: list[float] = []
@@ -456,6 +832,23 @@ def compare_displacement_histories(
             raise NativeFineComparisonError(
                 f"our-solver step {step} lacks a 3-component tip_mean_displacement_m"
             )
+        # The canonical solver embeds the 2-D Fluent x/y plane as -z/+y.
+        our_tip_streamwise = _finite_float(
+            -float(our_vector[2]),
+            f"our-solver streamwise tip displacement at step {step}",
+        )
+        our_tip_transverse = _finite_float(
+            our_vector[1],
+            f"our-solver transverse tip displacement at step {step}",
+        )
+        fluent_tip_streamwise_value = _finite_float(
+            fluent_row.get("tip_displacement_x_m"),
+            f"Fluent streamwise tip displacement at step {step}",
+        )
+        fluent_tip_transverse_value = _finite_float(
+            fluent_row.get("tip_displacement_y_m"),
+            f"Fluent transverse tip displacement at step {step}",
+        )
         our_tip_norm = float(np.linalg.norm(np.asarray(our_vector[:3], dtype=np.float64)))
         fluent_tip_norm = _finite_float(
             fluent_row.get("tip_mean_vector_norm_m"),
@@ -469,6 +862,10 @@ def compare_displacement_histories(
             fluent_row.get("max_displacement_m"),
             f"Fluent maximum displacement at step {step}",
         )
+        solver_tip_streamwise.append(our_tip_streamwise)
+        fluent_tip_streamwise.append(fluent_tip_streamwise_value)
+        solver_tip_transverse.append(our_tip_transverse)
+        fluent_tip_transverse.append(fluent_tip_transverse_value)
         solver_tip.append(our_tip_norm)
         fluent_tip.append(fluent_tip_norm)
         solver_solid.append(our_solid_max)
@@ -477,6 +874,20 @@ def compare_displacement_histories(
             {
                 "step": step,
                 "time_s": float(step * dt_s),
+                "our_tip_streamwise_displacement_m": our_tip_streamwise,
+                "fluent_tip_streamwise_displacement_m": (
+                    fluent_tip_streamwise_value
+                ),
+                "tip_streamwise_signed_error_m": (
+                    our_tip_streamwise - fluent_tip_streamwise_value
+                ),
+                "our_tip_transverse_displacement_m": our_tip_transverse,
+                "fluent_tip_transverse_displacement_m": (
+                    fluent_tip_transverse_value
+                ),
+                "tip_transverse_signed_error_m": (
+                    our_tip_transverse - fluent_tip_transverse_value
+                ),
                 "our_tip_mean_vector_norm_m": our_tip_norm,
                 "fluent_tip_mean_vector_norm_m": fluent_tip_norm,
                 "tip_mean_signed_error_m": our_tip_norm - fluent_tip_norm,
@@ -493,6 +904,14 @@ def compare_displacement_histories(
         "diagnostic_only": True,
         "definition_alignment": "diagnostic_analog_not_identical",
         "sample_count": expected_steps,
+        "tip_streamwise": _series_error_metrics(
+            solver_tip_streamwise,
+            fluent_tip_streamwise,
+        ),
+        "tip_transverse": _series_error_metrics(
+            solver_tip_transverse,
+            fluent_tip_transverse,
+        ),
         "tip_mean_vector": _series_error_metrics(solver_tip, fluent_tip),
         "solid_max": _series_error_metrics(solver_solid, fluent_solid),
         "our_tip_definition": (
@@ -532,6 +951,7 @@ def read_typed_csv(path: str | Path) -> list[dict[str, Any]]:
 def render_markdown_report(report: Mapping[str, Any]) -> str:
     field = report["final_field_comparison"]
     displacement = report["displacement_comparison"]
+    interface_force = report["interface_force_comparison"]
     geometry = report["deformed_geometry_contract"]
     step_history = report["step_history_contract"]
     extrema = field["final_extrema"]
@@ -579,6 +999,17 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         f"- Whole-solid maximum RMSE: `{displacement['solid_max']['rmse_m']}` m",
         f"- Our tip definition: {displacement['our_tip_definition']}",
         f"- Fluent tip definition: {displacement['fluent_tip_definition']}",
+        "",
+        "## Interface-force comparison",
+        "",
+        f"- Exact aligned samples: `{interface_force['sample_count']}`",
+        "- Solver-to-Fluent mapping: `Fx=-Fz/span`, `Fy=+Fy/span`",
+        f"- Streamwise waveform NRMSE: "
+        f"`{interface_force['streamwise']['nrmse_by_reference_peak']}`",
+        f"- Transverse waveform NRMSE: "
+        f"`{interface_force['transverse']['nrmse_by_reference_peak']}`",
+        f"- Out-of-plane leakage fraction: "
+        f"`{interface_force['out_of_plane_leakage_by_reference_streamwise_peak']}`",
         "",
         "## Diagnostic model blockers",
         "",
@@ -704,6 +1135,9 @@ def _compare_final_fields(
             "sampled_mean_offset_our_minus_fluent_pa": pressure_mean_offset,
             "zero_mean_pressure_difference_rmse_pa": pressure_zero_mean_rmse,
             "raw_pressure_difference_rmse_pa": direct_errors["p"]["rmse"],
+            "native_fluent_sampled_pressure_range_pa": float(
+                np.max(reference_pressure) - np.min(reference_pressure)
+            ),
             "constant_offset_removed_from_primary_metrics": False,
         },
         "existing_parity_helper_diagnostics": helper_result,
@@ -729,18 +1163,59 @@ def _series_error_metrics(values: Iterable[float], reference: Iterable[float]) -
     difference = values_array - reference_array
     rmse = float(np.sqrt(np.mean(difference * difference)))
     reference_scale = max(float(np.max(np.abs(reference_array))), np.finfo(np.float64).eps)
+    our_peak_index = int(np.argmax(np.abs(values_array)))
+    fluent_peak_index = int(np.argmax(np.abs(reference_array)))
     return {
         "rmse_m": rmse,
         "nrmse_by_reference_peak": rmse / reference_scale,
         "mean_signed_error_m": float(np.mean(difference)),
         "mean_absolute_error_m": float(np.mean(np.abs(difference))),
         "max_absolute_error_m": float(np.max(np.abs(difference))),
-        "our_peak_m": float(np.max(values_array)),
-        "fluent_peak_m": float(np.max(reference_array)),
-        "our_peak_step": int(np.argmax(values_array) + 1),
-        "fluent_peak_step": int(np.argmax(reference_array) + 1),
+        "our_peak_m": float(values_array[our_peak_index]),
+        "fluent_peak_m": float(reference_array[fluent_peak_index]),
+        "our_peak_step": our_peak_index + 1,
+        "fluent_peak_step": fluent_peak_index + 1,
         "our_final_m": float(values_array[-1]),
         "fluent_final_m": float(reference_array[-1]),
+    }
+
+
+def _force_series_error_metrics(
+    values: Iterable[float],
+    reference: Iterable[float],
+) -> dict[str, Any]:
+    values_array = np.asarray(list(values), dtype=np.float64)
+    reference_array = np.asarray(list(reference), dtype=np.float64)
+    if (
+        values_array.size == 0
+        or values_array.shape != reference_array.shape
+        or not np.all(np.isfinite(values_array))
+        or not np.all(np.isfinite(reference_array))
+    ):
+        raise NativeFineComparisonError(
+            "interface force series must be non-empty, aligned, and finite"
+        )
+    difference = values_array - reference_array
+    rmse = float(np.sqrt(np.mean(difference * difference)))
+    reference_scale = float(np.max(np.abs(reference_array)))
+    if reference_scale <= 0.0:
+        raise NativeFineComparisonError(
+            "native Fluent interface force component peak must be positive"
+        )
+    our_peak_index = int(np.argmax(np.abs(values_array)))
+    fluent_peak_index = int(np.argmax(np.abs(reference_array)))
+    return {
+        "rmse_n_per_m": rmse,
+        "nrmse_by_reference_peak": rmse / reference_scale,
+        "mean_signed_error_n_per_m": float(np.mean(difference)),
+        "mean_absolute_error_n_per_m": float(np.mean(np.abs(difference))),
+        "max_absolute_error_n_per_m": float(np.max(np.abs(difference))),
+        "our_peak_n_per_m": float(values_array[our_peak_index]),
+        "fluent_peak_n_per_m": float(reference_array[fluent_peak_index]),
+        "our_peak_step": our_peak_index + 1,
+        "fluent_peak_step": fluent_peak_index + 1,
+        "our_final_n_per_m": float(values_array[-1]),
+        "fluent_final_n_per_m": float(reference_array[-1]),
     }
 
 
@@ -786,7 +1261,7 @@ def _input_manifest(
         *additional_paths,
     ]
     return {
-        "schema": "our_solver_vs_native_fluent_fine_inputs_v1",
+        "schema": "our_solver_vs_native_fluent_fine_inputs_v2",
         "expected_steps": expected_steps,
         "dt_s": dt_s,
         "native_fluent_schema": NATIVE_FLUENT_SCHEMA,

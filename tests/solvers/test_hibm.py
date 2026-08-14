@@ -55,7 +55,7 @@ HIBM_MPM_REPORTS_SOURCE = Path("simulation_core/coupling/hibm_mpm/reports.py")
 
 
 class HibmMpmSurfaceMarkerTests(unittest.TestCase):
-    def test_open_ribbon_tip_cap_projection_vertices_do_not_enter_traction_count(
+    def test_open_ribbon_tip_cap_edges_stay_boundary_only_but_cap_enters_forces(
         self,
     ) -> None:
         markers = HibmMpmSurfaceMarkers(
@@ -110,10 +110,10 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         np.testing.assert_allclose(
             markers.v_gamma_mps.to_numpy()[4:8],
             (
-                (0.0, 0.40, 0.50),
-                (0.0, 0.50, 0.20),
-                (0.0, 0.40, 0.50),
-                (0.0, 0.50, 0.20),
+                (0.0, 0.30, 0.40),
+                (0.0, 0.40, 0.10),
+                (0.0, 0.30, 0.40),
+                (0.0, 0.40, 0.10),
             ),
             atol=1.0e-6,
         )
@@ -137,13 +137,24 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         )
 
         markers.F_gamma_n[4] = (1000.0, 0.0, 0.0)
-        markers.F_gamma_n[6] = (0.0, 1000.0, 0.0)
+        markers.set_tip_cap_gauge_pressure_tractions_pa((-10000.0, -10000.0))
+        markers.compute_marker_forces()
         force_report = markers.aggregate_region_forces(
             primary_region_id=101,
             secondary_region_id=202,
         )
-        self.assertEqual(force_report.total_marker_count, 4)
-        np.testing.assert_allclose(force_report.total_marker_force_n, (0.0, 0.0, 0.0))
+        self.assertEqual(force_report.total_marker_count, 6)
+        self.assertEqual(force_report.tip_cap_marker_count, 2)
+        np.testing.assert_allclose(
+            force_report.tip_cap_marker_force_n,
+            (0.0, 2000.0, 0.0),
+            atol=1.0e-3,
+        )
+        np.testing.assert_allclose(
+            force_report.total_marker_force_n,
+            (0.0, 2000.0, 0.0),
+            atol=1.0e-3,
+        )
 
     def test_projection_segments_reject_nonmanifold_branch(self) -> None:
         markers = HibmMpmSurfaceMarkers(
@@ -249,8 +260,8 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
             obstacle=_NoDownloadField(),
             hibm_pressure_outlet_reachable=_NoDownloadField(),
             hibm_pressure_reachability_barrier=_NoDownloadField(),
-            velocity_dirichlet_boundary_active=_NoDownloadField(),
-            velocity_dirichlet_boundary_marker_region_id=_NoDownloadField(),
+            velocity_dirichlet_boundary_active_component_mask=_NoDownloadField(),
+            velocity_dirichlet_boundary_component_region_id=_NoDownloadField(),
             last_hibm_pressure_unreached_cell_count=0,
             # The gate checks the raw (non-Dirichlet-excluded) unreached
             # count, since that matches the population this report itself
@@ -280,8 +291,8 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
             obstacle=_NoDownloadField(),
             hibm_pressure_outlet_reachable=_NoDownloadField(),
             hibm_pressure_reachability_barrier=_NoDownloadField(),
-            velocity_dirichlet_boundary_active=_NoDownloadField(),
-            velocity_dirichlet_boundary_marker_region_id=_NoDownloadField(),
+            velocity_dirichlet_boundary_active_component_mask=_NoDownloadField(),
+            velocity_dirichlet_boundary_component_region_id=_NoDownloadField(),
             last_hibm_pressure_unreached_raw_cell_count=17,
             last_hibm_pressure_unreached_component_count=2,
             last_hibm_pressure_unreached_component_raw_count=3,
@@ -332,117 +343,6 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
             compact.count("candidate_distance>=-same_side_tolerance_m"),
             2,
         )
-
-    def test_velocity_dirichlet_relocation_uses_deterministic_complete_payload_arbitration(
-        self,
-    ) -> None:
-        module_source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
-        start = module_source.index(
-            "    def _relocate_masked_velocity_dirichlet_rows_kernel("
-        )
-        source = module_source[start : module_source.index("\n    def ", start + 8)]
-        compact = "".join(source.split())
-        candidate_index = compact.index(
-            "self._velocity_dirichlet_relocation_candidate("
-        )
-        arbitration_index = compact.index(
-            "ti.atomic_min("
-            "self.velocity_dirichlet_relocation_winner_source_linear_key"
-        )
-
-        self.assertLess(candidate_index, arbitration_index)
-        self.assertNotIn(
-            "ti.atomic_or(velocity_dirichlet_active",
-            compact,
-            msg="active is the published valid bit, not a relocation winner lock",
-        )
-
-        candidate_start = module_source.index(
-            "    def _velocity_dirichlet_relocation_candidate("
-        )
-        candidate = module_source[
-            candidate_start : module_source.index("\n    def ", candidate_start + 8)
-        ]
-        self.assertIn("self._walk_interior_velocity_sample(", candidate)
-        for payload_name in (
-            "destination",
-            "target_velocity",
-            "reconstruction_alpha",
-            "enforcement_weight",
-            "boundary_point",
-            "accepted_sample_point",
-        ):
-            self.assertIn(payload_name, candidate)
-
-        materialize_start = module_source.index(
-            "    def _materialize_velocity_dirichlet_relocation_winners_kernel("
-        )
-        materialize = module_source[
-            materialize_start : module_source.index("\n    def ", materialize_start + 8)
-        ]
-        materialize_compact = "".join(materialize.split())
-        self.assertIn(
-            "self._velocity_dirichlet_relocation_candidate(",
-            materialize,
-            msg="selection and publication must derive one equivalent payload",
-        )
-        self.assertIn(
-            "winner_source_linear_key==source_linear_key",
-            materialize_compact,
-        )
-        value_index = materialize.index("velocity_dirichlet_value_mps[destination] =")
-        projection_index = materialize.index(
-            "velocity_dirichlet_projection_weight[destination] ="
-        )
-        enforcement_index = materialize.index(
-            "velocity_dirichlet_enforcement_weight[destination] ="
-        )
-        ownership_index = materialize.index(
-            "self.velocity_dirichlet_owned_row[destination] = 1"
-        )
-        active_index = materialize.index("velocity_dirichlet_active[destination] = 1")
-        self.assertLess(value_index, active_index)
-        self.assertLess(projection_index, active_index)
-        self.assertLess(enforcement_index, active_index)
-        self.assertLess(ownership_index, active_index)
-
-        shadow_payload_index = materialize.index(
-            "self.velocity_dirichlet_relocation_shadow_source_row["
-        )
-        shadow_valid_index = materialize.index(
-            "self.velocity_dirichlet_relocation_shadow_claim_valid["
-        )
-        self.assertLess(shadow_payload_index, shadow_valid_index)
-
-        clear_start = module_source.index(
-            "    def _clear_velocity_dirichlet_relocation_shadow_claims_kernel("
-        )
-        clear_source = module_source[
-            clear_start : module_source.index("\n    def ", clear_start + 8)
-        ]
-        self.assertIn(
-            "velocity_dirichlet_relocation_winner_source_linear_key",
-            clear_source,
-            msg="rollback/generation clear must also invalidate winner arbitration",
-        )
-
-        impl_start = module_source.index(
-            "    def _assemble_velocity_dirichlet_reconstructed_boundary_rows_impl("
-        )
-        impl_source = module_source[
-            impl_start : module_source.index("\n    def ", impl_start + 8)
-        ]
-        clear_index = impl_source.index(
-            "self._clear_velocity_dirichlet_relocation_shadow_claims_kernel()"
-        )
-        select_index = impl_source.index(
-            "self._relocate_masked_velocity_dirichlet_rows_kernel("
-        )
-        publish_index = impl_source.index(
-            "self._materialize_velocity_dirichlet_relocation_winners_kernel("
-        )
-        self.assertLess(clear_index, select_index)
-        self.assertLess(select_index, publish_index)
 
     def test_pressure_sampling_accumulates_pressure_in_f64(self) -> None:
         source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
@@ -824,13 +724,8 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         measure_source = inspect.getsource(
             HibmMpmIbBoundaryConditions._measure_marker_target_closure_kernel
         )
-        sweep_source = inspect.getsource(
-            HibmMpmIbBoundaryConditions._marker_target_closure_kaczmarz_sweep_kernel
-        )
-
-        for source in (measure_source, sweep_source):
-            self.assertIn("physical_marker_count", source)
-            self.assertIn("marker >= physical_marker_count", source)
+        self.assertIn("physical_marker_count", measure_source)
+        self.assertIn("marker >= physical_marker_count", measure_source)
 
     def test_hibm_sharp_steps_warm_start_pressure_by_default(self) -> None:
         mpm_default = inspect.signature(
@@ -855,8 +750,8 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         self.assertIn("update_surface_feedback_from_mpm_surface_particles", source)
         self.assertIn("update_surface_feedback_from_mpm_particles", source)
 
-    def test_sharp_orchestration_does_not_erase_external_velocity_rows(self) -> None:
-        """Moving-boundary rebuilds clear only rows in their ownership ledger."""
+    def test_sharp_orchestration_uses_the_canonical_component_face_ledger(self) -> None:
+        """Every sharp rebuild enters the shared canonical assembly path."""
 
         for operation in (
             assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
@@ -868,7 +763,10 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
                     "fluid.clear_velocity_dirichlet_boundary_rows()",
                     source,
                 )
-                self.assertIn("velocity_dirichlet_owned_row", source)
+                self.assertIn(
+                    "_assemble_and_seal_hibm_velocity_component_face_ledger",
+                    source,
+                )
 
     def test_hibm_sharp_internal_obstacle_conversion_is_on_by_default(self) -> None:
         defaulted_symbols = (
@@ -1985,7 +1883,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         np.testing.assert_allclose(marker_velocity, (0.1, 0.0, 0.0), atol=1.0e-6)
         self.assertAlmostEqual(report.max_marker_displacement_m, 0.01, delta=1.0e-6)
 
-    def test_surface_feedback_records_invalid_marker_without_particle_support(self) -> None:
+    def test_surface_feedback_without_particle_support_retires_geometry(self) -> None:
         markers = HibmMpmSurfaceMarkers(marker_capacity=1)
         markers.load_markers(
             positions_m=((0.5, 0.5, 0.5),),
@@ -2008,20 +1906,19 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
             density_kgm3=1000.0,
         )
 
-        report = markers.update_surface_feedback_from_mpm_particles(
-            solid.x,
-            solid.v,
-            particle_count=solid.particle_count,
-            support_radius_m=0.1,
-            dt_s=0.1,
-        )
+        with self.assertRaisesRegex(RuntimeError, "incomplete.*surface feedback"):
+            markers.update_surface_feedback_from_mpm_particles(
+                solid.x,
+                solid.v,
+                particle_count=solid.particle_count,
+                support_radius_m=0.1,
+                dt_s=0.1,
+            )
 
-        self.assertEqual(report.updated_marker_count, 0)
-        self.assertEqual(report.invalid_marker_count, 1)
-        marker_position = tuple(float(markers.x_gamma_m[0][axis]) for axis in range(3))
-        marker_velocity = tuple(float(markers.v_gamma_mps[0][axis]) for axis in range(3))
-        self.assertEqual(marker_position, (0.5, 0.5, 0.5))
-        self.assertEqual(marker_velocity, (0.0, 0.0, 0.0))
+        self.assertEqual(markers.marker_count, 0)
+        self.assertEqual(markers.projection_vertex_count, 0)
+        self.assertEqual(markers.projection_triangle_count, 0)
+        self.assertEqual(markers.projection_segment_count, 0)
 
 
 class HibmMpmIbNodeSearchTests(unittest.TestCase):
@@ -3219,67 +3116,6 @@ class HibmMpmIbNodeSearchTests(unittest.TestCase):
 
 
 class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
-    def test_reconstructed_velocity_rows_require_complete_projection_ledger(
-        self,
-    ) -> None:
-        grid_nodes = (4, 4, 4)
-        search = SimpleNamespace(grid_nodes=grid_nodes)
-        boundary = object.__new__(HibmMpmIbBoundaryConditions)
-        boundary.grid_nodes = grid_nodes
-        ledger_field = SimpleNamespace(shape=grid_nodes)
-        complete_ledger = {
-            "velocity_dirichlet_hard_fixed_component_mask": ledger_field,
-            "velocity_dirichlet_owned_row": ledger_field,
-            "velocity_dirichlet_enforcement_weight": ledger_field,
-            "velocity_dirichlet_external_exact_component_mask": ledger_field,
-        }
-        cases = {
-            "all_missing": {},
-            "hard_missing": {
-                key: value
-                for key, value in complete_ledger.items()
-                if key != "velocity_dirichlet_hard_fixed_component_mask"
-            },
-            "owned_missing": {
-                key: value
-                for key, value in complete_ledger.items()
-                if key != "velocity_dirichlet_owned_row"
-            },
-            "enforcement_missing": {
-                key: value
-                for key, value in complete_ledger.items()
-                if key != "velocity_dirichlet_enforcement_weight"
-            },
-            "external_exact_missing": {
-                key: value
-                for key, value in complete_ledger.items()
-                if key != "velocity_dirichlet_external_exact_component_mask"
-            },
-        }
-
-        for name, ledger in cases.items():
-            with self.subTest(name=name):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "complete velocity projection ledger requires",
-                ):
-                    boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        search,
-                        cell_face_x_m=None,
-                        cell_face_y_m=None,
-                        cell_face_z_m=None,
-                        cell_center_x_m=None,
-                        cell_center_y_m=None,
-                        cell_center_z_m=None,
-                        grid_nodes=grid_nodes,
-                        **ledger,
-                    )
-
     def test_builds_external_ib_no_slip_and_pressure_neumann_targets(self) -> None:
         markers = HibmMpmSurfaceMarkers(marker_capacity=1)
         markers.load_markers(
@@ -3369,43 +3205,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
         self.assertEqual(int(marker_region_id_out[0, 0, 1]), 8)
         self.assertEqual(int(marker_region_id_out[1, 1, 1]), -1)
         self.assertEqual(int(marker_region_id_out[2, 2, 2]), 42)
-
-    def test_velocity_dirichlet_region_counts_stay_device_side(self) -> None:
-        source = inspect.getsource(
-            HibmMpmIbBoundaryConditions._velocity_dirichlet_region_row_counts
-        )
-        self.assertNotIn(".to_numpy()", source)
-
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(2, 2, 2),
-            marker_capacity=1,
-        )
-        velocity_dirichlet_active = ti.field(dtype=ti.i32, shape=(2, 2, 2))
-        marker_region_id = ti.field(dtype=ti.i32, shape=(2, 2, 2))
-        velocity_dirichlet_active.fill(0)
-        marker_region_id.fill(-1)
-
-        velocity_dirichlet_active[0, 0, 0] = 1
-        velocity_dirichlet_active[0, 0, 1] = 1
-        velocity_dirichlet_active[0, 1, 0] = 1
-        velocity_dirichlet_active[1, 0, 0] = 1
-        marker_region_id[0, 0, 0] = 7
-        marker_region_id[0, 0, 1] = 8
-        marker_region_id[0, 1, 0] = 9
-        boundary.velocity_dirichlet_owned_row[0, 0, 0] = 1
-        boundary.velocity_dirichlet_owned_row[0, 0, 1] = 1
-        boundary.velocity_dirichlet_owned_row[0, 1, 0] = 1
-        boundary.velocity_dirichlet_owned_row[1, 0, 0] = 1
-
-        self.assertEqual(
-            boundary._velocity_dirichlet_region_row_counts(
-                velocity_dirichlet_active,
-                marker_region_id,
-                primary_region_id=7,
-                secondary_region_id=8,
-            ),
-            (1, 1, 1, 1),
-        )
 
     def test_triangle_projection_interpolates_curved_surface_boundary_targets(
         self,
@@ -3697,7 +3496,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -3710,19 +3508,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             cell_center_y_m=fluid.cell_center_y_m,
             cell_center_z_m=fluid.cell_center_z_m,
             grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_marker_region_id=(
-                fluid.velocity_dirichlet_boundary_marker_region_id
-            ),
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            marker_region_id=markers.region_id,
         )
         matrix_report = fluid.pressure_interface_matrix_terms_report()
         fluid._prepare_fv_multigrid_rhs(rhs_scale=1.0)
@@ -3840,7 +3625,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -3853,7 +3637,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             cell_center_y_m=fluid.cell_center_y_m,
             cell_center_z_m=fluid.cell_center_z_m,
             grid_nodes=fluid.grid.grid_nodes,
-            marker_region_id=markers.region_id,
         )
         candidate_counts = (
             boundary.marker_pressure_neumann_candidate_node_count.to_numpy()
@@ -3913,7 +3696,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -3926,10 +3708,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             cell_center_y_m=fluid.cell_center_y_m,
             cell_center_z_m=fluid.cell_center_z_m,
             grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_marker_region_id=(
-                fluid.velocity_dirichlet_boundary_marker_region_id
-            ),
-            marker_region_id=markers.region_id,
         )
 
         self.assertEqual(report.active_pressure_neumann_rows, 0)
@@ -3978,7 +3756,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4110,7 +3887,7 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             0.75,
         )
         fluid.obstacle[node] = 1
-        fluid.velocity_dirichlet_boundary_active[seam] = 1
+        fluid.velocity_dirichlet_boundary_active_component_mask[seam] = 7
 
         report = boundary.assemble_pressure_neumann_matrix_rows(
             fluid.pressure_interface_matrix_diagonal,
@@ -4119,7 +3896,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4139,10 +3915,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             cell_center_y_m=fluid.cell_center_y_m,
             cell_center_z_m=fluid.cell_center_z_m,
             grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_marker_region_id=(
-                fluid.velocity_dirichlet_boundary_marker_region_id
-            ),
-            marker_region_id=markers.region_id,
         )
 
         self.assertEqual(report.active_pressure_neumann_rows, 1)
@@ -4155,7 +3927,9 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             0.0,
         )
 
-    def test_pressure_neumann_matrix_relocates_velocity_dirichlet_owner(self) -> None:
+    def test_pressure_neumann_component_face_owner_remains_pressure_eligible(
+        self,
+    ) -> None:
         markers = HibmMpmSurfaceMarkers(marker_capacity=1)
         markers.load_markers(
             positions_m=((0.625, 0.625, 0.5),),
@@ -4188,7 +3962,7 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
             runtime=TaichiRuntimeConfig(arch="cuda"),
         )
-        fluid.velocity_dirichlet_boundary_active[2, 2, 2] = 1
+        fluid.velocity_dirichlet_boundary_active_component_mask[2, 2, 2] = 7
 
         report = boundary.assemble_pressure_neumann_matrix_rows(
             fluid.pressure_interface_matrix_diagonal,
@@ -4197,7 +3971,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4213,15 +3986,17 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
         )
         matrix_report = fluid.pressure_interface_matrix_terms_report()
 
-        active_rows = report.active_pressure_neumann_rows
-        skipped_rows = report.skipped_velocity_dirichlet_row_count
-        seam_skipped_rows = report.skipped_pressure_boundary_adjacent_row_count
-        self.assertEqual(active_rows + skipped_rows + seam_skipped_rows, 1)
+        self.assertEqual(report.active_pressure_neumann_rows, 1)
+        self.assertEqual(report.skipped_velocity_dirichlet_row_count, 0)
+        self.assertEqual(report.skipped_pressure_boundary_adjacent_row_count, 0)
         self.assertEqual(report.invalid_reconstruction_row_count, 0)
-        self.assertEqual(int(fluid.pressure_interface_coupling_active[2, 2, 2]), 0)
-        if active_rows > 0:
-            self.assertGreater(matrix_report["active_cells"], 0)
-            self.assertGreater(matrix_report["diagonal_integral"], 0.0)
+        self.assertEqual(int(fluid.pressure_interface_coupling_active[2, 2, 2]), 1)
+        self.assertGreater(
+            float(fluid.pressure_interface_matrix_diagonal[2, 2, 2]),
+            0.0,
+        )
+        self.assertGreater(matrix_report["active_cells"], 0)
+        self.assertGreater(matrix_report["diagonal_integral"], 0.0)
         self.assertAlmostEqual(matrix_report["rhs_integral"], 0.0)
 
     def test_pressure_neumann_matrix_counts_obstacle_owner_without_fluid_owner(
@@ -4268,7 +4043,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4331,7 +4105,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4402,7 +4175,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4475,7 +4247,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4546,7 +4317,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4617,7 +4387,7 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
         search.node_interior_fluid_point_m[node] = (0.5, 0.5, 0.7)
         search.node_anchor_cell[node] = anchor
         fluid.obstacle[node] = 1
-        fluid.velocity_dirichlet_boundary_active[anchor] = 1
+        fluid.velocity_dirichlet_boundary_active_component_mask[anchor] = 7
 
         report = boundary.assemble_pressure_neumann_matrix_rows(
             fluid.pressure_interface_matrix_diagonal,
@@ -4626,7 +4396,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4706,7 +4475,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4772,7 +4540,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -4899,7 +4666,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5032,7 +4798,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5115,7 +4880,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5206,7 +4970,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5284,7 +5047,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5297,12 +5059,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             cell_center_y_m=fluid.cell_center_y_m,
             cell_center_z_m=fluid.cell_center_z_m,
             grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
         )
 
         self.assertEqual(report.active_pressure_neumann_rows, 0)
@@ -5352,7 +5108,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5434,7 +5189,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5495,7 +5249,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5557,7 +5310,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5620,7 +5372,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5687,7 +5438,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5763,7 +5513,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5836,7 +5585,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5930,7 +5678,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -5957,1097 +5704,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
         rhs = float(fluid._weighted_dot_kernel(fluid.pressure_tmp, fluid.cg_Ad))
         relative_error = abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0e-30)
         self.assertLess(relative_error, 1.0e-5)
-
-    def test_no_slip_dirichlet_targets_assemble_into_fluid_boundary_rows(self) -> None:
-        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
-        markers.load_markers(
-            positions_m=((0.625, 0.625, 0.5),),
-            velocities_mps=((0.25, -0.5, 0.75),),
-            normals=((0.0, 0.0, 1.0),),
-            areas_m2=(0.04,),
-            region_ids=(7,),
-        )
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        search.search_and_classify(
-            markers,
-            search_radius_m=0.13,
-            interior_probe_distance_m=0.125,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        boundary.build_from_search(
-            search,
-            markers,
-            marker_pressure_neumann_gradient_pa_per_m=(0.0,),
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-
-        report = boundary.assemble_velocity_dirichlet_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-        )
-        apply_report = fluid.apply_velocity_dirichlet_boundary_rows(read_report=True)
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertEqual(apply_report.active_cells, 1)
-        self.assertEqual(fluid.velocity_dirichlet_boundary_active[2, 2, 2], 1)
-        self.assertEqual(
-            tuple(float(fluid.velocity[2, 2, 2][axis]) for axis in range(3)),
-            (0.25, -0.5, 0.75),
-        )
-        self.assertEqual(fluid.velocity_constraint_weight[2, 2, 2], 0.0)
-
-    def test_no_slip_dirichlet_rows_reconstruct_along_surface_normal(self) -> None:
-        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
-        markers.load_markers(
-            positions_m=((0.625, 0.625, 0.5),),
-            velocities_mps=((0.0, 0.0, 0.1),),
-            normals=((0.0, 0.0, 1.0),),
-            areas_m2=(0.04,),
-            region_ids=(7,),
-        )
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        search.search_and_classify(
-            markers,
-            search_radius_m=0.13,
-            interior_probe_distance_m=0.125,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        boundary.build_from_search(
-            search,
-            markers,
-            marker_pressure_neumann_gradient_pa_per_m=(0.0,),
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        fluid.velocity.fill((0.0, 0.0, 0.4))
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_marker_region_id=(
-                fluid.velocity_dirichlet_boundary_marker_region_id
-            ),
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-            marker_region_id=markers.region_id,
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertEqual(report.invalid_reconstruction_row_count, 0)
-        self.assertAlmostEqual(report.min_projection_weight, 0.5, delta=1.0e-6)
-        self.assertAlmostEqual(report.max_projection_weight, 0.5, delta=1.0e-6)
-        self.assertEqual(fluid.velocity_dirichlet_boundary_active[2, 2, 2], 1)
-        self.assertEqual(
-            int(fluid.velocity_dirichlet_boundary_marker_region_id[2, 2, 2]),
-            7,
-        )
-        reconstructed_z = float(
-            fluid.velocity_dirichlet_boundary_value_mps[2, 2, 2][2]
-        )
-        self.assertAlmostEqual(reconstructed_z, 0.25, delta=1.0e-6)
-        self.assertAlmostEqual(
-            float(fluid.velocity_dirichlet_boundary_projection_weight[2, 2, 2]),
-            0.5,
-            delta=1.0e-6,
-        )
-
-    def test_projection_preapply_preserves_reconstructed_hibm_target(self) -> None:
-        """Projection must see the same stamped HIBM target it leaves behind."""
-
-        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
-        markers.load_markers(
-            positions_m=((0.25, 0.625, 0.625),),
-            velocities_mps=((0.0, 0.0, 0.0),),
-            normals=((1.0, 0.0, 0.0),),
-            areas_m2=(0.04,),
-            region_ids=(7,),
-        )
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        fluid.velocity.fill((1.0, 0.0, 0.0))
-
-        node = (1, 2, 2)
-        boundary.active_ib_node[node] = 1
-        boundary.velocity_dirichlet_mps_field[node] = (0.0, 0.0, 0.0)
-        boundary.pressure_neumann_normal_field[node] = (1.0, 0.0, 0.0)
-        search.nearest_marker[node] = 0
-        search.node_boundary_point_m[node] = (0.25, 0.625, 0.625)
-        search.node_interior_fluid_point_m[node] = (0.75, 0.625, 0.625)
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_marker_region_id=(
-                fluid.velocity_dirichlet_boundary_marker_region_id
-            ),
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-            marker_region_id=markers.region_id,
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertAlmostEqual(report.min_projection_weight, 0.25, delta=1.0e-6)
-        self.assertEqual(
-            int(fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[node]),
-            7,
-        )
-        self.assertAlmostEqual(
-            float(fluid.velocity_dirichlet_boundary_value_mps[node][0]),
-            0.25,
-            delta=1.0e-6,
-        )
-
-        assembled_target = tuple(
-            float(fluid.velocity_dirichlet_boundary_value_mps[node][axis])
-            for axis in range(3)
-        )
-        captured: dict[str, object] = {}
-        original_solve = fluid._solve_pressure_poisson_with_solver
-        original_subtract = fluid._subtract_pressure_gradient_kernel
-
-        def capture_pre_solve_velocity(**kwargs) -> None:
-            captured["velocity"] = tuple(
-                float(fluid.velocity[node][axis]) for axis in range(3)
-            )
-            original_solve(**kwargs)
-
-        def capture_pre_reclamp_divergence(*args, **kwargs) -> None:
-            original_subtract(*args, **kwargs)
-            fluid.compute_divergence()
-            captured["pre_reclamp_raw_l2"] = float(
-                fluid.divergence_stats()["l2"]
-            )
-
-        fluid._solve_pressure_poisson_with_solver = capture_pre_solve_velocity
-        self.addCleanup(
-            setattr,
-            fluid,
-            "_solve_pressure_poisson_with_solver",
-            original_solve,
-        )
-        fluid._subtract_pressure_gradient_kernel = capture_pre_reclamp_divergence
-        self.addCleanup(
-            setattr,
-            fluid,
-            "_subtract_pressure_gradient_kernel",
-            original_subtract,
-        )
-        project_report = fluid.project(
-            iterations=4000,
-            pressure_solver="fv_jacobi",
-            reset_pressure=True,
-            read_report=True,
-        )
-
-        np.testing.assert_allclose(captured["velocity"], assembled_target, atol=1.0e-6)
-        np.testing.assert_allclose(
-            tuple(float(fluid.velocity[node][axis]) for axis in range(3)),
-            assembled_target,
-            atol=1.0e-6,
-        )
-        pre_reclamp_raw_l2 = float(captured["pre_reclamp_raw_l2"])
-        # Velocity faces are stored in float32, so the exact fixed-face
-        # projection leaves an O(1e-7) divergence floor on this unit grid.
-        # This threshold remains more than five orders of magnitude below the
-        # old post-reclamp defect (~1.77e-1).
-        projection_roundoff_l2 = 1.0e-6
-        self.assertLess(pre_reclamp_raw_l2, projection_roundoff_l2)
-        self.assertLessEqual(
-            float(project_report["projection_raw_l2"]),
-            max(projection_roundoff_l2, 10.0 * pre_reclamp_raw_l2),
-        )
-
-    def test_no_slip_wall_velocity_mode_does_not_reinject_polluted_interior_velocity(
-        self,
-    ) -> None:
-        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
-        markers.load_markers(
-            positions_m=((0.625, 0.625, 0.5),),
-            velocities_mps=((0.0, 0.0, 0.1),),
-            normals=((0.0, 0.0, 1.0),),
-            areas_m2=(0.04,),
-            region_ids=(7,),
-        )
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        search.search_and_classify(
-            markers,
-            search_radius_m=0.13,
-            interior_probe_distance_m=0.125,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        boundary.build_from_search(
-            search,
-            markers,
-            marker_pressure_neumann_gradient_pa_per_m=(0.0,),
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        fluid.velocity.fill((0.0, 0.0, 1000.0))
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_marker_region_id=(
-                fluid.velocity_dirichlet_boundary_marker_region_id
-            ),
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-            marker_region_id=markers.region_id,
-            interpolate_interior_velocity=False,
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertEqual(report.boundary_velocity_only_row_count, 1)
-        self.assertAlmostEqual(
-            report.raw_reconstructed_max_abs_velocity_mps,
-            500.05,
-            delta=1.0e-4,
-        )
-        self.assertAlmostEqual(report.max_abs_velocity_mps, 0.1, delta=1.0e-6)
-        self.assertAlmostEqual(
-            float(fluid.velocity_dirichlet_boundary_value_mps[2, 2, 2][2]),
-            0.1,
-            delta=1.0e-6,
-        )
-        self.assertAlmostEqual(
-            float(fluid.velocity_dirichlet_boundary_projection_weight[2, 2, 2]),
-            0.5,
-            delta=1.0e-6,
-        )
-        self.assertEqual(
-            int(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[
-                    2, 2, 2
-                ]
-            ),
-            0,
-        )
-
-    def test_velocity_only_row_uses_complementary_enforcement_weight(self) -> None:
-        """Velocity-only enforcement must reproduce the geometric reconstruction.
-
-        For a node at ``alpha = d_node / d_sample`` along the boundary-to-fluid
-        segment, the reconstructed value is ``u_b + alpha * (u_f - u_b)``.
-        When the row stores only ``u_b`` as its target, applying that row to the
-        current fluid value therefore requires the complementary blend
-        ``1 - alpha``.  The stored pressure-projection weight remains ``alpha``.
-        """
-
-        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
-        markers.load_markers(
-            positions_m=((0.25, 0.625, 0.625),),
-            velocities_mps=((0.0, 0.0, 0.0),),
-            normals=((1.0, 0.0, 0.0),),
-            areas_m2=(0.04,),
-            region_ids=(7,),
-        )
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        fluid.velocity.fill((1.0, 0.0, 0.0))
-
-        node = (1, 2, 2)
-        boundary.active_ib_node[node] = 1
-        boundary.velocity_dirichlet_mps_field[node] = (0.0, 0.0, 0.0)
-        boundary.pressure_neumann_normal_field[node] = (1.0, 0.0, 0.0)
-        search.nearest_marker[node] = 0
-        search.node_boundary_point_m[node] = (0.25, 0.625, 0.625)
-        search.node_interior_fluid_point_m[node] = (0.75, 0.625, 0.625)
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_marker_region_id=(
-                fluid.velocity_dirichlet_boundary_marker_region_id
-            ),
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=fluid.velocity_dirichlet_boundary_owned_row,
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-            marker_region_id=markers.region_id,
-            interpolate_interior_velocity=False,
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertAlmostEqual(
-            float(fluid.velocity_dirichlet_boundary_projection_weight[node]),
-            0.25,
-            delta=1.0e-6,
-        )
-        self.assertAlmostEqual(
-            float(fluid.velocity_dirichlet_boundary_enforcement_weight[node]),
-            0.75,
-            delta=1.0e-6,
-        )
-        self.assertEqual(int(fluid.velocity_dirichlet_boundary_owned_row[node]), 1)
-        self.assertEqual(
-            int(fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[node]),
-            0,
-        )
-
-        fluid.apply_velocity_dirichlet_boundary_rows(read_report=False)
-
-        self.assertAlmostEqual(float(fluid.velocity[node][0]), 0.25, delta=1.0e-6)
-        self.assertAlmostEqual(float(fluid.velocity[node][1]), 0.0, delta=1.0e-6)
-        self.assertAlmostEqual(float(fluid.velocity[node][2]), 0.0, delta=1.0e-6)
-
-    def test_no_slip_reconstruction_falls_back_to_nearest_marker_velocity(
-        self,
-    ) -> None:
-        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
-        markers.load_markers(
-            positions_m=((0.625, 0.625, 0.625),),
-            velocities_mps=((0.1, 0.0, 0.0),),
-            normals=((1.0, 0.0, 0.0),),
-            areas_m2=(0.04,),
-            region_ids=(7,),
-        )
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        node = (2, 2, 2)
-        boundary.active_ib_node[node] = 1
-        boundary.velocity_dirichlet_mps_field[node] = (0.1, 0.0, 0.0)
-        boundary.pressure_neumann_normal_field[node] = (1.0, 0.0, 0.0)
-        search.node_boundary_point_m[node] = (0.625, 0.625, 0.625)
-        search.node_interior_fluid_point_m[node] = (0.625, 0.625, 0.625)
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_marker_region_id=(
-                fluid.velocity_dirichlet_boundary_marker_region_id
-            ),
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-            marker_region_id=markers.region_id,
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertEqual(report.invalid_reconstruction_row_count, 1)
-        self.assertEqual(report.invalid_no_fluid_sample_row_count, 0)
-        self.assertEqual(report.invalid_nonpositive_gap_row_count, 1)
-        self.assertEqual(report.invalid_node_behind_boundary_row_count, 0)
-        self.assertEqual(report.invalid_node_beyond_interior_row_count, 0)
-        self.assertEqual(report.min_projection_weight, 0.0)
-        self.assertEqual(report.max_projection_weight, 0.0)
-        self.assertEqual(int(fluid.velocity_dirichlet_boundary_active[node]), 1)
-        np.testing.assert_allclose(
-            tuple(float(fluid.velocity_dirichlet_boundary_value_mps[node][axis]) for axis in range(3)),
-            (0.1, 0.0, 0.0),
-            atol=1.0e-7,
-        )
-        self.assertEqual(
-            float(fluid.velocity_dirichlet_boundary_projection_weight[node]),
-            0.0,
-        )
-        self.assertEqual(
-            int(fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[node]),
-            0,
-        )
-
-    def test_velocity_dirichlet_row_relocates_to_first_fluid_cell_when_node_masked(
-        self,
-    ) -> None:
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        node = (2, 2, 2)
-        boundary.active_ib_node[node] = 1
-        boundary.velocity_dirichlet_mps_field[node] = (0.2, 0.0, 0.0)
-        boundary.pressure_neumann_normal_field[node] = (1.0, 0.0, 0.0)
-        search.node_boundary_point_m[node] = (0.5, 0.625, 0.625)
-        search.node_interior_fluid_point_m[node] = (0.875, 0.625, 0.625)
-        fluid.obstacle[2, 2, 2] = 1
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertEqual(report.relocated_row_count, 1)
-        self.assertEqual(report.relocation_blocked_row_count, 0)
-        self.assertEqual(report.inactive_obstacle_rows, 0)
-        self.assertEqual(report.invalid_reconstruction_row_count, 0)
-        self.assertEqual(int(fluid.velocity_dirichlet_boundary_active[2, 2, 2]), 0)
-        self.assertEqual(int(fluid.velocity_dirichlet_boundary_active[3, 2, 2]), 1)
-        np.testing.assert_allclose(
-            tuple(
-                float(fluid.velocity_dirichlet_boundary_value_mps[3, 2, 2][axis])
-                for axis in range(3)
-            ),
-            (0.08, 0.0, 0.0),
-            atol=1.0e-6,
-        )
-        # Exact reconstructed relocation retains the sampled pressure
-        # mobility alpha while the full hard mask removes that mobility from
-        # the pressure operator.  Enforcement remains exact and independent.
-        self.assertAlmostEqual(
-            float(fluid.velocity_dirichlet_boundary_projection_weight[3, 2, 2]),
-            0.6,
-            delta=1.0e-6,
-        )
-        self.assertAlmostEqual(
-            float(fluid.velocity_dirichlet_boundary_enforcement_weight[3, 2, 2]),
-            1.0,
-            delta=1.0e-6,
-        )
-        self.assertEqual(
-            int(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[
-                    3, 2, 2
-                ]
-            ),
-            7,
-        )
-
-    def test_velocity_only_relocated_row_preserves_split_enforcement_semantics(
-        self,
-    ) -> None:
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        masked_owner = (2, 2, 2)
-        relocated_owner = (3, 2, 2)
-        boundary.active_ib_node[masked_owner] = 1
-        boundary.velocity_dirichlet_mps_field[masked_owner] = (0.2, 0.0, 0.0)
-        boundary.pressure_neumann_normal_field[masked_owner] = (1.0, 0.0, 0.0)
-        search.node_boundary_point_m[masked_owner] = (0.5, 0.625, 0.625)
-        search.node_interior_fluid_point_m[masked_owner] = (0.875, 0.625, 0.625)
-        fluid.obstacle[masked_owner] = 1
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-            interpolate_interior_velocity=False,
-        )
-
-        self.assertEqual(report.relocated_row_count, 1)
-        self.assertEqual(
-            int(fluid.velocity_dirichlet_boundary_active[relocated_owner]),
-            1,
-        )
-        np.testing.assert_allclose(
-            tuple(
-                float(
-                    fluid.velocity_dirichlet_boundary_value_mps[relocated_owner][axis]
-                )
-                for axis in range(3)
-            ),
-            (0.2, 0.0, 0.0),
-            atol=1.0e-6,
-        )
-        self.assertAlmostEqual(
-            float(
-                fluid.velocity_dirichlet_boundary_projection_weight[relocated_owner]
-            ),
-            0.6,
-            delta=1.0e-6,
-        )
-        self.assertAlmostEqual(
-            float(
-                fluid.velocity_dirichlet_boundary_enforcement_weight[relocated_owner]
-            ),
-            0.4,
-            delta=1.0e-6,
-        )
-        self.assertEqual(
-            int(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[
-                    relocated_owner
-                ]
-            ),
-            0,
-        )
-
-        fluid.apply_velocity_dirichlet_boundary_rows(read_report=False)
-
-        self.assertAlmostEqual(
-            float(fluid.velocity[relocated_owner][0]),
-            0.08,
-            delta=1.0e-6,
-        )
-
-    def test_velocity_dirichlet_row_relocates_to_opposite_fluid_side_when_normal_side_is_air(
-        self,
-    ) -> None:
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        node = (2, 2, 2)
-        boundary.active_ib_node[node] = 1
-        boundary.velocity_dirichlet_mps_field[node] = (0.2, 0.0, 0.0)
-        boundary.pressure_neumann_normal_field[node] = (1.0, 0.0, 0.0)
-        search.node_boundary_point_m[node] = (0.5, 0.625, 0.625)
-        search.node_interior_fluid_point_m[node] = (0.875, 0.625, 0.625)
-        obstacle = np.zeros((4, 4, 4), dtype=np.int32)
-        obstacle[2:, :, :] = 1
-        fluid.obstacle.from_numpy(obstacle)
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertEqual(report.relocated_row_count, 1)
-        self.assertEqual(report.relocation_blocked_row_count, 0)
-        self.assertEqual(int(fluid.velocity_dirichlet_boundary_active[2, 2, 2]), 0)
-        self.assertEqual(int(fluid.velocity_dirichlet_boundary_active[1, 2, 2]), 1)
-        np.testing.assert_allclose(
-            tuple(
-                float(fluid.velocity_dirichlet_boundary_value_mps[1, 2, 2][axis])
-                for axis in range(3)
-            ),
-            (0.13333334, 0.0, 0.0),
-            atol=1.0e-7,
-        )
-
-    def test_no_slip_reconstruction_classifies_wall_limited_gap_as_narrow_gap_row(
-        self,
-    ) -> None:
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        node = (2, 2, 2)
-        boundary.active_ib_node[node] = 1
-        boundary.velocity_dirichlet_mps_field[node] = (0.3, 0.0, 0.0)
-        boundary.pressure_neumann_normal_field[node] = (1.0, 0.0, 0.0)
-        search.node_boundary_point_m[node] = (0.5, 0.625, 0.625)
-        search.node_interior_fluid_point_m[node] = (0.875, 0.625, 0.625)
-        obstacle = np.zeros((4, 4, 4), dtype=np.int32)
-        obstacle[3, :, :] = 1
-        fluid.obstacle.from_numpy(obstacle)
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertEqual(report.narrow_gap_boundary_velocity_row_count, 1)
-        self.assertEqual(report.invalid_reconstruction_row_count, 0)
-        self.assertEqual(report.invalid_no_fluid_sample_row_count, 0)
-        self.assertEqual(int(fluid.velocity_dirichlet_boundary_active[node]), 1)
-        np.testing.assert_allclose(
-            tuple(
-                float(fluid.velocity_dirichlet_boundary_value_mps[node][axis])
-                for axis in range(3)
-            ),
-            (0.3, 0.0, 0.0),
-            atol=1.0e-7,
-        )
-        self.assertEqual(
-            float(fluid.velocity_dirichlet_boundary_projection_weight[node]),
-            0.0,
-        )
-        self.assertEqual(
-            int(fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[node]),
-            0,
-        )
-
-    def test_no_slip_reconstruction_falls_back_for_node_beyond_interior_segment(
-        self,
-    ) -> None:
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        node = (2, 2, 2)
-        boundary.active_ib_node[node] = 1
-        boundary.velocity_dirichlet_mps_field[node] = (0.2, 0.0, 0.0)
-        boundary.pressure_neumann_normal_field[node] = (1.0, 0.0, 0.0)
-        search.node_boundary_point_m[node] = (0.25, 0.625, 0.625)
-        search.node_interior_fluid_point_m[node] = (0.375, 0.625, 0.625)
-        fluid.velocity.fill((0.4, 0.0, 0.0))
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertEqual(report.invalid_reconstruction_row_count, 0)
-        self.assertEqual(report.invalid_no_fluid_sample_row_count, 0)
-        self.assertEqual(report.invalid_nonpositive_gap_row_count, 0)
-        self.assertEqual(report.invalid_node_behind_boundary_row_count, 0)
-        self.assertEqual(report.invalid_node_beyond_interior_row_count, 0)
-        self.assertGreater(
-            float(fluid.velocity_dirichlet_boundary_projection_weight[node]),
-            0.0,
-        )
-        np.testing.assert_allclose(
-            tuple(
-                float(fluid.velocity_dirichlet_boundary_value_mps[node][axis])
-                for axis in range(3)
-            ),
-            (0.35, 0.0, 0.0),
-            atol=1.0e-6,
-        )
-
-    def test_no_slip_reconstruction_falls_back_for_node_behind_boundary_plane(
-        self,
-    ) -> None:
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        node = (1, 2, 2)
-        boundary.active_ib_node[node] = 1
-        boundary.velocity_dirichlet_mps_field[node] = (0.2, 0.0, 0.0)
-        boundary.pressure_neumann_normal_field[node] = (1.0, 0.0, 0.0)
-        search.node_boundary_point_m[node] = (0.5, 0.625, 0.625)
-        search.node_interior_fluid_point_m[node] = (0.625, 0.625, 0.625)
-        fluid.velocity.fill((0.4, 0.0, 0.0))
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertEqual(report.invalid_reconstruction_row_count, 0)
-        self.assertEqual(report.invalid_node_behind_boundary_row_count, 0)
-        self.assertEqual(report.invalid_node_beyond_interior_row_count, 0)
-        self.assertAlmostEqual(
-            float(fluid.velocity_dirichlet_boundary_projection_weight[node]),
-            0.5,
-            delta=1.0e-6,
-        )
-        np.testing.assert_allclose(
-            tuple(
-                float(fluid.velocity_dirichlet_boundary_value_mps[node][axis])
-                for axis in range(3)
-            ),
-            (0.3, 0.0, 0.0),
-            atol=1.0e-6,
-        )
-
-    def test_project_consumes_hibm_no_slip_dirichlet_rows_without_legacy_constraints(
-        self,
-    ) -> None:
-        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
-        markers.load_markers(
-            positions_m=((0.625, 0.625, 0.5),),
-            velocities_mps=((0.1, 0.2, -0.3),),
-            normals=((0.0, 0.0, 1.0),),
-            areas_m2=(0.04,),
-            region_ids=(7,),
-        )
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        search.search_and_classify(
-            markers,
-            search_radius_m=0.13,
-            interior_probe_distance_m=0.125,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        boundary.build_from_search(
-            search,
-            markers,
-            marker_pressure_neumann_gradient_pa_per_m=(0.0,),
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        boundary.assemble_velocity_dirichlet_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-        )
-
-        fluid.project(
-            iterations=2,
-            pressure_solver="fv_jacobi",
-            preserve_velocity_constraints=False,
-            reset_pressure=True,
-            read_report=False,
-        )
-
-        velocity = tuple(float(fluid.velocity[2, 2, 2][axis]) for axis in range(3))
-        for actual, expected in zip(velocity, (0.1, 0.2, -0.3), strict=True):
-            self.assertAlmostEqual(actual, expected, delta=1.0e-6)
-        self.assertEqual(fluid.velocity_constraint_weight[2, 2, 2], 0.0)
 
     def test_pressure_neumann_reconstruction_activates_multiple_ib_rows(self) -> None:
         markers = HibmMpmSurfaceMarkers(marker_capacity=1)
@@ -7090,7 +5746,6 @@ class HibmMpmIbBoundaryConditionTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -7270,7 +5925,12 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
         )
 
         self.assertEqual(report.ib_node_search.external_ib_node_count, 1)
-        self.assertEqual(report.velocity_dirichlet.active_velocity_dirichlet_rows, 1)
+        self.assertEqual(
+            report.velocity_dirichlet["canonical_velocity_dirichlet_report"][
+                "final_active_storage_row_count"
+            ],
+            1,
+        )
         self.assertEqual(report.pressure_neumann.active_pressure_neumann_rows, 0)
         self.assertEqual(
             report.pressure_neumann.skipped_velocity_dirichlet_row_count,
@@ -7296,7 +5956,10 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             delta=1.0e-5,
         )
         self.assertEqual(fluid.velocity_constraint_weight[2, 2, 2], 0.0)
-        self.assertEqual(fluid.velocity_dirichlet_boundary_active[2, 2, 2], 1)
+        self.assertEqual(
+            fluid.velocity_dirichlet_boundary_active_component_mask[2, 2, 2],
+            7,
+        )
         row_velocity = tuple(float(fluid.velocity[2, 2, 2][axis]) for axis in range(3))
         row_target = tuple(
             float(fluid.velocity_dirichlet_boundary_value_mps[2, 2, 2][axis])
@@ -7461,6 +6124,7 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
             runtime=TaichiRuntimeConfig(arch="cuda"),
         )
+        fluid.set_velocity_dirichlet_boundary_authority("canonical")
         solid = NeoHookeanMpmState(
             particle_capacity=1,
             bounds_min_m=(0.0, 0.0, 0.0),
@@ -7682,6 +6346,7 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
             runtime=TaichiRuntimeConfig(arch="cuda"),
         )
+        fluid.set_velocity_dirichlet_boundary_authority("canonical")
         solid = NeoHookeanMpmState(
             particle_capacity=1,
             bounds_min_m=(0.0, 0.0, 0.0),
@@ -7721,7 +6386,10 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
 
         def fake_predict(dt_s=None, *, advection_scheme="euler") -> None:
             substep = sum(1 for call in calls if call.startswith("predict"))
-            self.assertEqual(fluid.velocity_dirichlet_boundary_active[2, 2, 2], 1)
+            self.assertEqual(
+                fluid.velocity_dirichlet_boundary_active_component_mask[2, 2, 2],
+                7,
+            )
             self.assertEqual(dt_s, 2.5e-4)
             self.assertEqual(advection_scheme, "euler")
             calls.append(f"predict{substep}")
@@ -8006,7 +6674,12 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
 
         self.assertEqual(report.ib_node_search.near_boundary_node_count, 1)
         self.assertEqual(report.ib_node_search.external_ib_node_count, 1)
-        self.assertEqual(report.velocity_dirichlet.active_velocity_dirichlet_rows, 1)
+        self.assertEqual(
+            report.velocity_dirichlet["canonical_velocity_dirichlet_report"][
+                "final_active_storage_row_count"
+            ],
+            1,
+        )
 
     def test_sharp_neo_hookean_step_advances_mpm_and_rebuilds_next_surface_boundary(
         self,
@@ -8087,7 +6760,12 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
         self.assertIsNotNone(report.mpm)
         self.assertEqual(report.surface_feedback.updated_marker_count, 1)
         self.assertGreater(report.next_ib_node_search.external_ib_node_count, 0)
-        self.assertGreater(report.next_velocity_dirichlet.active_velocity_dirichlet_rows, 0)
+        self.assertGreater(
+            report.next_velocity_dirichlet["canonical_velocity_dirichlet_report"][
+                "final_active_storage_row_count"
+            ],
+            0,
+        )
         self.assertGreater(
             report.next_pressure_neumann.active_pressure_neumann_rows
             + report.next_pressure_neumann.skipped_velocity_dirichlet_row_count,
@@ -8263,7 +6941,12 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
         self.assertEqual(report.surface_feedback.updated_marker_count, 3)
         self.assertEqual(report.surface_feedback.geometry_updated_marker_count, 3)
         self.assertGreater(report.next_ib_node_search.external_ib_node_count, 0)
-        self.assertGreater(report.next_velocity_dirichlet.active_velocity_dirichlet_rows, 0)
+        self.assertGreater(
+            report.next_velocity_dirichlet["canonical_velocity_dirichlet_report"][
+                "final_active_storage_row_count"
+            ],
+            0,
+        )
         self.assertTrue(report.post_solid_kinematic_projection_applied)
         self.assertIsNotNone(report.post_solid_no_slip_residual)
         summary = hibm_mpm_sharp_step_summary(report)
@@ -8417,6 +7100,7 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
             runtime=TaichiRuntimeConfig(arch="cuda"),
         )
+        fluid.set_velocity_dirichlet_boundary_authority("canonical")
         solid = NeoHookeanMpmState(
             particle_capacity=1,
             bounds_min_m=(0.0, 0.0, 0.0),
@@ -8510,18 +7194,20 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             "hibm_no_slip_residual_argmax_sample_position_m",
             "hibm_no_slip_residual_argmax_fluid_velocity_mps",
             "hibm_boundary_max_abs_velocity_mps",
-            "hibm_velocity_dirichlet_max_abs_velocity_mps",
-            "hibm_velocity_dirichlet_invalid_reconstruction_count",
-            "hibm_velocity_dirichlet_invalid_no_fluid_sample_count",
-            "hibm_velocity_dirichlet_invalid_nonpositive_gap_count",
-            "hibm_velocity_dirichlet_invalid_node_behind_boundary_count",
-            "hibm_velocity_dirichlet_invalid_node_beyond_interior_count",
-            "hibm_velocity_dirichlet_primary_region_active_rows",
-            "hibm_velocity_dirichlet_secondary_region_active_rows",
-            "hibm_velocity_dirichlet_other_region_active_rows",
-            "hibm_velocity_dirichlet_unassigned_region_active_rows",
-            "hibm_velocity_dirichlet_min_projection_weight",
-            "hibm_velocity_dirichlet_max_projection_weight",
+            "hibm_velocity_dirichlet_schema_version",
+            "hibm_velocity_dirichlet_authority",
+            "hibm_velocity_dirichlet_invariant_violation_count",
+            "hibm_velocity_dirichlet_final_active_component_count",
+            "hibm_velocity_dirichlet_final_active_storage_row_count",
+            "hibm_velocity_dirichlet_primary_region_active_component_count",
+            "hibm_velocity_dirichlet_secondary_region_active_component_count",
+            "hibm_velocity_dirichlet_other_region_active_component_count",
+            "hibm_velocity_dirichlet_unassigned_region_active_component_count",
+            "hibm_velocity_dirichlet_max_abs_committed_target_mps",
+            "hibm_velocity_dirichlet_min_active_pressure_mobility",
+            "hibm_velocity_dirichlet_max_active_pressure_mobility",
+            "hibm_velocity_dirichlet_min_active_enforcement_weight",
+            "hibm_velocity_dirichlet_max_active_enforcement_weight",
             "hibm_velocity_dirichlet_apply_calls",
             "hibm_velocity_dirichlet_applied_active_cells_total",
             "hibm_velocity_dirichlet_applied_active_cells_max",
@@ -8570,24 +7256,20 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             "hibm_next_pressure_disconnected_component_overflow",
             "hibm_next_boundary_no_slip_count",
             "hibm_next_boundary_max_abs_velocity_mps",
-            "hibm_next_velocity_dirichlet_active_rows",
-            "hibm_next_velocity_dirichlet_max_abs_velocity_mps",
-            "hibm_next_velocity_dirichlet_invalid_reconstruction_count",
-            "hibm_next_velocity_dirichlet_primary_region_active_rows",
-            "hibm_next_velocity_dirichlet_secondary_region_active_rows",
-            "hibm_next_velocity_dirichlet_other_region_active_rows",
-            "hibm_next_velocity_dirichlet_unassigned_region_active_rows",
+            "hibm_next_velocity_dirichlet_schema_version",
+            "hibm_next_velocity_dirichlet_authority",
+            "hibm_next_velocity_dirichlet_invariant_violation_count",
+            "hibm_next_velocity_dirichlet_final_active_component_count",
+            "hibm_next_velocity_dirichlet_final_active_storage_row_count",
+            "hibm_next_velocity_dirichlet_primary_region_active_component_count",
+            "hibm_next_velocity_dirichlet_secondary_region_active_component_count",
+            "hibm_next_velocity_dirichlet_other_region_active_component_count",
+            "hibm_next_velocity_dirichlet_unassigned_region_active_component_count",
             "hibm_next_pressure_neumann_skipped_pressure_boundary_adjacent_count",
             "hibm_next_pressure_neumann_invalid_reconstruction_count",
             "hibm_next_pressure_neumann_invalid_unreconstructable_count",
             "hibm_next_pressure_neumann_invalid_bad_marker_count",
             "hibm_next_pressure_neumann_invalid_nonpositive_volume_count",
-            "hibm_coupling_scheme",
-            "hibm_added_mass_stability_status",
-            "hibm_added_mass_stability_measured",
-            "hibm_added_mass_stabilization",
-            "hibm_semi_implicit_coupling_enabled",
-            "hibm_semi_implicit_coupling_matrix_active",
             "hibm_pressure_correctable_divergence_l2",
             "hibm_pressure_correctable_divergence_max_abs",
             "hibm_pressure_correctable_divergence_cell_count",
@@ -8629,15 +7311,8 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             "hibm_post_solid_no_slip_residual_argmax_fluid_velocity_mps",
         }
         self.assertTrue(expected_keys <= set(summary))
-        self.assertEqual(summary["hibm_coupling_scheme"], "explicit_loose")
-        self.assertEqual(
-            summary["hibm_added_mass_stability_status"],
-            "unmeasured_single_pass",
-        )
-        self.assertFalse(summary["hibm_added_mass_stability_measured"])
-        self.assertEqual(summary["hibm_added_mass_stabilization"], "none")
-        self.assertFalse(summary["hibm_semi_implicit_coupling_enabled"])
-        self.assertFalse(summary["hibm_semi_implicit_coupling_matrix_active"])
+        self.assertNotIn("hibm_coupling_scheme", summary)
+        self.assertNotIn("hibm_fsi_coupling_converged", summary)
         self.assertEqual(
             summary["hibm_ib_node_count"],
             report.fluid_to_mpm_loads.ib_node_search.near_boundary_node_count,
@@ -8909,6 +7584,8 @@ class HibmMpmSharpPathFailFastTests(unittest.TestCase):
                     total_marker_force_n=(0.0, 0.0, 0.0),
                     total_mpm_external_force_n=(0.0, 0.0, 0.0),
                     action_reaction_residual_n=residual_n,
+                    invalid_external_force_particle_count=0,
+                    max_abs_external_force_component_n=0.0,
                 ),
                 marker_forces=SimpleNamespace(
                     total_marker_count=required_marker_count,
@@ -9653,7 +8330,6 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
             fluid.pressure_interface_coupling_neighbor,
             fluid.pressure_interface_coupling_coefficient,
             fluid.obstacle,
-            fluid.velocity_dirichlet_boundary_active,
             fluid.cell_width_x_m,
             fluid.cell_width_y_m,
             fluid.cell_width_z_m,
@@ -9799,249 +8475,6 @@ class HibmMpmFarSidePressureClosureTests(unittest.TestCase):
             default_report.far_pressure_anchor_closed_marker_count,
             0,
         )
-
-    def test_velocity_dirichlet_row_assembly_records_node_anchor_cell(self) -> None:
-        # S2-A7 red test (capture side): the velocity-Dirichlet
-        # reconstructed row assembly must publish, for the IB node that
-        # received a row, an interior-fluid anchor cell in
-        # search.node_anchor_cell, and the field must read (-1, -1, -1)
-        # before any assembly ran. Same minimal 4^3 fixture as
-        # test_no_slip_dirichlet_rows_reconstruct_along_surface_normal:
-        # exactly one reconstructed row at node (2, 2, 2).
-        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
-        markers.load_markers(
-            positions_m=((0.625, 0.625, 0.5),),
-            velocities_mps=((0.0, 0.0, 0.1),),
-            normals=((0.0, 0.0, 1.0),),
-            areas_m2=(0.04,),
-            region_ids=(7,),
-        )
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        anchor_before = tuple(
-            int(search.node_anchor_cell[2, 2, 2][axis]) for axis in range(3)
-        )
-        self.assertEqual(anchor_before, (-1, -1, -1))
-        search.search_and_classify(
-            markers,
-            search_radius_m=0.13,
-            interior_probe_distance_m=0.125,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        boundary.build_from_search(
-            search,
-            markers,
-            marker_pressure_neumann_gradient_pa_per_m=(0.0,),
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        fluid.velocity.fill((0.0, 0.0, 0.4))
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        anchor = tuple(
-            int(search.node_anchor_cell[2, 2, 2][axis]) for axis in range(3)
-        )
-        # The anchor is the containing cell of the row's interior fluid
-        # sample: a non-obstacle cell that participates in the pressure
-        # solve. (Exact cell index is not pinned: the sample sits on the
-        # face between cells 2 and 3 along z, so f32 rounding may resolve
-        # the containing cell to either side - both are fluid.)
-        self.assertGreaterEqual(anchor[0], 0)
-        self.assertGreaterEqual(anchor[1], 0)
-        self.assertGreaterEqual(anchor[2], 0)
-        self.assertLess(anchor[0], 4)
-        self.assertLess(anchor[1], 4)
-        self.assertLess(anchor[2], 4)
-        self.assertEqual(int(fluid.obstacle[anchor[0], anchor[1], anchor[2]]), 0)
-        # A node that never was an IB node keeps the sentinel after the
-        # assembly-time reset + prefill + capture sequence.
-        untouched = tuple(
-            int(search.node_anchor_cell[0, 0, 0][axis]) for axis in range(3)
-        )
-        self.assertEqual(untouched, (-1, -1, -1))
-
-    def test_velocity_dirichlet_row_assembly_preserves_external_boundary_rows(
-        self,
-    ) -> None:
-        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
-        markers.load_markers(
-            positions_m=((0.625, 0.625, 0.5),),
-            velocities_mps=((0.0, 0.0, 0.1),),
-            normals=((0.0, 0.0, 1.0),),
-            areas_m2=(0.04,),
-            region_ids=(7,),
-        )
-        search = HibmMpmIbNodeSearch(
-            grid_nodes=(4, 4, 4),
-            bounds_min_m=(0.0, 0.0, 0.0),
-            bounds_max_m=(1.0, 1.0, 1.0),
-            marker_capacity=1,
-        )
-        search.search_and_classify(
-            markers,
-            search_radius_m=0.13,
-            interior_probe_distance_m=0.125,
-        )
-        boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=(4, 4, 4),
-            marker_capacity=1,
-        )
-        boundary.build_from_search(
-            search,
-            markers,
-            marker_pressure_neumann_gradient_pa_per_m=(0.0,),
-        )
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
-        fluid.velocity.fill((0.0, 0.0, 0.4))
-
-        active = np.zeros((4, 4, 4), dtype=np.int32)
-        values = np.zeros((4, 4, 4, 3), dtype=np.float32)
-        weights = np.zeros((4, 4, 4), dtype=np.float32)
-        enforcement_weights = np.zeros((4, 4, 4), dtype=np.float32)
-        marker_regions = np.full((4, 4, 4), -1, dtype=np.int32)
-        hard_masks = np.zeros((4, 4, 4), dtype=np.int32)
-        owned_rows = np.zeros((4, 4, 4), dtype=np.int32)
-        active[0, 0, 3] = 1
-        values[0, 0, 3] = (0.0, 0.0, -10.0)
-        weights[0, 0, 3] = 1.0
-        enforcement_weights[0, 0, 3] = 1.0
-        hard_masks[0, 0, 3] = 7
-        active[0, 0, 2] = 1
-        values[0, 0, 2] = (9.0, 9.0, 9.0)
-        weights[0, 0, 2] = 0.5
-        enforcement_weights[0, 0, 2] = 0.5
-        marker_regions[0, 0, 2] = 7
-        active[0, 0, 1] = 1
-        values[0, 0, 1] = (3.0, 3.0, 3.0)
-        weights[0, 0, 1] = 0.25
-        enforcement_weights[0, 0, 1] = 1.0
-        marker_regions[0, 0, 1] = 7
-        hard_masks[0, 0, 1] = 7
-        owned_rows[0, 0, 1] = 1
-        fluid.velocity_dirichlet_boundary_active.from_numpy(active)
-        fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
-        fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
-        fluid.velocity_dirichlet_boundary_enforcement_weight.from_numpy(
-            enforcement_weights
-        )
-        fluid.velocity_dirichlet_boundary_marker_region_id.from_numpy(marker_regions)
-        fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.from_numpy(
-            hard_masks
-        )
-        fluid.velocity_dirichlet_boundary_owned_row.from_numpy(owned_rows)
-
-        report = boundary.assemble_velocity_dirichlet_reconstructed_boundary_rows(
-            fluid.velocity_dirichlet_boundary_active,
-            fluid.velocity_dirichlet_boundary_value_mps,
-            fluid.velocity_dirichlet_boundary_projection_weight,
-            fluid.obstacle,
-            fluid.velocity,
-            search,
-            cell_face_x_m=fluid.cell_face_x_m,
-            cell_face_y_m=fluid.cell_face_y_m,
-            cell_face_z_m=fluid.cell_face_z_m,
-            cell_center_x_m=fluid.cell_center_x_m,
-            cell_center_y_m=fluid.cell_center_y_m,
-            cell_center_z_m=fluid.cell_center_z_m,
-            grid_nodes=fluid.grid.grid_nodes,
-            velocity_dirichlet_marker_region_id=(
-                fluid.velocity_dirichlet_boundary_marker_region_id
-            ),
-            velocity_dirichlet_hard_fixed_component_mask=(
-                fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
-            ),
-            velocity_dirichlet_owned_row=(
-                fluid.velocity_dirichlet_boundary_owned_row
-            ),
-            velocity_dirichlet_enforcement_weight=(
-                fluid.velocity_dirichlet_boundary_enforcement_weight
-            ),
-            velocity_dirichlet_external_exact_component_mask=(
-                fluid.velocity_dirichlet_boundary_external_exact_component_mask
-            ),
-            marker_region_id=markers.region_id,
-            primary_region_id=7,
-        )
-
-        active_after = fluid.velocity_dirichlet_boundary_active.to_numpy()
-        values_after = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
-        weights_after = fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
-        enforcement_after = (
-            fluid.velocity_dirichlet_boundary_enforcement_weight.to_numpy()
-        )
-        owned_after = fluid.velocity_dirichlet_boundary_owned_row.to_numpy()
-        marker_regions_after = (
-            fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
-        )
-        hard_masks_after = (
-            fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.to_numpy()
-        )
-
-        self.assertEqual(report.active_velocity_dirichlet_rows, 1)
-        self.assertEqual(report.primary_region_active_rows, 1)
-        self.assertEqual(report.secondary_region_active_rows, 0)
-        self.assertEqual(report.other_region_active_rows, 0)
-        self.assertEqual(report.unassigned_region_active_rows, 0)
-        self.assertEqual(int(active_after[0, 0, 3]), 1)
-        np.testing.assert_allclose(values_after[0, 0, 3], (0.0, 0.0, -10.0))
-        self.assertAlmostEqual(float(weights_after[0, 0, 3]), 1.0)
-        self.assertAlmostEqual(float(enforcement_after[0, 0, 3]), 1.0)
-        self.assertEqual(int(owned_after[0, 0, 3]), 0)
-        self.assertEqual(int(marker_regions_after[0, 0, 3]), -1)
-        self.assertEqual(int(hard_masks_after[0, 0, 3]), 7)
-        self.assertEqual(int(active_after[0, 0, 2]), 1)
-        np.testing.assert_allclose(values_after[0, 0, 2], (9.0, 9.0, 9.0))
-        self.assertAlmostEqual(float(weights_after[0, 0, 2]), 0.5)
-        self.assertAlmostEqual(float(enforcement_after[0, 0, 2]), 0.5)
-        self.assertEqual(int(owned_after[0, 0, 2]), 0)
-        self.assertEqual(int(marker_regions_after[0, 0, 2]), 7)
-        self.assertEqual(int(active_after[0, 0, 1]), 0)
-        np.testing.assert_allclose(values_after[0, 0, 1], (0.0, 0.0, 0.0))
-        self.assertAlmostEqual(float(weights_after[0, 0, 1]), 0.0)
-        self.assertAlmostEqual(float(enforcement_after[0, 0, 1]), 0.0)
-        self.assertEqual(int(owned_after[0, 0, 1]), 0)
-        self.assertEqual(int(marker_regions_after[0, 0, 1]), -1)
-        self.assertEqual(int(hard_masks_after[0, 0, 1]), 0)
 
     def test_sampling_view_lets_closure_fire_through_converted_sealed_water(
         self,
@@ -10510,9 +8943,9 @@ class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
     def test_every_band_call_site_passes_node_classification(self) -> None:
         import inspect
 
-        import simulation_core.coupling.hibm_mpm as hibm_mpm_module
+        import simulation_core.coupling.hibm_mpm.core as hibm_mpm_core_module
 
-        source = inspect.getsource(hibm_mpm_module)
+        source = inspect.getsource(hibm_mpm_core_module)
         fragments = source.split(
             "fluid.mark_hibm_solid_band_nonprojectable_cells("
         )[1:]
@@ -10534,7 +8967,7 @@ class HibmSolidBandPopulationSplitContractTests(unittest.TestCase):
                 window,
             )
             self.assertIn(
-                "protect_unstamped_velocity_dirichlet_rows=True",
+                "protect_unstamped_velocity_dirichlet_components=True",
                 window,
             )
 
@@ -11151,11 +9584,23 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
     labeled -> seed.
     """
 
-    def _solver(self):
-        return CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(16, 16, 16), dt_s=1.0e-3),
+    @staticmethod
+    def _canonical_solver(grid_nodes: tuple[int, int, int]):
+        fluid = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=grid_nodes, dt_s=1.0e-3),
             runtime=TaichiRuntimeConfig(arch="cuda"),
         )
+        fluid.set_velocity_dirichlet_boundary_authority("canonical")
+        fluid.prepare_and_seal_velocity_dirichlet_component_ledger()
+        return fluid
+
+    def _solver(self):
+        return self._canonical_solver((16, 16, 16))
+
+    @staticmethod
+    def _reseal_velocity_ledger(fluid: CartesianFluidSolver) -> None:
+        fluid._invalidate_velocity_dirichlet_component_ledger()
+        fluid.prepare_and_seal_velocity_dirichlet_component_ledger()
 
     def test_post_step_next_rebuild_applies_air_backed_conversion(self) -> None:
         source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
@@ -11561,7 +10006,7 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         )
         self.assertEqual(fluid.convert_hibm_air_backed_cells(), 1792)
 
-    def test_air_seed_region_fallback_uses_dirichlet_row_region_map(
+    def test_air_seed_region_fallback_uses_component_region_map(
         self,
     ) -> None:
         fluid, markers = self._sealed_chamber_fixture()
@@ -11572,9 +10017,16 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         node_kind.fill(HibmMpmIbNodeSearch._NODE_NONE)
         nearest_marker = ti.field(dtype=ti.i32, shape=(16, 16, 16))
         nearest_marker.fill(-1)
-        row_region = ti.field(dtype=ti.i32, shape=(16, 16, 16))
-        row_region.fill(-1)
-        row_region[8, 8, 12] = 7
+        active_component_mask = ti.field(dtype=ti.i32, shape=(16, 16, 16))
+        component_region = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=(16, 16, 16),
+        )
+        active_component_mask.fill(0)
+        component_region.fill((-1, -1, -1))
+        active_component_mask[8, 8, 12] = 7
+        component_region[8, 8, 12] = (7, 7, 7)
 
         seeded, missed = markers.mark_far_pressure_air_backed_seed_components(
             fluid.obstacle,
@@ -11598,7 +10050,8 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
             fallback_to_region_adjacency_if_all_missed=True,
             node_kind_code=node_kind,
             nearest_marker=nearest_marker,
-            velocity_dirichlet_marker_region_id=row_region,
+            velocity_dirichlet_active_component_mask=active_component_mask,
+            velocity_dirichlet_component_region_id=component_region,
         )
 
         self.assertEqual((seeded, missed), (0, 1))
@@ -11648,10 +10101,17 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         node_kind.fill(HibmMpmIbNodeSearch._NODE_NONE)
         nearest_marker = ti.field(dtype=ti.i32, shape=(16, 16, 16))
         nearest_marker.fill(-1)
-        row_region = ti.field(dtype=ti.i32, shape=(16, 16, 16))
-        row_region.fill(-1)
+        active_component_mask = ti.field(dtype=ti.i32, shape=(16, 16, 16))
+        component_region = ti.Vector.field(
+            3,
+            dtype=ti.i32,
+            shape=(16, 16, 16),
+        )
+        active_component_mask.fill(0)
+        component_region.fill((-1, -1, -1))
         target_cell = component_cells[39]
-        row_region[target_cell] = 7
+        active_component_mask[target_cell] = 7
+        component_region[target_cell] = (7, 7, 7)
 
         seeded, missed = markers.mark_far_pressure_air_backed_seed_components(
             fluid.obstacle,
@@ -11675,35 +10135,37 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
             fallback_to_region_adjacency_if_all_missed=True,
             node_kind_code=node_kind,
             nearest_marker=nearest_marker,
-            velocity_dirichlet_marker_region_id=row_region,
+            velocity_dirichlet_active_component_mask=active_component_mask,
+            velocity_dirichlet_component_region_id=component_region,
         )
 
         self.assertEqual((seeded, missed), (0, 1))
         self.assertEqual(fluid.convert_hibm_air_backed_cells(), 1)
         self.assertEqual(int(fluid.hibm_air_cell[target_cell]), 1)
 
-    def test_solid_band_split_preserves_protected_dirichlet_row_region_cells(
+    def test_solid_band_split_preserves_protected_component_region_cells(
         self,
     ) -> None:
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
+        fluid = self._canonical_solver((5, 5, 5))
         obstacle = np.ones((5, 5, 5), dtype=np.int32)
         obstacle[2, 2, 3] = 0
         fluid.obstacle.from_numpy(obstacle)
         node_kind = ti.field(dtype=ti.i32, shape=(5, 5, 5))
         node_kind.fill(HibmMpmIbNodeSearch._NODE_NONE)
-        fluid.velocity_dirichlet_boundary_active[2, 2, 3] = 1
-        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
-        fluid.velocity_dirichlet_boundary_marker_region_id[2, 2, 3] = 8
+        fluid.velocity_dirichlet_boundary_active_component_mask[2, 2, 3] = 7
+        fluid.velocity_dirichlet_boundary_component_region_id[2, 2, 3] = (
+            8,
+            8,
+            8,
+        )
+        self._reseal_velocity_ledger(fluid)
 
         marked = fluid.mark_hibm_solid_band_nonprojectable_cells(
             pressure_outlet_zmin=True,
             node_kind_code=node_kind,
             unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
             protect_velocity_dirichlet_radius_cells=0,
-            protect_velocity_dirichlet_marker_region_id=8,
+            protect_velocity_dirichlet_component_region_id=8,
         )
 
         self.assertEqual(marked, 0)
@@ -11715,27 +10177,24 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         )
         self.assertEqual(int(fluid.obstacle[2, 2, 3]), 0)
 
-    def test_solid_band_split_preserves_unstamped_external_dirichlet_rows(
+    def test_solid_band_split_preserves_unstamped_external_components(
         self,
     ) -> None:
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
+        fluid = self._canonical_solver((5, 5, 5))
         obstacle = np.ones((5, 5, 5), dtype=np.int32)
         obstacle[2, 2, 3] = 0
         fluid.obstacle.from_numpy(obstacle)
         node_kind = ti.field(dtype=ti.i32, shape=(5, 5, 5))
         node_kind.fill(HibmMpmIbNodeSearch._NODE_NONE)
-        fluid.velocity_dirichlet_boundary_active[2, 2, 3] = 1
-        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
+        fluid.velocity_dirichlet_boundary_active_component_mask[2, 2, 3] = 7
+        self._reseal_velocity_ledger(fluid)
 
         marked = fluid.mark_hibm_solid_band_nonprojectable_cells(
             pressure_outlet_zmin=True,
             node_kind_code=node_kind,
             unclassified_node_code=HibmMpmIbNodeSearch._NODE_NONE,
             protect_velocity_dirichlet_radius_cells=0,
-            protect_unstamped_velocity_dirichlet_rows=True,
+            protect_unstamped_velocity_dirichlet_components=True,
         )
 
         self.assertEqual(marked, 0)
@@ -11748,16 +10207,12 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
     def test_pressure_reachability_allows_unstamped_external_velocity_inlet(
         self,
     ) -> None:
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
+        fluid = self._canonical_solver((4, 4, 4))
         obstacle = np.ones((4, 4, 4), dtype=np.int32)
         obstacle[1, 1, :] = 0
         fluid.obstacle.from_numpy(obstacle)
-        fluid.velocity_dirichlet_boundary_active.fill(0)
-        fluid.velocity_dirichlet_boundary_active[1, 1, 3] = 1
-        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
+        fluid.velocity_dirichlet_boundary_active_component_mask[1, 1, 3] = 4
+        self._reseal_velocity_ledger(fluid)
 
         unreached = fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
             pressure_outlet_zmin=True,
@@ -11766,7 +10221,12 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         self.assertEqual(unreached, 0)
         self.assertEqual(int(fluid.hibm_pressure_outlet_reachable[1, 1, 3]), 1)
 
-        fluid.velocity_dirichlet_boundary_marker_region_id[1, 1, 3] = 7
+        fluid.velocity_dirichlet_boundary_component_region_id[1, 1, 3] = (
+            -1,
+            -1,
+            7,
+        )
+        self._reseal_velocity_ledger(fluid)
         unreached_with_marker_provenance_only = (
             fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
                 pressure_outlet_zmin=True,
@@ -11777,6 +10237,7 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         self.assertEqual(int(fluid.hibm_pressure_outlet_reachable[1, 1, 3]), 1)
 
         fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[1, 1, 3] = 4
+        self._reseal_velocity_ledger(fluid)
         unreached_with_hard_z_face = (
             fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
                 pressure_outlet_zmin=True,
@@ -11789,10 +10250,7 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
     def test_row_cloud_orphan_conversion_preserves_unstamped_components(
         self,
     ) -> None:
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(7, 5, 7), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
+        fluid = self._canonical_solver((7, 5, 7))
         obstacle = np.ones((7, 5, 7), dtype=np.int32)
         obstacle[:, :, 0] = 0
         obstacle[2, 2, 4] = 0
@@ -11800,8 +10258,13 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         obstacle[5, 2, 4] = 0
         obstacle[5, 2, 5] = 0
         fluid.obstacle.from_numpy(obstacle)
-        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
-        fluid.velocity_dirichlet_boundary_marker_region_id[2, 2, 4] = 8
+        fluid.velocity_dirichlet_boundary_active_component_mask[2, 2, 4] = 7
+        fluid.velocity_dirichlet_boundary_component_region_id[2, 2, 4] = (
+            8,
+            8,
+            8,
+        )
+        self._reseal_velocity_ledger(fluid)
         fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
             pressure_outlet_zmin=True,
         )
@@ -11820,19 +10283,20 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
     def test_row_cloud_orphan_conversion_uses_pressure_component_barriers(
         self,
     ) -> None:
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 6), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
+        fluid = self._canonical_solver((5, 5, 6))
         obstacle = np.ones((5, 5, 6), dtype=np.int32)
         obstacle[:, :, 0] = 0
         obstacle[2, 2, 3] = 0
         obstacle[2, 2, 4] = 0
         fluid.obstacle.from_numpy(obstacle)
-        fluid.velocity_dirichlet_boundary_active.fill(0)
-        fluid.velocity_dirichlet_boundary_active[2, 2, 4] = 1
-        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
-        fluid.velocity_dirichlet_boundary_marker_region_id[2, 2, 4] = 8
+        fluid.velocity_dirichlet_boundary_active_component_mask[2, 2, 4] = 7
+        fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[2, 2, 4] = 7
+        fluid.velocity_dirichlet_boundary_component_region_id[2, 2, 4] = (
+            8,
+            8,
+            8,
+        )
+        self._reseal_velocity_ledger(fluid)
 
         unreached = fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
             pressure_outlet_zmin=True,
@@ -11852,10 +10316,7 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
     def test_row_cloud_orphan_conversion_cleans_overflow_singletons_without_row_stamp(
         self,
     ) -> None:
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(29, 29, 29), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
+        fluid = self._canonical_solver((29, 29, 29))
         obstacle = np.ones((29, 29, 29), dtype=np.int32)
         obstacle[:, :, 0] = 0
         singleton_cells: list[tuple[int, int, int]] = []
@@ -11873,8 +10334,6 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
                     large_cells.append(cell)
                     obstacle[cell] = 0
         fluid.obstacle.from_numpy(obstacle)
-        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
-
         unreached = fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
             pressure_outlet_zmin=True,
         )
@@ -11921,23 +10380,24 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
     def test_overflow_singleton_cleanup_respects_velocity_dirichlet_face_barriers(
         self,
     ) -> None:
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
+        fluid = self._canonical_solver((5, 5, 5))
         obstacle = np.ones((5, 5, 5), dtype=np.int32)
         obstacle[:, :, 0] = 0
         obstacle[2, 2, 3] = 0
         obstacle[2, 2, 4] = 0
         fluid.obstacle.from_numpy(obstacle)
-        fluid.velocity_dirichlet_boundary_active.fill(0)
-        fluid.velocity_dirichlet_boundary_active[2, 2, 4] = 1
-        fluid.velocity_dirichlet_boundary_projection_weight[2, 2, 4] = 1.0
-        fluid.velocity_dirichlet_boundary_enforcement_weight[2, 2, 4] = 1.0
-        fluid.velocity_dirichlet_boundary_owned_row[2, 2, 4] = 1
+        fluid.velocity_dirichlet_boundary_active_component_mask[2, 2, 4] = 7
+        fluid.velocity_dirichlet_boundary_component_enforcement_weight[
+            2, 2, 4
+        ] = (1.0, 1.0, 1.0)
+        fluid.velocity_dirichlet_boundary_owned_component_mask[2, 2, 4] = 7
         fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[2, 2, 4] = 7
-        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
-        fluid.velocity_dirichlet_boundary_marker_region_id[2, 2, 4] = 8
+        fluid.velocity_dirichlet_boundary_component_region_id[2, 2, 4] = (
+            8,
+            8,
+            8,
+        )
+        self._reseal_velocity_ledger(fluid)
 
         unreached = fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
             pressure_outlet_zmin=True,
@@ -11961,13 +10421,10 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         self.assertEqual(int(fluid.obstacle[2, 2, 3]), 1)
         self.assertEqual(int(fluid.obstacle[2, 2, 4]), 0)
 
-    def test_overflow_singleton_cleanup_preserves_no_slip_row_neighborhood(
+    def test_overflow_singleton_cleanup_preserves_no_slip_component_neighborhood(
         self,
     ) -> None:
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(7, 7, 7), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
+        fluid = self._canonical_solver((7, 7, 7))
         obstacle = np.ones((7, 7, 7), dtype=np.int32)
         obstacle[:, :, 0] = 0
         protected_singleton = (3, 3, 4)
@@ -11975,9 +10432,8 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         obstacle[protected_singleton] = 0
         obstacle[remote_singleton] = 0
         fluid.obstacle.from_numpy(obstacle)
-        fluid.velocity_dirichlet_boundary_active.fill(0)
-        fluid.velocity_dirichlet_boundary_active[3, 3, 2] = 1
-        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
+        fluid.velocity_dirichlet_boundary_active_component_mask[3, 3, 2] = 7
+        self._reseal_velocity_ledger(fluid)
 
         unreached = fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
             pressure_outlet_zmin=True,
@@ -11997,13 +10453,10 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         self.assertEqual(int(fluid.obstacle[protected_singleton]), 0)
         self.assertEqual(int(fluid.obstacle[remote_singleton]), 1)
 
-    def test_row_cloud_orphan_cleanup_zero_radius_protects_exact_dirichlet_row(
+    def test_row_cloud_orphan_cleanup_zero_radius_protects_exact_component_face(
         self,
     ) -> None:
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(7, 7, 7), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
+        fluid = self._canonical_solver((7, 7, 7))
         obstacle = np.ones((7, 7, 7), dtype=np.int32)
         obstacle[:, :, 0] = 0
         protected_singleton = (3, 3, 4)
@@ -12011,9 +10464,10 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         obstacle[protected_singleton] = 0
         obstacle[remote_singleton] = 0
         fluid.obstacle.from_numpy(obstacle)
-        fluid.velocity_dirichlet_boundary_active.fill(0)
-        fluid.velocity_dirichlet_boundary_active[protected_singleton] = 1
-        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
+        fluid.velocity_dirichlet_boundary_active_component_mask[
+            protected_singleton
+        ] = 7
+        self._reseal_velocity_ledger(fluid)
 
         unreached = fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
             pressure_outlet_zmin=True,
@@ -12035,10 +10489,7 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
     def test_row_cloud_orphan_conversion_handles_uncompacted_positive_labels(
         self,
     ) -> None:
-        fluid = CartesianFluidSolver(
-            FluidDomainSpec.unit_box(grid_nodes=(5, 5, 5), dt_s=1.0e-3),
-            runtime=TaichiRuntimeConfig(arch="cuda"),
-        )
+        fluid = self._canonical_solver((5, 5, 5))
         obstacle = np.ones((5, 5, 5), dtype=np.int32)
         obstacle[:, :, 0] = 0
         obstacle[2, 2, 3] = 0
@@ -12050,8 +10501,13 @@ class HibmMpmFarPressureAirBackedTests(unittest.TestCase):
         fluid.hibm_pressure_unreached_component_label.from_numpy(labels)
         fluid.hibm_pressure_outlet_reachable.fill(0)
         fluid.hibm_pressure_reachability_barrier.fill(0)
-        fluid.velocity_dirichlet_boundary_marker_region_id.fill(-1)
-        fluid.velocity_dirichlet_boundary_marker_region_id[2, 2, 3] = 8
+        fluid.velocity_dirichlet_boundary_active_component_mask[2, 2, 3] = 7
+        fluid.velocity_dirichlet_boundary_component_region_id[2, 2, 3] = (
+            8,
+            8,
+            8,
+        )
+        self._reseal_velocity_ledger(fluid)
 
         converted = fluid.convert_hibm_row_cloud_orphan_components(
             max_component_cells=8,

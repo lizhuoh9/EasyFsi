@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import math
+from numbers import Integral
 
 import numpy as np
 import taichi as ti
@@ -263,9 +264,19 @@ class TriSurfaceRegionDiagnostics:
         spacing = cls._velocity_tuple(spacing_m, "spacing_m")
         if any(value <= 0.0 for value in spacing):
             raise ValueError("spacing_m must contain positive values")
-        nodes = tuple(int(value) for value in grid_nodes)
-        if len(nodes) != 3 or any(value <= 1 for value in nodes):
-            raise ValueError("grid_nodes must contain three values greater than one")
+        nodes_error = "grid_nodes must contain three strict integers greater than one"
+        try:
+            raw_nodes = tuple(grid_nodes)
+        except TypeError as exc:
+            raise ValueError(nodes_error) from exc
+        if len(raw_nodes) != 3 or any(
+            isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral)
+            for value in raw_nodes
+        ):
+            raise ValueError(nodes_error)
+        nodes = tuple(int(value) for value in raw_nodes)
+        if any(value <= 1 for value in nodes):
+            raise ValueError(nodes_error)
         return probe_distance, bounds_min, bounds_max, nodes
 
     @classmethod
@@ -1976,7 +1987,25 @@ class TriSurfaceRegionDiagnostics:
                         )
 
     @staticmethod
-    def _grid_field_tuple(grid_fields) -> tuple[object, ...]:
+    def _require_field_shapes(
+        requirements: tuple[tuple[str, object, tuple[int, ...]], ...],
+    ) -> None:
+        for name, field, expected_shape in requirements:
+            try:
+                actual_shape = tuple(field.shape)
+            except (AttributeError, TypeError) as exc:
+                raise ValueError(f"{name} must expose shape {expected_shape}") from exc
+            if actual_shape != expected_shape:
+                raise ValueError(
+                    f"{name}.shape must be {expected_shape}, got {actual_shape}"
+                )
+
+    @classmethod
+    def _grid_field_tuple(
+        cls,
+        grid_fields,
+        grid_nodes: tuple[int, int, int],
+    ) -> tuple[object, ...]:
         required_fields = (
             "cell_face_x_m",
             "cell_face_y_m",
@@ -1993,7 +2022,23 @@ class TriSurfaceRegionDiagnostics:
             raise ValueError(
                 "grid_fields must expose CartesianGrid device fields: " + ", ".join(missing)
             )
-        return tuple(getattr(grid_fields, name) for name in required_fields)
+        fields = tuple(getattr(grid_fields, name) for name in required_fields)
+        nx, ny, nz = grid_nodes
+        expected_shapes = (
+            (nx + 1,),
+            (ny + 1,),
+            (nz + 1,),
+            (nx,),
+            (ny,),
+            (nz,),
+            (nx,),
+            (ny,),
+            (nz,),
+        )
+        cls._require_field_shapes(
+            tuple(zip(required_fields, fields, expected_shapes, strict=True))
+        )
+        return fields
 
     def spread_pressure_interface_matrix_terms(
         self,
@@ -2063,7 +2108,17 @@ class TriSurfaceRegionDiagnostics:
             spacing_m=spacing_m,
             grid_nodes=grid_nodes,
         )
-        grid_field_tuple = self._grid_field_tuple(grid_fields)
+        grid_field_tuple = self._grid_field_tuple(grid_fields, grid_nodes_tuple)
+        self._require_field_shapes(
+            tuple(
+                (f"spread_pressure_interface_matrix_terms.{name}", field, grid_nodes_tuple)
+                for name, field in (
+                    ("diagonal_field", diagonal_field),
+                    ("rhs_field", rhs_field),
+                    ("obstacle_field", obstacle_field),
+                )
+            )
+        )
         self._spread_pressure_interface_matrix_terms_kernel(
             diagonal_field,
             rhs_field,
@@ -2202,7 +2257,19 @@ class TriSurfaceRegionDiagnostics:
             raise ValueError("primary_interface_area_m2 must be positive when primary impedance force is nonzero")
         if any(component != 0.0 for component in secondary_impedance_force) and secondary_area_m2 <= 0.0:
             raise ValueError("secondary_interface_area_m2 must be positive when secondary impedance force is nonzero")
-        grid_field_tuple = self._grid_field_tuple(grid_fields)
+        grid_field_tuple = self._grid_field_tuple(grid_fields, nodes)
+        self._require_field_shapes(
+            tuple(
+                (f"spread_fsi_forces.{name}", field, nodes)
+                for name, field in (
+                    ("velocity_field", velocity_field),
+                    ("pressure_field", pressure_field),
+                    ("force_field", force_field),
+                    ("volume_source_field", volume_source_field),
+                    ("obstacle_field", obstacle_field),
+                )
+            )
+        )
         self._spread_fsi_force_kernel(
             velocity_field,
             pressure_field,
@@ -2358,7 +2425,19 @@ class TriSurfaceRegionDiagnostics:
             raise ValueError("primary_interface_area_m2 must be positive when primary impedance force is nonzero")
         if any(component != 0.0 for component in secondary_impedance_force) and secondary_area_m2 <= 0.0:
             raise ValueError("secondary_interface_area_m2 must be positive when secondary impedance force is nonzero")
-        grid_field_tuple = self._grid_field_tuple(grid_fields)
+        grid_field_tuple = self._grid_field_tuple(grid_fields, nodes)
+        self._require_field_shapes(
+            tuple(
+                (f"diagnose_fsi_forces_from_fields.{name}", field, nodes)
+                for name, field in (
+                    ("velocity_field", velocity_field),
+                    ("pressure_field", pressure_field),
+                    ("force_field", force_field),
+                    ("volume_source_field", volume_source_field),
+                    ("obstacle_field", obstacle_field),
+                )
+            )
+        )
         self._spread_fsi_force_kernel(
             velocity_field,
             pressure_field,
@@ -2426,7 +2505,7 @@ class TriSurfaceRegionDiagnostics:
         )
         primary_velocity = self._velocity_tuple(primary_velocity_mps, "primary_velocity_mps")
         secondary_velocity = self._velocity_tuple(secondary_velocity_mps, "secondary_velocity_mps")
-        grid_field_tuple = self._grid_field_tuple(grid_fields)
+        grid_field_tuple = self._grid_field_tuple(grid_fields, nodes)
         obstacle_field = getattr(grid_fields, "obstacle", None)
         if obstacle_field is None:
             raise ValueError("grid_fields must expose obstacle for velocity-constraint diagnostics")
@@ -2455,6 +2534,32 @@ class TriSurfaceRegionDiagnostics:
             and hasattr(grid_fields, "velocity_constraint_primary_weight")
             and hasattr(grid_fields, "velocity_constraint_secondary_sum")
             and hasattr(grid_fields, "velocity_constraint_secondary_weight")
+        )
+        self._require_field_shapes(
+            tuple(
+                (f"spread_fsi_velocity_constraints.{name}", field, nodes)
+                for name, field in (
+                    ("target_sum_field", target_sum_field),
+                    ("weight_field", weight_field),
+                    ("obstacle", obstacle_field),
+                    (
+                        "velocity_constraint_primary_sum",
+                        primary_target_sum_field,
+                    ),
+                    (
+                        "velocity_constraint_primary_weight",
+                        primary_weight_field,
+                    ),
+                    (
+                        "velocity_constraint_secondary_sum",
+                        secondary_target_sum_field,
+                    ),
+                    (
+                        "velocity_constraint_secondary_weight",
+                        secondary_weight_field,
+                    ),
+                )
+            )
         )
         self._spread_fsi_velocity_constraint_kernel(
             target_sum_field,
@@ -2515,10 +2620,17 @@ class TriSurfaceRegionDiagnostics:
         )
         primary_velocity = self._velocity_tuple(primary_velocity_mps, "primary_velocity_mps")
         secondary_velocity = self._velocity_tuple(secondary_velocity_mps, "secondary_velocity_mps")
-        grid_field_tuple = self._grid_field_tuple(grid_fields)
+        grid_field_tuple = self._grid_field_tuple(grid_fields, nodes)
         obstacle_field = getattr(grid_fields, "obstacle", None)
         if obstacle_field is None:
             raise ValueError("grid_fields must expose obstacle for velocity-gradient diagnostics")
+        self._require_field_shapes(
+            (
+                ("diagnose_from_fields.velocity_field", velocity_field, nodes),
+                ("diagnose_from_fields.pressure_field", pressure_field, nodes),
+                ("diagnose_from_fields.obstacle", obstacle_field, nodes),
+            )
+        )
         self._diagnose_from_fields_kernel(
             velocity_field,
             pressure_field,

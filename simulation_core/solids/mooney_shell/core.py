@@ -1,4 +1,5 @@
 import math
+import struct
 
 import numpy as np
 import taichi as ti
@@ -75,32 +76,55 @@ def _mesh_bounds_with_padding(
     return tuple(float(v) for v in padded_min), tuple(float(v) for v in padded_max)
 
 
+def _finite_f32(value: float, name: str) -> float:
+    try:
+        source = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be numeric") from exc
+    if not math.isfinite(source):
+        raise ValueError(f"{name} must be finite")
+    try:
+        result = struct.unpack("=f", struct.pack("=f", source))[0]
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be representable as ti.f32") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be representable as ti.f32")
+    if source != 0.0 and result == 0.0:
+        raise ValueError(f"{name} must not underflow ti.f32")
+    return result
+
+
+def _unit_interval_float(value: float, name: str) -> float:
+    result = _finite_f32(value, name)
+    if not 0.0 <= float(value) <= 1.0:
+        raise ValueError(f"{name} must be in [0, 1]")
+    return result
+
+
 def _validate_flip_blend(flip_blend: float) -> float:
-    value = float(flip_blend)
-    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
-        raise ValueError("flip_blend must be in [0, 1]")
-    return value
+    return _unit_interval_float(flip_blend, "flip_blend")
 
 
 def _vector3(value: tuple[float, float, float], name: str) -> tuple[float, float, float]:
     if len(value) != 3:
         raise ValueError(f"{name} must contain exactly 3 components")
-    result = (float(value[0]), float(value[1]), float(value[2]))
-    if not all(math.isfinite(component) for component in result):
-        raise ValueError(f"{name} must contain only finite values")
-    return result
+    return (
+        _finite_f32(value[0], f"{name}[0]"),
+        _finite_f32(value[1], f"{name}[1]"),
+        _finite_f32(value[2], f"{name}[2]"),
+    )
 
 
 def _positive_float(value: float, name: str) -> float:
-    result = float(value)
-    if not math.isfinite(result) or result <= 0.0:
+    result = _finite_f32(value, name)
+    if result <= 0.0:
         raise ValueError(f"{name} must be a finite positive number")
     return result
 
 
 def _non_negative_float(value: float, name: str) -> float:
-    result = float(value)
-    if not math.isfinite(result) or result < 0.0:
+    result = _finite_f32(value, name)
+    if result < 0.0:
         raise ValueError(f"{name} must be a finite non-negative number")
     return result
 
@@ -1430,12 +1454,16 @@ class TriMooneyShellMpmState:
         read_report: bool = True,
         allow_force_sanitization: bool = False,
     ) -> TriMooneyShellMpmReport | None:
+        dt = _non_negative_float(dt_s, "dt_s")
+        pressure = _finite_f32(pressure_pa, "pressure_pa")
+        damping = _unit_interval_float(velocity_damping, "velocity_damping")
+        flip = _validate_flip_blend(flip_blend)
         body_acceleration = _vector3(body_acceleration_mps2, "body_acceleration_mps2")
         self._step_kernel(
-            float(dt_s),
-            float(pressure_pa),
-            float(velocity_damping),
-            _validate_flip_blend(flip_blend),
+            dt,
+            pressure,
+            damping,
+            flip,
             float(body_acceleration[0]),
             float(body_acceleration[1]),
             float(body_acceleration[2]),
@@ -1476,6 +1504,9 @@ class TriMooneyShellMpmState:
         allow_force_sanitization: bool = False,
     ) -> TriMooneyShellMpmReport | None:
         """Advance two region-specific external loads without case-specific axes."""
+        dt = _non_negative_float(dt_s, "dt_s")
+        damping = _unit_interval_float(velocity_damping, "velocity_damping")
+        flip = _validate_flip_blend(flip_blend)
         primary_area_load = _vector3(primary_area_load_npm2, "primary_area_load_npm2")
         primary_reaction = _vector3(primary_interface_reaction_n, "primary_interface_reaction_n")
         secondary_reaction = _vector3(secondary_interface_reaction_n, "secondary_interface_reaction_n")
@@ -1486,7 +1517,7 @@ class TriMooneyShellMpmState:
             else int(primary_area_load_region_id)
         )
         self._step_region_kernel(
-            float(dt_s),
+            dt,
             int(primary_region_id),
             int(secondary_region_id),
             area_load_region_id,
@@ -1499,8 +1530,8 @@ class TriMooneyShellMpmState:
             float(secondary_reaction[0]),
             float(secondary_reaction[1]),
             float(secondary_reaction[2]),
-            float(velocity_damping),
-            _validate_flip_blend(flip_blend),
+            damping,
+            flip,
             float(body_acceleration[0]),
             float(body_acceleration[1]),
             float(body_acceleration[2]),
@@ -1535,9 +1566,12 @@ class TriMooneyShellMpmState:
         allow_force_sanitization: bool = False,
     ) -> TriMooneyShellMpmReport | None:
         """Advance shell dynamics using preloaded external_force_n as MPM load."""
+        dt = _non_negative_float(dt_s, "dt_s")
+        damping = _unit_interval_float(velocity_damping, "velocity_damping")
+        flip = _validate_flip_blend(flip_blend)
         body_acceleration = _vector3(body_acceleration_mps2, "body_acceleration_mps2")
         self._step_region_kernel(
-            float(dt_s),
+            dt,
             int(primary_region_id),
             int(secondary_region_id),
             int(primary_region_id),
@@ -1550,8 +1584,8 @@ class TriMooneyShellMpmState:
             0.0,
             0.0,
             0.0,
-            float(velocity_damping),
-            _validate_flip_blend(flip_blend),
+            damping,
+            flip,
             float(body_acceleration[0]),
             float(body_acceleration[1]),
             float(body_acceleration[2]),
@@ -2433,12 +2467,16 @@ class UvMooneyShellMpmState:
         body_acceleration_mps2: tuple[float, float, float] = (0.0, 0.0, 0.0),
         allow_force_sanitization: bool = False,
     ) -> UvMooneyShellMpmReport:
+        dt = _non_negative_float(dt_s, "dt_s")
+        pressure = _finite_f32(pressure_pa, "pressure_pa")
+        damping = _unit_interval_float(velocity_damping, "velocity_damping")
+        flip = _validate_flip_blend(flip_blend)
         body_acceleration = _vector3(body_acceleration_mps2, "body_acceleration_mps2")
         self._step_kernel(
-            float(dt_s),
-            float(pressure_pa),
-            float(velocity_damping),
-            _validate_flip_blend(flip_blend),
+            dt,
+            pressure,
+            damping,
+            flip,
             float(body_acceleration[0]),
             float(body_acceleration[1]),
             float(body_acceleration[2]),

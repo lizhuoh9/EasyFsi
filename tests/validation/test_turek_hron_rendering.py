@@ -75,9 +75,11 @@ def _write_snapshot(
     step: int,
     peak_speed_mps: float,
     drop_field: str | None = None,
+    span_index: int = 2,
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     fields = _snapshot_fields(step=step, peak_speed_mps=peak_speed_mps)
+    fields["span_index"] = np.asarray(span_index, dtype=np.int64)
     if drop_field is not None:
         fields = {key: value for key, value in fields.items() if key != drop_field}
     path = directory / f"step_{step:06d}.npz"
@@ -155,6 +157,28 @@ def test_snapshot_discovery_rejects_a_missing_periodic_step(tmp_path: Path) -> N
 
     with pytest.raises(FlowSnapshotContractError, match="non-contiguous.*expected step 4"):
         discover_flow_snapshot_paths(tmp_path)
+
+
+def test_renderer_rejects_a_span_index_change_between_frames(tmp_path: Path) -> None:
+    snapshots = tmp_path / "flow_snapshots"
+    _write_snapshot(
+        snapshots,
+        step=2,
+        peak_speed_mps=1.0,
+        span_index=1,
+    )
+    _write_snapshot(
+        snapshots,
+        step=4,
+        peak_speed_mps=2.0,
+        span_index=2,
+    )
+
+    with pytest.raises(FlowSnapshotContractError, match="span_index changes"):
+        render_turek_hron_flow_gif(
+            snapshots,
+            tmp_path / "rendered" / "velocity.gif",
+        )
 
 
 def test_load_snapshot_rejects_a_missing_export_field(tmp_path: Path) -> None:

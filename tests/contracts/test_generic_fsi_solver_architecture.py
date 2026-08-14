@@ -1,80 +1,19 @@
 from __future__ import annotations
-
 import inspect
 from pathlib import Path
 import unittest
 
 
 class GenericFsiSolverArchitectureTests(unittest.TestCase):
-    def test_core_exposes_case_agnostic_fsi_driver_contract(self) -> None:
-        from simulation_core.drivers.fsi_driver import FsiCaseSpec, FsiDriver
-
-        spec = FsiCaseSpec(
-            case_id="toy-fluid-solid",
-            source_url="https://example.invalid/toy-fluid-solid",
-            coordinate_model="cartesian-2d",
-            geometry={"domain": "toy"},
-            fluid={"model": "toy-fluid"},
-            solid={"model": "toy-solid"},
-            boundary_conditions={"interface": {"type": "two-way-fsi"}},
-            reference_results={"max_displacement_m": 2.0},
-            acceptance_tolerance=0.05,
-        )
-
-        class ToyFluid:
-            def __init__(self) -> None:
-                self.force_n = (0.0, -2.0)
-
-            def advance(self, context):
-                return {"fluid_advanced": context.step_index}
-
-            def interface_force_n(self):
-                return self.force_n
-
-            def apply_interface_displacement(self, displacement_m):
-                self.displacement_m = displacement_m
-
-        class ToySolid:
-            def __init__(self) -> None:
-                self.displacement_m = (0.0, 0.0)
-
-            def apply_interface_force(self, force_n):
-                self.force_n = force_n
-
-            def advance(self, context):
-                self.displacement_m = (0.0, -float(context.step_index + 1))
-                return {"solid_advanced": context.step_index}
-
-            def interface_displacement_m(self):
-                return self.displacement_m
-
-        driver = FsiDriver(
-            case_spec=spec,
-            fluid_model=ToyFluid(),
-            solid_model=ToySolid(),
-        )
-
-        report = driver.run(step_count=2)
-
-        self.assertEqual(report.case_id, "toy-fluid-solid")
-        self.assertEqual(report.step_count, 2)
-        self.assertEqual(report.final_results["max_displacement_m"], 2.0)
-        self.assertLessEqual(
-            report.relative_errors["max_displacement_m"],
-            spec.acceptance_tolerance,
-        )
-        self.assertEqual(report.step_reports[-1].solid_displacement_m, (0.0, -2.0))
-        self.assertLessEqual(
-            report.step_reports[-1].action_reaction.relative_error,
-            1.0e-12,
-        )
-
     def test_generic_solver_boundary_is_case_agnostic_and_injected(self) -> None:
+        import numpy as np
+
         from simulation_core.drivers.generic_fsi_solver import (
             DiagnosticsConfig,
             FluidDomain,
             FsiProblem,
             FsiSolverConfig,
+            FsiTrialResult,
             InterfaceSurface,
             OneSidedPressurePolicy,
             PressureSamplePairProvider,
@@ -84,6 +23,30 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
             TractionConfig,
             solve_fsi,
         )
+
+        class ToyRuntime:
+            def begin_step(self, context):
+                return np.zeros((1, 3), dtype=np.float64)
+
+            def evaluate_trial(self, context, marker_velocity_guess_mps):
+                target = np.full((1, 3), float(context.step), dtype=np.float64)
+                return FsiTrialResult(
+                    marker_velocity_mps=(
+                        0.5 * (np.asarray(marker_velocity_guess_mps) + target)
+                    )
+                )
+
+            def commit_step(self, context, trial, coupling):
+                return {"max_displacement_m": float(context.step) * 0.1}
+
+            def rollback_step(self, context):
+                raise AssertionError("converged toy step must not roll back")
+
+            def finalize_run(self):
+                return {
+                    "diagnostics": {"runtime": "toy"},
+                    "artifacts": {"matrix": "toy-matrix.json"},
+                }
 
         provider = PressureSamplePairProvider(
             mode="runtime_anchored_cell_pair",
@@ -117,15 +80,7 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
                 ),
             ),
             traction_config=traction,
-            runtime_executor=lambda problem, solver_config, diagnostics_config: {
-                "run_status": "completed",
-                "history": [
-                    {"step": 1, "max_displacement_m": 0.1},
-                    {"step": 2, "max_displacement_m": 0.2},
-                ],
-                "diagnostics": {"executor_problem": problem.problem_id},
-                "artifacts": {"matrix": "toy-matrix.json"},
-            },
+            runtime_factory=lambda problem, solver_config, diagnostics_config: ToyRuntime(),
         )
 
         result = solve_fsi(
@@ -181,7 +136,6 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
             Cartesian3DCoordinateModel,
         )
         from simulation_core.geometry_tools.fluid_domain import (
-            AxisAlignedBoundary,
             BoundaryRegion,
             FluidDomain,
         )
@@ -295,51 +249,6 @@ class GenericFsiSolverArchitectureTests(unittest.TestCase):
             module = __import__(module_name, fromlist=["CASE_SPEC"])
             self.assertEqual(module.CASE_SPEC.acceptance_tolerance, 0.05)
 
-
-def _toy_fsi_problem(runtime_executor):
-    """Minimal FsiProblem for exercising solve_fsi()'s own bookkeeping.
-
-    Geometry/traction details are irrelevant here -- these tests are about
-    solve_fsi()'s completion honesty and FsiSolverConfig's input validation,
-    not about any particular fluid/solid model.
-    """
-    from simulation_core.drivers.generic_fsi_solver import (
-        FluidDomain,
-        FsiProblem,
-        InterfaceSurface,
-        OneSidedPressurePolicy,
-        PressureSamplePairProvider,
-        PressureSamplingConfig,
-        SolidBody,
-        SurfaceRegion,
-        TractionConfig,
-    )
-
-    provider = PressureSamplePairProvider(mode="runtime_anchored_cell_pair")
-    traction = TractionConfig(
-        pressure_sampling=PressureSamplingConfig(pair_provider=provider),
-        one_sided_pressure=OneSidedPressurePolicy(),
-    )
-    return FsiProblem(
-        problem_id="toy-completion",
-        fluid_domain=FluidDomain(
-            domain_id="toy-fluid",
-            coordinate_model="cartesian-3d",
-            grid_nodes=(2, 2, 2),
-            bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
-        ),
-        solid_bodies=(SolidBody(body_id="toy-solid", material={}),),
-        interface_surfaces=(
-            InterfaceSurface(
-                surface_id="toy-interface",
-                regions=(SurfaceRegion(region_id="face-a"),),
-            ),
-        ),
-        traction_config=traction,
-        runtime_executor=runtime_executor,
-    )
-
-
 class FsiSolverConfigValidationTests(unittest.TestCase):
     """FsiSolverConfig.__post_init__ must reject non-finite numeric fields.
 
@@ -408,10 +317,7 @@ class FsiSolverConfigValidationTests(unittest.TestCase):
 
 class GenericFsiGeometryAndPressureValidationTests(unittest.TestCase):
     def test_required_names_reject_none_and_blank_text(self) -> None:
-        from simulation_core.drivers.generic_fsi_solver import (
-            FluidDomain,
-            FsiSolverConfig,
-        )
+        from simulation_core.drivers.generic_fsi_solver import FluidDomain
 
         for value in (None, "", "   "):
             with self.subTest(value=value):
@@ -421,12 +327,6 @@ class GenericFsiGeometryAndPressureValidationTests(unittest.TestCase):
                         coordinate_model="cartesian-3d",
                         grid_nodes=(2, 2, 2),
                         bounds_m=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
-                    )
-                with self.assertRaisesRegex(ValueError, "solver_name.*non-empty"):
-                    FsiSolverConfig(
-                        step_count=1,
-                        time_step_s=0.01,
-                        solver_name=value,
                     )
 
     def test_grid_nodes_require_exactly_three_entries(self) -> None:
@@ -633,146 +533,3 @@ class GenericFsiDiscreteCountValidationTests(unittest.TestCase):
 
         self.assertEqual(zero.sample_pair_fallback_count_max, 0)
         self.assertEqual(positive.sample_pair_fallback_count_max, 3)
-
-
-class SolveFsiRunStatusHonestyTests(unittest.TestCase):
-    """solve_fsi() must not report "completed" for a short/aborted run.
-
-    Previously run_status defaulted to "completed" whenever the executor
-    returned any non-empty history at all, even when completed_step_count
-    was far short of requested_step_count (e.g. 1 of 10 requested steps) --
-    a silent, dishonest success signal for a run that stopped early. See
-    ``_resolve_run_status`` in generic_fsi_solver.py for the fixed policy.
-    """
-
-    def _run(self, *, step_count, history, run_status=None):
-        from simulation_core.drivers.generic_fsi_solver import (
-            DiagnosticsConfig,
-            FsiSolverConfig,
-            solve_fsi,
-        )
-
-        def executor(problem, solver_config, diagnostics_config):
-            raw = {"history": history}
-            if run_status is not None:
-                raw["run_status"] = run_status
-            return raw
-
-        problem = _toy_fsi_problem(executor)
-        solver_config = FsiSolverConfig(step_count=step_count, time_step_s=0.1)
-        diagnostics_config = DiagnosticsConfig(output_root="outputs/toy-completion")
-        return solve_fsi(problem, solver_config, diagnostics_config)
-
-    def test_short_history_is_partial_when_executor_is_silent_on_status(self) -> None:
-        # Probe: 10 requested, 1 returned, no explicit run_status -- the
-        # pre-fix default fell back to "completed" here.
-        result = self._run(step_count=10, history=[{"step": 1}])
-
-        self.assertEqual(result.completed_step_count, 1)
-        self.assertEqual(result.requested_step_count, 10)
-        self.assertEqual(result.run_status, "partial")
-        self.assertNotIn("run_status_overridden_reason", result.diagnostics)
-
-    def test_short_history_is_downgraded_to_partial_when_executor_claims_completed(
-        self,
-    ) -> None:
-        # Same 10-requested/1-returned probe, but this time the executor
-        # itself (wrongly) claims "completed" -- must still be corrected.
-        result = self._run(
-            step_count=10, history=[{"step": 1}], run_status="completed"
-        )
-
-        self.assertEqual(result.run_status, "partial")
-        self.assertIn("run_status_overridden_reason", result.diagnostics)
-        reason = result.diagnostics["run_status_overridden_reason"]
-        self.assertIn("completed_step_count", reason)
-        self.assertIn("1", reason)
-        self.assertIn("10", reason)
-
-    def test_exact_step_count_is_completed(self) -> None:
-        history = [{"step": 1}, {"step": 2}]
-        result = self._run(step_count=2, history=history)
-
-        self.assertEqual(result.completed_step_count, 2)
-        self.assertEqual(result.run_status, "completed")
-        self.assertNotIn("run_status_overridden_reason", result.diagnostics)
-
-    def test_exact_step_count_stays_completed_when_executor_says_so_explicitly(
-        self,
-    ) -> None:
-        history = [{"step": 1}, {"step": 2}]
-        result = self._run(step_count=2, history=history, run_status="completed")
-
-        self.assertEqual(result.run_status, "completed")
-        self.assertNotIn("run_status_overridden_reason", result.diagnostics)
-
-    def test_explicit_failed_status_is_preserved_even_with_full_history(self) -> None:
-        history = [{"step": 1}, {"step": 2}]
-        result = self._run(step_count=2, history=history, run_status="failed")
-
-        self.assertEqual(result.run_status, "failed")
-        self.assertNotIn("run_status_overridden_reason", result.diagnostics)
-
-    def test_explicit_failed_status_is_preserved_with_empty_history(self) -> None:
-        result = self._run(step_count=5, history=[], run_status="failed")
-
-        self.assertEqual(result.completed_step_count, 0)
-        self.assertEqual(result.run_status, "failed")
-
-    def test_empty_history_with_silent_executor_is_unknown_not_completed(self) -> None:
-        result = self._run(step_count=5, history=[])
-
-        self.assertEqual(result.completed_step_count, 0)
-        self.assertEqual(result.run_status, "unknown")
-
-    def test_empty_history_with_executor_claiming_completed_is_not_trusted(
-        self,
-    ) -> None:
-        # Zero steps can never honestly be "completed"; the override lands
-        # on "unknown" rather than "partial" since no progress was made.
-        result = self._run(step_count=5, history=[], run_status="completed")
-
-        self.assertEqual(result.run_status, "unknown")
-        self.assertIn("run_status_overridden_reason", result.diagnostics)
-
-    def test_duplicate_step_history_cannot_complete_requested_run(self) -> None:
-        result = self._run(
-            step_count=2,
-            history=[{"step": 1}, {"step": 1}],
-            run_status="completed",
-        )
-
-        self.assertEqual(result.completed_step_count, 1)
-        self.assertEqual(result.run_status, "partial")
-        self.assertIn("run_status_overridden_reason", result.diagnostics)
-
-    def test_gapped_step_history_counts_only_the_contiguous_prefix(self) -> None:
-        result = self._run(
-            step_count=3,
-            history=[{"step": 1}, {"step": 3}, {"step": 2}],
-        )
-
-        self.assertEqual(result.completed_step_count, 1)
-        self.assertEqual(result.run_status, "partial")
-
-    def test_history_starting_at_wrong_step_is_unknown(self) -> None:
-        result = self._run(step_count=2, history=[{"step": 2}, {"step": 1}])
-
-        self.assertEqual(result.completed_step_count, 0)
-        self.assertEqual(result.run_status, "unknown")
-
-    def test_non_integer_history_step_does_not_count_as_completed(self) -> None:
-        for value in (True, 1.0, "1"):
-            with self.subTest(value=value):
-                result = self._run(step_count=1, history=[{"step": value}])
-                self.assertEqual(result.completed_step_count, 0)
-                self.assertEqual(result.run_status, "unknown")
-
-    def test_legacy_history_without_step_fields_remains_count_compatible(self) -> None:
-        result = self._run(
-            step_count=2,
-            history=[{"residual": 1.0}, {"residual": 0.5}],
-        )
-
-        self.assertEqual(result.completed_step_count, 2)
-        self.assertEqual(result.run_status, "completed")

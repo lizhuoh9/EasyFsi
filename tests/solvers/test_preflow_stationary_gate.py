@@ -30,6 +30,75 @@ def _config(**overrides: object) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def _canonical_velocity_boundary_report(
+    *,
+    active_components: int = 10,
+) -> dict[str, object]:
+    active_scalar = 1.0 if active_components > 0 else 0.0
+    device_report = {
+        key: 0
+        for key in (
+            solid_mpm_fsi_runner.CANONICAL_HIBM_VELOCITY_DIRICHLET_DEVICE_REPORT_KEYS
+        )
+    }
+    device_report.update(
+        {
+            "schema_version": 4,
+            "authority": "canonical_component_face",
+            "new_owned_claim_component_count": active_components,
+            "final_active_component_count": active_components,
+            "final_owned_component_count": active_components,
+            "final_soft_component_count": active_components,
+            "final_active_storage_row_count": active_components,
+            "final_active_x_component_count": active_components,
+            "primary_region_active_component_count": active_components,
+            "min_active_pressure_mobility": active_scalar,
+            "max_active_pressure_mobility": active_scalar,
+            "min_active_enforcement_weight": active_scalar,
+            "max_active_enforcement_weight": active_scalar,
+            "marker_target_closure": {
+                "enabled": True,
+                "constraint_count": 0,
+                "adjustable_constraint_count": 0,
+                "immutable_constraint_count": 0,
+                "iterations": 0,
+                "initial_max_residual_mps": 0.0,
+                "final_max_residual_mps": 0.0,
+                "final_max_adjustable_residual_mps": 0.0,
+                "final_max_immutable_residual_mps": 0.0,
+                "absolute_tolerance_mps": 1.0e-4,
+                "closure_tolerance_mps": 1.0e-6,
+                "density_kgm3": 1.2,
+                "projection_only_marker_count": 0,
+                "projection_only_evaluated_axis_count": 0,
+                "projection_only_invalid_axis_count": 0,
+                "projection_only_constraint_count": 0,
+                "projection_only_max_residual_mps": 0.0,
+            },
+        }
+    )
+    return {
+        "hibm_velocity_dirichlet_authority": "canonical",
+        "hibm_velocity_dirichlet_ledger_generation": 1,
+        "hibm_velocity_dirichlet_authority_registered": True,
+        "hibm_velocity_dirichlet_authority_sealed": True,
+        "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count": 0,
+        "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count": 0,
+        "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio": 0.0,
+        "canonical_velocity_dirichlet_report": device_report,
+    }
+
+
+def _canonical_velocity_boundary_report_with_device_override(
+    **overrides: object,
+) -> dict[str, object]:
+    report = _canonical_velocity_boundary_report()
+    device_report = dict(report["canonical_velocity_dirichlet_report"])
+    device_report.update(overrides)
+    report["canonical_velocity_dirichlet_report"] = device_report
+    return report
+
+
 def _row(step: int, *, scale: float = 1.0, **overrides) -> dict[str, object]:
     row: dict[str, object] = {
         "preflow_step": step,
@@ -75,25 +144,7 @@ def _row(step: int, *, scale: float = 1.0, **overrides) -> dict[str, object]:
         "hibm_preassembly_topology_mutated": False,
         "hibm_preassembly_remaining_unreached_cell_count": 0,
         "hibm_sharp_marker_boundary_enabled": True,
-        "hibm_velocity_dirichlet_active_rows": 10,
-        "hibm_velocity_dirichlet_primary_region_active_rows": 10,
-        "hibm_velocity_dirichlet_secondary_region_active_rows": 0,
-        "hibm_velocity_dirichlet_other_region_active_rows": 0,
-        "hibm_velocity_dirichlet_unassigned_region_active_rows": 0,
-        "hibm_velocity_dirichlet_max_abs_velocity_mps": 0.5,
-        "hibm_velocity_dirichlet_raw_reconstructed_max_abs_velocity_mps": 0.5,
-        "hibm_velocity_dirichlet_boundary_velocity_only_rows": 10,
-        "hibm_velocity_dirichlet_invalid_reconstruction_count": 0,
-        "hibm_velocity_dirichlet_invalid_no_fluid_sample_count": 0,
-        "hibm_velocity_dirichlet_invalid_nonpositive_gap_count": 0,
-        "hibm_velocity_dirichlet_invalid_node_behind_boundary_count": 0,
-        "hibm_velocity_dirichlet_invalid_node_beyond_interior_count": 0,
-        "hibm_velocity_dirichlet_narrow_gap_count": 0,
-        "hibm_velocity_dirichlet_relocated_rows": 0,
-        "hibm_velocity_dirichlet_relocation_merged_rows": 0,
-        "hibm_velocity_dirichlet_relocation_blocked_rows": 0,
-        "hibm_velocity_dirichlet_min_projection_weight": 0.5,
-        "hibm_velocity_dirichlet_max_projection_weight": 0.5,
+        **_canonical_velocity_boundary_report(),
         "flow_volume_source_applied": False,
         "flow_inlet_boundary_reapplied": True,
         "flow_inlet_source_factor": 1.0,
@@ -399,10 +450,13 @@ def test_windowed_stationary_gate_fails_closed_on_physical_or_solver_guard():
         {"flow_projection_pressure_solve_failed": True},
         {"flow_projection_pressure_projection_physical_failure": True},
         {"hibm_preassembly_topology_mutated": True},
-        {"hibm_velocity_dirichlet_invalid_reconstruction_count": 1},
-        {"hibm_velocity_dirichlet_narrow_gap_count": 1},
-        {"hibm_velocity_dirichlet_min_projection_weight": float("nan")},
-        {"hibm_velocity_dirichlet_max_projection_weight": 1.01},
+        {"hibm_velocity_dirichlet_authority_sealed": False},
+        _canonical_velocity_boundary_report_with_device_override(
+            schema_version=3,
+        ),
+        _canonical_velocity_boundary_report_with_device_override(
+            max_active_pressure_mobility=1.01,
+        ),
         {"flow_inlet_boundary_reapplied": False},
         {"flow_volume_source_applied": True, "flow_inlet_source_factor": 0.99},
         {"flow_projection_l2": 100000.0},
@@ -656,6 +710,63 @@ def test_flow_only_stationary_gate_does_not_treat_unmeasured_zero_force_as_evide
     assert report["marker_force_reference_area_m2"] is None
     assert "marker_force_relative_span" not in report["window_metrics"]
     assert report["excluded_window_metrics"] == ["marker_force_relative_span"]
+
+
+def test_flow_only_stationary_gate_accepts_valid_tip_cap_with_unmeasured_side_traction():
+    config = _config(
+        preflow_traction_readiness_mode="flow_only",
+        traction_tip_cap_pressure_enabled=True,
+    )
+    history = [
+        _row(
+            step,
+            stress_valid_marker_count=2,
+            stress_invalid_marker_count=128,
+            tip_cap_marker_count=2,
+            tip_cap_valid_marker_count=2,
+            tip_cap_invalid_marker_count=0,
+        )
+        for step in range(1, 33)
+    ]
+
+    report = solid_mpm_fsi_runner._preflow_windowed_stationary_report(
+        history,
+        config,
+    )
+
+    assert report["stationary"] is True
+    assert report["traction_readiness"] == "not_evaluated"
+    assert report["marker_force_metric_evaluated"] is False
+
+
+@pytest.mark.parametrize(
+    ("stress_valid", "stress_invalid", "tip_valid", "tip_invalid"),
+    (
+        (0, 130, 0, 2),
+        (1, 129, 1, 1),
+        (129, 1, 2, 0),
+    ),
+)
+def test_tip_cap_traction_readiness_rejects_invalid_or_partial_populations(
+    stress_valid: int,
+    stress_invalid: int,
+    tip_valid: int,
+    tip_invalid: int,
+):
+    config = _config(traction_tip_cap_pressure_enabled=True)
+    row = _row(
+        1,
+        stress_valid_marker_count=stress_valid,
+        stress_invalid_marker_count=stress_invalid,
+        tip_cap_marker_count=2,
+        tip_cap_valid_marker_count=tip_valid,
+        tip_cap_invalid_marker_count=tip_invalid,
+    )
+
+    assert (
+        solid_mpm_fsi_runner._preflow_traction_readiness([row], config)
+        == "invalid"
+    )
 
 
 def test_flow_only_zero_marker_case_does_not_require_force_area():
