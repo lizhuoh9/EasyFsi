@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 
 # A single fluid owner cell may receive many sharp-interface pressure rows on
@@ -11,6 +11,57 @@ PRESSURE_INTERFACE_COUPLING_SLOT_COUNT = 16
 PRESSURE_INTERFACE_COUPLING_EXTRA_SLOTS = (
     PRESSURE_INTERFACE_COUPLING_SLOT_COUNT - 1
 )
+
+
+class CanonicalVelocityBoundaryTopologyIncompatibilityError(RuntimeError):
+    """A provisional obstacle mutation cannot retain a canonical ledger."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str,
+        count: int,
+        diagnostics: Mapping[object, object] | None = None,
+    ) -> None:
+        super().__init__(str(message))
+        self.reason_code = str(reason_code)
+        self.count = int(count)
+        context = _json_safe_plain_dict(diagnostics)
+        self.diagnostics = {
+            "schema_version": 1,
+            "reason_code": self.reason_code,
+            "count": self.count,
+            "context": context,
+        }
+
+
+def _json_safe_plain_dict(
+    diagnostics: Mapping[object, object] | None,
+) -> dict[str, object]:
+    """Return exception details suitable for a JSON report without aliases."""
+
+    if diagnostics is None:
+        return {}
+    return {
+        str(key): _json_safe_value(value)
+        for key, value in dict(diagnostics).items()
+    }
+
+
+def _json_safe_value(value: object) -> object:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe_value(nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(item) for item in value]
+    return str(value)
 
 
 def far_pressure_side_normal_sign_from_direction(

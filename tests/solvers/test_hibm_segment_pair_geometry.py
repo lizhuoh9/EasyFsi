@@ -65,6 +65,7 @@ def _captured_finite_segment_union_admission_probe(
     boundary: ti.template(),
     marker_position_m: ti.template(),
     marker_velocity_mps: ti.template(),
+    marker_pressure_owner_index: ti.template(),
     marker_region_id: ti.template(),
     face_center_m: ti.template(),
     component_axis: ti.i32,
@@ -77,6 +78,8 @@ def _captured_finite_segment_union_admission_probe(
     author_projection_weights: ti.template(),
     projection_segment_indices: ti.template(),
     projection_segment_count: ti.i32,
+    physical_marker_count: ti.i32,
+    projection_vertex_count: ti.i32,
     configured_source_support_xyz_m: ti.template(),
     configured_source_support_available: ti.i32,
     configured_source_support_anisotropic: ti.i32,
@@ -183,6 +186,8 @@ def _captured_finite_segment_union_admission_probe(
         pair_clamp_support_ratio,
         pair_geometry_tolerance,
         _pair_direct_face_owner_shadow,
+        pair_strict_adjacent_owner_cause,
+        _pair_derived_terminal_cause,
     ) = boundary._canonical_component_face_finite_segment_union_owner_geometry(
         target,
         component_axis,
@@ -218,7 +223,10 @@ def _captured_finite_segment_union_admission_probe(
         -1,
         marker_position_m,
         marker_velocity_mps,
+        marker_pressure_owner_index,
         marker_region_id,
+        physical_marker_count,
+        projection_vertex_count,
         cell_face_x_m,
         cell_face_y_m,
         cell_face_z_m,
@@ -230,6 +238,9 @@ def _captured_finite_segment_union_admission_probe(
     result_i32[4] = pair_admission_valid
     result_i32[5] = pair_full_valid
     result_i32[6] = pair_endpoint_clamped
+    # `0` is not a valid strict owner.  The nonzero payload identifies the
+    # cached author whose interior primitive owns an adjacent finite union.
+    result_i32[7] = pair_strict_adjacent_owner_cause
     result_f64[0] = first_distance_squared
     result_f64[1] = second_distance_squared
     result_f64[2] = ti.cast(first_clamp_support_ratio, ti.f64)
@@ -604,7 +615,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
         cell_face_x_m = ti.field(dtype=ti.f32, shape=5)
         cell_face_y_m = ti.field(dtype=ti.f32, shape=5)
         cell_face_z_m = ti.field(dtype=ti.f32, shape=5)
-        result_i32 = ti.field(dtype=ti.i32, shape=7)
+        result_i32 = ti.field(dtype=ti.i32, shape=8)
         result_f64 = ti.field(dtype=ti.f64, shape=16)
 
         target_index[None] = case.get("target", (0, 1, 2))
@@ -681,6 +692,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                 boundary,
                 markers.x_gamma_m,
                 markers.v_gamma_mps,
+                markers.projection_vertex_pressure_owner_index,
                 markers.region_id,
                 face_center_m,
                 int(case.get("component_axis", 2)),
@@ -693,6 +705,8 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                 author_projection_weights,
                 markers.projection_triangle_indices,
                 int(markers.projection_segment_count),
+                int(markers.marker_count),
+                int(markers.projection_vertex_count),
                 configured_source_support_xyz_m,
                 int(case.get("configured_source_support_available", 1)),
                 int(case.get("configured_source_support_anisotropic", 1)),
@@ -715,8 +729,9 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             tuple(int(value) for value in installed_segment_array[index, :2])
             for index in range(int(markers.projection_segment_count))
         )
+        result_width = 8 if case.get("include_strict_owner_cause", False) else 7
         return (
-            tuple(int(result_i32[index]) for index in range(7)),
+            tuple(int(result_i32[index]) for index in range(result_width)),
             tuple(float(result_f64[index]) for index in range(16)),
             installed_segments,
         )
@@ -1067,6 +1082,130 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
         }
 
     @staticmethod
+    def _r22_curved_internal_vertex_case() -> dict[str, object]:
+        """Return the compact physical 125/126/127 witness from r22."""
+
+        face = (
+            0.000375000003259629,
+            0.0097265625,
+            0.0465625,
+        )
+        positions = (
+            (
+                0.001500000013038516,
+                0.009574354626238346,
+                0.046793319284915924,
+            ),
+            (
+                0.001500000013038516,
+                0.009730605408549309,
+                0.04679048806428909,
+            ),
+            (
+                0.001500000013038516,
+                0.009886866435408592,
+                0.04678821191191673,
+            ),
+        )
+        velocities = (
+            (
+                6.37106617462635e-11,
+                -0.010037652216851711,
+                -0.09510516375303268,
+            ),
+            (
+                7.500073478938774e-11,
+                -0.010002819821238518,
+                -0.09595957398414612,
+            ),
+            (
+                8.512038296437652e-11,
+                -0.009974488988518715,
+                -0.09664444625377655,
+            ),
+        )
+        weights = (
+            (0.017549455165863037, 0.982450544834137, 0.0),
+            (0.9900567531585693, 0.009943218901753426, 0.0),
+        )
+        stored_positions = np.asarray(positions, dtype=np.float32)
+        stored_weights = np.asarray(weights, dtype=np.float32)
+        boundaries = tuple(
+            tuple(float(value) for value in anchor)
+            for anchor in (
+                stored_positions[0]
+                + stored_weights[0, 1]
+                * (stored_positions[1] - stored_positions[0]),
+                stored_positions[1]
+                + stored_weights[1, 1]
+                * (stored_positions[2] - stored_positions[1]),
+            )
+        )
+        active_segments = (
+            stored_positions[1, 1:].astype(np.float64)
+            - stored_positions[0, 1:].astype(np.float64),
+            stored_positions[2, 1:].astype(np.float64)
+            - stored_positions[1, 1:].astype(np.float64),
+        )
+        chord_normals = tuple(
+            np.asarray((segment[1], -segment[0]), dtype=np.float64)
+            / np.linalg.norm(segment)
+            for segment in active_segments
+        )
+        normals = tuple(
+            (0.0, float(chord_normal[0]), float(chord_normal[1]))
+            for chord_normal in chord_normals
+        )
+        source_centers = (
+            (face[0], face[1], 0.04671875),
+            (face[0], face[1], 0.04640625),
+        )
+        probe_margin_m = 0.001
+        probes = []
+        for boundary_point, source_center, normal in zip(
+            boundaries, source_centers, normals, strict=True
+        ):
+            boundary_array = np.asarray(boundary_point, dtype=np.float64)
+            source_array = np.asarray(source_center, dtype=np.float64)
+            normal_array = np.asarray(normal, dtype=np.float64)
+            probe_progress_m = probe_margin_m - float(
+                np.dot(boundary_array - source_array, normal_array)
+            )
+            probes.append(
+                tuple(boundary_array + probe_progress_m * normal_array)
+            )
+        return {
+            "component_axis": 2,
+            "face": face,
+            "region": 202,
+            "positions": positions,
+            "velocities": velocities,
+            "projection_segments": ((0, 1), (1, 2)),
+            "source_centers": source_centers,
+            "boundaries": boundaries,
+            "probes": tuple(probes),
+            "normals": normals,
+            "indices": ((0, 1, -1), (1, 2, -1)),
+            "nearest_markers": (1, 1),
+            "weights": weights,
+            "configured_source_support_xyz_m": (
+                0.0012,
+                0.000390625,
+                0.00046875,
+            ),
+            "configured_source_support_available": 1,
+            "configured_source_support_anisotropic": 1,
+            "cell_face_x_m": (0.0, 0.00075, 0.0015, 0.00225, 0.003),
+            "cell_face_y_m": tuple(
+                face[1] + (offset - 0.5) * 7.8125e-5
+                for offset in (-1, 0, 1, 2, 3)
+            ),
+            "cell_face_z_m": tuple(
+                face[2] + offset * 0.0003125 for offset in (-2, -1, 0, 1, 2)
+            ),
+        }
+
+    @staticmethod
     def _vf48i_strict_interior_owner_case() -> dict[str, object]:
         """Return the compact adjacent-segment witness from vf48i."""
 
@@ -1152,10 +1291,87 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             ),
         }
 
+    @staticmethod
+    def _vf48i_strict_interior_owner_remapped_case() -> dict[str, object]:
+        """Use the same chain with the shared vertex at the largest index.
+
+        ``set_projection_segments`` canonicalizes endpoints, so this fixture
+        makes the raw second chord point *toward* its shared endpoint.  A
+        valid strict-owner proof must topology-orient the chain before it
+        compares each author's normal to its own chord.
+        """
+
+        base = HibmMpmSegmentPairGeometryTests._vf48i_strict_interior_owner_case()
+        positions = base["positions"]
+        velocities = base["velocities"]
+        first_weights, second_weights = base["weights"]
+        return {
+            **base,
+            "positions": (positions[0], positions[2], positions[1]),
+            "velocities": (velocities[0], velocities[2], velocities[1]),
+            "projection_segments": ((0, 2), (1, 2)),
+            "indices": ((0, 2, -1), (1, 2, -1)),
+            "nearest_markers": (2, 2),
+            # The second physical primitive is now encoded right-to-left.
+            "weights": (
+                first_weights,
+                (second_weights[1], second_weights[0], second_weights[2]),
+            ),
+            "include_strict_owner_cause": True,
+        }
+
+    def test_vf48i_remapped_adjacent_strict_owner_uses_topology_orientation(
+        self,
+    ) -> None:
+        """Same-side normals remain valid when endpoint sorting reverses one chord."""
+
+        case = self._vf48i_strict_interior_owner_remapped_case()
+        integer_result, _, installed_segments = self._run_direct_finite_segment_union_case(
+            case
+        )
+
+        self.assertEqual(installed_segments, ((0, 2), (1, 2)))
+        self.assertEqual(integer_result[0:4], (1, 1, 1, 0))
+        self.assertEqual(
+            integer_result[4:],
+            (1, 1, 0, 2),
+            msg=(
+                "the strict interior second author must be cached as the "
+                "topology-oriented adjacent-union owner"
+            ),
+        )
+
+    def test_vf48i_remapped_adjacent_strict_owner_rejects_flipped_normal(
+        self,
+    ) -> None:
+        """Opposite author normals cannot inherit validity from raw chord order."""
+
+        case = self._vf48i_strict_interior_owner_remapped_case()
+        flipped_second_normal = {
+            **case,
+            "normals": (case["normals"][0], (0.0, 0.0, 1.0)),
+        }
+        integer_result, _, _ = self._run_direct_finite_segment_union_case(
+            flipped_second_normal
+        )
+
+        self.assertEqual(integer_result[0:4], (1, 1, 1, 0))
+        self.assertEqual(
+            integer_result[4:],
+            (0, 0, 0, 0),
+            msg=(
+                "antiparallel normals that each agree with raw sorted chords "
+                "must fail closed"
+            ),
+        )
+
     def test_vf48i_strict_interior_owner_survives_distance_band(self) -> None:
         """A common normal offset cannot hide a unique finite-segment owner."""
 
-        case = self._vf48i_strict_interior_owner_case()
+        case = {
+            **self._vf48i_strict_interior_owner_case(),
+            "include_strict_owner_cause": True,
+        }
         positions = np.asarray(case["positions"], dtype=np.float32).astype(
             np.float64
         )
@@ -1206,6 +1422,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             (1, 1),
             msg="strict interior primitive must own the adjacent finite union",
         )
+        self.assertEqual(integer_result[6:], (0, 2))
         expected_target = velocities[1, 1] + raw_parameters[1] * (
             velocities[2, 1] - velocities[1, 1]
         )
@@ -1230,7 +1447,8 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
         swapped_integer, swapped_float, _ = (
             self._run_direct_finite_segment_union_case(swapped)
         )
-        self.assertEqual(swapped_integer[4:], integer_result[4:])
+        self.assertEqual(swapped_integer[4:7], integer_result[4:7])
+        self.assertEqual(swapped_integer[7], 1)
         self.assertEqual(
             np.asarray(swapped_float[4:], dtype=np.float64).tobytes(),
             np.asarray(float_result[4:], dtype=np.float64).tobytes(),
@@ -1425,6 +1643,349 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
         )
         self.assertEqual(swapped_integer[4:], integer_result[4:])
         self.assertEqual(swapped_float[4:], float_result[4:])
+
+    def test_r22_curved_internal_degree2_vertex_is_canonical(self) -> None:
+        """A smooth physical bend still has one shared-marker state."""
+
+        case = self._r22_curved_internal_vertex_case()
+        positions = np.asarray(case["positions"], dtype=np.float32).astype(
+            np.float64
+        )
+        face = np.asarray(case["face"], dtype=np.float32).astype(np.float64)
+        raw_parameters = []
+        for marker_a, marker_b in case["projection_segments"]:
+            segment = positions[marker_b, 1:] - positions[marker_a, 1:]
+            raw_parameters.append(
+                float(
+                    np.dot(face[1:] - positions[marker_a, 1:], segment)
+                    / np.dot(segment, segment)
+                )
+            )
+        first_outward = positions[0, 1:] - positions[1, 1:]
+        second_outward = positions[2, 1:] - positions[1, 1:]
+        tangent_continuity = float(
+            np.dot(first_outward, second_outward)
+            / (np.linalg.norm(first_outward) * np.linalg.norm(second_outward))
+        )
+
+        self.assertAlmostEqual(raw_parameters[0], 1.000564, places=6)
+        self.assertAlmostEqual(raw_parameters[1], -0.004619, places=6)
+        self.assertGreater(tangent_continuity, -0.999999)
+        self.assertLess(tangent_continuity, -0.9999)
+
+        integer_result, float_result, installed_segments = (
+            self._run_direct_finite_segment_union_case(case)
+        )
+        self.assertEqual(installed_segments, ((0, 1), (1, 2)))
+        self.assertEqual(integer_result[0:4], (1, 1, 1, 1))
+        self.assertEqual(
+            integer_result[4:7],
+            (1, 1, 0),
+            msg=(
+                "the r22 locally curved degree-two vertex must be admitted "
+                "as one shared physical state"
+            ),
+        )
+        self.assertEqual(
+            float_result[6],
+            float(np.float32(case["velocities"][1][2])),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(float_result[7:10], dtype=np.float32),
+            np.asarray(
+                (case["face"][0], *positions[1, 1:]),
+                dtype=np.float32,
+            ),
+        )
+
+        swapped = {
+            **case,
+            **{
+                key: tuple(reversed(case[key]))
+                for key in (
+                    "source_centers",
+                    "boundaries",
+                    "probes",
+                    "normals",
+                    "indices",
+                    "weights",
+                    "nearest_markers",
+                )
+            },
+        }
+        swapped_integer, swapped_float, _ = (
+            self._run_direct_finite_segment_union_case(swapped)
+        )
+        self.assertEqual(swapped_integer[4:], integer_result[4:])
+        self.assertEqual(
+            np.asarray(swapped_float[4:], dtype=np.float64).tobytes(),
+            np.asarray(float_result[4:], dtype=np.float64).tobytes(),
+        )
+
+    def test_r22_curved_internal_vertex_rejects_face_ray_outside_normal_cone(
+        self,
+    ) -> None:
+        """A smooth shared vertex rejects only the ray outside its cone."""
+
+        base = self._r22_curved_internal_vertex_case()
+        positions = np.asarray(
+            (
+                (0.001500000013038516, 0.009105602279305458, 0.04680181294679642),
+                (0.001500000013038516, 0.009730605408549309, 0.04679048806428909),
+                (0.001500000013038516, 0.010355649515986443, 0.04678138345479965),
+            ),
+            dtype=np.float32,
+        )
+        inside_face = np.asarray(
+            (0.000375000003259629, 0.009726474061608315, 0.046562500298023224),
+            dtype=np.float32,
+        )
+        outside_face = np.asarray(
+            (0.000375000003259629, 0.00972647313028574, 0.046562500298023224),
+            dtype=np.float32,
+        )
+        weights = np.asarray(base["weights"], dtype=np.float32)
+        boundaries = np.asarray(
+            (
+                positions[0]
+                + weights[0, 1] * (positions[1] - positions[0]),
+                positions[1]
+                + weights[1, 1] * (positions[2] - positions[1]),
+            ),
+            dtype=np.float32,
+        )
+        positions_f64 = positions.astype(np.float64)
+        active_segments = np.diff(positions_f64[:, 1:], axis=0)
+        active_normals = np.column_stack(
+            (active_segments[:, 1], -active_segments[:, 0])
+        )
+        active_normals = active_normals / np.linalg.norm(
+            active_normals, axis=1
+        )[:, None]
+        normals = tuple(
+            (0.0, float(normal[0]), float(normal[1]))
+            for normal in active_normals
+        )
+        base_face = np.asarray(base["face"], dtype=np.float32)
+        base_y_faces = np.asarray(base["cell_face_y_m"], dtype=np.float32)
+
+        def case_for(face: np.ndarray) -> dict[str, object]:
+            source_centers = tuple(
+                (float(source[0]), float(face[1]), float(source[2]))
+                for source in base["source_centers"]
+            )
+
+            def probe_for(
+                boundary_point: np.ndarray,
+                source_center: tuple[float, ...],
+                normal: tuple[float, ...],
+            ) -> tuple[float, ...]:
+                boundary_f64 = boundary_point.astype(np.float64)
+                source_f64 = np.asarray(source_center, dtype=np.float64)
+                normal_f64 = np.asarray(normal, dtype=np.float64)
+                progress = 0.001 - float(
+                    np.dot(boundary_f64 - source_f64, normal_f64)
+                )
+                return tuple(boundary_f64 + progress * normal_f64)
+
+            probes = tuple(
+                probe_for(boundary, source, normal)
+                for boundary, source, normal in zip(
+                    boundaries, source_centers, normals, strict=True
+                )
+            )
+            y_face_shift = np.float32(face[1] - base_face[1])
+            return {
+                **base,
+                "face": tuple(float(value) for value in face),
+                "positions": tuple(tuple(row) for row in positions),
+                "boundaries": tuple(tuple(row) for row in boundaries),
+                "source_centers": source_centers,
+                "probes": probes,
+                "normals": normals,
+                "cell_face_y_m": tuple(base_y_faces + y_face_shift),
+                "include_strict_owner_cause": True,
+            }
+
+        inside_case = case_for(inside_face)
+        case = case_for(outside_face)
+        stored_face = np.asarray(case["face"], dtype=np.float32).astype(np.float64)
+        stored_boundaries = boundaries.astype(np.float64)
+        stored_normals = np.asarray(case["normals"], dtype=np.float32)[
+            :, 1:
+        ].astype(np.float64)
+        stored_normals = stored_normals / np.linalg.norm(
+            stored_normals, axis=1
+        )[:, None]
+        normal_alignment = float(np.dot(stored_normals[0], stored_normals[1]))
+        symmetric_normal = np.sum(stored_normals, axis=0)
+        symmetric_normal /= np.linalg.norm(symmetric_normal)
+        face_ray = stored_face[1:] - positions_f64[1, 1:]
+        face_progress = float(np.dot(face_ray, symmetric_normal))
+        tangential_offset = face_ray - face_progress * symmetric_normal
+        tangential_distance_squared = float(tangential_offset @ tangential_offset)
+        y_faces = np.asarray(case["cell_face_y_m"], dtype=np.float32)
+        z_faces = np.asarray(case["cell_face_z_m"], dtype=np.float32)
+        local_width = np.abs(
+            (float(y_faces[2] - y_faces[1]), float(z_faces[3] - z_faces[2]))
+        )
+        active_geometry = np.vstack(
+            (stored_face[None, 1:], stored_boundaries[:, 1:], positions_f64[:, 1:])
+        )
+        geometry_scale = np.maximum(
+            np.max(np.abs(active_geometry), axis=0), local_width
+        )
+        geometry_tolerance = max(
+            1.0e-12,
+            2.0 * float(np.finfo(np.float32).eps) * float(np.max(geometry_scale)),
+        )
+        cone_ratio_squared = 0.5 * max(0.0, 1.0 - normal_alignment)
+        cone_limit_squared = (
+            cone_ratio_squared * float(face_ray @ face_ray)
+            + 3.0 * geometry_tolerance**2
+        )
+        raw_parameters = np.einsum(
+            "ij,ij->i", stored_face[1:] - positions_f64[:-1, 1:], active_segments
+        ) / np.einsum("ij,ij->i", active_segments, active_segments)
+        closest_points = positions_f64[:-1, 1:] + np.clip(
+            raw_parameters, 0.0, 1.0
+        )[:, None] * active_segments
+        closest_deltas = stored_face[1:] - closest_points
+        distance_squared = np.einsum(
+            "ij,ij->i", closest_deltas, closest_deltas
+        )
+        tie_tolerance_squared = (
+            4.0
+            * float(np.finfo(np.float32).eps)
+            * max(*distance_squared, *(local_width * local_width), 1.0e-24)
+        )
+
+        self.assertGreaterEqual(normal_alignment, 0.9999)
+        self.assertLess(normal_alignment, 0.999999)
+        self.assertGreater(face_progress, geometry_tolerance)
+        cone_ratio = tangential_distance_squared / cone_limit_squared
+        self.assertGreater(cone_ratio, 1.0)
+        self.assertLess(cone_ratio, 1.01)
+        parameter_tolerance = 2.0e-6
+        self.assertFalse(
+            parameter_tolerance < raw_parameters[0] < 1.0 - parameter_tolerance
+        )
+        self.assertFalse(
+            parameter_tolerance < raw_parameters[1] < 1.0 - parameter_tolerance
+        )
+        self.assertGreaterEqual(raw_parameters[0], 1.0 - parameter_tolerance)
+        self.assertLess(raw_parameters[0], 1.0)
+        self.assertLess(raw_parameters[1], -parameter_tolerance)
+        self.assertTrue(
+            np.all(
+                np.linalg.norm(closest_points - positions_f64[1, 1:], axis=1)
+                <= geometry_tolerance
+            )
+        )
+        self.assertLessEqual(
+            abs(distance_squared[0] - distance_squared[1]),
+            tie_tolerance_squared,
+        )
+        self.assertEqual(tuple(case["nearest_markers"]), (1, 1))
+        self.assertEqual(
+            sum(1 in segment for segment in case["projection_segments"]), 2
+        )
+
+        inside_integer, _, _ = self._run_direct_finite_segment_union_case(
+            inside_case
+        )
+        self.assertEqual(inside_integer, (1, 1, 0, 1, 1, 1, 0, 0))
+        integer_result, _, installed_segments = (
+            self._run_direct_finite_segment_union_case(case)
+        )
+        self.assertEqual(installed_segments, ((0, 1), (1, 2)))
+        self.assertEqual(integer_result, (1, 1, 0, 1, 0, 0, 0, 0))
+        swapped = {
+            **case,
+            **{
+                key: tuple(reversed(case[key]))
+                for key in (
+                    "source_centers",
+                    "boundaries",
+                    "probes",
+                    "normals",
+                    "indices",
+                    "weights",
+                    "nearest_markers",
+                )
+            },
+        }
+        swapped_integer, _, swapped_segments = (
+            self._run_direct_finite_segment_union_case(swapped)
+        )
+        self.assertEqual(swapped_segments, installed_segments)
+        self.assertEqual(swapped_integer, (1, 1, 1, 0, 0, 0, 0, 0))
+
+    def test_r22_curved_internal_vertex_rejects_sharp_corner(self) -> None:
+        """Degree-two topology alone cannot merge a visible corner."""
+
+        base = self._r22_curved_internal_vertex_case()
+        positions = np.asarray(base["positions"], dtype=np.float32)
+        positions[2, 2] += np.float32(7.8125e-5)
+        weights = np.asarray(base["weights"], dtype=np.float32)
+        boundaries = (
+            positions[0] + weights[0, 1] * (positions[1] - positions[0]),
+            positions[1] + weights[1, 1] * (positions[2] - positions[1]),
+        )
+        active_segments = (
+            positions[1, 1:].astype(np.float64)
+            - positions[0, 1:].astype(np.float64),
+            positions[2, 1:].astype(np.float64)
+            - positions[1, 1:].astype(np.float64),
+        )
+        active_normals = tuple(
+            np.asarray((segment[1], -segment[0]), dtype=np.float64)
+            / np.linalg.norm(segment)
+            for segment in active_segments
+        )
+        normals = tuple(
+            (0.0, float(normal[0]), float(normal[1]))
+            for normal in active_normals
+        )
+        probes = []
+        for boundary_point, source_center, normal in zip(
+            boundaries, base["source_centers"], normals, strict=True
+        ):
+            boundary_array = np.asarray(boundary_point, dtype=np.float64)
+            source_array = np.asarray(source_center, dtype=np.float64)
+            normal_array = np.asarray(normal, dtype=np.float64)
+            progress_m = 0.001 - float(
+                np.dot(boundary_array - source_array, normal_array)
+            )
+            probes.append(tuple(boundary_array + progress_m * normal_array))
+        sharp_corner = {
+            **base,
+            "positions": tuple(
+                tuple(float(value) for value in row) for row in positions
+            ),
+            "boundaries": tuple(
+                tuple(float(value) for value in row) for row in boundaries
+            ),
+            "probes": tuple(probes),
+            "normals": normals,
+        }
+        first_outward = positions[0, 1:] - positions[1, 1:]
+        second_outward = positions[2, 1:] - positions[1, 1:]
+        corner_tangent_continuity = float(
+            np.dot(first_outward, second_outward)
+            / (np.linalg.norm(first_outward) * np.linalg.norm(second_outward))
+        )
+        self.assertGreater(
+            corner_tangent_continuity,
+            -0.9999,
+            msg="the negative must remain outside the smooth-curvature band",
+        )
+
+        integer_result, _, _ = self._run_direct_finite_segment_union_case(
+            sharp_corner
+        )
+        self.assertEqual(integer_result[0:2], (1, 1))
+        self.assertEqual(integer_result[4:6], (0, 0))
 
     def test_internal_near_c0_vertex_canonical_state_is_order_independent(
         self,
@@ -1781,6 +2342,209 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                 source,
             )
 
+        ordinary_live_helper_name = (
+            "_canonical_component_face_same_segment_direct_pair_cache_is_current"
+        )
+        ordinary_classifier_name = (
+            "_classify_velocity_dirichlet_component_face_ordinary_same_segment_live_reproof_kernel"
+        )
+        ordinary_classifier = textwrap.dedent(
+            inspect.getsource(
+                HibmMpmIbBoundaryConditions._classify_velocity_dirichlet_component_face_ordinary_same_segment_live_reproof_kernel
+            )
+        )
+        smooth_live_helper_name = (
+            "_canonical_component_face_smooth_shared_vertex_pair_cache_is_current"
+        )
+        smooth_classifier_name = (
+            "_classify_velocity_dirichlet_component_face_smooth_shared_vertex_live_reproof_kernel"
+        )
+        smooth_classifier = textwrap.dedent(
+            inspect.getsource(
+                getattr(HibmMpmIbBoundaryConditions, smooth_classifier_name)
+            )
+        )
+        smooth_live_proof_field = (
+            "velocity_dirichlet_component_face_smooth_shared_vertex_live_reproof_valid"
+        )
+        orchestrator = textwrap.dedent(
+            inspect.getsource(
+                HibmMpmIbBoundaryConditions.assemble_velocity_dirichlet_component_face_ledger
+            )
+        )
+
+        self.assertEqual(ordinary_classifier.count(ordinary_live_helper_name), 1)
+        self.assertNotIn(ordinary_live_helper_name, reconstruct)
+        self.assertEqual(smooth_classifier.count(smooth_live_helper_name), 1)
+        for source in (precompute, prepare, ordinary_classifier, reconstruct):
+            self.assertNotIn(smooth_live_helper_name, source)
+
+        reconstruct_tree = ast.parse(reconstruct)
+        smooth_live_proof_accesses = [
+            node
+            for node in ast.walk(reconstruct_tree)
+            if isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == smooth_live_proof_field
+        ]
+        self.assertTrue(smooth_live_proof_accesses)
+        self.assertTrue(
+            all(
+                isinstance(access.ctx, ast.Load)
+                for access in smooth_live_proof_accesses
+            )
+        )
+
+        tangential_tolerance_name = "face_tangential_tolerance_squared"
+        default_tolerance_assignments = [
+            node
+            for node in ast.walk(reconstruct_tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == tangential_tolerance_name
+                for target in node.targets
+            )
+        ]
+        self.assertEqual(len(default_tolerance_assignments), 1)
+        expected_default_tolerance = ast.parse(
+            "3.0 * maximum_geometry_tolerance * maximum_geometry_tolerance",
+            mode="eval",
+        ).body
+        self.assertEqual(
+            ast.dump(default_tolerance_assignments[0].value),
+            ast.dump(expected_default_tolerance),
+        )
+
+        smooth_tolerance_guards = [
+            node
+            for node in ast.walk(reconstruct_tree)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "smooth_shared_vertex_direct_finite_owner"
+        ]
+        self.assertEqual(len(smooth_tolerance_guards), 1)
+        tangential_tolerance_adjustments = [
+            node
+            for node in ast.walk(reconstruct_tree)
+            if isinstance(node, ast.AugAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == tangential_tolerance_name
+        ]
+        self.assertEqual(len(tangential_tolerance_adjustments), 1)
+        tangential_tolerance_adjustment = tangential_tolerance_adjustments[0]
+        self.assertIsInstance(tangential_tolerance_adjustment.op, ast.Add)
+        expected_dynamic_adjustment = ast.parse(
+            "ti.cast(smooth_tangential_increment, ti.f32)",
+            mode="eval",
+        ).body
+        self.assertEqual(
+            ast.dump(tangential_tolerance_adjustment.value),
+            ast.dump(expected_dynamic_adjustment),
+        )
+
+        legacy_smooth_adjustment = ast.parse(
+            "2.0e-6 * face_offset.dot(face_offset)",
+            mode="eval",
+        ).body
+        matching_legacy_adjustments = [
+            node
+            for node in ast.walk(reconstruct_tree)
+            if isinstance(node, ast.BinOp)
+            and ast.dump(node) == ast.dump(legacy_smooth_adjustment)
+        ]
+        self.assertEqual(matching_legacy_adjustments, [])
+
+        def unique_matching_assignment(
+            name: str,
+            expected_value: ast.expr,
+        ) -> ast.Assign:
+            matching_assignments = [
+                node
+                for node in ast.walk(reconstruct_tree)
+                if isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == name
+                    for target in node.targets
+                )
+                and ast.dump(node.value) == ast.dump(expected_value)
+            ]
+            self.assertEqual(len(matching_assignments), 1, msg=name)
+            return matching_assignments[0]
+
+        expected_dynamic_ratio = ast.parse(
+            "ti.cast(0.5, ti.f64) * "
+            "ti.max(ti.cast(0.0, ti.f64), "
+            "ti.cast(1.0, ti.f64) - smooth_live_chord_alignment)",
+            mode="eval",
+        ).body
+        dynamic_ratio_assignment = unique_matching_assignment(
+            "smooth_normal_cone_ratio_squared",
+            expected_dynamic_ratio,
+        )
+        smooth_face_offset_assignment = unique_matching_assignment(
+            "smooth_face_offset",
+            ast.parse("ti.cast(face_offset, ti.f64)", mode="eval").body,
+        )
+        smooth_increment_assignment = unique_matching_assignment(
+            "smooth_tangential_increment",
+            ast.parse(
+                "smooth_normal_cone_ratio_squared * "
+                "smooth_face_offset.dot(smooth_face_offset)",
+                mode="eval",
+            ).body,
+        )
+        smooth_guard_node_ids = {
+            id(node) for node in ast.walk(smooth_tolerance_guards[0])
+        }
+        self.assertTrue(
+            all(
+                id(node) in smooth_guard_node_ids
+                for node in (
+                    dynamic_ratio_assignment,
+                    smooth_face_offset_assignment,
+                    smooth_increment_assignment,
+                    tangential_tolerance_adjustment,
+                )
+            )
+        )
+
+        tangential_tolerance_comparisons = [
+            node
+            for node in ast.walk(reconstruct_tree)
+            if isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name)
+            and node.left.id == "face_tangential_distance_squared"
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.Gt)
+            and len(node.comparators) == 1
+            and isinstance(node.comparators[0], ast.Name)
+            and node.comparators[0].id == tangential_tolerance_name
+        ]
+        self.assertEqual(len(tangential_tolerance_comparisons), 1)
+        self.assertLess(
+            default_tolerance_assignments[0].lineno,
+            smooth_tolerance_guards[0].lineno,
+        )
+        self.assertLess(
+            smooth_tolerance_guards[0].lineno,
+            tangential_tolerance_comparisons[0].lineno,
+        )
+
+        prepare_call = orchestrator.index(
+            "self._prepare_velocity_dirichlet_component_face_claims_kernel("
+        )
+        ordinary_classifier_call = orchestrator.index(
+            f"self.{ordinary_classifier_name}("
+        )
+        smooth_classifier_call = orchestrator.index(f"self.{smooth_classifier_name}(")
+        reconstruct_call = orchestrator.index(
+            "self._reconstruct_velocity_dirichlet_component_face_segment_claims_kernel("
+        )
+        self.assertLess(prepare_call, ordinary_classifier_call)
+        self.assertLess(ordinary_classifier_call, smooth_classifier_call)
+        self.assertLess(smooth_classifier_call, reconstruct_call)
+
     def test_cold_jit_owner_payload_matches_direct_probe_outputs(self) -> None:
         """The nine precomputed owner outputs retain direct-probe parity."""
 
@@ -1852,6 +2616,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             nearest,
             markers.x_gamma_m,
             markers.v_gamma_mps,
+            markers.projection_vertex_pressure_owner_index,
             markers.region_id,
             markers.projection_triangle_indices,
             int(markers.projection_segment_count),
@@ -1867,6 +2632,8 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             center_z,
             *nodes,
             3,
+            int(markers.marker_count),
+            int(markers.projection_vertex_count),
             0,
         )
         index = (*target, int(case["component_axis"]))
@@ -1936,6 +2703,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             nearest,
             markers.x_gamma_m,
             markers.v_gamma_mps,
+            markers.projection_vertex_pressure_owner_index,
             markers.region_id,
             markers.projection_triangle_indices,
             int(markers.projection_segment_count),
@@ -1951,12 +2719,15 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             center_z,
             *nodes,
             3,
+            int(markers.marker_count),
+            int(markers.projection_vertex_count),
             0,
         )
         neutral_i32 = (
             boundary.velocity_dirichlet_component_face_segment_pair_admission_valid,
             boundary.velocity_dirichlet_component_face_segment_pair_full_valid,
             boundary.velocity_dirichlet_component_face_segment_pair_endpoint_clamped,
+            boundary.velocity_dirichlet_component_face_segment_pair_derived_terminal_cause,
         )
         neutral_vectors = (
             boundary.velocity_dirichlet_component_face_segment_pair_boundary_point_m,
@@ -1974,7 +2745,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             boundary.velocity_dirichlet_component_face_segment_pair_first_author_kind,
             boundary.velocity_dirichlet_component_face_segment_pair_second_author_kind,
         )
-        self.assertEqual(sum(int(field[index]) == 0 for field in neutral_i32), 3)
+        self.assertEqual(sum(int(field[index]) == 0 for field in neutral_i32), 4)
         self.assertEqual(
             sum(
                 np.array_equal(
@@ -2894,7 +3665,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
         cell_face_x_m = ti.field(dtype=ti.f32, shape=5)
         cell_face_y_m = ti.field(dtype=ti.f32, shape=5)
         cell_face_z_m = ti.field(dtype=ti.f32, shape=5)
-        result_i32 = ti.field(dtype=ti.i32, shape=7)
+        result_i32 = ti.field(dtype=ti.i32, shape=8)
         result_f64 = ti.field(dtype=ti.f64, shape=16)
         cell_face_x_m.from_numpy(np.linspace(0.0, 1.0, 5, dtype=np.float32))
         configured_source_support_xyz_m[None] = (1.0e30, 1.0e30, 1.0e30)
@@ -2967,6 +3738,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                     boundary,
                     markers.x_gamma_m,
                     markers.v_gamma_mps,
+                    markers.projection_vertex_pressure_owner_index,
                     markers.region_id,
                     face_center_m,
                     2,
@@ -2979,6 +3751,8 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                     author_projection_weights,
                     markers.projection_triangle_indices,
                     int(markers.projection_segment_count),
+                    int(markers.marker_count),
+                    int(markers.projection_vertex_count),
                     configured_source_support_xyz_m,
                     1,
                     1,
@@ -2986,6 +3760,8 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                     cell_face_y_m,
                     cell_face_z_m,
                     int(case["region"]),
+                    0,
+                    0,
                     result_i32,
                     result_f64,
                 )
@@ -3080,7 +3856,10 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                 )
                 self.assertEqual(integer_result[5], 1)
 
-                canonical_integer_payload = result_i32.to_numpy()[4:].tobytes(
+                # Slot 7 identifies FIRST/SECOND author and therefore flips
+                # under a complete author-record reversal.  Compare only the
+                # canonical admission/full/clamp payload here.
+                canonical_integer_payload = result_i32.to_numpy()[4:7].tobytes(
                     order="C"
                 )
                 canonical_float_payload = result_f64.to_numpy()[4:].tobytes(
@@ -3114,6 +3893,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                     boundary,
                     markers.x_gamma_m,
                     markers.v_gamma_mps,
+                    markers.projection_vertex_pressure_owner_index,
                     markers.region_id,
                     face_center_m,
                     2,
@@ -3126,6 +3906,8 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                     author_projection_weights,
                     markers.projection_triangle_indices,
                     int(markers.projection_segment_count),
+                    int(markers.marker_count),
+                    int(markers.projection_vertex_count),
                     configured_source_support_xyz_m,
                     1,
                     1,
@@ -3133,11 +3915,13 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                     cell_face_y_m,
                     cell_face_z_m,
                     int(case["region"]),
+                    0,
+                    0,
                     result_i32,
                     result_f64,
                 )
                 self.assertEqual(
-                    result_i32.to_numpy()[4:].tobytes(order="C"),
+                    result_i32.to_numpy()[4:7].tobytes(order="C"),
                     canonical_integer_payload,
                 )
                 self.assertEqual(
@@ -3221,6 +4005,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                 boundary,
                 markers.x_gamma_m,
                 markers.v_gamma_mps,
+                markers.projection_vertex_pressure_owner_index,
                 markers.region_id,
                 face_center_m,
                 2,
@@ -3233,6 +4018,8 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                 author_projection_weights,
                 markers.projection_triangle_indices,
                 int(markers.projection_segment_count),
+                int(markers.marker_count),
+                int(markers.projection_vertex_count),
                 configured_source_support_xyz_m,
                 1,
                 1,
@@ -3240,6 +4027,8 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                 cell_face_y_m,
                 cell_face_z_m,
                 int(case["region"]),
+                0,
+                0,
                 result_i32,
                 result_f64,
             )

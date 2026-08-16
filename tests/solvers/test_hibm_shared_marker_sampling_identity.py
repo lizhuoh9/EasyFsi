@@ -501,6 +501,61 @@ class HibmSharedMarkerSamplingBehaviorContractTests(unittest.TestCase):
             msg="the direct pass must count the marker that triggered fallback",
         )
 
+    def test_subminimum_direct_support_walks_to_first_supported_candidate(
+        self,
+    ) -> None:
+        """A tiny valid sliver must not be renormalized into a direct sample."""
+
+        fixture = self.fixture()
+        fixture.reset(position=(0.50390625, 0.375, 0.375), normal=(1.0, 0.0, 0.0))
+        valid_mask = np.zeros(fixture.GRID_NODES, dtype=np.int32)
+        valid_mask[3, :, :] |= 1 << 0
+        valid_mask[2:4, :, :] |= (1 << 1) | (1 << 2)
+        fixture.component_face_valid_mask.from_numpy(valid_mask)
+
+        identity = fixture.prepare_identity()
+
+        valid, source, position = fixture.identity_record(identity)
+        self.assertEqual(valid, 1)
+        self.assertEqual(source, 2)  # normal_walk
+        self.assert_position_almost_equal(position, (0.62890625, 0.375, 0.375))
+        self.assertEqual(
+            int(
+                fixture.markers._prepared_no_slip_unresolved_marker_count[
+                    None
+                ]
+            ),
+            1,
+            msg="the subminimum direct sample must trigger fallback",
+        )
+
+    def test_minimum_supported_physical_interface_remains_direct(self) -> None:
+        """The inclusive minimum-support boundary preserves the physical sample."""
+
+        fixture = self.fixture()
+        marker_position = (0.5078125, 0.375, 0.375)
+        fixture.reset(position=marker_position, normal=(1.0, 0.0, 0.0))
+        valid_mask = np.zeros(fixture.GRID_NODES, dtype=np.int32)
+        valid_mask[3, :, :] |= 1 << 0
+        valid_mask[2:4, :, :] |= (1 << 1) | (1 << 2)
+        fixture.component_face_valid_mask.from_numpy(valid_mask)
+
+        identity = fixture.prepare_identity()
+
+        valid, source, position = fixture.identity_record(identity)
+        self.assertEqual(valid, 1)
+        self.assertEqual(source, 1)  # direct
+        self.assert_position_almost_equal(position, marker_position)
+        self.assertEqual(
+            int(
+                fixture.markers._prepared_no_slip_unresolved_marker_count[
+                    None
+                ]
+            ),
+            0,
+            msg="an exactly minimum-supported marker must not dispatch fallback",
+        )
+
     def test_capacity_two_mixed_batch_preserves_direct_and_normal_walk(self) -> None:
         """One unresolved marker must not rewrite an already direct marker."""
 
@@ -877,6 +932,106 @@ class HibmSharedMarkerSamplingBehaviorContractTests(unittest.TestCase):
         self.assertLessEqual(
             residual_after.max_no_slip_residual_mps,
             1.0e-6,
+        )
+
+    def test_projector_replaces_false_recursive_convergence_with_true_residual(
+        self,
+    ) -> None:
+        """A stale recursive PCG residual must restart from ``rhs - A lambda``."""
+
+        fixture = self.fixture()
+        fixture.velocity.fill((0.0, 0.0, 0.0))
+        fixture.obstacle.fill(0)
+        fixture.component_face_valid_mask.fill((1 << 0) | (1 << 1) | (1 << 2))
+        fixture.hard_fixed_component_mask.fill(0)
+        fixture.external_exact_component_mask.fill(0)
+        markers = HibmMpmSurfaceMarkers(marker_capacity=2)
+        markers.load_markers(
+            positions_m=((0.34, 0.375, 0.375), (0.43, 0.375, 0.375)),
+            velocities_mps=((1.0, 0.0, 0.0), (-0.4, 0.0, 0.0)),
+            normals=((1.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
+            areas_m2=(1.0, 1.0),
+            region_ids=(1, 1),
+        )
+        identity = markers.prepare_no_slip_sampling_identity(
+            obstacle_field=fixture.obstacle,
+            component_face_valid_mask=fixture.component_face_valid_mask,
+            cell_face_x_m=fixture.cell_face_x_m,
+            cell_face_y_m=fixture.cell_face_y_m,
+            cell_face_z_m=fixture.cell_face_z_m,
+            cell_center_x_m=fixture.cell_center_x_m,
+            cell_center_y_m=fixture.cell_center_y_m,
+            cell_center_z_m=fixture.cell_center_z_m,
+            grid_nodes=fixture.GRID_NODES,
+            topology_generation=fixture.TOPOLOGY_GENERATION,
+            component_face_valid_mask_generation=fixture.VALID_MASK_GENERATION,
+        )
+        operator = HibmMpmMarkerMacConstraintOperator(
+            grid_nodes=fixture.GRID_NODES,
+            marker_capacity=2,
+        )
+        operator.prepare(
+            markers=markers,
+            fluid=fixture.fluid,
+            component_face_valid_mask=fixture.component_face_valid_mask,
+            primary_region_id=1,
+            secondary_region_id=-1,
+            prepared_sampling_identity=identity,
+            **self.matching_generations(fixture),
+        )
+
+        real_check_convergence = operator._check_convergence_kernel
+        real_apply_matrix = operator._apply_matrix
+        convergence_check_count = 0
+        forced_lambda_apply_count = 0
+
+        def force_one_false_recursive_convergence(tolerance: float) -> None:
+            nonlocal convergence_check_count
+            convergence_check_count += 1
+            real_check_convergence(tolerance)
+            if convergence_check_count == 2:
+                operator._max_residual[None] = 0.0
+                operator._device_converged[None] = 1
+
+        def count_forced_lambda_apply(
+            input_rows,
+            output_rows,
+            *,
+            force_run: bool,
+        ) -> None:
+            nonlocal forced_lambda_apply_count
+            if input_rows is operator._lambda and force_run:
+                forced_lambda_apply_count += 1
+            real_apply_matrix(input_rows, output_rows, force_run=force_run)
+
+        operator._check_convergence_kernel = force_one_false_recursive_convergence
+        operator._apply_matrix = count_forced_lambda_apply
+        try:
+            operator.solve_device(
+                max_iterations=32,
+                absolute_tolerance_mps=1.0e-6,
+                component_face_valid_mask=fixture.component_face_valid_mask,
+                obstacle_field=fixture.obstacle,
+                **self.matching_generations(fixture),
+            )
+        finally:
+            operator._check_convergence_kernel = real_check_convergence
+            operator._apply_matrix = real_apply_matrix
+
+        report = operator.report()
+        self.assertTrue(report.converged)
+        self.assertFalse(report.committed)
+        self.assertGreaterEqual(report.iterations, 2)
+        self.assertLessEqual(report.max_residual_mps, 1.0e-6)
+        self.assertEqual(report.exact_residual_restart_count, 1)
+        self.assertGreaterEqual(
+            report.exact_residual_confirmation_count,
+            2,
+        )
+        self.assertEqual(
+            forced_lambda_apply_count,
+            report.exact_residual_confirmation_count,
+            msg="an accepted exact candidate must not be rebuilt before validation",
         )
 
     def test_consumers_fail_closed_when_prepared_identity_becomes_stale(self) -> None:

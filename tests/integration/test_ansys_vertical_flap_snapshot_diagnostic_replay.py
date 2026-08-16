@@ -94,12 +94,13 @@ def _write_inputs(
     schema_version: int = 8,
     authority: str = "canonical",
     stored_sources: Mapping[str, bytes] | None = None,
+    stored_step_count: Any = 2,
 ) -> tuple[Path, Path, Path, dict[str, str]]:
     snapshot_path = tmp_path / "preflow_state"
     npz_path = tmp_path / "preflow_state.0123456789abcdef0123456789abcdef.npz"
     npz_path.write_bytes(b"immutable snapshot payload")
     config_payload = {
-        "step_count": 2,
+        "step_count": stored_step_count,
         "preflow_steps": 200,
         "preflow_convergence_mode": "windowed_stationary",
         "preflow_stationary_min_steps": 20,
@@ -180,6 +181,11 @@ def _runtime_for(
     runtime_error: Exception | None = None,
     history_step: int = 1,
     loader_invocations: int = 1,
+    expected_step_count: int = 1,
+    expected_export_final_flow_snapshot: bool = False,
+    expect_step_observer: bool = False,
+    accepted_steps_before_error: int = 1,
+    history_steps: int = 1,
 ) -> tuple[Any, Any, list[tuple[_Identity, str]], list[_Config]]:
     sources = dict(
         current_sources
@@ -205,11 +211,19 @@ def _runtime_for(
 
     runner_module = SimpleNamespace(load_preflow_snapshot=public_loader)
 
-    def run_case(config: _Config) -> dict[str, object]:
+    def run_case(
+        config: _Config,
+        *,
+        step_observer: Any | None = None,
+    ) -> dict[str, object]:
         configs.append(config)
-        assert config.step_count == 1
+        assert (step_observer is not None) is expect_step_observer
+        assert config.step_count == expected_step_count
         assert config.preflow_snapshot_output_path is None
-        assert config.export_final_flow_snapshot is False
+        assert (
+            config.export_final_flow_snapshot
+            is expected_export_final_flow_snapshot
+        )
         assert config.preflow_steps == 200
         assert config.preflow_convergence_mode == "windowed_stationary"
         assert config.preflow_stationary_min_steps == 20
@@ -232,10 +246,21 @@ def _runtime_for(
             )
         if mutate_npz is not None:
             mutate_npz.write_bytes(b"mutated during diagnostic")
+        if step_observer is not None:
+            for accepted_step in range(1, accepted_steps_before_error + 1):
+                step_observer(
+                    accepted_step,
+                    float(accepted_step),
+                    {"step": accepted_step, "diagnostic": "mock-only"},
+                    {},
+                )
         if runtime_error is not None:
             raise runtime_error
         return {
-            "history": [{"step": history_step, "diagnostic": "mock-only"}],
+            "history": [
+                {"step": history_step + offset, "diagnostic": "mock-only"}
+                for offset in range(history_steps)
+            ],
             "preflow_snapshot_loaded": True,
             "preflow_snapshot_identity": {
                 "config_sha256": (
@@ -654,6 +679,151 @@ def test_runtime_failure_is_recorded_without_becoming_validation_evidence(
     assert failure["evidence_class"] == "diagnostic_only"
     assert failure["formal_validation_eligible"] is False
     assert failure["parity_claimed"] is False
+
+
+def test_preserve_config_step_count_records_failed_accepted_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script()
+    snapshot, config, source_manifest, stored_identity = _write_inputs(
+        tmp_path,
+        stored_step_count=50,
+    )
+    pcg_error = RuntimeError("marker MAC constraint PCG did not converge")
+    pcg_error.diagnostics = {  # type: ignore[attr-defined]
+        "stage": "marker_mac_constraint_pcg",
+        "reason": "max_iterations_exhausted",
+        "iterations": 64,
+        "nested": {"nonfinite": float("nan"), "support_rows": [3, 7]},
+    }
+    runtime, runner_module, _loader_calls, configs = _runtime_for(
+        module,
+        stored_identity,
+        runtime_error=pcg_error,
+        expected_step_count=50,
+        expect_step_observer=True,
+        accepted_steps_before_error=24,
+    )
+    original_loader = runner_module.load_preflow_snapshot
+    original_run_case = runtime.run_case
+    monkeypatch.setattr(module, "_load_runtime", lambda: runtime)
+    output_dir = tmp_path / "diagnostic-formal-prefix-failure"
+
+    with pytest.raises(module.DiagnosticReplayError, match="marker MAC"):
+        module.run_diagnostic_replay(
+            snapshot_path=snapshot,
+            config_path=config,
+            source_manifest_path=source_manifest,
+            output_dir=output_dir,
+            allowed_source_diffs=(CORE_SOURCE,),
+            preserve_config_step_count=True,
+        )
+
+    assert runner_module.load_preflow_snapshot is original_loader
+    assert runtime.run_case is original_run_case
+    assert len(configs) == 1
+    assert configs[0].step_count == 50
+    assert configs[0].preflow_snapshot_output_path is None
+    assert configs[0].export_final_flow_snapshot is False
+    failure = json.loads(
+        (output_dir / "diagnostic_replay.json").read_text(encoding="utf-8")
+    )
+    assert failure["status"] == "failed"
+    assert failure["evidence_class"] == "diagnostic_only"
+    assert failure["formal_validation_eligible"] is False
+    assert failure["production_identity_valid"] is False
+    assert failure["preflow_snapshot_loaded"] is True
+    assert failure["snapshot_artifacts_unchanged"] is True
+    assert failure["requested_fsi_steps"] == 50
+    assert failure["completed_fsi_steps"] == 24
+    assert failure["accepted_fsi_steps"] == list(range(1, 25))
+    assert failure["last_completed_fsi_step"] == 24
+    assert failure["attempted_fsi_step"] == 25
+    assert failure["failure_diagnostics"] == {
+        "stage": "marker_mac_constraint_pcg",
+        "reason": "max_iterations_exhausted",
+        "iterations": 64,
+        "nested": {"nonfinite": "nan", "support_rows": [3, 7]},
+    }
+
+
+def test_preserve_config_step_count_records_completed_formal_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script()
+    snapshot, config, source_manifest, stored_identity = _write_inputs(
+        tmp_path,
+        stored_step_count=50,
+    )
+    runtime, runner_module, _loader_calls, configs = _runtime_for(
+        module,
+        stored_identity,
+        expected_step_count=50,
+        expect_step_observer=True,
+        accepted_steps_before_error=50,
+        history_steps=50,
+    )
+    original_loader = runner_module.load_preflow_snapshot
+    original_run_case = runtime.run_case
+    monkeypatch.setattr(module, "_load_runtime", lambda: runtime)
+
+    payload = module.run_diagnostic_replay(
+        snapshot_path=snapshot,
+        config_path=config,
+        source_manifest_path=source_manifest,
+        output_dir=tmp_path / "diagnostic-formal-prefix-complete",
+        allowed_source_diffs=(CORE_SOURCE,),
+        preserve_config_step_count=True,
+    )
+
+    assert runner_module.load_preflow_snapshot is original_loader
+    assert runtime.run_case is original_run_case
+    assert len(configs) == 1
+    assert configs[0].step_count == 50
+    assert configs[0].preflow_snapshot_output_path is None
+    assert configs[0].export_final_flow_snapshot is False
+    assert payload["status"] == "completed"
+    assert payload["evidence_class"] == "diagnostic_only"
+    assert payload["formal_validation_eligible"] is False
+    assert payload["production_identity_valid"] is False
+    assert payload["snapshot_artifacts_unchanged"] is True
+    assert payload["requested_fsi_steps"] == 50
+    assert payload["completed_fsi_steps"] == 50
+    assert payload["accepted_fsi_steps"] == list(range(1, 51))
+    assert payload["last_completed_fsi_step"] == 50
+
+
+@pytest.mark.parametrize("stored_step_count", (2, 50.0, "50", True))
+def test_preserve_config_step_count_rejects_nonformal_config_before_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stored_step_count: Any,
+) -> None:
+    module = _load_script()
+    snapshot, config, source_manifest, stored_identity = _write_inputs(
+        tmp_path,
+        stored_step_count=stored_step_count,
+    )
+    runtime, _runner_module, loader_calls, configs = _runtime_for(
+        module,
+        stored_identity,
+    )
+    monkeypatch.setattr(module, "_load_runtime", lambda: runtime)
+
+    with pytest.raises(module.DiagnosticReplayError, match="50"):
+        module.run_diagnostic_replay(
+            snapshot_path=snapshot,
+            config_path=config,
+            source_manifest_path=source_manifest,
+            output_dir=tmp_path / "diagnostic-nonformal-config",
+            allowed_source_diffs=(CORE_SOURCE,),
+            preserve_config_step_count=True,
+        )
+
+    assert loader_calls == []
+    assert configs == []
 
 
 @pytest.mark.parametrize("loader_invocations", (0, 2))

@@ -107,10 +107,63 @@ transaction after commit or rollback.
 Rollback invalidates HIBM classified-topology metadata but retains the
 shape-stable Taichi search, boundary, and projection resources. Reallocating
 those resources for every coupling trial changes template-field identity and
-forces redundant kernel specializations. Marker-target closure performs an
-initial active-row measurement, builds a compact host matrix, applies at most
-one inverse-mass weighted minimum-norm solve when needed, materializes the
-correction in f32, and then remeasures the rows on device. Marker-MAC PCG gives
+forces redundant kernel specializations.
+
+Before same-segment face-first reconstruction, the canonical ledger revalidates
+live author geometry. The ordinary non-clamped, inside-bracket lane publishes
+mode 132 (`4 | 128`, never bare `128`) only for either a proven
+physical-tip/derived-terminal alias or one uniquely registered, same-region
+projection-only segment whose two endpoints are self-owned; owner, region,
+registration, or geometry drift fails before canonical publication. This lane
+retains the interpolated face target. The live cache proof treats the configured
+source-search envelope as its support authority; it does not replace that
+case-level radius with a local cell diagonal.
+
+Projection-only CAP endpoint-clamped reconstruction uses mode 4 with terminal
+cause 3 (X) or 4 (Y). It requires exactly one exact (one-hot) endpoint author
+and one strict-interior author on a uniquely registered, self-owned,
+same-region segment; the selected endpoint must be degree one and nearest to
+the face, while both live anchors, normals, finite geometry, and support bounds
+must agree. The canonical target is that endpoint marker velocity; author
+ownership, region, registration, endpoint/anchor/normal geometry, or support
+drift fails closed before canonical publication.
+
+Adjacent distinct-segment authors retain separate reconstruction authorities.
+In the noninterpolated distance-tie path, a live f64 strict-interior owner
+wins only when the other registered primitive lies beyond their shared
+endpoint; author order cannot choose the result.  Field-only callers retain
+the validated legacy pair authority, while callers with live projection
+topology must still prove that both authored segments are uniquely registered
+and that the shared endpoint is degree two.  Stale live topology invalidates
+the transaction before canonical publication instead of falling back to a
+shared-vertex snap.
+
+A face-first, smoothly folded degree-two shared vertex remains a separate
+mode-4 lane. Precompute and its dedicated live classifier independently orient
+both active-plane chord normals to their own author normals, require their
+clamped dot product `c` to remain at least `0.9999`, and admit the raw face ray
+only when `progress > tol` and
+`tangent_squared <= 0.5 * max(0, 1 - c) * ray_squared + 3 * tol * tol`.
+The live proof also retains the fixed `0.999999` cached-normal alignment gate.
+Reconstruction consumes that live-proof bit, rederives `c` only after explicit
+marker-index, finite, and nonzero-chord guards, repeats `progress > tol`, and
+keeps the generic `3 * tol * tol` allowance while adding only
+`0.5 * max(0, 1 - c) * face_offset_squared` for this smooth lane. Generic,
+strict-owner, and derived-terminal lanes retain their original gates and
+tolerances; topology, cache, normal, or shared-owner drift fails closed.
+Focused contracts pair adjacent f32 rays immediately inside and outside the
+cone, requiring admission/full `(1, 1)` versus `(0, 0)`, with the outside
+failure repeated under author reversal; the physical r23 shared-vertex witness
+covers full-ledger reconstruction.
+
+Marker-target closure performs an
+initial active-row measurement, builds a compact host matrix, applies a primary
+inverse-mass weighted minimum-norm solve when needed, materializes the
+correction in f32, and remeasures the rows on device. If that actual device
+residual alone remains above tolerance, closure permits one bounded refinement
+solve followed by one final device remeasurement. A nonfinite, invalid, or
+still-excessive final device result aborts before canonical publication.
+Marker-MAC PCG gives
 an initially converged system a zero
 iteration budget and otherwise polls convergence or failure every eight
 iterations so the host stops dispatching work after device convergence.

@@ -13,6 +13,7 @@ import math
 
 import taichi as ti
 
+from .constants import HIBM_MARKER_Q_MAX_SINGLE_ROW_VELOCITY_AMPLIFICATION
 from .core import (
     HIBM_NO_SLIP_SAMPLE_INVALID_REASON_NO_COMPLETE_MAC_SUPPORT,
     HIBM_NO_SLIP_SAMPLE_INVALID_REASON_NONE,
@@ -40,6 +41,19 @@ def _uses_marker_constraint_hash(marker_count: int) -> bool:
     return int(marker_count) > HIBM_MARKER_CONSTRAINT_HASH_THRESHOLD
 
 
+def _finite_float_or_none(value: object) -> float | None:
+    converted = float(value)
+    return converted if math.isfinite(converted) else None
+
+
+class HibmMpmMarkerMacConvergenceError(RuntimeError):
+    """Max-iteration marker-PCG failure with JSON-safe diagnostics."""
+
+    def __init__(self, message: str, *, diagnostics: dict[str, object]) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics)
+
+
 @dataclass(frozen=True)
 class HibmMpmMarkerMacConstraintReport:
     """Immutable result of one marker-MAC constraint transaction."""
@@ -52,6 +66,11 @@ class HibmMpmMarkerMacConstraintReport:
     iterations: int
     max_residual_mps: float
     sample_identity_generation: int = 0
+    exact_residual_confirmation_count: int = 0
+    exact_residual_restart_count: int = 0
+    initial_max_rhs_mps: float = math.nan
+    candidate_max_correction_mps: float = math.nan
+    candidate_velocity_amplification: float = math.nan
 
 
 @dataclass(frozen=True)
@@ -282,6 +301,16 @@ class HibmMpmMarkerMacConstraintOperator:
         self._p_ap = ti.field(dtype=ti.f64, shape=())
         self._max_residual = ti.field(dtype=ti.f32, shape=())
         self._true_candidate_max_residual = ti.field(dtype=ti.f32, shape=())
+        self._initial_max_rhs = ti.field(dtype=ti.f32, shape=())
+        self._candidate_max_correction = ti.field(dtype=ti.f32, shape=())
+        self._candidate_velocity_amplification = ti.field(
+            dtype=ti.f32,
+            shape=(),
+        )
+        self._candidate_amplification_nonfinite = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self._failure_code = ti.field(dtype=ti.i32, shape=())
         self._audit_failure_code = ti.field(dtype=ti.i32, shape=())
         self._solved_correction_integrity_failure = ti.field(
@@ -290,6 +319,10 @@ class HibmMpmMarkerMacConstraintOperator:
         )
         self._device_converged = ti.field(dtype=ti.i32, shape=())
         self._device_iterations = ti.field(dtype=ti.i32, shape=())
+        self._exact_residual_inactive_failure_row = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         self._device_active_marker_count = ti.field(dtype=ti.i32, shape=())
         self._device_constraint_count = ti.field(dtype=ti.i32, shape=())
 
@@ -306,6 +339,13 @@ class HibmMpmMarkerMacConstraintOperator:
         self._iterations = 0
         self._absolute_tolerance_mps = math.nan
         self._max_residual_mps = math.inf
+        self._initial_max_rhs_mps = math.nan
+        self._candidate_max_correction_mps = math.nan
+        self._candidate_velocity_amplification_value = math.nan
+        self._exact_residual_confirmation_count = 0
+        self._exact_residual_restart_count = 0
+        self._confirmation_history: list[dict[str, object]] = []
+        self._confirmed_candidate_materialized = False
         self._phase = "idle"
         self._prepared_ledger_generation = -1
         self._prepared_primary_region_id = -1
@@ -369,11 +409,16 @@ class HibmMpmMarkerMacConstraintOperator:
         self._p_ap[None] = 0.0
         self._max_residual[None] = 0.0
         self._true_candidate_max_residual[None] = 0.0
+        self._initial_max_rhs[None] = 0.0
+        self._candidate_max_correction[None] = 0.0
+        self._candidate_velocity_amplification[None] = 0.0
+        self._candidate_amplification_nonfinite[None] = 0
         self._failure_code[None] = 0
         self._audit_failure_code[None] = 0
         self._solved_correction_integrity_failure[None] = 0
         self._device_converged[None] = 0
         self._device_iterations[None] = 0
+        self._exact_residual_inactive_failure_row[None] = self.constraint_capacity
         self._device_active_marker_count[None] = 0
         self._device_constraint_count[None] = 0
 
@@ -1710,6 +1755,50 @@ class HibmMpmMarkerMacConstraintOperator:
                 self._rz_old[None] = new_value
 
     @ti.kernel
+    def _replace_pcg_residual_from_exact_candidate_kernel(self, tolerance: ti.f32):
+        """Restart PCG from the explicitly regenerated ``rhs - A lambda``."""
+
+        self._max_residual[None] = 0.0
+        self._rz_old[None] = 0.0
+        self._device_converged[None] = 0
+        self._exact_residual_inactive_failure_row[None] = self.constraint_capacity
+        for row in range(self.constraint_capacity):
+            residual = 0.0
+            preconditioned = 0.0
+            if self._row_active[row] != 0:
+                axis = row % 3
+                sampled_correction = 0.0
+                for support in ti.static(range(8)):
+                    if self._stencil_free[row, support] != 0:
+                        index = self._stencil_index[row, support]
+                        sampled_correction += (
+                            self._stencil_weight[row, support]
+                            * self._correction[index.x, index.y, index.z][axis]
+                        )
+                residual = self._rhs[row] - sampled_correction
+                finite = residual == residual and ti.abs(residual) < 3.4e38
+                if not finite:
+                    ti.atomic_max(self._failure_code[None], 10)
+                    residual = 0.0
+                elif self._row_pcg_active[row] != 0:
+                    preconditioned = residual / self._diagonal[row]
+                    ti.atomic_add(
+                        self._rz_old[None],
+                        ti.cast(residual, ti.f64)
+                        * ti.cast(preconditioned, ti.f64),
+                    )
+                elif ti.abs(residual) > tolerance:
+                    ti.atomic_max(self._failure_code[None], 7)
+                    ti.atomic_min(
+                        self._exact_residual_inactive_failure_row[None],
+                        row,
+                    )
+                ti.atomic_max(self._max_residual[None], ti.abs(residual))
+            self._residual[row] = residual
+            self._preconditioned[row] = preconditioned
+            self._direction[row] = preconditioned
+
+    @ti.kernel
     def _clear_grid_scratch_kernel(self, force_run: ti.i32):
         for i, j, k in self._grid_scratch:
             if force_run != 0 or (
@@ -1823,6 +1912,87 @@ class HibmMpmMarkerMacConstraintOperator:
                 )
 
     @ti.kernel
+    def _measure_candidate_velocity_amplification_kernel(self):
+        """Reduce frozen RHS and materialized affine-Q correction magnitudes."""
+
+        self._initial_max_rhs[None] = 0.0
+        self._candidate_max_correction[None] = 0.0
+        self._candidate_amplification_nonfinite[None] = 0
+        for row in range(self.constraint_capacity):
+            if self._row_active[row] != 0:
+                rhs = self._rhs[row]
+                finite = rhs == rhs and ti.abs(rhs) < 3.4e38
+                if finite:
+                    ti.atomic_max(self._initial_max_rhs[None], ti.abs(rhs))
+                else:
+                    ti.atomic_max(self._candidate_amplification_nonfinite[None], 1)
+        for i, j, k in self._correction:
+            correction = self._correction[i, j, k]
+            for axis in ti.static(range(3)):
+                value = correction[axis]
+                finite = value == value and ti.abs(value) < 3.4e38
+                if finite:
+                    ti.atomic_max(
+                        self._candidate_max_correction[None],
+                        ti.abs(value),
+                    )
+                else:
+                    ti.atomic_max(self._candidate_amplification_nonfinite[None], 1)
+
+    @ti.kernel
+    def _finalize_candidate_velocity_amplification_kernel(
+        self,
+        absolute_tolerance_mps: ti.f32,
+    ):
+        denominator = ti.max(self._initial_max_rhs[None], absolute_tolerance_mps)
+        amplification = self._candidate_max_correction[None] / denominator
+        finite = amplification == amplification and amplification < 3.4e38
+        if finite:
+            self._candidate_velocity_amplification[None] = amplification
+        else:
+            self._candidate_velocity_amplification[None] = 3.4e38
+            self._candidate_amplification_nonfinite[None] = 1
+
+    def _reject_unsafe_candidate_velocity_amplification(
+        self,
+        absolute_tolerance_mps: float,
+    ) -> None:
+        """Reject an affine-Q correction before it can reach physical velocity."""
+
+        self._measure_candidate_velocity_amplification_kernel()
+        self._finalize_candidate_velocity_amplification_kernel(
+            float(absolute_tolerance_mps)
+        )
+        self._initial_max_rhs_mps = float(self._initial_max_rhs[None])
+        self._candidate_max_correction_mps = float(
+            self._candidate_max_correction[None]
+        )
+        self._candidate_velocity_amplification_value = float(
+            self._candidate_velocity_amplification[None]
+        )
+        nonfinite = int(self._candidate_amplification_nonfinite[None]) != 0
+        amplification = self._candidate_velocity_amplification_value
+        if (
+            nonfinite
+            or not math.isfinite(amplification)
+            or amplification
+            > HIBM_MARKER_Q_MAX_SINGLE_ROW_VELOCITY_AMPLIFICATION
+        ):
+            self._phase = "failed"
+            self._converged = False
+            raise RuntimeError(
+                "marker MAC candidate velocity amplification exceeds cap before "
+                "velocity commit: "
+                f"initial_max_rhs_mps={self._initial_max_rhs_mps}, "
+                "candidate_max_correction_mps="
+                f"{self._candidate_max_correction_mps}, "
+                "candidate_velocity_amplification="
+                f"{self._candidate_velocity_amplification_value}, "
+                "cap="
+                f"{HIBM_MARKER_Q_MAX_SINGLE_ROW_VELOCITY_AMPLIFICATION}"
+            )
+
+    @ti.kernel
     def _commit_kernel(
         self,
         velocity: ti.template(),
@@ -1849,6 +2019,43 @@ class HibmMpmMarkerMacConstraintOperator:
         self._clear_grid_scratch_kernel(device_force_run)
         self._scatter_rows_to_grid_kernel(input_rows, device_force_run)
         self._gather_grid_to_rows_kernel(output_rows, device_force_run)
+
+    def _confirm_exact_pcg_residual(self, tolerance: float) -> float:
+        """Replace a recursive residual with ``rhs - A lambda`` and classify it."""
+
+        self._confirmed_candidate_materialized = False
+        confirmation_iteration = int(self._device_iterations[None])
+        recursive_residual = float(self._max_residual[None])
+        self._apply_matrix(
+            self._lambda,
+            self._matrix_direction,
+            force_run=True,
+        )
+        self._copy_grid_scratch_to_correction_kernel()
+        self._replace_pcg_residual_from_exact_candidate_kernel(tolerance)
+        self._exact_residual_confirmation_count += 1
+        exact_residual = float(self._max_residual[None])
+        self._confirmation_history = [
+            *self._confirmation_history,
+            {
+                "iteration": confirmation_iteration,
+                "recursive_residual_mps_before_refresh": (
+                    _finite_float_or_none(recursive_residual)
+                ),
+                "exact_residual_mps_after_refresh": _finite_float_or_none(
+                    exact_residual
+                ),
+                "exact_argmax_row": None,
+            },
+        ]
+        if (
+            int(self._failure_code[None]) == 0
+            and math.isfinite(exact_residual)
+            and exact_residual <= tolerance
+        ):
+            self._check_convergence_kernel(tolerance)
+            self._confirmed_candidate_materialized = True
+        return exact_residual
 
     def _clear_pressure_nullspace_lifecycle(self) -> None:
         """Invalidate owners/generations while retaining opt-in allocations."""
@@ -1880,6 +2087,10 @@ class HibmMpmMarkerMacConstraintOperator:
         self._iterations = 0
         self._absolute_tolerance_mps = math.nan
         self._max_residual_mps = math.inf
+        self._exact_residual_confirmation_count = 0
+        self._exact_residual_restart_count = 0
+        self._confirmation_history = []
+        self._confirmed_candidate_materialized = False
         self._prepared_ledger_generation = -1
         self._prepared_primary_region_id = -1
         self._prepared_secondary_region_id = -1
@@ -3022,6 +3233,9 @@ class HibmMpmMarkerMacConstraintOperator:
         self._iterations = 0
         self._absolute_tolerance_mps = math.nan
         self._max_residual_mps = math.inf
+        self._exact_residual_confirmation_count = 0
+        self._exact_residual_restart_count = 0
+        self._confirmed_candidate_materialized = False
         self._prepared_ledger_generation = int(
             fluid.velocity_dirichlet_component_ledger_generation
         )
@@ -3134,6 +3348,197 @@ class HibmMpmMarkerMacConstraintOperator:
             f"marker_position_m={position}, supports=[{supports}]"
         )
 
+    @staticmethod
+    def _max_abs_row_statistics(values, active_rows: list[int]) -> dict[str, object]:
+        max_abs: float | None = None
+        argmax_row: int | None = None
+        nonfinite_count = 0
+        for row in active_rows:
+            value = _finite_float_or_none(values[row])
+            if value is None:
+                nonfinite_count += 1
+                continue
+            magnitude = abs(value)
+            if max_abs is None or magnitude > max_abs:
+                max_abs = magnitude
+                argmax_row = row
+        return {
+            "max_abs": max_abs,
+            "argmax_row": argmax_row,
+            "nonfinite_count": nonfinite_count,
+        }
+
+    @staticmethod
+    def _diagonal_row_statistics(
+        diagonal,
+        active_rows: list[int],
+    ) -> dict[str, object]:
+        minimum: float | None = None
+        maximum: float | None = None
+        min_positive: float | None = None
+        argmin_row: int | None = None
+        argmax_row: int | None = None
+        argmin_positive_row: int | None = None
+        zero_or_tiny_count = 0
+        nonfinite_count = 0
+        for row in active_rows:
+            value = _finite_float_or_none(diagonal[row])
+            if value is None:
+                nonfinite_count += 1
+                continue
+            if minimum is None or value < minimum:
+                minimum = value
+                argmin_row = row
+            if maximum is None or value > maximum:
+                maximum = value
+                argmax_row = row
+            if value <= 1.0e-20:
+                zero_or_tiny_count += 1
+            elif min_positive is None or value < min_positive:
+                min_positive = value
+                argmin_positive_row = row
+        return {
+            "min": minimum,
+            "max": maximum,
+            "min_positive": min_positive,
+            "zero_or_tiny_count": zero_or_tiny_count,
+            "nonfinite_count": nonfinite_count,
+            "argmin_row": argmin_row,
+            "argmin_positive_row": argmin_positive_row,
+            "argmax_row": argmax_row,
+        }
+
+    def _max_iteration_failure_diagnostics(
+        self,
+        *,
+        max_iterations: int,
+        tolerance_mps: float,
+    ) -> dict[str, object]:
+        active = self._row_active.to_numpy()
+        pcg_active = self._row_pcg_active.to_numpy()
+        rhs = self._rhs.to_numpy()
+        diagonal = self._diagonal.to_numpy()
+        lambda_values = self._lambda.to_numpy()
+        residual = self._residual.to_numpy()
+        active_rows = [
+            row for row in range(self.constraint_capacity) if int(active[row]) != 0
+        ]
+        a_lambda = [math.nan] * self.constraint_capacity
+        for row in active_rows:
+            row_rhs = _finite_float_or_none(rhs[row])
+            row_residual = _finite_float_or_none(residual[row])
+            if row_rhs is not None and row_residual is not None:
+                a_lambda[row] = row_rhs - row_residual
+        row_statistics = {
+            "active_rows": list(active_rows),
+            "active_row_count": len(active_rows),
+            "pcg_active_row_count": sum(int(pcg_active[row]) != 0 for row in active_rows),
+            "diagonal": self._diagonal_row_statistics(diagonal, active_rows),
+            "rhs": self._max_abs_row_statistics(rhs, active_rows),
+            "lambda": self._max_abs_row_statistics(lambda_values, active_rows),
+            "a_lambda": self._max_abs_row_statistics(a_lambda, active_rows),
+            "residual": self._max_abs_row_statistics(residual, active_rows),
+        }
+        initial_max_rhs = row_statistics["rhs"]["max_abs"]
+
+        self._measure_candidate_velocity_amplification_kernel()
+        self._finalize_candidate_velocity_amplification_kernel(tolerance_mps)
+        candidate_nonfinite = int(self._candidate_amplification_nonfinite[None]) != 0
+        candidate_max_correction = _finite_float_or_none(
+            self._candidate_max_correction[None]
+        )
+        candidate_amplification = _finite_float_or_none(
+            self._candidate_velocity_amplification[None]
+        )
+        if candidate_nonfinite:
+            candidate_max_correction = None
+            candidate_amplification = None
+
+        residual_argmax_row = row_statistics["residual"]["argmax_row"]
+        argmax_row = None
+        if residual_argmax_row is not None:
+            row = int(residual_argmax_row)
+            marker = row // 3
+            axis_index = row % 3
+            axis_bit = 1 << axis_index
+            marker_positions = self._marker_position_snapshot_m.to_numpy()
+            marker_targets = self._marker_target_snapshot_mps.to_numpy()
+            marker_regions = self._marker_region_snapshot.to_numpy()
+            stencil_indices = self._stencil_index.to_numpy()
+            stencil_weights = self._stencil_weight.to_numpy()
+            stencil_free = self._stencil_free.to_numpy()
+            stencil_inverse_mass = self._stencil_inverse_mass_per_kg.to_numpy()
+            support_velocity = self._support_velocity_snapshot_mps.to_numpy()
+            support_valid = self._support_valid_mask_snapshot.to_numpy()
+            support_hard = self._support_hard_mask_snapshot.to_numpy()
+            support_external = self._support_external_mask_snapshot.to_numpy()
+            target = _finite_float_or_none(marker_targets[marker][axis_index])
+            row_rhs = _finite_float_or_none(rhs[row])
+            sampled = None if target is None or row_rhs is None else target - row_rhs
+            supports = [
+                {
+                    "slot": slot,
+                    "index": [int(value) for value in stencil_indices[row, slot]],
+                    "weight": _finite_float_or_none(stencil_weights[row, slot]),
+                    "free": bool(int(stencil_free[row, slot])),
+                    "inverse_mass_per_kg": _finite_float_or_none(
+                        stencil_inverse_mass[row, slot]
+                    ),
+                    "support_velocity_mps": _finite_float_or_none(
+                        support_velocity[row, slot]
+                    ),
+                    "valid": bool(int(support_valid[row, slot]) & axis_bit),
+                    "hard": bool(int(support_hard[row, slot]) & axis_bit),
+                    "external": bool(int(support_external[row, slot]) & axis_bit),
+                }
+                for slot in range(8)
+            ]
+            argmax_row = {
+                "row": row,
+                "marker": marker,
+                "axis": "xyz"[axis_index],
+                "region": int(marker_regions[marker]),
+                "position_m": [
+                    _finite_float_or_none(value) for value in marker_positions[marker]
+                ],
+                "target_mps": target,
+                "sampled_mps": sampled,
+                "rhs_mps": row_rhs,
+                "diagonal": _finite_float_or_none(diagonal[row]),
+                "lambda": _finite_float_or_none(lambda_values[row]),
+                "A_lambda": _finite_float_or_none(a_lambda[row]),
+                "residual_mps": _finite_float_or_none(residual[row]),
+                "supports": supports,
+            }
+
+        confirmation_history = list(map(dict, self._confirmation_history))
+        if confirmation_history:
+            confirmation_history[-1] = {
+                **confirmation_history[-1],
+                "exact_argmax_row": residual_argmax_row,
+            }
+        exact_residual = row_statistics["residual"]["max_abs"]
+        return {
+            "stage": "marker_mac_constraint_pcg",
+            "reason": "max_iterations_exhausted",
+            "iterations": int(self._iterations),
+            "max_iterations": int(max_iterations),
+            "absolute_tolerance_mps": float(tolerance_mps),
+            "exact_residual_mps": exact_residual,
+            "exact_residual_confirmation_count": int(
+                self._exact_residual_confirmation_count
+            ),
+            "exact_residual_restart_count": int(self._exact_residual_restart_count),
+            "active_marker_count": int(self._active_marker_count),
+            "constraint_count": int(self._constraint_count),
+            "initial_max_rhs_mps": initial_max_rhs,
+            "candidate_max_correction_mps": candidate_max_correction,
+            "candidate_velocity_amplification": candidate_amplification,
+            "confirmation_history": confirmation_history,
+            "row_statistics": row_statistics,
+            "argmax_row": argmax_row,
+        }
+
     def solve_device(
         self,
         *,
@@ -3167,6 +3572,13 @@ class HibmMpmMarkerMacConstraintOperator:
             obstacle_field=obstacle_field,
         )
         self._absolute_tolerance_mps = tolerance
+        self._initial_max_rhs_mps = math.nan
+        self._candidate_max_correction_mps = math.nan
+        self._candidate_velocity_amplification_value = math.nan
+        self._exact_residual_confirmation_count = 0
+        self._exact_residual_restart_count = 0
+        self._confirmation_history = []
+        self._confirmed_candidate_materialized = False
         self._initialize_pcg_kernel(tolerance)
         if int(self._failure_code[None]) == 3:
             self._phase = "failed"
@@ -3176,31 +3588,44 @@ class HibmMpmMarkerMacConstraintOperator:
             )
         self._check_convergence_kernel(tolerance)
         self._compute_initial_rz_kernel()
-        iteration_budget = (
-            0 if int(self._device_converged[None]) != 0 else iterations
-        )
+        if int(self._device_converged[None]) != 0:
+            self._confirm_exact_pcg_residual(tolerance)
         poll_interval = 8
-        for iteration_index in range(iteration_budget):
-            self._apply_matrix(
-                self._direction,
-                self._matrix_direction,
-                force_run=False,
+        while (
+            int(self._device_converged[None]) == 0
+            and int(self._failure_code[None]) == 0
+            and int(self._device_iterations[None]) < iterations
+        ):
+            completed_before_batch = int(self._device_iterations[None])
+            batch_iterations = min(
+                poll_interval,
+                iterations - completed_before_batch,
             )
-            self._compute_p_ap_kernel()
-            self._reset_iteration_residual_kernel()
-            self._pcg_step_device_kernel()
-            self._check_convergence_kernel(tolerance)
-            self._pcg_update_direction_device_kernel()
-            self._pcg_finish_direction_device_kernel()
-            completed_iterations = iteration_index + 1
-            if (
-                completed_iterations % poll_interval == 0
-                or completed_iterations == iteration_budget
-            ) and (
-                int(self._device_converged[None]) != 0
-                or int(self._failure_code[None]) != 0
-            ):
+            for _ in range(batch_iterations):
+                self._apply_matrix(
+                    self._direction,
+                    self._matrix_direction,
+                    force_run=False,
+                )
+                self._compute_p_ap_kernel()
+                self._reset_iteration_residual_kernel()
+                self._pcg_step_device_kernel()
+                self._check_convergence_kernel(tolerance)
+                self._pcg_update_direction_device_kernel()
+                self._pcg_finish_direction_device_kernel()
+            completed_after_batch = int(self._device_iterations[None])
+            recursive_converged = int(self._device_converged[None]) != 0
+            budget_exhausted = completed_after_batch >= iterations
+            if int(self._failure_code[None]) != 0:
                 break
+            if recursive_converged or budget_exhausted:
+                self._confirm_exact_pcg_residual(tolerance)
+                if (
+                    int(self._device_converged[None]) == 0
+                    and int(self._failure_code[None]) == 0
+                    and int(self._device_iterations[None]) < iterations
+                ):
+                    self._exact_residual_restart_count += 1
 
         failure_code = int(self._failure_code[None])
         self._converged = bool(int(self._device_converged[None]))
@@ -3209,17 +3634,43 @@ class HibmMpmMarkerMacConstraintOperator:
         if failure_code in (4, 5):
             self._phase = "failed"
             raise RuntimeError("unsatisfiable marker constraint PCG breakdown")
-        if not self._converged:
+        if failure_code == 10:
             self._phase = "failed"
             raise RuntimeError(
-                "marker MAC constraint PCG did not converge within max_iterations"
+                "marker MAC exact residual refresh produced a non-finite value"
             )
-        self._apply_matrix(
-            self._lambda,
-            self._matrix_direction,
-            force_run=True,
-        )
-        self._copy_grid_scratch_to_correction_kernel()
+        if failure_code == 7:
+            self._phase = "failed"
+            failure_row = int(self._exact_residual_inactive_failure_row[None])
+            raise RuntimeError(
+                "exact marker constraint residual exceeds tolerance on an active "
+                "row without free MAC mobility after residual refresh: "
+                f"row={failure_row}, tolerance_mps={tolerance}"
+            )
+        if not self._converged:
+            self._phase = "failed"
+            self._converged = False
+            message = (
+                "marker MAC constraint PCG did not converge within max_iterations: "
+                f"iterations={self._iterations}, max_iterations={iterations}, "
+                f"exact_residual_mps={self._max_residual_mps}, "
+                "exact_residual_confirmation_count="
+                f"{self._exact_residual_confirmation_count}, "
+                f"exact_residual_restart_count={self._exact_residual_restart_count}"
+            )
+            raise HibmMpmMarkerMacConvergenceError(
+                message,
+                diagnostics=self._max_iteration_failure_diagnostics(
+                    max_iterations=iterations,
+                    tolerance_mps=tolerance,
+                ),
+            )
+        if not self._confirmed_candidate_materialized:
+            self._phase = "failed"
+            self._converged = False
+            raise RuntimeError(
+                "marker MAC constraint converged without an exact materialized candidate"
+            )
         self._compute_true_candidate_residual_kernel()
         true_candidate_residual = float(
             self._true_candidate_max_residual[None]
@@ -3236,6 +3687,7 @@ class HibmMpmMarkerMacConstraintOperator:
                 "marker constraint tolerance after solve: "
                 f"{true_candidate_residual} > {tolerance}"
             )
+        self._reject_unsafe_candidate_velocity_amplification(tolerance)
         self._snapshot_solved_correction_kernel()
         self._phase = "solved"
 
@@ -3309,10 +3761,22 @@ class HibmMpmMarkerMacConstraintOperator:
             sample_identity_generation=int(
                 self._prepared_sampling_identity_generation
             ),
+            exact_residual_confirmation_count=int(
+                self._exact_residual_confirmation_count
+            ),
+            exact_residual_restart_count=int(self._exact_residual_restart_count),
+            initial_max_rhs_mps=float(self._initial_max_rhs_mps),
+            candidate_max_correction_mps=float(
+                self._candidate_max_correction_mps
+            ),
+            candidate_velocity_amplification=float(
+                self._candidate_velocity_amplification_value
+            ),
         )
 
 
 __all__ = [
+    "HibmMpmMarkerMacConvergenceError",
     "HibmMpmMarkerMacConstraintOperator",
     "HibmMpmMarkerMacConstraintReport",
 ]

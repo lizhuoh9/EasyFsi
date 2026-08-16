@@ -102,6 +102,15 @@ def _top_level_loop(function: ast.FunctionDef) -> ast.For:
     )
 
 
+def _solver_iteration_loop(function: ast.FunctionDef) -> ast.While:
+    for statement in function.body:
+        if isinstance(statement, ast.While) and _calls(statement, "_apply_matrix"):
+            return statement
+    raise AssertionError(
+        f"{function.name} must keep its actual-device-budgeted host loop"
+    )
+
+
 def _per_iteration_guard(function: ast.FunctionDef, loop: ast.For) -> ast.If:
     for statement in loop.body:
         if isinstance(statement, ast.If):
@@ -208,21 +217,13 @@ class MarkerMacPcgWorkElisionContracts(unittest.TestCase):
                 )
                 self.assertIsInstance(guard.test.op, ast.Or)
 
-    def test_iterative_apply_elides_but_final_lambda_apply_force_runs(self) -> None:
-        """The final lambda-to-correction transfer must survive convergence."""
+    def test_iterative_apply_elides_and_exact_confirmation_reuses_candidate(
+        self,
+    ) -> None:
+        """The exact candidate must be materialized once and reused after acceptance."""
 
         solve = _method("solve_device")
-        iteration_loop = next(
-            (
-                statement
-                for statement in solve.body
-                if isinstance(statement, ast.For)
-                and _calls(statement, "_apply_matrix")
-            ),
-            None,
-        )
-        self.assertIsNotNone(iteration_loop, "solve_device lost its fixed host loop")
-        assert iteration_loop is not None
+        iteration_loop = _solver_iteration_loop(solve)
         iterative_calls = _calls(iteration_loop, "_apply_matrix")
         self.assertEqual(len(iterative_calls), 1)
         self.assertTrue(
@@ -244,33 +245,43 @@ class MarkerMacPcgWorkElisionContracts(unittest.TestCase):
             ):
                 final_calls.append(call)
         self.assertEqual(
-            len(final_calls),
-            1,
-            "solve_device must have exactly one final lambda matrix apply",
+            final_calls,
+            [],
+            "solve_device must not rematerialize lambda after exact acceptance",
         )
-        final_call = final_calls[0]
-        self.assertGreater(final_call.lineno, iteration_loop.end_lineno)
+
+        confirmation = _method("_confirm_exact_pcg_residual")
+        confirmation_calls = _calls(confirmation, "_apply_matrix")
+        self.assertEqual(len(confirmation_calls), 1)
         self.assertTrue(
-            _is_bool_literal(_keyword_value(final_call, "force_run"), True),
-            "lambda-to-correction apply must execute even after device convergence",
+            _is_bool_literal(
+                _keyword_value(confirmation_calls[0], "force_run"),
+                True,
+            ),
+            "exact confirmation must force materialization after recursive convergence",
+        )
+        self.assertEqual(
+            len(_calls(confirmation, "_copy_grid_scratch_to_correction_kernel")),
+            1,
+            "the candidate being confirmed must be the pending correction",
+        )
+        self.assertEqual(
+            len(_calls(solve, "_compute_true_candidate_residual_kernel")),
+            1,
+            "final validation must remeasure the accepted candidate without rebuilding it",
         )
 
     def test_host_loop_polls_terminal_state_in_bounded_batches(self) -> None:
         """A converged solve must not dispatch the full configured iteration budget."""
 
         solve = _method("solve_device")
-        iteration_loop = next(
-            statement
-            for statement in solve.body
-            if isinstance(statement, ast.For)
-            and _calls(statement, "_apply_matrix")
-        )
+        iteration_loop = _solver_iteration_loop(solve)
         convergence_reads = _self_field_subscripts(
-            iteration_loop,
+            iteration_loop.test,
             "_device_converged",
         )
         failure_reads = _self_field_subscripts(
-            iteration_loop,
+            iteration_loop.test,
             "_failure_code",
         )
         self.assertGreaterEqual(
@@ -283,18 +294,61 @@ class MarkerMacPcgWorkElisionContracts(unittest.TestCase):
             1,
             "the host loop must stop promptly after a device-side breakdown",
         )
-        terminal_breaks = [
+        actual_iteration_reads = _self_field_subscripts(
+            iteration_loop,
+            "_device_iterations",
+        )
+        self.assertGreaterEqual(
+            len(actual_iteration_reads),
+            3,
+            "batch dispatch and remaining budget must use actual device iterations",
+        )
+        exact_confirmation_branches = [
             candidate
             for candidate in ast.walk(iteration_loop)
             if isinstance(candidate, ast.If)
-            and _self_field_subscripts(candidate.test, "_device_converged")
-            and _self_field_subscripts(candidate.test, "_failure_code")
-            and any(isinstance(statement, ast.Break) for statement in candidate.body)
+            and _calls(candidate, "_confirm_exact_pcg_residual")
         ]
         self.assertEqual(
-            len(terminal_breaks),
+            len(exact_confirmation_branches),
             1,
-            "one bounded polling branch must stop converged or failed PCG work",
+            "recursive convergence or budget exhaustion must trigger one exact check",
+        )
+
+    def test_recursive_convergence_is_replaced_by_exact_residual_restart(self) -> None:
+        """A recursive stop is provisional until ``rhs - A lambda`` is rebuilt."""
+
+        replacement = _method("_replace_pcg_residual_from_exact_candidate_kernel")
+        replacement_attributes = _attribute_names(replacement)
+        for required in (
+            "_rhs",
+            "_correction",
+            "_stencil_free",
+            "_stencil_index",
+            "_stencil_weight",
+            "_residual",
+            "_preconditioned",
+            "_direction",
+            "_rz_old",
+            "_device_converged",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, replacement_attributes)
+
+        confirmation = _method("_confirm_exact_pcg_residual")
+        matrix_calls = _calls(confirmation, "_apply_matrix")
+        self.assertEqual(len(matrix_calls), 1)
+        self.assertTrue(
+            _is_bool_literal(_keyword_value(matrix_calls[0], "force_run"), True)
+        )
+        self.assertEqual(
+            len(
+                _calls(
+                    confirmation,
+                    "_replace_pcg_residual_from_exact_candidate_kernel",
+                )
+            ),
+            1,
         )
 
     def test_zero_mobility_and_breakdown_remain_fail_closed(self) -> None:
@@ -308,12 +362,7 @@ class MarkerMacPcgWorkElisionContracts(unittest.TestCase):
         self.assertIn(5, _failure_codes_written(finish_direction))
 
         solve = _method("solve_device")
-        iteration_loop = next(
-            statement
-            for statement in solve.body
-            if isinstance(statement, ast.For)
-            and _calls(statement, "_apply_matrix")
-        )
+        iteration_loop = _solver_iteration_loop(solve)
         messages = _raise_messages(solve)
         zero_mobility_raises = [
             line

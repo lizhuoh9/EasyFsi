@@ -11,6 +11,9 @@ import numpy as np
 import taichi as ti
 
 from simulation_core import CartesianFluidSolver, FluidDomainSpec, TaichiRuntimeConfig
+from simulation_core.coupling.pressure_interface import (
+    CanonicalVelocityBoundaryTopologyIncompatibilityError,
+)
 from simulation_core.fluids import (
     HIBM_PRESSURE_COMPONENT_CAPACITY,
     CartesianGrid,
@@ -3239,16 +3242,31 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
             fail_if_recomputed,
             solver,
         )
+        conversion_calls = 0
+
+        def fail_if_converted(_self, **_kwargs: object) -> int:
+            nonlocal conversion_calls
+            conversion_calls += 1
+            raise AssertionError(
+                "prepared reachability must not trigger orphan conversion"
+            )
+
+        solver.convert_hibm_row_cloud_orphan_components = MethodType(
+            fail_if_converted,
+            solver,
+        )
 
         report = solver.project(
             iterations=1,
             pressure_outlet_zmin=True,
             pressure_solver="fv_cg",
             hibm_pressure_reachability_prepared=True,
+            hibm_tiny_unreached_cleanup_component_cells=1,
             read_report=False,
         )
 
         self.assertEqual(mark_calls, 0)
+        self.assertEqual(conversion_calls, 0)
         self.assertEqual(report, {})
 
     def test_fv_cg_interface_coupling_enters_operator_symmetrically(self) -> None:
@@ -4535,6 +4553,126 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         obstacle_after = solver.obstacle.to_numpy()
         self.assertTrue(all(int(obstacle_after[cell]) == 1 for cell in tiny_cells))
         self.assertTrue(all(int(obstacle_after[cell]) == 0 for cell in large_cells))
+
+    def test_canonical_tiny_unreached_cleanup_rejection_restores_device_state(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(9, 4, 9), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.ones((9, 4, 9), dtype=np.int32)
+        obstacle[:, :, 0] = 0
+        tiny_cells = ((2, 2, 4), (2, 2, 5))
+        large_cells = tuple((6, 2, k) for k in range(2, 7))
+        for cell in tiny_cells + large_cells:
+            obstacle[cell] = 0
+        solver.obstacle.from_numpy(obstacle)
+        solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+            pressure_outlet_zmin=True,
+        )
+        solver.velocity_dirichlet_boundary_authority = "canonical"
+
+        velocity = np.zeros((9, 4, 9, 3), dtype=np.float32)
+        velocity_prev = np.zeros_like(velocity)
+        volume_source = np.zeros((9, 4, 9), dtype=np.float32)
+        divergence = np.zeros_like(volume_source)
+        for index, cell in enumerate(tiny_cells, start=1):
+            velocity[cell] = (index, -2.0 * index, 3.0 * index)
+            velocity_prev[cell] = (-4.0 * index, 5.0 * index, -6.0 * index)
+            volume_source[cell] = 7.0 * index
+            divergence[cell] = -8.0 * index
+        solver.velocity.from_numpy(velocity)
+        solver.velocity_prev.from_numpy(velocity_prev)
+        solver.volume_source_s.from_numpy(volume_source)
+        solver.divergence.from_numpy(divergence)
+        before = {
+            "obstacle": solver.obstacle.to_numpy(),
+            "velocity": solver.velocity.to_numpy(),
+            "velocity_prev": solver.velocity_prev.to_numpy(),
+            "volume_source": solver.volume_source_s.to_numpy(),
+            "divergence": solver.divergence.to_numpy(),
+        }
+        callback_calls = 0
+
+        def rebuild_canonical_ledger() -> None:
+            nonlocal callback_calls
+            callback_calls += 1
+            obstacle_now = solver.obstacle.to_numpy()
+            velocity_now = solver.velocity.to_numpy()
+            if callback_calls == 1:
+                self.assertTrue(all(int(obstacle_now[cell]) == 1 for cell in tiny_cells))
+                self.assertTrue(
+                    all(np.array_equal(velocity_now[cell], (0.0, 0.0, 0.0)) for cell in tiny_cells)
+                )
+                raise CanonicalVelocityBoundaryTopologyIncompatibilityError(
+                    "synthetic canonical rejection",
+                    reason_code="test_rejection",
+                    count=len(tiny_cells),
+                    diagnostics={"component_count": 1},
+                )
+            self.assertEqual(callback_calls, 2)
+            self.assertTrue(all(int(obstacle_now[cell]) == 0 for cell in tiny_cells))
+            self.assertTrue(
+                all(
+                    np.array_equal(velocity_now[cell], before["velocity"][cell])
+                    for cell in tiny_cells
+                )
+            )
+            generation = int(solver.velocity_dirichlet_component_ledger_generation)
+            solver._velocity_dirichlet_component_ledger_consumer_generations = {
+                consumer: generation
+                for consumer in solver._VELOCITY_DIRICHLET_COMPONENT_LEDGER_CONSUMERS
+            }
+            solver._velocity_dirichlet_component_ledger_consumer_capabilities = dict(
+                solver._VELOCITY_DIRICHLET_COMPONENT_LEDGER_CONSUMER_CAPABILITIES
+            )
+            solver.velocity_dirichlet_component_ledger_sealed = True
+
+        report = solver.cleanup_hibm_pressure_outlet_tiny_unreached_components(
+            max_component_cells=4,
+            reachability_is_current=True,
+            after_topology_mutation=rebuild_canonical_ledger,
+        )
+
+        self.assertEqual(callback_calls, 2)
+        self.assertEqual(
+            int(report["hibm_preassembly_tiny_unreached_cleanup_cell_count"]),
+            0,
+        )
+        self.assertEqual(
+            int(report["hibm_preassembly_tiny_unreached_cleanup_pass_count"]),
+            0,
+        )
+        self.assertEqual(
+            int(report["hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count"]),
+            len(tiny_cells),
+        )
+        self.assertEqual(
+            int(report["hibm_preassembly_tiny_unreached_cleanup_rejected_component_count"]),
+            1,
+        )
+        self.assertEqual(
+            int(
+                report[
+                    "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count"
+                ]
+            ),
+            1,
+        )
+        self.assertEqual(
+            int(report["hibm_preassembly_remaining_unreached_cell_count"]),
+            len(tiny_cells) + len(large_cells),
+        )
+        for name, before_values in before.items():
+            field = {
+                "obstacle": solver.obstacle,
+                "velocity": solver.velocity,
+                "velocity_prev": solver.velocity_prev,
+                "volume_source": solver.volume_source_s,
+                "divergence": solver.divergence,
+            }[name]
+            np.testing.assert_array_equal(field.to_numpy(), before_values)
 
     def test_fv_cg_reports_unreached_component_label_overflow_as_physical_failure(
         self,

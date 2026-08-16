@@ -118,8 +118,11 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
                 self.last_hibm_reachability_valid = False
                 self.last_hibm_pressure_unreached_cell_count = 0
                 self.last_hibm_row_cloud_orphan_component_count = 0
+                self.last_hibm_row_cloud_orphan_rejected_cell_count = 0
+                self.last_hibm_row_cloud_orphan_rejected_component_count = 0
                 self.reachability_mark_count = 0
                 self.row_cloud_cleanup_count = 0
+                self.tiny_cleanup_count = 0
                 self.velocity_component_ledger_current = False
 
             def _invalidate_velocity_dirichlet_component_ledger(self) -> None:
@@ -149,9 +152,19 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
                 self, **_kwargs: object
             ) -> int:
                 self.row_cloud_cleanup_count += 1
+                self.last_hibm_row_cloud_orphan_rejected_cell_count = 0
+                self.last_hibm_row_cloud_orphan_rejected_component_count = 0
                 if self.row_cloud_cleanup_count == 1:
                     self.velocity_component_ledger_current = False
                     self.last_hibm_row_cloud_orphan_component_count = 1
+                    after_topology_mutation = _kwargs.get(
+                        "after_topology_mutation"
+                    )
+                    if not callable(after_topology_mutation):
+                        raise RuntimeError(
+                            "committed cleanup requires a topology callback"
+                        )
+                    after_topology_mutation()
                     return 1
                 self.last_hibm_row_cloud_orphan_component_count = 0
                 return 0
@@ -159,11 +172,61 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
             def cleanup_hibm_pressure_outlet_tiny_unreached_components(
                 self, **_kwargs: object
             ) -> dict[str, int]:
+                self.tiny_cleanup_count += 1
                 return {
                     "hibm_preassembly_tiny_unreached_cleanup_cell_count": 0,
                     "hibm_preassembly_tiny_unreached_cleanup_component_count": 0,
                     "hibm_preassembly_tiny_unreached_cleanup_pass_count": 0,
+                    (
+                        "hibm_preassembly_tiny_unreached_cleanup_"
+                        "rejected_cell_count"
+                    ): 0,
+                    (
+                        "hibm_preassembly_tiny_unreached_cleanup_"
+                        "rejected_component_count"
+                    ): 0,
+                    (
+                        "hibm_preassembly_tiny_unreached_cleanup_"
+                        "rejected_transaction_count"
+                    ): 0,
                 }
+
+        class _RejectedDynamicCleanupFluid(_FakeFluid):
+            def __init__(self) -> None:
+                super().__init__()
+                self.rejected_callback_seen = False
+
+            def mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                self, **_kwargs: object
+            ) -> int:
+                if not self.velocity_component_ledger_current:
+                    raise RuntimeError(
+                        "reachability reflood preceded component-ledger rebuild"
+                    )
+                self.reachability_mark_count += 1
+                self.last_hibm_reachability_valid = True
+                self.last_hibm_pressure_unreached_cell_count = 7
+                return 7
+
+            def convert_hibm_row_cloud_orphan_components(
+                self, **_kwargs: object
+            ) -> int:
+                self.row_cloud_cleanup_count += 1
+                self.last_hibm_row_cloud_orphan_component_count = 0
+                self.last_hibm_row_cloud_orphan_rejected_cell_count = 2
+                self.last_hibm_row_cloud_orphan_rejected_component_count = 1
+                self.rejected_callback_seen = callable(
+                    _kwargs.get("after_topology_mutation")
+                )
+                return 0
+
+            def cleanup_hibm_pressure_outlet_tiny_unreached_components(
+                self, **_kwargs: object
+            ) -> dict[str, int]:
+                self.tiny_cleanup_count += 1
+                raise AssertionError(
+                    "tiny cleanup must not retry a rejected overflow transaction"
+                )
 
         config = SimpleNamespace(
             flow_solid_boundary_mode="hibm_sharp_marker_rows",
@@ -253,11 +316,34 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
                 reuse_topology_from_previous_assembly=True,
             )
 
+            reused_fluid = fluid
+            reused_assembled_component_ledgers = tuple(
+                assembled_component_ledgers
+            )
+            dynamic_config = SimpleNamespace(
+                **{
+                    **vars(config),
+                    "flow_hibm_dynamic_solid_volume_enabled": True,
+                    "flow_hibm_tiny_unreached_cleanup_component_cells": 128,
+                }
+            )
+            fluid = _RejectedDynamicCleanupFluid()
+            rejected_dynamic_report = (
+                solid_mpm_fsi_runner._apply_hibm_sharp_marker_boundary_to_fluid(
+                    markers,
+                    fluid,
+                    dynamic_config,
+                    update_pressure_gradient=False,
+                    boundary_cache={},
+                )
+            )
+            rejected_dynamic_fluid = fluid
+
         self.assertTrue(report["hibm_sharp_marker_boundary_topology_reused"])
         self.assertTrue(report["hibm_preassembly_cleanup_reused"])
         self.assertFalse(report["hibm_preassembly_topology_mutated"])
         self.assertEqual(
-            fluid.row_cloud_cleanup_count,
+            reused_fluid.row_cloud_cleanup_count,
             first_cleanup_call_count,
         )
         solid_mpm_fsi_runner._require_velocity_only_topology_reuse(
@@ -268,24 +354,38 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
             report["hibm_preassembly_overflow_singleton_cleanup_cell_count"],
             1,
         )
-        self.assertTrue(assembled_component_ledgers)
+        self.assertTrue(reused_assembled_component_ledgers)
         self.assertTrue(
             all(
                 hard
-                is fluid.velocity_dirichlet_boundary_hard_fixed_component_mask
+                is (
+                    reused_fluid
+                    .velocity_dirichlet_boundary_hard_fixed_component_mask
+                )
                 and owned
-                is fluid.velocity_dirichlet_boundary_owned_component_mask
+                is (
+                    reused_fluid.velocity_dirichlet_boundary_owned_component_mask
+                )
                 and enforcement
-                is fluid.velocity_dirichlet_boundary_component_enforcement_weight
+                is (
+                    reused_fluid
+                    .velocity_dirichlet_boundary_component_enforcement_weight
+                )
                 and external_exact
-                is fluid.velocity_dirichlet_boundary_external_exact_component_mask
+                is (
+                    reused_fluid
+                    .velocity_dirichlet_boundary_external_exact_component_mask
+                )
                 for hard, owned, enforcement, external_exact in (
-                    assembled_component_ledgers
+                    reused_assembled_component_ledgers
                 )
             )
         )
-        self.assertGreater(fluid.reachability_mark_count, first_mark_count)
-        self.assertTrue(fluid.last_hibm_reachability_valid)
+        self.assertGreater(
+            reused_fluid.reachability_mark_count,
+            first_mark_count,
+        )
+        self.assertTrue(reused_fluid.last_hibm_reachability_valid)
         self.assertEqual(
             report["canonical_velocity_dirichlet_report"][
                 "final_active_storage_row_count"
@@ -294,6 +394,49 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
         )
         self.assertTrue(report["hibm_velocity_dirichlet_authority_registered"])
         self.assertTrue(report["hibm_velocity_dirichlet_authority_sealed"])
+
+        self.assertTrue(rejected_dynamic_fluid.rejected_callback_seen)
+        self.assertEqual(rejected_dynamic_fluid.tiny_cleanup_count, 0)
+        self.assertEqual(rejected_dynamic_fluid.reachability_mark_count, 2)
+        self.assertEqual(
+            rejected_dynamic_report[
+                "hibm_preassembly_overflow_singleton_cleanup_cell_count"
+            ],
+            0,
+        )
+        self.assertEqual(
+            rejected_dynamic_report[
+                "hibm_preassembly_overflow_singleton_cleanup_component_count"
+            ],
+            0,
+        )
+        self.assertEqual(
+            rejected_dynamic_report[
+                "hibm_preassembly_overflow_singleton_cleanup_rejected_cell_count"
+            ],
+            2,
+        )
+        self.assertEqual(
+            rejected_dynamic_report[
+                "hibm_preassembly_overflow_singleton_cleanup_rejected_component_count"
+            ],
+            1,
+        )
+        self.assertEqual(
+            rejected_dynamic_report[
+                "hibm_preassembly_tiny_unreached_cleanup_cell_count"
+            ],
+            0,
+        )
+        self.assertEqual(
+            rejected_dynamic_report[
+                "hibm_preassembly_remaining_unreached_cell_count"
+            ],
+            7,
+        )
+        self.assertFalse(
+            rejected_dynamic_report["hibm_preassembly_topology_mutated"]
+        )
 
 
 if __name__ == "__main__":

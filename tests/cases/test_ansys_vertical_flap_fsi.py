@@ -1024,13 +1024,21 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             "refresh_pressure_reachability()",
             cleanup_loop,
         )
-        rebuild_call = boundary_source.index(
-            "rebuild_velocity_rows_after_topology_mutation()",
+        overflow_conversion = boundary_source.index(
+            "fluid.convert_hibm_row_cloud_orphan_components(",
             reachability_call,
+        )
+        transactional_rebuild_callback = boundary_source.index(
+            "after_topology_mutation=(",
+            overflow_conversion,
+        )
+        overflow_rejection_guard = boundary_source.index(
+            "if overflow_rejected_cell_count > 0:",
+            transactional_rebuild_callback,
         )
         cleanup = boundary_source.index(
             "cleanup_hibm_pressure_outlet_tiny_unreached_components",
-            rebuild_call,
+            overflow_rejection_guard,
         )
         pressure_rows = boundary_source.index(
             "assemble_pressure_neumann_matrix_rows"
@@ -1040,8 +1048,16 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertLess(reachability, rebuild_helper)
         self.assertLess(rebuild_helper, cleanup_loop)
         self.assertLess(cleanup_loop, reachability_call)
-        self.assertLess(reachability_call, rebuild_call)
-        self.assertLess(rebuild_call, cleanup)
+        self.assertLess(reachability_call, overflow_conversion)
+        self.assertLess(overflow_conversion, transactional_rebuild_callback)
+        self.assertLess(transactional_rebuild_callback, overflow_rejection_guard)
+        self.assertLess(overflow_rejection_guard, cleanup)
+        self.assertIn(
+            '"hibm_preassembly_tiny_unreached_cleanup_cell_count": 0',
+            boundary_source[
+                overflow_rejection_guard:cleanup
+            ],
+        )
         self.assertLess(cleanup, pressure_rows)
         self.assertIn("reuse_topology_from_previous_assembly=True", advance_source)
 

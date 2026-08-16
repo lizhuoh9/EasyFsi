@@ -1185,6 +1185,16 @@ def prepare_rectangular_solid_marker_mpm_fsi_runtime(
                         "hibm_preassembly_overflow_singleton_cleanup_component_count"
                     ]
                 ),
+                "hibm_preassembly_overflow_singleton_cleanup_rejected_cell_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_overflow_singleton_cleanup_rejected_cell_count"
+                    ]
+                ),
+                "hibm_preassembly_overflow_singleton_cleanup_rejected_component_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_overflow_singleton_cleanup_rejected_component_count"
+                    ]
+                ),
                 "hibm_preassembly_tiny_unreached_cleanup_cell_count": (
                     latest_flow_report[
                         "hibm_preassembly_tiny_unreached_cleanup_cell_count"
@@ -1198,6 +1208,21 @@ def prepare_rectangular_solid_marker_mpm_fsi_runtime(
                 "hibm_preassembly_tiny_unreached_cleanup_pass_count": (
                     latest_flow_report[
                         "hibm_preassembly_tiny_unreached_cleanup_pass_count"
+                    ]
+                ),
+                "hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count"
+                    ]
+                ),
+                "hibm_preassembly_tiny_unreached_cleanup_rejected_component_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_tiny_unreached_cleanup_rejected_component_count"
+                    ]
+                ),
+                "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count"
                     ]
                 ),
                 "hibm_preassembly_remaining_unreached_cell_count": (
@@ -5269,7 +5294,7 @@ def _canonical_marker_target_closure_health_failure(
             "canonical marker-target closure count is negative: "
             f"{negative_counts[0]}"
         )
-    if counts["solve_count"] not in (0, 1):
+    if counts["solve_count"] not in (0, 1, 2):
         return (
             "canonical marker-target closure solve count is invalid: "
             f"{counts['solve_count']}"
@@ -5278,7 +5303,7 @@ def _canonical_marker_target_closure_health_failure(
         counts["matrix_rank"] != 0 or counts["adjustable_dof_count"] != 0
     ):
         return "canonical marker-target closure unsolved rank diagnostics are nonzero"
-    if counts["solve_count"] == 1 and (
+    if counts["solve_count"] > 0 and (
         counts["matrix_rank"] <= 0
         or counts["adjustable_dof_count"] <= 0
         or counts["matrix_rank"]
@@ -6758,9 +6783,14 @@ def _empty_hibm_sharp_marker_boundary_report() -> dict[str, object]:
         ),
         "hibm_preassembly_overflow_singleton_cleanup_cell_count": 0,
         "hibm_preassembly_overflow_singleton_cleanup_component_count": 0,
+        "hibm_preassembly_overflow_singleton_cleanup_rejected_cell_count": 0,
+        "hibm_preassembly_overflow_singleton_cleanup_rejected_component_count": 0,
         "hibm_preassembly_tiny_unreached_cleanup_cell_count": 0,
         "hibm_preassembly_tiny_unreached_cleanup_component_count": 0,
         "hibm_preassembly_tiny_unreached_cleanup_pass_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_rejected_component_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count": 0,
         "hibm_preassembly_remaining_unreached_cell_count": 0,
         "hibm_preassembly_cleanup_reused": False,
         "hibm_preassembly_topology_mutated": False,
@@ -7211,9 +7241,14 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
     cleanup_report = {
         "hibm_preassembly_overflow_singleton_cleanup_cell_count": 0,
         "hibm_preassembly_overflow_singleton_cleanup_component_count": 0,
+        "hibm_preassembly_overflow_singleton_cleanup_rejected_cell_count": 0,
+        "hibm_preassembly_overflow_singleton_cleanup_rejected_component_count": 0,
         "hibm_preassembly_tiny_unreached_cleanup_cell_count": 0,
         "hibm_preassembly_tiny_unreached_cleanup_component_count": 0,
         "hibm_preassembly_tiny_unreached_cleanup_pass_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_rejected_component_count": 0,
+        "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count": 0,
         "hibm_preassembly_remaining_unreached_cell_count": 0,
         "hibm_preassembly_cleanup_reused": False,
         "hibm_preassembly_topology_mutated": False,
@@ -7277,34 +7312,78 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
                     max_component_cells=1,
                     overflow_singletons_only=True,
                     protect_velocity_dirichlet_radius_cells=2,
-                )
-            )
-            overflow_component_count = 0
-            if int(converted_overflow_singletons) > 0:
-                overflow_component_count = int(
-                    fluid.last_hibm_row_cloud_orphan_component_count
-                )
-                rebuild_velocity_rows_after_topology_mutation()
-                refresh_pressure_reachability()
-            tiny_cleanup_report = (
-                fluid.cleanup_hibm_pressure_outlet_tiny_unreached_components(
-                    max_component_cells=tiny_cleanup_threshold,
-                    reachability_is_current=True,
                     after_topology_mutation=(
                         rebuild_velocity_rows_after_topology_mutation
                     ),
                 )
             )
+            overflow_component_count = 0
+            overflow_rejected_cell_count = int(
+                getattr(
+                    fluid,
+                    "last_hibm_row_cloud_orphan_rejected_cell_count",
+                    0,
+                )
+            )
+            overflow_rejected_component_count = int(
+                getattr(
+                    fluid,
+                    "last_hibm_row_cloud_orphan_rejected_component_count",
+                    0,
+                )
+            )
+            if int(converted_overflow_singletons) > 0:
+                overflow_component_count = int(
+                    fluid.last_hibm_row_cloud_orphan_component_count
+                )
+                refresh_pressure_reachability()
+            elif overflow_rejected_cell_count > 0:
+                # The transaction already restored and rebuilt the original
+                # canonical ledger.  Refresh reachability on that restored
+                # topology, then stop this cleanup pass: the broader tiny
+                # selector must not immediately retry the same rejected cell.
+                refresh_pressure_reachability()
+            if overflow_rejected_cell_count > 0:
+                tiny_cleanup_report = {
+                    "hibm_preassembly_tiny_unreached_cleanup_cell_count": 0,
+                    "hibm_preassembly_tiny_unreached_cleanup_component_count": 0,
+                    "hibm_preassembly_tiny_unreached_cleanup_pass_count": 0,
+                    "hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count": 0,
+                    "hibm_preassembly_tiny_unreached_cleanup_rejected_component_count": 0,
+                    "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count": 0,
+                    "hibm_preassembly_remaining_unreached_cell_count": int(
+                        fluid.last_hibm_pressure_unreached_cell_count
+                    ),
+                }
+            else:
+                tiny_cleanup_report = (
+                    fluid.cleanup_hibm_pressure_outlet_tiny_unreached_components(
+                        max_component_cells=tiny_cleanup_threshold,
+                        reachability_is_current=True,
+                        after_topology_mutation=(
+                            rebuild_velocity_rows_after_topology_mutation
+                        ),
+                    )
+                )
             cleanup_report[
                 "hibm_preassembly_overflow_singleton_cleanup_cell_count"
             ] += int(converted_overflow_singletons)
             cleanup_report[
                 "hibm_preassembly_overflow_singleton_cleanup_component_count"
             ] += int(overflow_component_count)
+            cleanup_report[
+                "hibm_preassembly_overflow_singleton_cleanup_rejected_cell_count"
+            ] += int(overflow_rejected_cell_count)
+            cleanup_report[
+                "hibm_preassembly_overflow_singleton_cleanup_rejected_component_count"
+            ] += int(overflow_rejected_component_count)
             for key in (
                 "hibm_preassembly_tiny_unreached_cleanup_cell_count",
                 "hibm_preassembly_tiny_unreached_cleanup_component_count",
                 "hibm_preassembly_tiny_unreached_cleanup_pass_count",
+                "hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count",
+                "hibm_preassembly_tiny_unreached_cleanup_rejected_component_count",
+                "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count",
             ):
                 cleanup_report[key] += int(tiny_cleanup_report[key])
             topology_mutated_this_pass = bool(
@@ -10400,6 +10479,16 @@ def _run_fixed_solid_preflow(
                     "hibm_preassembly_overflow_singleton_cleanup_component_count"
                 ]
             ),
+            "hibm_preassembly_overflow_singleton_cleanup_rejected_cell_count": (
+                flow_report[
+                    "hibm_preassembly_overflow_singleton_cleanup_rejected_cell_count"
+                ]
+            ),
+            "hibm_preassembly_overflow_singleton_cleanup_rejected_component_count": (
+                flow_report[
+                    "hibm_preassembly_overflow_singleton_cleanup_rejected_component_count"
+                ]
+            ),
             "hibm_preassembly_tiny_unreached_cleanup_cell_count": flow_report[
                 "hibm_preassembly_tiny_unreached_cleanup_cell_count"
             ],
@@ -10409,6 +10498,19 @@ def _run_fixed_solid_preflow(
             "hibm_preassembly_tiny_unreached_cleanup_pass_count": flow_report[
                 "hibm_preassembly_tiny_unreached_cleanup_pass_count"
             ],
+            "hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count": flow_report[
+                "hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count"
+            ],
+            "hibm_preassembly_tiny_unreached_cleanup_rejected_component_count": (
+                flow_report[
+                    "hibm_preassembly_tiny_unreached_cleanup_rejected_component_count"
+                ]
+            ),
+            "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count": (
+                flow_report[
+                    "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count"
+                ]
+            ),
             "hibm_preassembly_remaining_unreached_cell_count": flow_report[
                 "hibm_preassembly_remaining_unreached_cell_count"
             ],

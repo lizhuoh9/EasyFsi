@@ -30,6 +30,7 @@ from simulation_core.fluids.reports import (
 )
 from simulation_core.fluids.spec import FluidDomainSpec
 from simulation_core.coupling.pressure_interface import (
+    CanonicalVelocityBoundaryTopologyIncompatibilityError,
     PRESSURE_INTERFACE_COUPLING_EXTRA_SLOTS,
     PRESSURE_INTERFACE_COUPLING_SLOT_COUNT,
 )
@@ -1343,6 +1344,18 @@ class CartesianFluidSolver:
             dtype=ti.i32,
             shape=HIBM_PRESSURE_COMPONENT_CAPACITY,
         )
+        # Transaction scratch for tentative tiny-component closure.  Only the
+        # currently selected cells are touched, so a rejected canonical-ledger
+        # rebuild can restore the pre-mutation obstacle/velocity state exactly.
+        self.hibm_row_cloud_cleanup_candidate = ti.field(
+            dtype=ti.i32,
+            shape=shape,
+        )
+        self.hibm_row_cloud_cleanup_saved_velocity = ti.Vector.field(
+            3,
+            dtype=ti.f32,
+            shape=shape,
+        )
         self.report_hibm_row_cloud_orphan_cells = ti.field(dtype=ti.i32, shape=())
         self.report_hibm_row_cloud_orphan_components = ti.field(
             dtype=ti.i32,
@@ -2093,6 +2106,9 @@ class CartesianFluidSolver:
         self.last_hibm_air_backed_cell_volume_m3 = -1.0
         self.last_hibm_row_cloud_orphan_cell_count = 0
         self.last_hibm_row_cloud_orphan_component_count = 0
+        self.last_hibm_row_cloud_orphan_rejected_cell_count = 0
+        self.last_hibm_row_cloud_orphan_rejected_component_count = 0
+        self.last_hibm_row_cloud_orphan_cleanup_transaction_rejected = False
         self.last_unreached_divergence_raw_stats = {
             "max_abs": 0.0,
             "l2": 0.0,
@@ -2185,6 +2201,10 @@ class CartesianFluidSolver:
         for i, j, k in self.velocity:
             self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            self.hibm_row_cloud_cleanup_candidate[i, j, k] = 0
+            self.hibm_row_cloud_cleanup_saved_velocity[i, j, k] = ti.Vector(
+                [0.0, 0.0, 0.0]
+            )
             self.velocity_transport_base[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.saved_velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.saved_velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
@@ -4920,6 +4940,7 @@ class CartesianFluidSolver:
                 if label >= -HIBM_PRESSURE_COMPONENT_CAPACITY and label <= -1:
                     component = -label - 1
                     if self.hibm_row_cloud_component_selected[component] != 0:
+                        self.hibm_row_cloud_cleanup_candidate[i, j, k] = 1
                         if ti.static(commit_obstacle != 0):
                             self._convert_row_cloud_cell_to_obstacle(i, j, k)
                         converted += 1
@@ -4970,6 +4991,7 @@ class CartesianFluidSolver:
                     ):
                         selected = 0
                     if selected != 0:
+                        self.hibm_row_cloud_cleanup_candidate[i, j, k] = 1
                         ti.atomic_add(
                             self.report_hibm_row_cloud_orphan_components[None],
                             1,
@@ -4980,6 +5002,41 @@ class CartesianFluidSolver:
         ti.atomic_add(self.report_hibm_row_cloud_orphan_cells[None], converted)
         return converted
 
+    @ti.kernel
+    def _reset_row_cloud_orphan_cleanup_transaction_kernel(self):
+        for i, j, k in self.hibm_row_cloud_cleanup_candidate:
+            self.hibm_row_cloud_cleanup_candidate[i, j, k] = 0
+            self.hibm_row_cloud_cleanup_saved_velocity[i, j, k] = ti.Vector(
+                [0.0, 0.0, 0.0]
+            )
+
+    @ti.kernel
+    def _provision_row_cloud_orphan_cleanup_candidates_kernel(self):
+        for i, j, k in self.hibm_row_cloud_cleanup_candidate:
+            if self.hibm_row_cloud_cleanup_candidate[i, j, k] != 0:
+                self.hibm_row_cloud_cleanup_saved_velocity[i, j, k] = self.velocity[
+                    i, j, k
+                ]
+                self.obstacle[i, j, k] = 1
+                self.velocity[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+
+    @ti.kernel
+    def _rollback_row_cloud_orphan_cleanup_candidates_kernel(self):
+        for i, j, k in self.hibm_row_cloud_cleanup_candidate:
+            if self.hibm_row_cloud_cleanup_candidate[i, j, k] != 0:
+                self.obstacle[i, j, k] = 0
+                self.velocity[i, j, k] = self.hibm_row_cloud_cleanup_saved_velocity[
+                    i, j, k
+                ]
+
+    @ti.kernel
+    def _finalize_row_cloud_orphan_cleanup_candidates_kernel(self):
+        for i, j, k in self.hibm_row_cloud_cleanup_candidate:
+            if self.hibm_row_cloud_cleanup_candidate[i, j, k] != 0:
+                self.velocity_prev[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+                self.volume_source_s[i, j, k] = 0.0
+                self.divergence[i, j, k] = 0.0
+
     def convert_hibm_row_cloud_orphan_components(
         self,
         *,
@@ -4988,6 +5045,7 @@ class CartesianFluidSolver:
         protect_velocity_dirichlet_radius_cells: int = 0,
         protect_solid_band_mask: bool = False,
         convert_unstamped_small_components: bool = False,
+        after_topology_mutation: Callable[[], None] | None = None,
     ) -> int:
         """Convert small disconnected row-cloud components to obstacle cells.
 
@@ -5005,9 +5063,16 @@ class CartesianFluidSolver:
         disconnected water bodies remain active for the explicit air-backed or
         pressure compatibility paths.
         """
+        if after_topology_mutation is not None and not callable(
+            after_topology_mutation
+        ):
+            raise TypeError("after_topology_mutation must be callable")
         max_cells = int(max_component_cells)
         self.last_hibm_row_cloud_orphan_cell_count = 0
         self.last_hibm_row_cloud_orphan_component_count = 0
+        self.last_hibm_row_cloud_orphan_rejected_cell_count = 0
+        self.last_hibm_row_cloud_orphan_rejected_component_count = 0
+        self.last_hibm_row_cloud_orphan_cleanup_transaction_rejected = False
         if max_cells <= 0:
             return 0
         overflow_singleton_cleanup = bool(
@@ -5031,7 +5096,7 @@ class CartesianFluidSolver:
             getattr(self, "_hibm_pressure_unreached_component_count", 0)
         )
 
-        def run_conversion_pass(*, commit_obstacle: bool) -> int:
+        def select_candidate_cells() -> int:
             self._reset_row_cloud_orphan_cleanup_report_kernel()
             if component_count > 0:
                 self._accumulate_row_cloud_compact_component_stats_kernel(
@@ -5043,7 +5108,7 @@ class CartesianFluidSolver:
                     1 if overflow_singleton_cleanup else 0,
                     1 if bool(overflow_singletons_only) else 0,
                     1 if bool(convert_unstamped_small_components) else 0,
-                    1 if commit_obstacle else 0,
+                    0,
                 )
             self._convert_row_cloud_raw_singletons_kernel(
                 int(max_cells),
@@ -5052,25 +5117,75 @@ class CartesianFluidSolver:
                 1 if bool(convert_unstamped_small_components) else 0,
                 int(protect_radius),
                 int(protect_solid),
-                1 if commit_obstacle else 0,
+                0,
             )
             return int(self.report_hibm_row_cloud_orphan_cells[None])
 
-        candidate_count = run_conversion_pass(commit_obstacle=False)
+        self._reset_row_cloud_orphan_cleanup_transaction_kernel()
+        candidate_count = select_candidate_cells()
         if candidate_count <= 0:
             return 0
 
         self._invalidate_external_obstacle_topology_derived_state()
-        converted = run_conversion_pass(commit_obstacle=True)
-        if converted != candidate_count:
-            raise RuntimeError(
-                "row-cloud cleanup candidate set changed between selection and commit"
-            )
-        self.last_hibm_row_cloud_orphan_cell_count = converted
-        self.last_hibm_row_cloud_orphan_component_count = int(
-            self.report_hibm_row_cloud_orphan_components[None]
+        return self._commit_row_cloud_orphan_cleanup_transaction(
+            candidate_cell_count=candidate_count,
+            candidate_component_count=int(
+                self.report_hibm_row_cloud_orphan_components[None]
+            ),
+            after_topology_mutation=after_topology_mutation,
         )
-        return converted
+
+    def _commit_row_cloud_orphan_cleanup_transaction(
+        self,
+        *,
+        candidate_cell_count: int,
+        candidate_component_count: int,
+        after_topology_mutation: Callable[[], None] | None,
+    ) -> int:
+        """Commit selected cleanup cells only after canonical ledger admission."""
+
+        def rollback_and_rebuild_old_ledger(error: BaseException) -> None:
+            # The provisional callback can have rebuilt and sealed a ledger for
+            # the now-rejected topology. Retire that derived state before the
+            # obstacle/velocity rollback and rebuild the original ledger.
+            self._invalidate_external_obstacle_topology_derived_state()
+            self._rollback_row_cloud_orphan_cleanup_candidates_kernel()
+            if after_topology_mutation is None:
+                return
+            try:
+                after_topology_mutation()
+            except BaseException as recovery_error:
+                if hasattr(error, "add_note"):
+                    error.add_note(
+                        "row-cloud cleanup rollback recovery failed: "
+                        f"{type(recovery_error).__name__}: {recovery_error}"
+                    )
+                raise error from None
+
+        self._provision_row_cloud_orphan_cleanup_candidates_kernel()
+        try:
+            if after_topology_mutation is not None:
+                after_topology_mutation()
+        except CanonicalVelocityBoundaryTopologyIncompatibilityError as error:
+            rollback_and_rebuild_old_ledger(error)
+            self.last_hibm_row_cloud_orphan_rejected_cell_count = int(
+                candidate_cell_count
+            )
+            self.last_hibm_row_cloud_orphan_rejected_component_count = int(
+                candidate_component_count
+            )
+            self.last_hibm_row_cloud_orphan_cleanup_transaction_rejected = True
+            return 0
+        except BaseException as error:
+            rollback_and_rebuild_old_ledger(error)
+            raise
+
+        self._finalize_row_cloud_orphan_cleanup_candidates_kernel()
+        self.last_hibm_row_cloud_orphan_cell_count = int(candidate_cell_count)
+        self.last_hibm_row_cloud_orphan_component_count = int(
+            candidate_component_count
+        )
+        return int(candidate_cell_count)
 
     def cleanup_hibm_pressure_outlet_tiny_unreached_components(
         self,
@@ -5114,6 +5229,9 @@ class CartesianFluidSolver:
         converted_cell_count = 0
         converted_component_count = 0
         cleanup_pass_count = 0
+        rejected_cell_count = 0
+        rejected_component_count = 0
+        rejected_transaction_count = 0
         if not bool(reachability_is_current):
             self.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
                 pressure_outlet_zmin=True,
@@ -5125,7 +5243,26 @@ class CartesianFluidSolver:
                     convert_unstamped_small_components=True,
                     protect_velocity_dirichlet_radius_cells=0,
                     protect_solid_band_mask=False,
+                    after_topology_mutation=after_topology_mutation,
                 )
+                if bool(
+                    getattr(
+                        self,
+                        "last_hibm_row_cloud_orphan_cleanup_transaction_rejected",
+                        False,
+                    )
+                ):
+                    rejected_cell_count += int(
+                        self.last_hibm_row_cloud_orphan_rejected_cell_count
+                    )
+                    rejected_component_count += int(
+                        self.last_hibm_row_cloud_orphan_rejected_component_count
+                    )
+                    rejected_transaction_count += 1
+                    self.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
+                        pressure_outlet_zmin=True,
+                    )
+                    break
                 if int(converted) <= 0:
                     break
                 cleanup_pass_count += 1
@@ -5133,8 +5270,6 @@ class CartesianFluidSolver:
                 converted_component_count += int(
                     self.last_hibm_row_cloud_orphan_component_count
                 )
-                if after_topology_mutation is not None:
-                    after_topology_mutation()
                 self.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
                     pressure_outlet_zmin=True,
                 )
@@ -5148,6 +5283,15 @@ class CartesianFluidSolver:
             ),
             "hibm_preassembly_tiny_unreached_cleanup_pass_count": int(
                 cleanup_pass_count
+            ),
+            "hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count": int(
+                rejected_cell_count
+            ),
+            "hibm_preassembly_tiny_unreached_cleanup_rejected_component_count": int(
+                rejected_component_count
+            ),
+            "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count": int(
+                rejected_transaction_count
             ),
             "hibm_preassembly_remaining_unreached_cell_count": int(
                 self.last_hibm_pressure_unreached_cell_count
@@ -5628,6 +5772,9 @@ class CartesianFluidSolver:
         self.last_hibm_air_backed_cell_volume_m3 = -1.0
         self.last_hibm_row_cloud_orphan_cell_count = 0
         self.last_hibm_row_cloud_orphan_component_count = 0
+        self.last_hibm_row_cloud_orphan_rejected_cell_count = 0
+        self.last_hibm_row_cloud_orphan_rejected_component_count = 0
+        self.last_hibm_row_cloud_orphan_cleanup_transaction_rejected = False
         self._hibm_reachability_checksum = None
 
     @ti.kernel
@@ -28038,13 +28185,17 @@ class CartesianFluidSolver:
                 self.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
                     pressure_outlet_zmin=True,
                 )
-            converted_overflow_singletons = (
-                self.convert_hibm_row_cloud_orphan_components(
-                    max_component_cells=1,
-                    overflow_singletons_only=True,
-                    protect_velocity_dirichlet_radius_cells=2,
+            # A prepared reachability state transfers topology-cleanup ownership
+            # to the caller that assembled and sealed the dependent HIBM rows.
+            converted_overflow_singletons = 0
+            if not reachability_prepared:
+                converted_overflow_singletons = (
+                    self.convert_hibm_row_cloud_orphan_components(
+                        max_component_cells=1,
+                        overflow_singletons_only=True,
+                        protect_velocity_dirichlet_radius_cells=2,
+                    )
                 )
-            )
             if int(converted_overflow_singletons) > 0:
                 hibm_projection_topology_mutated = True
                 hibm_projection_overflow_singleton_cleanup_cell_count += int(
@@ -28057,9 +28208,13 @@ class CartesianFluidSolver:
                 self.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
                     pressure_outlet_zmin=True,
                 )
-            tiny_unreached_cleanup_threshold = max(
-                0,
-                int(hibm_tiny_unreached_cleanup_component_cells),
+            tiny_unreached_cleanup_threshold = (
+                0
+                if reachability_prepared
+                else max(
+                    0,
+                    int(hibm_tiny_unreached_cleanup_component_cells),
+                )
             )
             if tiny_unreached_cleanup_threshold > 0:
                 for _tiny_unreached_cleanup_pass in range(8):

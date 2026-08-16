@@ -785,6 +785,29 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                 self.assertIsNotNone(failure)
                 self.assertIn("closure", failure.lower())
 
+    def test_canonical_health_allows_one_closure_refinement_but_rejects_three_solves(
+        self,
+    ) -> None:
+        one_refinement = _healthy_canonical_runner_report()
+        one_refinement["canonical_velocity_dirichlet_report"][
+            "marker_target_closure"
+        ]["solve_count"] = 2
+        self.assertIsNone(
+            solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+                one_refinement
+            )
+        )
+
+        unbounded = copy.deepcopy(one_refinement)
+        unbounded["canonical_velocity_dirichlet_report"][
+            "marker_target_closure"
+        ]["solve_count"] = 3
+        failure = solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+            unbounded
+        )
+        self.assertIsNotNone(failure)
+        self.assertIn("solve count", failure.lower())
+
     def test_canonical_health_accepts_pressure_normal_external_subset(self) -> None:
         report = _healthy_canonical_runner_report()
         device_report = report["canonical_velocity_dirichlet_report"]

@@ -1,5 +1,11 @@
 HIBM_OWNER_RELOCATION_WALK_STEPS = 24
 HIBM_NO_SLIP_NEAREST_FLUID_FALLBACK_RADIUS_CELLS = 4
+# Bound component-wise validity renormalisation to 32x.  Smaller MAC support
+# slivers can collapse distinct marker targets onto the same normalized row.
+HIBM_NO_SLIP_MIN_COMPONENT_SUPPORT_WEIGHT = 1.0 / 32.0
+# Dimensionless residual-to-grid correction cap, aligned with the 1/32
+# component-support contract.
+HIBM_MARKER_Q_MAX_SINGLE_ROW_VELOCITY_AMPLIFICATION = 32.0
 HIBM_OVERFLOW_SINGLETON_NO_SLIP_PROTECTION_RADIUS_CELLS = 2
 HIBM_TINY_UNREACHED_COMPONENT_CLEANUP_THRESHOLD_CELLS = 4
 HIBM_PRESSURE_NEUMANN_NEAREST_FLUID_FALLBACK_RADIUS_CELLS = 2

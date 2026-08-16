@@ -115,6 +115,7 @@ def run_diagnostic_replay(
     source_manifest_path: str | Path,
     output_dir: str | Path,
     allowed_source_diffs: Sequence[str] = DEFAULT_ALLOWED_SOURCE_DIFFS,
+    preserve_config_step_count: bool = False,
 ) -> dict[str, Any]:
     started_at_utc = datetime.now(timezone.utc).isoformat()
     runtime = _load_runtime()
@@ -136,11 +137,13 @@ def run_diagnostic_replay(
         stored_source_sha256=artifacts.stored_identity["source_sha256"],
         allowed_source_diffs=allowed_source_diffs,
     )
-    config = _load_one_step_config(
+    config = _load_replay_config(
         stored_config=stored_config,
         snapshot_path=artifacts.snapshot_path,
         config_type=runtime.config_type,
+        preserve_config_step_count=preserve_config_step_count,
     )
+    requested_fsi_steps = int(config.step_count)
     current_config_sha256 = _validated_current_config_sha256(
         runtime=runtime,
         config=config,
@@ -169,6 +172,7 @@ def run_diagnostic_replay(
         source_evidence=source_evidence,
         current_config_sha256=current_config_sha256,
         started_at_utc=started_at_utc,
+        requested_fsi_steps=requested_fsi_steps,
     )
 
     report: Mapping[str, Any] | None = None
@@ -183,8 +187,17 @@ def run_diagnostic_replay(
             source_evidence=source_evidence,
             config=config,
             observations=observations,
+            preserve_config_step_count=preserve_config_step_count,
+            requested_fsi_steps=requested_fsi_steps,
         )
-        _require_exactly_one_completed_step(report)
+        if preserve_config_step_count:
+            _require_completed_steps(
+                report,
+                requested_fsi_steps=requested_fsi_steps,
+                accepted_fsi_steps=observations.get("accepted_fsi_steps"),
+            )
+        else:
+            _require_exactly_one_completed_step(report)
         sanitized_report, runner_requested_identity = _sanitize_runtime_report(
             report=report,
             current_identity=observations.get("current_identity"),
@@ -227,28 +240,56 @@ def run_diagnostic_replay(
         payload.update(
             {
                 "status": "completed",
-                "completed_fsi_steps": 1,
+                "completed_fsi_steps": requested_fsi_steps,
                 "preflow_snapshot_loaded": True,
                 "runner_requested_identity": dict(runner_requested_identity),
                 "validated_loader_identity": dict(artifacts.stored_identity),
                 "runtime_report": json_safe(sanitized_report),
+                **(
+                    {
+                        "last_completed_fsi_step": requested_fsi_steps,
+                    }
+                    if preserve_config_step_count
+                    else {}
+                ),
             }
         )
         write_json_exclusive(metadata_path, payload)
         return payload
 
-    payload.update(
-        {
-            "status": "failed",
-            "completed_fsi_steps": 0,
-            "preflow_snapshot_loaded": bool(
-                observations.get("canonical_snapshot_loaded", False)
-            ),
-            "error_type": type(execution_error).__name__,
-            "error": str(execution_error),
-            "traceback": execution_traceback,
-        }
+    completed_fsi_steps = (
+        len(observations.get("accepted_fsi_steps", []))
+        if preserve_config_step_count
+        else 0
     )
+    failure_payload: dict[str, Any] = {
+        "status": "failed",
+        "completed_fsi_steps": completed_fsi_steps,
+        "preflow_snapshot_loaded": bool(
+            observations.get("canonical_snapshot_loaded", False)
+        ),
+        "error_type": type(execution_error).__name__,
+        "error": str(execution_error),
+        "traceback": execution_traceback,
+    }
+    if preserve_config_step_count:
+        diagnostics = getattr(execution_error, "diagnostics", {})
+        failure_payload.update(
+            {
+                "last_completed_fsi_step": (
+                    completed_fsi_steps if completed_fsi_steps else None
+                ),
+                "attempted_fsi_step": (
+                    completed_fsi_steps + 1
+                    if completed_fsi_steps < requested_fsi_steps
+                    else None
+                ),
+                "failure_diagnostics": (
+                    json_safe(diagnostics) if isinstance(diagnostics, Mapping) else {}
+                ),
+            }
+        )
+    payload.update(failure_payload)
     write_json_exclusive(metadata_path, payload)
     raise DiagnosticReplayError(
         f"diagnostic one-step replay failed: {execution_error}"
@@ -281,21 +322,30 @@ def _resolve_repo_path(value: str | Path) -> Path:
     return (path if path.is_absolute() else REPO_ROOT / path).resolve()
 
 
-def _load_one_step_config(
+def _load_replay_config(
     *,
     stored_config: Mapping[str, Any],
     snapshot_path: Path,
     config_type: type[Any],
+    preserve_config_step_count: bool,
 ) -> Any:
-    one_step_payload = {
+    stored_step_count = stored_config.get("step_count")
+    if preserve_config_step_count and (
+        type(stored_step_count) is not int or stored_step_count != 50
+    ):
+        raise DiagnosticReplayError(
+            "preserve_config_step_count requires stored step_count exactly 50"
+        )
+    requested_fsi_steps = stored_step_count if preserve_config_step_count else 1
+    replay_payload = {
         **stored_config,
-        "step_count": 1,
+        "step_count": requested_fsi_steps,
         "preflow_snapshot_input_path": str(snapshot_path),
         "preflow_snapshot_output_path": None,
         "export_final_flow_snapshot": False,
     }
     try:
-        config = config_type(**one_step_payload)
+        config = config_type(**replay_payload)
     except (TypeError, ValueError) as exc:
         raise DiagnosticReplayError(f"solver config cannot be reconstructed: {exc}") from exc
     if getattr(config, "preflow_steps", None) != REQUIRED_PREFLOW_STEPS:
@@ -323,14 +373,14 @@ def _load_one_step_config(
             f"{changed_non_overrides}"
         )
     if (
-        getattr(config, "step_count", None) != 1
+        getattr(config, "step_count", None) != requested_fsi_steps
         or getattr(config, "preflow_snapshot_output_path", "invalid") is not None
         or getattr(config, "export_final_flow_snapshot", None) is not False
         or Path(str(getattr(config, "preflow_snapshot_input_path", "")))
         != snapshot_path
     ):
         raise DiagnosticReplayError(
-            "diagnostic config did not preserve the exactly-one-step/no-output contract"
+            "diagnostic config did not preserve the requested-step/no-output contract"
         )
     return config
 
@@ -365,6 +415,8 @@ def _run_with_temporary_source_only_loader(
     source_evidence: SourceDiffEvidence,
     config: Any,
     observations: dict[str, Any],
+    preserve_config_step_count: bool,
+    requested_fsi_steps: int,
 ) -> Mapping[str, Any]:
     original_loader = runtime.runner_module.load_preflow_snapshot
     if original_loader is not runtime.public_loader:
@@ -433,9 +485,26 @@ def _run_with_temporary_source_only_loader(
         observations["canonical_snapshot_loaded"] = True
         return snapshot
 
+    accepted_fsi_steps: list[int] = []
+
+    def step_observer(step: int, _time_s: float, _row: Any, _snapshot: Any) -> None:
+        expected_step = len(accepted_fsi_steps) + 1
+        if type(step) is not int or step != expected_step or step > requested_fsi_steps:
+            raise DiagnosticReplayError(
+                "diagnostic step observer received a non-contiguous accepted step: "
+                f"step={step!r}, expected={expected_step}"
+            )
+        accepted_fsi_steps.append(step)
+
+    if preserve_config_step_count:
+        observations["accepted_fsi_steps"] = accepted_fsi_steps
     runtime.runner_module.load_preflow_snapshot = diagnostic_loader
     try:
-        report = runtime.run_case(config)
+        report = (
+            runtime.run_case(config, step_observer=step_observer)
+            if preserve_config_step_count
+            else runtime.run_case(config)
+        )
     finally:
         runtime.runner_module.load_preflow_snapshot = original_loader
     if invocation_count != 1:
@@ -469,6 +538,42 @@ def _require_exactly_one_completed_step(report: Mapping[str, Any]) -> None:
         )
 
 
+def _require_completed_steps(
+    report: Mapping[str, Any],
+    *,
+    requested_fsi_steps: int,
+    accepted_fsi_steps: Any,
+) -> None:
+    history = report.get("history")
+    if (
+        not isinstance(history, Sequence)
+        or isinstance(history, (str, bytes, bytearray))
+        or len(history) != requested_fsi_steps
+    ):
+        count = len(history) if isinstance(history, Sequence) else "invalid"
+        raise DiagnosticReplayError(
+            "diagnostic runner did not complete the requested FSI steps: "
+            f"{count}"
+        )
+    labels = [
+        row.get("step") if isinstance(row, Mapping) else None
+        for row in history
+    ]
+    expected = list(range(1, requested_fsi_steps + 1))
+    if labels != expected:
+        raise DiagnosticReplayError(
+            "diagnostic runner history is not labeled with contiguous accepted steps"
+        )
+    if accepted_fsi_steps != expected:
+        raise DiagnosticReplayError(
+            "diagnostic step observer did not record contiguous accepted steps"
+        )
+    if report.get("preflow_snapshot_loaded") is not True:
+        raise DiagnosticReplayError(
+            "diagnostic runner did not report the preflow snapshot as loaded"
+        )
+
+
 def _sanitize_runtime_report(
     *,
     report: Mapping[str, Any],
@@ -498,6 +603,7 @@ def _base_metadata(
     source_evidence: SourceDiffEvidence,
     current_config_sha256: str,
     started_at_utc: str,
+    requested_fsi_steps: int,
 ) -> dict[str, Any]:
     return {
         "started_at_utc": started_at_utc,
@@ -509,7 +615,7 @@ def _base_metadata(
         "fresh_preflow": False,
         "production_identity_valid": False,
         "production_identity_reason": "source_sha256_mismatch_diagnostic_only",
-        "requested_fsi_steps": 1,
+        "requested_fsi_steps": requested_fsi_steps,
         "preflow_snapshot_output_path": None,
         "snapshot_path": str(artifacts.snapshot_path),
         "snapshot_metadata_path": str(artifacts.metadata_path),
@@ -558,6 +664,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-manifest-json", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument(
+        "--preserve-config-step-count",
+        action="store_true",
+        help="Require and replay the stored formal 50-step FSI count.",
+    )
+    parser.add_argument(
         "--allow-source-diff",
         action="append",
         default=None,
@@ -579,6 +690,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_manifest_path=args.source_manifest_json,
             output_dir=args.output_dir,
             allowed_source_diffs=allowed,
+            preserve_config_step_count=args.preserve_config_step_count,
         )
     except Exception as exc:  # pragma: no cover - command-line failure path.
         print(f"[preflow_snapshot_one_step_diagnostic] ERROR: {exc}", file=sys.stderr)

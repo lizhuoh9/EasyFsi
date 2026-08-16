@@ -5,6 +5,9 @@ import os
 import unittest
 from unittest import mock
 
+from simulation_core.coupling.pressure_interface import (
+    CanonicalVelocityBoundaryTopologyIncompatibilityError,
+)
 from simulation_core.fluids.solver import CartesianFluidSolver
 
 
@@ -302,6 +305,7 @@ class TopologyCacheInvalidationContracts(unittest.TestCase):
             return 0
 
         solver._reset_row_cloud_orphan_cleanup_report_kernel = reset_report
+        solver._reset_row_cloud_orphan_cleanup_transaction_kernel = lambda: None
         solver._convert_row_cloud_raw_singletons_kernel = no_candidates
 
         converted = solver.convert_hibm_row_cloud_orphan_components(
@@ -337,7 +341,7 @@ class TopologyCacheInvalidationContracts(unittest.TestCase):
 
         observed: list[tuple[bool, bool, int, bool, int, int]] = []
 
-        def select_then_commit(*args: object) -> int:
+        def select_candidate(*_args: object) -> int:
             observed.append(
                 (
                     bool(solver._pressure_outlet_nullspace_graph_valid),
@@ -352,20 +356,32 @@ class TopologyCacheInvalidationContracts(unittest.TestCase):
                     ),
                 )
             )
-            if len(args) < 7:
-                raise _SyntheticDeviceMutation(
-                    "row-cloud conversion is not split into select and commit"
-                )
-            commit_obstacle = int(args[-1])
             solver.report_hibm_row_cloud_orphan_cells[None] = 1
             solver.report_hibm_row_cloud_orphan_components[None] = 1
-            if commit_obstacle != 0:
-                raise _SyntheticDeviceMutation(
-                    "synthetic topology-kernel failure"
-                )
             return 1
 
-        solver._convert_row_cloud_raw_singletons_kernel = select_then_commit
+        def fail_provisional_transaction(**_kwargs: object) -> int:
+            observed.append(
+                (
+                    bool(solver._pressure_outlet_nullspace_graph_valid),
+                    bool(solver.last_hibm_reachability_valid),
+                    int(solver.velocity_dirichlet_component_ledger_generation),
+                    bool(solver.velocity_dirichlet_component_ledger_sealed),
+                    len(
+                        solver._velocity_dirichlet_component_ledger_consumer_generations
+                    ),
+                    len(
+                        solver._velocity_dirichlet_component_ledger_consumer_capabilities
+                    ),
+                )
+            )
+            raise _SyntheticDeviceMutation("synthetic topology-kernel failure")
+
+        solver._reset_row_cloud_orphan_cleanup_transaction_kernel = lambda: None
+        solver._convert_row_cloud_raw_singletons_kernel = select_candidate
+        solver._commit_row_cloud_orphan_cleanup_transaction = (
+            fail_provisional_transaction
+        )
         with self.assertRaises(_SyntheticDeviceMutation):
             solver.convert_hibm_row_cloud_orphan_components(
                 max_component_cells=1,
@@ -396,7 +412,7 @@ class TopologyCacheInvalidationContracts(unittest.TestCase):
         conversions = iter((2, 1, 0))
         events: list[str] = []
 
-        def convert(**_kwargs: object) -> int:
+        def convert(**kwargs: object) -> int:
             events.append("convert")
             converted = next(conversions)
             solver.last_hibm_row_cloud_orphan_component_count = (
@@ -404,6 +420,9 @@ class TopologyCacheInvalidationContracts(unittest.TestCase):
             )
             if converted > 0:
                 solver.velocity_dirichlet_component_ledger_sealed = False
+                callback = kwargs["after_topology_mutation"]
+                self.assertTrue(callable(callback))
+                callback()
             return converted
 
         def rebuild() -> None:
@@ -461,6 +480,169 @@ class TopologyCacheInvalidationContracts(unittest.TestCase):
                 max_component_cells=1,
                 reachability_is_current=True,
             )
+
+    def test_canonical_tiny_cleanup_rejects_incompatible_transaction_and_refloods(
+        self,
+    ) -> None:
+        """A rejected provisional obstacle write must restore the old ledger."""
+        solver = object.__new__(CartesianFluidSolver)
+        solver.velocity_dirichlet_boundary_authority = "canonical"
+        solver.last_hibm_pressure_unreached_cell_count = 3
+        solver.last_hibm_row_cloud_orphan_component_count = 0
+        solver.last_hibm_row_cloud_orphan_rejected_cell_count = 0
+        solver.last_hibm_row_cloud_orphan_rejected_component_count = 0
+        solver.last_hibm_row_cloud_orphan_cleanup_transaction_rejected = False
+        events: list[str] = []
+
+        def convert(**kwargs: object) -> int:
+            events.append("convert")
+            callback = kwargs["after_topology_mutation"]
+            self.assertTrue(callable(callback))
+            solver.last_hibm_row_cloud_orphan_rejected_cell_count = 2
+            solver.last_hibm_row_cloud_orphan_rejected_component_count = 1
+            solver.last_hibm_row_cloud_orphan_cleanup_transaction_rejected = True
+            return 0
+
+        def rebuild() -> None:
+            events.append("rebuild")
+            raise CanonicalVelocityBoundaryTopologyIncompatibilityError(
+                "synthetic incompatible provisional topology",
+                reason_code="synthetic",
+                count=2,
+                diagnostics={"cell_count": 2},
+            )
+
+        def reflood(**_kwargs: object) -> int:
+            events.append("reflood")
+            return solver.last_hibm_pressure_unreached_cell_count
+
+        solver.convert_hibm_row_cloud_orphan_components = convert
+        solver.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells = reflood
+
+        report = solver.cleanup_hibm_pressure_outlet_tiny_unreached_components(
+            max_component_cells=4,
+            reachability_is_current=True,
+            after_topology_mutation=rebuild,
+        )
+
+        self.assertEqual(events, ["convert", "reflood"])
+        self.assertEqual(
+            report["hibm_preassembly_tiny_unreached_cleanup_rejected_cell_count"],
+            2,
+        )
+        self.assertEqual(
+            report["hibm_preassembly_tiny_unreached_cleanup_rejected_component_count"],
+            1,
+        )
+        self.assertEqual(
+            report[
+                "hibm_preassembly_tiny_unreached_cleanup_rejected_transaction_count"
+            ],
+            1,
+        )
+
+    def test_cleanup_transaction_rolls_back_then_rebuilds_old_ledger(
+        self,
+    ) -> None:
+        solver = object.__new__(CartesianFluidSolver)
+        solver.last_hibm_row_cloud_orphan_cell_count = 0
+        solver.last_hibm_row_cloud_orphan_component_count = 0
+        solver.last_hibm_row_cloud_orphan_rejected_cell_count = 0
+        solver.last_hibm_row_cloud_orphan_rejected_component_count = 0
+        solver.last_hibm_row_cloud_orphan_cleanup_transaction_rejected = False
+        events: list[str] = []
+        rebuild_calls = 0
+        solver._provision_row_cloud_orphan_cleanup_candidates_kernel = lambda: events.append(
+            "provision"
+        )
+        solver._rollback_row_cloud_orphan_cleanup_candidates_kernel = lambda: events.append(
+            "rollback"
+        )
+        solver._finalize_row_cloud_orphan_cleanup_candidates_kernel = lambda: events.append(
+            "finalize"
+        )
+        solver._invalidate_external_obstacle_topology_derived_state = lambda: events.append(
+            "invalidate"
+        )
+
+        def rebuild() -> None:
+            nonlocal rebuild_calls
+            rebuild_calls += 1
+            events.append(f"rebuild-{rebuild_calls}")
+            if rebuild_calls == 1:
+                raise CanonicalVelocityBoundaryTopologyIncompatibilityError(
+                    "synthetic incompatible provisional topology",
+                    reason_code="synthetic",
+                    count=2,
+                    diagnostics={"cell_count": 2},
+                )
+
+        committed = solver._commit_row_cloud_orphan_cleanup_transaction(
+            candidate_cell_count=2,
+            candidate_component_count=1,
+            after_topology_mutation=rebuild,
+        )
+
+        self.assertEqual(committed, 0)
+        self.assertEqual(
+            events,
+            [
+                "provision",
+                "rebuild-1",
+                "invalidate",
+                "rollback",
+                "rebuild-2",
+            ],
+        )
+        self.assertEqual(solver.last_hibm_row_cloud_orphan_cell_count, 0)
+        self.assertEqual(solver.last_hibm_row_cloud_orphan_component_count, 0)
+        self.assertEqual(solver.last_hibm_row_cloud_orphan_rejected_cell_count, 2)
+        self.assertEqual(solver.last_hibm_row_cloud_orphan_rejected_component_count, 1)
+        self.assertTrue(solver.last_hibm_row_cloud_orphan_cleanup_transaction_rejected)
+
+    def test_cleanup_transaction_reraises_noncanonical_callback_error_after_rollback(
+        self,
+    ) -> None:
+        solver = object.__new__(CartesianFluidSolver)
+        events: list[str] = []
+        solver._provision_row_cloud_orphan_cleanup_candidates_kernel = lambda: events.append(
+            "provision"
+        )
+        solver._rollback_row_cloud_orphan_cleanup_candidates_kernel = lambda: events.append(
+            "rollback"
+        )
+        solver._finalize_row_cloud_orphan_cleanup_candidates_kernel = lambda: events.append(
+            "finalize"
+        )
+        solver._invalidate_external_obstacle_topology_derived_state = lambda: events.append(
+            "invalidate"
+        )
+        callback_calls = 0
+
+        def rebuild() -> None:
+            nonlocal callback_calls
+            callback_calls += 1
+            events.append(f"rebuild-{callback_calls}")
+            if callback_calls == 1:
+                raise _SyntheticDeviceMutation("synthetic callback failure")
+
+        with self.assertRaisesRegex(_SyntheticDeviceMutation, "callback failure"):
+            solver._commit_row_cloud_orphan_cleanup_transaction(
+                candidate_cell_count=2,
+                candidate_component_count=1,
+                after_topology_mutation=rebuild,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "provision",
+                "rebuild-1",
+                "invalidate",
+                "rollback",
+                "rebuild-2",
+            ],
+        )
 
     def test_project_rejects_canonical_cleanup_before_post_mutation_reflood(
         self,

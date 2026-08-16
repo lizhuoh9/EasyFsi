@@ -263,6 +263,14 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                 "hibm_marker_closure_final_measure",
                 "_measure_marker_target_closure_kernel",
             ),
+            (
+                "hibm_marker_closure_device_refinement_solve",
+                "_commit_marker_target_closure_candidate",
+            ),
+            (
+                "hibm_marker_closure_device_refinement_measure",
+                "_measure_marker_target_closure_kernel",
+            ),
         )
         for prefix, operation_name in stage_operations:
             with self.subTest(stage=prefix):
@@ -305,6 +313,16 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                 "_commit_marker_target_closure_candidate",
                 "initial_adjustable_max_residual > closure_tolerance",
             ),
+            (
+                "hibm_marker_closure_device_refinement_solve",
+                "_commit_marker_target_closure_candidate",
+                "needs_device_refinement",
+            ),
+            (
+                "hibm_marker_closure_device_refinement_measure",
+                "_measure_marker_target_closure_kernel",
+                "needs_device_refinement",
+            ),
         ):
             with self.subTest(conditional_stage=prefix):
                 guard = next(
@@ -336,7 +354,9 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                     )
                 )
 
-    def test_marker_closure_uses_one_atomic_weighted_solve_before_commit(self) -> None:
+    def test_marker_closure_uses_one_primary_and_one_bounded_refinement_solve(
+        self,
+    ) -> None:
         module = ast.parse(self.source)
         closure = next(
             node
@@ -351,7 +371,7 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
             and isinstance(node.func, ast.Name)
             and node.func.id == "solve_weighted_marker_target_closure"
         ]
-        self.assertEqual(len(weighted_solve_calls), 1)
+        self.assertEqual(len(weighted_solve_calls), 2)
         private_candidate_writes = [
             node
             for node in ast.walk(closure)
@@ -359,7 +379,41 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "_commit_marker_target_closure_candidate"
         ]
-        self.assertEqual(len(private_candidate_writes), 1)
+        self.assertEqual(len(private_candidate_writes), 2)
+        primary_guard = next(
+            node
+            for node in ast.walk(closure)
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test)
+            == "initial_adjustable_max_residual > closure_tolerance"
+        )
+        refinement_guard = next(
+            node
+            for node in ast.walk(closure)
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "needs_device_refinement"
+        )
+        for label, guard in (
+            ("primary", primary_guard),
+            ("device_refinement", refinement_guard),
+        ):
+            with self.subTest(solve=label):
+                self.assertEqual(
+                    sum(
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "solve_weighted_marker_target_closure"
+                        for node in ast.walk(guard)
+                    ),
+                    1,
+                )
+        self.assertFalse(
+            any(
+                isinstance(loop, (ast.For, ast.AsyncFor, ast.While))
+                and any(call in weighted_solve_calls for call in ast.walk(loop))
+                for loop in ast.walk(closure)
+            )
+        )
         self.assertNotIn(
             "_marker_target_closure_kaczmarz_sweeps_kernel",
             ast.unparse(closure),
