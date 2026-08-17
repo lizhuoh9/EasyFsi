@@ -1,5 +1,15 @@
 # Project Navigation for Agents
 
+## Authoritative WSL worktree
+
+For this project, the Windows checkout is only the Codex project entrypoint. The authoritative source tree is the WSL checkout:
+
+```text
+/home/zhuohengli/work/squid-robot/HIBM-MPM-refactored
+```
+
+At the start of every task, inspect the WSL repository branch and status. Run all Git operations, source edits, tests, and numerical simulations against that WSL path through `wsl.exe -d Ubuntu-22.04 -- ...`. Do not silently use the Windows mirror as the source of truth or copy changes back from Windows into WSL. If a command cannot be executed against WSL, report the limitation instead of falling back to the Windows checkout.
+
 This file is the fast path into this repository. Do not start by recursively
 reading every file.
 
