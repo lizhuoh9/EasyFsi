@@ -131,7 +131,7 @@ def test_final_identity_accepts_json_float_round_trip_for_locked_vector() -> Non
         0.000390625,
         0.00046875,
     ]
-    config["flow_hibm_sharp_interpolate_velocity_rows"] = True
+    config["flow_hibm_sharp_interpolate_velocity_rows"] = False
 
     contract = _validate_final_run_identity(
         manifest,
@@ -168,11 +168,11 @@ def test_final_identity_accepts_locked_windowed_stationary_preflow() -> None:
     assert contract["config"]["preflow_convergence_mode"] == "windowed_stationary"
 
 
-def test_final_identity_rejects_noninterpolated_hibm_velocity_rows() -> None:
+def test_final_identity_rejects_interpolated_hibm_velocity_rows() -> None:
     manifest: dict[str, object] = {"config": _fine_solver_config(50)}
     config = manifest["config"]
     assert isinstance(config, dict)
-    config["flow_hibm_sharp_interpolate_velocity_rows"] = False
+    config["flow_hibm_sharp_interpolate_velocity_rows"] = True
 
     with pytest.raises(
         NativeFineComparisonError,
@@ -188,13 +188,13 @@ def test_final_identity_rejects_noninterpolated_hibm_velocity_rows() -> None:
     ("key", "bad_value"),
     [
         ("flow_turbulence_model", "laminar"),
-        ("flow_sst_near_wall_treatment", "resolved"),
-        ("flow_symmetry_domain_walls", ["ymax"]),
+        ("flow_sst_near_wall_treatment", "fluent_correlation"),
+        ("flow_symmetry_domain_walls", ["xmin", "xmax", "ymax"]),
         ("solid_constitutive_model", "linear_elastic"),
         ("young_modulus_pa", 9.0e5),
         ("poisson_ratio", 0.45),
         ("solid_density_kgm3", 1500.0),
-        ("velocity_damping", 0.99),
+        ("velocity_damping", 1.0),
     ],
 )
 def test_final_identity_locks_sst_and_structural_material_contracts(
@@ -213,11 +213,15 @@ def test_final_identity_locks_sst_and_structural_material_contracts(
         )
 
 
-def test_final_identity_requires_anisotropic_pressure_probe_distance() -> None:
+def test_final_identity_rejects_anisotropic_pressure_probe_distance() -> None:
     manifest: dict[str, object] = {"config": _fine_solver_config(50)}
     config = manifest["config"]
     assert isinstance(config, dict)
-    config["flow_hibm_sharp_interior_probe_distance_xyz_m"] = None
+    config["flow_hibm_sharp_interior_probe_distance_xyz_m"] = [
+        1.125e-3,
+        0.1171875e-3,
+        0.46875e-3,
+    ]
 
     with pytest.raises(
         NativeFineComparisonError,
@@ -229,7 +233,7 @@ def test_final_identity_requires_anisotropic_pressure_probe_distance() -> None:
         )
 
 
-def test_partial_native_comparison_rejects_noninterpolated_hibm_rows() -> None:
+def test_partial_native_comparison_rejects_interpolated_hibm_rows() -> None:
     with pytest.raises(
         NativeFineComparisonError,
         match="flow_hibm_sharp_interpolate_velocity_rows",
@@ -237,12 +241,9 @@ def test_partial_native_comparison_rejects_noninterpolated_hibm_rows() -> None:
         _validate_run_contracts(
             {
                 "config": {
-                    "flow_hibm_sharp_interpolate_velocity_rows": False,
-                    "flow_hibm_sharp_interior_probe_distance_xyz_m": [
-                        1.0e-3,
-                        1.0e-4,
-                        5.0e-4,
-                    ],
+                    "flow_hibm_sharp_interpolate_velocity_rows": True,
+                    "flow_hibm_sharp_interior_probe_distance_m": 1.0e-3,
+                    "flow_hibm_sharp_interior_probe_distance_xyz_m": None,
                 }
             },
             {},
@@ -425,11 +426,11 @@ def test_postprocess_cli_forwards_explicit_fluent_force_history(tmp_path: Path) 
         ("config", "solid_density_kgm3", 1500.0),
         ("config", "young_modulus_pa", 9.0e5),
         ("config", "poisson_ratio", 0.45),
-        ("config", "velocity_damping", 0.99),
+        ("config", "velocity_damping", 1.0),
         ("config", "solid_constitutive_model", "linear_elastic"),
         ("config", "flow_advection_scheme", "euler"),
         ("config", "flow_turbulence_model", "laminar"),
-        ("config", "flow_sst_near_wall_treatment", "resolved"),
+        ("config", "flow_sst_near_wall_treatment", "fluent_correlation"),
         ("config", "flow_predictor_substeps", 64),
         ("config", "flow_hibm_sharp_search_radius_m", 1.6e-3),
         (
@@ -447,8 +448,11 @@ def test_postprocess_cli_forwards_explicit_fluent_force_history(tmp_path: Path) 
             "flow_hibm_sharp_interior_probe_distance_xyz_m",
             [1.125e-3, 1.125e-3, 1.125e-3],
         ),
+        ("config", "flow_hibm_sharp_interior_probe_distance_m", 1.0e-3),
         ("config", "solid_particle_counts", [True, 256, 20]),
-        ("config", "flow_hibm_sharp_interpolate_velocity_rows", False),
+        ("config", "flow_hibm_sharp_interpolate_velocity_rows", True),
+        ("config", "flow_hibm_marker_mac_constraint_iterations", 63),
+        ("config", "traction_tip_cap_pressure_enabled", True),
         ("config", "flow_hibm_dynamic_solid_volume_enabled", False),
         ("config", "update_fluid_obstacle_from_solid", False),
         ("config", "flow_hibm_tiny_unreached_cleanup_component_cells", 0),

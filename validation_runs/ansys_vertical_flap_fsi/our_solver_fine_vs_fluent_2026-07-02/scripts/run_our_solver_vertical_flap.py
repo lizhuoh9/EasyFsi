@@ -770,22 +770,6 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
                 float(config.duct_length_m) / float(args.grid_nodes[2]),
             )
         ),
-        # Pressure-Neumann sampling follows the marker normal.  Preserve each
-        # axis' mesh depth so the coarse inactive extrusion spacing cannot
-        # push an in-plane wall-normal probe many cells into the fluid.
-        flow_hibm_sharp_interior_probe_distance_xyz_m=(
-            1.5 * (float(config.span_m) / float(args.grid_nodes[0])),
-            1.5
-            * (
-                0.5
-                * float(config.duct_height_m)
-                / float(args.grid_nodes[1])
-            ),
-            1.5 * (float(config.duct_length_m) / float(args.grid_nodes[2])),
-        ),
-        flow_hibm_sharp_interpolate_velocity_rows=not bool(
-            getattr(args, "disable_hibm_interpolate_velocity_rows", False)
-        ),
         flow_hibm_dynamic_solid_volume_enabled=True,
         # A moving cut-cell topology can leave tiny row-cloud pockets that
         # are disconnected from the pressure outlet.  Convert only components
@@ -997,14 +981,6 @@ def main() -> int:
             "Override the sharp-IB row search radius; should scale with the "
             "grid (roughly 1.5x the finest in-plane spacing) so the Dirichlet "
             "row halo does not fatten the effective flap."
-        ),
-    )
-    parser.add_argument(
-        "--disable-hibm-interpolate-velocity-rows",
-        action="store_true",
-        help=(
-            "Use the physical marker velocity on sharp HIBM rows instead of "
-            "interpolating the interior-fluid velocity into the row value."
         ),
     )
     parser.add_argument(

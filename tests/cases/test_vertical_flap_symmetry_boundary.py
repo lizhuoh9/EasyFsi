@@ -66,20 +66,20 @@ class VerticalFlapSymmetryBoundaryContracts(unittest.TestCase):
             np.broadcast_to((3.0, 4.0), after_symmetry[-1, :, :, 1:].shape),
         )
 
-    def test_selected_case_reports_strict_out_of_plane_slip_identity(self) -> None:
+    def test_selected_case_reports_validated_finite_slab_identity(self) -> None:
         config = selected_formulation_solver_config(step_count=1)
 
         self.assertEqual(
             config.flow_symmetry_domain_walls,
-            ("xmin", "xmax", "ymax"),
+            ("ymax",),
         )
         report = runner.slab_equivalence_diagnostics(config)
         self.assertEqual(
             report["out_of_plane_boundary_policy"],
-            "strict_periodic_or_slip",
+            runner.OUT_OF_PLANE_BOUNDARY_POLICY,
         )
-        self.assertFalse(report["out_of_plane_boundary_residual_modeling_error"])
-        self.assertIn("strict slip", report["out_of_plane_boundary_note"].lower())
+        self.assertTrue(report["out_of_plane_boundary_residual_modeling_error"])
+        self.assertIn("finite 3d slab", report["out_of_plane_boundary_note"].lower())
 
 if __name__ == "__main__":
     unittest.main()

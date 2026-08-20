@@ -60,7 +60,11 @@ from .native_fine_rendering import (
 
 REPORT_SCHEMA = "our_solver_vs_native_fluent_fine_diagnostic_v2"
 PRESSURE_SEMANTICS_MODES = frozenset(("legacy_compatible", "strict"))
-SYNCHRONIZED_STEP_END_STAGE = "post_solid_kinematic_projection"
+DIRECT_STEP_END_STAGES = {
+    "flow_solution_stage": "pre_solid_projection",
+    "boundary_topology_stage": "pre_solid_projection",
+    "structure_geometry_stage": "post_solid_observer",
+}
 
 
 DIAGNOSTIC_MODEL_BLOCKERS: tuple[dict[str, str], ...] = (
@@ -108,13 +112,9 @@ DIAGNOSTIC_MODEL_BLOCKERS: tuple[dict[str, str], ...] = (
 def validate_synchronized_solver_time_layer(
     frame_paths: Sequence[str | Path],
 ) -> dict[str, Any]:
-    """Require every comparison frame to use one synchronized step-end state."""
+    """Require the validated direct flow/structure observer partition."""
 
-    stage_keys = (
-        "flow_solution_stage",
-        "boundary_topology_stage",
-        "structure_geometry_stage",
-    )
+    stage_keys = tuple(DIRECT_STEP_END_STAGES)
     for raw_path in frame_paths:
         path = Path(raw_path)
         try:
@@ -128,17 +128,14 @@ def validate_synchronized_solver_time_layer(
                         "synchronized time layer metadata is missing from "
                         f"{path.name}: {missing}"
                     )
-                for key in stage_keys:
+                for key, expected in DIRECT_STEP_END_STAGES.items():
                     value = np.asarray(frame[key])
                     actual = value.item() if value.shape == () else None
-                    if (
-                        not isinstance(actual, str)
-                        or actual != SYNCHRONIZED_STEP_END_STAGE
-                    ):
+                    if not isinstance(actual, str) or actual != expected:
                         raise NativeFineComparisonError(
                             "synchronized time layer mismatch in "
                             f"{path.name}: {key}={actual!r}, expected "
-                            f"{SYNCHRONIZED_STEP_END_STAGE!r}"
+                            f"{expected!r}"
                         )
                 synchronized = np.asarray(
                     frame["flow_boundary_state_synchronized"]
@@ -162,7 +159,7 @@ def validate_synchronized_solver_time_layer(
             ) from exc
     return {
         "status": "passed",
-        "stage": SYNCHRONIZED_STEP_END_STAGE,
+        "stages": dict(DIRECT_STEP_END_STAGES),
         "frame_count": len(frame_paths),
     }
 

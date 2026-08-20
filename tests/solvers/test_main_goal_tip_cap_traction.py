@@ -225,13 +225,13 @@ class TipCapTractionContracts(unittest.TestCase):
         self.assertAlmostEqual(report.secondary_marker_force_n[0], 0.2, delta=1.0e-6)
         self.assertEqual(report.tip_cap_marker_force_n, (0.0, 0.0, 0.0))
 
-    def test_vertical_flap_and_final_identity_lock_tip_cap_pressure_enabled(self) -> None:
+    def test_vertical_flap_and_final_identity_lock_tip_cap_pressure_disabled(self) -> None:
         config = VerticalFlapFsiConfig()
 
-        self.assertTrue(config.traction_tip_cap_pressure_enabled)
-        self.assertTrue(FINAL_FINE_CONFIG_IDENTITY["traction_tip_cap_pressure_enabled"])
+        self.assertFalse(config.traction_tip_cap_pressure_enabled)
+        self.assertFalse(FINAL_FINE_CONFIG_IDENTITY["traction_tip_cap_pressure_enabled"])
         markers = _build_markers(config, TaichiRuntimeConfig(arch="cuda"))
-        self.assertEqual(markers.projection_vertex_count, markers.marker_count + 4)
+        self.assertEqual(markers.projection_vertex_count, markers.marker_count)
 
 
 if __name__ == "__main__":

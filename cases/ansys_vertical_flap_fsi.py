@@ -98,7 +98,7 @@ ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
     },
     "structure_damping": {
         "native_fluent_structure_damping_enabled": False,
-        "solver_net_velocity_damping_per_physical_step": 1.0,
+        "solver_net_velocity_damping_per_physical_step": 0.995,
     },
     "solid_boundary": {
         "flap_attach": "fixed x/y displacement",
@@ -107,6 +107,16 @@ ANSYS_VERTICAL_FLAP_CASE_METADATA: dict[str, Any] = {
         "flap_wall": "two-way intrinsic FSI",
         "flap_wall_shadow": "two-way intrinsic FSI",
         "thin_wall_pressure_sampling": ANSYS_VERTICAL_FLAP_THIN_WALL_PRESSURE_SAMPLING,
+    },
+    "coupling_time_layer": {
+        "scheme": "direct_explicit_partitioned",
+        "physical_step_owner": (
+            "benchmarks.official.solid_mpm_fsi_runner.run_hibm_mpm_fsi"
+        ),
+        "step_end_flow_stage": "pre_solid_projection",
+        "step_end_structure_geometry_stage": "post_solid_observer",
+        "transport_advanced_by_step_end_projection": False,
+        "fail_closed_on_solver_health": True,
     },
     "time_integration": {
         "dt_s": 5.0e-4,
@@ -157,11 +167,6 @@ class VerticalFlapFsiConfig:
     solid_constitutive_model: str = "plane_stress_linear_elastic"
     dt_s: float = 5.0e-4
     step_count: int = 50
-    fsi_coupling_iterations: int = 8
-    fsi_coupling_relative_tolerance: float = 1.0e-3
-    fsi_coupling_absolute_tolerance_mps: float = 1.0e-5
-    fsi_coupling_initial_relaxation: float = 0.5
-    fsi_coupling_history_limit: int = 8
     grid_nodes: tuple[int, int, int] = (4, 32, 64)
     solid_particle_counts: tuple[int, int, int] = (1, 12, 4)
     marker_count: int = 12
@@ -175,13 +180,10 @@ class VerticalFlapFsiConfig:
     flow_post_dirichlet_consistency_projection_iterations: int = 1
     flow_reprojection_iterations: int | None = None
     flow_reprojection_cg_tolerance: float | None = None
-    # Reproject the current velocity after moving the solid so exported flow,
-    # boundary rows, and structure geometry share one step-end time layer.
-    flow_post_solid_kinematic_projection_enabled: bool = True
     flow_pressure_solve_failure_policy: str = "raise"
     flow_divergence_cleanup_iterations: int = 0
-    # Fluent disables structure damping; this is the net physical-step factor.
-    velocity_damping: float = 1.0
+    # Preserve the direct sharp pipeline that completed the validated 50 steps.
+    velocity_damping: float = 0.995
     solid_velocity_transfer_flip_blend: float = 0.0
     solid_substeps: int = 1600
     solid_cfl_target: float = 0.5
@@ -232,7 +234,7 @@ class VerticalFlapFsiConfig:
     flow_hibm_sharp_interior_probe_distance_xyz_m: (
         tuple[float, float, float] | None
     ) = None
-    flow_hibm_sharp_interpolate_velocity_rows: bool = True
+    flow_hibm_sharp_interpolate_velocity_rows: bool = False
     flow_hibm_marker_mac_constraint_iterations: int = 64
     # Keep the moving physical flap volume independent of the narrow HIBM
     # interface-row search.  Validation launchers enable this together with
@@ -259,7 +261,7 @@ class VerticalFlapFsiConfig:
     traction_marker_layout: str = "dual_physical_faces"
     traction_pressure_sampling_mode: str = "two_sided_pressure_jump"
     traction_include_viscous: bool = False
-    traction_tip_cap_pressure_enabled: bool = True
+    traction_tip_cap_pressure_enabled: bool = False
     traction_marker_face_offset_cells: float = 0.51
     traction_pressure_probe_origin_mode: str = "marker_position"
     traction_pressure_probe_origin_offset_cells: float | None = None
@@ -360,8 +362,6 @@ def selected_formulation_solver_config(
         flow_turbulent_viscosity_ratio=10.0,
         flow_backflow_turbulence_intensity=0.05,
         flow_backflow_turbulent_viscosity_ratio=10.0,
-        flow_sst_near_wall_treatment="fluent_correlation",
-        flow_symmetry_domain_walls=("xmin", "xmax", "ymax"),
         # Production uses one physical outer step; the core conservative
         # transport owns its CFL-sized SSP-RK2 slices.  Repeating a fixed
         # semi-Lagrangian remap here was the dominant long-run diffusion source.

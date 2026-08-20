@@ -105,6 +105,75 @@ class SquidSharpSourceContractTests(unittest.TestCase):
         )
         self.assertTrue(any(isinstance(node, ast.For) for node in ast.walk(public_entry)))
 
+    def test_each_fixed_point_trial_restores_the_complete_base_state(self) -> None:
+        source = (SQUID_ROOT / "step_loop.py").read_text(encoding="utf-8")
+        module = ast.parse(source)
+        public_entry = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "run_squid_step_loop"
+        )
+
+        def nested_function(name: str) -> ast.FunctionDef:
+            return next(
+                node
+                for node in ast.walk(public_entry)
+                if isinstance(node, ast.FunctionDef) and node.name == name
+            )
+
+        def call_name(call: ast.Call) -> str:
+            parts: list[str] = []
+            target: ast.expr = call.func
+            while isinstance(target, ast.Attribute):
+                parts.append(target.attr)
+                target = target.value
+            self.assertIsInstance(target, ast.Name)
+            parts.append(target.id)
+            return ".".join(reversed(parts))
+
+        restore = nested_function("restore_sharp_trial_state")
+        restore_calls = [
+            call_name(statement.value)
+            for statement in restore.body
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+        ]
+        self.assertEqual(
+            restore_calls,
+            [
+                "simulator.restore_reduced_state",
+                "simulator.fluid.restore_state",
+                "solid_mpm.restore_state",
+                "restore_sharp_marker_state_arrays",
+                "restore_sharp_pressure_neumann_gradient_state_array",
+            ],
+        )
+
+        fixed_point = nested_function("advance_sharp_marker_fixed_point_step")
+        trial_loop = next(
+            node for node in ast.walk(fixed_point) if isinstance(node, ast.For)
+        )
+        leading_calls: list[ast.Call] = []
+        for statement in trial_loop.body[:2]:
+            if isinstance(statement, (ast.Expr, ast.Assign)) and isinstance(
+                statement.value,
+                ast.Call,
+            ):
+                leading_calls.append(statement.value)
+        self.assertEqual(
+            [call_name(call) for call in leading_calls],
+            ["restore_sharp_trial_state", "advance_sharp_trial_once"],
+        )
+        self.assertEqual(
+            [
+                argument.id
+                for argument in leading_calls[0].args
+                if isinstance(argument, ast.Name)
+            ],
+            ["marker_guess", "pressure_gradient_state"],
+        )
+
     def test_checkpointing_wraps_core_state_and_keeps_numeric_helpers(self) -> None:
         source = (SQUID_ROOT / "checkpointing.py").read_text(encoding="utf-8")
 

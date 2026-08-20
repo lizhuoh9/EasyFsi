@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+from benchmarks.official import solid_mpm_fsi_runner
 import cases.ansys_vertical_flap_fsi as vertical_flap_case
 from cases.ansys_vertical_flap_fsi import VerticalFlapFsiConfig
 
@@ -91,7 +93,7 @@ def test_cli_rejects_snapshot_input_and_output_before_creating_run_dir(
     assert not output_dir.exists()
 
 
-def test_fine_config_uses_dynamic_solid_volume_and_narrow_anisotropic_hibm_band() -> None:
+def test_fine_config_uses_dynamic_solid_volume_and_validated_direct_hibm_band() -> None:
     runner = _load_runner_module()
     args = SimpleNamespace(
         steps=1,
@@ -132,19 +134,9 @@ def test_fine_config_uses_dynamic_solid_volume_and_narrow_anisotropic_hibm_band(
     assert config.flow_hibm_sharp_interior_probe_distance_m == pytest.approx(
         1.5 * max(dx, dy, dz)
     )
-    assert config.flow_hibm_sharp_interior_probe_distance_xyz_m == pytest.approx(
-        (1.5 * dx, 1.5 * dy, 1.5 * dz)
-    )
-    assert config.flow_hibm_sharp_interpolate_velocity_rows
+    assert config.flow_hibm_sharp_interior_probe_distance_xyz_m is None
+    assert not config.flow_hibm_sharp_interpolate_velocity_rows
     assert "flow_projection_velocity_inlet_zmax" not in config.__dataclass_fields__
-
-    boundary_velocity_only = runner._build_config(
-        SimpleNamespace(
-            **vars(args),
-            disable_hibm_interpolate_velocity_rows=True,
-        )
-    )
-    assert not boundary_velocity_only.flow_hibm_sharp_interpolate_velocity_rows
 
     scalar_probe_override = runner._build_config(
         SimpleNamespace(
@@ -158,6 +150,56 @@ def test_fine_config_uses_dynamic_solid_volume_and_narrow_anisotropic_hibm_band(
         pytest.approx(7.5e-4)
     )
     assert scalar_probe_override.flow_hibm_sharp_interior_probe_distance_xyz_m is None
+
+
+def test_direct_vertical_flap_config_preserves_validated_r13_physics() -> None:
+    config = vertical_flap_case.selected_formulation_solver_config(step_count=50)
+    dead_direct_fields = {
+        "fsi_coupling_iterations",
+        "fsi_coupling_relative_tolerance",
+        "fsi_coupling_absolute_tolerance_mps",
+        "fsi_coupling_initial_relaxation",
+        "fsi_coupling_history_limit",
+        "flow_post_solid_kinematic_projection_enabled",
+    }
+
+    assert dead_direct_fields.isdisjoint(config.__dataclass_fields__)
+    assert config.velocity_damping == pytest.approx(0.995)
+    assert config.flow_sst_near_wall_treatment == "resolved"
+    assert config.flow_symmetry_domain_walls == ("ymax",)
+    assert config.flow_hibm_sharp_interior_probe_distance_xyz_m is None
+    assert not config.flow_hibm_sharp_interpolate_velocity_rows
+    assert not config.traction_tip_cap_pressure_enabled
+
+
+def test_direct_validator_rejects_post_solid_projection_request() -> None:
+    config = SimpleNamespace(
+        flow_solid_boundary_mode="hibm_sharp_marker_rows",
+        flow_post_solid_kinematic_projection_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="direct HIBM-MPM output"):
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            config,
+            require_post_solid_projection=False,
+            require_tip_cap_pressure=False,
+        )
+
+
+def test_direct_validator_enforces_validated_no_tip_cap_contract() -> None:
+    config = vertical_flap_case.selected_formulation_solver_config(step_count=50)
+
+    solid_mpm_fsi_runner._validate_rectangular_solid_config(
+        config,
+        require_post_solid_projection=False,
+        require_tip_cap_pressure=False,
+    )
+    with pytest.raises(ValueError, match="direct HIBM-MPM traction"):
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            replace(config, traction_tip_cap_pressure_enabled=True),
+            require_post_solid_projection=False,
+            require_tip_cap_pressure=False,
+        )
 
 
 def test_case_wrapper_forwards_the_step_observer_to_the_single_solver() -> None:

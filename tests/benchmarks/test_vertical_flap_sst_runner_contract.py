@@ -56,7 +56,7 @@ def _method_calls(node: ast.AST, method_name: str) -> list[ast.Call]:
 
 
 class VerticalFlapSstRunnerContracts(unittest.TestCase):
-    def test_selected_production_formulation_matches_native_fluent_sst_inlet(
+    def test_selected_production_formulation_uses_validated_direct_sst_contract(
         self,
     ) -> None:
         self.assertEqual(VerticalFlapFsiConfig().flow_turbulence_model, "laminar")
@@ -75,7 +75,7 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
         )
         self.assertEqual(
             config.flow_sst_near_wall_treatment,
-            "fluent_correlation",
+            "resolved",
         )
         self.assertEqual(config.flow_advection_scheme, "muscl_tvd")
         self.assertEqual(config.flow_predictor_substeps, 1)
@@ -176,7 +176,7 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
             no_slip_domain_walls=runner._flow_predictor_no_slip_domain_walls(
                 config
             ),
-            near_wall_treatment="fluent_correlation",
+            near_wall_treatment="resolved",
             max_automatic_substeps=config.flow_sst_max_automatic_substeps,
             defer_wall_distance=True,
         )

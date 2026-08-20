@@ -360,19 +360,29 @@ def test_step_snapshot_rejects_a_relabelled_pre_solid_flow_state() -> None:
         )
 
 
-def test_ansys_identity_locks_synchronized_step_end_stage() -> None:
-    assert VerticalFlapFsiConfig().flow_post_solid_kinematic_projection_enabled
+def test_ansys_identity_locks_direct_partitioned_time_layers() -> None:
+    assert (
+        "flow_post_solid_kinematic_projection_enabled"
+        not in VerticalFlapFsiConfig.__dataclass_fields__
+    )
     assert ANSYS_VERTICAL_FLAP_CASE_METADATA["coupling_time_layer"] == {
-        "scheme": "partitioned_marker_velocity_iqn_ils",
-        "interface_unknown": "marker_velocity_mps",
-                "physical_step_owner": "simulation_core.drivers.solve_fsi_runtime",
-        "step_end_flow_stage": "post_solid_kinematic_projection",
+        "scheme": "direct_explicit_partitioned",
+        "physical_step_owner": (
+            "benchmarks.official.solid_mpm_fsi_runner.run_hibm_mpm_fsi"
+        ),
+        "step_end_flow_stage": "pre_solid_projection",
+        "step_end_structure_geometry_stage": "post_solid_observer",
         "transport_advanced_by_step_end_projection": False,
-        "fail_closed_on_nonconvergence": True,
+        "fail_closed_on_solver_health": True,
     }
     assert (
-        native_fine_final_contracts.FINAL_FINE_CONFIG_IDENTITY[
-            "flow_post_solid_kinematic_projection_enabled"
-        ]
-        is True
+        "flow_post_solid_kinematic_projection_enabled"
+        not in native_fine_final_contracts.FINAL_FINE_CONFIG_IDENTITY
     )
+    assert native_fine_final_contracts.FINAL_FINE_TIME_LAYER_IDENTITY == {
+        "scheme": "explicit_loose",
+        "step_end_flow_stage": "pre_solid_projection",
+        "step_end_structure_geometry_stage": "post_solid_observer",
+        "transport_advanced_by_step_end_projection": False,
+        "fluent_strong_coupling_equivalent": False,
+    }

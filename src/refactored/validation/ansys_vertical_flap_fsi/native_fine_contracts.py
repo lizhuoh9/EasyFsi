@@ -12,8 +12,6 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 from .native_fine_final_contracts import (
-    FINAL_FINE_CONFIG_IDENTITY,
-    FINAL_FINE_EXPORT_IDENTITY,
     FINAL_PROJECTION_REQUIRED_KEYS,
     NativeFineFinalContractError,
     validate_final_projection_success as _validate_final_projection_success_detail,
@@ -452,34 +450,33 @@ def _validate_run_contracts(
     config = our_manifest.get("config")
     if not isinstance(config, Mapping):
         raise NativeFineComparisonError("our run manifest has no config mapping")
-    if config.get("flow_hibm_sharp_interpolate_velocity_rows") is not True:
+    if config.get("flow_hibm_sharp_interpolate_velocity_rows") is not False:
         raise NativeFineComparisonError(
             "native-fine comparison requires "
-            "flow_hibm_sharp_interpolate_velocity_rows=true; disabling the "
-            "reconstructed row velocity creates a nonphysical hard no-slip halo"
+            "flow_hibm_sharp_interpolate_velocity_rows=false for the validated "
+            "direct sharp pipeline"
+        )
+    probe_distance = config.get("flow_hibm_sharp_interior_probe_distance_m")
+    if isinstance(probe_distance, bool) or not isinstance(
+        probe_distance, (int, float)
+    ):
+        raise NativeFineComparisonError(
+            "native-fine comparison requires a finite positive scalar "
+            "flow_hibm_sharp_interior_probe_distance_m"
+        )
+    if not math.isfinite(float(probe_distance)) or float(probe_distance) <= 0.0:
+        raise NativeFineComparisonError(
+            "native-fine comparison requires a finite positive scalar "
+            "flow_hibm_sharp_interior_probe_distance_m"
         )
     probe_distance_xyz = config.get(
         "flow_hibm_sharp_interior_probe_distance_xyz_m"
     )
-    if not isinstance(probe_distance_xyz, (list, tuple)) or len(
-        probe_distance_xyz
-    ) != 3:
+    if probe_distance_xyz is not None:
         raise NativeFineComparisonError(
-            "native-fine comparison requires a three-axis "
-            "flow_hibm_sharp_interior_probe_distance_xyz_m"
+            "native-fine comparison requires the validated scalar probe and "
+            "flow_hibm_sharp_interior_probe_distance_xyz_m=None"
         )
-    for axis, value in enumerate(probe_distance_xyz):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise NativeFineComparisonError(
-                "flow_hibm_sharp_interior_probe_distance_xyz_m must contain "
-                f"finite positive numbers; axis={axis}, value={value!r}"
-            )
-        distance = float(value)
-        if not math.isfinite(distance) or distance <= 0.0:
-            raise NativeFineComparisonError(
-                "flow_hibm_sharp_interior_probe_distance_xyz_m must contain "
-                f"finite positive numbers; axis={axis}, value={value!r}"
-            )
     if expected_steps == DEFAULT_EXPECTED_STEPS:
         _validate_final_run_identity(our_manifest, our_summary)
     dt_s = _finite_float(config.get("dt_s", DEFAULT_DT_S), "our run dt")

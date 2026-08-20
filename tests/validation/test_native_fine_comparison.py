@@ -302,12 +302,12 @@ def _fine_solver_config(steps: int) -> dict[str, object]:
         "solid_density_kgm3": 1600.0,
         "young_modulus_pa": 1.0e6,
         "poisson_ratio": 0.47,
-        "velocity_damping": 1.0,
+        "velocity_damping": 0.995,
         "solid_constitutive_model": "plane_stress_linear_elastic",
         "flow_advection_scheme": "muscl_tvd",
         "flow_turbulence_model": "sst_2003",
-        "flow_sst_near_wall_treatment": "fluent_correlation",
-        "flow_symmetry_domain_walls": ["xmin", "xmax", "ymax"],
+        "flow_sst_near_wall_treatment": "resolved",
+        "flow_symmetry_domain_walls": ["ymax"],
         "flow_predictor_substeps": 1,
         "flow_hibm_sharp_search_radius_m": 1.7e-3,
         "flow_hibm_sharp_search_radius_xyz_m": [
@@ -315,12 +315,10 @@ def _fine_solver_config(steps: int) -> dict[str, object]:
             0.390625e-3,
             0.46875e-3,
         ],
-        "flow_hibm_sharp_interior_probe_distance_xyz_m": [
-            1.125e-3,
-            0.1171875e-3,
-            0.46875e-3,
-        ],
-        "flow_hibm_sharp_interpolate_velocity_rows": True,
+        "flow_hibm_sharp_interior_probe_distance_m": 1.125e-3,
+        "flow_hibm_sharp_interior_probe_distance_xyz_m": None,
+        "flow_hibm_sharp_interpolate_velocity_rows": False,
+        "flow_hibm_marker_mac_constraint_iterations": 64,
         "flow_hibm_dynamic_solid_volume_enabled": True,
         "update_fluid_obstacle_from_solid": True,
         "flow_hibm_tiny_unreached_cleanup_component_cells": 128,
@@ -335,8 +333,7 @@ def _fine_solver_config(steps: int) -> dict[str, object]:
         "flow_cg_preconditioner": "fv_multigrid",
         "flow_cg_tolerance": 1.0e-6,
         "flow_pressure_solve_failure_policy": "raise",
-        "flow_post_solid_kinematic_projection_enabled": True,
-        "traction_tip_cap_pressure_enabled": True,
+        "traction_tip_cap_pressure_enabled": False,
         "traction_pressure_pair_runtime_provider_mode": (
             "runtime_anchored_cell_pair"
         ),
@@ -414,16 +411,10 @@ def _solver_field(
         "fluid_mask": np.ones_like(u, dtype=bool),
         "solid_mask": np.zeros_like(u, dtype=bool),
         "boundary_surrogate_mask": np.zeros_like(u, dtype=bool),
-        "flow_solution_stage": np.asarray(
-            "post_solid_kinematic_projection"
-        ),
-        "boundary_topology_stage": np.asarray(
-            "post_solid_kinematic_projection"
-        ),
+        "flow_solution_stage": np.asarray("pre_solid_projection"),
+        "boundary_topology_stage": np.asarray("pre_solid_projection"),
         "flow_boundary_state_synchronized": np.asarray(True),
-        "structure_geometry_stage": np.asarray(
-            "post_solid_kinematic_projection"
-        ),
+        "structure_geometry_stage": np.asarray("post_solid_observer"),
     }
     if not include_deformed_geometry:
         return fields
@@ -877,7 +868,9 @@ def test_postprocess_rejects_mixed_flow_and_structure_time_layer(
     frame_path = our_dir / "step_fields" / "step_0002.npz"
     with np.load(frame_path, allow_pickle=False) as archive:
         frame = {key: np.asarray(archive[key]) for key in archive.files}
-    frame["flow_solution_stage"] = np.asarray("pre_solid_projection")
+    frame["flow_solution_stage"] = np.asarray(
+        "post_solid_kinematic_projection"
+    )
     np.savez_compressed(frame_path, **frame)
 
     with pytest.raises(

@@ -598,7 +598,11 @@ def run_hibm_mpm_fsi(
         run_started_s=run_started_s,
         phase="initialization_fluid_build",
     )
-    _validate_rectangular_solid_config(config)
+    _validate_rectangular_solid_config(
+        config,
+        require_post_solid_projection=False,
+        require_tip_cap_pressure=False,
+    )
     runtime = TaichiRuntimeConfig(arch="cuda", strict_arch=True)
     fluid = _build_fluid(config, runtime)
     _initialize_computed_flow(fluid, config)
@@ -1271,7 +1275,7 @@ def run_hibm_mpm_fsi(
                 step_index + 1,
                 float(config.dt_s) * float(step_index + 1),
                 dict(history[-1]),
-                _step_observer_snapshot(
+                _direct_step_observer_snapshot(
                     observer_flow_snapshot,
                     solid,
                     markers,
@@ -1610,7 +1614,11 @@ def prepare_rectangular_solid_marker_mpm_fsi_runtime(
     ) -> PreparedFsiRuntime | dict[str, object]:
     """Initialize one rectangular marker-MPM runtime without advancing FSI."""
     run_started_s = time.perf_counter()
-    _validate_rectangular_solid_config(config)
+    _validate_rectangular_solid_config(
+        config,
+        require_post_solid_projection=True,
+        require_tip_cap_pressure=True,
+    )
     particle_position_generation = 0
 
     def record_particle_position_write() -> None:
@@ -3652,7 +3660,12 @@ def _preflow_snapshot_paths(config: Any) -> tuple[object | None, object | None]:
     return input_path, output_path
 
 
-def _validate_rectangular_solid_config(config: Any) -> None:
+def _validate_rectangular_solid_config(
+    config: Any,
+    *,
+    require_post_solid_projection: bool = False,
+    require_tip_cap_pressure: bool = False,
+) -> None:
     boundary_mode = str(
         getattr(
             config,
@@ -3671,15 +3684,20 @@ def _validate_rectangular_solid_config(config: Any) -> None:
     step_end_projection_enabled = getattr(
         config,
         "flow_post_solid_kinematic_projection_enabled",
-        True,
+        require_post_solid_projection,
     )
     if not isinstance(step_end_projection_enabled, (bool, np.bool_)):
         raise ValueError(
             "flow_post_solid_kinematic_projection_enabled must be bool"
         )
-    if not bool(step_end_projection_enabled):
+    if require_post_solid_projection and not bool(step_end_projection_enabled):
         raise ValueError(
             "official FSI output requires post-solid kinematic projection"
+        )
+    if not require_post_solid_projection and bool(step_end_projection_enabled):
+        raise ValueError(
+            "direct HIBM-MPM output does not perform post-solid kinematic "
+            "projection"
         )
     solid_boundary_mode = _flow_solid_boundary_mode(config)
     if solid_boundary_mode not in FLOW_SOLID_BOUNDARY_MODES:
@@ -3861,11 +3879,17 @@ def _validate_rectangular_solid_config(config: Any) -> None:
     if marker_layout not in TRACTION_MARKER_LAYOUTS:
         raise ValueError(f"unsupported traction_marker_layout: {marker_layout!r}")
     tip_cap_enabled = _traction_tip_cap_pressure_enabled(config)
-    if marker_layout == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES and not tip_cap_enabled:
-        raise ValueError(
-            "dual physical-face vertical-flap traction requires "
-            "traction_tip_cap_pressure_enabled=True"
-        )
+    if marker_layout == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES:
+        if require_tip_cap_pressure and not tip_cap_enabled:
+            raise ValueError(
+                "generic official FSI traction requires "
+                "traction_tip_cap_pressure_enabled=True"
+            )
+        if not require_tip_cap_pressure and tip_cap_enabled:
+            raise ValueError(
+                "direct HIBM-MPM traction requires "
+                "traction_tip_cap_pressure_enabled=False"
+            )
     pressure_sampling_mode = _traction_pressure_sampling_mode(config)
     if pressure_sampling_mode not in TRACTION_PRESSURE_SAMPLING_MODES:
         raise ValueError(
@@ -9892,6 +9916,12 @@ def _zmax_inlet_boundary_report(
 _PREFLOW_SNAPSHOT_FSI_ONLY_CONFIG_FIELDS = frozenset(
     {
         "step_count",
+        "fsi_coupling_iterations",
+        "fsi_coupling_relative_tolerance",
+        "fsi_coupling_absolute_tolerance_mps",
+        "fsi_coupling_initial_relaxation",
+        "fsi_coupling_history_limit",
+        "flow_post_solid_kinematic_projection_enabled",
         "young_modulus_pa",
         "poisson_ratio",
         "solid_density_kgm3",
@@ -12510,7 +12540,65 @@ def _step_observer_snapshot(
 ) -> dict[str, np.ndarray]:
     """Combine synchronized post-solid flow and structure state."""
 
-    expected_stage = FLOW_STAGE_POST_SOLID_KINEMATIC_PROJECTION
+    return _stage_aware_step_observer_snapshot(
+        flow_snapshot,
+        solid,
+        markers,
+        solid_positions_m=solid_positions_m,
+        solid_rest_positions_m=solid_rest_positions_m,
+        fixed_mask=fixed_mask,
+        tip_mask=tip_mask,
+        expected_flow_stage=FLOW_STAGE_POST_SOLID_KINEMATIC_PROJECTION,
+        structure_geometry_stage=FLOW_STAGE_POST_SOLID_KINEMATIC_PROJECTION,
+        error_message=(
+            "step observer requires a post-solid synchronized flow snapshot"
+        ),
+    )
+
+
+def _direct_step_observer_snapshot(
+    flow_snapshot: Mapping[str, np.ndarray],
+    solid: NeoHookeanMpmState,
+    markers: HibmMpmSurfaceMarkers,
+    *,
+    solid_positions_m: np.ndarray,
+    solid_rest_positions_m: np.ndarray,
+    fixed_mask: np.ndarray,
+    tip_mask: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Combine the projected direct-flow stage with post-solid geometry."""
+
+    return _stage_aware_step_observer_snapshot(
+        flow_snapshot,
+        solid,
+        markers,
+        solid_positions_m=solid_positions_m,
+        solid_rest_positions_m=solid_rest_positions_m,
+        fixed_mask=fixed_mask,
+        tip_mask=tip_mask,
+        expected_flow_stage="pre_solid_projection",
+        structure_geometry_stage="post_solid_observer",
+        error_message=(
+            "direct step observer requires a pre-solid synchronized flow snapshot"
+        ),
+    )
+
+
+def _stage_aware_step_observer_snapshot(
+    flow_snapshot: Mapping[str, np.ndarray],
+    solid: NeoHookeanMpmState,
+    markers: HibmMpmSurfaceMarkers,
+    *,
+    solid_positions_m: np.ndarray,
+    solid_rest_positions_m: np.ndarray,
+    fixed_mask: np.ndarray,
+    tip_mask: np.ndarray,
+    expected_flow_stage: str,
+    structure_geometry_stage: str,
+    error_message: str,
+) -> dict[str, np.ndarray]:
+    """Validate one synchronized flow stage and attach structure geometry."""
+
     stages = tuple(
         str(np.asarray(flow_snapshot.get(key, "")).item())
         for key in ("flow_solution_stage", "boundary_topology_stage")
@@ -12519,21 +12607,19 @@ def _step_observer_snapshot(
         flow_snapshot.get("flow_boundary_state_synchronized", False)
     )
     if (
-        stages != (expected_stage, expected_stage)
+        stages != (expected_flow_stage, expected_flow_stage)
         or synchronized.shape != ()
         or not isinstance(synchronized.item(), (bool, np.bool_))
         or not bool(synchronized.item())
     ):
-        raise RuntimeError(
-            "step observer requires a post-solid synchronized flow snapshot"
-        )
+        raise RuntimeError(error_message)
     snapshot = dict(flow_snapshot)
     solid_count = int(solid.particle_count)
     marker_count = int(markers.marker_count)
     snapshot.update(
         {
             "structure_geometry_stage": np.asarray(
-                FLOW_STAGE_POST_SOLID_KINEMATIC_PROJECTION
+                structure_geometry_stage
             ),
             "solid_position_m": np.asarray(solid_positions_m)[:solid_count].copy(),
             "solid_velocity_mps": solid.v.to_numpy()[:solid_count],

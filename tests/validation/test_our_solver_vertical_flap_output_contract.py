@@ -349,6 +349,44 @@ def test_core_step_snapshot_exports_active_solid_and_marker_geometry() -> None:
     assert snapshot["velocity_dirichlet_boundary_active"].item() == 1
 
 
+def test_direct_step_snapshot_keeps_pre_solid_flow_and_post_solid_structure() -> None:
+    solid = SimpleNamespace(
+        particle_count=2,
+        v=_ArrayField(np.ones((2, 3), dtype=np.float32)),
+    )
+    markers = SimpleNamespace(
+        marker_count=1,
+        x_gamma_m=_ArrayField(np.ones((1, 3), dtype=np.float32)),
+        v_gamma_mps=_ArrayField(np.full((1, 3), 2.0, dtype=np.float32)),
+        n_gamma=_ArrayField(np.full((1, 3), 3.0, dtype=np.float32)),
+        A_gamma_m2=_ArrayField(np.asarray([4.0], dtype=np.float32)),
+        region_id=_ArrayField(np.asarray([5], dtype=np.int32)),
+    )
+    positions = np.arange(6, dtype=np.float32).reshape(2, 3)
+    flow_stage_snapshot = {
+        "pressure": np.zeros((1, 1, 1), dtype=np.float32),
+        "obstacle": np.zeros((1, 1, 1), dtype=np.int32),
+        "flow_solution_stage": np.asarray("pre_solid_projection"),
+        "boundary_topology_stage": np.asarray("pre_solid_projection"),
+        "flow_boundary_state_synchronized": np.asarray(True),
+    }
+
+    snapshot = solid_runner._direct_step_observer_snapshot(
+        flow_stage_snapshot,
+        solid,
+        markers,
+        solid_positions_m=positions,
+        solid_rest_positions_m=positions,
+        fixed_mask=np.asarray([True, False]),
+        tip_mask=np.asarray([False, True]),
+    )
+
+    assert snapshot["flow_solution_stage"].item() == "pre_solid_projection"
+    assert snapshot["boundary_topology_stage"].item() == "pre_solid_projection"
+    assert bool(snapshot["flow_boundary_state_synchronized"].item())
+    assert snapshot["structure_geometry_stage"].item() == "post_solid_observer"
+
+
 def test_synchronized_flow_snapshot_tags_stage_without_mutating_source() -> None:
     source = {
         "pressure": np.zeros((1, 1, 1), dtype=np.float32),

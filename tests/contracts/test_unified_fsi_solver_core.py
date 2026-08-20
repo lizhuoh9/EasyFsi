@@ -499,11 +499,15 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
         self.assertIn("flow_predictor_substeps", case_source)
         self.assertNotIn("runtime_executor", case_source)
         self.assertNotIn("explicit_loose", case_source)
-        self.assertNotIn(
-            "coupling_time_layer",
-            ansys_vertical_flap_fsi.ANSYS_VERTICAL_FLAP_CASE_METADATA,
-            "direct ANSYS metadata must not claim the shared generic IQN driver",
+        time_layer = ansys_vertical_flap_fsi.ANSYS_VERTICAL_FLAP_CASE_METADATA[
+            "coupling_time_layer"
+        ]
+        self.assertEqual(time_layer["scheme"], "direct_explicit_partitioned")
+        self.assertEqual(
+            time_layer["physical_step_owner"],
+            "benchmarks.official.solid_mpm_fsi_runner.run_hibm_mpm_fsi",
         )
+        self.assertNotIn("iqn", str(time_layer).lower())
 
     def test_ansys_wrapper_delegates_once_to_direct_runner(self) -> None:
         from cases import ansys_vertical_flap_fsi
