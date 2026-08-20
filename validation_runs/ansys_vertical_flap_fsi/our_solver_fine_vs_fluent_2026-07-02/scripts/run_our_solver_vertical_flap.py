@@ -771,10 +771,10 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
             )
         ),
         flow_hibm_dynamic_solid_volume_enabled=True,
-        # A moving cut-cell topology can leave tiny row-cloud pockets that
-        # are disconnected from the pressure outlet.  Convert only components
-        # no larger than the solver's established small-component threshold.
-        flow_hibm_tiny_unreached_cleanup_component_cells=128,
+        # Preserve the validated direct-partitioned topology.  The pressure
+        # nullspace solve owns outlet-disconnected HIBM slivers; converting
+        # them to obstacles changes canonical owners as the flap moves.
+        flow_hibm_tiny_unreached_cleanup_component_cells=0,
         update_fluid_obstacle_from_solid=True,
         export_final_flow_snapshot=True,
         # Campaign runs fail loud on under-seeded solids (2026-07-03 audit:

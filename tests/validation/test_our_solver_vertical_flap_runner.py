@@ -127,7 +127,10 @@ def test_fine_config_uses_dynamic_solid_volume_and_validated_direct_hibm_band() 
 
     assert config.update_fluid_obstacle_from_solid
     assert config.flow_hibm_dynamic_solid_volume_enabled
-    assert config.flow_hibm_tiny_unreached_cleanup_component_cells == 128
+    # The validated direct partitioned path leaves outlet-disconnected HIBM
+    # slivers in the pressure/nullspace solve.  Converting them into obstacle
+    # cells changes the moving interface topology and its canonical owners.
+    assert config.flow_hibm_tiny_unreached_cleanup_component_cells == 0
     assert 0.5 * config.span_m - 0.5 * dx < rx <= 0.5 * config.span_m
     assert 4.0 * dy <= ry <= 6.0 * dy
     assert 1.5 * dz <= rz <= 2.0 * dz

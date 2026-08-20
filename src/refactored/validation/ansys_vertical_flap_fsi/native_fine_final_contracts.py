@@ -37,7 +37,7 @@ FINAL_FINE_CONFIG_IDENTITY = {
     "flow_hibm_marker_mac_constraint_iterations": 64,
     "flow_hibm_dynamic_solid_volume_enabled": True,
     "update_fluid_obstacle_from_solid": True,
-    "flow_hibm_tiny_unreached_cleanup_component_cells": 128,
+    "flow_hibm_tiny_unreached_cleanup_component_cells": 0,
     "preflow_steps": 200,
     "preflow_convergence_mode": "windowed_stationary",
     "preflow_stationary_min_steps": 20,
