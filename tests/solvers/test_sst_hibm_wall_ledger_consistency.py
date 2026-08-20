@@ -122,6 +122,56 @@ class _CanonicalHibmWallProbe:
 
 
 class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
+    def test_resolved_treatment_keeps_canonical_fluid_neighbor_in_shear_stencil(
+        self,
+    ) -> None:
+        solver = _cuda_solver()
+        solver.configure_sst_2003(
+            inlet_velocity_mps=3.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=_OPEN_WALLS,
+            near_wall_treatment="resolved",
+        )
+        solver.set_velocity_dirichlet_boundary_authority("canonical")
+
+        owner = (1, 2, 1)
+        solver.velocity_dirichlet_boundary_active_component_mask[owner] = 7
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask[owner] = 7
+        solver.velocity_dirichlet_boundary_owned_component_mask[owner] = 7
+        solver.velocity_dirichlet_boundary_external_exact_component_mask[owner] = 0
+        solver.velocity_dirichlet_boundary_pressure_mobility[owner] = (0.0, 0.0, 0.0)
+        solver.velocity_dirichlet_boundary_component_enforcement_weight[owner] = (
+            1.0,
+            1.0,
+            1.0,
+        )
+        solver.velocity_dirichlet_boundary_value_mps[owner] = (0.25, 0.0, 0.0)
+
+        cell_velocity = np.zeros((4, 4, 4, 3), dtype=np.float32)
+        cell_velocity[1, 0, 1, 0] = 0.0
+        cell_velocity[1, 1, 1, 0] = 2.0
+        cell_velocity[1, 2, 1, 0] = 3.0
+        solver.sst_cell_center_velocity_mps.from_numpy(cell_velocity)
+
+        probe = _CanonicalHibmWallProbe()
+        probe.evaluate_wall_normal_velocity_derivative(solver)
+
+        # The resolved treatment already represents the wall through its
+        # obstacle/wall-distance ledger.  Reinterpreting a canonical fluid row
+        # as an additional half-cell wall here double-counts that interface and
+        # injects excessive SST production.  Keep the historical cell-centred
+        # stencil; the correlation treatment has its own canonical-wall test.
+        expected_interior_derivative = (
+            cell_velocity[1, 2, 1] - cell_velocity[1, 0, 1]
+        ) / (2.0 * solver.dy)
+        np.testing.assert_allclose(
+            probe.velocity_derivative.to_numpy(),
+            expected_interior_derivative,
+            rtol=0.0,
+            atol=2.0e-6,
+        )
+
     def test_correlation_uses_canonical_hard_face_when_obstacle_mask_is_fluid(
         self,
     ) -> None:

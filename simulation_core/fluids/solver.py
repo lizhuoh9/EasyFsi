@@ -10038,24 +10038,30 @@ class CartesianFluidSolver:
 
         minus_canonical_wall_mask = 0
         plus_canonical_wall_mask = 0
-        if has_minus:
-            minus_canonical_wall_mask = (
-                self._sst_canonical_hibm_wall_target_component_mask(
-                    i,
-                    j,
-                    k,
-                    derivative_axis,
+        if self.sst_near_wall_correlation_enabled[None] != 0:
+            # The Fluent wall-correlation closes this exact canonical face as
+            # a wall.  The resolved treatment instead keeps the historical
+            # cell-centred shear stencil: its obstacle/wall-distance ledger
+            # already represents the interface, so a second half-cell wall
+            # here would double-count the same boundary and overproduce SST k.
+            if has_minus:
+                minus_canonical_wall_mask = (
+                    self._sst_canonical_hibm_wall_target_component_mask(
+                        i,
+                        j,
+                        k,
+                        derivative_axis,
+                    )
                 )
-            )
-        if has_plus:
-            plus_canonical_wall_mask = (
-                self._sst_canonical_hibm_wall_target_component_mask(
-                    plus_i,
-                    plus_j,
-                    plus_k,
-                    derivative_axis,
+            if has_plus:
+                plus_canonical_wall_mask = (
+                    self._sst_canonical_hibm_wall_target_component_mask(
+                        plus_i,
+                        plus_j,
+                        plus_k,
+                        derivative_axis,
+                    )
                 )
-            )
         if minus_canonical_wall_mask != 0:
             has_minus = False
             minus_obstacle_wall = True
