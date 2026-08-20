@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import taichi as ti
 
-from simulation_core import InterfaceReactionRelaxationState
+if TYPE_CHECKING:
+    import argparse
 
-from .history import _final_row_int, _final_row_number, _row_bool, read_csv_rows
-from .schedules import pressure_schedule_dict
+    from .runtime_state import ReducedSquidFSI
+    from .spec import SquidReducedSpec
 
 RUN_CHECKPOINT_VERSION = 3
 
@@ -58,37 +60,8 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "solid_mpm_flip_blend",
     "mooney_membrane_force_scale",
     "poissons_ratio",
-    "constraint_force_scale",
-    "fsi_constraint_force_solid_mobility_ratio",
-    "fsi_solid_response_mobility_coupling",
-    "fsi_velocity_target_solid_mobility_ratio",
-    "fsi_solid_response_velocity_mobility_coupling",
-    "fsi_velocity_constraint_blend",
-    "fsi_velocity_constraint_solid_mobility_ratio",
     "interface_reaction_relaxation",
     "interface_reaction_aitken",
-    "interface_reaction_aitken_lower_bound",
-    "interface_reaction_aitken_upper_bound",
-    "interface_reaction_passivity_limit",
-    "interface_reaction_robin_impedance_ns_m",
-    "interface_reaction_robin_matrix_impedance_ns_m",
-    "interface_reaction_robin_target_mode",
-    "fsi_coupling_mode",
-    "fsi_stabilization_preset",
-    "fsi_coupling_solver",
-    "fsi_coupling_target_map_relaxation",
-    "fsi_coupling_rejected_trial_backtrack",
-    "fsi_coupling_residual_growth_rejection_factor",
-    "fsi_coupling_max_accepted_residual_n",
-    "fsi_coupling_trust_region_force_increment_n",
-    "fsi_coupling_trust_region_adaptive",
-    "fsi_coupling_trust_region_shrink_factor",
-    "fsi_coupling_trust_region_growth_factor",
-    "fsi_coupling_trust_region_rebound_factor",
-    "fsi_coupling_trust_region_rebound_backtrack",
-    "fsi_coupling_trust_region_rebound_stop_factor",
-    "fsi_coupling_trust_region_rebound_stop_max_residual_n",
-    "reuse_accepted_fsi_trial_state",
     "min_outlet_to_main_volume_flux_ratio",
     "pressure_outlet_source_ratio_tolerance",
     "fluid_substeps",
@@ -96,21 +69,7 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "adaptive_fluid_substeps_target_cfl",
     "adaptive_fluid_substeps_max",
     "adaptive_fluid_substeps_safety",
-    "ibm_correction_iterations",
     "fsi_coupling_iterations",
-    "fsi_coupling_adaptive_iterations_max",
-    "fsi_coupling_adaptive_iterations_residual_threshold_n",
-    "fsi_coupling_adaptive_iterations_cfl_threshold",
-    "fsi_coupling_same_step_rerun_iterations_max",
-    "fsi_coupling_same_step_rerun_residual_threshold_n",
-    "fsi_coupling_same_step_rerun_fluid_substep_factor",
-    "fsi_coupling_residual_continuation_iterations_max",
-    "fsi_coupling_residual_continuation_threshold_n",
-    "fsi_coupling_residual_continuation_rebound_secant_from_best",
-    "fsi_coupling_residual_continuation_rebound_secant_factor",
-    "fsi_coupling_residual_continuation_rebound_secant_evaluation_extensions_max",
-    "fsi_coupling_trial_interior_divergence_tolerance",
-    "fsi_coupling_tolerance_n",
     "fsi_marker_coupling_tolerance_mps",
     "disable_pressure_outlet_zmin",
     "disable_reduced_obstacles",
@@ -271,77 +230,6 @@ def _read_scalar_field(field: ti.template()) -> float:
 
 def _write_scalar_field(field: ti.template(), value: object) -> None:
     field[None] = float(np.asarray(value))
-
-def _read_vector_field(field: ti.template()) -> np.ndarray:
-    value = field[None]
-    return np.asarray([float(value[0]), float(value[1]), float(value[2])], dtype=np.float32)
-
-def _write_vector_field(field: ti.template(), value: object) -> None:
-    array = np.asarray(value, dtype=np.float32).reshape(3)
-    field[None] = ti.Vector([float(array[0]), float(array[1]), float(array[2])])
-
-def _checkpoint_interface_state_dict(
-    state: InterfaceReactionRelaxationState,
-) -> dict[str, object]:
-    return {
-        "relaxation": float(state.relaxation),
-        "previous_residual_n": (
-            None
-            if state.previous_residual_n is None
-            else [float(value) for value in state.previous_residual_n]
-        ),
-        "previous_velocity_mps": (
-            None
-            if state.previous_velocity_mps is None
-            else [float(value) for value in state.previous_velocity_mps]
-        ),
-    }
-
-def _checkpoint_interface_vector(
-    data: object,
-    *,
-    name: str,
-) -> tuple[float, ...] | None:
-    if data is None:
-        return None
-    try:
-        vector = tuple(float(value) for value in data)  # type: ignore[union-attr]
-    except TypeError as exc:
-        raise ValueError(f"checkpoint {name} must be a vector or null") from exc
-    except ValueError as exc:
-        raise ValueError(f"checkpoint {name} must contain numeric values") from exc
-    if not vector:
-        raise ValueError(f"checkpoint {name} must not be empty")
-    if any(not math.isfinite(value) for value in vector):
-        raise ValueError(f"checkpoint {name} must contain only finite values")
-    return vector
-
-def _interface_state_from_checkpoint(data: object) -> InterfaceReactionRelaxationState:
-    if not isinstance(data, dict):
-        raise ValueError("checkpoint interface_reaction_state must be an object")
-    residual = _checkpoint_interface_vector(
-        data.get("previous_residual_n"),
-        name="previous_residual_n",
-    )
-    velocity = _checkpoint_interface_vector(
-        data.get("previous_velocity_mps"),
-        name="previous_velocity_mps",
-    )
-    if residual is not None and velocity is not None and len(residual) != len(velocity):
-        raise ValueError(
-            "checkpoint previous_residual_n and previous_velocity_mps must have the same length"
-        )
-    try:
-        relaxation = float(data.get("relaxation", 1.0))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("checkpoint relaxation must be finite") from exc
-    if not math.isfinite(relaxation):
-        raise ValueError("checkpoint relaxation must be finite")
-    return InterfaceReactionRelaxationState(
-        previous_residual_n=residual,
-        previous_velocity_mps=velocity,
-        relaxation=relaxation,
-    )
 
 def sharp_marker_state_arrays(markers) -> dict[str, np.ndarray]:
     """Export the dynamic HIBM sharp marker state for checkpointing.
@@ -645,7 +533,6 @@ def write_run_checkpoint(
     args: argparse.Namespace,
     simulator: ReducedSquidFSI,
     solid_mpm: object,
-    interface_reaction_state: InterfaceReactionRelaxationState,
     sharp_coupling_state=None,
 ) -> None:
     payload: dict[str, np.ndarray] = {}
@@ -662,9 +549,6 @@ def write_run_checkpoint(
             spec=simulator.spec,
             step_count=step_count,
             full_pressure_waveform_steps=full_pressure_waveform_steps,
-        ),
-        "interface_reaction_state": _checkpoint_interface_state_dict(
-            interface_reaction_state
         ),
     }
     _array_to_payload(payload, "__metadata__", np.asarray(json.dumps(metadata)))
@@ -691,12 +575,6 @@ def write_run_checkpoint(
         "downstream_sample_count",
     ):
         _array_to_payload(payload, f"sim_{name}", int(getattr(simulator, name)[None]))
-    for name in (
-        "primary_interface_reaction_force_n",
-        "secondary_interface_reaction_force_n",
-    ):
-        _array_to_payload(payload, f"sim_{name}", _read_vector_field(getattr(simulator, name)))
-
     fluid = simulator.fluid
     for name in ("velocity", "velocity_prev", "pressure"):
         _array_to_payload(payload, f"fluid_{name}", getattr(fluid, name).to_numpy())
@@ -734,7 +612,7 @@ def load_run_checkpoint(
     step_count: int | None = None,
     full_pressure_waveform_steps: int | None = None,
     sharp_coupling_state=None,
-) -> tuple[int, InterfaceReactionRelaxationState]:
+) -> int:
     if not path.exists():
         raise FileNotFoundError(f"checkpoint not found: {path}")
     with np.load(path, allow_pickle=False) as checkpoint:
@@ -792,12 +670,6 @@ def load_run_checkpoint(
             "downstream_sample_count",
         ):
             getattr(simulator, name)[None] = int(np.asarray(checkpoint[f"sim_{name}"]))
-        for name in (
-            "primary_interface_reaction_force_n",
-            "secondary_interface_reaction_force_n",
-        ):
-            _write_vector_field(getattr(simulator, name), checkpoint[f"sim_{name}"])
-
         fluid = simulator.fluid
         for name in ("velocity", "velocity_prev", "pressure"):
             getattr(fluid, name).from_numpy(checkpoint[f"fluid_{name}"])
@@ -834,7 +706,4 @@ def load_run_checkpoint(
                 },
             )
 
-        return (
-            int(metadata["completed_step"]),
-            _interface_state_from_checkpoint(metadata.get("interface_reaction_state")),
-        )
+        return int(metadata["completed_step"])

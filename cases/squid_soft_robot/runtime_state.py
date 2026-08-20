@@ -1,5 +1,3 @@
-from collections.abc import Sequence
-
 import taichi as ti
 
 from simulation_core import CartesianFluidSolver, FluidDomainSpec, TaichiRuntimeConfig
@@ -7,7 +5,6 @@ from simulation_core.diagnostics.runtime import init_taichi
 
 from .history import divergence_sample_report_fields
 from .setup import cartesian_grid_axis_min_spacing_m, nozzle_taper_geometry
-from .source_config import _vector3
 from .spec import SquidReducedSpec
 
 
@@ -41,8 +38,6 @@ class ReducedSquidFSI:
         self.main_v_mps = ti.field(dtype=ti.f32, shape=())
         self.tail_w_m = ti.field(dtype=ti.f32, shape=())
         self.tail_v_mps = ti.field(dtype=ti.f32, shape=())
-        self.primary_interface_reaction_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.secondary_interface_reaction_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.volume_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.nozzle_velocity_z_mps = ti.field(dtype=ti.f32, shape=())
         self.max_speed_mps = ti.field(dtype=ti.f32, shape=())
@@ -54,7 +49,6 @@ class ReducedSquidFSI:
         self.downstream_sample_count = ti.field(dtype=ti.i32, shape=())
         self.sample_report_float_snapshot = ti.Vector.field(15, dtype=ti.f32, shape=())
         self.sample_report_count_snapshot = ti.Vector.field(3, dtype=ti.i32, shape=())
-        self.sample_report_host_snapshot = ti.field(dtype=ti.f64, shape=18)
         self.saved_time_s = ti.field(dtype=ti.f32, shape=())
         self.saved_pressure_load_pa = ti.field(dtype=ti.f32, shape=())
         self.saved_hydraulic_pressure_pa = ti.field(dtype=ti.f32, shape=())
@@ -62,8 +56,6 @@ class ReducedSquidFSI:
         self.saved_main_v_mps = ti.field(dtype=ti.f32, shape=())
         self.saved_tail_w_m = ti.field(dtype=ti.f32, shape=())
         self.saved_tail_v_mps = ti.field(dtype=ti.f32, shape=())
-        self.saved_primary_interface_reaction_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.saved_secondary_interface_reaction_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.saved_volume_flux_m3s = ti.field(dtype=ti.f32, shape=())
         self.saved_nozzle_velocity_z_mps = ti.field(dtype=ti.f32, shape=())
         self.saved_max_speed_mps = ti.field(dtype=ti.f32, shape=())
@@ -86,8 +78,6 @@ class ReducedSquidFSI:
         self.main_v_mps[None] = 0.0
         self.tail_w_m[None] = 0.0
         self.tail_v_mps[None] = 0.0
-        self.primary_interface_reaction_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
-        self.secondary_interface_reaction_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
         self.volume_flux_m3s[None] = 0.0
         self.nozzle_velocity_z_mps[None] = 0.0
         self.max_speed_mps[None] = 0.0
@@ -101,8 +91,6 @@ class ReducedSquidFSI:
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         )
         self.sample_report_count_snapshot[None] = ti.Vector([0, 0, 0])
-        for index in ti.static(range(18)):
-            self.sample_report_host_snapshot[index] = 0.0
         self.saved_time_s[None] = 0.0
         self.saved_pressure_load_pa[None] = 0.0
         self.saved_hydraulic_pressure_pa[None] = 0.0
@@ -110,8 +98,6 @@ class ReducedSquidFSI:
         self.saved_main_v_mps[None] = 0.0
         self.saved_tail_w_m[None] = 0.0
         self.saved_tail_v_mps[None] = 0.0
-        self.saved_primary_interface_reaction_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
-        self.saved_secondary_interface_reaction_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
         self.saved_volume_flux_m3s[None] = 0.0
         self.saved_nozzle_velocity_z_mps[None] = 0.0
         self.saved_max_speed_mps[None] = 0.0
@@ -131,8 +117,6 @@ class ReducedSquidFSI:
         self.saved_main_v_mps[None] = self.main_v_mps[None]
         self.saved_tail_w_m[None] = self.tail_w_m[None]
         self.saved_tail_v_mps[None] = self.tail_v_mps[None]
-        self.saved_primary_interface_reaction_force_n[None] = self.primary_interface_reaction_force_n[None]
-        self.saved_secondary_interface_reaction_force_n[None] = self.secondary_interface_reaction_force_n[None]
         self.saved_volume_flux_m3s[None] = self.volume_flux_m3s[None]
         self.saved_nozzle_velocity_z_mps[None] = self.nozzle_velocity_z_mps[None]
         self.saved_max_speed_mps[None] = self.max_speed_mps[None]
@@ -152,8 +136,6 @@ class ReducedSquidFSI:
         self.main_v_mps[None] = self.saved_main_v_mps[None]
         self.tail_w_m[None] = self.saved_tail_w_m[None]
         self.tail_v_mps[None] = self.saved_tail_v_mps[None]
-        self.primary_interface_reaction_force_n[None] = self.saved_primary_interface_reaction_force_n[None]
-        self.secondary_interface_reaction_force_n[None] = self.saved_secondary_interface_reaction_force_n[None]
         self.volume_flux_m3s[None] = self.saved_volume_flux_m3s[None]
         self.nozzle_velocity_z_mps[None] = self.saved_nozzle_velocity_z_mps[None]
         self.max_speed_mps[None] = self.saved_max_speed_mps[None]
@@ -169,28 +151,6 @@ class ReducedSquidFSI:
 
     def restore_reduced_state(self) -> None:
         self.restore_reduced_state_kernel()
-
-    @ti.kernel
-    def set_interface_reaction_kernel(
-        self,
-        primary_force_n: ti.types.vector(3, ti.f32),
-        secondary_force_n: ti.types.vector(3, ti.f32),
-    ):
-        self.primary_interface_reaction_force_n[None] = primary_force_n
-        self.secondary_interface_reaction_force_n[None] = secondary_force_n
-
-    def set_interface_reaction(
-        self,
-        *,
-        primary_force_n: Sequence[float],
-        secondary_force_n: Sequence[float],
-    ) -> None:
-        primary = _vector3(primary_force_n, name="primary_force_n")
-        secondary = _vector3(secondary_force_n, name="secondary_force_n")
-        self.set_interface_reaction_kernel(
-            ti.Vector(primary),
-            ti.Vector(secondary),
-        )
 
     @ti.kernel
     def set_structure_state_kernel(
@@ -576,8 +536,8 @@ class ReducedSquidFSI:
                 self.main_v_mps[None],
                 self.tail_w_m[None],
                 self.tail_v_mps[None],
-                self.primary_interface_reaction_force_n[None].z,
-                self.secondary_interface_reaction_force_n[None].z,
+                0.0,
+                0.0,
                 self.volume_flux_m3s[None],
                 self.nozzle_velocity_z_mps[None],
                 self.lip_flow_z_m3s[None],
@@ -593,31 +553,6 @@ class ReducedSquidFSI:
                 self.downstream_sample_count[None],
             ]
         )
-        self.sample_report_host_snapshot[0] = ti.cast(self.time_s[None], ti.f64)
-        self.sample_report_host_snapshot[1] = ti.cast(self.pressure_load_pa[None], ti.f64)
-        self.sample_report_host_snapshot[2] = ti.cast(self.hydraulic_pressure_pa[None], ti.f64)
-        self.sample_report_host_snapshot[3] = ti.cast(self.main_w_m[None], ti.f64)
-        self.sample_report_host_snapshot[4] = ti.cast(self.main_v_mps[None], ti.f64)
-        self.sample_report_host_snapshot[5] = ti.cast(self.tail_w_m[None], ti.f64)
-        self.sample_report_host_snapshot[6] = ti.cast(self.tail_v_mps[None], ti.f64)
-        self.sample_report_host_snapshot[7] = ti.cast(
-            self.primary_interface_reaction_force_n[None].z,
-            ti.f64,
-        )
-        self.sample_report_host_snapshot[8] = ti.cast(
-            self.secondary_interface_reaction_force_n[None].z,
-            ti.f64,
-        )
-        self.sample_report_host_snapshot[9] = ti.cast(self.volume_flux_m3s[None], ti.f64)
-        self.sample_report_host_snapshot[10] = ti.cast(self.nozzle_velocity_z_mps[None], ti.f64)
-        self.sample_report_host_snapshot[11] = ti.cast(self.lip_flow_z_m3s[None], ti.f64)
-        self.sample_report_host_snapshot[12] = ti.cast(self.outlet_flow_z_m3s[None], ti.f64)
-        self.sample_report_host_snapshot[13] = ti.cast(self.downstream_flow_z_m3s[None], ti.f64)
-        self.sample_report_host_snapshot[14] = ti.cast(self.max_speed_mps[None], ti.f64)
-        self.sample_report_host_snapshot[15] = ti.cast(self.lip_sample_count[None], ti.f64)
-        self.sample_report_host_snapshot[16] = ti.cast(self.outlet_sample_count[None], ti.f64)
-        self.sample_report_host_snapshot[17] = ti.cast(self.downstream_sample_count[None], ti.f64)
-
     def project_and_sample(
         self,
         projection_iterations: int,

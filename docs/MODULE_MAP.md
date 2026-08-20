@@ -15,7 +15,6 @@ implementation belongs in the functional packages below.
 | `simulation_core/materials/` | Constitutive material models and material conversion helpers. | Changing Neo-Hookean or Ecoflex material behavior, stress probes, or material-unit conversions. |
 | `simulation_core/geometry_tools/` | CAD parsing, STEP tessellation, coordinate models, fluid-domain geometry, and reusable surface meshes. | Changing CAD/surface mesh handling, domain geometry, boundary-region descriptors, or coordinate-system models. |
 | `simulation_core/diagnostics/` | Validation helpers, CFL/time-step controllers, field checks, and Taichi runtime bootstrap. | Changing validation/report helpers, CFL substep rules, or shared runtime initialization. |
-| `simulation_core/drivers/` | Case-agnostic FSI driver contracts and generic solver orchestration. | Changing benchmark/case orchestration interfaces, generic FSI problem contracts, or driver result envelopes. |
 
 ## Removed Legacy Entry Points
 
@@ -27,8 +26,6 @@ registers `sys.modules` aliases for these names.
 | --- | --- |
 | `simulation_core.fluid` | `simulation_core.fluids` |
 | `simulation_core.fsi_coupling` | `simulation_core.coupling.fsi_coupling` |
-| `simulation_core.fsi_driver` | `simulation_core.drivers.fsi_driver` |
-| `simulation_core.generic_fsi_solver` | `simulation_core.drivers.generic_fsi_solver` |
 | `simulation_core.hibm` | `simulation_core.coupling.hibm` |
 | `simulation_core.hibm_mpm` | `simulation_core.coupling.hibm_mpm` |
 | `simulation_core.interface_pair` | `simulation_core.coupling.interface_pair` |
@@ -56,6 +53,20 @@ users alone is not a deletion signal. New project code should import from the
 functional packages directly, and new root exports should be added only when the
 symbol is intentionally public.
 
+The superseded `simulation_core.drivers` package has no replacement facade.
+For the official ANSYS rectangular-solid benchmark, FSI execution is
+consolidated into one numerical entry point:
+`benchmarks.official.solid_mpm_fsi_runner.run_hibm_mpm_fsi`.
+`cases.ansys_vertical_flap_fsi.run_ansys_vertical_flap_benchmark` adds only
+case metadata and official-report validation around that solver. `FsiCaseSpec`
+lives with the official benchmark contracts in
+`benchmarks.official.official_benchmark_solver`.
+
+This consolidation is not a claim that unlike physical cases share one runner.
+The Squid, Turek-Hron, and COMSOL cases retain case-specific geometry and model
+assembly. Where a case uses HIBM-MPM, it must use the canonical sharp
+formulation rather than adding a parallel projected/reduced workflow.
+
 ## Migration Summary
 
 Moved real implementations out of root compatibility modules and removed the
@@ -69,8 +80,6 @@ root wrapper files:
 - `pressure_sample_pairs.py` -> `coupling/pressure_sample_pairs.py`
 - `projected_ibm.py` -> `coupling/projected_ibm.py`
 - `tri_surface.py` -> `coupling/tri_surface.py`
-- `fsi_driver.py` -> `drivers/fsi_driver.py`
-- `generic_fsi_solver.py` -> `drivers/generic_fsi_solver.py`
 - `runtime.py` -> `diagnostics/runtime.py`
 
 ## Navigation Rules
@@ -82,7 +91,13 @@ root wrapper files:
 - Material laws go in `simulation_core/materials/`.
 - CAD, surface mesh, coordinate, and domain geometry changes go in `simulation_core/geometry_tools/`.
 - Validation helpers and runtime initialization go in `simulation_core/diagnostics/`.
-- Case-agnostic FSI orchestration goes in `simulation_core/drivers/`.
+- The reusable ANSYS rectangular-solid HIBM-MPM numerical loop goes only in
+  `benchmarks/official/solid_mpm_fsi_runner.py`; do not add parallel driver or
+  generic-solver entry points.
+- ANSYS vertical-flap wrappers may add metadata and report validation, but must
+  delegate their numerical work to `run_hibm_mpm_fsi`.
+- Other physical cases may keep case-specific assembly, but must not expose a
+  second coupling formulation for the same case workflow.
 - Fluent benchmark/parity runners should use these package paths and must not introduce case-specific solver logic under `simulation_core/`.
 
 Legacy module names are not installed. New project code and external migration

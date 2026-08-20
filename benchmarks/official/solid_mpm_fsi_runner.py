@@ -181,12 +181,7 @@ FLOW_DRIVER_SUSTAINED_BOUNDARY_PREDICTOR = "sustained_boundary_predictor"
 FLOW_DRIVER_SUSTAINED_SOURCE = "sustained_volume_source_inlet"
 FLOW_DRIVER_SUSTAINED_PREDICTOR = "sustained_inlet_predictor"
 FLOW_DRIVER_SHARP_REFERENCE = "sharp_hibm_mpm_reference"
-FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS = "cell_obstacle_layers"
 FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS = "hibm_sharp_marker_rows"
-FLOW_SOLID_BOUNDARY_MODES = {
-    FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS,
-    FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS,
-}
 FLOW_INLET_SOURCE_PROFILES = {"constant", "linear_ramp"}
 FLOW_INLET_SOURCE_SCHEDULE_SCOPES = {"global", "phase_local"}
 FLOW_TURBULENCE_MODELS = {"laminar", "sst_2003"}
@@ -264,7 +259,6 @@ FLOW_SOURCE_REPORT_KEYS = (
     "pressure_outlet_flux_ratio",
     "velocity_outlet_flux_ratio",
 )
-FLOW_OBSTACLE_NORMAL_VELOCITY_POLICIES = {"face_clamp", "cell_zero_only"}
 FLOW_PRESSURE_OUTLET_BACKFLOW_POLICIES = {"clamp", "allow"}
 FLOW_PROJECTION_REPORT_KEYS = (
     "pressure_solver_requested",
@@ -422,7 +416,7 @@ def _advance_solid_substeps_batched(
         raise
 
 
-def run_rectangular_solid_marker_mpm_fsi_smoke(
+def run_hibm_mpm_fsi(
     *,
     case_id: str,
     case_metadata: Mapping[str, Any],
@@ -434,9 +428,9 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     ]
     | None = None,
 ) -> dict[str, object]:
-    """Run a generic Cartesian fluid to rectangular solid MPM marker-FSI smoke."""
+    """Run the general Cartesian HIBM-MPM fluid-structure solver."""
     _validate_rectangular_solid_config(config)
-    runtime = TaichiRuntimeConfig(arch="cuda")
+    runtime = TaichiRuntimeConfig(arch="cuda", strict_arch=True)
     fluid = _build_fluid(config, runtime)
     _initialize_computed_flow(fluid, config)
     markers = _build_markers(config, runtime)
@@ -470,18 +464,13 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     # Install the physical MPM volume before fixed-solid preflow.  In sharp
     # mode it is stored in a dedicated layer; the first HIBM assembly then
     # combines it with the static geometry and carves only external row owners.
-    if bool(
-        _use_hibm_sharp_marker_boundary(config)
-        and getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)
-    ):
+    if bool(getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)):
         latest_dynamic_obstacle_report = _update_fluid_obstacle_from_solid(
             fluid,
             solid,
             config,
         )
     else:
-        # Preserve the legacy non-sharp ordering: its particle obstacle is
-        # first refreshed only after the first solid update, not before preflow.
         latest_dynamic_obstacle_report = _fluid_obstacle_update_disabled_report()
     refresh_runtime_pressure_pair_anchors()
     fixed_mask, tip_mask = _solid_masks(solid, config)
@@ -514,28 +503,38 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
     fluid_projection_after_feedback_count = 0
     fluid_projection_consumed_feedback_count = 0
     feedback_available_for_projection = False
-    feedback_constraint_cells: set[tuple[int, int, int]] = set()
     history: list[dict[str, object]] = []
     final_flow_field_snapshot: dict[str, np.ndarray] = {}
     apply_feedback = bool(getattr(config, "apply_marker_feedback_to_fluid", True))
     flow_driver_mode = _effective_flow_driver_mode(config, flow_phase="fsi")
     sharp_boundary_cache: dict[str, object] = {}
+    export_final_flow_snapshot = bool(
+        getattr(config, "export_final_flow_snapshot", False)
+    )
+    immutable_flow_geometry = (
+        _immutable_flow_geometry_snapshot(
+            fluid,
+            include_full_geometry=export_final_flow_snapshot,
+        )
+        if _flow_geometry_snapshot_cache_required(
+            step_count=int(config.step_count),
+            has_step_observer=step_observer is not None,
+            export_final_flow_snapshot=export_final_flow_snapshot,
+        )
+        else None
+    )
 
     for step_index in range(config.step_count):
         if _flow_driver_requires_full_field_reinitialize(flow_driver_mode):
             _initialize_computed_flow(fluid, config)
-            feedback_constraint_cells = set()
         feedback_available_before_projection = (
             feedback_available_for_projection and apply_feedback
         )
         latest_feedback_constraint_report = _apply_marker_feedback_to_fluid(
             markers,
             fluid,
-            config,
             feedback_available=feedback_available_before_projection,
-            previous_feedback_constraint_cells=feedback_constraint_cells,
         )
-        feedback_constraint_cells = latest_feedback_constraint_report["_feedback_constraint_cells"]
         latest_flow_report = _flow_advance_current_step(
             fluid,
             config,
@@ -552,35 +551,28 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
         )
         observer_flow_snapshot = (
             _synchronized_flow_boundary_snapshot(
-                _flow_parity_snapshot(fluid),
+                _flow_parity_snapshot(
+                    fluid,
+                    immutable_geometry=immutable_flow_geometry,
+                ),
                 stage="pre_solid_projection",
             )
             if step_observer is not None
             else None
         )
-        if bool(getattr(config, "export_final_flow_snapshot", False)) and (
+        if export_final_flow_snapshot and (
             step_index + 1 == int(config.step_count)
         ):
             final_flow_field_snapshot = _synchronized_flow_boundary_snapshot(
-                _flow_field_snapshot(fluid),
+                _flow_field_snapshot(
+                    fluid,
+                    immutable_geometry=immutable_flow_geometry,
+                ),
                 stage="pre_solid_projection",
             )
         latest_feedback_constraint_report[
             "no_slip_projected_residual_after_projection_mps"
-        ] = (
-            float(latest_flow_report["hibm_no_slip_max_residual_mps"])
-            if _use_hibm_sharp_marker_boundary(config)
-            else _measure_projected_no_slip_residual(
-                markers,
-                fluid,
-                config,
-                feedback_consumed=bool(
-                    latest_feedback_constraint_report[
-                        "fluid_projection_consumed_feedback"
-                    ]
-                ),
-            )
-        )
+        ] = float(latest_flow_report["hibm_no_slip_max_residual_mps"])
         fluid_projection_count += 1
         if feedback_available_before_projection:
             fluid_projection_after_feedback_count += 1
@@ -718,17 +710,8 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "flow_predictor_no_slip_domain_walls": latest_flow_report[
                     "flow_predictor_no_slip_domain_walls"
                 ],
-                "flow_obstacle_no_slip_layers": latest_flow_report[
-                    "flow_obstacle_no_slip_layers"
-                ],
-                "flow_obstacle_no_slip_weight": latest_flow_report[
-                    "flow_obstacle_no_slip_weight"
-                ],
                 "flow_solid_boundary_mode": latest_flow_report[
                     "flow_solid_boundary_mode"
-                ],
-                "flow_obstacle_normal_velocity_policy": latest_flow_report[
-                    "flow_obstacle_normal_velocity_policy"
                 ],
                 "flow_pressure_outlet_backflow_policy": latest_flow_report[
                     "flow_pressure_outlet_backflow_policy"
@@ -937,11 +920,6 @@ def run_rectangular_solid_marker_mpm_fsi_smoke(
                 "fluid_marker_feedback_enforcement_mode": (
                     latest_feedback_constraint_report[
                         "fluid_marker_feedback_enforcement_mode"
-                    ]
-                ),
-                "legacy_constraint_active_cell_count": (
-                    latest_feedback_constraint_report[
-                        "legacy_constraint_active_cell_count"
                     ]
                 ),
                 **latest_dynamic_obstacle_report,
@@ -1950,19 +1928,24 @@ def _preflow_snapshot_paths(config: Any) -> tuple[object | None, object | None]:
 
 
 def _validate_rectangular_solid_config(config: Any) -> None:
+    boundary_mode = str(
+        getattr(
+            config,
+            "flow_solid_boundary_mode",
+            FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS,
+        )
+    )
+    if boundary_mode != FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS:
+        raise ValueError(
+            "flow_solid_boundary_mode must be "
+            f"{FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS!r}; got {boundary_mode!r}"
+        )
     _preflow_snapshot_paths(config)
     _preflow_traction_readiness_mode(config)
-    solid_boundary_mode = _flow_solid_boundary_mode(config)
-    if solid_boundary_mode not in FLOW_SOLID_BOUNDARY_MODES:
-        raise ValueError(f"unsupported flow_solid_boundary_mode: {solid_boundary_mode!r}")
     dynamic_solid_volume_enabled = bool(
         getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)
     )
     if dynamic_solid_volume_enabled:
-        if solid_boundary_mode != FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS:
-            raise ValueError(
-                "HIBM dynamic solid volume requires hibm_sharp_marker_rows"
-            )
         if not bool(getattr(config, "update_fluid_obstacle_from_solid", False)):
             raise ValueError(
                 "HIBM dynamic solid volume requires "
@@ -2016,37 +1999,6 @@ def _validate_rectangular_solid_config(config: Any) -> None:
     ymin_no_slip_rows = int(getattr(config, "flow_ymin_no_slip_rows", 0))
     if ymin_no_slip_rows < 0:
         raise ValueError("flow_ymin_no_slip_rows must be non-negative")
-    obstacle_no_slip_layers = int(getattr(config, "flow_obstacle_no_slip_layers", 0))
-    if obstacle_no_slip_layers < 0:
-        raise ValueError("flow_obstacle_no_slip_layers must be non-negative")
-    obstacle_no_slip_weight = float(getattr(config, "flow_obstacle_no_slip_weight", 1.0))
-    if not math.isfinite(obstacle_no_slip_weight) or not 0.0 <= obstacle_no_slip_weight <= 1.0:
-        raise ValueError("flow_obstacle_no_slip_weight must be in [0, 1]")
-    obstacle_cap_no_slip_weight = getattr(
-        config,
-        "flow_obstacle_cap_no_slip_weight",
-        None,
-    )
-    if obstacle_cap_no_slip_weight is not None:
-        obstacle_cap_no_slip_weight = float(obstacle_cap_no_slip_weight)
-        if (
-            not math.isfinite(obstacle_cap_no_slip_weight)
-            or not 0.0 <= obstacle_cap_no_slip_weight <= 1.0
-        ):
-            raise ValueError("flow_obstacle_cap_no_slip_weight must be in [0, 1]")
-    obstacle_wake_no_slip_layers = int(
-        getattr(config, "flow_obstacle_wake_no_slip_layers", 0)
-    )
-    if obstacle_wake_no_slip_layers < 0:
-        raise ValueError("flow_obstacle_wake_no_slip_layers must be non-negative")
-    obstacle_wake_no_slip_weight = float(
-        getattr(config, "flow_obstacle_wake_no_slip_weight", 0.5)
-    )
-    if (
-        not math.isfinite(obstacle_wake_no_slip_weight)
-        or not 0.0 <= obstacle_wake_no_slip_weight <= 1.0
-    ):
-        raise ValueError("flow_obstacle_wake_no_slip_weight must be in [0, 1]")
     viscosity_multiplier = float(
         getattr(config, "flow_predictor_kinematic_viscosity_multiplier", 1.0)
     )
@@ -2111,14 +2063,6 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError(
             "unsupported flow_pressure_outlet_backflow_policy: "
             f"{pressure_outlet_backflow_policy!r}"
-        )
-    obstacle_normal_velocity_policy = str(
-        getattr(config, "flow_obstacle_normal_velocity_policy", "face_clamp")
-    )
-    if obstacle_normal_velocity_policy not in FLOW_OBSTACLE_NORMAL_VELOCITY_POLICIES:
-        raise ValueError(
-            "unsupported flow_obstacle_normal_velocity_policy: "
-            f"{obstacle_normal_velocity_policy!r}"
         )
     marker_layout = _traction_marker_layout(config)
     if marker_layout not in TRACTION_MARKER_LAYOUTS:
@@ -2440,29 +2384,8 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         )
 
 
-def _flow_solid_boundary_mode(config: Any) -> str:
-    return str(
-        getattr(
-            config,
-            "flow_solid_boundary_mode",
-            FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS,
-        )
-    )
-
-
 def _flow_pressure_outlet_backflow_policy(config: Any) -> str:
     return str(getattr(config, "flow_pressure_outlet_backflow_policy", "clamp"))
-
-
-def _flow_obstacle_normal_velocity_policy(config: Any) -> str:
-    return str(getattr(config, "flow_obstacle_normal_velocity_policy", "face_clamp"))
-
-
-def _use_hibm_sharp_marker_boundary(config: Any) -> bool:
-    return (
-        _flow_solid_boundary_mode(config)
-        == FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS
-    )
 
 
 def _domain_bounds(config: Any) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -2888,8 +2811,7 @@ def _build_fluid(config: Any, runtime: TaichiRuntimeConfig) -> CartesianFluidSol
         ),
         runtime=runtime,
     )
-    if _use_hibm_sharp_marker_boundary(config):
-        fluid.set_velocity_dirichlet_boundary_authority("canonical")
+    fluid.set_velocity_dirichlet_boundary_authority("canonical")
     fluid.obstacle.from_numpy(_initial_fluid_obstacle(config))
     if _flow_turbulence_model(config) == "sst_2003":
         fluid.configure_sst_2003(
@@ -2924,47 +2846,8 @@ def _build_fluid(config: Any, runtime: TaichiRuntimeConfig) -> CartesianFluidSol
     return fluid
 
 
-def _cell_interval_overlaps(
-    cell_min: float,
-    cell_max: float,
-    box_min: float,
-    box_max: float,
-) -> bool:
-    return cell_min < box_max and cell_max > box_min
-
-
-def _solid_obstacle(config: Any) -> np.ndarray:
-    nx, ny, nz = config.grid_nodes
-    bounds_min, bounds_max = _domain_bounds(config)
-    solid_min, solid_max = _solid_box(config)
-    dx = (bounds_max[0] - bounds_min[0]) / nx
-    dy = (bounds_max[1] - bounds_min[1]) / ny
-    dz = (bounds_max[2] - bounds_min[2]) / nz
-    obstacle = np.zeros((nx, ny, nz), dtype=np.int32)
-    for i in range(nx):
-        x_min = bounds_min[0] + i * dx
-        x_max = x_min + dx
-        x_overlaps = _cell_interval_overlaps(x_min, x_max, solid_min[0], solid_max[0])
-        for j in range(ny):
-            y_min = bounds_min[1] + j * dy
-            y_max = y_min + dy
-            y_overlaps = _cell_interval_overlaps(y_min, y_max, solid_min[1], solid_max[1])
-            for k in range(nz):
-                z_min = bounds_min[2] + k * dz
-                z_max = z_min + dz
-                if (
-                    x_overlaps
-                    and y_overlaps
-                    and _cell_interval_overlaps(z_min, z_max, solid_min[2], solid_max[2])
-                ):
-                    obstacle[i, j, k] = 1
-    return obstacle
-
-
 def _initial_fluid_obstacle(config: Any) -> np.ndarray:
-    if _use_hibm_sharp_marker_boundary(config):
-        return np.zeros(tuple(int(value) for value in config.grid_nodes), dtype=np.int32)
-    return _solid_obstacle(config)
+    return np.zeros(tuple(int(value) for value in config.grid_nodes), dtype=np.int32)
 
 
 def _fluid_obstacle_update_disabled_report() -> dict[str, object]:
@@ -2983,12 +2866,11 @@ def _update_fluid_obstacle_from_solid(
     config: Any,
 ) -> dict[str, object]:
     sharp_dynamic_volume = bool(
-        _use_hibm_sharp_marker_boundary(config)
-        and getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)
+        getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)
     )
     if not bool(getattr(config, "update_fluid_obstacle_from_solid", False)):
         return _fluid_obstacle_update_disabled_report()
-    if _use_hibm_sharp_marker_boundary(config) and not sharp_dynamic_volume:
+    if not sharp_dynamic_volume:
         return _fluid_obstacle_update_disabled_report()
 
     device_update = getattr(fluid, "update_dynamic_solid_obstacle_from_particles", None)
@@ -3147,14 +3029,6 @@ def _initialize_inlet_flow(
         obstacle,
         config,
     )
-    if not _use_hibm_sharp_marker_boundary(config):
-        _apply_obstacle_no_slip_rows(
-            active,
-            values,
-            weights,
-            obstacle,
-            config,
-        )
     if not canonical_authority:
         # Legacy storage aliases the plus-side physical face onto the final
         # compact row.  Canonical storage has a separate directed zmax face;
@@ -3276,23 +3150,6 @@ def _project_current_flow(
     pre_projection_velocity_projector: object | None = None,
     pressure_velocity_nullspace_projector: object | None = None,
 ) -> dict[str, object]:
-    configured_velocity_inlet_zmax = getattr(
-        config,
-        "flow_projection_velocity_inlet_zmax",
-        None,
-    )
-    if configured_velocity_inlet_zmax is not None and not isinstance(
-        configured_velocity_inlet_zmax,
-        (bool, np.bool_),
-    ):
-        raise ValueError(
-            "flow_projection_velocity_inlet_zmax must be bool or None"
-        )
-    velocity_inlet_zmax = (
-        None
-        if configured_velocity_inlet_zmax is None
-        else bool(configured_velocity_inlet_zmax)
-    )
     effective_preserve_velocity_constraints = (
         bool(getattr(config, "preserve_marker_velocity_constraints", True))
         if preserve_velocity_constraints is None
@@ -3308,9 +3165,7 @@ def _project_current_flow(
     pressure_outlet_enabled = bool(
         getattr(config, "flow_pressure_outlet_enabled", True)
     )
-    sharp_reachability_prepared = bool(
-        _use_hibm_sharp_marker_boundary(config) and pressure_outlet_enabled
-    )
+    sharp_reachability_prepared = pressure_outlet_enabled
     if sharp_reachability_prepared:
         # The sharp path stabilizes topology before it assembles the current
         # pressure-interface matrix.  Repeating cleanup inside project() would
@@ -3327,9 +3182,7 @@ def _project_current_flow(
             pressure_outlet_backflow_policy=str(
                 getattr(config, "flow_pressure_outlet_backflow_policy", "clamp")
             ),
-            obstacle_normal_velocity_policy=str(
-                getattr(config, "flow_obstacle_normal_velocity_policy", "face_clamp")
-            ),
+            obstacle_normal_velocity_policy="face_clamp",
             preserve_velocity_constraints=effective_preserve_velocity_constraints,
             velocity_constraint_blend=float(
                 getattr(config, "marker_velocity_constraint_blend", 1.0)
@@ -3375,7 +3228,7 @@ def _project_current_flow(
             pressure_velocity_nullspace_projector=(
                 pressure_velocity_nullspace_projector
             ),
-            velocity_inlet_zmax=velocity_inlet_zmax,
+            velocity_inlet_zmax=None,
             dt_s=float(config.dt_s),
         )
     )
@@ -6248,8 +6101,8 @@ class _HibmPreProjectionVelocityProjector:
 
 def _empty_hibm_sharp_marker_boundary_report() -> dict[str, object]:
     return {
-        "flow_solid_boundary_mode": FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS,
-        "hibm_sharp_marker_boundary_enabled": False,
+        "flow_solid_boundary_mode": FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS,
+        "hibm_sharp_marker_boundary_enabled": True,
         "hibm_sharp_marker_boundary_search_radius_xyz_m": "",
         "hibm_dynamic_solid_volume_enabled": False,
         "hibm_sharp_marker_boundary_search_reused": False,
@@ -6328,8 +6181,6 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
     reuse_topology_from_previous_assembly: bool = False,
     topology_only: bool = False,
 ) -> dict[str, object]:
-    if not _use_hibm_sharp_marker_boundary(config):
-        return _empty_hibm_sharp_marker_boundary_report()
     if markers is None:
         raise ValueError("hibm_sharp_marker_rows requires surface markers")
     stage_wall_times = _empty_hibm_sharp_boundary_stage_wall_times()
@@ -6526,7 +6377,7 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
         topology_report = _empty_hibm_sharp_marker_boundary_report()
         topology_report.update(
             {
-                "flow_solid_boundary_mode": _flow_solid_boundary_mode(config),
+                "flow_solid_boundary_mode": FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS,
                 "hibm_sharp_marker_boundary_enabled": True,
                 "hibm_dynamic_solid_volume_enabled": dynamic_solid_volume_enabled,
                 "hibm_sharp_marker_boundary_search_reused": bool(search_reused),
@@ -6847,7 +6698,7 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
         ),
     )
     return {
-        "flow_solid_boundary_mode": _flow_solid_boundary_mode(config),
+        "flow_solid_boundary_mode": FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS,
         "hibm_sharp_marker_boundary_enabled": True,
         "hibm_sharp_marker_boundary_search_radius_xyz_m": (
             list(search_radius_xyz_m) if search_radius_xyz_m is not None else ""
@@ -7052,61 +6903,6 @@ def _apply_ymin_no_slip_rows(
     owned_row_rows[clear_rows] = 0
 
 
-def _apply_obstacle_no_slip_rows(
-    active: np.ndarray,
-    values: np.ndarray,
-    weights: np.ndarray,
-    obstacle: np.ndarray,
-    config: Any,
-) -> int:
-    layers = int(getattr(config, "flow_obstacle_no_slip_layers", 0))
-    wake_layers = int(getattr(config, "flow_obstacle_wake_no_slip_layers", 0))
-    if layers <= 0 and wake_layers <= 0:
-        return 0
-    weight = float(getattr(config, "flow_obstacle_no_slip_weight", 1.0))
-    cap_weight_config = getattr(config, "flow_obstacle_cap_no_slip_weight", None)
-    cap_weight = weight if cap_weight_config is None else float(cap_weight_config)
-    wake_weight = float(getattr(config, "flow_obstacle_wake_no_slip_weight", 0.5))
-    fluid_mask = obstacle == 0
-    solid_front = obstacle != 0
-    selected = np.zeros_like(fluid_mask, dtype=bool)
-    row_weights = np.zeros_like(weights, dtype=np.float32)
-    for _layer in range(layers):
-        x_adjacent = np.zeros_like(fluid_mask, dtype=bool)
-        x_adjacent[1:, :, :] |= solid_front[:-1, :, :]
-        x_adjacent[:-1, :, :] |= solid_front[1:, :, :]
-        y_adjacent = np.zeros_like(fluid_mask, dtype=bool)
-        y_adjacent[:, 1:, :] |= solid_front[:, :-1, :]
-        y_adjacent[:, :-1, :] |= solid_front[:, 1:, :]
-        z_adjacent = np.zeros_like(fluid_mask, dtype=bool)
-        z_adjacent[:, :, 1:] |= solid_front[:, :, :-1]
-        z_adjacent[:, :, :-1] |= solid_front[:, :, 1:]
-        adjacent_by_axis = (x_adjacent, y_adjacent, z_adjacent)
-        adjacent = np.zeros_like(fluid_mask, dtype=bool)
-        cap_adjacent = np.zeros_like(fluid_mask, dtype=bool)
-        for axis, axis_adjacent in enumerate(adjacent_by_axis):
-            adjacent |= axis_adjacent
-            if axis != STREAMWISE_AXIS_INDEX:
-                cap_adjacent |= axis_adjacent
-        layer_cells = adjacent & fluid_mask & ~selected
-        selected |= layer_cells
-        row_weights[layer_cells] = weight
-        row_weights[layer_cells & cap_adjacent] = cap_weight
-        solid_front = solid_front | layer_cells
-    solid_mask = obstacle != 0
-    for layer_index in range(1, wake_layers + 1):
-        shifted = np.zeros_like(fluid_mask, dtype=bool)
-        shifted[:, :, :-layer_index] |= solid_mask[:, :, layer_index:]
-        layer_cells = shifted & fluid_mask & ~selected
-        selected |= layer_cells
-        row_weights[layer_cells] = wake_weight
-    constrained = selected & (row_weights > 0.0)
-    active[constrained] = 1
-    values[constrained] = 0.0
-    weights[constrained] = row_weights[constrained]
-    return int(np.count_nonzero(constrained))
-
-
 def _flow_advance_current_step(
     fluid: CartesianFluidSolver,
     config: Any,
@@ -7134,14 +6930,11 @@ def _flow_advance_current_step(
         volume_source_applied=False,
     )
     predictor_applied = False
-    velocity_only_soft_rows = (
-        _use_hibm_sharp_marker_boundary(config)
-        and not bool(
-            getattr(
-                config,
-                "flow_hibm_sharp_interpolate_velocity_rows",
-                True,
-            )
+    velocity_only_soft_rows = not bool(
+        getattr(
+            config,
+            "flow_hibm_sharp_interpolate_velocity_rows",
+            True,
         )
     )
 
@@ -7424,17 +7217,16 @@ def _flow_advance_current_step(
         context=f"{flow_phase} step {step_index_local} projection assembly",
     )
     pre_projection_velocity_projector = None
-    if _use_hibm_sharp_marker_boundary(config):
-        if markers is None:
-            raise RuntimeError(
-                "sharp HIBM pre-projection velocity projector requires markers"
-            )
-        pre_projection_velocity_projector = (
-            _hibm_pre_projection_velocity_projector_from_cache(
-                sharp_boundary_cache,
-                markers=markers,
-            )
+    if markers is None:
+        raise RuntimeError(
+            "sharp HIBM pre-projection velocity projector requires markers"
         )
+    pre_projection_velocity_projector = (
+        _hibm_pre_projection_velocity_projector_from_cache(
+            sharp_boundary_cache,
+            markers=markers,
+        )
+    )
     main_soft_rows_already_applied = False
     if velocity_only_soft_rows and predictor_applied:
         if pre_predictor_ledger_generation is None:
@@ -7491,20 +7283,16 @@ def _flow_advance_current_step(
             )
         )
     terminal_sharp_boundary_report = sharp_boundary_report
-    sharp_joint_qp_enabled = _use_hibm_sharp_marker_boundary(config)
-    consistency_projection_count = (
-        max(
-            0,
-            int(
-                getattr(
-                    config,
-                    "flow_post_dirichlet_consistency_projection_iterations",
-                    0,
-                )
-            ),
-        )
-        if sharp_joint_qp_enabled
-        else 0
+    sharp_joint_qp_enabled = True
+    consistency_projection_count = max(
+        0,
+        int(
+            getattr(
+                config,
+                "flow_post_dirichlet_consistency_projection_iterations",
+                0,
+            )
+        ),
     )
     joint_qp_cycle_budget = 1 + consistency_projection_count
     reprojection_iterations = getattr(config, "flow_reprojection_iterations", None)
@@ -7513,10 +7301,8 @@ def _flow_advance_current_step(
         "flow_reprojection_cg_tolerance",
         None,
     )
-    joint_qp_no_slip_tolerance = (
-        _hibm_marker_mac_constraint_absolute_tolerance_mps(config)
-        if sharp_joint_qp_enabled
-        else 0.0
+    joint_qp_no_slip_tolerance = _hibm_marker_mac_constraint_absolute_tolerance_mps(
+        config
     )
     joint_qp_cycle_trace: list[dict[str, object]] = []
     terminal_no_slip_report: dict[str, object] | None = None
@@ -7535,9 +7321,7 @@ def _flow_advance_current_step(
                 )
             ),
         },
-        preserve_velocity_constraints=(
-            False if _use_hibm_sharp_marker_boundary(config) else None
-        ),
+        preserve_velocity_constraints=False,
         velocity_dirichlet_soft_rows_already_applied=(
             main_soft_rows_already_applied
         ),
@@ -7770,38 +7554,11 @@ def _flow_advance_current_step(
             preflow_history=preflow_history,
         )
     )
-    flow_report["flow_obstacle_no_slip_layers"] = int(
-        getattr(config, "flow_obstacle_no_slip_layers", 0)
-    )
-    flow_report["flow_obstacle_no_slip_weight"] = float(
-        getattr(config, "flow_obstacle_no_slip_weight", 1.0)
-    )
-    cap_no_slip_weight = getattr(config, "flow_obstacle_cap_no_slip_weight", None)
-    flow_report["flow_obstacle_cap_no_slip_weight"] = (
-        None if cap_no_slip_weight is None else float(cap_no_slip_weight)
-    )
-    flow_report["flow_obstacle_wake_no_slip_layers"] = int(
-        getattr(config, "flow_obstacle_wake_no_slip_layers", 0)
-    )
-    flow_report["flow_obstacle_wake_no_slip_weight"] = float(
-        getattr(config, "flow_obstacle_wake_no_slip_weight", 0.5)
-    )
-    flow_report["flow_solid_boundary_mode"] = _flow_solid_boundary_mode(config)
-    flow_report["flow_obstacle_normal_velocity_policy"] = (
-        _flow_obstacle_normal_velocity_policy(config)
+    flow_report["flow_solid_boundary_mode"] = (
+        FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS
     )
     flow_report["flow_pressure_outlet_backflow_policy"] = (
         _flow_pressure_outlet_backflow_policy(config)
-    )
-    configured_velocity_inlet_zmax = getattr(
-        config,
-        "flow_projection_velocity_inlet_zmax",
-        None,
-    )
-    flow_report["flow_projection_velocity_inlet_zmax"] = (
-        None
-        if configured_velocity_inlet_zmax is None
-        else bool(configured_velocity_inlet_zmax)
     )
     return flow_report
 
@@ -7919,143 +7676,32 @@ def _flow_driver_report(
     }
 
 
-def _zmax_inlet_boundary_device_refresh_compatible(config: Any) -> bool:
-    if int(getattr(config, "flow_ymin_no_slip_rows", 0)) > 0:
-        return False
-    if _use_hibm_sharp_marker_boundary(config):
-        return True
-    return (
-        int(getattr(config, "flow_obstacle_no_slip_layers", 0)) <= 0
-        and int(getattr(config, "flow_obstacle_wake_no_slip_layers", 0)) <= 0
-    )
-
-
 def _refresh_zmax_inlet_boundary(
     fluid: CartesianFluidSolver,
     config: Any,
 ) -> dict[str, object]:
-    authority = str(
-        getattr(fluid, "velocity_dirichlet_boundary_authority", "legacy")
-    )
-    if authority == "canonical":
-        canonical_refresh = getattr(
-            fluid,
-            "refresh_zmax_inlet_boundary_canonical",
-            None,
+    if str(getattr(fluid, "velocity_dirichlet_boundary_authority", "")) != "canonical":
+        raise RuntimeError("sharp HIBM requires canonical zmax inlet authority")
+    canonical_refresh = getattr(fluid, "refresh_zmax_inlet_boundary_canonical", None)
+    if not callable(canonical_refresh):
+        raise RuntimeError("canonical zmax refresh requires the canonical device writer")
+    report = dict(
+        canonical_refresh(
+            inlet_velocity_mps=float(config.inlet_velocity_mps),
+            streamwise_axis_index=STREAMWISE_AXIS_INDEX,
         )
-        if not callable(canonical_refresh):
-            raise RuntimeError(
-                "canonical zmax refresh requires the canonical device writer; "
-                "legacy host row fallback is forbidden"
-            )
-        report = dict(
-            canonical_refresh(
-                inlet_velocity_mps=float(config.inlet_velocity_mps),
-                streamwise_axis_index=STREAMWISE_AXIS_INDEX,
-            )
-        )
-        _prepare_and_seal_canonical_velocity_dirichlet_component_ledger(fluid)
-        return report
-    device_refresh = getattr(fluid, "refresh_zmax_inlet_boundary", None)
-    if (
-        device_refresh is not None
-        and _zmax_inlet_boundary_device_refresh_compatible(config)
-    ):
-        return dict(
-            device_refresh(
-                inlet_velocity_mps=float(config.inlet_velocity_mps),
-                streamwise_axis_index=STREAMWISE_AXIS_INDEX,
-            )
-        )
-
-    active = fluid.velocity_dirichlet_boundary_active.to_numpy()
-    values = fluid.velocity_dirichlet_boundary_value_mps.to_numpy()
-    weights = fluid.velocity_dirichlet_boundary_projection_weight.to_numpy()
-    enforcement_weights = (
-        fluid.velocity_dirichlet_boundary_enforcement_weight.to_numpy()
     )
-    marker_regions = fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
-    hard_masks = (
-        fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.to_numpy()
-    )
-    external_exact_masks = (
-        fluid.velocity_dirichlet_boundary_external_exact_component_mask.to_numpy()
-    )
-    owned_rows = fluid.velocity_dirichlet_boundary_owned_row.to_numpy()
-    obstacle = fluid.obstacle.to_numpy()
-    k = int(config.grid_nodes[2]) - 1
-    _apply_ymin_no_slip_rows(
-        active,
-        values,
-        weights,
-        marker_regions,
-        hard_masks,
-        external_exact_masks,
-        owned_rows,
-        obstacle,
-        config,
-    )
-    if not _use_hibm_sharp_marker_boundary(config):
-        _apply_obstacle_no_slip_rows(
-            active,
-            values,
-            weights,
-            obstacle,
-            config,
-        )
-    direct_rows = owned_rows == 0
-    enforcement_weights[direct_rows] = weights[direct_rows]
-    enforcement_weights[active == 0] = 0.0
-    fluid_mask = obstacle[:, :, k] == 0
-
-    active[:, :, k] = fluid_mask.astype(np.int32)
-    values[:, :, k, :] = 0.0
-    values[:, :, k, STREAMWISE_AXIS_INDEX] = (
-        -float(config.inlet_velocity_mps) * fluid_mask.astype(np.float32)
-    )
-    weights[:, :, k] = fluid_mask.astype(np.float32)
-    enforcement_weights[:, :, k] = fluid_mask.astype(np.float32)
-    marker_regions[:, :, k] = -1
-    hard_masks[:, :, k] = np.where(fluid_mask, 0b111, 0).astype(np.int32)
-    external_exact_masks[:, :, k] = np.where(
-        fluid_mask,
-        external_exact_masks[:, :, k] | np.int32(0b100),
-        0,
-    ).astype(np.int32)
-    owned_rows[:, :, k] = 0
-
-    fluid.velocity_dirichlet_boundary_active.from_numpy(active)
-    fluid.velocity_dirichlet_boundary_value_mps.from_numpy(values)
-    fluid.velocity_dirichlet_boundary_projection_weight.from_numpy(weights)
-    fluid.velocity_dirichlet_boundary_enforcement_weight.from_numpy(
-        enforcement_weights
-    )
-    fluid.velocity_dirichlet_boundary_marker_region_id.from_numpy(marker_regions)
-    fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.from_numpy(hard_masks)
-    fluid.velocity_dirichlet_boundary_external_exact_component_mask.from_numpy(
-        external_exact_masks
-    )
-    fluid.velocity_dirichlet_boundary_owned_row.from_numpy(owned_rows)
-    return _zmax_inlet_boundary_report(fluid)
+    _prepare_and_seal_canonical_velocity_dirichlet_component_ledger(fluid)
+    return report
 
 
 def _zmax_inlet_boundary_report(
     fluid: CartesianFluidSolver,
 ) -> dict[str, object]:
     device_report = getattr(fluid, "zmax_inlet_boundary_report", None)
-    if device_report is not None:
-        return dict(device_report())
-    active = fluid.velocity_dirichlet_boundary_active.to_numpy()
-    obstacle = fluid.obstacle.to_numpy()
-    k = active.shape[2] - 1
-    active_slice = active[:, :, k] != 0
-    obstacle_slice = obstacle[:, :, k] != 0
-    return {
-        "flow_inlet_boundary_active_cell_count": int(active_slice.sum()),
-        "flow_inlet_boundary_obstacle_cell_count": int(
-            np.logical_and(active_slice, obstacle_slice).sum()
-        ),
-    }
+    if not callable(device_report):
+        raise RuntimeError("sharp HIBM requires the canonical zmax inlet report")
+    return dict(device_report())
 
 
 _PREFLOW_SNAPSHOT_FSI_ONLY_CONFIG_FIELDS = frozenset(
@@ -8246,32 +7892,6 @@ def _prepare_and_seal_canonical_velocity_dirichlet_component_ledger(
     _prepare_canonical_preflow_snapshot_restore(fluid, prepare_plan)
 
 
-def _rebuild_legacy_preflow_snapshot_derived_state(fluid: Any) -> None:
-    """Preserve the established legacy restore ordering exactly."""
-
-    invalidate_reachability = getattr(
-        fluid,
-        "_invalidate_hibm_pressure_reachability",
-        None,
-    )
-    if callable(invalidate_reachability):
-        invalidate_reachability()
-    rebuild_no_slip_obstacle = getattr(
-        fluid,
-        "build_hibm_no_slip_sampling_obstacle",
-        None,
-    )
-    if callable(rebuild_no_slip_obstacle):
-        rebuild_no_slip_obstacle()
-    rebuild_no_slip_component_mask = getattr(
-        fluid,
-        "build_hibm_no_slip_component_face_valid_mask",
-        None,
-    )
-    if callable(rebuild_no_slip_component_mask):
-        rebuild_no_slip_component_mask()
-
-
 def _rollback_preflow_snapshot_restore(
     *,
     runtime_fields: Mapping[str, Any],
@@ -8327,6 +7947,8 @@ def _restore_preflow_snapshot_fields(
     if set(fields) != set(PREFLOW_SNAPSHOT_FIELD_NAMES):
         raise ValueError("preflow snapshot fields do not match the runtime contract")
     current_authority = str(fluid.velocity_dirichlet_boundary_authority)
+    if current_authority != "canonical":
+        raise ValueError("sharp HIBM snapshot restore requires canonical authority")
     if velocity_dirichlet_boundary_authority is None:
         velocity_dirichlet_boundary_authority = current_authority
     if velocity_dirichlet_component_ledger_generation is None:
@@ -8421,11 +8043,7 @@ def _restore_preflow_snapshot_fields(
         derived_fields[name] = runtime_field
         derived_backups[name] = np.asarray(to_numpy()).copy()
 
-    canonical_prepare_plan = (
-        _canonical_snapshot_restore_prepare_plan(fluid)
-        if current_authority == "canonical"
-        else ()
-    )
+    canonical_prepare_plan = _canonical_snapshot_restore_prepare_plan(fluid)
 
     try:
         for name in PREFLOW_SNAPSHOT_FIELD_NAMES:
@@ -8455,14 +8073,10 @@ def _restore_preflow_snapshot_fields(
                     ]
                 )
             )
-        if current_authority == "canonical":
-            _prepare_canonical_preflow_snapshot_restore(
-                fluid,
-                canonical_prepare_plan,
-            )
-        else:
-            _rebuild_legacy_preflow_snapshot_derived_state(fluid)
-            fluid._require_velocity_dirichlet_component_ledger_sealed()
+        _prepare_canonical_preflow_snapshot_restore(
+            fluid,
+            canonical_prepare_plan,
+        )
     except BaseException as restore_error:
         # Rollback restores direct backups only.  Re-entering prepare/seal here
         # can reproduce the same failure and obscure the original exception.
@@ -8674,8 +8288,6 @@ def _mutable_preflow_report_value(
 
 
 def _preflow_expected_no_slip_marker_count(config: Any) -> int:
-    if not _use_hibm_sharp_marker_boundary(config):
-        return 0
     expected_marker_count = int(getattr(config, "marker_count", 0))
     if _traction_marker_layout(config) == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES:
         expected_marker_count *= 2
@@ -9032,7 +8644,7 @@ def _preflow_report_snapshot_payload(
     pressure_operator_health_failure = (
         _preflow_pressure_operator_health_failure(final_row)
     )
-    q_health_ok = not _use_hibm_sharp_marker_boundary(config) or (
+    q_health_ok = (
         bool(
             final_row.get(
                 "flow_projection_pre_projection_velocity_projector_prepared_all",
@@ -9245,7 +8857,6 @@ def _run_fixed_solid_preflow(
         raise ValueError(f"unsupported preflow_convergence_mode: {convergence_mode!r}")
     history: list[dict[str, object]] = []
     previous_row: dict[str, object] | None = None
-    previous_feedback_constraint_cells: set[tuple[int, int, int]] = set()
     converged = requested_steps == 0
     stop_reason = "not_requested" if requested_steps == 0 else "max_steps"
     sharp_boundary_cache: dict[str, object] = {}
@@ -9258,12 +8869,7 @@ def _run_fixed_solid_preflow(
         feedback_constraint_report = _apply_marker_feedback_to_fluid(
             markers,
             fluid,
-            config,
             feedback_available=bool(getattr(config, "apply_marker_feedback_to_fluid", True)),
-            previous_feedback_constraint_cells=previous_feedback_constraint_cells,
-        )
-        previous_feedback_constraint_cells = set(
-            feedback_constraint_report.get("_feedback_constraint_cells", set())
         )
         try:
             flow_report = _flow_advance_current_step(
@@ -9302,20 +8908,7 @@ def _run_fixed_solid_preflow(
             ) from exc
         feedback_constraint_report[
             "no_slip_projected_residual_after_projection_mps"
-        ] = (
-            float(flow_report["hibm_no_slip_max_residual_mps"])
-            if _use_hibm_sharp_marker_boundary(config)
-            else _measure_projected_no_slip_residual(
-                markers,
-                fluid,
-                config,
-                feedback_consumed=bool(
-                    feedback_constraint_report[
-                        "fluid_marker_velocity_constraints_enabled"
-                    ]
-                ),
-            )
-        )
+        ] = float(flow_report["hibm_no_slip_max_residual_mps"])
         stress_report = _sample_stress_to_marker_forces(markers, fluid, config)
         force_report = markers.aggregate_region_forces(
             primary_region_id=PRIMARY_REGION_ID,
@@ -9376,12 +8969,7 @@ def _run_fixed_solid_preflow(
             "flow_predictor_no_slip_domain_walls": flow_report[
                 "flow_predictor_no_slip_domain_walls"
             ],
-            "flow_obstacle_no_slip_layers": flow_report["flow_obstacle_no_slip_layers"],
-            "flow_obstacle_no_slip_weight": flow_report["flow_obstacle_no_slip_weight"],
             "flow_solid_boundary_mode": flow_report["flow_solid_boundary_mode"],
-            "flow_obstacle_normal_velocity_policy": flow_report[
-                "flow_obstacle_normal_velocity_policy"
-            ],
             "flow_pressure_outlet_backflow_policy": flow_report[
                 "flow_pressure_outlet_backflow_policy"
             ],
@@ -9490,9 +9078,6 @@ def _run_fixed_solid_preflow(
             ),
             "fluid_marker_feedback_enforcement_mode": feedback_constraint_report[
                 "fluid_marker_feedback_enforcement_mode"
-            ],
-            "legacy_constraint_active_cell_count": feedback_constraint_report[
-                "legacy_constraint_active_cell_count"
             ],
             "fluid_feedback_constraint_marker_count": (
                 feedback_constraint_report["fluid_feedback_constraint_marker_count"]
@@ -9996,7 +9581,7 @@ def _preflow_windowed_stationary_report(
         pressure_operator_health_failure = (
             _preflow_pressure_operator_health_failure(row)
         )
-        q_health_ok = not _use_hibm_sharp_marker_boundary(config) or (
+        q_health_ok = (
             bool(
                 row.get(
                     "flow_projection_pre_projection_velocity_projector_prepared_all",
@@ -10105,7 +9690,59 @@ def _relative_delta(current: object, previous: object) -> float:
     return abs(current_value - previous_value) / scale
 
 
-def _flow_field_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
+_IMMUTABLE_FLOW_GEOMETRY_FIELD_NAMES = (
+    "cell_face_x_m",
+    "cell_face_y_m",
+    "cell_face_z_m",
+    "cell_center_x_m",
+    "cell_center_y_m",
+    "cell_center_z_m",
+    "cell_width_x_m",
+    "cell_width_y_m",
+    "cell_width_z_m",
+)
+_PARITY_FLOW_GEOMETRY_FIELD_NAMES = (
+    "cell_center_y_m",
+    "cell_center_z_m",
+)
+
+
+def _flow_geometry_snapshot_cache_required(
+    *,
+    step_count: int,
+    has_step_observer: bool,
+    export_final_flow_snapshot: bool,
+) -> bool:
+    return step_count > 0 and (
+        has_step_observer or export_final_flow_snapshot
+    )
+
+
+def _immutable_flow_geometry_snapshot(
+    fluid: CartesianFluidSolver,
+    *,
+    include_full_geometry: bool,
+) -> dict[str, np.ndarray]:
+    """Download immutable grid geometry once for host-side snapshot export."""
+
+    field_names = (
+        _IMMUTABLE_FLOW_GEOMETRY_FIELD_NAMES
+        if include_full_geometry
+        else _PARITY_FLOW_GEOMETRY_FIELD_NAMES
+    )
+    snapshot: dict[str, np.ndarray] = {}
+    for field_name in field_names:
+        value = np.asarray(getattr(fluid, field_name).to_numpy()).copy()
+        value.setflags(write=False)
+        snapshot[field_name] = value
+    return snapshot
+
+
+def _flow_field_snapshot(
+    fluid: CartesianFluidSolver,
+    *,
+    immutable_geometry: Mapping[str, np.ndarray] | None = None,
+) -> dict[str, np.ndarray]:
     snapshot = {
         "pressure": _fluid_feedback_pressure_numpy(fluid),
         "velocity": fluid.velocity.to_numpy(),
@@ -10138,23 +9775,28 @@ def _flow_field_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
         "velocity_dirichlet_boundary_marker_region_id": (
             fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
         ),
-        "cell_face_x_m": fluid.cell_face_x_m.to_numpy(),
-        "cell_face_y_m": fluid.cell_face_y_m.to_numpy(),
-        "cell_face_z_m": fluid.cell_face_z_m.to_numpy(),
-        "cell_center_x_m": fluid.cell_center_x_m.to_numpy(),
-        "cell_center_y_m": fluid.cell_center_y_m.to_numpy(),
-        "cell_center_z_m": fluid.cell_center_z_m.to_numpy(),
-        "cell_width_x_m": fluid.cell_width_x_m.to_numpy(),
-        "cell_width_y_m": fluid.cell_width_y_m.to_numpy(),
-        "cell_width_z_m": fluid.cell_width_z_m.to_numpy(),
     }
+    snapshot.update(
+        {
+            field_name: (
+                immutable_geometry[field_name]
+                if immutable_geometry is not None
+                else getattr(fluid, field_name).to_numpy()
+            )
+            for field_name in _IMMUTABLE_FLOW_GEOMETRY_FIELD_NAMES
+        }
+    )
     sampling_obstacle = getattr(fluid, "sampling_obstacle", None)
     if sampling_obstacle is not None:
         snapshot["sampling_obstacle"] = sampling_obstacle.to_numpy()
     return snapshot
 
 
-def _flow_parity_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
+def _flow_parity_snapshot(
+    fluid: CartesianFluidSolver,
+    *,
+    immutable_geometry: Mapping[str, np.ndarray] | None = None,
+) -> dict[str, np.ndarray]:
     """Return only the arrays needed for per-step Fluent-parity frames."""
 
     return {
@@ -10189,8 +9831,16 @@ def _flow_parity_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
         "velocity_dirichlet_boundary_marker_region_id": (
             fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
         ),
-        "cell_center_y_m": fluid.cell_center_y_m.to_numpy(),
-        "cell_center_z_m": fluid.cell_center_z_m.to_numpy(),
+        "cell_center_y_m": (
+            immutable_geometry["cell_center_y_m"]
+            if immutable_geometry is not None
+            else fluid.cell_center_y_m.to_numpy()
+        ),
+        "cell_center_z_m": (
+            immutable_geometry["cell_center_z_m"]
+            if immutable_geometry is not None
+            else fluid.cell_center_z_m.to_numpy()
+        ),
     }
 
 
@@ -10266,386 +9916,33 @@ def _fluid_feedback_pressure_numpy(fluid: CartesianFluidSolver) -> np.ndarray:
 def _apply_marker_feedback_to_fluid(
     markers: HibmMpmSurfaceMarkers,
     fluid: CartesianFluidSolver,
-    config: Any,
     *,
     feedback_available: bool,
-    previous_feedback_constraint_cells: set[tuple[int, int, int]],
 ) -> dict[str, object]:
-    sharp_reconstructed_rows = _use_hibm_sharp_marker_boundary(config)
-    authority = str(
-        getattr(fluid, "velocity_dirichlet_boundary_authority", "legacy")
+    if str(getattr(fluid, "velocity_dirichlet_boundary_authority", "")) != "canonical":
+        raise RuntimeError("sharp HIBM marker feedback requires canonical authority")
+    report = _empty_feedback_constraint_report()
+    report.update(
+        {
+            "fluid_projection_consumed_feedback": bool(
+                feedback_available and int(markers.marker_count) > 0
+            ),
+            "fluid_feedback_constraint_marker_count": (
+                int(markers.marker_count) if feedback_available else 0
+            ),
+            "fluid_marker_feedback_collocated_writer_used": False,
+            "fluid_marker_feedback_enforcement_mode": "hibm_sharp_reconstructed_rows",
+        }
     )
-    if authority == "canonical":
-        if not sharp_reconstructed_rows:
-            raise RuntimeError(
-                "canonical marker feedback requires component-face HIBM; "
-                "legacy collocated feedback is forbidden"
-            )
-        report = _empty_feedback_constraint_report()
-        report.update(
-            {
-                "fluid_projection_consumed_feedback": bool(
-                    feedback_available and int(markers.marker_count) > 0
-                ),
-                "fluid_feedback_constraint_marker_count": (
-                    int(markers.marker_count) if feedback_available else 0
-                ),
-                "fluid_marker_feedback_collocated_writer_used": False,
-                "fluid_marker_feedback_enforcement_mode": (
-                    "hibm_sharp_reconstructed_rows"
-                ),
-                "legacy_constraint_active_cell_count": 0,
-            }
-        )
-        return report
-    # The sharp HIBM path already consumes marker velocity through its
-    # reconstructed interface rows.  Stamping the same velocity into the
-    # marker's containing cell creates a second, geometrically inconsistent
-    # constraint which is subsequently overwritten by the sharp row.  Keep the
-    # device clear operation, but never assemble the legacy collocated rows in
-    # sharp mode.
-    legacy_feedback_available = bool(feedback_available) and not sharp_reconstructed_rows
-    preserve_legacy_constraints = bool(
-        getattr(config, "preserve_marker_velocity_constraints", True)
-    ) and not sharp_reconstructed_rows
-    apply_device = getattr(fluid, "apply_marker_feedback_constraints", None)
-    marker_region_field = getattr(markers, "region_id", None)
-    if apply_device is not None and marker_region_field is not None:
-        report = apply_device(
-            markers.x_gamma_m,
-            markers.v_gamma_mps,
-            marker_region_field,
-            int(markers.marker_count),
-            feedback_available=legacy_feedback_available,
-            preserve_velocity_constraints=preserve_legacy_constraints,
-            primary_region_id=PRIMARY_REGION_ID,
-            secondary_region_id=SECONDARY_REGION_ID,
-        )
-        report["_feedback_constraint_cells"] = set()
-    else:
-        report = _apply_marker_feedback_to_fluid_host_fallback(
-            markers,
-            fluid,
-            config,
-            feedback_available=legacy_feedback_available,
-            previous_feedback_constraint_cells=previous_feedback_constraint_cells,
-        )
-    report["fluid_marker_feedback_collocated_writer_used"] = True
-    if sharp_reconstructed_rows:
-        report.update(
-            {
-                "fluid_projection_consumed_feedback": bool(
-                    feedback_available and int(markers.marker_count) > 0
-                ),
-                "fluid_feedback_constraint_marker_count": (
-                    int(markers.marker_count) if feedback_available else 0
-                ),
-                "fluid_feedback_constraint_active_cell_count": 0,
-                "fluid_feedback_constraint_obstacle_cell_count": 0,
-                "fluid_feedback_constraint_non_obstacle_cell_count": 0,
-                "fluid_feedback_constraint_projection_participating_cell_count": 0,
-                "fluid_marker_velocity_constraints_enabled": False,
-                "fluid_marker_velocity_constraint_active_cell_count": 0,
-                "fluid_marker_feedback_enforcement_mode": (
-                    "hibm_sharp_reconstructed_rows"
-                ),
-                "legacy_constraint_active_cell_count": 0,
-                "no_slip_residual_before_mps": "",
-                "no_slip_residual_after_mps": "",
-                "no_slip_target_residual_after_assembly_mps": "",
-                "no_slip_projected_residual_after_projection_mps": 0.0,
-            }
-        )
-    else:
-        report["fluid_marker_feedback_enforcement_mode"] = (
-            "legacy_collocated_marker_cells"
-        )
-        report["legacy_constraint_active_cell_count"] = int(
-            report.get("fluid_feedback_constraint_active_cell_count", 0)
-        )
     return report
 
 
-def _apply_marker_feedback_to_fluid_host_fallback(
-    markers: HibmMpmSurfaceMarkers,
-    fluid: CartesianFluidSolver,
-    config: Any,
-    *,
-    feedback_available: bool,
-    previous_feedback_constraint_cells: set[tuple[int, int, int]],
-) -> dict[str, object]:
-    authority = str(
-        getattr(fluid, "velocity_dirichlet_boundary_authority", "legacy")
-    )
-    if authority == "canonical":
-        raise RuntimeError(
-            "canonical marker feedback forbids the legacy host row fallback"
-        )
-    preserve_velocity_constraints = bool(
-        getattr(config, "preserve_marker_velocity_constraints", True)
-    )
-    ledger_field_names = (
-        "velocity_dirichlet_boundary_active",
-        "velocity_dirichlet_boundary_value_mps",
-        "velocity_dirichlet_boundary_projection_weight",
-        "velocity_dirichlet_boundary_enforcement_weight",
-        "velocity_dirichlet_boundary_marker_region_id",
-        "velocity_dirichlet_boundary_hard_fixed_component_mask",
-        "velocity_dirichlet_boundary_external_exact_component_mask",
-        "velocity_dirichlet_boundary_owned_row",
-    )
-    ledger_fields: dict[str, object] = {}
-    invalid_fields: list[str] = []
-    for field_name in ledger_field_names:
-        field = getattr(fluid, field_name, None)
-        if (
-            field is None
-            or not callable(getattr(field, "to_numpy", None))
-            or not callable(getattr(field, "from_numpy", None))
-        ):
-            invalid_fields.append(field_name)
-        else:
-            ledger_fields[field_name] = field
-    if invalid_fields:
-        raise RuntimeError(
-            "host marker-feedback fallback requires a complete velocity "
-            "Dirichlet boundary ledger before clearing state: "
-            + ", ".join(invalid_fields)
-        )
-    _clear_fluid_velocity_constraints(fluid)
-
-    active_field = ledger_fields["velocity_dirichlet_boundary_active"]
-    value_field = ledger_fields["velocity_dirichlet_boundary_value_mps"]
-    projection_weight_field = ledger_fields[
-        "velocity_dirichlet_boundary_projection_weight"
-    ]
-    enforcement_field = ledger_fields[
-        "velocity_dirichlet_boundary_enforcement_weight"
-    ]
-    row_region_field = ledger_fields[
-        "velocity_dirichlet_boundary_marker_region_id"
-    ]
-    hard_mask_field = ledger_fields[
-        "velocity_dirichlet_boundary_hard_fixed_component_mask"
-    ]
-    external_exact_mask_field = ledger_fields[
-        "velocity_dirichlet_boundary_external_exact_component_mask"
-    ]
-    owned_row_field = ledger_fields["velocity_dirichlet_boundary_owned_row"]
-    active = active_field.to_numpy()
-    values = value_field.to_numpy()
-    weights = projection_weight_field.to_numpy()
-    enforcement_weights = enforcement_field.to_numpy()
-    row_regions = row_region_field.to_numpy()
-    hard_masks = hard_mask_field.to_numpy()
-    external_exact_masks = external_exact_mask_field.to_numpy()
-    owned_rows = owned_row_field.to_numpy()
-
-    def _commit_boundary_ledger() -> None:
-        active_field.from_numpy(active)
-        value_field.from_numpy(values)
-        projection_weight_field.from_numpy(weights)
-        enforcement_field.from_numpy(enforcement_weights)
-        row_region_field.from_numpy(row_regions)
-        hard_mask_field.from_numpy(hard_masks)
-        external_exact_mask_field.from_numpy(external_exact_masks)
-        owned_row_field.from_numpy(owned_rows)
-
-    cleared_cell_count = 0
-    for i, j, k in previous_feedback_constraint_cells:
-        active[i, j, k] = 0
-        values[i, j, k] = 0.0
-        weights[i, j, k] = 0.0
-        enforcement_weights[i, j, k] = 0.0
-        row_regions[i, j, k] = -1
-        hard_masks[i, j, k] = 0
-        external_exact_masks[i, j, k] = 0
-        owned_rows[i, j, k] = 0
-        cleared_cell_count += 1
-
-    if not feedback_available:
-        _commit_boundary_ledger()
-        return _empty_feedback_constraint_report(cleared_cell_count)
-
-    marker_count = int(markers.marker_count)
-    if marker_count <= 0:
-        _commit_boundary_ledger()
-        return _empty_feedback_constraint_report(cleared_cell_count)
-
-    marker_positions = markers.x_gamma_m.to_numpy()[:marker_count]
-    marker_velocities = markers.v_gamma_mps.to_numpy()[:marker_count]
-    marker_region_ids = _marker_region_ids(markers, marker_count)
-    velocity = fluid.velocity.to_numpy()
-
-    marker_cells = _marker_grid_cells(marker_positions, config)
-
-    target_sum: dict[tuple[int, int, int], np.ndarray] = {}
-    target_count: dict[tuple[int, int, int], int] = {}
-    target_regions: dict[tuple[int, int, int], set[int]] = {}
-    target_primary_sum: dict[tuple[int, int, int], np.ndarray] = {}
-    target_primary_count: dict[tuple[int, int, int], int] = {}
-    target_secondary_sum: dict[tuple[int, int, int], np.ndarray] = {}
-    target_secondary_count: dict[tuple[int, int, int], int] = {}
-    before_residuals: list[float] = []
-    for marker_index, (cell, marker_velocity) in enumerate(
-        zip(marker_cells, marker_velocities)
-    ):
-        i, j, k = (int(cell[0]), int(cell[1]), int(cell[2]))
-        key = (i, j, k)
-        target_sum[key] = target_sum.get(key, np.zeros(3, dtype=np.float64)) + np.asarray(
-            marker_velocity,
-            dtype=np.float64,
-        )
-        target_count[key] = target_count.get(key, 0) + 1
-        marker_region_id = int(marker_region_ids[marker_index])
-        target_regions.setdefault(key, set()).add(marker_region_id)
-        if marker_region_id == PRIMARY_REGION_ID:
-            target_primary_sum[key] = target_primary_sum.get(
-                key,
-                np.zeros(3, dtype=np.float64),
-            ) + np.asarray(marker_velocity, dtype=np.float64)
-            target_primary_count[key] = target_primary_count.get(key, 0) + 1
-        elif marker_region_id == SECONDARY_REGION_ID:
-            target_secondary_sum[key] = target_secondary_sum.get(
-                key,
-                np.zeros(3, dtype=np.float64),
-            ) + np.asarray(marker_velocity, dtype=np.float64)
-            target_secondary_count[key] = target_secondary_count.get(key, 0) + 1
-        before_residuals.append(float(np.linalg.norm(velocity[i, j, k] - marker_velocity)))
-
-    for (i, j, k), summed_velocity in target_sum.items():
-        active[i, j, k] = 1
-        values[i, j, k] = summed_velocity / float(target_count[(i, j, k)])
-        weights[i, j, k] = 1.0
-        enforcement_weights[i, j, k] = 1.0
-        regions = target_regions[(i, j, k)]
-        row_regions[i, j, k] = next(iter(regions)) if len(regions) == 1 else -1
-        hard_masks[i, j, k] = 0b111
-        external_exact_masks[i, j, k] = 0
-        owned_rows[i, j, k] = 0
-
-    constraint_active_cell_count = 0
-    if preserve_velocity_constraints:
-        constraint_active_cell_count = _write_marker_velocity_constraints(
-            fluid,
-            target_sum=target_sum,
-            target_count=target_count,
-            target_primary_sum=target_primary_sum,
-            target_primary_count=target_primary_count,
-            target_secondary_sum=target_secondary_sum,
-            target_secondary_count=target_secondary_count,
-        )
-
-    after_residuals: list[float] = []
-    for cell, marker_velocity in zip(marker_cells, marker_velocities):
-        i, j, k = (int(cell[0]), int(cell[1]), int(cell[2]))
-        after_residuals.append(float(np.linalg.norm(values[i, j, k] - marker_velocity)))
-
-    _commit_boundary_ledger()
-
-    obstacle = fluid.obstacle.to_numpy()
-    active_cell_count = len(target_sum)
-    obstacle_cell_count = sum(1 for i, j, k in target_sum if obstacle[i, j, k] != 0)
-    non_obstacle_cell_count = active_cell_count - obstacle_cell_count
-    return {
-        "fluid_projection_consumed_feedback": active_cell_count > 0,
-        "fluid_feedback_constraint_marker_count": marker_count,
-        "fluid_feedback_constraint_active_cell_count": active_cell_count,
-        "fluid_feedback_constraint_cleared_cell_count": cleared_cell_count,
-        "fluid_feedback_constraint_obstacle_cell_count": obstacle_cell_count,
-        "fluid_feedback_constraint_non_obstacle_cell_count": non_obstacle_cell_count,
-        "fluid_feedback_constraint_projection_participating_cell_count": (
-            non_obstacle_cell_count
-        ),
-        "fluid_marker_velocity_constraints_enabled": preserve_velocity_constraints,
-        "fluid_marker_velocity_constraint_active_cell_count": constraint_active_cell_count,
-        "no_slip_residual_before_mps": max(before_residuals, default=0.0),
-        "no_slip_residual_after_mps": max(after_residuals, default=0.0),
-        "no_slip_target_residual_after_assembly_mps": max(
-            after_residuals,
-            default=0.0,
-        ),
-        "no_slip_projected_residual_after_projection_mps": 0.0,
-        "_feedback_constraint_cells": set(target_sum),
-    }
-
-
-def _clear_fluid_velocity_constraints(fluid: CartesianFluidSolver) -> None:
-    fluid.clear_velocity_constraints()
-
-
-def _marker_region_ids(
-    markers: HibmMpmSurfaceMarkers,
-    marker_count: int,
-) -> np.ndarray:
-    region_field = getattr(markers, "region_id", None)
-    if region_field is None:
-        return np.full(marker_count, -1, dtype=np.int32)
-    return np.asarray(region_field.to_numpy()[:marker_count], dtype=np.int32)
-
-
-def _write_marker_velocity_constraints(
-    fluid: CartesianFluidSolver,
-    *,
-    target_sum: Mapping[tuple[int, int, int], np.ndarray],
-    target_count: Mapping[tuple[int, int, int], int],
-    target_primary_sum: Mapping[tuple[int, int, int], np.ndarray],
-    target_primary_count: Mapping[tuple[int, int, int], int],
-    target_secondary_sum: Mapping[tuple[int, int, int], np.ndarray],
-    target_secondary_count: Mapping[tuple[int, int, int], int],
-) -> int:
-    required_fields = (
-        "velocity_constraint_sum",
-        "velocity_constraint_weight",
-        "velocity_constraint_primary_sum",
-        "velocity_constraint_primary_weight",
-        "velocity_constraint_secondary_sum",
-        "velocity_constraint_secondary_weight",
-    )
-    if any(getattr(fluid, name, None) is None for name in required_fields):
-        return 0
-
-    constraint_sum = fluid.velocity_constraint_sum.to_numpy()
-    constraint_weight = fluid.velocity_constraint_weight.to_numpy()
-    primary_sum = fluid.velocity_constraint_primary_sum.to_numpy()
-    primary_weight = fluid.velocity_constraint_primary_weight.to_numpy()
-    secondary_sum = fluid.velocity_constraint_secondary_sum.to_numpy()
-    secondary_weight = fluid.velocity_constraint_secondary_weight.to_numpy()
-
-    for (i, j, k), summed_velocity in target_sum.items():
-        count = float(target_count[(i, j, k)])
-        constraint_sum[i, j, k] = np.asarray(summed_velocity, dtype=np.float64)
-        constraint_weight[i, j, k] = count
-        if (i, j, k) in target_primary_sum:
-            primary_sum[i, j, k] = np.asarray(
-                target_primary_sum[(i, j, k)],
-                dtype=np.float64,
-            )
-            primary_weight[i, j, k] = float(target_primary_count[(i, j, k)])
-        if (i, j, k) in target_secondary_sum:
-            secondary_sum[i, j, k] = np.asarray(
-                target_secondary_sum[(i, j, k)],
-                dtype=np.float64,
-            )
-            secondary_weight[i, j, k] = float(target_secondary_count[(i, j, k)])
-
-    fluid.velocity_constraint_sum.from_numpy(constraint_sum)
-    fluid.velocity_constraint_weight.from_numpy(constraint_weight)
-    fluid.velocity_constraint_primary_sum.from_numpy(primary_sum)
-    fluid.velocity_constraint_primary_weight.from_numpy(primary_weight)
-    fluid.velocity_constraint_secondary_sum.from_numpy(secondary_sum)
-    fluid.velocity_constraint_secondary_weight.from_numpy(secondary_weight)
-    return len(target_sum)
-
-
-def _empty_feedback_constraint_report(
-    cleared_cell_count: int = 0,
-) -> dict[str, object]:
+def _empty_feedback_constraint_report() -> dict[str, object]:
     return {
         "fluid_projection_consumed_feedback": False,
         "fluid_feedback_constraint_marker_count": 0,
         "fluid_feedback_constraint_active_cell_count": 0,
-        "fluid_feedback_constraint_cleared_cell_count": cleared_cell_count,
+        "fluid_feedback_constraint_cleared_cell_count": 0,
         "fluid_feedback_constraint_obstacle_cell_count": 0,
         "fluid_feedback_constraint_non_obstacle_cell_count": 0,
         "fluid_feedback_constraint_projection_participating_cell_count": 0,
@@ -10655,57 +9952,7 @@ def _empty_feedback_constraint_report(
         "no_slip_residual_after_mps": "",
         "no_slip_target_residual_after_assembly_mps": "",
         "no_slip_projected_residual_after_projection_mps": 0.0,
-        "_feedback_constraint_cells": set(),
     }
-
-
-def _measure_projected_no_slip_residual(
-    markers: HibmMpmSurfaceMarkers,
-    fluid: CartesianFluidSolver,
-    config: Any,
-    *,
-    feedback_consumed: bool,
-) -> float:
-    if not feedback_consumed:
-        return 0.0
-
-    marker_count = int(markers.marker_count)
-    if marker_count <= 0:
-        return 0.0
-
-    measure_device = getattr(fluid, "marker_feedback_projected_residual_mps", None)
-    if measure_device is not None:
-        return float(
-            measure_device(
-                markers.x_gamma_m,
-                markers.v_gamma_mps,
-                marker_count,
-            )
-        )
-
-    marker_positions = markers.x_gamma_m.to_numpy()[:marker_count]
-    marker_velocities = markers.v_gamma_mps.to_numpy()[:marker_count]
-    marker_cells = _marker_grid_cells(marker_positions, config)
-    velocity = fluid.velocity.to_numpy()
-
-    residuals = []
-    for cell, marker_velocity in zip(marker_cells, marker_velocities):
-        i, j, k = (int(cell[0]), int(cell[1]), int(cell[2]))
-        residuals.append(float(np.linalg.norm(velocity[i, j, k] - marker_velocity)))
-    return max(residuals, default=0.0)
-
-
-def _marker_grid_cells(
-    marker_positions: np.ndarray,
-    config: Any,
-) -> np.ndarray:
-    bounds_min, bounds_max = _domain_bounds(config)
-    lower = np.asarray(bounds_min, dtype=np.float64)
-    upper = np.asarray(bounds_max, dtype=np.float64)
-    grid_nodes = np.asarray(config.grid_nodes, dtype=np.int32)
-    cell_width = (upper - lower) / grid_nodes.astype(np.float64)
-    marker_cells = np.floor((marker_positions - lower) / cell_width).astype(np.int32)
-    return np.clip(marker_cells, 0, grid_nodes - 1)
 
 
 def _flow_state_report(

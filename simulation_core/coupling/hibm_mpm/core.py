@@ -34,11 +34,6 @@ from .constants import (
     STRESS_INVALID_REASON_TWO_SIDED_PRESSURE_MISSING,
     STRESS_INVALID_REASON_VISCOUS_GRADIENT_MISSING,
 )
-from .modes import (
-    FSI_COUPLING_MODE_CHOICES,
-    FSI_COUPLING_MODE_HIBM_MPM_SHARP,
-    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
-)
 from .reports import (
     HibmMpmExternalForceClearReport,
     HibmMpmFluidStressSampleReport,

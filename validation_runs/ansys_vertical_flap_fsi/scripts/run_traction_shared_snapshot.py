@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     VerticalFlapFsiConfig,
-    run_vertical_flap_fsi_smoke,
+    run_ansys_vertical_flap_benchmark,
 )
 
 
@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     config = _snapshot_config()
-    report = run_vertical_flap_fsi_smoke(config)
+    report = run_ansys_vertical_flap_benchmark(config)
     snapshot = _validated_snapshot(report, config)
     arrays = _npz_arrays(snapshot, config, report)
 

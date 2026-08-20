@@ -3,31 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from simulation_core.drivers.generic_fsi_solver import (
-    DiagnosticsConfig,
-    FluidDomain,
-    FsiProblem,
-    FsiSolverConfig,
-    InterfaceSurface,
-    OneSidedPressurePolicy,
-    PressureSamplePairProvider,
-    PressureSamplingConfig,
-    SolidBody,
-    SurfaceRegion,
-    SurfaceRegionPolicy,
-    TractionConfig,
-)
-from simulation_core.drivers.fsi_driver import FsiCaseSpec
 from benchmarks.official.official_benchmark_solver import (
+    FsiCaseSpec,
     OfficialBenchmarkRunSpec,
     run_official_fsi_benchmark,
 )
 from benchmarks.official.solid_mpm_fsi_runner import (
     OUT_OF_PLANE_BOUNDARY_POLICY,
-    run_rectangular_solid_marker_mpm_fsi_smoke,
+    run_hibm_mpm_fsi,
     slab_equivalence_diagnostics,
 )
 
@@ -174,10 +160,6 @@ class VerticalFlapFsiConfig:
     flow_reprojection_cg_tolerance: float | None = None
     flow_pressure_solve_failure_policy: str = "raise"
     flow_divergence_cleanup_iterations: int = 0
-    # None delegates external-face topology to the exact velocity-boundary
-    # ledger. True/False remain explicit legacy assertions for callers that
-    # deliberately need them.
-    flow_projection_velocity_inlet_zmax: bool | None = None
     velocity_damping: float = 0.995
     solid_velocity_transfer_flip_blend: float = 0.0
     solid_substeps: int = 1600
@@ -223,13 +205,10 @@ class VerticalFlapFsiConfig:
     flow_predictor_no_slip_domain_walls: tuple[str, ...] = ("ymin",)
     flow_symmetry_domain_walls: tuple[str, ...] = ("ymax",)
     flow_ymin_no_slip_rows: int = 0
-    flow_obstacle_no_slip_layers: int = 0
-    flow_obstacle_no_slip_weight: float = 1.0
-    flow_obstacle_cap_no_slip_weight: float | None = None
-    flow_obstacle_wake_no_slip_layers: int = 0
-    flow_obstacle_wake_no_slip_weight: float = 0.5
-    flow_obstacle_normal_velocity_policy: str = "face_clamp"
-    flow_solid_boundary_mode: str = "hibm_sharp_marker_rows"
+    flow_solid_boundary_mode: str = field(
+        default="hibm_sharp_marker_rows",
+        init=False,
+    )
     flow_hibm_sharp_search_radius_m: float | None = None
     flow_hibm_sharp_search_radius_xyz_m: tuple[float, float, float] | None = None
     flow_hibm_sharp_interior_probe_distance_m: float | None = None
@@ -348,192 +327,10 @@ ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET: dict[str, Any] = {
 }
 
 
-@dataclass(frozen=True)
-class AnsysVerticalFlapProblem:
-    pressure_pair_provider_mode: str = "runtime_anchored_cell_pair"
-    selected_anchor_markers_json: str | None = None
-    step_count: int = 50
-
-    def to_fsi_problem(self) -> FsiProblem:
-        if self.pressure_pair_provider_mode not in {
-            "runtime_anchored_cell_pair",
-            "replay_from_diagnostics",
-        }:
-            raise ValueError(
-                f"unsupported pressure_pair_provider_mode: {self.pressure_pair_provider_mode!r}"
-            )
-        if (
-            self.pressure_pair_provider_mode == "replay_from_diagnostics"
-            and not self.selected_anchor_markers_json
-        ):
-            raise ValueError(
-                "replay_from_diagnostics requires selected_anchor_markers_json"
-            )
-        config = VerticalFlapFsiConfig(step_count=self.step_count)
-        primary_region = SurfaceRegion(
-            region_id="primary_flap_face",
-            marker_count=config.marker_count,
-            fluid_side_normal_sign=float(
-                ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
-                    "primary_fluid_side_normal_sign"
-                ]
-            ),
-            reference_pressure_pa=0.0,
-        )
-        secondary_region = SurfaceRegion(
-            region_id="secondary_flap_face",
-            marker_count=config.marker_count,
-            fluid_side_normal_sign=float(
-                ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET[
-                    "secondary_fluid_side_normal_sign"
-                ]
-            ),
-            reference_pressure_pa=0.0,
-        )
-        pair_source_status = (
-            "runtime_generated"
-            if self.pressure_pair_provider_mode == "runtime_anchored_cell_pair"
-            else "replay_from_diagnostics"
-        )
-        pair_source = (
-            ""
-            if self.pressure_pair_provider_mode == "runtime_anchored_cell_pair"
-            else str(self.selected_anchor_markers_json or "")
-        )
-        pair_provider = PressureSamplePairProvider(
-            mode=self.pressure_pair_provider_mode,
-            pair_source_status=pair_source_status,
-            source=pair_source,
-        )
-        traction_config = TractionConfig(
-            pressure_sampling=PressureSamplingConfig(pair_provider=pair_provider),
-            one_sided_pressure=OneSidedPressurePolicy(
-                region_policies=(
-                    SurfaceRegionPolicy(
-                        region_id=primary_region.region_id,
-                        fluid_side_normal_sign=float(
-                            primary_region.fluid_side_normal_sign
-                        ),
-                    ),
-                    SurfaceRegionPolicy(
-                        region_id=secondary_region.region_id,
-                        fluid_side_normal_sign=float(
-                            secondary_region.fluid_side_normal_sign
-                        ),
-                    ),
-                )
-            ),
-            include_viscous=False,
-        )
-        runtime_discretization_model = "cartesian-3d-half-domain"
-        slab_diagnostics = slab_equivalence_diagnostics(
-            config,
-            conceptual_coordinate_model=CASE_SPEC.coordinate_model,
-            runtime_discretization_model=runtime_discretization_model,
-            out_of_plane_boundary_policy=OUT_OF_PLANE_BOUNDARY_POLICY,
-        )
-        runtime_bounds_m = (
-            (0.0, 0.0, 0.0),
-            (
-                float(config.span_m),
-                float(
-                    ANSYS_VERTICAL_FLAP_CASE_METADATA["geometry"][
-                        "modeled_height_m"
-                    ]
-                ),
-                float(config.duct_length_m),
-            ),
-        )
-        return FsiProblem(
-            problem_id=CASE_SPEC.case_id,
-            fluid_domain=FluidDomain(
-                domain_id="flap_air_domain",
-                coordinate_model=runtime_discretization_model,
-                grid_nodes=tuple(int(value) for value in config.grid_nodes),
-                bounds_m=runtime_bounds_m,
-                boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
-            ),
-            solid_bodies=(
-                SolidBody(
-                    body_id="elastic_flap",
-                    material=ANSYS_VERTICAL_FLAP_CASE_METADATA["solid"],
-                    initial_state={"fixed_root": True},
-                ),
-            ),
-            interface_surfaces=(
-                InterfaceSurface(
-                    surface_id="flap_wall",
-                    regions=(primary_region, secondary_region),
-                ),
-            ),
-            traction_config=traction_config,
-            runtime_executor=_run_ansys_vertical_flap_generic_runtime,
-            metadata={
-                "adapter": "AnsysVerticalFlapProblem",
-                "case_name": "ansys_vertical_flap_fsi",
-                "selected_traction_preset": ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET,
-                "conceptual_coordinate_model": CASE_SPEC.coordinate_model,
-                "runtime_discretization_model": runtime_discretization_model,
-                "extrusion_depth_m": slab_diagnostics["extrusion_depth_m"],
-                "extrusion_depth_source": slab_diagnostics["extrusion_depth_source"],
-                "span_is_extrusion_depth": slab_diagnostics[
-                    "span_is_extrusion_depth"
-                ],
-                "flap_streamwise_thickness_m": slab_diagnostics[
-                    "flap_streamwise_thickness_m"
-                ],
-                "flap_thickness_is_streamwise_not_extrusion": slab_diagnostics[
-                    "flap_thickness_is_streamwise_not_extrusion"
-                ],
-                "out_of_plane_axis": slab_diagnostics["out_of_plane_axis"],
-                "out_of_plane_boundary_policy": slab_diagnostics[
-                    "out_of_plane_boundary_policy"
-                ],
-                "out_of_plane_boundary_residual_modeling_error": slab_diagnostics[
-                    "out_of_plane_boundary_residual_modeling_error"
-                ],
-                "runtime_domain_mode": ANSYS_VERTICAL_FLAP_CASE_METADATA[
-                    "geometry"
-                ]["modeled_domain"],
-                "pressure_pair_provider_mode": self.pressure_pair_provider_mode,
-                "selected_anchor_markers_json": self.selected_anchor_markers_json,
-            },
-        )
-
-
-def build_ansys_vertical_flap_generic_problem(
-    *,
-    pressure_pair_provider_mode: str = "runtime_anchored_cell_pair",
-    selected_anchor_markers_json: str | None = None,
-    step_count: int = 50,
-) -> FsiProblem:
-    return AnsysVerticalFlapProblem(
-        pressure_pair_provider_mode=pressure_pair_provider_mode,
-        selected_anchor_markers_json=selected_anchor_markers_json,
-        step_count=step_count,
-    ).to_fsi_problem()
-
-
 def selected_formulation_solver_config(
     *,
     step_count: int,
-    pressure_pair_provider_mode: str = "runtime_anchored_cell_pair",
-    selected_anchor_markers_json: str | None = None,
 ) -> VerticalFlapFsiConfig:
-    if pressure_pair_provider_mode == "replay_from_diagnostics":
-        if not selected_anchor_markers_json:
-            raise ValueError(
-                "replay_from_diagnostics requires selected_anchor_markers_json"
-            )
-        runtime_provider_mode = "disabled"
-        anchor_markers_json = selected_anchor_markers_json
-    elif pressure_pair_provider_mode == "runtime_anchored_cell_pair":
-        runtime_provider_mode = "runtime_anchored_cell_pair"
-        anchor_markers_json = None
-    else:
-        raise ValueError(
-            f"unsupported pressure_pair_provider_mode: {pressure_pair_provider_mode!r}"
-        )
     config = VerticalFlapFsiConfig(
         step_count=step_count,
         flow_turbulence_model="sst_2003",
@@ -571,72 +368,29 @@ def selected_formulation_solver_config(
                 "secondary_fluid_side_normal_sign"
             ]
         ),
-        traction_pressure_pair_anchor_markers_json=anchor_markers_json,
-        traction_pressure_pair_runtime_provider_mode=runtime_provider_mode,
+        traction_pressure_pair_anchor_markers_json=None,
+        traction_pressure_pair_runtime_provider_mode=(
+            "runtime_anchored_cell_pair"
+        ),
         allow_selected_traction_formulation_coupled_smoke=True,
         allow_selected_traction_formulation_coupled_long_validation=True,
     )
     return with_local_surface_force_support(config)
 
 
-def _run_ansys_vertical_flap_generic_runtime(
-    problem: FsiProblem,
-    solver_config: FsiSolverConfig,
-    diagnostics_config: DiagnosticsConfig,
-) -> dict[str, Any]:
-    pressure_pair_provider_mode = str(
-        problem.metadata["pressure_pair_provider_mode"]
-    )
-    selected_anchor_markers_json = problem.metadata.get("selected_anchor_markers_json")
-    config = selected_formulation_solver_config(
-        step_count=int(solver_config.step_count),
-        pressure_pair_provider_mode=pressure_pair_provider_mode,
-        selected_anchor_markers_json=(
-            None if selected_anchor_markers_json is None else str(selected_anchor_markers_json)
-        ),
-    )
-    report = run_vertical_flap_fsi_smoke(config)
-    history = list(report.get("history", []))
-    pressure_policy = problem.traction_config.pressure_sampling.pair_provider
-    return {
-        "run_status": (
-            "completed"
-            if len(history) == int(solver_config.step_count)
-            else "blocked"
-        ),
-        "history": history,
-        "report": report,
-        "diagnostics": {
-            "adapter": "AnsysVerticalFlapProblem",
-            "diagnostics_output_root": diagnostics_config.output_root,
-            "selected_formulation_preset": ANSYS_VERTICAL_FLAP_SELECTED_TRACTION_PRESET,
-            "selected_anchor_markers_json": selected_anchor_markers_json or "",
-            "pressure_pair_runtime_generation_status": (
-                pressure_policy.pair_source_status
-            ),
-            "pressure_pair_runtime_generation_complete": (
-                not pressure_policy.transition_backed
-            ),
-            "transition_artifact_dependency": pressure_policy.transition_backed,
-            "fluent_parity_claimed": False,
-        },
-        "artifacts": {},
-    }
-
-
-def run_vertical_flap_fsi_smoke(
+def run_ansys_vertical_flap_benchmark(
     config: VerticalFlapFsiConfig | None = None,
     *,
     step_observer: Callable[..., None] | None = None,
 ) -> dict[str, object]:
     cfg = with_local_surface_force_support(config or VerticalFlapFsiConfig())
-    runner = (
-        _run_vertical_flap_fsi_core
-        if step_observer is None
-        else lambda active_config: _run_vertical_flap_fsi_core(
-            active_config,
-            step_observer=step_observer,
-        )
+    runner = lambda active_config: run_hibm_mpm_fsi(
+        case_id=CASE_SPEC.case_id,
+        case_metadata=ANSYS_VERTICAL_FLAP_CASE_METADATA,
+        boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
+        reference_results=ANSYS_VERTICAL_FLAP_REFERENCE_RESULTS,
+        config=active_config,
+        step_observer=step_observer,
     )
     return run_official_fsi_benchmark(
         OfficialBenchmarkRunSpec(
@@ -647,21 +401,6 @@ def run_vertical_flap_fsi_smoke(
             config=cfg,
             runner=runner,
         )
-    )
-
-
-def _run_vertical_flap_fsi_core(
-    config: VerticalFlapFsiConfig,
-    *,
-    step_observer: Callable[..., None] | None = None,
-) -> dict[str, object]:
-    return run_rectangular_solid_marker_mpm_fsi_smoke(
-        case_id=CASE_SPEC.case_id,
-        case_metadata=ANSYS_VERTICAL_FLAP_CASE_METADATA,
-        boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
-        reference_results=ANSYS_VERTICAL_FLAP_REFERENCE_RESULTS,
-        config=config,
-        step_observer=step_observer,
     )
 
 
@@ -838,51 +577,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Number of near-ymin fluid rows constrained to zero velocity.",
     )
     parser.add_argument(
-        "--flow-obstacle-no-slip-layers",
-        type=int,
-        default=VerticalFlapFsiConfig.flow_obstacle_no_slip_layers,
-        help="Number of fluid layers adjacent to obstacle cells constrained to zero velocity.",
-    )
-    parser.add_argument(
-        "--flow-obstacle-no-slip-weight",
-        type=float,
-        default=VerticalFlapFsiConfig.flow_obstacle_no_slip_weight,
-        help="Projection weight for obstacle-adjacent no-slip rows.",
-    )
-    parser.add_argument(
-        "--flow-obstacle-cap-no-slip-weight",
-        type=float,
-        default=VerticalFlapFsiConfig.flow_obstacle_cap_no_slip_weight,
-        help=(
-            "Optional projection weight for non-streamwise obstacle cap rows; "
-            "omit to use --flow-obstacle-no-slip-weight."
-        ),
-    )
-    parser.add_argument(
-        "--flow-obstacle-wake-no-slip-layers",
-        type=int,
-        default=VerticalFlapFsiConfig.flow_obstacle_wake_no_slip_layers,
-        help="Downstream wake-only no-slip layers behind obstacle cells.",
-    )
-    parser.add_argument(
-        "--flow-obstacle-wake-no-slip-weight",
-        type=float,
-        default=VerticalFlapFsiConfig.flow_obstacle_wake_no_slip_weight,
-        help="Projection weight for downstream wake-only no-slip rows.",
-    )
-    parser.add_argument(
-        "--flow-obstacle-normal-velocity-policy",
-        default=VerticalFlapFsiConfig.flow_obstacle_normal_velocity_policy,
-        choices=("face_clamp", "cell_zero_only"),
-        help="Generic obstacle normal-velocity clamp policy.",
-    )
-    parser.add_argument(
-        "--flow-solid-boundary-mode",
-        default=VerticalFlapFsiConfig.flow_solid_boundary_mode,
-        choices=("cell_obstacle_layers", "hibm_sharp_marker_rows"),
-        help="Generic solid-wall boundary representation used by the fluid projection.",
-    )
-    parser.add_argument(
         "--disable-pressure-outlet",
         action="store_true",
         help="Diagnostic mode: disable zmin pressure outlet during projection.",
@@ -931,7 +625,7 @@ def _parse_wall_names(value: str) -> tuple[str, ...]:
 
 def main(argv: list[str] | None = None) -> dict[str, object]:
     args = _build_parser().parse_args(argv)
-    report = run_vertical_flap_fsi_smoke(
+    report = run_ansys_vertical_flap_benchmark(
         VerticalFlapFsiConfig(
             step_count=args.steps,
             preflow_steps=args.preflow_steps,
@@ -976,21 +670,6 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
                 args.flow_divergence_cleanup_iterations
             ),
             flow_ymin_no_slip_rows=args.flow_ymin_no_slip_rows,
-            flow_obstacle_no_slip_layers=args.flow_obstacle_no_slip_layers,
-            flow_obstacle_no_slip_weight=args.flow_obstacle_no_slip_weight,
-            flow_obstacle_cap_no_slip_weight=(
-                args.flow_obstacle_cap_no_slip_weight
-            ),
-            flow_obstacle_wake_no_slip_layers=(
-                args.flow_obstacle_wake_no_slip_layers
-            ),
-            flow_obstacle_wake_no_slip_weight=(
-                args.flow_obstacle_wake_no_slip_weight
-            ),
-            flow_obstacle_normal_velocity_policy=(
-                args.flow_obstacle_normal_velocity_policy
-            ),
-            flow_solid_boundary_mode=args.flow_solid_boundary_mode,
             flow_pressure_outlet_enabled=not args.disable_pressure_outlet,
             flow_pressure_outlet_backflow_policy=(
                 args.flow_pressure_outlet_backflow_policy

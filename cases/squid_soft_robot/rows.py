@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
-from .history import solid_force_vector_from_report
 from .source_config import _vector3
 
 
@@ -28,6 +27,27 @@ def _mapping_int(
     default: int = 0,
 ) -> int:
     return int(mapping.get(key, default) or 0)
+
+
+def _solid_force_vector_from_report(
+    report: object,
+    *,
+    solid_model: str,
+) -> tuple[float, float, float]:
+    if hasattr(report, "total_force_n"):
+        field = "total_force_n"
+    elif solid_model == "neo_hookean_mpm" and hasattr(report, "external_force_n"):
+        field = "external_force_n"
+    else:
+        raise AttributeError(
+            f"solid model {solid_model!r} report does not expose a finite 3D force vector"
+        )
+    vector = _vector3(getattr(report, field), name=field)
+    if not all(math.isfinite(value) for value in vector):
+        raise ValueError(
+            f"solid model {solid_model!r} report {field!r} must be finite"
+        )
+    return vector
 
 
 def build_hibm_mpm_sharp_case_row(
@@ -60,7 +80,7 @@ def build_hibm_mpm_sharp_case_row(
     )
     primary_reaction_n = tuple(-value for value in primary_force_n)
     secondary_reaction_n = tuple(-value for value in secondary_force_n)
-    solid_mpm_total_force_n = solid_force_vector_from_report(
+    solid_mpm_total_force_n = _solid_force_vector_from_report(
         solid_mpm_report,
         solid_model=solid_model,
     )
@@ -155,7 +175,6 @@ def build_hibm_mpm_sharp_case_row(
             "region_pair_reaction_diagnostic_only": bool(
                 fsi_coupling_mode_report["region_pair_reaction_diagnostic_only"]
             ),
-            "fsi_coupling_solver": "hibm_mpm_sharp",
             "fsi_coupling_scheme": str(
                 sharp_summary.get("hibm_coupling_scheme", "explicit_loose")
             ),

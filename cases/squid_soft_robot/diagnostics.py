@@ -1,49 +1,9 @@
 from __future__ import annotations
 
-import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
-import numpy as np
+from .history import _required_finite_row_number, _row_bool
 
-from simulation_core import vector_norm
-
-from .history import _final_row_number, _required_finite_row_number, _row_bool
-from .source_config import _vector3
-
-def fsi_trial_acceptance_passes(
-    payload: Mapping[str, object],
-    *,
-    cfl_limit: float,
-    interior_divergence_l2_limit: float = math.inf,
-) -> bool:
-    return (
-        fsi_trial_acceptance_rejection_reason(
-            payload,
-            cfl_limit=cfl_limit,
-            interior_divergence_l2_limit=interior_divergence_l2_limit,
-        )
-        is None
-    )
-
-def fsi_trial_acceptance_rejection_reason(
-    payload: Mapping[str, object],
-    *,
-    cfl_limit: float,
-    interior_divergence_l2_limit: float = math.inf,
-) -> str | None:
-    trial_cfl = float(payload.get("trial_cfl", math.inf))
-    if not (math.isfinite(trial_cfl) and trial_cfl < float(cfl_limit)):
-        return "cfl"
-    if math.isfinite(float(interior_divergence_l2_limit)):
-        trial_interior_divergence_l2 = float(
-            payload.get("trial_interior_divergence_l2", math.inf)
-        )
-        if not (
-            math.isfinite(trial_interior_divergence_l2)
-            and trial_interior_divergence_l2 <= float(interior_divergence_l2_limit)
-        ):
-            return "interior_divergence_l2"
-    return None
 
 def sharp_report_fluid_projection_failure_reason(report: object) -> str:
     load_report = getattr(report, "fluid_to_mpm_loads", None)
@@ -70,31 +30,6 @@ def sharp_report_fluid_projection_failure_reason(report: object) -> str:
         reasons.append(f"cg_breakdown_count={cg_breakdown_count}")
     return "; ".join(reasons)
 
-def force_decomposition_report(
-    *,
-    grid_force_n: Sequence[float],
-    component_forces_n: Sequence[Sequence[float]],
-    tolerance: float = 1.0e-6,
-) -> dict[str, object]:
-    grid_force = _vector3(grid_force_n, name="grid_force_n")
-    component_vectors = tuple(
-        _vector3(component, name="component_force_n") for component in component_forces_n
-    )
-    component_sum = tuple(
-        sum(component[index] for component in component_vectors) for index in range(3)
-    )
-    residual = tuple(grid_force[index] - component_sum[index] for index in range(3))
-    residual_norm = vector_norm(residual)
-    scale = max(vector_norm(grid_force) + vector_norm(component_sum), 1.0e-30)
-    relative_error = residual_norm / scale
-    return {
-        "grid_force_n": grid_force,
-        "component_sum_n": component_sum,
-        "residual_components_n": residual,
-        "residual_norm_n": residual_norm,
-        "relative_error": relative_error,
-        "passed": relative_error <= float(tolerance),
-    }
 
 def _raise_for_step_numerical_guard(
     row: dict[str, object],
@@ -168,6 +103,7 @@ def _raise_for_step_numerical_guard(
                     f"{breakdown_count:.0f}"
                 )
 
+
 def _raise_for_step_solid_out_of_bounds_guard(row: dict[str, object]) -> None:
     step = row.get("step")
     field = "solid_mpm_grid_out_of_bounds_particle_count"
@@ -183,6 +119,7 @@ def _raise_for_step_solid_out_of_bounds_guard(row: dict[str, object]) -> None:
             f"step {step} numerical guard failed: {field}="
             f"{out_of_bounds_count:.0f} solid MPM particle(s) outside the solid grid"
         )
+
 
 def _raise_for_closure_coverage_floor(
     rows: list[dict[str, object]],
@@ -200,7 +137,7 @@ def _raise_for_closure_coverage_floor(
     if len(rows) < int(patience):
         return
     field = "hibm_full_stress_far_pressure_closed_marker_count"
-    recent = rows[-int(patience):]
+    recent = rows[-int(patience) :]
     last_value = 0.0
     for row in recent:
         if field not in row:

@@ -1,51 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from simulation_core import FSI_COUPLING_MODE_HIBM_MPM_SHARP, HibmMpmSharpCouplingState, TaichiRuntimeConfig
-
-
-@dataclass(frozen=True)
-class SharpCouplingModeControl:
-    enabled: bool
-    mode: str
-
-
-def hibm_mpm_sharp_case_enabled(*, fsi_coupling_mode: str) -> bool:
-    return str(fsi_coupling_mode) == FSI_COUPLING_MODE_HIBM_MPM_SHARP
-
-
-def hibm_mpm_sharp_coupling_control(
-    *,
-    fsi_coupling_mode: str,
-) -> SharpCouplingModeControl:
-    return SharpCouplingModeControl(
-        enabled=hibm_mpm_sharp_case_enabled(fsi_coupling_mode=fsi_coupling_mode),
-        mode=str(fsi_coupling_mode),
-    )
-
-
-def raise_for_unsupported_hibm_mpm_sharp_robin_options(
-    *,
-    fsi_coupling_mode: str,
-    interface_reaction_robin_impedance_ns_m: float,
-    interface_reaction_robin_matrix_impedance_ns_m: float,
-) -> None:
-    if str(fsi_coupling_mode) != FSI_COUPLING_MODE_HIBM_MPM_SHARP:
-        return
-    enabled_options: list[str] = []
-    if float(interface_reaction_robin_impedance_ns_m) > 0.0:
-        enabled_options.append("--interface-reaction-robin-impedance-ns-m")
-    if float(interface_reaction_robin_matrix_impedance_ns_m) > 0.0:
-        enabled_options.append("--interface-reaction-robin-matrix-impedance-ns-m")
-    if enabled_options:
-        joined_options = ", ".join(enabled_options)
-        raise ValueError(
-            "hibm_mpm_sharp currently reports explicit_loose coupling and has "
-            "no marker-level Robin semi-implicit pressure/interface solve; "
-            f"do not pass {joined_options} with --fsi-coupling-mode "
-            "hibm_mpm_sharp until that marker-level Robin path is implemented."
-        )
+from simulation_core import HibmMpmSharpCouplingState, TaichiRuntimeConfig
 
 
 def build_hibm_mpm_sharp_coupling_state(

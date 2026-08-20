@@ -2,14 +2,46 @@ from __future__ import annotations
 
 import unittest
 
-from simulation_core.drivers.fsi_driver import FsiCaseSpec
 from benchmarks.official.official_benchmark_solver import (
+    FsiCaseSpec,
     OfficialBenchmarkRunSpec,
     run_official_fsi_benchmark,
 )
 
 
 class OfficialBenchmarkSolverTests(unittest.TestCase):
+    def test_shared_runner_invokes_configured_runner_exactly_once(self) -> None:
+        calls: list[object] = []
+        config = object()
+
+        def fake_runner(received_config: object) -> dict[str, object]:
+            calls.append(received_config)
+            return {"computed_result_sources": {}}
+
+        case_spec = FsiCaseSpec(
+            case_id="single-call",
+            source_url="https://example.invalid/single-call",
+            coordinate_model="cartesian-3d",
+            geometry={},
+            fluid={},
+            solid={},
+            boundary_conditions={},
+            reference_results={},
+        )
+
+        run_official_fsi_benchmark(
+            OfficialBenchmarkRunSpec(
+                case_spec=case_spec,
+                solver_family="fake-family",
+                case_metadata={},
+                boundary_conditions={},
+                config=config,
+                runner=fake_runner,
+            )
+        )
+
+        self.assertEqual(calls, [config])
+
     def test_shared_runner_adds_standard_case_fields(self) -> None:
         case_spec = FsiCaseSpec(
             case_id="toy-official-fsi",

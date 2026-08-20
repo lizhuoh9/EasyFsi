@@ -19,8 +19,7 @@ from cases.ansys_vertical_flap_fsi import (
     ANSYS_VERTICAL_FLAP_REFERENCE_RESULTS,
     ANSYS_VERTICAL_FLAP_THIN_WALL_PRESSURE_SAMPLING,
     VerticalFlapFsiConfig,
-    build_ansys_vertical_flap_generic_problem,
-    run_vertical_flap_fsi_smoke,
+    run_ansys_vertical_flap_benchmark,
     selected_formulation_solver_config,
     surface_force_support_radius_m,
     thin_wall_pressure_probe_max_multiplier,
@@ -63,7 +62,9 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             hasattr(vertical_flap_case, "_reference_equivalent_pressure_jump_pa")
         )
 
-        run_source = inspect.getsource(vertical_flap_case.run_vertical_flap_fsi_smoke)
+        run_source = inspect.getsource(
+            vertical_flap_case.run_ansys_vertical_flap_benchmark
+        )
         self.assertNotIn("_load_reference_pressure_and_velocity", run_source)
         self.assertNotIn("pressure_jump_pa", run_source)
 
@@ -164,13 +165,16 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(config.flow_predictor_no_slip_domain_walls, ("ymin",))
         self.assertEqual(config.flow_symmetry_domain_walls, ("ymax",))
         self.assertEqual(config.flow_ymin_no_slip_rows, 0)
-        self.assertEqual(config.flow_obstacle_no_slip_layers, 0)
         self.assertEqual(config.flow_solid_boundary_mode, "hibm_sharp_marker_rows")
         self.assertEqual(config.flow_pressure_outlet_backflow_policy, "allow")
-        self.assertEqual(config.flow_obstacle_normal_velocity_policy, "face_clamp")
+        self.assertNotIn("flow_obstacle_no_slip_layers", config.__dataclass_fields__)
+        self.assertNotIn(
+            "flow_obstacle_normal_velocity_policy",
+            config.__dataclass_fields__,
+        )
 
         run_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
         run_source += inspect.getsource(
             solid_mpm_fsi_runner._advance_solid_substeps_batched
@@ -232,29 +236,32 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
 
         run_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
         self.assertIn("_enforce_solid_seeding_limit", run_source)
 
     def test_hibm_sharp_mode_starts_without_legacy_solid_obstacle(self):
         config = VerticalFlapFsiConfig(
             grid_nodes=(1, 8, 40),
-            flow_solid_boundary_mode="hibm_sharp_marker_rows",
         )
 
         initial = solid_mpm_fsi_runner._initial_fluid_obstacle(config)
 
         self.assertEqual(int(np.count_nonzero(initial)), 0)
 
-    def test_legacy_cell_obstacle_mode_keeps_static_solid_obstacle(self):
-        config = VerticalFlapFsiConfig(
-            grid_nodes=(1, 8, 40),
-            flow_solid_boundary_mode="cell_obstacle_layers",
-        )
+    def test_public_ansys_entrypoints_reject_removed_cell_obstacle_backend(self):
+        with self.assertRaises(TypeError):
+            VerticalFlapFsiConfig(flow_solid_boundary_mode="cell_obstacle_layers")
 
-        initial = solid_mpm_fsi_runner._initial_fluid_obstacle(config)
+        with self.assertRaises(SystemExit):
+            vertical_flap_case._build_parser().parse_args(
+                ["--flow-solid-boundary-mode", "cell_obstacle_layers"]
+            )
 
-        self.assertGreater(int(np.count_nonzero(initial)), 0)
+        with self.assertRaisesRegex(ValueError, "flow_solid_boundary_mode"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                SimpleNamespace(flow_solid_boundary_mode="cell_obstacle_layers")
+            )
 
     def test_ymin_no_slip_rows_constrain_only_fluid_wall_cells(self):
         active = np.zeros((1, 3, 4), dtype=np.int32)
@@ -331,31 +338,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(active[0, 0, 0], 1)
         np.testing.assert_allclose(values[0, 0, 0], (0.0, 0.0, 0.0))
         self.assertEqual(int(external_exact_masks[0, 0, 0]), 0b010)
-
-    def test_obstacle_no_slip_layers_constrain_only_adjacent_fluid_cells(self):
-        active = np.zeros((1, 4, 5), dtype=np.int32)
-        values = np.ones((1, 4, 5, 3), dtype=np.float32)
-        weights = np.zeros((1, 4, 5), dtype=np.float32)
-        obstacle = np.zeros((1, 4, 5), dtype=np.int32)
-        obstacle[0, 1, 2] = 1
-        config = SimpleNamespace(flow_obstacle_no_slip_layers=1)
-
-        count = solid_mpm_fsi_runner._apply_obstacle_no_slip_rows(
-            active,
-            values,
-            weights,
-            obstacle,
-            config,
-        )
-
-        self.assertEqual(count, 4)
-        for cell in ((0, 0, 2), (0, 2, 2), (0, 1, 1), (0, 1, 3)):
-            self.assertEqual(int(active[cell]), 1)
-            self.assertEqual(float(weights[cell]), 1.0)
-            np.testing.assert_allclose(values[cell], [0.0, 0.0, 0.0])
-        self.assertEqual(int(active[0, 1, 2]), 0)
-        self.assertEqual(float(weights[0, 1, 2]), 0.0)
-        self.assertEqual(int(active[0, 3, 4]), 0)
 
     def test_plane_stress_constitutive_model_uses_official_two_dimensional_lame(
         self,
@@ -787,18 +769,26 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             rest_x=FakeField(rest),
         )
 
-        static = solid_mpm_fsi_runner._solid_obstacle(config)
+        rest_solid = SimpleNamespace(
+            particle_count=len(rest),
+            x=FakeField(rest),
+            rest_x=FakeField(rest),
+        )
+        rest_obstacle = solid_mpm_fsi_runner._solid_obstacle_from_mpm_particles(
+            rest_solid,
+            config,
+        )
         dynamic = solid_mpm_fsi_runner._solid_obstacle_from_mpm_particles(
             solid,
             config,
         )
 
-        static_k = np.argwhere(static != 0)[:, 2]
+        rest_k = np.argwhere(rest_obstacle != 0)[:, 2]
         dynamic_k = np.argwhere(dynamic != 0)[:, 2]
-        self.assertGreater(static_k.size, 0)
+        self.assertGreater(rest_k.size, 0)
         self.assertGreater(dynamic_k.size, 0)
-        self.assertLess(int(dynamic_k.min()), int(static_k.min()))
-        self.assertLess(int(dynamic_k.max()), int(static_k.max()))
+        self.assertLess(int(dynamic_k.min()), int(rest_k.min()))
+        self.assertLess(int(dynamic_k.max()), int(rest_k.max()))
 
     def test_dynamic_fluid_obstacle_update_prefers_solver_device_api(self):
         class FailingField:
@@ -820,8 +810,8 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         config = VerticalFlapFsiConfig(
             grid_nodes=(1, 8, 40),
             solid_particle_counts=(1, 4, 2),
-            flow_solid_boundary_mode="cell_obstacle_layers",
             update_fluid_obstacle_from_solid=True,
+            flow_hibm_dynamic_solid_volume_enabled=True,
         )
         fake_fluid = FakeFluid()
         fake_solid = SimpleNamespace(
@@ -887,7 +877,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         config = VerticalFlapFsiConfig(
             grid_nodes=(1, 8, 40),
             solid_particle_counts=(1, 4, 2),
-            flow_solid_boundary_mode="hibm_sharp_marker_rows",
             update_fluid_obstacle_from_solid=True,
             flow_hibm_dynamic_solid_volume_enabled=True,
         )
@@ -912,7 +901,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
     def test_hibm_dynamic_solid_volume_requires_device_update(self):
         config = VerticalFlapFsiConfig(
-            flow_solid_boundary_mode="hibm_sharp_marker_rows",
             flow_hibm_dynamic_solid_volume_enabled=True,
             update_fluid_obstacle_from_solid=False,
         )
@@ -961,7 +949,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
     def test_observer_boundary_rows_refresh_after_solid_volume_commit(self):
         source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
 
         volume_commit = source.index("_update_fluid_obstacle_from_solid(")
@@ -1277,114 +1265,14 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 VerticalFlapFsiConfig(marker_count=1)
             )
 
-    def test_generic_problem_defaults_to_runtime_pressure_pairs_without_json(self):
-        problem = build_ansys_vertical_flap_generic_problem(step_count=50)
-        provider = problem.traction_config.pressure_sampling.pair_provider
-
-        self.assertEqual(provider.mode, "runtime_anchored_cell_pair")
-        self.assertEqual(provider.pair_source_status, "runtime_generated")
-        self.assertEqual(provider.source, "")
-        self.assertFalse(provider.transition_backed)
-        self.assertNotIn("selected_anchor_markers_json", provider.as_diagnostics()["source"])
-
+    def test_selected_config_has_one_runtime_pressure_pair_policy(self):
+        signature = inspect.signature(selected_formulation_solver_config)
+        self.assertEqual(tuple(signature.parameters), ("step_count",))
         config = selected_formulation_solver_config(step_count=50)
         self.assertIsNone(config.traction_pressure_pair_anchor_markers_json)
         self.assertEqual(
             config.traction_pressure_pair_runtime_provider_mode,
             "runtime_anchored_cell_pair",
-        )
-
-    def test_generic_replay_pressure_pairs_require_anchor_json(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            "replay_from_diagnostics requires selected_anchor_markers_json",
-        ):
-            build_ansys_vertical_flap_generic_problem(
-                pressure_pair_provider_mode="replay_from_diagnostics",
-                step_count=50,
-            )
-
-        problem = build_ansys_vertical_flap_generic_problem(
-            pressure_pair_provider_mode="replay_from_diagnostics",
-            selected_anchor_markers_json=SELECTED_ANCHOR_MARKERS_JSON,
-            step_count=50,
-        )
-        provider = problem.traction_config.pressure_sampling.pair_provider
-        self.assertEqual(provider.mode, "replay_from_diagnostics")
-        self.assertEqual(provider.source, SELECTED_ANCHOR_MARKERS_JSON)
-        self.assertTrue(provider.transition_backed)
-
-    def test_generic_pressure_pair_provider_mode_is_fail_closed(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            "unsupported pressure_pair_provider_mode",
-        ):
-            build_ansys_vertical_flap_generic_problem(
-                pressure_pair_provider_mode="transition_seeded_from_anchor_artifact",
-                step_count=50,
-            )
-
-    def test_runtime_pressure_pair_mode_ignores_supplied_anchor_json_source(self):
-        problem = build_ansys_vertical_flap_generic_problem(
-            selected_anchor_markers_json=SELECTED_ANCHOR_MARKERS_JSON,
-            step_count=50,
-        )
-        provider = problem.traction_config.pressure_sampling.pair_provider
-
-        self.assertEqual(provider.mode, "runtime_anchored_cell_pair")
-        self.assertEqual(provider.pair_source_status, "runtime_generated")
-        self.assertEqual(provider.source, "")
-        self.assertFalse(provider.transition_backed)
-
-        config = selected_formulation_solver_config(
-            step_count=50,
-            selected_anchor_markers_json=SELECTED_ANCHOR_MARKERS_JSON,
-        )
-        self.assertIsNone(config.traction_pressure_pair_anchor_markers_json)
-        self.assertEqual(
-            config.traction_pressure_pair_runtime_provider_mode,
-            "runtime_anchored_cell_pair",
-        )
-
-    def test_generic_problem_reports_runtime_half_domain_metadata(self):
-        problem = build_ansys_vertical_flap_generic_problem(step_count=50)
-        config = VerticalFlapFsiConfig(step_count=50)
-
-        self.assertEqual(
-            problem.fluid_domain.coordinate_model,
-            "cartesian-3d-half-domain",
-        )
-        self.assertEqual(problem.fluid_domain.grid_nodes, (4, 32, 64))
-        self.assertEqual(problem.fluid_domain.bounds_m[0], (0.0, 0.0, 0.0))
-        self.assertAlmostEqual(problem.fluid_domain.bounds_m[1][0], config.span_m)
-        self.assertAlmostEqual(
-            problem.fluid_domain.bounds_m[1][1],
-            0.5 * config.duct_height_m,
-        )
-        self.assertAlmostEqual(
-            problem.fluid_domain.bounds_m[1][1],
-            ANSYS_VERTICAL_FLAP_CASE_METADATA["geometry"]["modeled_height_m"],
-        )
-        self.assertAlmostEqual(
-            problem.fluid_domain.bounds_m[1][2],
-            config.duct_length_m,
-        )
-        self.assertEqual(
-            problem.metadata["conceptual_coordinate_model"],
-            "cartesian-2d",
-        )
-        self.assertEqual(
-            problem.metadata["runtime_discretization_model"],
-            "cartesian-3d-half-domain",
-        )
-        self.assertAlmostEqual(problem.metadata["extrusion_depth_m"], config.span_m)
-        self.assertEqual(
-            problem.metadata["extrusion_depth_source"],
-            "VerticalFlapFsiConfig.span_m",
-        )
-        self.assertEqual(
-            problem.metadata["out_of_plane_boundary_policy"],
-            "finite_slab_x_faces_no_periodic_or_slip",
         )
 
     def test_slab_equivalence_diagnostics_expose_3d_and_per_depth_quantities(self):
@@ -1588,8 +1476,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 "--disable-pressure-outlet",
                 "--flow-pressure-outlet-backflow-policy",
                 "allow",
-                "--flow-obstacle-normal-velocity-policy",
-                "cell_zero_only",
                 "--flow-outlet-balance-policy",
                 "report_only",
                 "--json",
@@ -1608,7 +1494,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(args.flow_inlet_source_profile, "linear_ramp")
         self.assertTrue(args.disable_pressure_outlet)
         self.assertEqual(args.flow_pressure_outlet_backflow_policy, "allow")
-        self.assertEqual(args.flow_obstacle_normal_velocity_policy, "cell_zero_only")
         self.assertEqual(args.flow_outlet_balance_policy, "report_only")
 
     def test_hibm_sharp_controls_are_declared_config_fields(self):
@@ -1781,7 +1666,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             )
 
         run_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
         self.assertIn("config.step_count == 0 and preflow_history", run_source)
         self.assertIn("_preflow_only_report", run_source)
@@ -1806,7 +1691,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(config.traction_viscosity_pa_s, 0.0)
 
         run_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
         self.assertIn("apply_marker_feedback_to_fluid", run_source)
         self.assertIn("flow_reset_pressure_each_step", run_source)
@@ -2166,13 +2051,9 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
         feedback_call = preflow_source.index("_apply_marker_feedback_to_fluid")
         flow_advance_call = preflow_source.index("_flow_advance_current_step")
-        projected_residual_call = preflow_source.index(
-            "_measure_projected_no_slip_residual"
-        )
         row_call = preflow_source.index("row = {")
         self.assertLess(feedback_call, flow_advance_call)
-        self.assertLess(flow_advance_call, projected_residual_call)
-        self.assertLess(projected_residual_call, row_call)
+        self.assertLess(flow_advance_call, row_call)
         self.assertIn("apply_marker_feedback_to_fluid", preflow_source)
         self.assertIn("fluid_marker_velocity_constraints_enabled", preflow_source)
         self.assertIn("fluid_feedback_constraint_active_cell_count", preflow_source)
@@ -2232,7 +2113,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         config = VerticalFlapFsiConfig(
             grid_nodes=(2, 2, 2),
             flow_symmetry_domain_walls=("ymax",),
-            flow_projection_velocity_inlet_zmax=None,
         )
         fake_fluid = FakeFluid()
 
@@ -2263,14 +2143,12 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             ]
         )
 
-    def test_hibm_sharp_marker_boundary_mode_is_generic_and_not_reserved(self):
-        config = VerticalFlapFsiConfig(
-            flow_solid_boundary_mode="hibm_sharp_marker_rows",
-        )
+    def test_hibm_sharp_marker_boundary_mode_is_the_only_public_mode(self):
+        config = VerticalFlapFsiConfig()
 
         solid_mpm_fsi_runner._validate_rectangular_solid_config(config)
 
-        self.assertTrue(solid_mpm_fsi_runner._use_hibm_sharp_marker_boundary(config))
+        self.assertEqual(config.flow_solid_boundary_mode, "hibm_sharp_marker_rows")
         self.assertNotIn(
             "cantilever",
             inspect.getsource(solid_mpm_fsi_runner).lower(),
@@ -2457,31 +2335,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
         self.assertEqual(report["flow_inlet_boundary_active_cell_count"], 16)
         self.assertEqual(report["flow_inlet_boundary_obstacle_cell_count"], 0)
-
-    def test_zmax_inlet_boundary_device_refresh_keeps_legacy_fallback_conditions(
-        self,
-    ):
-        self.assertFalse(
-            solid_mpm_fsi_runner._zmax_inlet_boundary_device_refresh_compatible(
-                replace(VerticalFlapFsiConfig(), flow_ymin_no_slip_rows=1)
-            )
-        )
-        self.assertFalse(
-            solid_mpm_fsi_runner._zmax_inlet_boundary_device_refresh_compatible(
-                replace(
-                    VerticalFlapFsiConfig(),
-                    flow_solid_boundary_mode=(
-                        solid_mpm_fsi_runner.FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS
-                    ),
-                    flow_obstacle_no_slip_layers=1,
-                )
-            )
-        )
-        self.assertTrue(
-            solid_mpm_fsi_runner._zmax_inlet_boundary_device_refresh_compatible(
-                VerticalFlapFsiConfig()
-            )
-        )
 
     def test_solver_refresh_zmax_inlet_boundary_writes_only_top_face(self):
         fluid = CartesianFluidSolver(
@@ -2710,22 +2563,14 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(negative_report["pressure_min_pa"], -33.0)
         self.assertEqual(negative_report["pressure_max_pa"], -12.0)
 
-    def test_marker_feedback_default_path_uses_solver_device_api(self):
+    def test_marker_feedback_path_has_no_host_or_collocated_fallback(self):
         feedback_source = inspect.getsource(
             solid_mpm_fsi_runner._apply_marker_feedback_to_fluid
         )
-        fallback_source = inspect.getsource(
-            solid_mpm_fsi_runner._apply_marker_feedback_to_fluid_host_fallback
-        )
-        residual_source = inspect.getsource(
-            solid_mpm_fsi_runner._measure_projected_no_slip_residual
-        )
 
-        self.assertIn("apply_marker_feedback_constraints", feedback_source)
+        self.assertIn("velocity_dirichlet_boundary_authority", feedback_source)
         self.assertNotIn(".to_numpy(", feedback_source)
         self.assertNotIn(".from_numpy(", feedback_source)
-        self.assertIn(".to_numpy(", fallback_source)
-        self.assertIn("marker_feedback_projected_residual_mps", residual_source)
 
     def test_flow_projection_report_fields_flatten_solver_diagnostics(self):
         fields = solid_mpm_fsi_runner._flow_projection_report_fields(
@@ -2757,104 +2602,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             "residual did not converge",
         )
         self.assertFalse(fields["flow_projection_fsi_pressure_snapshot_updated"])
-
-    def test_obstacle_no_slip_weight_controls_generic_boundary_row_strength(self):
-        config = VerticalFlapFsiConfig(
-            flow_obstacle_no_slip_layers=1,
-            flow_obstacle_no_slip_weight=0.5,
-        )
-        solid_mpm_fsi_runner._validate_rectangular_solid_config(config)
-
-        obstacle = np.zeros((3, 3, 3), dtype=np.int32)
-        obstacle[1, 1, 1] = 1
-        active = np.zeros_like(obstacle)
-        values = np.ones(obstacle.shape + (3,), dtype=np.float32)
-        weights = np.zeros(obstacle.shape, dtype=np.float32)
-
-        count = solid_mpm_fsi_runner._apply_obstacle_no_slip_rows(
-            active,
-            values,
-            weights,
-            obstacle,
-            config,
-        )
-
-        self.assertEqual(count, 6)
-        self.assertTrue(np.all(active[weights > 0.0] == 1))
-        np.testing.assert_allclose(weights[weights > 0.0], 0.5)
-        np.testing.assert_allclose(values[weights > 0.0], 0.0)
-        with self.assertRaisesRegex(ValueError, "flow_obstacle_no_slip_weight"):
-            solid_mpm_fsi_runner._validate_rectangular_solid_config(
-                VerticalFlapFsiConfig(flow_obstacle_no_slip_weight=1.5)
-            )
-        with self.assertRaisesRegex(ValueError, "flow_obstacle_cap_no_slip_weight"):
-            solid_mpm_fsi_runner._validate_rectangular_solid_config(
-                VerticalFlapFsiConfig(flow_obstacle_cap_no_slip_weight=-0.1)
-            )
-
-    def test_obstacle_cap_no_slip_weight_keeps_coarse_tip_cells_open(self):
-        config = VerticalFlapFsiConfig(
-            flow_obstacle_no_slip_layers=1,
-            flow_obstacle_no_slip_weight=1.0,
-            flow_obstacle_cap_no_slip_weight=0.0,
-        )
-        solid_mpm_fsi_runner._validate_rectangular_solid_config(config)
-
-        obstacle = np.zeros((3, 4, 5), dtype=np.int32)
-        obstacle[1, 0:2, 2] = 1
-        active = np.zeros_like(obstacle)
-        values = np.ones(obstacle.shape + (3,), dtype=np.float32)
-        weights = np.zeros(obstacle.shape, dtype=np.float32)
-
-        solid_mpm_fsi_runner._apply_obstacle_no_slip_rows(
-            active,
-            values,
-            weights,
-            obstacle,
-            config,
-        )
-
-        self.assertEqual(active[1, 2, 2], 0)
-        self.assertEqual(weights[1, 2, 2], 0.0)
-        self.assertEqual(active[1, 1, 1], 1)
-        self.assertEqual(weights[1, 1, 1], 1.0)
-        self.assertEqual(active[1, 1, 3], 1)
-        self.assertEqual(weights[1, 1, 3], 1.0)
-
-    def test_obstacle_wake_no_slip_layers_extend_only_downstream(self):
-        config = VerticalFlapFsiConfig(
-            flow_obstacle_no_slip_layers=1,
-            flow_obstacle_no_slip_weight=1.0,
-            flow_obstacle_wake_no_slip_layers=3,
-            flow_obstacle_wake_no_slip_weight=0.5,
-        )
-        solid_mpm_fsi_runner._validate_rectangular_solid_config(config)
-
-        obstacle = np.zeros((3, 3, 7), dtype=np.int32)
-        obstacle[1, 1, 3] = 1
-        active = np.zeros_like(obstacle)
-        values = np.ones(obstacle.shape + (3,), dtype=np.float32)
-        weights = np.zeros(obstacle.shape, dtype=np.float32)
-
-        count = solid_mpm_fsi_runner._apply_obstacle_no_slip_rows(
-            active,
-            values,
-            weights,
-            obstacle,
-            config,
-        )
-
-        self.assertEqual(count, 8)
-        self.assertEqual(active[1, 1, 4], 1)
-        self.assertEqual(weights[1, 1, 4], 1.0)
-        self.assertEqual(active[1, 1, 2], 1)
-        self.assertEqual(active[1, 1, 1], 1)
-        self.assertEqual(weights[1, 1, 2], 1.0)
-        self.assertEqual(weights[1, 1, 1], 0.5)
-        self.assertEqual(active[1, 1, 0], 1)
-        self.assertEqual(weights[1, 1, 0], 0.5)
-        self.assertEqual(active[0, 1, 2], 0)
-        np.testing.assert_allclose(values[active.astype(bool)], 0.0)
 
     def test_source_strength_factor_supports_constant_and_ramp_profiles(self):
         constant = VerticalFlapFsiConfig(flow_inlet_source_strength=0.4)
@@ -2949,7 +2696,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             grid_nodes=(1, 2, 3),
             inlet_velocity_mps=10.0,
             flow_driver_mode="sustained_boundary_predictor",
-            flow_solid_boundary_mode="cell_obstacle_layers",
             flow_inlet_source_strength=0.75,
             flow_predictor_substeps=1,
             flow_predictor_no_slip_domain_walls=(),
@@ -3059,7 +2805,6 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             grid_nodes=(1, 2, 3),
             inlet_velocity_mps=10.0,
             flow_driver_mode="sustained_inlet_predictor",
-            flow_solid_boundary_mode="cell_obstacle_layers",
             flow_inlet_source_strength=0.75,
             flow_predictor_substeps=1,
             flow_predictor_no_slip_domain_walls=(),
@@ -3309,7 +3054,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
     # displacement history still fails the official-web physical targets.
     @unittest.expectedFailure
     def test_smoke_fsi_chain_matches_reference_displacement_tolerance(self):
-        report = run_vertical_flap_fsi_smoke(
+        report = run_ansys_vertical_flap_benchmark(
             VerticalFlapFsiConfig(step_count=50, displacement_tolerance=0.05)
         )
 

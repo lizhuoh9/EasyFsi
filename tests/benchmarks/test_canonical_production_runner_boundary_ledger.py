@@ -216,7 +216,7 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             set(CANONICAL_SCHEMA_THREE_REPORT_KEYS),
         )
 
-    def test_build_fluid_selects_canonical_only_for_sharp_component_face_hibm(
+    def test_build_fluid_always_selects_canonical_authority(
         self,
     ) -> None:
         function = _function_node("_build_fluid")
@@ -230,30 +230,23 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         self.assertEqual(len(authority_call.args), 1)
         self.assertIsInstance(authority_call.args[0], ast.Constant)
         self.assertEqual(authority_call.args[0].value, "canonical")
-        conditional = next(
-            node
-            for node in ast.walk(function)
-            if isinstance(node, ast.If)
-            and "_use_hibm_sharp_marker_boundary" in ast.unparse(node.test)
-        )
-        self.assertIn(authority_call, tuple(ast.walk(conditional)))
         self.assertLess(
             source.index(ast.unparse(authority_call)),
             source.index("return fluid"),
         )
 
-    def test_non_sharp_runner_retains_legacy_authority_and_collocated_feedback(
+    def test_runner_has_no_non_sharp_authority_or_collocated_feedback_path(
         self,
     ) -> None:
         function = _function_node("_build_fluid")
         source = ast.unparse(function)
         self.assertNotIn("else:\n        fluid.set_velocity_dirichlet_boundary_authority", source)
 
-        feedback_source = inspect.getsource(
-            solid_mpm_fsi_runner._apply_marker_feedback_to_fluid
-        )
-        self.assertIn('authority == "canonical"', feedback_source)
-        self.assertIn("apply_marker_feedback_constraints", feedback_source)
+        runner_source = Path(
+            "benchmarks/official/solid_mpm_fsi_runner.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("_use_hibm_sharp_marker_boundary", runner_source)
+        self.assertNotIn("apply_marker_feedback_constraints", runner_source)
 
     def test_initialize_inlet_flow_writes_all_eight_canonical_fields(self) -> None:
         function = _function_node("_initialize_inlet_flow")
@@ -1430,13 +1423,10 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         report = solid_mpm_fsi_runner._apply_marker_feedback_to_fluid(
             markers,
             _CanonicalFluid(),
-            config,
             feedback_available=True,
-            previous_feedback_constraint_cells=set(),
         )
         self.assertFalse(report["fluid_marker_feedback_collocated_writer_used"])
         self.assertFalse(report["fluid_marker_velocity_constraints_enabled"])
-        self.assertEqual(report["legacy_constraint_active_cell_count"], 0)
         self.assertEqual(
             report["fluid_marker_feedback_enforcement_mode"],
             "hibm_sharp_reconstructed_rows",

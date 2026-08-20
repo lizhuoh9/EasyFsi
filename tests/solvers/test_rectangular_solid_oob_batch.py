@@ -51,7 +51,7 @@ def _config(*, enforce_plane_strain_x: bool) -> SimpleNamespace:
 class RectangularSolidOutOfBoundsBatchTests(unittest.TestCase):
     def test_rectangular_runner_delegates_the_solid_loop_to_batch_helper(self) -> None:
         source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
 
         self.assertIn(

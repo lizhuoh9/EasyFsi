@@ -36,7 +36,7 @@ os.environ.setdefault("TI_OFFLINE_CACHE", "0")
 from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     ANSYS_VERTICAL_FLAP_CASE_METADATA,
     VerticalFlapFsiConfig,
-    run_vertical_flap_fsi_smoke,
+    run_ansys_vertical_flap_benchmark,
     selected_formulation_solver_config,
     with_local_surface_force_support,
 )
@@ -524,11 +524,7 @@ def _grid_summary(config: VerticalFlapFsiConfig) -> dict[str, Any]:
 
 
 def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
-    config = selected_formulation_solver_config(
-        step_count=int(args.steps),
-        pressure_pair_provider_mode=str(args.pressure_pair_provider_mode),
-        selected_anchor_markers_json=args.selected_anchor_markers_json,
-    )
+    config = selected_formulation_solver_config(step_count=int(args.steps))
     config = replace(
         config,
         grid_nodes=tuple(int(v) for v in args.grid_nodes),
@@ -586,7 +582,6 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
         ),
         preflow_snapshot_input_path=getattr(args, "preflow_snapshot_in", None),
         preflow_snapshot_output_path=getattr(args, "preflow_snapshot_out", None),
-        flow_projection_velocity_inlet_zmax=None,
         flow_hibm_sharp_search_radius_m=1.7e-3,
         # The physical flap core is now represented independently by the MPM
         # volume mask.  HIBM only needs a narrow mesh-scaled interface band.
@@ -867,12 +862,6 @@ def main() -> int:
             "load calibration is still open."
         ),
     )
-    parser.add_argument(
-        "--pressure-pair-provider-mode",
-        default="runtime_anchored_cell_pair",
-        choices=("runtime_anchored_cell_pair", "replay_from_diagnostics"),
-    )
-    parser.add_argument("--selected-anchor-markers-json")
     parser.add_argument("--span-reduction", default="mean", choices=("mean", "center"))
     parser.add_argument("--streamwise-velocity-sign", type=float, default=-1.0)
     parser.add_argument(
@@ -901,7 +890,12 @@ def main() -> int:
         "repo_root": str(REPO_ROOT),
         "script": str(Path(__file__).resolve()),
         "case": "official Fluent fsi_2way vertical flap",
-        "solver_entry": "cases.ansys_vertical_flap_fsi.run_vertical_flap_fsi_smoke",
+        "solver_entry": (
+            "cases.ansys_vertical_flap_fsi.run_ansys_vertical_flap_benchmark"
+        ),
+        "numerical_solver_entry": (
+            "benchmarks.official.solid_mpm_fsi_runner.run_hibm_mpm_fsi"
+        ),
         "selected_formulation": "selected_formulation_solver_config",
         "physical_solid_bounds": PHYSICAL_SOLID_BOUNDS,
         "config": config_payload,
@@ -936,7 +930,7 @@ def main() -> int:
 
     start = time.perf_counter()
     try:
-        report = run_vertical_flap_fsi_smoke(
+        report = run_ansys_vertical_flap_benchmark(
             config,
             step_observer=step_observer,
         )

@@ -6,12 +6,12 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import simulation_core
 
 from simulation_core import (
     AxisAlignedBoundary,
     CartesianGrid,
     FSI_COUPLING_MODE_HIBM_MPM_SHARP,
-    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
     FluidDomainSpec,
     FluidDomain,
     GradedGridSpec,
@@ -33,14 +33,15 @@ from simulation_core import (
     advance_hibm_mpm_sharp_neo_hookean_step,
     assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
     build_graded_grid,
-    fsi_coupling_mode_report,
     hibm_mpm_sharp_step_summary,
     hibm_mpm_paper_requirements,
     region_pair_interface_reaction_forces,
     relax_interface_reaction_forces,
-    require_implemented_fsi_coupling_mode,
     solve_and_apply_interface_reaction_step,
     solve_interface_reaction_fixed_point,
+)
+from simulation_core.coupling.hibm_mpm.modes import (
+    hibm_mpm_sharp_coupling_report,
 )
 from simulation_core.geometry_tools import (
     infer_uv_sphere_resolution,
@@ -167,35 +168,58 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertNotIn("solid_mobility_ratio", hibm_source)
 
     def test_hibm_surface_feedback_is_marker_to_mpm_taichi_field_path(self) -> None:
-        source = "\n".join(
+        initialization_source = "\n".join(
             inspect.getsource(method)
             for method in (
                 HibmMpmSurfaceMarkers._load_markers_from_surface_fields_kernel,
                 HibmMpmSurfaceMarkers._load_markers_from_surface_velocity_fields_kernel,
                 HibmMpmSurfaceMarkers.load_markers_from_surface_fields,
+            )
+        )
+        runtime_feedback_source = "\n".join(
+            inspect.getsource(method)
+            for method in (
+                HibmMpmSurfaceMarkers._update_surface_feedback_from_mpm_particles_kernel,
                 HibmMpmSurfaceMarkers.update_surface_feedback_from_mpm_particles,
+                HibmMpmSurfaceMarkers._update_surface_feedback_from_mpm_surface_particles_kernel,
                 HibmMpmSurfaceMarkers.update_surface_feedback_from_mpm_surface_particles,
             )
         )
 
-        self.assertIn("load_markers_from_surface_fields", source)
-        self.assertIn("_load_markers_from_surface_fields_kernel", source)
-        self.assertIn("surface_position_m", source)
-        self.assertIn("surface_normal", source)
-        self.assertIn("surface_area_m2", source)
-        self.assertIn("surface_region_id", source)
-        self.assertIn("surface_velocity_mps", source)
-        self.assertIn("_load_markers_from_surface_velocity_fields_kernel", source)
-        self.assertIn("update_surface_feedback_from_mpm_particles", source)
-        self.assertIn("update_surface_feedback_from_mpm_surface_particles", source)
-        self.assertIn("particle_position_m", source)
-        self.assertIn("particle_velocity_mps", source)
-        self.assertIn("particle_normal", source)
-        self.assertIn("particle_area_m2", source)
-        self.assertIn("report_surface_feedback_invalid_marker_count", source)
-        self.assertIn("geometry_updated_marker_count", source)
-        self.assertNotIn(".to_numpy(", source)
-        self.assertNotIn(".from_numpy(", source)
+        self.assertIn("load_markers_from_surface_fields", initialization_source)
+        self.assertIn("_load_markers_from_surface_fields_kernel", initialization_source)
+        self.assertIn("surface_position_m", initialization_source)
+        self.assertIn("surface_normal", initialization_source)
+        self.assertIn("surface_area_m2", initialization_source)
+        self.assertIn("surface_region_id", initialization_source)
+        self.assertIn("surface_velocity_mps", initialization_source)
+        self.assertIn(
+            "_load_markers_from_surface_velocity_fields_kernel",
+            initialization_source,
+        )
+        self.assertNotIn(".to_numpy(", initialization_source)
+        self.assertEqual(initialization_source.count(".from_numpy("), 1)
+        self.assertIn(
+            "projection_vertex_pressure_owner_index.from_numpy(pressure_owners)",
+            initialization_source,
+        )
+
+        self.assertIn("update_surface_feedback_from_mpm_particles", runtime_feedback_source)
+        self.assertIn(
+            "update_surface_feedback_from_mpm_surface_particles",
+            runtime_feedback_source,
+        )
+        self.assertIn("particle_position_m", runtime_feedback_source)
+        self.assertIn("particle_velocity_mps", runtime_feedback_source)
+        self.assertIn("particle_normal", runtime_feedback_source)
+        self.assertIn("particle_area_m2", runtime_feedback_source)
+        self.assertIn(
+            "report_surface_feedback_invalid_marker_count",
+            runtime_feedback_source,
+        )
+        self.assertIn("geometry_updated_marker_count", runtime_feedback_source)
+        self.assertNotIn(".to_numpy(", runtime_feedback_source)
+        self.assertNotIn(".from_numpy(", runtime_feedback_source)
 
     def test_hibm_sharp_load_assembly_is_core_marker_to_mpm_path(self) -> None:
         source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
@@ -259,19 +283,10 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertNotIn('"classify_hibm_near_boundary_nodes"', init_source)
         self.assertNotIn('"compute_hibm_surface_tractions"', init_source)
 
-    def test_hibm_mpm_mode_report_does_not_relabel_legacy_coupling(self) -> None:
-        legacy_report = fsi_coupling_mode_report(FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED)
-        sharp_report = fsi_coupling_mode_report(FSI_COUPLING_MODE_HIBM_MPM_SHARP)
+    def test_hibm_mpm_package_exposes_only_canonical_sharp_mode(self) -> None:
+        sharp_report = hibm_mpm_sharp_coupling_report()
 
-        self.assertTrue(legacy_report["legacy"])
-        self.assertTrue(legacy_report["implemented"])
-        self.assertFalse(legacy_report["paper_hibm_mpm"])
-        self.assertTrue(legacy_report["region_pair_reaction_diagnostic_only"])
-        self.assertNotIn("main/tail", legacy_report["primary_coupling_variable"])
-        self.assertNotIn("main_tail", json.dumps(legacy_report))
-        self.assertEqual(legacy_report["solver_layer"], "simulation_core")
-
-        self.assertFalse(sharp_report["legacy"])
+        self.assertEqual(sharp_report["mode"], FSI_COUPLING_MODE_HIBM_MPM_SHARP)
         self.assertTrue(sharp_report["implemented"])
         self.assertTrue(sharp_report["paper_hibm_mpm"])
         self.assertTrue(sharp_report["core_runner_available"])
@@ -281,25 +296,14 @@ class SimulationCorePackageTests(unittest.TestCase):
         self.assertNotIn("nozzle", json.dumps(sharp_report).lower())
         self.assertNotIn("surface markers", sharp_report["missing"])
         self.assertNotIn("pressure Neumann matrix rows", sharp_report["missing"])
-
-    def test_hibm_mpm_sharp_mode_is_runnable_but_not_phase5_validated(self) -> None:
-        report = require_implemented_fsi_coupling_mode(FSI_COUPLING_MODE_HIBM_MPM_SHARP)
-
-        self.assertEqual(report["mode"], FSI_COUPLING_MODE_HIBM_MPM_SHARP)
-        self.assertTrue(report["implemented"])
-        self.assertTrue(report["core_runner_available"])
-        self.assertTrue(report["case_runner_available"])
-        self.assertTrue(report["paper_hibm_mpm"])
-        self.assertFalse(report["phase5_validation_complete"])
-        self.assertEqual(report["missing"], ["long-run validation"])
-
-        legacy_report = require_implemented_fsi_coupling_mode(
-            FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED
-        )
-        self.assertEqual(
-            legacy_report["mode"],
-            FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
-        )
+        for removed_name in (
+            "FSI_COUPLING_MODE_CHOICES",
+            "FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED",
+            "fsi_coupling_mode_report",
+            "require_implemented_fsi_coupling_mode",
+        ):
+            with self.subTest(removed_name=removed_name):
+                self.assertFalse(hasattr(simulation_core, removed_name))
 
     def test_phase0_paper_vs_code_table_lists_missing_hibm_mpm_requirements(self) -> None:
         table = Path("HIBM_MPM_PAPER_VS_CODE.md").read_text(encoding="utf-8")
@@ -313,7 +317,7 @@ class SimulationCorePackageTests(unittest.TestCase):
             "full-stress traction",
             "per-marker MPM external force",
             "surface feedback",
-            "legacy projected/reduced",
+            "legacy_projected_reduced",
             "not paper HIBM-MPM",
         )
         for term in required_terms:

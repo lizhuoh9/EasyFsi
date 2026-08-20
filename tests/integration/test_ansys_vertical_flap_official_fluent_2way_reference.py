@@ -606,75 +606,6 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
         self.assertEqual(report["flow_inlet_source_factor"], 0.0)
         self.assertEqual(report["flow_inlet_source_normal_velocity_mps"], 0.0)
 
-    def test_marker_feedback_populates_velocity_constraint_fields(self):
-        fluid = _FakePredictorFluid(shape=(2, 2, 2))
-        markers = _FakeMarkers(
-            positions=np.array(
-                [
-                    [0.25, 0.25, 0.25],
-                    [0.25, 0.25, 0.25],
-                    [0.75, 0.25, 0.75],
-                ],
-                dtype=np.float64,
-            ),
-            velocities=np.array(
-                [
-                    [0.0, 1.0, 2.0],
-                    [0.0, 3.0, 4.0],
-                    [5.0, 6.0, 7.0],
-                ],
-                dtype=np.float64,
-            ),
-            region_ids=np.array(
-                [
-                    fsi_runner.PRIMARY_REGION_ID,
-                    fsi_runner.PRIMARY_REGION_ID,
-                    fsi_runner.SECONDARY_REGION_ID,
-                ],
-                dtype=np.int32,
-            ),
-        )
-        config = SimpleNamespace(
-            grid_nodes=(2, 2, 2),
-            span_m=1.0,
-            duct_height_m=2.0,
-            duct_length_m=1.0,
-            preserve_marker_velocity_constraints=True,
-        )
-
-        report = fsi_runner._apply_marker_feedback_to_fluid(
-            markers,
-            fluid,
-            config,
-            feedback_available=True,
-            previous_feedback_constraint_cells=set(),
-        )
-
-        self.assertTrue(report["fluid_marker_velocity_constraints_enabled"])
-        self.assertEqual(report["fluid_marker_velocity_constraint_active_cell_count"], 2)
-        self.assertEqual(fluid.calls, ["clear_velocity_constraints"])
-        np.testing.assert_allclose(
-            fluid.velocity_constraint_sum.value[0, 0, 0],
-            [0.0, 4.0, 6.0],
-        )
-        self.assertEqual(float(fluid.velocity_constraint_weight.value[0, 0, 0]), 2.0)
-        np.testing.assert_allclose(
-            fluid.velocity_constraint_primary_sum.value[0, 0, 0],
-            [0.0, 4.0, 6.0],
-        )
-        self.assertEqual(
-            float(fluid.velocity_constraint_primary_weight.value[0, 0, 0]),
-            2.0,
-        )
-        np.testing.assert_allclose(
-            fluid.velocity_constraint_secondary_sum.value[1, 0, 1],
-            [5.0, 6.0, 7.0],
-        )
-        self.assertEqual(
-            float(fluid.velocity_constraint_secondary_weight.value[1, 0, 1]),
-            1.0,
-        )
-
     def test_project_current_flow_preserves_marker_velocity_constraints(self):
         fluid = _FakePredictorFluid(shape=(2, 2, 2))
         config = SimpleNamespace(
@@ -682,14 +613,12 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
             flow_projection_iterations=7,
             flow_pressure_outlet_enabled=True,
             flow_pressure_outlet_backflow_policy="allow",
-            flow_obstacle_normal_velocity_policy="cell_zero_only",
             preserve_marker_velocity_constraints=True,
             marker_velocity_constraint_blend=0.25,
             marker_velocity_constraint_solid_mobility_ratio=2.0,
             flow_pressure_solver="fv_cg",
             flow_cg_tolerance=2.5e-7,
             flow_divergence_cleanup_iterations=3,
-            flow_hibm_tiny_unreached_cleanup_component_cells=128,
         )
 
         report = fsi_runner._project_current_flow(
@@ -704,12 +633,12 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
         self.assertEqual(fluid.project_kwargs["divergence_cleanup_iterations"], 3)
         self.assertEqual(
             fluid.project_kwargs["hibm_tiny_unreached_cleanup_component_cells"],
-            128,
+            0,
         )
         self.assertEqual(fluid.project_kwargs["pressure_outlet_backflow_policy"], "allow")
         self.assertEqual(
             fluid.project_kwargs["obstacle_normal_velocity_policy"],
-            "cell_zero_only",
+            "face_clamp",
         )
         self.assertTrue(fluid.project_kwargs["preserve_velocity_constraints"])
         self.assertEqual(fluid.project_kwargs["velocity_constraint_blend"], 0.25)
@@ -883,20 +812,6 @@ class _FakeField:
 
     def from_numpy(self, value: np.ndarray) -> None:
         self.value = np.array(value, copy=True)
-
-
-class _FakeMarkers:
-    def __init__(
-        self,
-        *,
-        positions: np.ndarray,
-        velocities: np.ndarray,
-        region_ids: np.ndarray,
-    ) -> None:
-        self.marker_count = int(len(positions))
-        self.x_gamma_m = _FakeField(positions)
-        self.v_gamma_mps = _FakeField(velocities)
-        self.region_id = _FakeField(region_ids)
 
 
 class _FakePredictorFluid:

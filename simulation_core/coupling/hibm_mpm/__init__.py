@@ -31,11 +31,7 @@ from .core import (
     hibm_mpm_sharp_step_summary,
 )
 from .modes import (
-    FSI_COUPLING_MODE_CHOICES,
     FSI_COUPLING_MODE_HIBM_MPM_SHARP,
-    FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED,
-    fsi_coupling_mode_report,
-    require_implemented_fsi_coupling_mode,
 )
 from .marker_mac_constraint import (
     HibmMpmMarkerMacConstraintOperator,
@@ -64,9 +60,7 @@ from .reports import (
 )
 
 __all__ = [
-    "FSI_COUPLING_MODE_CHOICES",
     "FSI_COUPLING_MODE_HIBM_MPM_SHARP",
-    "FSI_COUPLING_MODE_LEGACY_PROJECTED_REDUCED",
     "HIBM_NO_SLIP_NEAREST_FLUID_FALLBACK_RADIUS_CELLS",
     "HIBM_OVERFLOW_SINGLETON_NO_SLIP_PROTECTION_RADIUS_CELLS",
     "HIBM_OWNER_RELOCATION_WALK_STEPS",
@@ -110,10 +104,8 @@ __all__ = [
     "advance_hibm_mpm_sharp_mpm_step",
     "advance_hibm_mpm_sharp_neo_hookean_step",
     "assemble_hibm_mpm_sharp_fluid_to_mpm_loads",
-    "fsi_coupling_mode_report",
     "hibm_mpm_external_force_fresh_for_solid_step",
     "hibm_mpm_paper_requirements",
     "hibm_mpm_pressure_disconnected_region_report",
     "hibm_mpm_sharp_step_summary",
-    "require_implemented_fsi_coupling_mode",
 ]

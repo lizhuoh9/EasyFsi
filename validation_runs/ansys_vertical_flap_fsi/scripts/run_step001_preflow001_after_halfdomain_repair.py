@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from cases.ansys_vertical_flap_fsi import (
     VerticalFlapFsiConfig,
-    run_vertical_flap_fsi_smoke,
+    run_ansys_vertical_flap_benchmark,
 )
 
 
@@ -43,7 +43,7 @@ def main() -> int:
         },
     )
     try:
-        report = run_vertical_flap_fsi_smoke(
+        report = run_ansys_vertical_flap_benchmark(
             VerticalFlapFsiConfig(step_count=1, preflow_steps=1)
         )
     except Exception as exc:  # pragma: no cover - process evidence path.

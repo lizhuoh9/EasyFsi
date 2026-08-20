@@ -661,7 +661,6 @@ def test_flow_only_stationary_gate_does_not_treat_unmeasured_zero_force_as_evide
 def test_flow_only_zero_marker_case_does_not_require_force_area():
     config = _config(
         marker_count=0,
-        flow_solid_boundary_mode="cell_obstacle_layers",
         preflow_traction_readiness_mode="flow_only",
     )
     history = [

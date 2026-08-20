@@ -384,7 +384,6 @@ def _run_runtime_flow_advance(
     terminal_no_slip_residuals_mps: tuple[float, ...] | None = None,
     pressure_reports: tuple[dict[str, object], ...] | None = None,
     preflow_history: list[dict[str, object]] | None = None,
-    sharp_boundary: bool = True,
     reprojection_cg_tolerance: float | None = None,
     sharp_boundary_stage_times: tuple[dict[str, float], ...] | None = None,
 ) -> dict[str, object]:
@@ -413,8 +412,6 @@ def _run_runtime_flow_advance(
         flow_driver_mode=solid_mpm_fsi_runner.FLOW_DRIVER_PROJECTION_ONLY,
         flow_solid_boundary_mode=(
             solid_mpm_fsi_runner.FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS
-            if sharp_boundary
-            else solid_mpm_fsi_runner.FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS
         ),
         flow_hibm_sharp_interpolate_velocity_rows=True,
         flow_hibm_marker_mac_constraint_absolute_tolerance_mps=1.0e-4,
@@ -430,10 +427,10 @@ def _run_runtime_flow_advance(
     )
     boundary_reports = iter(
         (
-            {"hibm_sharp_marker_boundary_enabled": bool(sharp_boundary)},
+            {"hibm_sharp_marker_boundary_enabled": True},
             *(
                 {
-                    "hibm_sharp_marker_boundary_enabled": bool(sharp_boundary),
+                    "hibm_sharp_marker_boundary_enabled": True,
                     "hibm_sharp_marker_boundary_stage_wall_time_s": dict(
                         stage_times
                     ),
@@ -1261,19 +1258,6 @@ class GenericRunnerQpLifecycleContracts(unittest.TestCase):
         )
         self.assertEqual(trace.events[-1][0], "P")
         json.dumps(joint_report, allow_nan=False)
-
-    def test_non_hibm_flow_keeps_one_pressure_projection_without_joint_gate(
-        self,
-    ) -> None:
-        trace = _FlowAdvanceQpTrace()
-        report = _run_runtime_flow_advance(
-            trace,
-            consistency_projection_count=3,
-            sharp_boundary=False,
-        )
-
-        self.assertEqual(trace.events, (("P", "main"),))
-        self.assertNotIn("hibm_joint_qp_converged", report["projection_report"])
 
     def test_projection_report_q_health_uses_runtime_all_truth_table(self) -> None:
         healthy_report = {key: True for key in Q_REPORT_KEYS}

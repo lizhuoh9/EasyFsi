@@ -41,7 +41,7 @@ def test_fsi_step_history_keeps_flow_and_observer_stage_diagnostics() -> None:
 
     function_source = textwrap.dedent(
         inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
+            solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
     )
     tree = ast.parse(function_source)

@@ -132,15 +132,14 @@ class SimulationCoreFacadeTests(unittest.TestCase):
             tri_surface.TriSurfaceForcePairReport,
         )
 
-    def test_driver_facade_exports_existing_driver_api(self) -> None:
-        drivers = importlib.import_module("simulation_core.drivers")
-        fsi_driver = importlib.import_module("simulation_core.drivers.fsi_driver")
-        generic = importlib.import_module("simulation_core.drivers.generic_fsi_solver")
-
-        self.assertIs(drivers.FsiCaseSpec, fsi_driver.FsiCaseSpec)
-        self.assertIs(drivers.FsiDriver, fsi_driver.FsiDriver)
-        self.assertIs(drivers.FsiProblem, generic.FsiProblem)
-        self.assertIs(drivers.solve_fsi, generic.solve_fsi)
+    def test_superseded_driver_package_is_not_importable(self) -> None:
+        for module_name in (
+            "simulation_core.drivers.fsi_driver",
+            "simulation_core.drivers.generic_fsi_solver",
+        ):
+            with self.subTest(module_name=module_name):
+                with self.assertRaises(ModuleNotFoundError):
+                    importlib.import_module(module_name)
 
     def test_coupling_support_packages_export_support_api(self) -> None:
         interface_pair = importlib.import_module("simulation_core.coupling.interface_pair")

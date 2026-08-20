@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import unittest
 from pathlib import Path
 
@@ -67,6 +68,40 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
             "FSI loop must project or recompute fluid before stress sampling",
         )
         self.assertLess(min(recompute_indices), stress_index)
+
+    def test_direct_runner_initializes_strict_cuda_before_fluid_build(self) -> None:
+        tree = ast.parse(_runner_source())
+        run_function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "run_hibm_mpm_fsi"
+        )
+        runtime_calls = [
+            node
+            for node in ast.walk(run_function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "TaichiRuntimeConfig"
+        ]
+        self.assertEqual(len(runtime_calls), 1)
+        runtime_call = runtime_calls[0]
+        keywords = {
+            keyword.arg: ast.literal_eval(keyword.value)
+            for keyword in runtime_call.keywords
+        }
+        self.assertEqual(
+            keywords,
+            {"arch": "cuda", "strict_arch": True},
+        )
+        fluid_build = next(
+            node
+            for node in ast.walk(run_function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_build_fluid"
+        )
+        self.assertLess(runtime_call.lineno, fluid_build.lineno)
 
 
 def _runner_source() -> str:

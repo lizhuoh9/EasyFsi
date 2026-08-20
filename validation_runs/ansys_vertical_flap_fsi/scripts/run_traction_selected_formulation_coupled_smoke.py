@@ -15,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from cases.ansys_vertical_flap_fsi import (
     VerticalFlapFsiConfig,
-    run_vertical_flap_fsi_smoke,
+    run_ansys_vertical_flap_benchmark,
 )
 
 
@@ -197,7 +197,7 @@ def _run_smoke_scenario(
     scenario = str(scenario_spec["scenario"])
     config = _selected_smoke_config(step_count=int(scenario_spec["step_count"]))
     try:
-        report = run_vertical_flap_fsi_smoke(config)
+        report = run_ansys_vertical_flap_benchmark(config)
         row = _row_from_report(
             report=report,
             config=config,

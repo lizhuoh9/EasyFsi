@@ -56,14 +56,13 @@ def _fake_fluid() -> SimpleNamespace:
     boundary_inactive = boundary_active == 0
     boundary_weight = scalar_f32 / 7.0
     boundary_weight[boundary_inactive] = 0.0
-    # These are legacy direct rows, so their projection and enforcement
-    # weights must match exactly under the snapshot contract.
+    # Canonical compact-row fixtures retain matched projection and enforcement
+    # weights under the snapshot contract.
     boundary_enforcement_weight = boundary_weight.copy()
     boundary_region = scalar_i32 + 6
     boundary_region[boundary_inactive] = -1
-    boundary_hard_mask = scalar_i32 % 8
-    boundary_hard_mask[boundary_inactive] = 0
-    boundary_external_exact_mask = boundary_hard_mask & np.int32(0b100)
+    boundary_hard_mask = np.zeros_like(boundary_active)
+    boundary_external_exact_mask = np.zeros_like(boundary_active)
     canonical_active_mask = np.zeros_like(boundary_active)
     canonical_vector_shape = boundary_active.shape + (3,)
     external_x_plane_shape = (2, boundary_active.shape[1], boundary_active.shape[2])
@@ -100,7 +99,9 @@ def _fake_fluid() -> SimpleNamespace:
         hibm_dynamic_solid_volume_obstacle=_FakeField((scalar_i32 + 2) % 2),
         hibm_dynamic_solid_volume_external_carve=_FakeField((scalar_i32 + 3) % 2),
         velocity_dirichlet_boundary_active=_FakeField(boundary_active),
-        velocity_dirichlet_boundary_value_mps=_FakeField(vector_f32 + 4),
+        velocity_dirichlet_boundary_value_mps=_FakeField(
+            np.zeros_like(vector_f32)
+        ),
         velocity_dirichlet_boundary_projection_weight=_FakeField(boundary_weight),
         velocity_dirichlet_boundary_enforcement_weight=_FakeField(
             boundary_enforcement_weight
@@ -148,7 +149,7 @@ def _fake_fluid() -> SimpleNamespace:
         external_velocity_boundary_z_face_value_mps=_FakeField(
             np.full(external_z_plane_shape + (3,), 3.0, dtype=np.float32)
         ),
-        velocity_dirichlet_boundary_authority="legacy",
+        velocity_dirichlet_boundary_authority="canonical",
         velocity_dirichlet_component_ledger_generation=0,
         velocity_dirichlet_component_ledger_sealed=False,
         _velocity_dirichlet_component_ledger_consumer_generations={},
@@ -158,6 +159,22 @@ def _fake_fluid() -> SimpleNamespace:
     fluid._invalidate_hibm_pressure_reachability = lambda: None
     fluid.build_hibm_no_slip_sampling_obstacle = lambda: None
     fluid.build_hibm_no_slip_component_face_valid_mask = lambda: None
+    prepare_methods = dict(
+        solid_mpm_fsi_runner._CANONICAL_SNAPSHOT_RESTORE_PREPARE_METHODS
+    )
+    fluid._VELOCITY_DIRICHLET_COMPONENT_LEDGER_CONSUMERS = frozenset(
+        prepare_methods
+    )
+    fluid._velocity_dirichlet_component_ledger_generation_errors = (
+        lambda: ([], [], [], [])
+    )
+    for method_name in prepare_methods.values():
+        setattr(fluid, method_name, lambda: None)
+    fluid.seal_velocity_dirichlet_component_ledger = lambda: setattr(
+        fluid,
+        "velocity_dirichlet_component_ledger_sealed",
+        True,
+    )
     return fluid
 
 
@@ -879,7 +896,7 @@ def test_canonical_snapshot_restore_prepare_failure_rolls_back_without_retry():
     assert target.velocity_dirichlet_component_ledger_generation == generation_before
 
 
-def test_legacy_snapshot_restore_preserves_derived_rebuild_order():
+def test_canonical_snapshot_restore_uses_prepare_and_seal_order():
     source = _fake_fluid()
     captured = solid_mpm_fsi_runner._capture_preflow_snapshot_fields(source)
     target = _fake_fluid()
@@ -887,17 +904,26 @@ def test_legacy_snapshot_restore_preserves_derived_rebuild_order():
     target._invalidate_hibm_pressure_reachability = lambda: events.append(
         "invalidate"
     )
-    target.build_hibm_no_slip_sampling_obstacle = lambda: events.append("obstacle")
-    target.build_hibm_no_slip_component_face_valid_mask = lambda: events.append(
-        "component_mask"
+    consumers = _install_complete_canonical_restore_prepare_fixture(target, events)
+    target.build_hibm_no_slip_sampling_obstacle = lambda: pytest.fail(
+        "canonical restore must not call the legacy no-slip builder"
     )
+    target.build_hibm_no_slip_component_face_valid_mask = lambda: pytest.fail(
+        "canonical restore must not call the legacy component-mask builder"
+    )
+    target.seal_velocity_dirichlet_component_ledger = lambda: events.append("seal")
     target._require_velocity_dirichlet_component_ledger_sealed = (
         lambda: events.append("require")
     )
 
     solid_mpm_fsi_runner._restore_preflow_snapshot_fields(target, captured)
 
-    assert events == ["invalidate", "obstacle", "component_mask", "require"]
+    assert events == [
+        "invalidate",
+        *(f"prepare:{consumer}" for consumer in consumers),
+        "seal",
+        "require",
+    ]
 
 
 def test_runner_snapshot_helpers_round_trip_frozen_history(tmp_path):
@@ -1601,63 +1627,6 @@ def test_sustained_boundary_predictor_requires_explicit_topology_reuse_before_ma
 
 
 @pytest.mark.parametrize(
-    "missing_field",
-    (
-        "velocity_dirichlet_boundary_enforcement_weight",
-        "velocity_dirichlet_boundary_marker_region_id",
-        "velocity_dirichlet_boundary_hard_fixed_component_mask",
-        "velocity_dirichlet_boundary_external_exact_component_mask",
-        "velocity_dirichlet_boundary_owned_row",
-    ),
-)
-def test_host_feedback_fallback_requires_complete_boundary_ledger_before_clearing(
-    missing_field,
-):
-    fluid = _fake_fluid()
-    clear_calls: list[bool] = []
-    fluid.clear_velocity_constraints = lambda: clear_calls.append(True)
-    delattr(fluid, missing_field)
-
-    with pytest.raises(RuntimeError, match=missing_field):
-        solid_mpm_fsi_runner._apply_marker_feedback_to_fluid_host_fallback(
-            SimpleNamespace(marker_count=0),
-            fluid,
-            SimpleNamespace(preserve_marker_velocity_constraints=True),
-            feedback_available=False,
-            previous_feedback_constraint_cells=set(),
-        )
-
-    assert clear_calls == []
-
-
-def test_host_feedback_fallback_writes_back_every_boundary_ledger_field():
-    fluid = _fake_fluid()
-    fluid.clear_velocity_constraints = lambda: None
-    ledger_field_names = (
-        "velocity_dirichlet_boundary_active",
-        "velocity_dirichlet_boundary_value_mps",
-        "velocity_dirichlet_boundary_projection_weight",
-        "velocity_dirichlet_boundary_enforcement_weight",
-        "velocity_dirichlet_boundary_marker_region_id",
-        "velocity_dirichlet_boundary_hard_fixed_component_mask",
-        "velocity_dirichlet_boundary_external_exact_component_mask",
-        "velocity_dirichlet_boundary_owned_row",
-    )
-
-    solid_mpm_fsi_runner._apply_marker_feedback_to_fluid_host_fallback(
-        SimpleNamespace(marker_count=0),
-        fluid,
-        SimpleNamespace(preserve_marker_velocity_constraints=True),
-        feedback_available=False,
-        previous_feedback_constraint_cells={(0, 0, 0)},
-    )
-
-    assert {
-        name: getattr(fluid, name).from_numpy_calls for name in ledger_field_names
-    } == {name: 1 for name in ledger_field_names}
-
-
-@pytest.mark.parametrize(
     ("override", "reason_fragment"),
     (
         ({"hibm_velocity_dirichlet_invalid_reconstruction_count": 1}, "invalid"),
@@ -2197,6 +2166,8 @@ def test_windowed_snapshot_load_revalidates_stored_terminal_windows(tmp_path):
             ),
             identity=identity,
             history=invalid_report,
+            velocity_dirichlet_boundary_authority="canonical",
+            velocity_dirichlet_component_ledger_generation=0,
         ),
     )
 
@@ -2256,7 +2227,7 @@ def test_snapshot_path_conflict_is_rejected_before_cuda_runtime_construction():
         patch.object(solid_mpm_fsi_runner, "TaichiRuntimeConfig") as runtime,
         pytest.raises(ValueError, match="cannot both be set"),
     ):
-        solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke(
+        solid_mpm_fsi_runner.run_hibm_mpm_fsi(
             case_id="snapshot-path-conflict",
             case_metadata={},
             boundary_conditions={},

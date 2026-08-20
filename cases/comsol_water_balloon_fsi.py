@@ -16,6 +16,7 @@ from benchmarks.official.membrane_inflation_fsi import (
     run_uv_membrane_inflation_smoke,
 )
 from benchmarks.official.official_benchmark_solver import (
+    FsiCaseSpec,
     OfficialBenchmarkRunSpec,
     run_official_fsi_benchmark,
 )
@@ -23,7 +24,6 @@ from benchmarks.official.ogden_membrane import (
     OgdenMembraneMaterial,
     stretch_from_volume_ratio,
 )
-from simulation_core.drivers.fsi_driver import FsiCaseSpec
 from simulation_core.diagnostics.validation import ReferenceCurve
 
 

@@ -1,80 +1,74 @@
-# HIBM-MPM 重构版（refactored/）
+# HIBM-MPM 求解器与验证仓库
 
-本目录是对上级目录 HIBM-MPM 代码的**功能等价重构副本**。原目录代码未被修改。
+本目录是当前维护中的 HIBM-MPM/MPM/CFD 仿真代码库。代码已经历模块拆分、入口收敛、
+失效参数和死代码清理；历史重构记录仅用于追溯，不能替代当前源码、测试和验证说明。
 
-> 当前同步说明：本仓库已经包含 refactored 副本之后继续推进的 sharp HIBM-MPM / squid FSI 收敛修复与验证工作。最新目标和审查记录见
-> [SHARP_HIBM_MPM_CONVERGENCE_FIX_GOAL_2026-06-18.md](docs/refactoring/SHARP_HIBM_MPM_CONVERGENCE_FIX_GOAL_2026-06-18.md)、
-> [SQUID_2S_SIMULATION_GOAL_2026-06-17.md](docs/refactoring/SQUID_2S_SIMULATION_GOAL_2026-06-17.md) 和
-> [SQUID_JET_FSI_COUPLING_REVIEW.md](SQUID_JET_FSI_COUPLING_REVIEW.md)。
+当前导航入口：
 
-## 目录性质
+- [模块地图](docs/MODULE_MAP.md)：实现归属、依赖方向和已删除的旧入口；
+- [验证说明](docs/VALIDATION.md)：结构检查、短程诊断和正式数值验证的边界；
+- [HIBM-MPM 论文与代码对照](HIBM_MPM_PAPER_VS_CODE.md)：sharp 耦合实现与论文要求的对应关系；
+- [架构说明](ARCHITECTURE.md)：仓库层级和公共接口约束。
 
-- 这是一份**保守、可验证**的重构：所有修改都以"行为不变"为第一原则，逐条列在
-  [REFACTORING_NOTES.md](REFACTORING_NOTES.md) 中，并按风险分级。
-- 大文件（`fluid.py`、`hibm_mpm.py`、`tri_surface.py`、`mooney_shell_mpm.py`、
-  `cases/squid_soft_robot/runner.py`）**未做结构性大改**——对 3.5 万行的数值代码做整体改写
-  无法在不跑长仿真验证的情况下保证功能不变。对它们的重构按
-  [REFACTORING_NOTES.md](REFACTORING_NOTES.md) 中的分阶段蓝图执行。
-- 一次性调试脚本（`tools_*.py`、`run_phase0_raw_map_scaling.py`）按审计结论归档到
-  `archive/tools/`，不参与测试。
+## 当前求解器架构
 
-## 已应用的修改（摘要）
+`simulation_core/` 保存可复用的流体、固体、耦合、材料、几何和诊断实现。旧的根级兼容
+模块与通用 FSI driver 已删除；新代码应使用 `docs/MODULE_MAP.md` 列出的功能包路径。
 
-| 文件 | 修改 | 类型 |
-|---|---|---|
-| `simulation_core/runtime.py` | `default_fp` 严格校验（原先拼错会静默落到 f64）；重复初始化时 fp 不一致改为报错；记录已初始化的 arch/fp | bug 修复 |
-| `simulation_core/validation.py` | 删除全仓无引用的 `check()` / `ValidationCheck` / `validation_summary()` | 死代码删除 |
-| `simulation_core/geometry.py` | 删除全仓无引用的 `vertex_area_weights()`；`orient_faces_outward()` 向量化（语义逐位等价，初始化加速） | 死代码删除 + 性能 |
-| `simulation_core/fsi_coupling.py` | 删除全仓无引用的 `_solve_small_linear_system()` 与 `_max_secant_amplification()`；`required_history` 化简为常量 2（原表达式恒等于 2） | 死代码删除 |
-| `simulation_core/neo_hookean_mpm.py` | 删除类内无引用的 `_particle_grid_out_of_bounds()` 与 `_read_vector()` | 死代码删除 |
-| `simulation_core/projected_ibm.py` | `ProjectedIbmRegionPairStepConfig.__post_init__` 增加 `primary_region_id != secondary_region_id` 校验（原先两 region 相同会被静默接受并双重计力） | 边界条件加固 |
+当前案例工作流只保留 canonical sharp HIBM-MPM 耦合模式 `HIBM_MPM_SHARP`，不再提供
+`legacy_projected_reduced` 模式选择、别名或兼容 shim。
 
-其余文件为原样副本。`simulation_core/__init__.py` 的公开 API 完全不变。
+官方 ANSYS rectangular-solid/vertical-flap 基准的数值入口是
+`benchmarks.official.solid_mpm_fsi_runner.run_hibm_mpm_fsi`；
+`cases.ansys_vertical_flap_fsi.run_ansys_vertical_flap_benchmark` 只在其外层添加案例元数据和
+官方报告校验。
 
-## 如何验证
+其他物理案例仍保留各自的几何、边界条件和模型装配：
 
-在本目录（`refactored/`）下运行：
+- Squid：`cases/squid_soft_robot/runner.py`；
+- Turek-Hron：`cases/turek_hron_fsi.py`；
+- COMSOL：`cases/comsol_multibody_mechanism_fsi.py` 和
+  `cases/comsol_water_balloon_fsi.py`。
 
-```powershell
-$python = if ($env:EASYFSI_PYTHON) { $env:EASYFSI_PYTHON } else { 'python' }
-& $python -m unittest discover -s tests/contracts -p "test_*.py" -v
-& $python -m unittest discover -s tests/integration -p "test_*.py" -v
-& $python -m unittest discover -s tests/tools -p "test_*.py" -v
-# 需要 CUDA GPU：
-& $python -m unittest discover -s tests -p "test_*.py" -v
-```
-
-测试目录是随副本一起拷贝的，`test_source_static_contracts.py` 的源码契约检查在本目录内自洽。
+上述收敛只统一耦合模式和官方 ANSYS 数值入口，并不表示所有案例由同一个运行函数驱动。
 
 ## 运行案例
 
-squid 案例必须显式传 `--source-config`，指向一份**已存在**的 GUI 导出
-`simulation_config.json`。CLI 的历史默认路径（`_diagnostic_runs/.../simulation_config.json`）
-是被忽略的诊断输出，不在仓库内，因此不带该参数直接运行会立刻失败——
-runner 现在会在创建任何输出目录/写 `run_process.json` **之前**报
-`source config not found` 并保持文件系统不变：
+Squid 案例必须显式传入已存在的 GUI 导出 `simulation_config.json`。输入不存在时，runner
+会在创建输出目录或写入 `run_process.json` 之前 fail closed：
 
 ```powershell
+$python = if ($env:EASYFSI_PYTHON) { $env:EASYFSI_PYTHON } else { 'python' }
 & $python run_simulation.py squid-soft-robot --steps 8 `
     --source-config ".\config\simulation_config.json"
 ```
 
-可运行案例清单以 `run_simulation.py --help` 输出为准（`comsol-*` 两个基准案例
-只提供 `run_*_fsi_smoke()` 编程入口，没有 CLI `main()`，不能从该分发器运行）。
+可运行的 CLI 案例以 `run_simulation.py --help` 为准。COMSOL 两个案例提供编程式 smoke
+入口，不应假定它们都由 `run_simulation.py` 分发。
+
+## 验证边界
+
+先运行与改动相关的 host-only/focused 测试，再按 [docs/VALIDATION.md](docs/VALIDATION.md)
+选择结构检查、短程 Taichi 诊断或正式验证。focused 测试通过不等同于完整 GPU 回归、
+长时程收敛或 Fluent 一致性验证；相关结论必须引用实际运行产物。
+
+```powershell
+& $python -m pytest -q tests/contracts
+& $python -m pytest -q tests/cases/test_squid_package_exports.py `
+    tests/benchmarks/test_official_benchmark_solver.py
+```
+
+只有明确需要数值验证且输出目录已经确定时，才启动 CUDA/Taichi 长任务。
 
 ## Repository layout
 
-- `simulation_core/`: reusable solver package. Implementation lives under layered packages; top-level legacy modules are compatibility shims.
-- `cases/`: runnable simulation cases registered by `run_simulation.py`.
-- `benchmarks/`: official/vendor benchmark adapters and reusable benchmark runners.
-- `tools/`: diagnostics, rendering, and post-processing helpers.
-- `tests/`: tests grouped by `solvers/`, `cases/`, `benchmarks/`, `tools/`, `integration/`, and `contracts/`.
-- `docs/`: architecture, validation, and refactoring records.
-- `archive/`: historical one-shot maintenance scripts.
+- `simulation_core/`：可复用求解器实现；
+- `cases/`：案例专用装配、边界条件和报告；
+- `benchmarks/official/`：官方基准合同与 canonical ANSYS runner；
+- `tools/`：诊断、验证、渲染和后处理；
+- `tests/`：按 solver、case、benchmark、integration 和 contract 分组的测试；
+- `docs/`：当前架构、验证说明和历史重构记录；
+- `archive/`：不参与生产导入的一次性历史脚本。
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for dependency direction and legacy
-compatibility policy. See [docs/VALIDATION.md](docs/VALIDATION.md) for the
-current structure validation matrix. Detailed refactoring step records live in
-`docs/refactoring/`.
-
-Use `python -m tools.diagnostics...` or `python -m tools.rendering...` for helper scripts.
+辅助工具应通过 `python -m tools.diagnostics...` 或
+`python -m tools.rendering...` 的模块路径调用。

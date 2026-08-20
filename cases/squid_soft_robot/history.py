@@ -4,7 +4,7 @@ import csv
 import math
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from simulation_core import (
@@ -12,141 +12,6 @@ from simulation_core import (
     vector_norm,
 )
 
-FINITE_REQUIRED_ROW_FIELDS = (
-    "main_displacement_z_m",
-    "tail_displacement_z_m",
-    "main_velocity_z_mps",
-    "tail_velocity_z_mps",
-    "max_fluid_speed_mps",
-    "cfl",
-    "outlet_flow_negative_z_m3s",
-    "divergence_l2",
-    "divergence_max_abs",
-    "interior_divergence_l2",
-    "interior_divergence_max_abs",
-    "pressure_correctable_divergence_l2",
-    "pressure_correctable_divergence_max_abs",
-    "pressure_correctable_divergence_cell_count",
-    "pressure_fixed_divergence_l2",
-    "pressure_fixed_divergence_max_abs",
-    "pressure_fixed_divergence_cell_count",
-    "interior_pressure_correctable_divergence_l2",
-    "interior_pressure_correctable_divergence_max_abs",
-    "interior_pressure_correctable_divergence_cell_count",
-    "interior_pressure_fixed_divergence_l2",
-    "interior_pressure_fixed_divergence_max_abs",
-    "interior_pressure_fixed_divergence_cell_count",
-    "pre_projection_divergence_l2",
-    "pre_projection_divergence_max_abs",
-    "projection_divergence_l2",
-    "projection_divergence_max_abs",
-    "projection_to_pre_divergence_l2_ratio",
-    "post_boundary_divergence_l2",
-    "post_boundary_divergence_max_abs",
-    "post_boundary_to_pre_divergence_l2_ratio",
-    "post_constraint_divergence_l2",
-    "post_constraint_divergence_max_abs",
-    "post_constraint_to_pre_divergence_l2_ratio",
-    "pressure_traction_force_x_n",
-    "pressure_traction_force_y_n",
-    "pressure_traction_force_z_n",
-    "pressure_traction_abs_force_n",
-    "viscous_traction_force_x_n",
-    "viscous_traction_force_y_n",
-    "viscous_traction_force_z_n",
-    "fluid_stress_traction_force_x_n",
-    "fluid_stress_traction_force_y_n",
-    "fluid_stress_traction_force_z_n",
-    "projected_ibm_residual_mps",
-    "projected_ibm_residual_l2_mps",
-    "fsi_probe_valid_fraction",
-    "fsi_force_probe_valid_fraction",
-    "fsi_probe_invalid_area_m2",
-    "fsi_probe_invalid_volume_source_m3s",
-    "fsi_force_probe_invalid_area_m2",
-    "fsi_force_probe_invalid_volume_source_m3s",
-    "fsi_volume_source_m3s",
-    "main_fsi_volume_source_m3s",
-    "tail_fsi_volume_source_m3s",
-    "pressure_outlet_source_volume_flux_m3s",
-    "pressure_outlet_positive_source_volume_flux_m3s",
-    "pressure_outlet_abs_source_volume_flux_m3s",
-    "pressure_outlet_reachable_source_volume_flux_m3s",
-    "pressure_outlet_unreached_source_volume_flux_m3s",
-    "pressure_outlet_reachability_valid",
-    "pressure_outlet_reachability_revision",
-    "pressure_outlet_velocity_flux_m3s",
-    "pressure_outlet_velocity_to_source_ratio",
-    "pressure_outlet_velocity_to_net_source_ratio",
-    "pressure_outlet_velocity_to_positive_source_ratio",
-    "pressure_outlet_velocity_to_abs_source_ratio",
-    "pressure_outlet_pressure_flux_m3s",
-    "pressure_outlet_pressure_to_source_ratio",
-    "pressure_outlet_pressure_to_net_source_ratio",
-    "pressure_outlet_pressure_to_positive_source_ratio",
-    "pressure_outlet_pressure_to_abs_source_ratio",
-    "pressure_outlet_projection_pre_velocity_flux_m3s",
-    "pressure_outlet_projection_post_pressure_velocity_flux_m3s",
-    "pressure_outlet_projection_post_boundary_velocity_flux_m3s",
-    "pressure_projection_cg_project_calls",
-    "pressure_projection_cg_iterations_total",
-    "pressure_projection_cg_iterations_max",
-    "pressure_projection_cg_host_residual_checks",
-    "pressure_projection_cg_mean_projection_count",
-    "pressure_projection_cg_restart_count",
-    "pressure_projection_cg_restart_count_measured",
-    "pressure_projection_cg_restart_policy",
-    "pressure_projection_cg_max_relative_residual",
-    "pressure_projection_cg_max_initial_relative_residual",
-    "pressure_projection_cg_breakdown_count",
-    "pressure_projection_cg_breakdown_code",
-    "pressure_projection_cg_breakdown_dAd",
-    "fsi_trial_pressure_projection_cg_project_calls",
-    "fsi_trial_pressure_projection_cg_iterations_total",
-    "fsi_trial_pressure_projection_cg_iterations_max",
-    "fsi_trial_pressure_projection_cg_host_residual_checks",
-    "fsi_trial_pressure_projection_cg_mean_projection_count",
-    "fsi_trial_pressure_projection_cg_max_relative_residual",
-    "fsi_trial_pressure_projection_cg_max_initial_relative_residual",
-    "fsi_trial_pressure_projection_cg_breakdown_count",
-    "total_pressure_projection_cg_project_calls",
-    "total_pressure_projection_cg_iterations_total",
-    "total_pressure_projection_cg_iterations_max",
-    "total_pressure_projection_cg_host_residual_checks",
-    "total_pressure_projection_cg_mean_projection_count",
-    "total_pressure_projection_cg_max_relative_residual",
-    "total_pressure_projection_cg_max_initial_relative_residual",
-    "total_pressure_projection_cg_breakdown_count",
-    "fsi_action_reaction_residual_abs_n",
-    "fsi_action_reaction_relative_error",
-    "fsi_fluid_reaction_action_reaction_relative_error",
-    "main_fsi_fluid_force_x_n",
-    "main_fsi_fluid_force_y_n",
-    "main_fsi_fluid_force_z_n",
-    "tail_fsi_fluid_force_x_n",
-    "tail_fsi_fluid_force_y_n",
-    "tail_fsi_fluid_force_z_n",
-    "main_fsi_fluid_reaction_x_n",
-    "main_fsi_fluid_reaction_y_n",
-    "main_fsi_fluid_reaction_z_n",
-    "tail_fsi_fluid_reaction_x_n",
-    "tail_fsi_fluid_reaction_y_n",
-    "tail_fsi_fluid_reaction_z_n",
-    "fsi_last_correction_grid_force_x_n",
-    "fsi_last_correction_grid_force_y_n",
-    "fsi_last_correction_grid_force_z_n",
-    "fsi_last_correction_grid_decomposition_residual_abs_n",
-    "fsi_last_correction_grid_decomposition_relative_error",
-    "main_fsi_fluid_reaction_full_residual_n",
-    "main_fsi_fluid_reaction_full_relative_error",
-    "tail_fsi_fluid_reaction_full_residual_n",
-    "tail_fsi_fluid_reaction_full_relative_error",
-    "solid_mpm_transfer_relative_error",
-    "solid_mpm_max_speed_mps",
-    "solid_mpm_total_force_x_n",
-    "solid_mpm_total_force_y_n",
-    "solid_mpm_total_force_z_n",
-)
 
 NEO_HOOKEAN_REQUIRED_ROW_FIELDS = (
     "solid_mpm_max_abs_j",
@@ -429,20 +294,18 @@ HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS = (
     "solid_mpm_total_force_z_n",
 )
 
-def finite_required_row_fields_for_solid_model(solid_model: str) -> tuple[str, ...]:
-    if solid_model == "neo_hookean_mpm":
-        return FINITE_REQUIRED_ROW_FIELDS + NEO_HOOKEAN_REQUIRED_ROW_FIELDS
-    return FINITE_REQUIRED_ROW_FIELDS
 
 def finite_required_row_fields_for_mode(
     fsi_coupling_mode: str,
     *,
     solid_model: str,
 ) -> tuple[str, ...]:
-    if str(fsi_coupling_mode) == FSI_COUPLING_MODE_HIBM_MPM_SHARP:
-        fields = HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS
-    else:
-        fields = finite_required_row_fields_for_solid_model(solid_model)
+    if str(fsi_coupling_mode) != FSI_COUPLING_MODE_HIBM_MPM_SHARP:
+        raise ValueError(
+            "fsi_coupling_mode must be "
+            f"{FSI_COUPLING_MODE_HIBM_MPM_SHARP!r}"
+        )
+    fields = HIBM_MPM_SHARP_REQUIRED_ROW_FIELDS
     if solid_model == "neo_hookean_mpm":
         return fields + tuple(
             field for field in NEO_HOOKEAN_REQUIRED_ROW_FIELDS if field not in fields
@@ -697,15 +560,6 @@ def _rows_max_int(rows: Sequence[Mapping[str, object]], key: str) -> int:
 def _rows_any_bool(rows: Sequence[Mapping[str, object]], key: str) -> bool:
     return any(_row_bool(row.get(key, False)) for row in rows)
 
-def count_enabled_unconverged_fsi_rows(
-    rows: Sequence[Mapping[str, object]],
-) -> int:
-    return sum(
-        1
-        for row in rows
-        if _row_bool(row.get("fsi_coupling_enabled", False))
-        and not _row_bool(row.get("fsi_coupling_converged", False))
-    )
 
 def solid_mpm_force_nonzero_when_pressure_loaded(
     rows: Sequence[dict[str, object]],
@@ -740,101 +594,10 @@ def solid_mpm_force_nonzero_when_pressure_loaded(
 
     return loaded_row_count == 0
 
-def _required_finite_triplet(
-    value: object,
-    *,
-    field: str,
-    context: str,
-) -> tuple[float, float, float]:
-    try:
-        components = tuple(float(component) for component in value)  # type: ignore[operator]
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{context} field {field!r} must be a finite 3D vector") from exc
-    if len(components) != 3:
-        raise ValueError(
-            f"{context} field {field!r} must have exactly 3 components, got {len(components)}"
-        )
-    for component_index, component in enumerate(components):
-        if not math.isfinite(component):
-            raise ValueError(
-                f"{context} field {field!r}[{component_index}] is not finite: {component!r}"
-            )
-    return components
 
-def _required_finite_report_number(
-    report: object,
-    *,
-    field: str,
-    context: str,
-) -> float:
-    if not hasattr(report, field):
-        raise AttributeError(f"{context} missing required numeric report field {field!r}")
-    try:
-        value = float(getattr(report, field))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{context} field {field!r} must be numeric") from exc
-    if not math.isfinite(value):
-        raise ValueError(f"{context} field {field!r} is non-finite: {value!r}")
-    return value
 
-def solid_force_vector_from_report(
-    report: object,
-    *,
-    solid_model: str,
-) -> tuple[float, float, float]:
-    if hasattr(report, "total_force_n"):
-        return _required_finite_triplet(
-            getattr(report, "total_force_n"),
-            field="total_force_n",
-            context=f"solid model {solid_model!r} report",
-        )
-    if solid_model == "neo_hookean_mpm" and hasattr(report, "external_force_n"):
-        return _required_finite_triplet(
-            getattr(report, "external_force_n"),
-            field="external_force_n",
-            context=f"solid model {solid_model!r} report",
-        )
-    raise AttributeError(
-        f"solid model {solid_model!r} report does not expose a finite 3D force vector"
-    )
 
-def required_projected_ibm_force_report(report: object | None) -> object:
-    if report is None:
-        raise RuntimeError("projected IBM step did not produce a force report")
-    context = "projected IBM force report"
-    for field in (
-        "grid_force_n",
-        "primary_fluid_force_n",
-        "secondary_fluid_force_n",
-        "constraint_force_n",
-        "primary_constraint_force_n",
-        "secondary_constraint_force_n",
-    ):
-        _required_finite_triplet(getattr(report, field), field=field, context=context)
-    for field in (
-        "volume_source_m3s",
-        "primary_volume_source_m3s",
-        "secondary_volume_source_m3s",
-        "active_force_cells",
-        "force_sample_count",
-        "force_invalid_probe_count",
-        "force_valid_probe_count",
-        "force_valid_probe_fraction",
-        "invalid_probe_area_m2",
-        "invalid_probe_volume_source_m3s",
-    ):
-        _required_finite_report_number(report, field=field, context=context)
-    return report
 
-def required_fluid_impulse_report(report: object | None) -> object:
-    if report is None:
-        raise RuntimeError("projected IBM step did not produce a fluid impulse report")
-    context = "fluid impulse report"
-    for field in ("grid_impulse_n_s", "momentum_delta_n_s"):
-        _required_finite_triplet(getattr(report, field), field=field, context=context)
-    _required_finite_report_number(report, field="impulse_relative_error", context=context)
-    _required_finite_report_number(report, field="active_velocity_cells", context=context)
-    return report
 
 WRITE_CSV_REPLACE_ATTEMPTS = 20
 

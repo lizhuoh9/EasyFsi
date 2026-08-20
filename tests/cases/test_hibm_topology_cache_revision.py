@@ -92,9 +92,6 @@ def _patched_runner():
     _FakeProjector.instances.clear()
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            mock.patch.object(runner, "_use_hibm_sharp_marker_boundary", return_value=True)
-        )
-        stack.enter_context(
             mock.patch.object(runner, "_domain_bounds", return_value=((0, 0, 0), (1, 1, 1)))
         )
         stack.enter_context(
@@ -131,9 +128,6 @@ def _patched_runner():
                 "_hibm_marker_mac_constraint_absolute_tolerance_mps",
                 return_value=1.0e-4,
             )
-        )
-        stack.enter_context(
-            mock.patch.object(runner, "_flow_solid_boundary_mode", return_value="sharp")
         )
         stack.enter_context(mock.patch.object(runner, "TaichiRuntimeConfig", lambda **_kwargs: object()))
         stack.enter_context(mock.patch.object(runner, "HibmMpmIbNodeSearch", _FakeSearch))

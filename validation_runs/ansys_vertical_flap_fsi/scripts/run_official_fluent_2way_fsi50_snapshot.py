@@ -20,7 +20,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     VerticalFlapFsiConfig,
-    run_vertical_flap_fsi_smoke,
+    run_ansys_vertical_flap_benchmark,
 )
 from refactored.validation.ansys_vertical_flap_fsi.official_fluent_parity import (  # noqa: E402
     save_solver_npz_from_flow_snapshot,
@@ -64,7 +64,7 @@ def run(
         flap_streamwise_min_m=float(flap_min),
         flap_streamwise_max_m=float(flap_max),
     )
-    report = run_vertical_flap_fsi_smoke(config)
+    report = run_ansys_vertical_flap_benchmark(config)
     snapshot = dict(report.get("final_flow_field_snapshot") or {})
     if not snapshot:
         raise RuntimeError("solver report did not include final_flow_field_snapshot")

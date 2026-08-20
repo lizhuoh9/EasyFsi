@@ -42,8 +42,6 @@ PACKAGE_IMPLEMENTATIONS = {
     ("coupling", "projected_ibm.py"): "class ProjectedIbmRegionPairStepConfig",
     ("coupling", "tri_surface.py"): "class TriSurfaceRegionDiagnostics",
     ("diagnostics", "runtime.py"): "class TaichiRuntimeConfig",
-    ("drivers", "fsi_driver.py"): "class FsiDriver",
-    ("drivers", "generic_fsi_solver.py"): "class FsiProblem",
     ("solids", "neo_hookean_mpm.py"): "class NeoHookeanMpmState",
     ("solids", "mooney_shell", "core.py"): "class TriMooneyShellMpmState",
     ("geometry_tools", "surface_mesh.py"): "class SurfaceMesh",
@@ -53,6 +51,22 @@ PACKAGE_IMPLEMENTATIONS = {
     ("diagnostics", "time_stepping.py"): "class CflSubstepController",
 }
 
+REMOVED_FSI_IMPLEMENTATION_MODULES = (
+    Path("simulation_core") / "drivers" / "__init__.py",
+    Path("simulation_core") / "drivers" / "fsi_driver.py",
+    Path("simulation_core") / "drivers" / "generic_fsi_solver.py",
+)
+
+REMOVED_FSI_ENTRYPOINT_SYMBOLS = {
+    "AnsysVerticalFlapProblem",
+    "FsiDriver",
+    "RuntimeExecutor",
+    "build_ansys_vertical_flap_generic_problem",
+    "run_rectangular_solid_marker_mpm_fsi_smoke",
+    "run_vertical_flap_fsi_smoke",
+    "solve_fsi",
+}
+
 PACKAGE_IMPLEMENTATION_ROOTS = (
     REPO_ROOT / "simulation_core" / "fluids",
     REPO_ROOT / "simulation_core" / "coupling",
@@ -60,7 +74,6 @@ PACKAGE_IMPLEMENTATION_ROOTS = (
     REPO_ROOT / "simulation_core" / "geometry_tools",
     REPO_ROOT / "simulation_core" / "materials",
     REPO_ROOT / "simulation_core" / "diagnostics",
-    REPO_ROOT / "simulation_core" / "drivers",
 )
 
 LEGACY_IMPORT_TOKENS = (
@@ -91,6 +104,55 @@ LEGACY_IMPORT_TOKENS = (
 
 
 class ArchitectureBoundaryTests(unittest.TestCase):
+    def test_hibm_mpm_has_one_public_numerical_entrypoint(self) -> None:
+        for relative_path in REMOVED_FSI_IMPLEMENTATION_MODULES:
+            self.assertFalse(
+                (REPO_ROOT / relative_path).exists(),
+                msg=f"superseded FSI implementation still exists: {relative_path}",
+            )
+
+        definitions: dict[str, list[Path]] = {}
+        for root in (
+            REPO_ROOT / "benchmarks",
+            REPO_ROOT / "cases",
+            REPO_ROOT / "simulation_core",
+        ):
+            for path in _python_files(root):
+                tree = ast.parse(
+                    path.read_text(encoding="utf-8-sig"),
+                    filename=str(path),
+                )
+                for node in tree.body:
+                    if isinstance(
+                        node,
+                        (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+                    ):
+                        definitions.setdefault(node.name, []).append(path)
+
+        self.assertEqual(
+            definitions.get("run_hibm_mpm_fsi"),
+            [
+                REPO_ROOT
+                / "benchmarks"
+                / "official"
+                / "solid_mpm_fsi_runner.py"
+            ],
+        )
+        for symbol in sorted(REMOVED_FSI_ENTRYPOINT_SYMBOLS):
+            self.assertNotIn(
+                symbol,
+                definitions,
+                msg=f"superseded FSI entrypoint still defined: {symbol}",
+            )
+
+        case_spec_path = (
+            REPO_ROOT
+            / "benchmarks"
+            / "official"
+            / "official_benchmark_solver.py"
+        )
+        self.assertEqual(definitions.get("FsiCaseSpec"), [case_spec_path])
+
     def test_simulation_core_does_not_import_cases_tools_or_benchmarks(self) -> None:
         forbidden = {"cases", "tools", "benchmarks"}
 
@@ -132,7 +194,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             "fluids",
             "solids",
             "coupling",
-            "drivers",
             "geometry_tools",
             "materials",
             "diagnostics",

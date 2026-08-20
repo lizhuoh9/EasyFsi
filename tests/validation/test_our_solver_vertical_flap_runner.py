@@ -95,8 +95,6 @@ def test_fine_config_uses_dynamic_solid_volume_and_narrow_anisotropic_hibm_band(
     runner = _load_runner_module()
     args = SimpleNamespace(
         steps=1,
-        pressure_pair_provider_mode="runtime_anchored_cell_pair",
-        selected_anchor_markers_json=None,
         grid_nodes=(4, 256, 320),
         solid_particle_counts=(1, 256, 20),
         marker_count=64,
@@ -135,7 +133,7 @@ def test_fine_config_uses_dynamic_solid_volume_and_narrow_anisotropic_hibm_band(
         1.5 * max(dx, dy, dz)
     )
     assert config.flow_hibm_sharp_interpolate_velocity_rows
-    assert config.flow_projection_velocity_inlet_zmax is None
+    assert "flow_projection_velocity_inlet_zmax" not in config.__dataclass_fields__
 
     boundary_velocity_only = runner._build_config(
         SimpleNamespace(
@@ -146,20 +144,20 @@ def test_fine_config_uses_dynamic_solid_volume_and_narrow_anisotropic_hibm_band(
     assert not boundary_velocity_only.flow_hibm_sharp_interpolate_velocity_rows
 
 
-def test_case_core_forwards_the_step_observer() -> None:
+def test_case_wrapper_forwards_the_step_observer_to_the_single_solver() -> None:
     observer = object()
-    expected = {"history": []}
+    expected = {"history": [], "computed_result_sources": {}}
     with patch.object(
         vertical_flap_case,
-        "run_rectangular_solid_marker_mpm_fsi_smoke",
+        "run_hibm_mpm_fsi",
         return_value=expected,
     ) as run_core:
-        actual = vertical_flap_case._run_vertical_flap_fsi_core(
+        actual = vertical_flap_case.run_ansys_vertical_flap_benchmark(
             VerticalFlapFsiConfig(),
             step_observer=observer,
         )
 
-    assert actual is expected
+    assert actual["history"] == expected["history"]
     assert run_core.call_args.kwargs["step_observer"] is observer
 
 
@@ -257,7 +255,6 @@ def test_campaign_readme_has_the_exact_unique_output_command() -> None:
         '--solid-substeps 1600',
         '--flow-predictor-substeps 64',
         '--hibm-search-radius-m 0.0017',
-        '--pressure-pair-provider-mode runtime_anchored_cell_pair',
         '--span-reduction mean',
         '--streamwise-velocity-sign -1.0',
         '--save-step-fields',
@@ -265,6 +262,16 @@ def test_campaign_readme_has_the_exact_unique_output_command() -> None:
     for fragment in required_fragments:
         assert fragment in readme
     assert "our_solver\\production" not in readme
+
+
+def test_formal_cli_uses_one_fixed_solver_route() -> None:
+    source = RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert "run_ansys_vertical_flap_benchmark" in source
+    assert "run_hibm_mpm_fsi" in source
+    assert "--pressure-pair-provider-mode" not in source
+    assert "--selected-anchor-markers-json" not in source
+    assert "replay_from_diagnostics" not in source
 
 
 def test_json_safe_collapses_legacy_force_unit_aliases() -> None:
@@ -305,7 +312,11 @@ def test_main_records_post_run_artifact_validation_failure(tmp_path: Path) -> No
 
     with (
         patch.object(runner, "_source_hashes", return_value={}),
-        patch.object(runner, "run_vertical_flap_fsi_smoke", return_value=report),
+        patch.object(
+            runner,
+            "run_ansys_vertical_flap_benchmark",
+            return_value=report,
+        ),
         patch.object(
             runner,
             "_validate_step_artifacts",
@@ -382,7 +393,7 @@ def test_main_preserves_rejected_preflow_history_in_failure_artifact(
         patch.object(runner, "_source_hashes", return_value={}),
         patch.object(
             runner,
-            "run_vertical_flap_fsi_smoke",
+            "run_ansys_vertical_flap_benchmark",
             side_effect=reject_snapshot,
         ),
         patch.object(
@@ -444,7 +455,7 @@ def test_main_treats_empty_final_snapshot_as_absent_after_loaded_preflow(
         patch.object(runner, "_source_hashes", return_value={}),
         patch.object(
             runner,
-            "run_vertical_flap_fsi_smoke",
+            "run_ansys_vertical_flap_benchmark",
             return_value=report,
         ) as run_smoke,
         patch.object(
@@ -499,7 +510,7 @@ def test_main_does_not_complete_progress_for_blocked_summary(tmp_path: Path) -> 
         patch.object(runner, "_source_hashes", return_value={}),
         patch.object(
             runner,
-            "run_vertical_flap_fsi_smoke",
+            "run_ansys_vertical_flap_benchmark",
             return_value={"history": []},
         ),
         patch.object(
@@ -541,7 +552,7 @@ def test_main_records_keyboard_interrupt_without_marking_failure(
         patch.object(runner, "_source_hashes", return_value={}),
         patch.object(
             runner,
-            "run_vertical_flap_fsi_smoke",
+            "run_ansys_vertical_flap_benchmark",
             side_effect=KeyboardInterrupt(),
         ),
         patch.object(
