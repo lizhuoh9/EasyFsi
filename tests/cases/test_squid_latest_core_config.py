@@ -2994,6 +2994,8 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertEqual(coupled_budget["full_report_pressure_project_calls_per_step"], 1)
         self.assertEqual(coupled_budget["trial_pressure_project_calls_per_step_max"], 2)
         self.assertEqual(coupled_budget["cg_iteration_budget_per_physical_step_max"], 9000)
+        self.assertTrue(coupled_budget["fsi_iterative_coupling_enabled"])
+        self.assertNotIn("fsi_coupling_enabled", coupled_budget)
 
         uncoupled_budget = pressure_projection_budget_report(
             fluid_substeps=12,
@@ -3004,6 +3006,8 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
         self.assertEqual(uncoupled_budget["fluid_step_evaluations_per_physical_step_max"], 1)
         self.assertEqual(uncoupled_budget["pressure_project_calls_per_physical_step_max"], 12)
         self.assertEqual(uncoupled_budget["trial_pressure_project_calls_per_step_max"], 0)
+        self.assertFalse(uncoupled_budget["fsi_iterative_coupling_enabled"])
+        self.assertNotIn("fsi_coupling_enabled", uncoupled_budget)
         self.assertEqual(uncoupled_budget["cg_iteration_budget_per_physical_step_max"], 36000)
 
     def test_runtime_budget_report_extrapolates_from_measured_step_wall_time(self) -> None:

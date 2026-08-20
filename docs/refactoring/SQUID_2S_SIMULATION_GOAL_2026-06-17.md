@@ -5,7 +5,7 @@
 > `legacy_projected_reduced` 路线；该路线及其模式选择现已删除，不能再作为运行指南。
 > 当前 Squid 工作流只保留 `HIBM_MPM_SHARP`。请以根目录 [README](../../README.md)、
 > [`docs/MODULE_MAP.md`](../MODULE_MAP.md) 和
-> [HIBM-MPM 论文与代码对照](../../HIBM_MPM_PAPER_VS_CODE.md) 为准。
+> [HIBM-MPM 论文与代码对照](../validation/HIBM_MPM_PAPER_VS_CODE.md) 为准。
 > 下方历史正文保留不改，用于解释旧实验产物和当时的决策背景。
 
 ## Objective

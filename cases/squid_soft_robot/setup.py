@@ -1841,7 +1841,7 @@ def pressure_projection_budget_report(
     total_project_calls = coupling_iterations * project_calls_per_fluid_evaluation
     return {
         "fluid_substeps": substeps,
-        "fsi_coupling_enabled": coupling_iterations > 1,
+        "fsi_iterative_coupling_enabled": coupling_iterations > 1,
         "fsi_coupling_trial_evaluations_per_physical_step_max": trial_evaluations,
         "accepted_fluid_step_evaluations_per_physical_step": accepted_evaluations,
         "fluid_step_evaluations_per_physical_step_max": (

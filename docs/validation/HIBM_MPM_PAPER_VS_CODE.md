@@ -4,7 +4,7 @@ Reference: `Numerical Methods in Fluids - 2007 - Gilmanov - A hybrid immersed bo
 
 Scope: compare the solver-level requirements in Gilmanov and Acharya Sections 2-4 against the current implementation in this checkout. Squid is only a validation case. The solver work belongs in `simulation_core`; `cases/squid_soft_robot/runner.py` invokes the canonical HIBM-MPM workflow and reports diagnostics.
 
-Implementation constraint: every production HIBM-MPM solver operation must be Taichi-resident. IB search, inside/outside classification, normal reconstruction, pressure/velocity boundary rows, stress sampling, traction, and MPM force scatter must use Taichi fields/kernels. NumPy loops, `.to_numpy()`, `.from_numpy()`, or host round-trips may be used only for offline tests or one-time initialization, not for the runtime solver path.
+Implementation constraint: production HIBM-MPM physics operators must be Taichi-resident. IB search, inside/outside classification, normal reconstruction, pressure/velocity boundary rows, stress sampling, traction, and MPM force scatter must use Taichi fields/kernels. NumPy loops or host transfers must not implement those operators. Host transfers are limited to explicit orchestration boundaries: one-time initialization, output diagnostics, and marker/pressure-gradient state capture and restore for multi-iteration trial rollback. The rollback path preserves the validated numerical semantics but has transfer overhead; a device-resident state copy is a future performance candidate that requires controlled A/B validation before adoption.
 
 ## Phase 0 Conclusion
 
