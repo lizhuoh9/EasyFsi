@@ -461,20 +461,6 @@ def _apply_region14_opening_carve_to_obstacle(
     return carved
 
 
-def _z_min_connected_active_mask(
-    candidate_fluid_mask: np.ndarray,
-    *,
-    seed_radius_cells: int,
-) -> tuple[np.ndarray, int]:
-    active = np.asarray(candidate_fluid_mask, dtype=bool)
-    seed = np.zeros(active.shape, dtype=bool)
-    nz = active.shape[2]
-    seed_depth = max(1, int(seed_radius_cells))
-    seed_depth = min(seed_depth, nz)
-    seed[:, :, :seed_depth] = True
-    return _connected_active_mask(active, seed)
-
-
 def _connected_active_mask(
     candidate_fluid_mask: np.ndarray,
     seed_mask: np.ndarray,
@@ -1830,7 +1816,7 @@ def effective_fluid_substeps_for_grid(
     min_spacing_m = min(cartesian_grid_axis_min_spacing_m(grid_for_spacing))
     farfield_spacing_m = max(float(value) for value in spec.graded_grid.farfield_spacing_m)
     # Resolve the finest graded cells at a half-farfield CFL; the full-step
-    # ratio was not enough for the projected-IBM divergence guard.
+    # ratio was not enough for the sharp-interface divergence guard.
     fine_cell_spacing_ratio = int(math.ceil(farfield_spacing_m / max(min_spacing_m, 1.0e-12)))
     reference_dt_s = float(spec.base_dt_s) if spec.base_dt_s is not None else float(spec.dt_s)
     dt_scale = float(spec.dt_s) / max(reference_dt_s, 1.0e-12)
@@ -1841,29 +1827,25 @@ def effective_fluid_substeps_for_grid(
 def pressure_projection_budget_report(
     *,
     fluid_substeps: int,
-    ibm_correction_iterations: int,
     fsi_coupling_iterations: int,
     projection_iterations: int,
-    fsi_coupling_enabled: bool,
 ) -> dict[str, object]:
     substeps = max(1, int(fluid_substeps))
-    correction_iterations = max(1, int(ibm_correction_iterations))
     coupling_iterations = max(1, int(fsi_coupling_iterations))
     pressure_iterations = max(1, int(projection_iterations))
-    trial_evaluations = coupling_iterations if bool(fsi_coupling_enabled) else 0
+    trial_evaluations = coupling_iterations - 1
     accepted_evaluations = 1
-    project_calls_per_fluid_evaluation = substeps * correction_iterations
+    project_calls_per_fluid_evaluation = substeps
     trial_project_calls = trial_evaluations * project_calls_per_fluid_evaluation
     accepted_project_calls = accepted_evaluations * project_calls_per_fluid_evaluation
-    total_project_calls = trial_project_calls + accepted_project_calls
+    total_project_calls = coupling_iterations * project_calls_per_fluid_evaluation
     return {
         "fluid_substeps": substeps,
-        "ibm_correction_iterations": correction_iterations,
-        "fsi_coupling_enabled": bool(fsi_coupling_enabled),
+        "fsi_coupling_enabled": coupling_iterations > 1,
         "fsi_coupling_trial_evaluations_per_physical_step_max": trial_evaluations,
         "accepted_fluid_step_evaluations_per_physical_step": accepted_evaluations,
         "fluid_step_evaluations_per_physical_step_max": (
-            trial_evaluations + accepted_evaluations
+            coupling_iterations
         ),
         "pressure_project_calls_per_fluid_evaluation": project_calls_per_fluid_evaluation,
         "trial_pressure_project_calls_per_step_max": trial_project_calls,
@@ -1896,80 +1878,3 @@ def resolve_divergence_cleanup_iterations(
             "non-uniform cleanup operators are implemented"
         )
     return iterations
-
-
-def reduced_active_water_connectivity(
-    spec: SquidReducedSpec,
-    obstacle_cell_count: int,
-    obstacle_mask: np.ndarray | None = None,
-) -> dict[str, object]:
-    total_cells = int(spec.grid_nodes[0] * spec.grid_nodes[1] * spec.grid_nodes[2])
-    active_cells = total_cells - int(obstacle_cell_count)
-    if obstacle_mask is None:
-        return {
-            "method": "latest_core_reduced_chamber_nozzle_obstacle_seeded_from_z_min_analytic_fallback",
-            "component_count": 1,
-            "seed_boundary": "z_min",
-            "active_cell_count": active_cells,
-            "inactive_cell_count": int(obstacle_cell_count),
-            "z_min_connected_active_cell_count": active_cells,
-            "trapped_active_cell_count": 0,
-            "connectivity_passed": active_cells > 0,
-            "limitation": "No obstacle mask was supplied, so connectivity fell back to the legacy analytic count.",
-        }
-    mask = np.asarray(obstacle_mask, dtype=np.int32)
-    if mask.shape != tuple(spec.grid_nodes):
-        raise ValueError(
-            f"obstacle_mask shape {mask.shape!r} does not match grid_nodes {tuple(spec.grid_nodes)!r}"
-        )
-    active = mask == 0
-    active_cells = int(np.count_nonzero(active))
-    inactive_cells = int(mask.size - active_cells)
-    visited = np.zeros(active.shape, dtype=bool)
-    component_count = 0
-    z_min_connected_active_cells = 0
-    trapped_active_cells = 0
-    nx, ny, nz = active.shape
-    for seed_index in zip(*np.nonzero(active), strict=False):
-        if visited[seed_index]:
-            continue
-        component_count += 1
-        stack = [tuple(int(value) for value in seed_index)]
-        visited[seed_index] = True
-        component_size = 0
-        touches_z_min = False
-        while stack:
-            i, j, k = stack.pop()
-            component_size += 1
-            touches_z_min = touches_z_min or k == 0
-            for ni, nj, nk in (
-                (i - 1, j, k),
-                (i + 1, j, k),
-                (i, j - 1, k),
-                (i, j + 1, k),
-                (i, j, k - 1),
-                (i, j, k + 1),
-            ):
-                if (
-                    0 <= ni < nx
-                    and 0 <= nj < ny
-                    and 0 <= nk < nz
-                    and active[ni, nj, nk]
-                    and not visited[ni, nj, nk]
-                ):
-                    visited[ni, nj, nk] = True
-                    stack.append((ni, nj, nk))
-        if touches_z_min:
-            z_min_connected_active_cells += component_size
-        else:
-            trapped_active_cells += component_size
-    return {
-        "method": "latest_core_obstacle_flood_fill_from_z_min",
-        "component_count": component_count,
-        "seed_boundary": "z_min",
-        "active_cell_count": active_cells,
-        "inactive_cell_count": inactive_cells,
-        "z_min_connected_active_cell_count": z_min_connected_active_cells,
-        "trapped_active_cell_count": trapped_active_cells,
-        "connectivity_passed": active_cells > 0 and trapped_active_cells == 0,
-    }

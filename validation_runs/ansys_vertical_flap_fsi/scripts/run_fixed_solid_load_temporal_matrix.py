@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     VerticalFlapFsiConfig,
-    run_vertical_flap_fsi_smoke,
+    run_ansys_vertical_flap_benchmark,
 )
 from tools.validation.ansys_vertical_flap_temporal_gates import (  # noqa: E402
     STEP30_FIXED_SOLID_PROFILE,
@@ -386,7 +386,7 @@ def _run_config(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     started = time.perf_counter()
     try:
-        report = run_vertical_flap_fsi_smoke(config)
+        report = run_ansys_vertical_flap_benchmark(config)
         history = [_history_row(scenario, row) for row in report.get("preflow_history", [])]
         row = _summary_row(scenario, config, report, history)
         row["elapsed_s"] = time.perf_counter() - started

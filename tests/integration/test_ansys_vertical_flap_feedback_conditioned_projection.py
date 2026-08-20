@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
-from benchmarks.official.solid_mpm_fsi_runner import _combine_flow_projection_reports
+from benchmarks.official.solid_mpm_fsi_runner import (
+    _apply_marker_feedback_to_fluid,
+    _combine_flow_projection_reports,
+)
 
 
 RUNNER_SOURCE = Path("benchmarks") / "official" / "solid_mpm_fsi_runner.py"
-FLUID_SOLVER_SOURCE = Path("simulation_core") / "fluids" / "solver.py"
 
 
 class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
@@ -111,6 +114,29 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
             6.25,
         )
 
+    def test_sharp_feedback_does_not_stamp_legacy_collocated_constraints(self) -> None:
+        class FakeFluid:
+            velocity_dirichlet_boundary_authority = "canonical"
+
+        markers = SimpleNamespace(
+            x_gamma_m=object(),
+            v_gamma_mps=object(),
+            region_id=object(),
+            marker_count=8,
+        )
+        report = _apply_marker_feedback_to_fluid(
+            markers,
+            FakeFluid(),
+            SimpleNamespace(flow_solid_boundary_mode="hibm_sharp_marker_rows"),
+            feedback_available=True,
+        )
+
+        self.assertEqual(
+            report["fluid_marker_feedback_enforcement_mode"],
+            "hibm_sharp_reconstructed_rows",
+        )
+        self.assertTrue(report["fluid_projection_consumed_feedback"])
+
     def test_sharp_flow_adds_accumulating_consistency_projection(self) -> None:
         body = _function_body(_runner_source(), "def _flow_advance_current_step(")
 
@@ -135,7 +161,7 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
     def test_post_solid_observer_refresh_rebuilds_current_sharp_rows(self) -> None:
         body = _function_body(
             _runner_source(),
-            "def prepare_rectangular_solid_marker_mpm_fsi_runtime(",
+            "def run_hibm_mpm_fsi(",
         )
         solid_update = body.index(
             "latest_feedback_report = markers.update_surface_feedback_from_mpm_surface_particles("
@@ -144,11 +170,11 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
             "latest_observer_topology_report = (",
             solid_update,
         )
-        trial_return = body.index(
-            "return FsiTrialResult(",
+        feedback_ready = body.index(
+            "feedback_available_for_projection = True",
             observer_refresh,
         )
-        refresh_body = body[observer_refresh:trial_return]
+        refresh_body = body[observer_refresh:feedback_ready]
 
         self.assertIn("topology_only=False", refresh_body)
 
@@ -189,81 +215,32 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
         ):
             self.assertIn(field, history_body)
 
-    def test_runner_keeps_feedback_ownership_on_the_solver(self) -> None:
-        source = _runner_source()
-
-        self.assertNotIn("previous_feedback_constraint_cells", source)
-        self.assertNotIn('"_feedback_constraint_cells"', source)
-
-    def test_adapter_reads_marker_feedback_and_updates_fluid_constraints(self) -> None:
+    def test_adapter_requires_canonical_authority_without_a_host_fallback(self) -> None:
         source = _runner_source()
         adapter_body = _function_body(source, "def _apply_marker_feedback_to_fluid(")
 
-        # Device path: marker fields are passed straight into the fused
-        # apply_marker_feedback_constraints() kernel dispatch, which reads
-        # marker positions/velocities on-device and writes the fluid's
-        # velocity-Dirichlet constraint fields without a host round-trip.
-        self.assertIn("report = fluid.apply_marker_feedback_constraints(", adapter_body)
-        self.assertIn("markers.x_gamma_m,", adapter_body)
-        self.assertIn("markers.v_gamma_mps,", adapter_body)
-        self.assertIn("markers.region_id,", adapter_body)
-        self.assertNotIn("getattr(fluid,", adapter_body)
-        self.assertNotIn("_host_fallback", source)
-        self.assertNotIn(".to_numpy(", adapter_body)
-
-    def test_solver_clears_only_device_owned_feedback_constraints(self) -> None:
-        # Clearing of previously-owned cells happens inside
-        # _clear_marker_feedback_constraints_kernel(), gated on the
-        # per-cell marker_feedback_owned flag.
-        solver_source = _fluid_solver_source()
-        clear_kernel_body = _method_body(
-            solver_source, "def _clear_marker_feedback_constraints_kernel(self):"
-        )
-        self.assertIn("if self.marker_feedback_owned[i, j, k] != 0:", clear_kernel_body)
-        self.assertIn("self.velocity_dirichlet_boundary_active[i, j, k] = 0", clear_kernel_body)
-        self.assertIn("self.velocity_dirichlet_boundary_value_mps[i, j, k] = ti.Vector(", clear_kernel_body)
-        self.assertIn("self.velocity_dirichlet_boundary_projection_weight[i, j, k] = 0.0", clear_kernel_body)
-        self.assertIn("self.marker_feedback_owned[i, j, k] = 0", clear_kernel_body)
-        self.assertIn("self.report_marker_feedback_cleared_cell_count[None]", clear_kernel_body)
-
-    def test_runner_computes_post_projection_no_slip_residual(self) -> None:
-        loop_body = _fsi_loop_body(_runner_source())
-
-        project_index = loop_body.index("_flow_advance_current_step(")
-        residual_index = loop_body.index("_measure_projected_no_slip_residual(")
-
-        self.assertLess(project_index, residual_index)
-        self.assertIn(
-            '"no_slip_projected_residual_after_projection_mps"',
-            _runner_source(),
-        )
-        self.assertIn(
-            '"no_slip_target_residual_after_assembly_mps"',
-            _runner_source(),
-        )
+        self.assertIn('velocity_dirichlet_boundary_authority', adapter_body)
+        self.assertIn('"canonical"', adapter_body)
+        self.assertNotIn("host_fallback", source)
+        sharp_branch = adapter_body[: adapter_body.index('if authority != "legacy"')]
+        self.assertNotIn("apply_marker_feedback_constraints", sharp_branch)
 
 
 def _runner_source() -> str:
     return RUNNER_SOURCE.read_text(encoding="utf-8")
 
 
-def _fluid_solver_source() -> str:
-    return FLUID_SOLVER_SOURCE.read_text(encoding="utf-8")
-
-
 def _fsi_loop_body(source: str) -> str:
-    trial_start = source.index("    def evaluate_trial(")
-    trial_end = source.index("    def commit_step(", trial_start)
-    return source[trial_start:trial_end]
+    loop_start = source.index("for step_index in range(config.step_count):")
+    loop_end = source.index("    if (\n        latest_stress_report is None", loop_start)
+    return source[loop_start:loop_end]
 
 
 def _history_append_body(source: str) -> str:
-    commit_start = source.index("    def commit_step(")
-    commit_end = source.index("    class RectangularMarkerVelocityRuntime", commit_start)
-    commit_body = source[commit_start:commit_end]
-    append_start = commit_body.index("history.append(")
-    append_end = commit_body.index("\n        )", append_start) + len("\n        )")
-    return commit_body[append_start:append_end]
+    loop_body = _fsi_loop_body(source)
+    append_start = loop_body.index("history.append(")
+    append_end = loop_body.index("\n        )", append_start) + len("\n        )")
+    return loop_body[append_start:append_end]
 
 
 def _function_body(source: str, signature: str) -> str:
@@ -272,21 +249,6 @@ def _function_body(source: str, signature: str) -> str:
     if next_function < 0:
         return source[start:]
     return source[start:next_function]
-
-
-def _method_body(source: str, signature: str) -> str:
-    """Extract an indented class-method body (stops at the next sibling
-    ``    def``/``    @`` at the same indentation, unlike ``_function_body``
-    which only recognizes top-level ``def``)."""
-
-    start = source.index(signature)
-    search_from = start + len(signature)
-    next_def = source.find("\n    def ", search_from)
-    next_decorator = source.find("\n    @", search_from)
-    candidates = [index for index in (next_def, next_decorator) if index >= 0]
-    if not candidates:
-        return source[start:]
-    return source[start : min(candidates)]
 
 
 if __name__ == "__main__":

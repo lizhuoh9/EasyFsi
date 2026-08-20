@@ -475,86 +475,63 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
             generic_fsi_solver.FsiSolverConfig.__dataclass_fields__,
         )
 
-    def test_ansys_uses_core_loop_but_keeps_component_substeps(self) -> None:
+    def test_ansys_uses_validated_direct_loop_but_keeps_shared_driver(self) -> None:
         from benchmarks.official import solid_mpm_fsi_runner
         from cases import ansys_vertical_flap_fsi
 
-        runner_source = inspect.getsource(
-            solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
+        direct_source = inspect.getsource(
+            solid_mpm_fsi_runner.run_hibm_mpm_fsi
+        )
+        shared_source = inspect.getsource(
+            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
         )
         case_source = inspect.getsource(ansys_vertical_flap_fsi)
 
-        self.assertNotIn("for step_index in range(config.step_count)", runner_source)
-        self.assertNotIn("solve_fsi_step(", runner_source)
-        self.assertIn("solve_fsi_runtime(", inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
-        ))
-        self.assertIn("solid_substeps=solid_substeps", runner_source)
+        self.assertIn("for step_index in range(config.step_count)", direct_source)
+        self.assertNotIn("solve_fsi_runtime(", direct_source)
+        self.assertIn("solve_fsi_runtime(", shared_source)
+        self.assertIn("run_hibm_mpm_fsi(", case_source)
+        self.assertNotIn(
+            "run_rectangular_solid_marker_mpm_fsi_smoke(",
+            case_source,
+        )
+        self.assertIn("solid_substeps=solid_substeps", direct_source)
         self.assertIn("flow_predictor_substeps", case_source)
         self.assertNotIn("runtime_executor", case_source)
         self.assertNotIn("explicit_loose", case_source)
-        self.assertEqual(
-            ansys_vertical_flap_fsi.ANSYS_VERTICAL_FLAP_CASE_METADATA[
-                "coupling_time_layer"
-            ]["interface_unknown"],
-            "marker_velocity_mps",
+        self.assertNotIn(
+            "coupling_time_layer",
+            ansys_vertical_flap_fsi.ANSYS_VERTICAL_FLAP_CASE_METADATA,
+            "direct ANSYS metadata must not claim the shared generic IQN driver",
         )
 
-    def test_ansys_problem_factory_returns_a_trial_runtime_to_solve_fsi(self) -> None:
-        from benchmarks.official.solid_mpm_fsi_runner import PreparedFsiRuntime
+    def test_ansys_wrapper_delegates_once_to_direct_runner(self) -> None:
         from cases import ansys_vertical_flap_fsi
-        from simulation_core.drivers.generic_fsi_solver import (
-            DiagnosticsConfig,
-            FsiCouplingConfig,
-            FsiSolverConfig,
-            FsiTrialResult,
-            solve_fsi,
-        )
-
-        class ToyAnsysRuntime:
-            def begin_step(self, context):
-                return np.zeros((2, 3), dtype=np.float64)
-
-            def evaluate_trial(self, context, marker_velocity_guess_mps):
-                return FsiTrialResult(marker_velocity_mps=marker_velocity_guess_mps)
-
-            def commit_step(self, context, trial, coupling):
-                return {"adapter": "ansys-toy"}
-
-            def rollback_step(self, context):
-                raise AssertionError("converged ANSYS toy step must not roll back")
-
-            def finalize_run(self):
-                return {"report": {"case": "ansys-toy"}}
-
-        problem = ansys_vertical_flap_fsi.build_ansys_vertical_flap_generic_problem(
-            step_count=2
-        )
-        solver_config = FsiSolverConfig(
-            step_count=2,
-            time_step_s=5.0e-4,
-            coupling=FsiCouplingConfig(max_iterations=4),
-        )
-        prepared = PreparedFsiRuntime(ToyAnsysRuntime(), solver_config)
+        config = ansys_vertical_flap_fsi.VerticalFlapFsiConfig(step_count=2)
+        expected = {"case": "ansys-direct-toy"}
         with patch.object(
             ansys_vertical_flap_fsi,
-            "prepare_rectangular_solid_marker_mpm_fsi_runtime",
-            return_value=prepared,
-        ) as prepare:
-            result = solve_fsi(
-                problem,
-                solver_config,
-                DiagnosticsConfig(output_root="outputs/ansys-toy"),
+            "run_hibm_mpm_fsi",
+            return_value=expected,
+        ) as direct_runner, patch.object(
+            ansys_vertical_flap_fsi,
+            "run_official_fsi_benchmark",
+            side_effect=lambda spec: spec.runner(spec.config),
+        ) as official_wrapper:
+            result = ansys_vertical_flap_fsi.run_ansys_vertical_flap_benchmark(
+                config
             )
 
-        self.assertEqual(result.completed_step_count, 2)
-        self.assertEqual(result.raw_report["case"], "ansys-toy")
-        prepared_config = prepare.call_args.kwargs["config"]
-        self.assertEqual(prepared_config.fsi_coupling_iterations, 4)
+        self.assertIs(result, expected)
+        official_wrapper.assert_called_once()
+        direct_runner.assert_called_once()
+        call = direct_runner.call_args.kwargs
         self.assertEqual(
-            prepared_config.fsi_coupling_relative_tolerance,
-            solver_config.coupling.relative_tolerance,
+            call["case_id"],
+            ansys_vertical_flap_fsi.CASE_SPEC.case_id,
         )
+        self.assertIs(call["config"], official_wrapper.call_args.args[0].config)
+        self.assertEqual(call["config"].step_count, 2)
 
     def test_marker_restore_recovers_retired_geometry_probe_and_tip_vertices(
         self,

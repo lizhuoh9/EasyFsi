@@ -98,7 +98,7 @@ class SquidExplicitContextContractTests(unittest.TestCase):
             tuple(field.name for field in fields(StepLoopContext)),
             ("settings", "resources", "callbacks", "state"),
         )
-        self.assertEqual(len(fields(StepLoopSettings)), 31)
+        self.assertEqual(len(fields(StepLoopSettings)), 32)
         self.assertEqual(
             tuple(field.name for field in fields(StepLoopResources)),
             (
@@ -110,10 +110,10 @@ class SquidExplicitContextContractTests(unittest.TestCase):
                 "process_path",
                 "run_checkpoint_path",
                 "frozen_run_fingerprint",
+                "run_started_at_perf",
                 "simulator",
                 "solid_mpm",
                 "spec",
-                "tri_diagnostics",
             ),
         )
         self.assertEqual(

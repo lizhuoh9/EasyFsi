@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     VerticalFlapFsiConfig,
-    run_vertical_flap_fsi_smoke,
+    run_ansys_vertical_flap_benchmark,
 )
 
 
@@ -71,7 +71,7 @@ def _run_case(preflow_steps: int) -> dict[str, Any]:
     started = time.perf_counter()
     scenario = f"preflow_only_{preflow_steps:02d}"
     try:
-        report = run_vertical_flap_fsi_smoke(
+        report = run_ansys_vertical_flap_benchmark(
             VerticalFlapFsiConfig(step_count=0, preflow_steps=preflow_steps)
         )
         last = dict(report["preflow_history"][-1])

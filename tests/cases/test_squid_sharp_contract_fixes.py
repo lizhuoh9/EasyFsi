@@ -21,7 +21,7 @@ from cases.squid_soft_robot import (
 )
 from cases.squid_soft_robot.cli import parse_args
 from cases.squid_soft_robot.step_loop import (
-    _run_squid_sharp_runtime,
+    run_squid_step_loop,
 )
 
 
@@ -341,7 +341,7 @@ class SquidSharpCliContractTests(unittest.TestCase):
         self.assertEqual(default_fingerprint, explicit_fingerprint)
 
     def test_sharp_step_uses_named_values_instead_of_case_magic_constants(self) -> None:
-        source = inspect.getsource(_run_squid_sharp_runtime)
+        source = inspect.getsource(run_squid_step_loop)
         call = source.split("sharp_coupling_state.advance_mpm_step(", 1)[1].split(
             "fluid_dt_s=", 1
         )[0]
@@ -365,7 +365,7 @@ class SquidSharpCliContractTests(unittest.TestCase):
 
     def test_neo_step_receives_the_resolved_lock_policy(self) -> None:
         runner_source = inspect.getsource(runner.run)
-        step_loop_source = inspect.getsource(_run_squid_sharp_runtime)
+        step_loop_source = inspect.getsource(run_squid_step_loop)
         self.assertIn(
             "fixed_node_lock_policy=neo_fixed_node_lock_policy",
             runner_source,

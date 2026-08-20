@@ -1,8 +1,10 @@
 # Squid Jet FSI — Coupling Architecture Review
 
-**Status:** root cause proven; four fixes attempted and defeated; architecture re-evaluated.
+**Status:** archived historical investigation; the legacy workflow discussed below has been removed.
 **Tree state:** clean (`e99a851`) — every experiment below was a flag, an env-gated diagnostic, or a change that was fully reverted. No production code is modified.
 **Date:** 2026-06-17
+
+> **Current architecture (2026-08-20):** case runners and CLIs expose only the canonical `hibm_mpm_sharp` workflow. The former `legacy_projected_reduced` workflow and its CLI option were deleted. Mentions below are retained solely to explain historical experiments; commands selecting that mode are intentionally no longer executable.
 
 ---
 
@@ -12,9 +14,9 @@ The squid jet case (`hibm_mpm_sharp`, real‑CAD STEP source config) does not ej
 
 **Proven root cause:** the sharp HIBM‑MPM imposes the membrane velocity as a **hard velocity‑Dirichlet pin** on the immersed‑boundary band. Every pressure‑routing operator skips pinned cells, so the displaced volume is both *uncorrectable* and *unreachable from the z‑min outlet*. It cannot drain → divergence accumulates → no jet.
 
-**Four fixes were attempted on the sharp path; all were defeated by the same wall** (§3). The existing **diffuse coupling mode** (`legacy_projected_reduced`) *eliminates* the walling (`interior_div_l2 = 0`) but is **numerically unstable** — a pressure runaway at the membrane interface blows the velocity up in 2–3 steps (§5).
+**Four fixes were attempted on the sharp path; all were defeated by the same wall** (§3). The then-existing **diffuse coupling mode** (`legacy_projected_reduced`) *eliminated* the walling (`interior_div_l2 = 0`) but was **numerically unstable** — a pressure runaway at the membrane interface blew the velocity up in 2–3 steps (§5).
 
-**Conclusion:** neither existing coupling mode is a complete solution; they fail in opposite, complementary ways. A complete fix needs a coupling that is **both non‑pinning (avoid walling) and stably strong‑coupled (avoid blowup)**. Recommended path: **port the sharp path's convergent strong coupling (Aitken/IQN‑ILS) onto the diffuse/projected‑IBM path** (§6).
+**Historical conclusion:** neither workflow tested in June 2026 was complete; they failed in opposite, complementary ways. The diffuse/projected workflow was subsequently retired rather than carried as a second production solution. Current development must improve the one canonical sharp HIBM-MPM workflow without restoring a parallel case-level solver.
 
 ---
 
@@ -72,18 +74,18 @@ Keep‑open, re‑project, and L2 are all blocked by the **same wall**: the velo
 
 ---
 
-## 4. Architecture re‑evaluation — the diffuse mode confirms the diagnosis
+## 4. Historical architecture re‑evaluation — the retired diffuse mode confirmed the diagnosis
 
-The codebase already exposes a non‑pinning coupling: `fsi_coupling_mode = legacy_projected_reduced` ([constants hibm_mpm.py:18-19](simulation_core/hibm_mpm.py); CLI [squid_soft_robot.py:13988](cases/squid_soft_robot.py); sharp is the default at [squid_soft_robot.py:554](cases/squid_soft_robot.py)). It runs `advance_projected_ibm_region_pair_fluid_step` ([simulation_core/projected_ibm.py:456](simulation_core/projected_ibm.py)) which uses **spread‑force + `volume_source`** ([projected_ibm.py:588-645](simulation_core/projected_ibm.py)) and **no hard velocity pin**.
+At the time of this review, the codebase exposed a non‑pinning case workflow named `legacy_projected_reduced`. That workflow and its CLI selection have since been deleted; the following measurements describe the archived experiment, not a current runtime option. It used spread-force plus `volume_source` and no hard velocity pin.
 
-**Run** (`--fsi-coupling-mode legacy_projected_reduced --source-config <STEP>`, zero code):
+**Historical run (no longer supported):**
 - **Step 1: `interior_div_l2 = 0.000`.** The walling/divergence‑accumulation problem is **gone** — the non‑pinning coupling routes the volume and the projection is divergence‑free. This **confirms the sharp pin is the root cause** of the divergence accumulation.
 - **Step 2: CFL blows up** (`cfl=7.2 ≥ 0.5` guard).
 
 | | walling (divergence) | stability |
 |---|---|---|
 | **sharp** (`hibm_mpm_sharp`) | ❌ walls cavity → divergence accumulates, no jet | ✅ stable |
-| **diffuse** (`legacy_projected_reduced`) | ✅ **zero divergence** (no walling) | ❌ blows up in 2–3 steps |
+| **retired diffuse workflow** (`legacy_projected_reduced`) | ✅ **zero divergence** (no walling) | ❌ blows up in 2–3 steps |
 
 The two modes fail in **opposite** ways.
 
@@ -106,7 +108,7 @@ All spikes are at **z ≈ 1.006–1.011 m — the region‑7/8 membrane/cavity i
 
 ---
 
-## 6. Conclusion and recommended paths
+## 6. Historical conclusion and options considered
 
 Neither existing coupling mode solves the squid case. A complete fix needs a coupling that is **both non‑pinning** (to avoid the sharp wall) **and stably strong‑coupled** (to avoid the diffuse blowup).
 
@@ -117,11 +119,13 @@ Neither existing coupling mode solves the squid case. A complete fix needs a cou
 | L1 | Partial‑weight the sharp pin ([fluid.py:5852-5859](simulation_core/fluid.py)) + let reachability pass | medium | med‑high | Un‑walls sharp but changes no‑slip fidelity; the cavity is also thin (see D). |
 | D | Refine the fluid grid near the cavity/nozzle | low code, high compute | low | The thin cavity / ~1.6 mm aperture is only ~1–2 cells; **likely needed regardless** so any coupling has routable interior + a ≥3‑cell throat. Combine with B/C/L1. |
 
-**Recommendation:** pursue **B**, almost certainly combined with **D**. The diffuse mode already solves the hard half (no walling, `div=0`); the remaining work is to give it the strong coupling the sharp path has.
+The June 2026 recommendation was to pursue option B, likely with D. That recommendation is preserved as historical analysis only. The project now retains one canonical sharp HIBM-MPM workflow, so future fixes must be integrated into that workflow rather than restoring the retired diffuse runner.
 
 ---
 
-## 7. Reproduction
+## 7. Historical reproduction record
+
+The commands in this section document the 2026 experiment. The sharp command may require current CLI adjustments; the diffuse-mode command was removed with the retired workflow and must not be reintroduced merely to replay this note.
 
 Baseline failure (sharp):
 ```
@@ -130,12 +134,7 @@ Baseline failure (sharp):
   --steps 8 --fsi-coupling-iterations 6 --fsi-marker-coupling-tolerance-mps 2.5e-4 \
   --projection-divergence-tolerance 0.1 --pressure-solve-failure-policy report --progress --progress-interval 1
 ```
-Diffuse mode (zero divergence, then CFL blowup):
-```
-"D:/TOOL/Anaconda/python.exe" run_simulation.py squid-soft-robot \
-  --source-config <same> --fsi-coupling-mode legacy_projected_reduced \
-  --steps 4 --projection-divergence-tolerance 0.1 --pressure-solve-failure-policy report --progress --progress-interval 1
-```
+The retired diffuse run used the now-deleted `--fsi-coupling-mode legacy_projected_reduced` option. No current reproduction command is provided because that workflow is intentionally unavailable.
 Validation artifacts (history.csv, console logs, masks) live under `_codex_validation/` (`phaseE_*`, `L2_*`, `diffuse_*`).
 
 ---

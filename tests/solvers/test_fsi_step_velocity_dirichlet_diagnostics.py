@@ -47,32 +47,36 @@ def test_velocity_dirichlet_mapping_can_qualify_post_solid_observer_stage() -> N
 def test_fsi_step_history_keeps_flow_and_observer_stage_diagnostics() -> None:
     """The saved history must describe the same post-solid state as its snapshot."""
 
-    function_source = textwrap.dedent(
-            inspect.getsource(
-                solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
-            )
+    entrypoints = (
+        solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime,
+        solid_mpm_fsi_runner.run_hibm_mpm_fsi,
     )
-    tree = ast.parse(function_source)
-    mapping_calls: set[tuple[str, str | None]] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if not (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "_hibm_velocity_dirichlet_mapping_fields"
-            and node.args
-            and isinstance(node.args[0], ast.Name)
-        ):
-            continue
-        stage = None
-        for keyword in node.keywords:
-            if (
-                keyword.arg == "stage"
-                and isinstance(keyword.value, ast.Constant)
-                and isinstance(keyword.value.value, str)
+    for entrypoint in entrypoints:
+        function_source = textwrap.dedent(inspect.getsource(entrypoint))
+        tree = ast.parse(function_source)
+        mapping_calls: set[tuple[str, str | None]] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "_hibm_velocity_dirichlet_mapping_fields"
+                and node.args
+                and isinstance(node.args[0], ast.Name)
             ):
-                stage = keyword.value.value
-        mapping_calls.add((node.args[0].id, stage))
+                continue
+            stage = None
+            for keyword in node.keywords:
+                if (
+                    keyword.arg == "stage"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                ):
+                    stage = keyword.value.value
+            mapping_calls.add((node.args[0].id, stage))
 
-    assert ("latest_flow_report", None) in mapping_calls
-    assert ("latest_observer_topology_report", "observer") in mapping_calls
+        assert ("latest_flow_report", None) in mapping_calls, entrypoint.__name__
+        assert (
+            "latest_observer_topology_report",
+            "observer",
+        ) in mapping_calls, entrypoint.__name__

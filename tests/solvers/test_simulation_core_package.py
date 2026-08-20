@@ -292,7 +292,7 @@ class SimulationCorePackageTests(unittest.TestCase):
             "full-stress traction",
             "per-marker MPM external force",
             "surface feedback",
-            "legacy projected/reduced",
+            "legacy_projected_reduced",
             "not paper HIBM-MPM",
         )
         for term in required_terms:

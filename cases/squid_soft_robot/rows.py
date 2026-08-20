@@ -71,31 +71,113 @@ def build_hibm_mpm_sharp_case_row(
         sharp_summary,
         "hibm_mpm_scatter_action_reaction_residual_n",
     )
-    sharp_fsi_residual_source = str(
-        sharp_summary["hibm_fsi_coupling_residual_source"]
+    sharp_fsi_convergence_measured = (
+        "hibm_fsi_coupling_residual_l2_mps" in sharp_summary
     )
-    sharp_fsi_residual_l2_mps = float(
-        sharp_summary["hibm_fsi_coupling_residual_l2_mps"]
+    sharp_explicit_single_pass = bool(
+        sharp_summary.get("hibm_fsi_coupling_explicit_single_pass", True)
     )
-    sharp_fsi_residual_max_mps = float(
-        sharp_summary["hibm_fsi_coupling_residual_max_mps"]
+    sharp_added_mass_status = str(
+        sharp_summary.get("hibm_added_mass_stability_status", "unmeasured")
     )
+    if sharp_explicit_single_pass and not sharp_fsi_convergence_measured:
+        sharp_added_mass_status = "unmeasured_single_pass"
+    if sharp_fsi_convergence_measured:
+        sharp_fsi_residual_source = str(
+            sharp_summary.get(
+                "hibm_fsi_coupling_residual_source",
+                "marker_surface_fixed_point_velocity_residual_l2_mps",
+            )
+        )
+        sharp_fsi_residual_l2_mps = _mapping_float(
+            sharp_summary,
+            "hibm_fsi_coupling_residual_l2_mps",
+        )
+        sharp_fsi_residual_max_mps = _mapping_float(
+            sharp_summary,
+            "hibm_fsi_coupling_residual_max_mps",
+        )
+    elif bool(sharp_summary.get("hibm_post_solid_kinematic_projection_applied", False)):
+        valid_marker_count = _mapping_int(
+            sharp_summary,
+            "hibm_post_solid_no_slip_residual_valid_marker_count",
+        )
+        if total_marker_count > 0 and valid_marker_count <= 0:
+            sharp_fsi_residual_source = (
+                "unmeasured_no_valid_post_solid_no_slip_markers"
+            )
+            sharp_fsi_residual_l2_mps = math.nan
+            sharp_fsi_residual_max_mps = math.nan
+        else:
+            sharp_fsi_residual_source = (
+                "hibm_post_solid_no_slip_velocity_residual_l2_mps"
+            )
+            sharp_fsi_residual_l2_mps = _mapping_float(
+                sharp_summary,
+                "hibm_post_solid_no_slip_residual_l2_mps",
+            )
+            sharp_fsi_residual_max_mps = _mapping_float(
+                sharp_summary,
+                "hibm_post_solid_no_slip_residual_max_mps",
+            )
+    else:
+        valid_marker_count = _mapping_int(
+            sharp_summary,
+            "hibm_no_slip_residual_valid_marker_count",
+        )
+        if total_marker_count > 0 and valid_marker_count <= 0:
+            sharp_fsi_residual_source = "unmeasured_no_valid_no_slip_markers"
+            sharp_fsi_residual_l2_mps = math.nan
+            sharp_fsi_residual_max_mps = math.nan
+        else:
+            sharp_fsi_residual_source = "hibm_no_slip_velocity_residual_l2_mps"
+            sharp_fsi_residual_l2_mps = _mapping_float(
+                sharp_summary,
+                "hibm_no_slip_residual_l2_mps",
+            )
+            sharp_fsi_residual_max_mps = _mapping_float(
+                sharp_summary,
+                "hibm_no_slip_residual_max_mps",
+            )
 
     row.update(
         {
             "fsi_coupling_iterations_requested": int(
                 fsi_coupling_iterations_requested
             ),
-            "fsi_coupling_solver": "iqn_ils",
-            "fsi_coupling_scheme": "marker_velocity_iqn_ils",
-            "fsi_coupling_iterations_used": int(
-                sharp_summary["hibm_fsi_coupling_iterations_used"]
+            "fsi_coupling_solver": "marker_fixed_point",
+            "fsi_coupling_scheme": str(
+                sharp_summary.get("hibm_coupling_scheme", "explicit_loose")
+            ),
+            "fsi_coupling_iterations_used": _mapping_int(
+                sharp_summary,
+                "hibm_fsi_coupling_iterations_used",
+                1,
             ),
             "fsi_coupling_enabled": True,
+            "fsi_coupling_explicit_single_pass": sharp_explicit_single_pass,
+            "fsi_added_mass_stability_status": sharp_added_mass_status,
+            "fsi_added_mass_stability_measured": bool(
+                sharp_summary.get("hibm_added_mass_stability_measured", False)
+            ),
+            "fsi_added_mass_stabilization": str(
+                sharp_summary.get("hibm_added_mass_stabilization", "none")
+            ),
+            "fsi_semi_implicit_coupling_enabled": bool(
+                sharp_summary.get("hibm_semi_implicit_coupling_enabled", False)
+            ),
+            "fsi_semi_implicit_coupling_matrix_active": bool(
+                sharp_summary.get(
+                    "hibm_semi_implicit_coupling_matrix_active",
+                    False,
+                )
+            ),
             "fsi_coupling_step_completed": True,
-            "fsi_coupling_convergence_measured": True,
+            "fsi_coupling_convergence_measured": bool(
+                sharp_fsi_convergence_measured
+            ),
             "fsi_coupling_converged": bool(
-                sharp_summary["hibm_fsi_coupling_converged"]
+                sharp_summary.get("hibm_fsi_coupling_converged", False)
             ),
             "fluid_substeps": actual_fluid_substeps,
             "fluid_substep_dt_s": float(fluid_dt_s) / float(actual_fluid_substeps),

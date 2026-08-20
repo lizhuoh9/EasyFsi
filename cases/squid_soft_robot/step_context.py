@@ -12,7 +12,6 @@ if TYPE_CHECKING:
         HibmMpmSharpCouplingState,
         NeoHookeanMpmState,
         TriMooneyShellMpmState,
-        TriSurfaceRegionDiagnostics,
     )
     from simulation_core.materials.hyperelastic import NeoHookeanMaterial
 
@@ -34,13 +33,14 @@ class StepLoopSettings:
     far_pressure_air_backed_probe_normal_sign: float
     far_pressure_inside_probe_max_multiplier: float
     fixed_rim_region_id: int
-    fluid_grid_axis_min_spacing_m: float
     fluid_probe_distance_m: float
     fsi_coupling_iterations: int
     fsi_marker_coupling_tolerance_mps: float
     full_pressure_waveform_steps: int
+    interface_reaction_aitken: bool
+    interface_reaction_relaxation: float
     max_wall_time_s: float
-    neo_fixed_node_lock_policy: str
+    neo_fixed_node_lock_policy: str | None
     one_sided_probe_max_multiplier: float
     pressure_far_side_normal_sign: float
     pressure_load_region_id: int
@@ -69,10 +69,10 @@ class StepLoopResources:
     process_path: Path
     run_checkpoint_path: Path
     frozen_run_fingerprint: Mapping[str, object]
+    run_started_at_perf: float
     simulator: ReducedSquidFSI
     solid_mpm: NeoHookeanMpmState | TriMooneyShellMpmState | None
     spec: SquidReducedSpec
-    tri_diagnostics: TriSurfaceRegionDiagnostics
 
 
 @dataclass(frozen=True)

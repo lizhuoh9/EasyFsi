@@ -82,7 +82,7 @@ def _load_runtime() -> RuntimeBindings:
     from benchmarks.official import solid_mpm_fsi_runner as runner_module
     from cases.ansys_vertical_flap_fsi import (
         VerticalFlapFsiConfig,
-        run_vertical_flap_fsi_smoke,
+        run_ansys_vertical_flap_benchmark,
     )
     from simulation_core.fluids.preflow_snapshot import (
         PREFLOW_SNAPSHOT_FORMAT,
@@ -104,7 +104,7 @@ def _load_runtime() -> RuntimeBindings:
         current_source_payload=runner_module._preflow_snapshot_source_payload,
         snapshot_config_payload=runner_module._preflow_snapshot_config_payload,
         config_type=VerticalFlapFsiConfig,
-        run_case=run_vertical_flap_fsi_smoke,
+        run_case=run_ansys_vertical_flap_benchmark,
     )
 
 

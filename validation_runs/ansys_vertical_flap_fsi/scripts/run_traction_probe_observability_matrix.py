@@ -15,7 +15,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.official import solid_mpm_fsi_runner  # noqa: E402
-from cases.ansys_vertical_flap_fsi import run_vertical_flap_fsi_smoke  # noqa: E402
+from cases.ansys_vertical_flap_fsi import (  # noqa: E402
+    run_ansys_vertical_flap_benchmark,
+)
 from validation_runs.ansys_vertical_flap_fsi.scripts import (  # noqa: E402
     run_traction_formulation_validation_matrix as base,
 )
@@ -177,7 +179,7 @@ def _run_config(
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
     started = time.perf_counter()
     try:
-        report = run_vertical_flap_fsi_smoke(config)
+        report = run_ansys_vertical_flap_benchmark(config)
         raw_history = list(report.get("preflow_history", []))
         history = [
             base._history_row(scenario, row)

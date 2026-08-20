@@ -577,6 +577,1007 @@ def _advance_solid_substeps_batched(
         raise
 
 
+def run_hibm_mpm_fsi(
+    *,
+    case_id: str,
+    case_metadata: Mapping[str, Any],
+    boundary_conditions: Mapping[str, Any],
+    reference_results: Mapping[str, Any],
+    config: Any,
+    step_observer: Callable[
+        [int, float, dict[str, object], dict[str, np.ndarray]], None
+    ]
+    | None = None,
+    progress_observer: Callable[[dict[str, object]], None] | None = None,
+    profile_wall_time: bool = False,
+) -> dict[str, object]:
+    """Run the canonical Cartesian rectangular-solid HIBM-MPM pipeline."""
+    run_started_s = time.perf_counter()
+    _emit_run_progress(
+        progress_observer,
+        run_started_s=run_started_s,
+        phase="initialization_fluid_build",
+    )
+    _validate_rectangular_solid_config(config)
+    runtime = TaichiRuntimeConfig(arch="cuda", strict_arch=True)
+    fluid = _build_fluid(config, runtime)
+    _initialize_computed_flow(fluid, config)
+    markers = _build_markers(config, runtime)
+    anchor_install_report = _install_selected_pressure_pair_anchor_markers(
+        markers,
+        config,
+    )
+    pressure_pair_anchor_pair_map = dict(
+        anchor_install_report.pop("pressure_pair_anchor_pair_map", {})
+    )
+    pressure_pair_anchor_runtime_refresh_count = 0
+
+    def refresh_runtime_pressure_pair_anchors() -> None:
+        nonlocal anchor_install_report
+        nonlocal pressure_pair_anchor_pair_map
+        nonlocal pressure_pair_anchor_runtime_refresh_count
+        next_refresh_count = pressure_pair_anchor_runtime_refresh_count + 1
+        refreshed = _refresh_runtime_pressure_pair_anchor_markers(
+            markers,
+            fluid,
+            config,
+            refresh_count=next_refresh_count,
+        )
+        if refreshed is None:
+            return
+        anchor_install_report, pair_map = refreshed
+        pressure_pair_anchor_pair_map = dict(pair_map.as_diagnostics())
+        pressure_pair_anchor_runtime_refresh_count = next_refresh_count
+
+    solid = _build_solid(config, runtime)
+    # Install the physical MPM volume before fixed-solid preflow.  In sharp
+    # mode it is stored in a dedicated layer; the first HIBM assembly then
+    # combines it with the static geometry and carves only external row owners.
+    if bool(getattr(config, "flow_hibm_dynamic_solid_volume_enabled", False)):
+        latest_dynamic_obstacle_report = _update_fluid_obstacle_from_solid(
+            fluid,
+            solid,
+            config,
+        )
+    else:
+        latest_dynamic_obstacle_report = _fluid_obstacle_update_disabled_report()
+    refresh_runtime_pressure_pair_anchors()
+    fixed_mask, tip_mask = _solid_masks(solid, config)
+    # cache the constant rest positions once so the per-step displacement report
+    # does not re-fetch the whole rest array from the device every step
+    rest_positions_m = solid.rest_x.to_numpy()[: solid.particle_count]
+    mu_pa, lambda_pa = _lame_parameters(config)
+    solid_substep_cfl = solid_substep_cfl_report(config)
+    solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])
+    solid_seeding = _enforce_solid_seeding_limit(config)
+    preflow_report = _run_or_restore_fixed_solid_preflow(
+        markers=markers,
+        fluid=fluid,
+        solid=solid,
+        config=config,
+        progress_observer=progress_observer,
+        run_started_s=run_started_s,
+        profile_wall_time=profile_wall_time,
+    )
+    preflow_history = preflow_report["preflow_history"]
+    # A restored snapshot or the final fixed-solid HIBM assembly may replace
+    # the obstacle view.  Seal anchors against that actual pre-FSI state.
+    refresh_runtime_pressure_pair_anchors()
+
+    latest_stress_report = None
+    latest_force_report = None
+    latest_scatter_report = None
+    latest_solid_report = None
+    latest_feedback_report = None
+    latest_flow_report = None
+    latest_feedback_constraint_report = None
+    fluid_projection_count = 0
+    fluid_projection_after_feedback_count = 0
+    fluid_projection_consumed_feedback_count = 0
+    feedback_available_for_projection = False
+    history: list[dict[str, object]] = []
+    final_flow_field_snapshot: dict[str, np.ndarray] = {}
+    apply_feedback = bool(getattr(config, "apply_marker_feedback_to_fluid", True))
+    flow_driver_mode = _effective_flow_driver_mode(config, flow_phase="fsi")
+    sharp_boundary_cache: dict[str, object] = {}
+    export_final_flow_snapshot = bool(
+        getattr(config, "export_final_flow_snapshot", False)
+    )
+    immutable_flow_geometry = (
+        _immutable_flow_geometry_snapshot(
+            fluid,
+            include_full_geometry=export_final_flow_snapshot,
+        )
+        if _flow_geometry_snapshot_cache_required(
+            step_count=int(config.step_count),
+            has_step_observer=step_observer is not None,
+            export_final_flow_snapshot=export_final_flow_snapshot,
+        )
+        else None
+    )
+
+    for step_index in range(config.step_count):
+        if _flow_driver_requires_full_field_reinitialize(flow_driver_mode):
+            _initialize_computed_flow(fluid, config)
+        feedback_available_before_projection = (
+            feedback_available_for_projection and apply_feedback
+        )
+        latest_feedback_constraint_report = _apply_marker_feedback_to_fluid(
+            markers,
+            fluid,
+            config,
+            feedback_available=feedback_available_before_projection,
+        )
+        latest_flow_report = _flow_advance_current_step(
+            fluid,
+            config,
+            markers=markers,
+            sharp_boundary_cache=sharp_boundary_cache,
+            flow_phase="fsi",
+            step_index_local=step_index,
+            step_index_global=len(preflow_history) + step_index,
+            preflow_history=preflow_history,
+            reset_pressure=(
+                bool(getattr(config, "flow_reset_pressure_each_step", False))
+                or (step_index == 0 and not preflow_history)
+            ),
+            measure_wall_times=profile_wall_time,
+        )
+        observer_flow_snapshot = (
+            _synchronized_flow_boundary_snapshot(
+                _flow_parity_snapshot(
+                    fluid,
+                    immutable_geometry=immutable_flow_geometry,
+                ),
+                stage="pre_solid_projection",
+            )
+            if step_observer is not None
+            else None
+        )
+        if export_final_flow_snapshot and (
+            step_index + 1 == int(config.step_count)
+        ):
+            final_flow_field_snapshot = _synchronized_flow_boundary_snapshot(
+                _flow_field_snapshot(
+                    fluid,
+                    immutable_geometry=immutable_flow_geometry,
+                ),
+                stage="pre_solid_projection",
+            )
+        latest_feedback_constraint_report[
+            "no_slip_projected_residual_after_projection_mps"
+        ] = float(latest_flow_report["hibm_no_slip_max_residual_mps"])
+        fluid_projection_count += 1
+        if feedback_available_before_projection:
+            fluid_projection_after_feedback_count += 1
+        if latest_feedback_constraint_report["fluid_projection_consumed_feedback"]:
+            fluid_projection_consumed_feedback_count += 1
+        latest_stress_report = _sample_stress_to_marker_forces(
+            markers,
+            fluid,
+            config,
+        )
+        latest_force_report = markers.aggregate_region_forces(
+            primary_region_id=PRIMARY_REGION_ID,
+            secondary_region_id=SECONDARY_REGION_ID,
+        )
+        markers.clear_mpm_external_forces(
+            solid.external_force_n,
+            particle_count=solid.particle_count,
+        )
+        latest_scatter_report = markers.scatter_marker_forces_to_mpm_particles(
+            solid.external_force_n,
+            solid.x,
+            particle_count=solid.particle_count,
+            support_radius_m=config.mpm_support_radius_m,
+        )
+        solid_substep_dt_s = config.dt_s / float(solid_substeps)
+        solid_substep_velocity_damping = _solid_substep_velocity_damping(
+            config,
+            solid_substeps=solid_substeps,
+        )
+        latest_solid_report = _advance_solid_substeps_batched(
+            solid,
+            config,
+            solid_substeps=solid_substeps,
+            solid_substep_dt_s=solid_substep_dt_s,
+            mu_pa=mu_pa,
+            lambda_pa=lambda_pa,
+            solid_substep_velocity_damping=solid_substep_velocity_damping,
+        )
+        latest_feedback_report = markers.update_surface_feedback_from_mpm_surface_particles(
+            solid.x,
+            solid.v,
+            solid.surface_normal,
+            solid.area_weight_m2,
+            particle_count=solid.particle_count,
+            support_radius_m=config.mpm_support_radius_m,
+            dt_s=config.dt_s,
+            preserve_marker_area=bool(
+                getattr(config, "preserve_marker_area_during_surface_feedback", False)
+            ),
+        )
+        latest_dynamic_obstacle_report = _update_fluid_obstacle_from_solid(
+            fluid,
+            solid,
+            config,
+        )
+        latest_observer_topology_report = (
+            _apply_hibm_sharp_marker_boundary_to_fluid(
+                markers,
+                fluid,
+                config,
+                update_pressure_gradient=False,
+                boundary_cache=sharp_boundary_cache,
+                # Rebuild rows as well as topology so the per-step and final
+                # snapshots never combine the post-solid obstacle with the
+                # previous fluid stage's boundary mask.  The resulting cache
+                # also lets the next predictor reuse search and cleanup.
+                topology_only=False,
+            )
+        )
+        _require_hibm_velocity_dirichlet_health(
+            latest_observer_topology_report,
+            context=f"FSI step {step_index + 1} post-solid observer assembly",
+        )
+        refresh_runtime_pressure_pair_anchors()
+        feedback_available_for_projection = True
+        step_solid_positions_m = solid.x.to_numpy()[: solid.particle_count]
+        step_displacement = _solid_displacement_report(
+            solid,
+            fixed_mask,
+            tip_mask,
+            rest=rest_positions_m,
+            positions=step_solid_positions_m,
+        )
+        history.append(
+            {
+                "step": step_index + 1,
+                "apply_marker_feedback_to_fluid": apply_feedback,
+                "flow_driver_mode": latest_flow_report["flow_driver_mode"],
+                "flow_driver_diagnostic_only": latest_flow_report[
+                    "flow_driver_diagnostic_only"
+                ],
+                "flow_driver_uses_full_velocity_reset": latest_flow_report[
+                    "flow_driver_uses_full_velocity_reset"
+                ],
+                "flow_full_field_reinitialized": latest_flow_report[
+                    "flow_full_field_reinitialized"
+                ],
+                "flow_inlet_boundary_reapplied": latest_flow_report[
+                    "flow_inlet_boundary_reapplied"
+                ],
+                "flow_volume_source_applied": latest_flow_report[
+                    "flow_volume_source_applied"
+                ],
+                "flow_inlet_source_strength": float(
+                    getattr(config, "flow_inlet_source_strength", 1.0)
+                ),
+                "flow_inlet_source_profile": str(
+                    getattr(config, "flow_inlet_source_profile", "constant")
+                ),
+                "flow_inlet_source_ramp_steps": int(
+                    getattr(config, "flow_inlet_source_ramp_steps", 0)
+                ),
+                "flow_inlet_source_schedule_scope": str(
+                    getattr(config, "flow_inlet_source_schedule_scope", "global")
+                ),
+                "flow_inlet_source_factor": latest_flow_report[
+                    "flow_inlet_source_factor"
+                ],
+                "flow_inlet_source_normal_velocity_mps": latest_flow_report[
+                    "flow_inlet_source_normal_velocity_mps"
+                ],
+                "flow_pressure_outlet_enabled": bool(
+                    getattr(config, "flow_pressure_outlet_enabled", True)
+                ),
+                "flow_outlet_balance_policy": str(
+                    getattr(config, "flow_outlet_balance_policy", "report_only")
+                ),
+                "flow_predictor_applied": latest_flow_report[
+                    "flow_predictor_applied"
+                ],
+                "flow_predictor_note": latest_flow_report["flow_predictor_note"],
+                "flow_predictor_kinematic_viscosity_m2_s": latest_flow_report[
+                    "flow_predictor_kinematic_viscosity_m2_s"
+                ],
+                "flow_predictor_no_slip_domain_walls": latest_flow_report[
+                    "flow_predictor_no_slip_domain_walls"
+                ],
+                "flow_solid_boundary_mode": latest_flow_report[
+                    "flow_solid_boundary_mode"
+                ],
+                "flow_pressure_outlet_backflow_policy": latest_flow_report[
+                    "flow_pressure_outlet_backflow_policy"
+                ],
+                "hibm_sharp_marker_boundary_enabled": latest_flow_report[
+                    "hibm_sharp_marker_boundary_enabled"
+                ],
+                "hibm_sharp_marker_boundary_search_reused": latest_flow_report[
+                    "hibm_sharp_marker_boundary_search_reused"
+                ],
+                "hibm_sharp_marker_boundary_topology_reused": latest_flow_report[
+                    "hibm_sharp_marker_boundary_topology_reused"
+                ],
+                "hibm_preassembly_overflow_singleton_cleanup_cell_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_overflow_singleton_cleanup_cell_count"
+                    ]
+                ),
+                "hibm_preassembly_overflow_singleton_cleanup_component_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_overflow_singleton_cleanup_component_count"
+                    ]
+                ),
+                "hibm_preassembly_tiny_unreached_cleanup_cell_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_tiny_unreached_cleanup_cell_count"
+                    ]
+                ),
+                "hibm_preassembly_tiny_unreached_cleanup_component_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_tiny_unreached_cleanup_component_count"
+                    ]
+                ),
+                "hibm_preassembly_tiny_unreached_cleanup_pass_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_tiny_unreached_cleanup_pass_count"
+                    ]
+                ),
+                "hibm_preassembly_remaining_unreached_cell_count": (
+                    latest_flow_report[
+                        "hibm_preassembly_remaining_unreached_cell_count"
+                    ]
+                ),
+                "hibm_preassembly_cleanup_reused": latest_flow_report[
+                    "hibm_preassembly_cleanup_reused"
+                ],
+                "hibm_preassembly_topology_mutated": latest_flow_report[
+                    "hibm_preassembly_topology_mutated"
+                ],
+                "hibm_sharp_marker_boundary_near_node_count": latest_flow_report[
+                    "hibm_sharp_marker_boundary_near_node_count"
+                ],
+                "hibm_sharp_marker_boundary_external_node_count": latest_flow_report[
+                    "hibm_sharp_marker_boundary_external_node_count"
+                ],
+                "hibm_sharp_marker_boundary_internal_node_count": latest_flow_report[
+                    "hibm_sharp_marker_boundary_internal_node_count"
+                ],
+                "hibm_sharp_marker_boundary_internal_obstacle_cell_count": (
+                    latest_flow_report[
+                        "hibm_sharp_marker_boundary_internal_obstacle_cell_count"
+                    ]
+                ),
+                "hibm_sharp_marker_boundary_no_slip_rows": latest_flow_report[
+                    "hibm_sharp_marker_boundary_no_slip_rows"
+                ],
+                **_hibm_velocity_dirichlet_mapping_fields(latest_flow_report),
+                **_hibm_velocity_dirichlet_mapping_fields(
+                    latest_observer_topology_report,
+                    stage="observer",
+                ),
+                "hibm_sharp_marker_boundary_pressure_neumann_rows": (
+                    latest_flow_report[
+                        "hibm_sharp_marker_boundary_pressure_neumann_rows"
+                    ]
+                ),
+                "hibm_sharp_marker_boundary_pressure_gradient_updated": (
+                    latest_flow_report[
+                        "hibm_sharp_marker_boundary_pressure_gradient_updated"
+                    ]
+                ),
+                "hibm_pressure_neumann_skipped_velocity_dirichlet_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_skipped_velocity_dirichlet_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_skipped_pressure_boundary_adjacent_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_skipped_obstacle_owner_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_skipped_obstacle_owner_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_relocated_obstacle_owner_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_relocated_obstacle_owner_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_duplicate_owner_count": latest_flow_report[
+                    "hibm_pressure_neumann_duplicate_owner_count"
+                ],
+                "hibm_pressure_neumann_invalid_reconstruction_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_invalid_reconstruction_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_invalid_unreconstructable_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_invalid_unreconstructable_count"
+                    ]
+                ),
+                "hibm_pressure_neumann_invalid_bad_marker_count": latest_flow_report[
+                    "hibm_pressure_neumann_invalid_bad_marker_count"
+                ],
+                "hibm_pressure_neumann_invalid_nonpositive_volume_count": (
+                    latest_flow_report[
+                        "hibm_pressure_neumann_invalid_nonpositive_volume_count"
+                    ]
+                ),
+                "flow_inlet_boundary_active_cell_count": latest_flow_report[
+                    "flow_inlet_boundary_active_cell_count"
+                ],
+                "flow_inlet_boundary_obstacle_cell_count": latest_flow_report[
+                    "flow_inlet_boundary_obstacle_cell_count"
+                ],
+                "flow_phase": latest_flow_report["flow_phase"],
+                "flow_step_index_local": latest_flow_report[
+                    "flow_step_index_local"
+                ],
+                "flow_step_index_global": latest_flow_report[
+                    "flow_step_index_global"
+                ],
+                "flow_source_schedule_step_index": latest_flow_report[
+                    "flow_source_schedule_step_index"
+                ],
+                "flow_source_schedule_scope": latest_flow_report[
+                    "flow_source_schedule_scope"
+                ],
+                "flow_source_ramp_restarted_after_preflow": latest_flow_report[
+                    "flow_source_ramp_restarted_after_preflow"
+                ],
+                "flow_reset_pressure_each_step": bool(
+                    getattr(config, "flow_reset_pressure_each_step", False)
+                ),
+                "flow_pressure_reset_applied": latest_flow_report[
+                    "flow_pressure_reset_applied"
+                ],
+                "flow_reinitialize_inlet_each_step": bool(
+                    getattr(config, "flow_reinitialize_inlet_each_step", False)
+                ),
+                "fluid_recomputed": True,
+                "fluid_recomputed_after_feedback": (
+                    feedback_available_before_projection
+                ),
+                "feedback_available_before_projection": (
+                    feedback_available_before_projection
+                ),
+                "fluid_projection_consumed_feedback": (
+                    latest_feedback_constraint_report[
+                        "fluid_projection_consumed_feedback"
+                    ]
+                ),
+                "fluid_feedback_constraint_marker_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_marker_count"
+                    ]
+                ),
+                "fluid_feedback_constraint_active_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_active_cell_count"
+                    ]
+                ),
+                "fluid_feedback_constraint_cleared_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_cleared_cell_count"
+                    ]
+                ),
+                "fluid_feedback_constraint_obstacle_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_obstacle_cell_count"
+                    ]
+                ),
+                "fluid_feedback_constraint_non_obstacle_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_non_obstacle_cell_count"
+                    ]
+                ),
+                "fluid_feedback_constraint_projection_participating_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_feedback_constraint_projection_participating_cell_count"
+                    ]
+                ),
+                "fluid_marker_velocity_constraints_enabled": (
+                    latest_feedback_constraint_report[
+                        "fluid_marker_velocity_constraints_enabled"
+                    ]
+                ),
+                "fluid_marker_velocity_constraint_active_cell_count": (
+                    latest_feedback_constraint_report[
+                        "fluid_marker_velocity_constraint_active_cell_count"
+                    ]
+                ),
+                "fluid_marker_feedback_enforcement_mode": (
+                    latest_feedback_constraint_report[
+                        "fluid_marker_feedback_enforcement_mode"
+                    ]
+                ),
+                **latest_dynamic_obstacle_report,
+                "hibm_observer_topology_refreshed": bool(
+                    latest_observer_topology_report.get(
+                        "hibm_sharp_marker_boundary_enabled",
+                        False,
+                    )
+                ),
+                "hibm_observer_topology_near_node_count": int(
+                    latest_observer_topology_report.get(
+                        "hibm_sharp_marker_boundary_near_node_count",
+                        0,
+                    )
+                ),
+                "hibm_observer_topology_external_node_count": int(
+                    latest_observer_topology_report.get(
+                        "hibm_sharp_marker_boundary_external_node_count",
+                        0,
+                    )
+                ),
+                "hibm_observer_topology_internal_node_count": int(
+                    latest_observer_topology_report.get(
+                        "hibm_sharp_marker_boundary_internal_node_count",
+                        0,
+                    )
+                ),
+                "no_slip_residual_before_mps": latest_feedback_constraint_report[
+                    "no_slip_residual_before_mps"
+                ],
+                "no_slip_residual_after_mps": latest_feedback_constraint_report[
+                    "no_slip_residual_after_mps"
+                ],
+                "no_slip_target_residual_after_assembly_mps": (
+                    latest_feedback_constraint_report[
+                        "no_slip_target_residual_after_assembly_mps"
+                    ]
+                ),
+                "no_slip_projected_residual_after_projection_mps": (
+                    latest_feedback_constraint_report[
+                        "no_slip_projected_residual_after_projection_mps"
+                    ]
+                ),
+                "hibm_no_slip_valid_marker_count": latest_flow_report[
+                    "hibm_no_slip_valid_marker_count"
+                ],
+                "hibm_no_slip_invalid_marker_count": latest_flow_report[
+                    "hibm_no_slip_invalid_marker_count"
+                ],
+                "hibm_no_slip_max_residual_mps": latest_flow_report[
+                    "hibm_no_slip_max_residual_mps"
+                ],
+                "hibm_no_slip_l2_residual_mps": latest_flow_report[
+                    "hibm_no_slip_l2_residual_mps"
+                ],
+                "hibm_no_slip_direct_sample_marker_count": latest_flow_report[
+                    "hibm_no_slip_direct_sample_marker_count"
+                ],
+                "hibm_no_slip_normal_walk_sample_marker_count": latest_flow_report[
+                    "hibm_no_slip_normal_walk_sample_marker_count"
+                ],
+                "hibm_no_slip_nearest_fluid_sample_marker_count": latest_flow_report[
+                    "hibm_no_slip_nearest_fluid_sample_marker_count"
+                ],
+                "hibm_no_slip_no_fluid_sample_marker_count": latest_flow_report[
+                    "hibm_no_slip_no_fluid_sample_marker_count"
+                ],
+                "hibm_post_dirichlet_consistency_projection_count": (
+                    latest_flow_report[
+                        "hibm_post_dirichlet_consistency_projection_count"
+                    ]
+                ),
+                "hibm_post_dirichlet_consistency_projection_applied": (
+                    latest_flow_report[
+                        "hibm_post_dirichlet_consistency_projection_applied"
+                    ]
+                ),
+                "local_velocity_peak_mps": latest_flow_report[
+                    "local_velocity_peak_mps"
+                ],
+                "fluid_speed_p99_mps": latest_flow_report["fluid_speed_p99_mps"],
+                "fluid_speed_p999_mps": latest_flow_report["fluid_speed_p999_mps"],
+                "pressure_min_pa": latest_flow_report["pressure_min_pa"],
+                "pressure_max_pa": latest_flow_report["pressure_max_pa"],
+                "flow_projection_report": latest_flow_report["projection_report"],
+                **_flow_projection_report_fields(latest_flow_report),
+                **_flow_source_report_fields(latest_flow_report),
+                **_flow_transport_report_fields(latest_flow_report),
+                "solid_substeps_selected": solid_substeps,
+                "solid_constitutive_model": str(
+                    getattr(
+                        config,
+                        "solid_constitutive_model",
+                        SOLID_CONSTITUTIVE_MODEL_3D_NEO_HOOKEAN,
+                    )
+                ),
+                "solid_fixed_node_lock_policy": str(
+                    getattr(config, "fixed_node_lock_policy", "any_fixed_particle")
+                ),
+                "solid_velocity_transfer_flip_blend": float(
+                    getattr(config, "solid_velocity_transfer_flip_blend", 0.0)
+                ),
+                "solid_estimated_cfl": solid_substep_cfl["solid_estimated_cfl"],
+                "stress_valid_marker_count": latest_stress_report.valid_marker_count,
+                "stress_invalid_marker_count": (
+                    latest_stress_report.invalid_marker_count
+                ),
+                **_marker_projection_boundary_report_fields(
+                    markers,
+                    canonical_velocity_dirichlet_report=latest_flow_report.get(
+                        "canonical_velocity_dirichlet_report"
+                    ),
+                ),
+                "scatter_invalid_marker_count": (
+                    latest_scatter_report.invalid_marker_count
+                ),
+                "feedback_invalid_marker_count": (
+                    latest_feedback_report.invalid_marker_count
+                ),
+                "surface_feedback_preserve_marker_area": bool(
+                    getattr(
+                        config,
+                        "preserve_marker_area_during_surface_feedback",
+                        False,
+                    )
+                ),
+                "surface_feedback_geometry_updated_marker_count": (
+                    latest_feedback_report.geometry_updated_marker_count
+                ),
+                "surface_feedback_max_area_change_m2": (
+                    latest_feedback_report.max_marker_area_change_m2
+                ),
+                "total_marker_force_n": latest_force_report.total_marker_force_n,
+                **_marker_force_report_fields(latest_force_report),
+                **_stress_sampling_report_fields(latest_stress_report),
+                **_marker_traction_report_fields(
+                    markers, include_face_diagnostics=False
+                ),
+                **anchor_install_report,
+                **_scatter_report_fields(latest_scatter_report),
+                "mpm_external_force_n": latest_solid_report.external_force_n,
+                "mpm_primary_mean_velocity_mps": (
+                    latest_solid_report.primary_mean_velocity_mps
+                ),
+                "mpm_secondary_mean_velocity_mps": (
+                    latest_solid_report.secondary_mean_velocity_mps
+                ),
+                "mpm_primary_mean_displacement_m": (
+                    latest_solid_report.primary_mean_displacement_m
+                ),
+                "mpm_secondary_mean_displacement_m": (
+                    latest_solid_report.secondary_mean_displacement_m
+                ),
+                "mpm_active_grid_nodes": latest_solid_report.active_grid_nodes,
+                "mpm_grid_out_of_bounds_particle_count": (
+                    latest_solid_report.grid_out_of_bounds_particle_count
+                ),
+                "mpm_max_speed_mps": latest_solid_report.max_speed_mps,
+                "mpm_deformation_clamp_count": (
+                    latest_solid_report.deformation_clamp_count
+                ),
+                "max_displacement_m": step_displacement["max_displacement_m"],
+                "root_max_displacement_m": step_displacement[
+                    "root_max_displacement_m"
+                ],
+                "tip_mean_displacement_m": step_displacement[
+                    "tip_mean_displacement_m"
+                ],
+            }
+        )
+        if step_observer is not None:
+            if observer_flow_snapshot is None:
+                raise RuntimeError("step observer flow snapshot was not captured")
+            step_observer(
+                step_index + 1,
+                float(config.dt_s) * float(step_index + 1),
+                dict(history[-1]),
+                _step_observer_snapshot(
+                    observer_flow_snapshot,
+                    solid,
+                    markers,
+                    solid_positions_m=step_solid_positions_m,
+                    solid_rest_positions_m=rest_positions_m,
+                    fixed_mask=fixed_mask,
+                    tip_mask=tip_mask,
+                ),
+            )
+
+        _emit_run_progress(
+            progress_observer,
+            run_started_s=run_started_s,
+            phase="fsi_step",
+            step_completed=step_index + 1,
+            time_s=float(config.dt_s) * float(step_index + 1),
+            max_displacement_m=float(step_displacement["max_displacement_m"]),
+        )
+    if config.step_count == 0 and preflow_history:
+        return _preflow_only_report(
+            case_id=case_id,
+            case_metadata=case_metadata,
+            boundary_conditions=boundary_conditions,
+            reference_results=reference_results,
+            config=config,
+            markers=markers,
+            solid=solid,
+            fixed_mask=fixed_mask,
+            tip_mask=tip_mask,
+            solid_substep_cfl=solid_substep_cfl,
+            preflow_report=preflow_report,
+        )
+
+    if (
+        latest_stress_report is None
+        or latest_force_report is None
+        or latest_scatter_report is None
+        or latest_solid_report is None
+        or latest_feedback_report is None
+        or latest_flow_report is None
+        or latest_feedback_constraint_report is None
+    ):
+        raise RuntimeError("rectangular solid marker-MPM FSI smoke did not advance")
+
+    displacement = _solid_displacement_report(solid, fixed_mask, tip_mask)
+    reference_displacement = float(reference_results["max_displacement_m"])
+    reference_velocity_peak = float(reference_results["local_velocity_peak_mps"])
+    max_displacement = float(displacement["max_displacement_m"])
+    local_velocity_peak_mps = float(latest_flow_report["local_velocity_peak_mps"])
+    displacement_relative_error = (
+        abs(max_displacement - reference_displacement) / reference_displacement
+    )
+    velocity_relative_error = (
+        abs(local_velocity_peak_mps - reference_velocity_peak) / reference_velocity_peak
+    )
+    pressure_force_source = (
+        "total_marker_force_n_pressure_only"
+        if not _traction_include_viscous(config)
+        else "total_marker_force_n_pressure_plus_viscous"
+    )
+    slab_diagnostics = slab_equivalence_diagnostics(
+        config,
+        interface_force_total_n=latest_force_report.total_marker_force_n,
+        pressure_force_total_n=latest_force_report.total_marker_force_n,
+        marker_total_area_m2=_marker_total_area_m2(markers),
+        solid_mass_total_kg=latest_solid_report.total_mass_kg,
+        max_displacement_m=max_displacement,
+        pressure_force_source=pressure_force_source,
+    )
+
+    return {
+        "case": case_id,
+        "case_metadata": dict(case_metadata),
+        "config": asdict(config),
+        "flow_solution_mode": FLOW_SOLUTION_MODE,
+        "streamwise_axis": AXIS_NAMES[STREAMWISE_AXIS_INDEX],
+        "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
+        **slab_diagnostics,
+        **preflow_report,
+        "apply_marker_feedback_to_fluid": apply_feedback,
+        "flow_driver_mode": flow_driver_mode,
+        "flow_driver_diagnostic_only": (
+            flow_driver_mode == FLOW_DRIVER_REINITIALIZE_DIAGNOSTIC
+        ),
+        "flow_inlet_source_strength": float(
+            getattr(config, "flow_inlet_source_strength", 1.0)
+        ),
+        "flow_inlet_source_profile": str(
+            getattr(config, "flow_inlet_source_profile", "constant")
+        ),
+        "flow_inlet_source_ramp_steps": int(
+            getattr(config, "flow_inlet_source_ramp_steps", 0)
+        ),
+        "flow_inlet_source_schedule_scope": str(
+            getattr(config, "flow_inlet_source_schedule_scope", "global")
+        ),
+        "flow_pressure_outlet_enabled": bool(
+            getattr(config, "flow_pressure_outlet_enabled", True)
+        ),
+        "flow_outlet_balance_policy": str(
+            getattr(config, "flow_outlet_balance_policy", "report_only")
+        ),
+        "flow_reset_pressure_each_step": bool(
+            getattr(config, "flow_reset_pressure_each_step", False)
+        ),
+        "flow_pressure_reset_applied": latest_flow_report[
+            "flow_pressure_reset_applied"
+        ],
+        "flow_reinitialize_inlet_each_step": bool(
+            getattr(config, "flow_reinitialize_inlet_each_step", False)
+        ),
+        "official_half_domain": _is_official_half_domain(case_metadata),
+        "full_domain_two_flap": False,
+        "flap_count_modeled": 1,
+        "flap_count_displayed_after_symmetry_mirror": (
+            2 if _is_official_half_domain(case_metadata) else 1
+        ),
+        "modeled_grid_nodes": list(config.grid_nodes),
+        "display_grid_after_symmetry_mirror": _display_grid_after_symmetry_mirror(
+            config,
+            case_metadata,
+        ),
+        "flap_box_m": {
+            "min": list(_solid_box(config)[0]),
+            "max": list(_solid_box(config)[1]),
+        },
+        "marker_face_count": _traction_marker_face_count(config),
+        "marker_count_per_face": int(config.marker_count),
+        "marker_count_actual": int(markers.marker_count),
+        "marker_projection_mode": (
+            "segments" if int(markers.projection_segment_count) > 0 else "points"
+        ),
+        "marker_projection_segment_count": int(markers.projection_segment_count),
+        **_marker_projection_boundary_report_fields(
+            markers,
+            canonical_velocity_dirichlet_report=latest_flow_report.get(
+                "canonical_velocity_dirichlet_report"
+            ),
+        ),
+        "flow_projection_iterations_actual": int(config.flow_projection_iterations),
+        "solid_seeding_report": solid_seeding,
+        "solid_substep_cfl_report": solid_substep_cfl,
+        "solid_substeps_requested": solid_substep_cfl["solid_substeps_requested"],
+        "solid_substeps_selected": solid_substep_cfl["solid_substeps_selected"],
+        "solid_substeps_cfl_minimum": solid_substep_cfl[
+            "solid_substeps_cfl_minimum"
+        ],
+        "solid_estimated_cfl": solid_substep_cfl["solid_estimated_cfl"],
+        "solid_elastic_wave_speed_mps": solid_substep_cfl[
+            "solid_elastic_wave_speed_mps"
+        ],
+        "solid_min_grid_spacing_m": solid_substep_cfl["solid_min_grid_spacing_m"],
+        "solid_cfl_target": solid_substep_cfl["solid_cfl_target"],
+        "computed_result_sources": {
+            "pressure_pa": "fluid.fsi_pressure",
+            "local_velocity_peak_mps": "max(norm(fluid.velocity))",
+            "fluid_interface_force_n": "HIBM marker traction integral",
+            "max_displacement_m": "solid.x-rest_x",
+        },
+        "boundary_conditions": dict(boundary_conditions),
+        "reference_results": dict(reference_results),
+        "flow_projection_report": latest_flow_report["projection_report"],
+        "flow_phase": latest_flow_report["flow_phase"],
+        "flow_step_index_local": latest_flow_report["flow_step_index_local"],
+        "flow_step_index_global": latest_flow_report["flow_step_index_global"],
+        "flow_source_schedule_step_index": latest_flow_report[
+            "flow_source_schedule_step_index"
+        ],
+        "flow_source_schedule_scope": latest_flow_report["flow_source_schedule_scope"],
+        "flow_source_ramp_restarted_after_preflow": latest_flow_report[
+            "flow_source_ramp_restarted_after_preflow"
+        ],
+        **_flow_source_report_fields(latest_flow_report),
+        **_flow_transport_report_fields(latest_flow_report),
+        "flow_obstacle_cell_count": latest_flow_report["obstacle_cell_count"],
+        "flow_fluid_cell_count": latest_flow_report["fluid_cell_count"],
+        "computed_pressure_min_pa": latest_flow_report["pressure_min_pa"],
+        "computed_pressure_max_pa": latest_flow_report["pressure_max_pa"],
+        "pressure_sign_convention": latest_flow_report["pressure_sign_convention"],
+        "local_velocity_peak_mps": local_velocity_peak_mps,
+        "fluid_speed_p99_mps": latest_flow_report["fluid_speed_p99_mps"],
+        "fluid_speed_p999_mps": latest_flow_report["fluid_speed_p999_mps"],
+        "local_velocity_peak_relative_error": velocity_relative_error,
+        "velocity_peak_tolerance": config.velocity_peak_tolerance,
+        "fluid_recomputed_after_feedback": (
+            fluid_projection_after_feedback_count > 0
+        ),
+        "feedback_closure_status": (
+            "CLOSED_LOOP_RECOMPUTED_AFTER_FEEDBACK"
+            if fluid_projection_after_feedback_count > 0
+            else "OPEN_LOOP_OR_PREFEEDBACK_ONLY"
+        ),
+        "fluid_recompute_count": fluid_projection_count,
+        "fluid_projection_count": fluid_projection_count,
+        "fluid_projection_after_feedback_count": (
+            fluid_projection_after_feedback_count
+        ),
+        "fluid_projection_consumed_feedback_count": (
+            fluid_projection_consumed_feedback_count
+        ),
+        "fluid_projection_consumed_feedback": latest_feedback_constraint_report[
+            "fluid_projection_consumed_feedback"
+        ],
+        "fluid_feedback_constraint_marker_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_marker_count"
+            ]
+        ),
+        "fluid_feedback_constraint_active_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_active_cell_count"
+            ]
+        ),
+        "fluid_feedback_constraint_cleared_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_cleared_cell_count"
+            ]
+        ),
+        "fluid_feedback_constraint_obstacle_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_obstacle_cell_count"
+            ]
+        ),
+        "fluid_feedback_constraint_non_obstacle_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_non_obstacle_cell_count"
+            ]
+        ),
+        "fluid_feedback_constraint_projection_participating_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_feedback_constraint_projection_participating_cell_count"
+            ]
+        ),
+        "fluid_marker_velocity_constraints_enabled": (
+            latest_feedback_constraint_report[
+                "fluid_marker_velocity_constraints_enabled"
+            ]
+        ),
+        "fluid_marker_velocity_constraint_active_cell_count": (
+            latest_feedback_constraint_report[
+                "fluid_marker_velocity_constraint_active_cell_count"
+            ]
+        ),
+        "no_slip_residual_before_mps": latest_feedback_constraint_report[
+            "no_slip_residual_before_mps"
+        ],
+        "no_slip_residual_after_mps": latest_feedback_constraint_report[
+            "no_slip_residual_after_mps"
+        ],
+        "no_slip_target_residual_after_assembly_mps": (
+            latest_feedback_constraint_report[
+                "no_slip_target_residual_after_assembly_mps"
+            ]
+        ),
+        "no_slip_projected_residual_after_projection_mps": (
+            latest_feedback_constraint_report[
+                "no_slip_projected_residual_after_projection_mps"
+            ]
+        ),
+        "stress_valid_marker_count": latest_stress_report.valid_marker_count,
+        "stress_invalid_marker_count": latest_stress_report.invalid_marker_count,
+        "two_sided_pressure_marker_count": (
+            latest_stress_report.two_sided_pressure_marker_count
+        ),
+        "max_abs_traction_pa": latest_stress_report.max_abs_traction_pa,
+        "total_marker_force_n": latest_force_report.total_marker_force_n,
+        **_marker_force_report_fields(latest_force_report),
+        **_stress_sampling_report_fields(latest_stress_report),
+        **_marker_traction_report_fields(markers, include_face_diagnostics=True),
+        **anchor_install_report,
+        "scatter_invalid_marker_count": latest_scatter_report.invalid_marker_count,
+        "scatter_active_marker_count": latest_scatter_report.active_marker_count,
+        "scatter_active_particle_count": latest_scatter_report.active_pair_count,
+        **_scatter_report_fields(latest_scatter_report),
+        "mpm_external_force_n": latest_solid_report.external_force_n,
+        "surface_feedback_updated_marker_count": (
+            latest_feedback_report.updated_marker_count
+        ),
+        "surface_feedback_invalid_marker_count": (
+            latest_feedback_report.invalid_marker_count
+        ),
+        "surface_feedback_max_marker_displacement_m": (
+            latest_feedback_report.max_marker_displacement_m
+        ),
+        "final_stress_marker_diagnostics": markers.stress_marker_diagnostics(),
+        "final_stress_face_diagnostics": markers.stress_face_diagnostics(
+            primary_region_id=PRIMARY_REGION_ID,
+            secondary_region_id=SECONDARY_REGION_ID,
+            streamwise_axis_index=STREAMWISE_AXIS_INDEX,
+            include_face_diagnostics=True,
+        ),
+        "pressure_pair_anchor_pair_map": pressure_pair_anchor_pair_map,
+        "history": history,
+        "max_displacement_m": max_displacement,
+        "reference_max_displacement_m": reference_displacement,
+        "max_displacement_relative_error": displacement_relative_error,
+        "displacement_tolerance": config.displacement_tolerance,
+        "final_flow_field_snapshot": (
+            final_flow_field_snapshot
+            if history and bool(getattr(config, "export_final_flow_snapshot", False))
+            else {}
+        ),
+        **displacement,
+    }
+
+
 def _fsi_marker_velocity_coupling_config(config: Any) -> FsiCouplingConfig:
     return FsiCouplingConfig(
         max_iterations=int(getattr(config, "fsi_coupling_iterations", 8)),
@@ -2652,6 +3653,19 @@ def _preflow_snapshot_paths(config: Any) -> tuple[object | None, object | None]:
 
 
 def _validate_rectangular_solid_config(config: Any) -> None:
+    boundary_mode = str(
+        getattr(
+            config,
+            "flow_solid_boundary_mode",
+            FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS,
+        )
+    )
+    if boundary_mode != FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS:
+        raise ValueError(
+            "flow_solid_boundary_mode must be "
+            f"{FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS!r}; got {boundary_mode!r}"
+        )
+
     _preflow_snapshot_paths(config)
     _preflow_traction_readiness_mode(config)
     step_end_projection_enabled = getattr(
@@ -11105,7 +12119,59 @@ def _relative_delta(current: object, previous: object) -> float:
     return abs(current_value - previous_value) / scale
 
 
-def _flow_field_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
+_IMMUTABLE_FLOW_GEOMETRY_FIELD_NAMES = (
+    "cell_face_x_m",
+    "cell_face_y_m",
+    "cell_face_z_m",
+    "cell_center_x_m",
+    "cell_center_y_m",
+    "cell_center_z_m",
+    "cell_width_x_m",
+    "cell_width_y_m",
+    "cell_width_z_m",
+)
+_PARITY_FLOW_GEOMETRY_FIELD_NAMES = (
+    "cell_center_y_m",
+    "cell_center_z_m",
+)
+
+
+def _flow_geometry_snapshot_cache_required(
+    *,
+    step_count: int,
+    has_step_observer: bool,
+    export_final_flow_snapshot: bool,
+) -> bool:
+    return step_count > 0 and (
+        has_step_observer or export_final_flow_snapshot
+    )
+
+
+def _immutable_flow_geometry_snapshot(
+    fluid: CartesianFluidSolver,
+    *,
+    include_full_geometry: bool,
+) -> dict[str, np.ndarray]:
+    """Download immutable grid geometry once for host-side snapshot export."""
+
+    field_names = (
+        _IMMUTABLE_FLOW_GEOMETRY_FIELD_NAMES
+        if include_full_geometry
+        else _PARITY_FLOW_GEOMETRY_FIELD_NAMES
+    )
+    snapshot: dict[str, np.ndarray] = {}
+    for field_name in field_names:
+        value = np.asarray(getattr(fluid, field_name).to_numpy()).copy()
+        value.setflags(write=False)
+        snapshot[field_name] = value
+    return snapshot
+
+
+def _flow_field_snapshot(
+    fluid: CartesianFluidSolver,
+    *,
+    immutable_geometry: Mapping[str, np.ndarray] | None = None,
+) -> dict[str, np.ndarray]:
     snapshot = {
         "pressure": _fluid_feedback_pressure_numpy(fluid),
         "velocity": fluid.velocity.to_numpy(),
@@ -11138,23 +12204,28 @@ def _flow_field_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
         "velocity_dirichlet_boundary_marker_region_id": (
             fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
         ),
-        "cell_face_x_m": fluid.cell_face_x_m.to_numpy(),
-        "cell_face_y_m": fluid.cell_face_y_m.to_numpy(),
-        "cell_face_z_m": fluid.cell_face_z_m.to_numpy(),
-        "cell_center_x_m": fluid.cell_center_x_m.to_numpy(),
-        "cell_center_y_m": fluid.cell_center_y_m.to_numpy(),
-        "cell_center_z_m": fluid.cell_center_z_m.to_numpy(),
-        "cell_width_x_m": fluid.cell_width_x_m.to_numpy(),
-        "cell_width_y_m": fluid.cell_width_y_m.to_numpy(),
-        "cell_width_z_m": fluid.cell_width_z_m.to_numpy(),
     }
+    snapshot.update(
+        {
+            field_name: (
+                immutable_geometry[field_name]
+                if immutable_geometry is not None
+                else getattr(fluid, field_name).to_numpy()
+            )
+            for field_name in _IMMUTABLE_FLOW_GEOMETRY_FIELD_NAMES
+        }
+    )
     sampling_obstacle = getattr(fluid, "sampling_obstacle", None)
     if sampling_obstacle is not None:
         snapshot["sampling_obstacle"] = sampling_obstacle.to_numpy()
     return snapshot
 
 
-def _flow_parity_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
+def _flow_parity_snapshot(
+    fluid: CartesianFluidSolver,
+    *,
+    immutable_geometry: Mapping[str, np.ndarray] | None = None,
+) -> dict[str, np.ndarray]:
     """Return only the arrays needed for per-step Fluent-parity frames."""
 
     return {
@@ -11189,8 +12260,16 @@ def _flow_parity_snapshot(fluid: CartesianFluidSolver) -> dict[str, np.ndarray]:
         "velocity_dirichlet_boundary_marker_region_id": (
             fluid.velocity_dirichlet_boundary_marker_region_id.to_numpy()
         ),
-        "cell_center_y_m": fluid.cell_center_y_m.to_numpy(),
-        "cell_center_z_m": fluid.cell_center_z_m.to_numpy(),
+        "cell_center_y_m": (
+            immutable_geometry["cell_center_y_m"]
+            if immutable_geometry is not None
+            else fluid.cell_center_y_m.to_numpy()
+        ),
+        "cell_center_z_m": (
+            immutable_geometry["cell_center_z_m"]
+            if immutable_geometry is not None
+            else fluid.cell_center_z_m.to_numpy()
+        ),
     }
 
 

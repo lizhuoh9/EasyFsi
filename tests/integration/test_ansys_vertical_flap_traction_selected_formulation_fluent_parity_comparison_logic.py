@@ -120,7 +120,9 @@ class AnsysVerticalFlapFluentParityComparisonLogicTests(unittest.TestCase):
 
     def test_active_manifest_rejects_absolute_contract_path(self):
         manifest = _real_active_manifest()
-        manifest["active_contract"] = "C:/tmp/fluent_reference_contract.json"
+        manifest["active_contract"] = str(
+            Path.cwd().resolve() / "fluent_reference_contract.json"
+        )
 
         with self.assertRaisesRegex(ValueError, "not repo-relative"):
             RUNNER._validate_active_contract_manifest(manifest)

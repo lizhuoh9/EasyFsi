@@ -2143,7 +2143,7 @@ def test_snapshot_path_conflict_is_rejected_before_cuda_runtime_construction():
         patch.object(solid_mpm_fsi_runner, "TaichiRuntimeConfig") as runtime,
         pytest.raises(ValueError, match="cannot both be set"),
     ):
-        solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke(
+        solid_mpm_fsi_runner.run_hibm_mpm_fsi(
             case_id="snapshot-path-conflict",
             case_metadata={},
             boundary_conditions={},

@@ -16,7 +16,7 @@ def test_no_arg_cli_uses_the_declared_smoke_preset() -> None:
     captured = []
     with patch.object(
         vertical_flap,
-        "run_vertical_flap_fsi_smoke",
+        "run_ansys_vertical_flap_benchmark",
         side_effect=lambda config: captured.append(config) or _completed_report(),
     ):
         vertical_flap.main([])

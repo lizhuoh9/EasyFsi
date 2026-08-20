@@ -19,6 +19,7 @@ class TaichiRuntimeConfig:
     random_seed: int = 0
     offline_cache: bool | None = None
     offline_cache_file_path: str | None = None
+    strict_arch: bool = False
 
 
 _INITIALIZED = False
@@ -51,9 +52,7 @@ def _normalized_cache_path(value: object, source: str) -> str:
         raise ValueError(f"{source} must be a filesystem path") from exc
     if not isinstance(path, str) or not path.strip():
         raise ValueError(f"{source} must be a non-blank filesystem path")
-    return os.path.normcase(
-        os.path.abspath(os.path.expanduser(path))
-    )
+    return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
 
 
 def _requested_offline_cache(
@@ -63,9 +62,7 @@ def _requested_offline_cache(
     if offline_cache is not None and not isinstance(offline_cache, bool):
         raise ValueError("offline_cache must be a bool or None")
     if offline_cache is None:
-        offline_cache = _environment_flag(
-            "SIMULATION_TAICHI_OFFLINE_CACHE"
-        )
+        offline_cache = _environment_flag("SIMULATION_TAICHI_OFFLINE_CACHE")
     if offline_cache is None:
         offline_cache = _environment_flag("TI_OFFLINE_CACHE")
     if offline_cache is None:
@@ -96,21 +93,39 @@ def _requested_offline_cache(
     return offline_cache, normalized_path
 
 
+def _assert_actual_runtime_arch(requested_arch: str) -> None:
+    actual_arch = getattr(ti.cfg, "arch", None)
+    if requested_arch == "cuda":
+        matches_request = actual_arch == ti.cuda
+    else:
+        matches_request = actual_arch in ti.gpu
+    if not matches_request:
+        raise RuntimeError(
+            "Taichi actual runtime arch="
+            f"{actual_arch!r} does not match requested arch="
+            f"{requested_arch!r}; TI_ARCH may have overridden the request"
+        )
+
+
 def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
     """Initialize Taichi once for the simulation core.
 
-    The first call wins; later calls are no-ops only when they request the
-    same architecture, floating-point mode, random seed, and offline-cache
-    identity.
-    Conflicting requests fail instead of producing misleading provenance.
+    The first call wins. Legacy implicit calls (``config is None``) reuse an
+    existing runtime when its floating-point mode matches. Explicit configs
+    must match the existing architecture, floating-point mode, random seed,
+    and offline-cache identity. Conflicting explicit requests fail instead
+    of producing misleading provenance.
     """
 
+    implicit_default_request = config is None
     cfg = config or TaichiRuntimeConfig()
     requested_arch = cfg.arch.lower()
     if requested_arch == "cpu":
         raise ValueError("simulation_core is GPU-only; use arch='cuda' or arch='gpu'")
     if requested_arch not in _SUPPORTED_ARCHS:
         raise ValueError(f"unsupported Taichi arch: {cfg.arch!r}")
+    if not isinstance(cfg.strict_arch, bool):
+        raise ValueError("strict_arch must be a bool")
     requested_fp = str(cfg.default_fp)
     if requested_fp not in _SUPPORTED_FPS:
         raise ValueError(
@@ -122,15 +137,19 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
         raise ValueError("random_seed must be an integer")
     requested_random_seed = int(cfg.random_seed)
 
-    offline_cache, offline_cache_file_path = _requested_offline_cache(cfg)
-
     global _INITIALIZED, _INITIALIZED_ARCH, _INITIALIZED_FP
     global _INITIALIZED_RANDOM_SEED
     global _INITIALIZED_OFFLINE_CACHE
     global _INITIALIZED_OFFLINE_CACHE_FILE_PATH
     with _INIT_LOCK:
         if _INITIALIZED:
-            if _INITIALIZED_ARCH is not None and requested_arch != _INITIALIZED_ARCH:
+            if cfg.strict_arch:
+                _assert_actual_runtime_arch(requested_arch)
+            if (
+                not implicit_default_request
+                and _INITIALIZED_ARCH is not None
+                and requested_arch != _INITIALIZED_ARCH
+            ):
                 raise ValueError(
                     "Taichi is already initialized with "
                     f"arch={_INITIALIZED_ARCH!r}; cannot re-initialize with "
@@ -142,6 +161,11 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
                     f"default_fp={_INITIALIZED_FP!r}; cannot re-initialize with "
                     f"default_fp={requested_fp!r}"
                 )
+            if implicit_default_request:
+                return
+            offline_cache, offline_cache_file_path = (
+                _requested_offline_cache(cfg)
+            )
             if requested_random_seed != _INITIALIZED_RANDOM_SEED:
                 raise ValueError(
                     "Taichi is already initialized with "
@@ -164,21 +188,24 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
                 )
             return
 
+        offline_cache, offline_cache_file_path = _requested_offline_cache(cfg)
         arch = ti.cuda if requested_arch == "cuda" else ti.gpu
         default_fp = ti.f32 if requested_fp == "f32" else ti.f64
-        taichi_kwargs: dict[str, object] = {}
-        if offline_cache is not None:
-            taichi_kwargs["offline_cache"] = bool(offline_cache)
+        taichi_kwargs: dict[str, object] = {
+            "offline_cache": bool(offline_cache),
+        }
         if offline_cache_file_path:
-            taichi_kwargs["offline_cache_file_path"] = (
-                offline_cache_file_path
-            )
+            taichi_kwargs["offline_cache_file_path"] = offline_cache_file_path
+        if cfg.strict_arch:
+            taichi_kwargs["enable_fallback"] = False
         ti.init(
             arch=arch,
             default_fp=default_fp,
             random_seed=requested_random_seed,
             **taichi_kwargs,
         )
+        if cfg.strict_arch:
+            _assert_actual_runtime_arch(requested_arch)
         _INITIALIZED = True
         _INITIALIZED_ARCH = requested_arch
         _INITIALIZED_FP = requested_fp

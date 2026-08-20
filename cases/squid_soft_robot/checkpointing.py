@@ -97,6 +97,8 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "solid_mpm_flip_blend",
     "mooney_membrane_force_scale",
     "poissons_ratio",
+    "interface_reaction_relaxation",
+    "interface_reaction_aitken",
     "min_outlet_to_main_volume_flux_ratio",
     "pressure_outlet_source_ratio_tolerance",
     "fluid_substeps",
@@ -104,7 +106,6 @@ CHECKPOINT_ARG_FINGERPRINT_FIELDS = (
     "adaptive_fluid_substeps_target_cfl",
     "adaptive_fluid_substeps_max",
     "adaptive_fluid_substeps_safety",
-    "ibm_correction_iterations",
     "fsi_coupling_iterations",
     "fsi_marker_coupling_tolerance_mps",
     "disable_pressure_outlet_zmin",
@@ -437,6 +438,231 @@ def _read_scalar_field(field: ti.template()) -> float:
 
 def _write_scalar_field(field: ti.template(), value: object) -> None:
     field[None] = float(np.asarray(value))
+
+
+def sharp_marker_state_arrays(markers) -> dict[str, np.ndarray]:
+    """Capture the dynamic sharp marker state used by a fixed-point trial."""
+    return capture_marker_interface_state(markers)
+
+
+def restore_sharp_marker_state_arrays(
+    markers,
+    state: Mapping[str, object],
+) -> None:
+    """Restore a marker state captured by :func:`sharp_marker_state_arrays`."""
+    restore_marker_interface_state(markers, state)
+
+
+def _sharp_marker_state_array(
+    state: Mapping[str, object],
+    name: str,
+    *,
+    expected_shape: tuple[int, ...] | None = None,
+) -> np.ndarray:
+    if name not in state:
+        raise ValueError(f"sharp marker state is missing {name!r}")
+    array = np.asarray(state[name], dtype=np.float64)
+    if expected_shape is not None and tuple(array.shape) != expected_shape:
+        raise ValueError(
+            f"sharp marker state {name!r} shape mismatch: "
+            f"{tuple(array.shape)} != {expected_shape}"
+        )
+    if not bool(np.all(np.isfinite(array))):
+        raise ValueError(f"sharp marker state {name!r} must be finite")
+    return array
+
+
+def _sharp_marker_fixed_point_residual_vector_mps(
+    guess: Mapping[str, object],
+    candidate: Mapping[str, object],
+    *,
+    dt_s: float,
+) -> np.ndarray:
+    dt = float(dt_s)
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt_s must be finite and positive")
+    guess_x = _sharp_marker_state_array(guess, "x_gamma_m")
+    candidate_x = _sharp_marker_state_array(
+        candidate,
+        "x_gamma_m",
+        expected_shape=tuple(guess_x.shape),
+    )
+    guess_v = _sharp_marker_state_array(guess, "v_gamma_mps")
+    candidate_v = _sharp_marker_state_array(
+        candidate,
+        "v_gamma_mps",
+        expected_shape=tuple(guess_v.shape),
+    )
+    if guess_x.ndim != 2 or guess_x.shape[1] != 3:
+        raise ValueError("x_gamma_m must have shape (marker_count, 3)")
+    if guess_v.ndim != 2 or guess_v.shape[1] != 3:
+        raise ValueError("v_gamma_mps must have shape (marker_count, 3)")
+    if guess_x.shape[0] != guess_v.shape[0]:
+        raise ValueError("x_gamma_m and v_gamma_mps marker counts must match")
+    position_residual_mps = (candidate_x - guess_x) / dt
+    velocity_residual_mps = candidate_v - guess_v
+    return np.concatenate(
+        [position_residual_mps, velocity_residual_mps],
+        axis=1,
+    )
+
+
+def sharp_marker_fixed_point_residual_mps(
+    guess: Mapping[str, object],
+    candidate: Mapping[str, object],
+    *,
+    dt_s: float,
+) -> dict[str, float | int]:
+    """Measure marker fixed-point mismatch in velocity units."""
+    residual_vector = _sharp_marker_fixed_point_residual_vector_mps(
+        guess,
+        candidate,
+        dt_s=dt_s,
+    )
+    if residual_vector.shape[0] <= 0:
+        return {
+            "l2_mps": 0.0,
+            "max_mps": 0.0,
+            "sample_count": 0,
+        }
+    marker_norms = np.linalg.norm(residual_vector, axis=1)
+    return {
+        "l2_mps": float(np.sqrt(np.mean(marker_norms * marker_norms))),
+        "max_mps": float(np.max(marker_norms)),
+        "sample_count": int(marker_norms.shape[0]),
+    }
+
+
+def _marker_group_l2_mps(
+    marker_norms_mps: np.ndarray,
+    mask: np.ndarray,
+) -> float:
+    if marker_norms_mps.shape[0] <= 0 or not bool(np.any(mask)):
+        return 0.0
+    values = marker_norms_mps[mask]
+    return float(np.sqrt(np.mean(values * values)))
+
+
+def sharp_marker_fixed_point_residual_diagnostics_mps(
+    guess: Mapping[str, object],
+    candidate: Mapping[str, object],
+    *,
+    dt_s: float,
+    marker_region_ids: object,
+    primary_region_id: int,
+    secondary_region_id: int,
+) -> dict[str, float | int]:
+    residual_vector = _sharp_marker_fixed_point_residual_vector_mps(
+        guess,
+        candidate,
+        dt_s=dt_s,
+    )
+    marker_count = int(residual_vector.shape[0])
+    if marker_count <= 0:
+        return {
+            "position_l2_mps": 0.0,
+            "position_max_mps": 0.0,
+            "velocity_l2_mps": 0.0,
+            "velocity_max_mps": 0.0,
+            "combined_l2_mps": 0.0,
+            "combined_max_mps": 0.0,
+            "primary_region_l2_mps": 0.0,
+            "secondary_region_l2_mps": 0.0,
+            "other_region_l2_mps": 0.0,
+            "max_marker_index": -1,
+            "max_marker_region_id": -1,
+            "max_marker_position_mps": 0.0,
+            "max_marker_velocity_mps": 0.0,
+            "max_marker_combined_mps": 0.0,
+        }
+    regions = np.asarray(marker_region_ids, dtype=np.int64)
+    if regions.shape[0] < marker_count:
+        raise ValueError("marker_region_ids must contain at least marker_count values")
+    regions = regions[:marker_count]
+    position_norms = np.linalg.norm(residual_vector[:, :3], axis=1)
+    velocity_norms = np.linalg.norm(residual_vector[:, 3:], axis=1)
+    marker_norms = np.linalg.norm(residual_vector, axis=1)
+    primary_mask = regions == int(primary_region_id)
+    secondary_mask = regions == int(secondary_region_id)
+    other_mask = ~(primary_mask | secondary_mask)
+    max_index = int(np.argmax(marker_norms))
+    return {
+        "position_l2_mps": float(np.sqrt(np.mean(position_norms * position_norms))),
+        "position_max_mps": float(np.max(position_norms)),
+        "velocity_l2_mps": float(np.sqrt(np.mean(velocity_norms * velocity_norms))),
+        "velocity_max_mps": float(np.max(velocity_norms)),
+        "combined_l2_mps": float(np.sqrt(np.mean(marker_norms * marker_norms))),
+        "combined_max_mps": float(np.max(marker_norms)),
+        "primary_region_l2_mps": _marker_group_l2_mps(marker_norms, primary_mask),
+        "secondary_region_l2_mps": _marker_group_l2_mps(
+            marker_norms,
+            secondary_mask,
+        ),
+        "other_region_l2_mps": _marker_group_l2_mps(marker_norms, other_mask),
+        "max_marker_index": max_index,
+        "max_marker_region_id": int(regions[max_index]),
+        "max_marker_position_mps": float(position_norms[max_index]),
+        "max_marker_velocity_mps": float(velocity_norms[max_index]),
+        "max_marker_combined_mps": float(marker_norms[max_index]),
+    }
+
+
+def relaxed_sharp_marker_state_arrays(
+    guess: Mapping[str, object],
+    candidate: Mapping[str, object],
+    *,
+    relaxation: float,
+) -> dict[str, np.ndarray]:
+    """Return a relaxed marker state without mutating either input mapping."""
+    omega = float(relaxation)
+    if not math.isfinite(omega) or not 0.0 <= omega <= 1.5:
+        raise ValueError("relaxation must be finite and in [0, 1.5]")
+    relaxed: dict[str, np.ndarray] = {}
+    for name in MARKER_INTERFACE_STATE_FIELDS:
+        guess_array = _sharp_marker_state_array(guess, name)
+        candidate_array = _sharp_marker_state_array(
+            candidate,
+            name,
+            expected_shape=tuple(guess_array.shape),
+        )
+        next_array = guess_array + omega * (candidate_array - guess_array)
+        if name == "A_gamma_m2":
+            next_array = np.maximum(next_array, 0.0)
+        elif name == "n_gamma":
+            norms = np.linalg.norm(next_array, axis=1)
+            invalid = norms <= 1.0e-12
+            safe_norms = np.where(invalid, 1.0, norms)
+            next_array = next_array / safe_norms[:, None]
+            if np.any(invalid):
+                next_array[invalid] = guess_array[invalid]
+        relaxed[name] = next_array.astype(
+            np.asarray(guess[name]).dtype,
+            copy=False,
+        )
+    return relaxed
+
+
+def _sharp_marker_aitken_relaxation(
+    *,
+    previous_relaxation: float,
+    previous_residual_mps: np.ndarray,
+    current_residual_mps: np.ndarray,
+    lower: float = 0.01,
+    upper: float = 1.0,
+) -> float:
+    previous = np.asarray(previous_residual_mps, dtype=np.float64).reshape(-1)
+    current = np.asarray(current_residual_mps, dtype=np.float64).reshape(-1)
+    if previous.shape != current.shape:
+        raise ValueError("Aitken residual vectors must have the same shape")
+    delta = current - previous
+    denominator = float(np.dot(delta, delta))
+    if denominator <= 1.0e-30:
+        return float(previous_relaxation)
+    raw = -float(previous_relaxation) * float(np.dot(previous, delta)) / denominator
+    if not math.isfinite(raw):
+        return float(previous_relaxation)
+    return max(float(lower), min(float(upper), raw))
+
 
 def sharp_pressure_neumann_gradient_state_array(sharp_coupling_state) -> np.ndarray:
     """Export the active marker pressure-Neumann gradients for trial restore."""

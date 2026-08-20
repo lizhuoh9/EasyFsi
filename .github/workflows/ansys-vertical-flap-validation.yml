@@ -122,7 +122,6 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_fixed_solid_selected_formulation_matrix.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_coupled_smoke.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_coupled_step50.py `
-            validation_runs\ansys_vertical_flap_fsi\scripts\run_ansys_vertical_flap_generic_solver.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\build_synthetic_fluent_reference_fixture.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\check_fluent_artifact_policy.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\fluent_reference_contract_schema.py `
@@ -136,7 +135,9 @@ jobs:
 
           python -m py_compile `
             tests\contracts\test_generic_fsi_solver_architecture.py `
-            tests\integration\test_ansys_vertical_flap_generic_solver_artifacts.py `
+            tests\contracts\test_architecture_boundaries.py `
+            tests\benchmarks\test_official_benchmark_solver.py `
+            tests\cases\test_ansys_vertical_flap_fsi.py `
             tests\integration\test_ansys_vertical_flap_branch_review_docs.py `
             tests\integration\test_ansys_vertical_flap_fluent_artifact_policy.py `
             tests\integration\test_ansys_vertical_flap_policy_reports.py `
@@ -153,18 +154,16 @@ jobs:
             tests\tools\test_validation_artifact_hygiene.py `
             tests\solvers\test_pressure_sample_pair_provider_contract.py
 
-      - name: Run runtime pressure-pair and generic architecture contracts
+      - name: Run shared-driver and canonical ANSYS contracts
         shell: pwsh
         run: |
           python -m unittest -v `
             tests.solvers.test_pressure_sample_pair_provider_contract `
             tests.contracts.test_generic_fsi_solver_architecture `
-            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_generic_problem_defaults_to_runtime_pressure_pairs_without_json `
-            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_generic_replay_pressure_pairs_require_anchor_json `
-            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_generic_pressure_pair_provider_mode_is_fail_closed `
-            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_runtime_pressure_pair_mode_ignores_supplied_anchor_json_source `
-            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_generic_problem_reports_runtime_half_domain_metadata `
-            tests.integration.test_ansys_vertical_flap_generic_solver_artifacts `
+            tests.contracts.test_architecture_boundaries `
+            tests.benchmarks.test_official_benchmark_solver `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_public_ansys_entrypoints_reject_removed_cell_obstacle_backend `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_selected_config_has_one_runtime_pressure_pair_policy `
             tests.integration.test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic
 
       - name: Run archive artifact test - official half-domain
@@ -335,11 +334,10 @@ jobs:
             tests.integration.test_ansys_vertical_flap_traction_selected_formulation_coupled_step50_artifacts `
             -v
 
-      - name: Run generic solver artifact test - selected formulation
+      - name: Run retained solver validation status artifact test
         shell: pwsh
         run: |
           python -m unittest `
-            tests.integration.test_ansys_vertical_flap_generic_solver_artifacts `
             tests.integration.test_ansys_vertical_flap_real_solver_validation_status `
             -v
 

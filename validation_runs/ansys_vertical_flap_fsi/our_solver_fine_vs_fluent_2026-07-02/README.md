@@ -32,7 +32,6 @@ if (Test-Path -LiteralPath $out) { throw "Refusing to reuse output directory: $o
   --solid-substeps 1600 `
   --flow-predictor-substeps 64 `
   --hibm-search-radius-m 0.0017 `
-  --pressure-pair-provider-mode runtime_anchored_cell_pair `
   --span-reduction mean `
   --streamwise-velocity-sign -1.0 `
   --save-step-fields

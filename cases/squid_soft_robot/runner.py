@@ -249,9 +249,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         args.solid_density_scale,
         option_name="--solid-density-scale",
     )
+    interface_reaction_relaxation = float(args.interface_reaction_relaxation)
+    if (
+        not math.isfinite(interface_reaction_relaxation)
+        or not 0.0 <= interface_reaction_relaxation <= 1.0
+    ):
+        raise ValueError(
+            "--interface-reaction-relaxation must be a finite number in [0, 1]"
+        )
+    interface_reaction_aitken = bool(args.interface_reaction_aitken)
     fsi_coupling_iterations = int(args.fsi_coupling_iterations)
-    if fsi_coupling_iterations < 2:
-        raise ValueError("--fsi-coupling-iterations must be at least 2")
+    if fsi_coupling_iterations < 1:
+        raise ValueError("--fsi-coupling-iterations must be at least 1")
     fsi_marker_coupling_tolerance_mps = float(
         args.fsi_marker_coupling_tolerance_mps
     )
@@ -513,10 +522,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     fluid_grid_resolution = fluid_grid_resolution_report(spec)
     pressure_projection_budget = pressure_projection_budget_report(
         fluid_substeps=effective_fluid_substeps,
-        ibm_correction_iterations=max(1, int(args.ibm_correction_iterations)),
         fsi_coupling_iterations=fsi_coupling_iterations,
         projection_iterations=int(args.projection_iterations),
-        fsi_coupling_enabled=True,
     )
     if args.preflight_only:
         grid = cartesian_grid_for_spec(spec)
@@ -570,7 +577,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 args.adaptive_fluid_substeps_safety
             ),
             "pressure_projection_budget": pressure_projection_budget,
-            "fsi_coupling_iterations": fsi_coupling_iterations,
+            "fsi_coupling_iterations_base": fsi_coupling_iterations,
+            "interface_reaction_aitken": interface_reaction_aitken,
+            "interface_reaction_relaxation": interface_reaction_relaxation,
             "fsi_marker_coupling_tolerance_mps": (
                 fsi_marker_coupling_tolerance_mps
             ),
@@ -1081,11 +1090,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 far_pressure_inside_probe_max_multiplier
             ),
             fixed_rim_region_id=fixed_rim_region_id,
-            fluid_grid_axis_min_spacing_m=fluid_grid_axis_min_spacing_m,
             fluid_probe_distance_m=fluid_probe_distance_m,
             fsi_coupling_iterations=fsi_coupling_iterations,
             fsi_marker_coupling_tolerance_mps=fsi_marker_coupling_tolerance_mps,
             full_pressure_waveform_steps=full_pressure_waveform_steps,
+            interface_reaction_aitken=interface_reaction_aitken,
+            interface_reaction_relaxation=interface_reaction_relaxation,
             max_wall_time_s=max_wall_time_s,
             neo_fixed_node_lock_policy=neo_fixed_node_lock_policy,
             one_sided_probe_max_multiplier=one_sided_probe_max_multiplier,
@@ -1114,10 +1124,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             process_path=process_path,
             run_checkpoint_path=run_checkpoint_path,
             frozen_run_fingerprint=frozen_run_fingerprint,
+            run_started_at_perf=run_started_at_perf,
             simulator=simulator,
             solid_mpm=solid_mpm,
             spec=spec,
-            tri_diagnostics=tri_diagnostics,
         ),
         callbacks=StepLoopCallbacks(
             publish_solid_report_to_reduced_state=(

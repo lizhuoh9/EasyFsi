@@ -15,7 +15,7 @@ implementation belongs in the functional packages below.
 | `simulation_core/materials/` | Constitutive material models and material conversion helpers. | Changing Neo-Hookean or Ecoflex material behavior, stress probes, or material-unit conversions. |
 | `simulation_core/geometry_tools/` | CAD parsing, STEP tessellation, coordinate models, fluid-domain geometry, and reusable surface meshes. | Changing CAD/surface mesh handling, domain geometry, boundary-region descriptors, or coordinate-system models. |
 | `simulation_core/diagnostics/` | Validation helpers, CFL/time-step controllers, field checks, and Taichi runtime bootstrap. | Changing validation/report helpers, CFL substep rules, or shared runtime initialization. |
-| `simulation_core/drivers/` | The sole case-agnostic FSI physical-step loop and marker-velocity IQN-ILS coupling loop, plus case metadata contracts. | Changing physical-step ownership, generic coupling convergence, runtime-adapter contracts, or driver result envelopes. |
+| `simulation_core/drivers/` | Shared runtime-adapter contracts and the case-agnostic FSI trial engine used by adapter-based cases. | Changing shared physical-step ownership, generic coupling convergence, runtime-adapter contracts, or driver result envelopes. |
 
 ## Removed Legacy Entry Points
 
@@ -83,37 +83,35 @@ root wrapper files:
 - Case-agnostic FSI orchestration goes in `simulation_core/drivers/`.
 - Fluent benchmark/parity runners should use these package paths and must not introduce case-specific solver logic under `simulation_core/`.
 
-## Unified FSI Time Hierarchy
+## FSI Execution Ownership
 
-`simulation_core.drivers.generic_fsi_solver` owns every committed physical step
-and every marker-velocity coupling trial. ANSYS vertical flap, Turek-Hron
-FSI1/2/3, and Squid provide runtime adapters only; they do not implement their
-own physical-step or interface fixed-point loops.
+`simulation_core.drivers.generic_fsi_solver` is the single shared trial engine
+for cases that implement its runtime-adapter protocol, including Turek-Hron.
+For those callers it owns each committed physical step, rollback transaction,
+and marker-velocity coupling trial. Component-local fluid CFL/RK substeps,
+solid elastic-wave substeps, and HIBM/pressure algebraic iterations do not count
+as extra committed physical steps.
 
-One trial may contain component-local fluid CFL/RK substeps, solid elastic-wave
-substeps, and HIBM/pressure algebraic iterations. These substeps are recomputed
-after a rejected trial rollback and never count as additional committed
-physical steps.
+The official ANSYS rectangular-solid benchmark deliberately uses the validated
+direct sharp pipeline in
+`benchmarks/official/solid_mpm_fsi_runner.run_hibm_mpm_fsi`. Its case wrapper
+must delegate exactly once and may add only metadata/report validation. Squid
+uses a typed `StepLoopContext` around its case-specific direct sharp fixed-point
+assembly. These are different execution adapters around the same canonical
+sharp HIBM-MPM formulation, not permission to restore a second
+`legacy_projected_reduced` or cell-obstacle workflow for either case.
 
-`begin_step()` captures the pre-preparation rollback base before reseeding,
-boundary writes, or predictors. An adapter may then capture a post-preparation
-trial base. `coupling/hibm_mpm/interface_state.py` owns the shared marker
-snapshot, including explicit pressure-probe origins and active projection
-metadata, so rejected trials cannot leak geometry into the next trial.
-Adapters invalidate the previous transaction before starting a new snapshot,
-arm rollback only after every pre-mutation snapshot succeeds, and clear the
-transaction after commit or rollback.
+Shared snapshot and rollback state lives in
+`coupling/hibm_mpm/interface_state.py`. Generic adapters must invalidate a
+previous transaction before a new snapshot, arm rollback only after every
+pre-mutation snapshot succeeds, and clear the transaction after commit or
+rollback. The direct ANSYS path instead has one accepted physical evaluation per
+step and retains its own fail-closed pressure, ledger, no-slip, traction, MPM,
+and SST health gates.
 
-Rollback invalidates HIBM classified-topology metadata but retains the
-shape-stable Taichi search, boundary, and projection resources. Reallocating
-those resources for every coupling trial changes template-field identity and
-forces redundant kernel specializations. Marker-target closure performs an
-initial active-row measurement, builds a compact host matrix, applies at most
-one inverse-mass weighted minimum-norm solve when needed, materializes the
-correction in f32, and then remeasures the rows on device. Marker-MAC PCG gives
-an initially converged system a zero
-iteration budget and otherwise polls convergence or failure every eight
-iterations so the host stops dispatching work after device convergence.
+Changing which adapter a validated case uses is a numerical behavior change.
+It requires a fresh source-matched preflow snapshot and staged CUDA
+FSI1/FSI8/FSI50 validation; host architecture tests alone are insufficient.
 
 Legacy module names are not installed. New project code and external migration
 guides should use the functional package path.

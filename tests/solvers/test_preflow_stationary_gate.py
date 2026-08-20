@@ -43,7 +43,7 @@ def _canonical_velocity_boundary_report(
     }
     device_report.update(
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "authority": "canonical_component_face",
             "new_owned_claim_component_count": active_components,
             "final_active_component_count": active_components,
@@ -61,7 +61,13 @@ def _canonical_velocity_boundary_report(
                 "constraint_count": 0,
                 "adjustable_constraint_count": 0,
                 "immutable_constraint_count": 0,
-                "iterations": 0,
+                "solver": "weighted_minimum_norm_lstsq",
+                "solve_count": 0,
+                "matrix_rank": 0,
+                "adjustable_dof_count": 0,
+                "least_squares_max_residual_mps": 0.0,
+                "materialized_max_residual_mps": 0.0,
+                "max_abs_correction_mps": 0.0,
                 "initial_max_residual_mps": 0.0,
                 "final_max_residual_mps": 0.0,
                 "final_max_adjustable_residual_mps": 0.0,
@@ -772,7 +778,6 @@ def test_tip_cap_traction_readiness_rejects_invalid_or_partial_populations(
 def test_flow_only_zero_marker_case_does_not_require_force_area():
     config = _config(
         marker_count=0,
-        flow_solid_boundary_mode="cell_obstacle_layers",
         preflow_traction_readiness_mode="flow_only",
     )
     history = [

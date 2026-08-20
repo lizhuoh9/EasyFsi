@@ -3,15 +3,20 @@ from __future__ import annotations
 import math
 import unittest
 
+import pytest
+
 from cases.ansys_vertical_flap_fsi import (
     VerticalFlapFsiConfig,
-    run_vertical_flap_fsi_smoke,
+    run_ansys_vertical_flap_benchmark,
 )
+
+
+pytestmark = pytest.mark.device
 
 
 class AnsysVerticalFlapFeedbackConditionedProjectionRuntimeTests(unittest.TestCase):
     def test_two_step_runtime_consumes_feedback_after_first_step(self) -> None:
-        report = run_vertical_flap_fsi_smoke(
+        report = run_ansys_vertical_flap_benchmark(
             VerticalFlapFsiConfig(
                 step_count=2,
                 flow_projection_iterations=64,
@@ -31,7 +36,6 @@ class AnsysVerticalFlapFeedbackConditionedProjectionRuntimeTests(unittest.TestCa
         )
         self.assertGreater(history[1]["fluid_feedback_constraint_marker_count"], 0)
         self.assertEqual(history[1]["fluid_feedback_constraint_active_cell_count"], 0)
-        self.assertEqual(history[1]["legacy_constraint_active_cell_count"], 0)
         self.assertEqual(
             history[1]["fluid_marker_feedback_enforcement_mode"],
             "hibm_sharp_reconstructed_rows",
@@ -50,7 +54,7 @@ class AnsysVerticalFlapFeedbackConditionedProjectionRuntimeTests(unittest.TestCa
         self.assertTrue(math.isfinite(history[1]["hibm_no_slip_max_residual_mps"]))
 
     def test_three_step_runtime_clears_previous_feedback_constraints(self) -> None:
-        report = run_vertical_flap_fsi_smoke(
+        report = run_ansys_vertical_flap_benchmark(
             VerticalFlapFsiConfig(
                 step_count=3,
                 flow_projection_iterations=64,
@@ -74,7 +78,6 @@ class AnsysVerticalFlapFeedbackConditionedProjectionRuntimeTests(unittest.TestCa
         )
         self.assertEqual(step_2["fluid_feedback_constraint_active_cell_count"], 0)
         self.assertEqual(step_3["fluid_feedback_constraint_cleared_cell_count"], 0)
-        self.assertEqual(step_3["legacy_constraint_active_cell_count"], 0)
         self.assertGreaterEqual(
             step_3["fluid_feedback_constraint_projection_participating_cell_count"],
             0,

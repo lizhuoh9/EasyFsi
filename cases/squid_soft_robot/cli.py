@@ -362,6 +362,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--poissons-ratio", type=float, default=0.49)
     parser.add_argument("--arch", default="cuda")
     parser.add_argument(
+        "--interface-reaction-relaxation",
+        type=float,
+        default=0.5,
+        help=(
+            "Under-relaxation for the marker-state fixed point. This is a "
+            "partitioned FSI coupling control, not a nozzle boundary condition."
+        ),
+    )
+    parser.add_argument(
+        "--interface-reaction-aitken",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use Aitken Delta^2 adaptation for step-internal marker-state "
+            "fixed-point updates. Enabled by default for added-mass stability; "
+            "use --no-interface-reaction-aitken only for diagnostics."
+        ),
+    )
+    parser.add_argument(
         "--min-outlet-to-main-volume-flux-ratio",
         type=float,
         default=0.1,
@@ -419,22 +438,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Safety multiplier applied to previous CFL when choosing adaptive substeps.",
     )
     parser.add_argument(
-        "--ibm-correction-iterations",
-        type=int,
-        default=2,
-        help=(
-            "Number of force-spread/body-force/projection correction passes per fluid step. "
-            "This repeats the projected IBM no-slip correction; it does not prescribe nozzle "
-            "velocity, pressure, or flow."
-        ),
-    )
-    parser.add_argument(
         "--fsi-coupling-iterations",
         type=int,
-        default=16,
+        default=1,
         help=(
-            "Maximum canonical marker-velocity IQN-ILS iterations per physical "
-            "FSI step (minimum 2)."
+            "Fixed marker-state iterations per physical MPM step. One preserves "
+            "the validated explicit baseline; values above one use the same "
+            "sharp trial body with marker position/velocity under-relaxation."
         ),
     )
     parser.add_argument(
@@ -442,8 +452,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1.0e-4,
         help=(
-            "Absolute convergence tolerance for the canonical HIBM-MPM "
-            "marker-velocity residual L2 norm in m/s."
+            "Convergence tolerance for the sharp marker fixed-point velocity "
+            "residual L2 norm in m/s."
         ),
     )
     parser.add_argument("--disable-pressure-outlet-zmin", action="store_true")

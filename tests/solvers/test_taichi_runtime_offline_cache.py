@@ -3,11 +3,20 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from simulation_core.diagnostics import runtime
+
+_RUNTIME_ENVIRONMENT_NAMES = (
+    "SIMULATION_TAICHI_OFFLINE_CACHE",
+    "SIMULATION_TAICHI_OFFLINE_CACHE_FILE_PATH",
+    "TI_OFFLINE_CACHE",
+    "TI_OFFLINE_CACHE_FILE_PATH",
+)
+
 
 
 @pytest.fixture(autouse=True)
@@ -20,9 +29,183 @@ def _reset_runtime_state(monkeypatch) -> None:
         "_INITIALIZED_OFFLINE_CACHE": None,
         "_INITIALIZED_OFFLINE_CACHE_FILE_PATH": None,
     }.items():
-        monkeypatch.setattr(runtime, name, value)
+        monkeypatch.setattr(runtime, name, value, raising=False)
+    for name in _RUNTIME_ENVIRONMENT_NAMES:
+        monkeypatch.delenv(name, raising=False)
 
 
+def test_runtime_config_defaults_preserve_legacy_non_strict_api() -> None:
+    config = runtime.TaichiRuntimeConfig()
+
+    assert config.arch == "cuda"
+    assert config.default_fp == "f32"
+    assert config.random_seed == 0
+    assert config.offline_cache is None
+    assert config.offline_cache_file_path is None
+    assert config.strict_arch is False
+
+
+def _publish_preinitialized_cpu_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(runtime, "_INITIALIZED", True)
+    monkeypatch.setattr(runtime, "_INITIALIZED_ARCH", "cpu")
+    monkeypatch.setattr(runtime, "_INITIALIZED_FP", "f32")
+
+
+def test_implicit_default_reuses_preinitialized_cpu_runtime(monkeypatch) -> None:
+    _publish_preinitialized_cpu_runtime(monkeypatch)
+
+    with patch.object(runtime.ti, "init") as taichi_init:
+        runtime.init_taichi()
+
+    taichi_init.assert_not_called()
+
+
+def test_implicit_default_does_not_resolve_cache_environment(monkeypatch) -> None:
+    _publish_preinitialized_cpu_runtime(monkeypatch)
+    monkeypatch.setenv("TI_OFFLINE_CACHE", "invalid-but-unused")
+
+    with patch.object(runtime.ti, "init") as taichi_init:
+        runtime.init_taichi()
+
+    taichi_init.assert_not_called()
+
+
+def test_implicit_default_reuses_explicit_nondefault_identity(
+    tmp_path: Path,
+) -> None:
+    explicit_config = runtime.TaichiRuntimeConfig(
+        arch="gpu",
+        random_seed=7,
+        offline_cache=False,
+        offline_cache_file_path=str(tmp_path / "cache"),
+    )
+
+    with patch.object(runtime.ti, "init") as taichi_init:
+        runtime.init_taichi(explicit_config)
+        runtime.init_taichi()
+
+    assert taichi_init.call_count == 1
+
+
+def test_implicit_default_still_rejects_float_mode_conflict(
+    monkeypatch,
+) -> None:
+    _publish_preinitialized_cpu_runtime(monkeypatch)
+    monkeypatch.setattr(runtime, "_INITIALIZED_FP", "f64")
+
+    with (
+        patch.object(runtime.ti, "init") as taichi_init,
+        pytest.raises(
+            ValueError,
+            match=(
+                "already initialized with default_fp='f64'; cannot "
+                "re-initialize with default_fp='f32'"
+            ),
+        ),
+    ):
+        runtime.init_taichi()
+
+    taichi_init.assert_not_called()
+
+
+def test_explicit_non_strict_cuda_rejects_preinitialized_cpu_runtime(
+    monkeypatch,
+) -> None:
+    _publish_preinitialized_cpu_runtime(monkeypatch)
+
+    with (
+        patch.object(runtime.ti, "init") as taichi_init,
+        pytest.raises(
+            ValueError,
+            match=(
+                "already initialized with arch='cpu'; cannot re-initialize "
+                "with arch='cuda'"
+            ),
+        ),
+    ):
+        runtime.init_taichi(runtime.TaichiRuntimeConfig(arch="cuda"))
+
+    taichi_init.assert_not_called()
+
+
+def test_strict_cuda_rejects_preinitialized_cpu_runtime(monkeypatch) -> None:
+    _publish_preinitialized_cpu_runtime(monkeypatch)
+    actual_config = SimpleNamespace(arch=runtime.ti.cpu)
+
+    with (
+        patch.object(runtime.ti, "cfg", actual_config),
+        patch.object(runtime.ti, "init") as taichi_init,
+        pytest.raises(RuntimeError, match="actual runtime arch"),
+    ):
+        runtime.init_taichi(
+            runtime.TaichiRuntimeConfig(arch="cuda", strict_arch=True)
+        )
+
+    taichi_init.assert_not_called()
+
+
+def test_strict_cuda_disables_fallback_and_checks_actual_backend() -> None:
+    actual_config = SimpleNamespace(arch=runtime.ti.cuda)
+
+    with (
+        patch.object(runtime.ti, "cfg", actual_config),
+        patch.object(runtime.ti, "init") as taichi_init,
+    ):
+        runtime.init_taichi(
+            runtime.TaichiRuntimeConfig(arch="cuda", strict_arch=True)
+        )
+
+    taichi_init.assert_called_once_with(
+        arch=runtime.ti.cuda,
+        default_fp=runtime.ti.f32,
+        random_seed=0,
+        offline_cache=True,
+        enable_fallback=False,
+    )
+
+
+def test_strict_cuda_rejects_fallback_without_publishing_state() -> None:
+    actual_config = SimpleNamespace(arch=runtime.ti.cpu)
+
+    with (
+        patch.object(runtime.ti, "cfg", actual_config),
+        patch.object(runtime.ti, "init") as taichi_init,
+        pytest.raises(RuntimeError, match="actual runtime arch"),
+    ):
+        runtime.init_taichi(
+            runtime.TaichiRuntimeConfig(arch="cuda", strict_arch=True)
+        )
+
+    taichi_init.assert_called_once()
+    assert runtime._INITIALIZED is False
+    assert runtime._INITIALIZED_ARCH is None
+
+
+def test_strict_fast_path_rechecks_actual_backend() -> None:
+    actual_config = SimpleNamespace(arch=runtime.ti.cpu)
+
+    with (
+        patch.object(runtime.ti, "cfg", actual_config),
+        patch.object(runtime.ti, "init") as taichi_init,
+    ):
+        runtime.init_taichi(runtime.TaichiRuntimeConfig(arch="cuda"))
+        with pytest.raises(RuntimeError, match="actual runtime arch"):
+            runtime.init_taichi(
+                runtime.TaichiRuntimeConfig(arch="cuda", strict_arch=True)
+            )
+
+    assert taichi_init.call_count == 1
+
+
+@pytest.mark.parametrize("value", [None, "true", 0, 1])
+def test_strict_arch_requires_boolean(value: object) -> None:
+    with (
+        patch.object(runtime.ti, "init") as taichi_init,
+        pytest.raises(ValueError, match="strict_arch must be a bool"),
+    ):
+        runtime.init_taichi(runtime.TaichiRuntimeConfig(strict_arch=value))
+
+    taichi_init.assert_not_called()
 def test_init_taichi_forwards_explicit_offline_cache_configuration(
     tmp_path: Path,
 ) -> None:

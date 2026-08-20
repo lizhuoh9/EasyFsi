@@ -92,7 +92,7 @@ def _write_fluid_snapshot_npz(
             markers.x_gamma_m.to_numpy()[: int(marker_count)],
             dtype=np.float32,
         )
-        nx, ny, nz = speed.shape
+        nx, ny = speed.shape[:2]
         path = snapshot_dir / f"snapshot_{int(step):06d}.npz"
         np.savez_compressed(
             path,

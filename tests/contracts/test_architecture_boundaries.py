@@ -225,6 +225,17 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         ):
             self.assertFalse((REPO_ROOT / name).exists())
 
+    def test_ansys_generic_validation_entrypoint_is_not_present(self) -> None:
+        self.assertFalse(
+            (
+                REPO_ROOT
+                / "validation_runs"
+                / "ansys_vertical_flap_fsi"
+                / "scripts"
+                / "run_ansys_vertical_flap_generic_solver.py"
+            ).exists()
+        )
+
     def test_cases_contains_no_rendering_helpers(self) -> None:
         for name in (
             "squid_jet_render.py",
@@ -274,13 +285,19 @@ class ArchitectureBoundaryTests(unittest.TestCase):
 
         self.assertNotIn("for step in range(first_step, step_count + 1):", source)
 
-    def test_squid_step_loop_delegates_main_step_loop_to_generic_solver(self) -> None:
+    def test_squid_step_loop_owns_typed_direct_sharp_loop(self) -> None:
         source = (
             REPO_ROOT / "cases" / "squid_soft_robot" / "step_loop.py"
         ).read_text(encoding="utf-8")
 
-        self.assertNotIn("for step in range(", source)
-        self.assertIn("solve_fsi_runtime(runtime, solver_config)", source)
+        self.assertIn(
+            "def run_squid_step_loop(context: StepLoopContext)",
+            source,
+        )
+        self.assertIn("for step in range(first_step, step_count + 1):", source)
+        self.assertNotIn("solve_fsi_runtime(", source)
+        self.assertNotIn("globals()", source)
+        self.assertNotIn("locals()", source)
 
     def test_squid_runner_does_not_define_sharp_trial_closure_after_step5_split(self) -> None:
         source = (

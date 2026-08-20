@@ -39,8 +39,6 @@ def test_probe_config_accepts_preflow_only_and_explicit_full_multigrid() -> None
         SimpleNamespace(
             steps=0,
             preflow_steps=1,
-            pressure_pair_provider_mode="runtime_anchored_cell_pair",
-            selected_anchor_markers_json=None,
             grid_nodes=(4, 16, 20),
             solid_particle_counts=(1, 16, 4),
             marker_count=12,
@@ -132,6 +130,164 @@ class _ArrayField:
 
     def to_numpy(self) -> np.ndarray:
         return self._value.copy()
+
+
+class _CountingField(_ArrayField):
+    def __init__(self, value: np.ndarray) -> None:
+        super().__init__(value)
+        self.to_numpy_calls = 0
+
+    def to_numpy(self) -> np.ndarray:
+        self.to_numpy_calls += 1
+        return super().to_numpy()
+
+
+def _flow_snapshot_fluid() -> tuple[SimpleNamespace, dict[str, _CountingField]]:
+    grid_shape = (1, 2, 3)
+    field_values = {
+        "fsi_pressure": np.arange(6, dtype=np.float32).reshape(grid_shape),
+        "pressure": np.zeros(grid_shape, dtype=np.float32),
+        "velocity": np.arange(18, dtype=np.float32).reshape(grid_shape + (3,)),
+        "obstacle": np.zeros(grid_shape, dtype=np.int32),
+        "hibm_base_obstacle": np.zeros(grid_shape, dtype=np.int32),
+        "hibm_dynamic_solid_volume_obstacle": np.zeros(
+            grid_shape, dtype=np.int32
+        ),
+        "hibm_dynamic_solid_volume_external_carve": np.zeros(
+            grid_shape, dtype=np.int32
+        ),
+        "velocity_dirichlet_boundary_active": np.zeros(
+            grid_shape, dtype=np.int32
+        ),
+        "velocity_dirichlet_boundary_projection_weight": np.zeros(
+            grid_shape, dtype=np.float32
+        ),
+        "velocity_dirichlet_boundary_enforcement_weight": np.zeros(
+            grid_shape, dtype=np.float32
+        ),
+        "velocity_dirichlet_boundary_hard_fixed_component_mask": np.zeros(
+            grid_shape, dtype=np.int32
+        ),
+        "velocity_dirichlet_boundary_external_exact_component_mask": np.zeros(
+            grid_shape, dtype=np.int32
+        ),
+        "velocity_dirichlet_boundary_owned_row": np.zeros(
+            grid_shape, dtype=np.int32
+        ),
+        "velocity_dirichlet_boundary_marker_region_id": np.full(
+            grid_shape, -1, dtype=np.int32
+        ),
+        "cell_face_x_m": np.asarray([0.0, 0.01], dtype=np.float32),
+        "cell_face_y_m": np.asarray([0.0, 0.01, 0.02], dtype=np.float32),
+        "cell_face_z_m": np.asarray([0.0, 0.01, 0.02, 0.03], dtype=np.float32),
+        "cell_center_x_m": np.asarray([0.005], dtype=np.float32),
+        "cell_center_y_m": np.asarray([0.005, 0.015], dtype=np.float32),
+        "cell_center_z_m": np.asarray([0.005, 0.015, 0.025], dtype=np.float32),
+        "cell_width_x_m": np.asarray([0.01], dtype=np.float32),
+        "cell_width_y_m": np.asarray([0.01, 0.01], dtype=np.float32),
+        "cell_width_z_m": np.asarray([0.01, 0.01, 0.01], dtype=np.float32),
+    }
+    fields = {
+        name: _CountingField(value) for name, value in field_values.items()
+    }
+    return SimpleNamespace(**fields, sampling_obstacle=None), fields
+
+
+@pytest.mark.parametrize(
+    ("step_count", "has_step_observer", "export_final", "expected"),
+    (
+        (0, False, False, False),
+        (0, True, False, False),
+        (0, False, True, False),
+        (1, False, False, False),
+        (1, True, False, True),
+        (1, False, True, True),
+        (1, True, True, True),
+    ),
+)
+def test_flow_geometry_cache_is_only_built_for_fsi_snapshot_exports(
+    step_count: int,
+    has_step_observer: bool,
+    export_final: bool,
+    expected: bool,
+) -> None:
+    assert (
+        solid_runner._flow_geometry_snapshot_cache_required(
+            step_count=step_count,
+            has_step_observer=has_step_observer,
+            export_final_flow_snapshot=export_final,
+        )
+        is expected
+    )
+
+
+def test_flow_snapshots_reuse_read_only_immutable_geometry_without_redownload() -> None:
+    fluid, fields = _flow_snapshot_fluid()
+    immutable_geometry = solid_runner._immutable_flow_geometry_snapshot(
+        fluid,
+        include_full_geometry=True,
+    )
+
+    parity_a = solid_runner._flow_parity_snapshot(
+        fluid,
+        immutable_geometry=immutable_geometry,
+    )
+    parity_b = solid_runner._flow_parity_snapshot(
+        fluid,
+        immutable_geometry=immutable_geometry,
+    )
+    full = solid_runner._flow_field_snapshot(
+        fluid,
+        immutable_geometry=immutable_geometry,
+    )
+
+    for name, value in immutable_geometry.items():
+        assert fields[name].to_numpy_calls == 1
+        assert not value.flags.writeable
+        with pytest.raises(ValueError):
+            value.flat[0] = value.flat[0]
+        assert full[name] is value
+    for parity in (parity_a, parity_b):
+        assert parity["cell_center_y_m"] is immutable_geometry["cell_center_y_m"]
+        assert parity["cell_center_z_m"] is immutable_geometry["cell_center_z_m"]
+    immutable_names = set(solid_runner._IMMUTABLE_FLOW_GEOMETRY_FIELD_NAMES)
+    for name, field in fields.items():
+        if name in immutable_names:
+            expected_calls = 1
+        elif name == "pressure":
+            expected_calls = 0
+        else:
+            expected_calls = 3
+        assert field.to_numpy_calls == expected_calls, name
+
+    uncached_fluid, _ = _flow_snapshot_fluid()
+    uncached_parity = solid_runner._flow_parity_snapshot(uncached_fluid)
+    uncached_full = solid_runner._flow_field_snapshot(uncached_fluid)
+    for cached, uncached in ((parity_a, uncached_parity), (full, uncached_full)):
+        assert tuple(cached) == tuple(uncached)
+        for name in cached:
+            assert cached[name].dtype == uncached[name].dtype
+            np.testing.assert_array_equal(cached[name], uncached[name])
+
+    partial_fluid, partial_fields = _flow_snapshot_fluid()
+    partial_geometry = solid_runner._immutable_flow_geometry_snapshot(
+        partial_fluid,
+        include_full_geometry=False,
+    )
+    partial_parity = solid_runner._flow_parity_snapshot(
+        partial_fluid,
+        immutable_geometry=partial_geometry,
+    )
+    assert tuple(partial_geometry) == solid_runner._PARITY_FLOW_GEOMETRY_FIELD_NAMES
+    for name in solid_runner._IMMUTABLE_FLOW_GEOMETRY_FIELD_NAMES:
+        expected_calls = 1 if name in partial_geometry else 0
+        assert partial_fields[name].to_numpy_calls == expected_calls
+    for name, field in partial_fields.items():
+        if name not in immutable_names and name != "pressure":
+            assert field.to_numpy_calls == 1, name
+    assert partial_fields["pressure"].to_numpy_calls == 0
+    assert partial_parity["cell_center_y_m"] is partial_geometry["cell_center_y_m"]
+    assert partial_parity["cell_center_z_m"] is partial_geometry["cell_center_z_m"]
 
 
 def test_core_step_snapshot_exports_active_solid_and_marker_geometry() -> None:

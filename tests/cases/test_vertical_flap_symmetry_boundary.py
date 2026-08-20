@@ -7,7 +7,6 @@ import numpy as np
 from benchmarks.official import solid_mpm_fsi_runner as runner
 from cases.ansys_vertical_flap_fsi import (
     VerticalFlapFsiConfig,
-    build_ansys_vertical_flap_generic_problem,
     selected_formulation_solver_config,
 )
 from simulation_core import TaichiRuntimeConfig
@@ -81,16 +80,6 @@ class VerticalFlapSymmetryBoundaryContracts(unittest.TestCase):
         )
         self.assertFalse(report["out_of_plane_boundary_residual_modeling_error"])
         self.assertIn("strict slip", report["out_of_plane_boundary_note"].lower())
-
-        problem = build_ansys_vertical_flap_generic_problem(step_count=1)
-        self.assertEqual(
-            problem.metadata["out_of_plane_boundary_policy"],
-            "strict_periodic_or_slip",
-        )
-        self.assertFalse(
-            problem.metadata["out_of_plane_boundary_residual_modeling_error"]
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

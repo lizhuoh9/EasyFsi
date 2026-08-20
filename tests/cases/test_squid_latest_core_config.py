@@ -105,7 +105,6 @@ from cases.squid_soft_robot.setup import (
     fluid_grid_resolution_report,
     nozzle_radius_at_z_m,
     pressure_projection_budget_report,
-    reduced_active_water_connectivity,
     reduced_water_geometry_report,
     resolve_divergence_cleanup_iterations,
     resolve_pressure_solver,
@@ -739,14 +738,13 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
 
     def test_sharp_coupling_failure_writes_partial_history_before_row_build(self) -> None:
         source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
-        sharp_block = source.split("def _run_squid_sharp_runtime(", 1)[1]
-        run_block = sharp_block
+        run_block = source.split("def run_squid_step_loop(", 1)[1]
 
         self.assertIn("try:", run_block)
-        self.assertIn("solve_fsi_runtime(runtime, solver_config)", run_block)
+        self.assertIn("advance_sharp_marker_fixed_point_step()", run_block)
         self.assertIn("_write_step_failure_artifacts(", run_block)
-        self.assertIn("rows=state.rows", run_block)
-        self.assertIn('step=int(step_state["step"])', run_block)
+        self.assertIn("rows=rows", run_block)
+        self.assertIn("step=step", run_block)
         self.assertIn("raise", run_block)
 
     def test_sharp_sampling_uses_fluid_substep_dt_for_cfl(self) -> None:
@@ -1666,32 +1664,6 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
                     )
                     with self.assertRaisesRegex(ValueError, message):
                         run(args)
-
-    def test_active_water_connectivity_detects_sealed_pocket(self) -> None:
-        spec = SquidReducedSpec(
-            source_config_path="dummy.json",
-            fluid_bounds_min_m=(0.0, 0.0, 0.0),
-            fluid_bounds_max_m=(1.0, 1.0, 1.0),
-            grid_nodes=(5, 5, 5),
-            dt_s=1.0e-3,
-            water_density_kgm3=1025.0,
-            water_viscosity_pa_s=1.05e-3,
-        )
-        obstacle = np.ones(spec.grid_nodes, dtype=np.int32)
-        obstacle[2, 2, 0] = 0
-        obstacle[2, 2, 1] = 0
-        obstacle[4, 4, 4] = 0
-
-        report = reduced_active_water_connectivity(
-            spec,
-            obstacle_cell_count=int(obstacle.sum()),
-            obstacle_mask=obstacle,
-        )
-
-        self.assertEqual(report["component_count"], 2)
-        self.assertEqual(report["z_min_connected_active_cell_count"], 2)
-        self.assertEqual(report["trapped_active_cell_count"], 1)
-        self.assertFalse(report["connectivity_passed"])
 
     def test_force_decomposition_report_detects_grid_force_mismatch(self) -> None:
         report = force_decomposition_report(
@@ -2762,15 +2734,6 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
 
         simulator.mark_reduced_squid_water_domain()
         obstacle = simulator.fluid.obstacle.to_numpy()
-        connectivity = reduced_active_water_connectivity(
-            spec,
-            obstacle_cell_count=int(np.sum(obstacle)),
-            obstacle_mask=obstacle,
-        )
-
-        self.assertTrue(connectivity["connectivity_passed"])
-        self.assertEqual(connectivity["trapped_active_cell_count"], 0)
-
         source_total_m3s = 1.0e-7
         source = np.zeros(spec.grid_nodes, dtype=np.float32)
         z_centers = np.asarray(grid.cell_centers_z_m, dtype=np.float64)
@@ -3022,30 +2985,26 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
     def test_pressure_projection_budget_counts_trials_and_accepted_step(self) -> None:
         coupled_budget = pressure_projection_budget_report(
             fluid_substeps=1,
-            ibm_correction_iterations=2,
             fsi_coupling_iterations=3,
             projection_iterations=3000,
-            fsi_coupling_enabled=True,
         )
 
-        self.assertEqual(coupled_budget["fluid_step_evaluations_per_physical_step_max"], 4)
-        self.assertEqual(coupled_budget["pressure_project_calls_per_physical_step_max"], 8)
-        self.assertEqual(coupled_budget["full_report_pressure_project_calls_per_step"], 2)
-        self.assertEqual(coupled_budget["trial_pressure_project_calls_per_step_max"], 6)
-        self.assertEqual(coupled_budget["cg_iteration_budget_per_physical_step_max"], 24000)
+        self.assertEqual(coupled_budget["fluid_step_evaluations_per_physical_step_max"], 3)
+        self.assertEqual(coupled_budget["pressure_project_calls_per_physical_step_max"], 3)
+        self.assertEqual(coupled_budget["full_report_pressure_project_calls_per_step"], 1)
+        self.assertEqual(coupled_budget["trial_pressure_project_calls_per_step_max"], 2)
+        self.assertEqual(coupled_budget["cg_iteration_budget_per_physical_step_max"], 9000)
 
         uncoupled_budget = pressure_projection_budget_report(
             fluid_substeps=12,
-            ibm_correction_iterations=2,
             fsi_coupling_iterations=1,
             projection_iterations=3000,
-            fsi_coupling_enabled=False,
         )
 
         self.assertEqual(uncoupled_budget["fluid_step_evaluations_per_physical_step_max"], 1)
-        self.assertEqual(uncoupled_budget["pressure_project_calls_per_physical_step_max"], 24)
+        self.assertEqual(uncoupled_budget["pressure_project_calls_per_physical_step_max"], 12)
         self.assertEqual(uncoupled_budget["trial_pressure_project_calls_per_step_max"], 0)
-        self.assertEqual(uncoupled_budget["cg_iteration_budget_per_physical_step_max"], 72000)
+        self.assertEqual(uncoupled_budget["cg_iteration_budget_per_physical_step_max"], 36000)
 
     def test_runtime_budget_report_extrapolates_from_measured_step_wall_time(self) -> None:
         report = runtime_budget_report(
@@ -3611,20 +3570,15 @@ END-ISO-10303-21;
         self.assertAlmostEqual(args.fsi_marker_coupling_tolerance_mps, 2.5e-4)
 
 
-    def test_sharp_generic_coupling_uses_marker_velocity_units(self) -> None:
+    def test_sharp_direct_coupling_uses_marker_velocity_units(self) -> None:
         source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn(
-            "absolute_tolerance_mps=float(",
-            source,
-        )
-        self.assertIn(
-            "settings.fsi_marker_coupling_tolerance_mps",
-            source,
-        )
-        self.assertIn("solve_fsi_runtime(runtime, solver_config)", source)
+        self.assertIn("advance_sharp_marker_fixed_point_step", source)
+        self.assertIn("fsi_marker_coupling_tolerance_mps", source)
+        self.assertIn("velocity_residual_norm_mps", source)
+        self.assertIn("marker_surface_fixed_point_velocity_residual_l2_mps", source)
         self.assertNotIn("fsi_coupling_tolerance_n", source)
-        self.assertNotIn("sharp marker fixed point", source.lower())
+        self.assertNotIn("solve_fsi_runtime(", source)
 
     def test_sharp_report_fluid_projection_failure_reason_reports_trial_failures(
         self,
@@ -3727,13 +3681,12 @@ END-ISO-10303-21;
     def test_sharp_runtime_trial_restore_resets_pressure_neumann_gradient(
         self,
     ) -> None:
-        source = (SQUID_CASE_ROOT / "coupling_sharp.py").read_text(
-            encoding="utf-8"
-        )
+        source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("_capture_pressure_gradient_state(", source)
-        self.assertIn("_restore_pressure_gradient_state(", source)
-        self.assertNotIn("relaxed_sharp_pressure_neumann_gradient_state_array", source)
+        self.assertIn("def restore_sharp_trial_state(", source)
+        self.assertIn("restore_sharp_pressure_neumann_gradient_state_array(", source)
+        self.assertIn("relaxed_sharp_pressure_neumann_gradient_state_array(", source)
+        self.assertNotIn("_capture_pressure_gradient_state(", source)
 
     def test_shell_surface_mass_scales_can_be_selected_explicitly(self) -> None:
         args = parse_args(
@@ -4492,10 +4445,12 @@ END-ISO-10303-21;
             "hibm_pressure_neumann_max_raw_transmissibility_m": 25.0,
             "hibm_pressure_neumann_max_transmissibility_limit_m": 5.0,
             "hibm_pressure_neumann_transmissibility_capped_row_count": 2,
+            "hibm_coupling_scheme": "marker_fixed_point",
             "hibm_fsi_coupling_iterations_used": 6,
             "hibm_fsi_coupling_converged": False,
+            "hibm_fsi_coupling_explicit_single_pass": False,
             "hibm_fsi_coupling_residual_source": (
-                "canonical_marker_velocity_absolute_rms_mps"
+                "marker_surface_fixed_point_velocity_residual_l2_mps"
             ),
             "hibm_fsi_coupling_residual_l2_mps": 8.0e-4,
             "hibm_fsi_coupling_residual_max_mps": 2.5e-3,
@@ -4608,8 +4563,8 @@ END-ISO-10303-21;
         )
 
         self.assertEqual(row["step"], 3)
-        self.assertEqual(row["fsi_coupling_solver"], "iqn_ils")
-        self.assertEqual(row["fsi_coupling_scheme"], "marker_velocity_iqn_ils")
+        self.assertEqual(row["fsi_coupling_solver"], "marker_fixed_point")
+        self.assertEqual(row["fsi_coupling_scheme"], "marker_fixed_point")
         self.assertTrue(row["fsi_coupling_step_completed"])
         self.assertTrue(row["fsi_coupling_convergence_measured"])
         self.assertFalse(row["fsi_coupling_converged"])
@@ -4617,7 +4572,7 @@ END-ISO-10303-21;
         self.assertFalse(row["fsi_action_reaction_balance_measured"])
         self.assertEqual(
             row["fsi_coupling_residual_source"],
-            "canonical_marker_velocity_absolute_rms_mps",
+            "marker_surface_fixed_point_velocity_residual_l2_mps",
         )
         self.assertEqual(row["fsi_coupling_residual_units"], "m/s")
         self.assertAlmostEqual(row["fsi_coupling_residual_norm_mps"], 8.0e-4)
@@ -5293,6 +5248,13 @@ class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
     def test_checkpoint_roundtrip_preserves_sharp_marker_state(self) -> None:
         # C1: markers advance by dt*v feedback and never re-converge to the
         # solid after a bad resume, so the checkpoint must carry their state.
+        self.assertIn("interface_reaction_relaxation", CHECKPOINT_ARG_FINGERPRINT_FIELDS)
+        self.assertIn("interface_reaction_aitken", CHECKPOINT_ARG_FINGERPRINT_FIELDS)
+        self.assertNotIn("ibm_correction_iterations", CHECKPOINT_ARG_FINGERPRINT_FIELDS)
+        self.assertNotIn(
+            "interface_reaction_aitken_lower_bound",
+            CHECKPOINT_ARG_FINGERPRINT_FIELDS,
+        )
         runtime, simulator, solid = self._sharp_checkpoint_fixture()
         coupling = build_hibm_mpm_sharp_coupling_state(
             fluid=simulator.fluid,
@@ -5478,8 +5440,8 @@ class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
     def test_run_loop_exit_and_resume_wire_sharp_marker_checkpoint_state(self) -> None:
         # C1 wiring + M1: the in-loop checkpoint writes and the resume load
         # must pass the sharp coupling state, and normal completion must
-        # persist a closing checkpoint. Early wall-time exit is rejected
-        # because the generic runtime has no early-stop contract.
+        # persist a closing checkpoint. The typed direct loop also supports
+        # the existing bounded wall-time partial-run checkpoint path.
         source = _read_squid_sources()
         runner_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         step_loop_source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
@@ -5490,8 +5452,8 @@ class SquidRunCheckpointMarkerStateTests(unittest.TestCase):
         )[0]
         self.assertIn("sharp_coupling_state=sharp_coupling_state", resume_block)
 
-        self.assertIn("solve_fsi_runtime has no early-stop contract", step_loop_source)
-        self.assertNotIn('partial_run_reason = "max_wall_time_s"', step_loop_source)
+        self.assertNotIn("solve_fsi_runtime has no early-stop contract", step_loop_source)
+        self.assertIn('partial_run_reason = "max_wall_time_s"', step_loop_source)
 
         closing_block = runner_source.split(
             "step_loop_result = run_squid_step_loop",

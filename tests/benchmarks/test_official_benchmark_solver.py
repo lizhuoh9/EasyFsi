@@ -24,6 +24,27 @@ class OfficialBenchmarkSolverTests(unittest.TestCase):
             acceptance_tolerance=0.05,
         )
 
+    def test_shared_runner_invokes_configured_runner_exactly_once(self) -> None:
+        calls: list[object] = []
+        config = object()
+
+        def fake_runner(received_config: object) -> dict[str, object]:
+            calls.append(received_config)
+            return {"computed_result_sources": {"value": "computed"}}
+
+        run_official_fsi_benchmark(
+            OfficialBenchmarkRunSpec(
+                case_spec=self._case_spec(),
+                solver_family="fake-family",
+                case_metadata={},
+                boundary_conditions={"wall": "no-slip"},
+                config=config,
+                runner=fake_runner,
+            )
+        )
+
+        self.assertEqual(calls, [config])
+
     def test_shared_runner_adds_standard_case_fields(self) -> None:
         case_spec = FsiCaseSpec(
             case_id="toy-official-fsi",
