@@ -199,10 +199,16 @@ class HibmMainGoalContracts(unittest.TestCase):
         self.assertEqual(markers.marker_count, 3)
         self.assertEqual(markers.projection_triangle_count, 1)
 
-    def test_storage_selector_prefers_face_on_probe_ray_over_earlier_projection(
+    def test_storage_selector_prefers_earliest_projection_before_tangential_tiebreak(
         self,
     ) -> None:
-        """Tangential consistency owns the MAC face; progress breaks true ties."""
+        """The first valid face on the probe ray owns the MAC component.
+
+        Tangential distance is only a tie-breaker.  Giving tiny transverse
+        roundoff priority can alternate adjacent rows between opposite faces,
+        collapse distinct marker constraints onto one MAC row, and make the
+        canonical no-slip closure rank-deficient.
+        """
 
         runtime = TaichiRuntimeConfig(arch="cuda", default_fp="f32")
         boundary = HibmMpmIbBoundaryConditions(
@@ -246,7 +252,7 @@ class HibmMainGoalContracts(unittest.TestCase):
 
         result = result_i32.to_numpy()
         self.assertEqual(int(result[0]), 1)
-        self.assertEqual(tuple(int(value) for value in result[1:4]), (0, 2, 1))
+        self.assertEqual(tuple(int(value) for value in result[1:4]), (0, 1, 1))
         self.assertEqual(int(result[4]), 0)
         self.assertGreater(float(result_f32[0]), 0.0)
 
@@ -390,7 +396,7 @@ class HibmMainGoalContracts(unittest.TestCase):
         markers.projection_triangle_count = 1
         markers.projection_segment_count = 1
         markers.marker_geometry_revision = 4
-        markers._open_ribbon_tip_cap_binding = ("active",)
+        markers._open_ribbon_tip_cap_binding = None
         markers._current_no_slip_sampling_identity = object()
         markers._input_validation_failure_count = _ScalarField()
         markers.report_surface_feedback_updated_marker_count = _ScalarField()

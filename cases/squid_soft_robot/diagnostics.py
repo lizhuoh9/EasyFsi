@@ -46,27 +46,34 @@ def fsi_trial_acceptance_rejection_reason(
 
 def sharp_report_fluid_projection_failure_reason(report: object) -> str:
     load_report = getattr(report, "fluid_to_mpm_loads", None)
-    projection = getattr(load_report, "fluid_projection", None)
-    if not isinstance(projection, Mapping):
-        return "missing_fluid_projection_report"
-
     reasons: list[str] = []
-    if bool(projection.get("pressure_solve_failed", False)):
-        reasons.append("pressure_solve_failed")
-    if bool(projection.get("pressure_projection_physical_failure", False)):
-        physical_reason = str(
-            projection.get(
-                "pressure_projection_physical_failure_reason",
-                "",
+    stage_projections = [
+        ("load", getattr(load_report, "fluid_projection", None)),
+    ]
+    post_solid_projection = getattr(report, "post_solid_fluid_projection", None)
+    if post_solid_projection is not None:
+        stage_projections.append(("post_solid", post_solid_projection))
+
+    for stage, projection in stage_projections:
+        if not isinstance(projection, Mapping):
+            reasons.append(f"{stage}:missing_fluid_projection_report")
+            continue
+        if bool(projection.get("pressure_solve_failed", False)):
+            reasons.append(f"{stage}:pressure_solve_failed")
+        if bool(projection.get("pressure_projection_physical_failure", False)):
+            physical_reason = str(
+                projection.get(
+                    "pressure_projection_physical_failure_reason",
+                    "",
+                )
+                or "pressure_projection_physical_failure"
             )
-            or "pressure_projection_physical_failure"
-        )
-        reasons.append(physical_reason)
-    if not bool(projection.get("cg_converged_all", True)):
-        reasons.append("cg_converged_all=false")
-    cg_breakdown_count = int(projection.get("cg_breakdown_count", 0) or 0)
-    if cg_breakdown_count > 0:
-        reasons.append(f"cg_breakdown_count={cg_breakdown_count}")
+            reasons.append(f"{stage}:{physical_reason}")
+        if not bool(projection.get("cg_converged_all", True)):
+            reasons.append(f"{stage}:cg_converged_all=false")
+        cg_breakdown_count = int(projection.get("cg_breakdown_count", 0) or 0)
+        if cg_breakdown_count > 0:
+            reasons.append(f"{stage}:cg_breakdown_count={cg_breakdown_count}")
     return "; ".join(reasons)
 
 def force_decomposition_report(

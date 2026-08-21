@@ -1319,6 +1319,185 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
             places=6,
         )
 
+    def test_resolved_sst_grad_k_keeps_algebraic_constraint_out_of_wall_geometry(
+        self,
+    ) -> None:
+        solver = _cuda_solver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(5, 4, 4),
+                density_kgm3=1.0,
+                viscosity_pa_s=1.0e-5,
+                dt_s=1.0e-4,
+            )
+        )
+        solver.obstacle.fill(0)
+        solver.configure_sst_2003(
+            inlet_velocity_mps=3.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=(False,) * 6,
+            near_wall_treatment="resolved",
+        )
+        solver.set_velocity_dirichlet_boundary_authority("canonical")
+
+        storage_i = 2
+        target_mps = 1.75
+        x_mask = np.zeros((5, 4, 4), dtype=np.int32)
+        x_mask[storage_i, :, :] = 1
+        solver.velocity_dirichlet_boundary_active_component_mask.from_numpy(
+            x_mask
+        )
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask.from_numpy(
+            x_mask
+        )
+        solver.velocity_dirichlet_boundary_owned_component_mask.from_numpy(
+            x_mask
+        )
+        targets = np.zeros((5, 4, 4, 3), dtype=np.float32)
+        targets[storage_i, :, :, 0] = target_mps
+        solver.velocity_dirichlet_boundary_value_mps.from_numpy(targets)
+        mobility = np.ones((5, 4, 4, 3), dtype=np.float32)
+        mobility[storage_i, :, :, 0] = 0.0
+        solver.velocity_dirichlet_boundary_pressure_mobility.from_numpy(
+            mobility
+        )
+        enforcement = np.zeros((5, 4, 4, 3), dtype=np.float32)
+        enforcement[storage_i, :, :, 0] = 1.0
+        solver.velocity_dirichlet_boundary_component_enforcement_weight.from_numpy(
+            enforcement
+        )
+
+        velocity_prev = np.zeros((5, 4, 4, 3), dtype=np.float32)
+        velocity_prev[storage_i, :, :, 0] = -9.0
+        solver.velocity_prev.from_numpy(velocity_prev)
+
+        measured_mps: list[float] = []
+        for plus_side_k_m2_s2 in (1.0, 2.0):
+            k_state = np.ones((5, 4, 4), dtype=np.float32)
+            k_state[storage_i, :, :] = plus_side_k_m2_s2
+            solver.sst_turbulent_kinetic_energy.from_numpy(k_state)
+            solver._sst_momentum_explicit_stress_rhs_checked(0.3)
+            measured_mps.append(
+                float(solver.velocity.to_numpy()[storage_i, 1, 1, 0])
+            )
+
+        expected_mps = (
+            -9.0,
+            -9.0
+            - (2.0 / 3.0)
+            * 0.3
+            * (2.0 - 1.0)
+            / float(solver.center_distance_x_m.to_numpy()[storage_i]),
+        )
+        np.testing.assert_allclose(
+            measured_mps,
+            expected_mps,
+            rtol=0.0,
+            atol=1.0e-6,
+            err_msg=(
+                "a fluid-fluid HIBM interpolation constraint must not invent "
+                "a resolved-SST wall normal or suppress the physical grad-k RHS"
+            ),
+        )
+
+    def test_correlation_sst_grad_k_wall_is_componentwise_on_all_axes(
+        self,
+    ) -> None:
+        shape = (5, 5, 5)
+        storage_coordinate = 2
+        sentinel_velocity_mps = np.array((17.0, -19.0, 23.0), dtype=np.float32)
+
+        for axis_index in range(3):
+            with self.subTest(axis_index=axis_index):
+                solver = _cuda_solver(
+                    FluidDomainSpec.unit_box(
+                        grid_nodes=shape,
+                        density_kgm3=1.0,
+                        viscosity_pa_s=1.0e-5,
+                        dt_s=1.0e-4,
+                    )
+                )
+                solver.obstacle.fill(0)
+                solver.configure_sst_2003(
+                    inlet_velocity_mps=3.0,
+                    turbulence_intensity=0.05,
+                    turbulent_viscosity_ratio=10.0,
+                    no_slip_domain_walls=(False,) * 6,
+                    near_wall_treatment="fluent_correlation",
+                )
+                solver.set_velocity_dirichlet_boundary_authority("canonical")
+
+                component_bit = 1 << axis_index
+                storage_plane = [slice(None)] * 3
+                storage_plane[axis_index] = storage_coordinate
+                storage_plane_index = tuple(storage_plane)
+                probe = [1, 1, 1]
+                probe[axis_index] = storage_coordinate
+                probe_index = tuple(probe)
+
+                exact_mask = np.zeros(shape, dtype=np.int32)
+                exact_mask[storage_plane_index] = component_bit
+                solver.velocity_dirichlet_boundary_active_component_mask.from_numpy(
+                    exact_mask
+                )
+                solver.velocity_dirichlet_boundary_hard_fixed_component_mask.from_numpy(
+                    exact_mask
+                )
+                solver.velocity_dirichlet_boundary_owned_component_mask.from_numpy(
+                    exact_mask
+                )
+
+                target_mps = 1.75 + axis_index
+                targets = np.zeros((*shape, 3), dtype=np.float32)
+                targets[storage_plane_index + (axis_index,)] = target_mps
+                solver.velocity_dirichlet_boundary_value_mps.from_numpy(targets)
+                mobility = np.ones((*shape, 3), dtype=np.float32)
+                mobility[storage_plane_index + (axis_index,)] = 0.0
+                solver.velocity_dirichlet_boundary_pressure_mobility.from_numpy(
+                    mobility
+                )
+                enforcement = np.zeros((*shape, 3), dtype=np.float32)
+                enforcement[storage_plane_index + (axis_index,)] = 1.0
+                solver.velocity_dirichlet_boundary_component_enforcement_weight.from_numpy(
+                    enforcement
+                )
+
+                velocity_prev = np.broadcast_to(
+                    sentinel_velocity_mps,
+                    (*shape, 3),
+                ).copy()
+                solver.velocity_prev.from_numpy(velocity_prev)
+                expected_velocity_mps = sentinel_velocity_mps.copy()
+                expected_velocity_mps[axis_index] = target_mps
+
+                minus_plane = [slice(None)] * 3
+                minus_plane[axis_index] = storage_coordinate - 1
+                minus_plane_index = tuple(minus_plane)
+                for high_k_side in ("minus", "plus"):
+                    with self.subTest(
+                        axis_index=axis_index,
+                        high_k_side=high_k_side,
+                    ):
+                        k_state = np.ones(shape, dtype=np.float32)
+                        high_plane_index = (
+                            minus_plane_index
+                            if high_k_side == "minus"
+                            else storage_plane_index
+                        )
+                        k_state[high_plane_index] = 1.0e6
+                        solver.sst_turbulent_kinetic_energy.from_numpy(k_state)
+                        solver._sst_momentum_explicit_stress_rhs_checked(0.3)
+                        np.testing.assert_allclose(
+                            solver.velocity.to_numpy()[probe_index],
+                            expected_velocity_mps,
+                            rtol=0.0,
+                            atol=1.0e-6,
+                            err_msg=(
+                                "the exact normal component must restore its "
+                                "target without freezing tangential components"
+                            ),
+                        )
+
     def test_sst_grad_k_rhs_restores_canonical_owner_for_both_face_orientations(
         self,
     ) -> None:
@@ -2557,8 +2736,10 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
                     "reconstructed_count": int(solver.reduction_count[None]),
                 }
 
+            solver._snapshot_fresh_fluid_reconstruction_pending_kernel()
             solver._reconstruct_hibm_fresh_fluid_cells_kernel(1)
             after_first_pass = snapshot()
+            solver._snapshot_fresh_fluid_reconstruction_pending_kernel()
             solver._reconstruct_hibm_fresh_fluid_cells_kernel(1)
             after_second_pass = snapshot()
             return after_first_pass, after_second_pass

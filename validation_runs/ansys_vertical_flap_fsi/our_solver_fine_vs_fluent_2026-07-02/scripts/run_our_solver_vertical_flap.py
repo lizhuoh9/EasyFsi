@@ -771,10 +771,11 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
             )
         ),
         flow_hibm_dynamic_solid_volume_enabled=True,
-        # Preserve the validated direct-partitioned topology.  The pressure
-        # nullspace solve owns outlet-disconnected HIBM slivers; converting
-        # them to obstacles changes canonical owners as the flap moves.
-        flow_hibm_tiny_unreached_cleanup_component_cells=0,
+        # Remove only small outlet-disconnected row-cloud fragments before
+        # pressure-row assembly.  They are discrete grid artifacts without an
+        # outlet pressure path; each conversion invalidates topology and
+        # rebuilds the canonical velocity rows before projection.
+        flow_hibm_tiny_unreached_cleanup_component_cells=128,
         update_fluid_obstacle_from_solid=True,
         export_final_flow_snapshot=True,
         # Campaign runs fail loud on under-seeded solids (2026-07-03 audit:

@@ -281,7 +281,20 @@ class CanonicalVelocityBoundaryComponentReportContracts(unittest.TestCase):
             HibmMpmIbBoundaryConditions._prepare_velocity_dirichlet_component_face_claims_kernel
         )
         self.assertIn("for source_author_slot in range(4)", prepare_source)
-        self.assertIn("author_kind =", prepare_source)
+        self.assertIn(
+            "source_slot = source_author_slot // 2",
+            prepare_source,
+        )
+        self.assertIn(
+            "author_kind = source_author_slot - 2 * source_slot",
+            prepare_source,
+        )
+        self.assertNotIn(
+            "author_kind = source_author_slot // 2",
+            prepare_source,
+            "direct-first enumeration drops the source-local relocation "
+            "shadow when the adjacent direct owner is visited first",
+        )
         self.assertIn(
             "velocity_dirichlet_component_face_actual_sample_velocity_mps",
             prepare_source,

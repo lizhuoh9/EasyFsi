@@ -127,10 +127,10 @@ def test_fine_config_uses_dynamic_solid_volume_and_validated_direct_hibm_band() 
 
     assert config.update_fluid_obstacle_from_solid
     assert config.flow_hibm_dynamic_solid_volume_enabled
-    # The validated direct partitioned path leaves outlet-disconnected HIBM
-    # slivers in the pressure/nullspace solve.  Converting them into obstacle
-    # cells changes the moving interface topology and its canonical owners.
-    assert config.flow_hibm_tiny_unreached_cleanup_component_cells == 0
+    # Bound the validated discrete cleanup to small outlet-disconnected
+    # row-cloud fragments; the runner rebuilds canonical owners after a
+    # conversion and leaves larger pressure pockets in the nullspace solve.
+    assert config.flow_hibm_tiny_unreached_cleanup_component_cells == 128
     assert 0.5 * config.span_m - 0.5 * dx < rx <= 0.5 * config.span_m
     assert 4.0 * dy <= ry <= 6.0 * dy
     assert 1.5 * dz <= rz <= 2.0 * dz
@@ -175,33 +175,13 @@ def test_direct_vertical_flap_config_preserves_validated_r13_physics() -> None:
     assert not config.traction_tip_cap_pressure_enabled
 
 
-def test_direct_validator_rejects_post_solid_projection_request() -> None:
-    config = SimpleNamespace(
-        flow_solid_boundary_mode="hibm_sharp_marker_rows",
-        flow_post_solid_kinematic_projection_enabled=True,
-    )
-
-    with pytest.raises(ValueError, match="direct HIBM-MPM output"):
-        solid_mpm_fsi_runner._validate_rectangular_solid_config(
-            config,
-            require_post_solid_projection=False,
-            require_tip_cap_pressure=False,
-        )
-
-
 def test_direct_validator_enforces_validated_no_tip_cap_contract() -> None:
     config = vertical_flap_case.selected_formulation_solver_config(step_count=50)
 
-    solid_mpm_fsi_runner._validate_rectangular_solid_config(
-        config,
-        require_post_solid_projection=False,
-        require_tip_cap_pressure=False,
-    )
+    solid_mpm_fsi_runner._validate_rectangular_solid_config(config)
     with pytest.raises(ValueError, match="direct HIBM-MPM traction"):
         solid_mpm_fsi_runner._validate_rectangular_solid_config(
             replace(config, traction_tip_cap_pressure_enabled=True),
-            require_post_solid_projection=False,
-            require_tip_cap_pressure=False,
         )
 
 

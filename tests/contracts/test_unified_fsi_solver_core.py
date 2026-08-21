@@ -441,6 +441,14 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
                 / "modes.py"
             ).exists()
         )
+        self.assertFalse(
+            (
+                simulation_core_root
+                / "coupling"
+                / "hibm_mpm"
+                / "marker_target_closure.py"
+            ).exists()
+        )
         self.assertFalse((squid_root / "coupling_legacy.py").exists())
 
         old_exports = (
@@ -475,25 +483,38 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
             generic_fsi_solver.FsiSolverConfig.__dataclass_fields__,
         )
 
-    def test_ansys_uses_validated_direct_loop_but_keeps_shared_driver(self) -> None:
+    def test_ansys_uses_only_the_validated_direct_loop(self) -> None:
         from benchmarks.official import solid_mpm_fsi_runner
         from cases import ansys_vertical_flap_fsi
 
         direct_source = inspect.getsource(
             solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
-        shared_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_rectangular_solid_marker_mpm_fsi_smoke
-        )
         case_source = inspect.getsource(ansys_vertical_flap_fsi)
 
         self.assertIn("for step_index in range(config.step_count)", direct_source)
         self.assertNotIn("solve_fsi_runtime(", direct_source)
-        self.assertIn("solve_fsi_runtime(", shared_source)
         self.assertIn("run_hibm_mpm_fsi(", case_source)
-        self.assertNotIn(
-            "run_rectangular_solid_marker_mpm_fsi_smoke(",
-            case_source,
+        self.assertFalse(
+            hasattr(
+                solid_mpm_fsi_runner,
+                "prepare_rectangular_solid_marker_mpm_fsi_runtime",
+            )
+        )
+        self.assertFalse(
+            hasattr(
+                solid_mpm_fsi_runner,
+                "run_rectangular_solid_marker_mpm_fsi_smoke",
+            )
+        )
+        self.assertFalse(
+            hasattr(
+                solid_mpm_fsi_runner,
+                "_finalize_post_solid_kinematic_flow",
+            )
+        )
+        self.assertFalse(
+            hasattr(solid_mpm_fsi_runner, "_step_observer_snapshot")
         )
         self.assertIn("solid_substeps=solid_substeps", direct_source)
         self.assertIn("flow_predictor_substeps", case_source)

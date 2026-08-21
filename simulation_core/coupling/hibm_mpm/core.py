@@ -56,11 +56,6 @@ from .mac_stencil import (
     mac_stencil_weight,
     sample_mac_component,
 )
-from .marker_target_closure import (
-    MarkerTargetClosureIncompatibleError,
-    solve_weighted_marker_target_closure,
-)
-
 HIBM_RELOCATION_NO_WINNER_SOURCE_LINEAR_KEY = (1 << 63) - 1
 # Component-face author keys are first formed from i32 grid coordinates inside
 # Taichi kernels.  Keeping the total node count within signed i32 also makes
@@ -12113,50 +12108,6 @@ class HibmMpmIbBoundaryConditions:
         self.velocity_dirichlet_marker_target_closure_unresolved_marker_count = (
             ti.field(dtype=ti.i32, shape=())
         )
-        closure_row_capacity = 3 * self.marker_capacity
-        closure_support_shape = (closure_row_capacity, 8)
-        self.velocity_dirichlet_marker_target_closure_row_active = ti.field(
-            dtype=ti.i32,
-            shape=closure_row_capacity,
-        )
-        self.velocity_dirichlet_marker_target_closure_row_residual_mps = ti.field(
-            dtype=ti.f32,
-            shape=closure_row_capacity,
-        )
-        self.velocity_dirichlet_marker_target_closure_row_valid_weight = ti.field(
-            dtype=ti.f32,
-            shape=closure_row_capacity,
-        )
-        self.velocity_dirichlet_marker_target_closure_support_index = ti.Vector.field(
-            3,
-            dtype=ti.i32,
-            shape=closure_support_shape,
-        )
-        self.velocity_dirichlet_marker_target_closure_support_weight = ti.field(
-            dtype=ti.f32,
-            shape=closure_support_shape,
-        )
-        self.velocity_dirichlet_marker_target_closure_support_inverse_mass_per_kg = (
-            ti.field(dtype=ti.f32, shape=closure_support_shape)
-        )
-        self._marker_target_closure_adjustable_dof_capacity = (
-            closure_row_capacity * 8
-        )
-        self.velocity_dirichlet_marker_target_closure_candidate_index_axis = (
-            ti.Vector.field(
-                4,
-                dtype=ti.i32,
-                shape=self._marker_target_closure_adjustable_dof_capacity,
-            )
-        )
-        self.velocity_dirichlet_marker_target_closure_candidate_base_mps = ti.field(
-            dtype=ti.f32,
-            shape=self._marker_target_closure_adjustable_dof_capacity,
-        )
-        self.velocity_dirichlet_marker_target_closure_candidate_value_mps = ti.field(
-            dtype=ti.f32,
-            shape=self._marker_target_closure_adjustable_dof_capacity,
-        )
         self.report_velocity_dirichlet_marker_target_closure_constraint_count = (
             ti.field(dtype=ti.i32, shape=())
         )
@@ -16214,10 +16165,6 @@ class HibmMpmIbBoundaryConditions:
             )
             best_progress = 1.0e30
             best_tangential_distance_squared = 1.0e30
-            tangential_tie_tolerance_squared = ti.max(
-                1.0e-24,
-                1.0e-12 * distance_squared,
-            )
             for offset in ti.static(range(2)):
                 storage = ti.Vector([source.x, source.y, source.z])
                 storage[axis] += offset
@@ -16287,19 +16234,12 @@ class HibmMpmIbBoundaryConditions:
                                 0.0,
                             )
                             better = 0
-                            if (
-                                tangential_distance_squared
-                                + tangential_tie_tolerance_squared
-                                < best_tangential_distance_squared
-                            ):
+                            if projected_progress < best_progress:
                                 better = 1
                             elif (
-                                ti.abs(
-                                    tangential_distance_squared
-                                    - best_tangential_distance_squared
-                                )
-                                <= tangential_tie_tolerance_squared
-                                and projected_progress < best_progress
+                                projected_progress == best_progress
+                                and tangential_distance_squared
+                                < best_tangential_distance_squared
                             ):
                                 better = 1
                             if better != 0:
@@ -18352,13 +18292,12 @@ class HibmMpmIbBoundaryConditions:
                 )
                 # A backward-face component at ``target`` can be authored
                 # only by target-e_axis (its forward face) or target itself.
-                # Visit both canonical direct owners before their derived
-                # relocation shadows.  A moving shadow can cross the shared
-                # marker endpoint and then carry the adjacent direct owner's
-                # segment, so both direct proofs must already be available.
+                # Keep each source's direct and relocation proofs adjacent.
+                # Relocation is source-local: visiting the neighboring direct
+                # owner first can suppress the moving shadow at a flap tip.
                 for source_author_slot in range(4):
-                    author_kind = source_author_slot // 2
-                    source_slot = source_author_slot - 2 * author_kind
+                    source_slot = source_author_slot // 2
+                    author_kind = source_author_slot - 2 * source_slot
                     source = ti.Vector([target.x, target.y, target.z])
                     if source_slot == 0:
                         source[axis] -= 1
@@ -23199,10 +23138,6 @@ class HibmMpmIbBoundaryConditions:
         nx = ti.static(self.grid_nodes[0])
         ny = ti.static(self.grid_nodes[1])
         nz = ti.static(self.grid_nodes[2])
-        for row in range(3 * self.marker_capacity):
-            self.velocity_dirichlet_marker_target_closure_row_active[row] = 0
-            self.velocity_dirichlet_marker_target_closure_row_residual_mps[row] = 0.0
-            self.velocity_dirichlet_marker_target_closure_row_valid_weight[row] = 0.0
         for marker in range(marker_count):
             region = marker_region_id[marker]
             constrained_marker = (
@@ -23232,17 +23167,6 @@ class HibmMpmIbBoundaryConditions:
             elif constrained_marker:
                 position = marker_position_m[marker]
                 for axis in ti.static(range(3)):
-                    row = 3 * marker + axis
-                    for support in ti.static(range(8)):
-                        self.velocity_dirichlet_marker_target_closure_support_index[
-                            row, support
-                        ] = ti.Vector([-1, -1, -1])
-                        self.velocity_dirichlet_marker_target_closure_support_weight[
-                            row, support
-                        ] = 0.0
-                        self.velocity_dirichlet_marker_target_closure_support_inverse_mass_per_kg[
-                            row, support
-                        ] = 0.0
                     if marker >= physical_marker_count:
                         ti.atomic_add(
                             self.report_velocity_dirichlet_marker_target_closure_projection_only_evaluated_axis_count[
@@ -23271,7 +23195,6 @@ class HibmMpmIbBoundaryConditions:
                         i = base.x + oi
                         j = base.y + oj
                         k = base.z + ok
-                        support = 4 * oi + 2 * oj + ok
                         weight = mac_stencil_weight(fraction, oi, oj, ok)
                         valid, q_free, adjustable, value = (
                             self._prospective_marker_target_closure_support_state(
@@ -23304,15 +23227,6 @@ class HibmMpmIbBoundaryConditions:
                                 adjustable_weighted_square += (
                                     weight * weight * inverse_mass_per_kg
                                 )
-                                self.velocity_dirichlet_marker_target_closure_support_index[
-                                    row, support
-                                ] = ti.Vector([i, j, k])
-                                self.velocity_dirichlet_marker_target_closure_support_weight[
-                                    row, support
-                                ] = weight
-                                self.velocity_dirichlet_marker_target_closure_support_inverse_mass_per_kg[
-                                    row, support
-                                ] = inverse_mass_per_kg
                     if valid_weight <= 1.0e-12:
                         ti.atomic_add(
                             self.report_velocity_dirichlet_marker_target_closure_invalid_count[
@@ -23341,9 +23255,6 @@ class HibmMpmIbBoundaryConditions:
                         sampled /= valid_weight
                         signed_residual = marker_velocity_mps[marker][axis] - sampled
                         residual = ti.abs(signed_residual)
-                        self.velocity_dirichlet_marker_target_closure_row_valid_weight[
-                            row
-                        ] = valid_weight
                         finite = residual == residual and residual < 3.4e38
                         if not finite:
                             residual = 3.4e38
@@ -23392,12 +23303,6 @@ class HibmMpmIbBoundaryConditions:
                                 residual,
                             )
                         if adjustable_weighted_square > 1.0e-24:
-                            self.velocity_dirichlet_marker_target_closure_row_active[
-                                row
-                            ] = 1
-                            self.velocity_dirichlet_marker_target_closure_row_residual_mps[
-                                row
-                            ] = signed_residual
                             ti.atomic_add(
                                 self.report_velocity_dirichlet_marker_target_closure_adjustable_count[
                                     None
@@ -23437,169 +23342,151 @@ class HibmMpmIbBoundaryConditions:
                                     1,
                                 )
 
-    def _marker_target_closure_linear_system(
+    @ti.kernel
+    def _marker_target_closure_kaczmarz_sweep_kernel(
         self,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[tuple[int, int, int, int]]]:
-        active = (
-            self.velocity_dirichlet_marker_target_closure_row_active.to_numpy()
-            != 0
-        )
-        row_indices = np.flatnonzero(active)
-        residual = np.asarray(
-            self.velocity_dirichlet_marker_target_closure_row_residual_mps.to_numpy()[
-                row_indices
-            ],
-            dtype=np.float64,
-        )
-        valid_weight = np.asarray(
-            self.velocity_dirichlet_marker_target_closure_row_valid_weight.to_numpy()[
-                row_indices
-            ],
-            dtype=np.float64,
-        )
-        support_indices = (
-            self.velocity_dirichlet_marker_target_closure_support_index.to_numpy()[
-                row_indices
-            ]
-        )
-        support_weights = np.asarray(
-            self.velocity_dirichlet_marker_target_closure_support_weight.to_numpy()[
-                row_indices
-            ],
-            dtype=np.float64,
-        )
-        support_inverse_mass = np.asarray(
-            self.velocity_dirichlet_marker_target_closure_support_inverse_mass_per_kg.to_numpy()[
-                row_indices
-            ],
-            dtype=np.float64,
-        )
-
-        keys: list[tuple[int, int, int, int]] = []
-        column_by_key: dict[tuple[int, int, int, int], int] = {}
-        inverse_mass_by_key: dict[tuple[int, int, int, int], float] = {}
-        row_entries: list[list[tuple[int, float]]] = []
-        for local_row, global_row in enumerate(row_indices):
-            entries: list[tuple[int, float]] = []
-            for support in range(8):
-                index = tuple(int(value) for value in support_indices[local_row, support])
-                weight = float(support_weights[local_row, support])
-                if index[0] < 0 or weight == 0.0:
-                    continue
-                key = (*index, int(global_row) % 3)
-                column = column_by_key.get(key)
-                if column is None:
-                    column = len(keys)
-                    column_by_key[key] = column
-                    keys.append(key)
-                    inverse_mass_by_key[key] = float(
-                        support_inverse_mass[local_row, support]
+        marker_position_m: ti.template(),
+        marker_sample_valid: ti.template(),
+        marker_velocity_mps: ti.template(),
+        marker_region_id: ti.template(),
+        marker_count: ti.i32,
+        physical_marker_count: ti.i32,
+        primary_region_id: ti.i32,
+        secondary_region_id: ti.i32,
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+        density_kgm3: ti.f32,
+        closure_tolerance_mps: ti.f32,
+    ):
+        nx = ti.static(self.grid_nodes[0])
+        ny = ti.static(self.grid_nodes[1])
+        nz = ti.static(self.grid_nodes[2])
+        ti.loop_config(serialize=True)
+        for marker in range(marker_count):
+            region = marker_region_id[marker]
+            constrained_marker = (
+                region == primary_region_id
+                or region == secondary_region_id
+                or marker >= physical_marker_count
+            )
+            if constrained_marker and marker_sample_valid[marker] != 0:
+                position = marker_position_m[marker]
+                for axis in ti.static(range(3)):
+                    base, fraction = mac_component_stencil_base_fraction(
+                        position,
+                        axis,
+                        cell_face_x_m,
+                        cell_face_y_m,
+                        cell_face_z_m,
+                        cell_center_x_m,
+                        cell_center_y_m,
+                        cell_center_z_m,
+                        nx,
+                        ny,
+                        nz,
                     )
-                entries.append((column, weight / valid_weight[local_row]))
-            row_entries.append(entries)
-
-        matrix = np.zeros((len(row_indices), len(keys)), dtype=np.float64)
-        for row, entries in enumerate(row_entries):
-            for column, coefficient in entries:
-                matrix[row, column] += coefficient
-        inverse_mass = np.asarray(
-            [inverse_mass_by_key[key] for key in keys],
-            dtype=np.float64,
-        )
-        return row_indices, matrix, residual, inverse_mass, keys
-
-    @ti.kernel
-    def _gather_marker_target_closure_candidate_kernel(
-        self,
-        candidate_count: ti.i32,
-    ):
-        for column in range(candidate_count):
-            key = self.velocity_dirichlet_marker_target_closure_candidate_index_axis[
-                column
-            ]
-            self.velocity_dirichlet_marker_target_closure_candidate_base_mps[
-                column
-            ] = self.velocity_dirichlet_marker_target_closure_value_mps[
-                key[0], key[1], key[2]
-            ][key[3]]
-
-    @ti.kernel
-    def _commit_marker_target_closure_candidate_kernel(
-        self,
-        candidate_count: ti.i32,
-    ):
-        for column in range(candidate_count):
-            key = self.velocity_dirichlet_marker_target_closure_candidate_index_axis[
-                column
-            ]
-            candidate = (
-                self.velocity_dirichlet_marker_target_closure_candidate_value_mps[
-                    column
-                ]
-            )
-            self.velocity_dirichlet_marker_target_closure_value_mps[
-                key[0], key[1], key[2]
-            ][key[3]] = candidate
-            self.velocity_dirichlet_component_face_claim_target_mps[
-                key[0], key[1], key[2]
-            ][key[3]] = candidate
-
-    def _commit_marker_target_closure_candidate(
-        self,
-        *,
-        keys: Sequence[tuple[int, int, int, int]],
-        correction_mps: np.ndarray,
-        matrix: np.ndarray,
-        residual_mps: np.ndarray,
-        closure_tolerance_mps: float,
-    ) -> float:
-        candidate_count = len(keys)
-        capacity = self._marker_target_closure_adjustable_dof_capacity
-        if candidate_count > capacity:
-            raise MarkerTargetClosureIncompatibleError(
-                "weighted marker-target closure adjustable DOF capacity exceeded"
-            )
-        packed_keys = np.full((capacity, 4), -1, dtype=np.int32)
-        packed_keys[:candidate_count] = np.asarray(keys, dtype=np.int32)
-        self.velocity_dirichlet_marker_target_closure_candidate_index_axis.from_numpy(
-            packed_keys
-        )
-        self._gather_marker_target_closure_candidate_kernel(candidate_count)
-        current = np.asarray(
-            self.velocity_dirichlet_marker_target_closure_candidate_base_mps.to_numpy()[
-                :candidate_count
-            ],
-            dtype=np.float64,
-        )
-        candidate = np.asarray(
-            current + np.asarray(correction_mps, dtype=np.float64),
-            dtype=np.float32,
-        )
-        if not np.all(np.isfinite(candidate)):
-            raise MarkerTargetClosureIncompatibleError(
-                "weighted marker-target closure produced a nonfinite f32 target"
-            )
-        effective_correction = candidate.astype(np.float64) - current
-        remaining = residual_mps - matrix @ effective_correction
-        max_residual = float(np.max(np.abs(remaining), initial=0.0))
-        if max_residual > closure_tolerance_mps:
-            raise MarkerTargetClosureIncompatibleError(
-                "weighted marker-target closure lost tolerance after f32 materialization: "
-                f"max_residual_mps={max_residual:.9g}, "
-                f"tolerance_mps={closure_tolerance_mps:.9g}"
-            )
-        packed_candidates = np.zeros(capacity, dtype=np.float32)
-        packed_candidates[:candidate_count] = candidate
-        self.velocity_dirichlet_marker_target_closure_candidate_value_mps.from_numpy(
-            packed_candidates
-        )
-        self._commit_marker_target_closure_candidate_kernel(candidate_count)
-        return max_residual
+                    sampled = 0.0
+                    valid_weight = 0.0
+                    q_free_diagonal_numerator = 0.0
+                    adjustable_weighted_square = 0.0
+                    for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
+                        i = base.x + oi
+                        j = base.y + oj
+                        k = base.z + ok
+                        weight = mac_stencil_weight(fraction, oi, oj, ok)
+                        valid, q_free, adjustable, value = (
+                            self._prospective_marker_target_closure_support_state(
+                                i,
+                                j,
+                                k,
+                                axis,
+                            )
+                        )
+                        if valid != 0:
+                            sampled += weight * value
+                            valid_weight += weight
+                            inverse_mass_per_kg = (
+                                self._marker_target_closure_inverse_dual_volume(
+                                    i,
+                                    j,
+                                    k,
+                                    axis,
+                                    cell_face_x_m,
+                                    cell_face_y_m,
+                                    cell_face_z_m,
+                                )
+                                / density_kgm3
+                            )
+                            if q_free != 0:
+                                q_free_diagonal_numerator += (
+                                    weight * weight * inverse_mass_per_kg
+                                )
+                            if adjustable != 0:
+                                adjustable_weighted_square += (
+                                    weight * weight * inverse_mass_per_kg
+                                )
+                    if (
+                        valid_weight > 1.0e-12
+                        and q_free_diagonal_numerator
+                        / (valid_weight * valid_weight)
+                        <= 1.0e-20
+                        and adjustable_weighted_square > 1.0e-24
+                    ):
+                        sampled /= valid_weight
+                        residual = marker_velocity_mps[marker][axis] - sampled
+                        denominator = adjustable_weighted_square / (
+                            valid_weight * valid_weight
+                        )
+                        if ti.abs(residual) > closure_tolerance_mps:
+                            for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
+                                i = base.x + oi
+                                j = base.y + oj
+                                k = base.z + ok
+                                weight = mac_stencil_weight(fraction, oi, oj, ok)
+                                valid, _q_free, adjustable, _value = (
+                                    self._prospective_marker_target_closure_support_state(
+                                        i,
+                                        j,
+                                        k,
+                                        axis,
+                                    )
+                                )
+                                if valid != 0 and adjustable != 0:
+                                    normalized_weight = weight / valid_weight
+                                    inverse_mass_per_kg = (
+                                        self._marker_target_closure_inverse_dual_volume(
+                                            i,
+                                            j,
+                                            k,
+                                            axis,
+                                            cell_face_x_m,
+                                            cell_face_y_m,
+                                            cell_face_z_m,
+                                        )
+                                        / density_kgm3
+                                    )
+                                    target_delta_mps = (
+                                        normalized_weight
+                                        * inverse_mass_per_kg
+                                        * residual
+                                        / denominator
+                                    )
+                                    self.velocity_dirichlet_component_face_claim_target_mps[
+                                        i, j, k
+                                    ][axis] += target_delta_mps
+                                    self.velocity_dirichlet_marker_target_closure_value_mps[
+                                        i, j, k
+                                    ][axis] += target_delta_mps
 
     def _close_owned_hard_targets_to_marker_constraints(
         self,
         *,
         markers: HibmMpmSurfaceMarkers,
+        max_iterations: int,
         absolute_tolerance_mps: float,
         closure_tolerance_mps: float,
         density_kgm3: float,
@@ -23620,9 +23507,12 @@ class HibmMpmIbBoundaryConditions:
         cell_center_z_m,
         stage_observer: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
+        iterations = int(max_iterations)
         tolerance = float(absolute_tolerance_mps)
         closure_tolerance = float(closure_tolerance_mps)
         density = float(density_kgm3)
+        if iterations <= 0:
+            raise ValueError("marker compatibility max_iterations must be positive")
         if not math.isfinite(tolerance) or tolerance <= 0.0:
             raise ValueError("marker compatibility absolute tolerance must be positive")
         if (
@@ -23762,60 +23652,17 @@ class HibmMpmIbBoundaryConditions:
                 f"failure_code={initial_failure_code}"
             )
         solve_count = 0
-        matrix_rank = 0
-        adjustable_dof_count = 0
-        least_squares_max_residual = 0.0
-        materialized_max_residual = 0.0
-        max_abs_correction = 0.0
         if initial_adjustable_max_residual > closure_tolerance:
             if stage_observer is not None:
-                stage_observer("hibm_marker_closure_weighted_solve_before")
-            row_indices, matrix, residual, inverse_mass, keys = (
-                self._marker_target_closure_linear_system()
-            )
-            try:
-                solution = solve_weighted_marker_target_closure(
-                    matrix,
-                    residual,
-                    inverse_mass,
-                    absolute_tolerance_mps=closure_tolerance,
+                stage_observer("hibm_marker_closure_kaczmarz_sweeps_before")
+            for _ in range(iterations):
+                self._marker_target_closure_kaczmarz_sweep_kernel(
+                    *measurement_arguments,
+                    closure_tolerance,
                 )
-                least_squares_max_residual = solution.max_residual_mps
-                materialized_max_residual = (
-                    self._commit_marker_target_closure_candidate(
-                        keys=keys,
-                        correction_mps=solution.correction_mps,
-                        matrix=matrix,
-                        residual_mps=residual,
-                        closure_tolerance_mps=closure_tolerance,
-                    )
-                )
-            except MarkerTargetClosureIncompatibleError as error:
-                top_local_row = int(np.argmax(np.abs(residual)))
-                top_global_row = int(row_indices[top_local_row])
-                top_marker = top_global_row // 3
-                top_axis = top_global_row % 3
-                top_position = tuple(
-                    float(value)
-                    for value in self.velocity_dirichlet_marker_target_closure_sample_position_m.to_numpy()[
-                        top_marker
-                    ]
-                )
-                top_region = int(markers.region_id.to_numpy()[top_marker])
-                raise RuntimeError(
-                    "HIBM-owned hard target marker compatibility closure is "
-                    f"incompatible before canonical commit: {error}; "
-                    f"largest_initial_row_marker={top_marker}, "
-                    f"axis={'xyz'[top_axis]}, region={top_region}, "
-                    f"position_m={top_position}, "
-                    f"initial_residual_mps={float(residual[top_local_row]):.9g}"
-                ) from error
             if stage_observer is not None:
-                stage_observer("hibm_marker_closure_weighted_solve_after")
+                stage_observer("hibm_marker_closure_kaczmarz_sweeps_after")
             solve_count = 1
-            matrix_rank = solution.rank
-            adjustable_dof_count = solution.adjustable_dof_count
-            max_abs_correction = solution.max_abs_correction_mps
         if stage_observer is not None:
             stage_observer("hibm_marker_closure_final_measure_before")
         self._measure_marker_target_closure_kernel(*measurement_arguments, tolerance)
@@ -23869,13 +23716,8 @@ class HibmMpmIbBoundaryConditions:
             "constraint_count": constraint_count,
             "adjustable_constraint_count": adjustable_count,
             "immutable_constraint_count": immutable_count,
-            "solver": "weighted_minimum_norm_lstsq",
+            "solver": "serialized_kaczmarz",
             "solve_count": solve_count,
-            "matrix_rank": matrix_rank,
-            "adjustable_dof_count": adjustable_dof_count,
-            "least_squares_max_residual_mps": least_squares_max_residual,
-            "materialized_max_residual_mps": materialized_max_residual,
-            "max_abs_correction_mps": max_abs_correction,
             "initial_max_residual_mps": initial_max_residual,
             "final_max_residual_mps": final_max_residual,
             "final_max_adjustable_residual_mps": final_adjustable_max_residual,
@@ -23935,6 +23777,7 @@ class HibmMpmIbBoundaryConditions:
         projection_vertex_count: int | None = None,
         surface_projection_inactive_axis: int = -1,
         markers: HibmMpmSurfaceMarkers | None = None,
+        marker_compatibility_max_iterations: int = 64,
         marker_compatibility_absolute_tolerance_mps: float = 1.0e-4,
         marker_compatibility_closure_tolerance_mps: float = 1.0e-6,
         marker_compatibility_density_kgm3: float = 1.0,
@@ -24395,13 +24238,8 @@ class HibmMpmIbBoundaryConditions:
                     "constraint_count": 0,
                     "adjustable_constraint_count": 0,
                     "immutable_constraint_count": 0,
-                    "solver": "weighted_minimum_norm_lstsq",
+                    "solver": "serialized_kaczmarz",
                     "solve_count": 0,
-                    "matrix_rank": 0,
-                    "adjustable_dof_count": 0,
-                    "least_squares_max_residual_mps": 0.0,
-                    "materialized_max_residual_mps": 0.0,
-                    "max_abs_correction_mps": 0.0,
                     "initial_max_residual_mps": 0.0,
                     "final_max_residual_mps": 0.0,
                     "final_max_adjustable_residual_mps": 0.0,
@@ -24425,6 +24263,7 @@ class HibmMpmIbBoundaryConditions:
                 marker_target_closure_report = (
                     self._close_owned_hard_targets_to_marker_constraints(
                         markers=markers,
+                        max_iterations=marker_compatibility_max_iterations,
                         absolute_tolerance_mps=(
                             marker_compatibility_absolute_tolerance_mps
                         ),

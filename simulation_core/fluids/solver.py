@@ -214,6 +214,7 @@ class _SSTWallDistanceCacheKey(NamedTuple):
 class _SSTWallDistanceBaseCacheKey(NamedTuple):
     wall_flags: tuple[bool, bool, bool, bool, bool, bool]
     obstacle_topology_revision: int
+    propagate_obstacle_distance: bool
 
 
 def _diagnostic_int(value: object, default: int = -1) -> int:
@@ -6739,9 +6740,10 @@ class CartesianFluidSolver:
         """Build a physical wall-distance field on the device.
 
         Domain faces use their exact physical coordinates.  Cell obstacles
-        seed their shared faces, after which a device Jacobi distance sweep
-        propagates through graded grids.  Sharp-interface callers may also
-        provide marker positions and continuous projection-segment topology;
+        seed their shared faces.  When no continuous surface is available, a
+        device Jacobi distance sweep propagates those voxel distances through
+        graded grids.  Sharp-interface callers may instead provide marker
+        positions and continuous projection-segment topology;
         an inactive extrusion axis can be removed from that point-to-surface
         distance without a host field round-trip.  Point-cloud distance is a
         compatibility fallback for surfaces without connectivity.
@@ -6767,6 +6769,9 @@ class CartesianFluidSolver:
         )
         marker_total = cache_key.marker_count
         segment_total = cache_key.segment_count
+        propagate_obstacle_distance = (
+            marker_total == 0 and segment_total == 0
+        )
         if self._sst_wall_distance_valid and cache_key == (
             self._sst_wall_distance_cache_key
         ):
@@ -6776,6 +6781,7 @@ class CartesianFluidSolver:
             obstacle_topology_revision=int(
                 self.hibm_external_obstacle_topology_revision
             ),
+            propagate_obstacle_distance=propagate_obstacle_distance,
         )
         # A failed rebuild must not leave the previous field published under
         # a new geometry identity.
@@ -6793,7 +6799,7 @@ class CartesianFluidSolver:
                 *(1 if flag else 0 for flag in wall_flags),
                 float(fallback_distance_m),
             )
-            if int(self.reduction_count[None]) > 0:
+            if propagate_obstacle_distance and int(self.reduction_count[None]) > 0:
                 # JFA provides the fast initial candidate field.  Unit sweeps
                 # then run to a device-reported fixed point.
                 jump = 1
@@ -11178,14 +11184,25 @@ class CartesianFluidSolver:
         k,
         normal_axis,
     ):
-        """SST view of the shared canonical hard-face contract."""
+        """Return canonical HIBM wall components used by SST correlations."""
 
-        return self._canonical_hibm_hard_face_target_component_mask(
-            i,
-            j,
-            k,
-            normal_axis,
-        )
+        target_component_mask = 0
+        if self.sst_near_wall_correlation_enabled[None] != 0:
+            # A canonical HIBM row is an algebraic velocity constraint, not
+            # physical wall-normal geometry.  Resolved SST already gets that
+            # geometry from the obstacle and wall-distance ledgers; promoting
+            # every constrained component to a Cartesian wall double-counts
+            # the interface.  Wall correlations intentionally close the
+            # canonical face and therefore retain the shared hard-row target.
+            target_component_mask = (
+                self._canonical_hibm_hard_face_target_component_mask(
+                    i,
+                    j,
+                    k,
+                    normal_axis,
+                )
+            )
+        return target_component_mask
 
     @ti.func
     def _sst_correlation_wall_face_values(
@@ -12009,7 +12026,16 @@ class CartesianFluidSolver:
             if i > 0:
                 left_fluid = self.obstacle[i - 1, j, k] == 0
                 right_fluid = self.obstacle[i, j, k] == 0
-                if left_fluid and right_fluid:
+                canonical_wall_target_mask = (
+                    self._sst_canonical_hibm_wall_target_component_mask(
+                        i, j, k, 0
+                    )
+                )
+                if (canonical_wall_target_mask & 1) != 0:
+                    rhs_velocity.x = (
+                        self.velocity_dirichlet_boundary_value_mps[i, j, k].x
+                    )
+                elif left_fluid and right_fluid:
                     grad_k_x = (
                         self.sst_turbulent_kinetic_energy[i, j, k]
                         - self.sst_turbulent_kinetic_energy[i - 1, j, k]
@@ -12032,7 +12058,16 @@ class CartesianFluidSolver:
             if j > 0:
                 lower_fluid = self.obstacle[i, j - 1, k] == 0
                 upper_fluid = self.obstacle[i, j, k] == 0
-                if lower_fluid and upper_fluid:
+                canonical_wall_target_mask = (
+                    self._sst_canonical_hibm_wall_target_component_mask(
+                        i, j, k, 1
+                    )
+                )
+                if (canonical_wall_target_mask & 2) != 0:
+                    rhs_velocity.y = (
+                        self.velocity_dirichlet_boundary_value_mps[i, j, k].y
+                    )
+                elif lower_fluid and upper_fluid:
                     grad_k_y = (
                         self.sst_turbulent_kinetic_energy[i, j, k]
                         - self.sst_turbulent_kinetic_energy[i, j - 1, k]
@@ -12055,7 +12090,16 @@ class CartesianFluidSolver:
             if k > 0:
                 back_fluid = self.obstacle[i, j, k - 1] == 0
                 front_fluid = self.obstacle[i, j, k] == 0
-                if back_fluid and front_fluid:
+                canonical_wall_target_mask = (
+                    self._sst_canonical_hibm_wall_target_component_mask(
+                        i, j, k, 2
+                    )
+                )
+                if (canonical_wall_target_mask & 4) != 0:
+                    rhs_velocity.z = (
+                        self.velocity_dirichlet_boundary_value_mps[i, j, k].z
+                    )
+                elif back_fluid and front_fluid:
                     grad_k_z = (
                         self.sst_turbulent_kinetic_energy[i, j, k]
                         - self.sst_turbulent_kinetic_energy[i, j, k - 1]
@@ -12441,17 +12485,15 @@ class CartesianFluidSolver:
                 component_coordinate = k
                 plus_component_width = self.cell_width_z_m[k]
 
-            plus_patch_canonical_wall = False
-            if self.sst_near_wall_correlation_enabled[None] != 0:
-                plus_patch_canonical_wall = (
-                    self._sst_canonical_hibm_wall_target_component_mask(
-                        ni,
-                        nj,
-                        nk,
-                        axis_index,
-                    )
-                    != 0
+            plus_patch_canonical_wall = (
+                self._sst_canonical_hibm_wall_target_component_mask(
+                    ni,
+                    nj,
+                    nk,
+                    axis_index,
                 )
+                != 0
+            )
             if (
                 self.obstacle[i, j, k] == 0
                 and self.obstacle[ni, nj, nk] == 0
@@ -12483,17 +12525,15 @@ class CartesianFluidSolver:
                     minus_component_width = self.cell_width_y_m[mj]
                 elif component == 2:
                     minus_component_width = self.cell_width_z_m[mk]
-                minus_patch_canonical_wall = False
-                if self.sst_near_wall_correlation_enabled[None] != 0:
-                    minus_patch_canonical_wall = (
-                        self._sst_canonical_hibm_wall_target_component_mask(
-                            mni,
-                            mnj,
-                            mnk,
-                            axis_index,
-                        )
-                        != 0
+                minus_patch_canonical_wall = (
+                    self._sst_canonical_hibm_wall_target_component_mask(
+                        mni,
+                        mnj,
+                        mnk,
+                        axis_index,
                     )
+                    != 0
+                )
                 if (
                     self.obstacle[mi, mj, mk] == 0
                     and self.obstacle[mni, mnj, mnk] == 0
@@ -15811,6 +15851,12 @@ class CartesianFluidSolver:
             self._last_momentum_advection_rejected_trial_count = 0
 
         if self.turbulence_model == "sst_2003":
+            if scheme != "muscl_tvd":
+                # The MUSCL path prepares these fixed obstacle/grid volumes
+                # before its SSP loop.  Euler and RK2 still use the same
+                # volume-multiplied Helmholtz operator and must initialize the
+                # geometry once before declaring it prepared below.
+                self._compute_muscl_momentum_dual_geometry_kernel()
             # Integrate the stiff spatially varying Reynolds stress with
             # automatically sized diffusion substeps.  No scalar mean of mu_t
             # is introduced.

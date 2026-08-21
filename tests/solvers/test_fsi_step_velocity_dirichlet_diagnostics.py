@@ -47,10 +47,7 @@ def test_velocity_dirichlet_mapping_can_qualify_post_solid_observer_stage() -> N
 def test_fsi_step_history_keeps_flow_and_observer_stage_diagnostics() -> None:
     """The saved history must describe the same post-solid state as its snapshot."""
 
-    entrypoints = (
-        solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime,
-        solid_mpm_fsi_runner.run_hibm_mpm_fsi,
-    )
+    entrypoints = (solid_mpm_fsi_runner.run_hibm_mpm_fsi,)
     for entrypoint in entrypoints:
         function_source = textwrap.dedent(inspect.getsource(entrypoint))
         tree = ast.parse(function_source)

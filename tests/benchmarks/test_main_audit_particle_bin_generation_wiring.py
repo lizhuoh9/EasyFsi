@@ -126,7 +126,7 @@ class ParticleBinGenerationWiringTests(unittest.TestCase):
     def test_main_runner_owns_initial_generation_and_preflow_propagates_it(
         self,
     ) -> None:
-        main = _function("prepare_rectangular_solid_marker_mpm_fsi_runtime")
+        main = _function("run_hibm_mpm_fsi")
         recorder = next(
             node
             for node in main.body
@@ -230,7 +230,6 @@ class ParticleBinGenerationWiringTests(unittest.TestCase):
                 {
                     "initialize_box": 1,
                     "step": 1,
-                    "restore_state": 1,
                     "enforce_rest_x_plane": 1,
                 }
             ),

@@ -89,6 +89,7 @@ from cases.squid_soft_robot.rows import (
 )
 from cases.squid_soft_robot.runner import run
 from cases.squid_soft_robot.runtime_state import ReducedSquidFSI
+from cases.squid_soft_robot.step_loop import run_squid_step_loop
 from cases.squid_soft_robot.schedules import (
     pressure_schedule_applied_in_history,
     pressure_schedule_pa,
@@ -749,18 +750,23 @@ class SquidLatestCoreConfigTests(unittest.TestCase):
 
     def test_sharp_sampling_uses_fluid_substep_dt_for_cfl(self) -> None:
         source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
-        sharp_block = source.split("def _run_squid_sharp_runtime(", 1)[1]
+        sharp_block = source.split("def run_squid_step_loop(", 1)[1]
         sample_block = sharp_block.split(
             "sample_report = simulator.sample_after_projection(",
             1,
         )[1].split("sample_wall_time_s =", 1)[0]
 
-        self.assertIn('dt_s=float(step_state["fluid_substep_dt_s"])', sample_block)
+        self.assertIn(
+            "step_fluid_substep_dt_s = float(spec.dt_s) / float(step_fluid_substeps)",
+            sharp_block,
+        )
+        self.assertIn("fluid_substep_dt_s = step_fluid_substep_dt_s", sharp_block)
+        self.assertIn("dt_s=fluid_substep_dt_s", sample_block)
         self.assertNotIn("dt_s=spec.dt_s", sample_block)
 
     def test_sharp_sampling_uses_latest_post_solid_projection_when_available(self) -> None:
         source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
-        sharp_block = source.split("def _run_squid_sharp_runtime(", 1)[1]
+        sharp_block = source.split("def run_squid_step_loop(", 1)[1]
         sample_block = sharp_block.split(
             "latest_fluid_projection_report =",
             1,
@@ -3496,7 +3502,7 @@ END-ISO-10303-21;
                     "--output-dir",
                     str(output_dir),
                     "--fsi-coupling-iterations",
-                    "1",
+                    "0",
                     "--preflight-only",
                 ]
             )
@@ -3612,8 +3618,8 @@ END-ISO-10303-21;
         self,
     ) -> None:
         source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
-        block = source.split("def evaluate_trial_once(", 1)[1].split(
-            "def commit_trial(",
+        block = source.split("def advance_sharp_trial_once():", 1)[1].split(
+            "def restore_sharp_trial_state(",
             1,
         )[0]
 
@@ -3623,6 +3629,135 @@ END-ISO-10303-21;
         trial_return = block.index("return sharp_report")
 
         self.assertLess(failure_check, trial_return)
+
+    def test_sharp_single_pass_report_policy_rejects_post_solid_projection_failure(
+        self,
+    ) -> None:
+        spec = SquidReducedSpec(
+            source_config_path="dummy.json",
+            fluid_bounds_min_m=(0.0, 0.0, 0.0),
+            fluid_bounds_max_m=(1.0, 1.0, 1.0),
+            grid_nodes=(2, 2, 2),
+            dt_s=1.0e-3,
+            water_density_kgm3=1025.0,
+            water_viscosity_pa_s=1.05e-3,
+        )
+        sharp_report = SimpleNamespace(
+            fluid_to_mpm_loads=SimpleNamespace(
+                fluid_projection={
+                    "pressure_solve_failed": False,
+                    "pressure_projection_physical_failure": False,
+                    "cg_converged_all": True,
+                    "cg_breakdown_count": 0,
+                }
+            ),
+            post_solid_fluid_projection={
+                "pressure_solve_failed": True,
+                "pressure_projection_physical_failure": True,
+                "pressure_projection_physical_failure_reason": (
+                    "unreached_component_rhs_incompatible"
+                ),
+                "cg_converged_all": True,
+                "cg_breakdown_count": 0,
+            },
+        )
+        sharp_coupling_state = SimpleNamespace(
+            markers=object(),
+            advance_mpm_step=lambda **_kwargs: sharp_report,
+        )
+        settings = SimpleNamespace(
+            adaptive_fluid_substeps_enabled=False,
+            cg_preconditioner="jacobi",
+            cg_tolerance=1.0e-6,
+            effective_fluid_substeps=1,
+            effective_multigrid_cycles=1,
+            estimated_solid_particle_spacing_m=1.0e-3,
+            far_pressure_air_backed=True,
+            far_pressure_air_backed_probe_normal_sign=0.0,
+            far_pressure_inside_probe_max_multiplier=12.0,
+            fixed_rim_region_id=5,
+            fluid_probe_distance_m=1.0e-3,
+            fsi_coupling_iterations=1,
+            fsi_marker_coupling_tolerance_mps=1.0e-4,
+            full_pressure_waveform_steps=1,
+            interface_reaction_aitken=False,
+            interface_reaction_relaxation=1.0,
+            max_wall_time_s=0.0,
+            neo_fixed_node_lock_policy=None,
+            one_sided_probe_max_multiplier=12.0,
+            pressure_far_side_normal_sign=1.0,
+            pressure_load_region_id=7,
+            pressure_outlet_zmin_enabled=True,
+            pressure_solver_name="fv_cg",
+            primary_shell_region_id=7,
+            projection_divergence_cleanup_iterations=0,
+            secondary_shell_region_id=8,
+            solid_mpm_flip_blend=0.0,
+            solid_mpm_substeps=1,
+            solid_sub_dt_s=spec.dt_s,
+            solid_substep_velocity_damping=1.0,
+            step_count=1,
+            two_sided_probe_max_multiplier=12.0,
+        )
+        args = SimpleNamespace(
+            diagnostic_disable_pressure_neumann_matrix_rows=False,
+            divergence_cleanup_relaxation=1.0,
+            fluid_advection_scheme="semi_lagrangian",
+            hibm_post_dirichlet_consistency_projections=0,
+            pressure_solve_failure_policy="report",
+            projection_iterations=1,
+            solid_model="neo_hookean_mpm",
+        )
+        solid_mpm = SimpleNamespace(
+            area_weight_m2=object(),
+            external_force_n=object(),
+            particle_count=1,
+            surface_normal=object(),
+            v=object(),
+            x=object(),
+        )
+        simulator = SimpleNamespace(fluid=object(), time_s={None: 0.0})
+        context = SimpleNamespace(
+            callbacks=SimpleNamespace(
+                publish_solid_report_to_reduced_state=lambda *_args: None
+            ),
+            resources=SimpleNamespace(
+                args=args,
+                fluid_substep_controller=None,
+                history_path=Path("unused_history.csv"),
+                material=SimpleNamespace(
+                    lame_lambda_pa=1.0,
+                    shear_modulus_pa=1.0,
+                ),
+                output_dir=Path("unused_output"),
+                process_path=Path("unused_process.json"),
+                simulator=simulator,
+                solid_mpm=solid_mpm,
+                spec=spec,
+            ),
+            settings=settings,
+            state=SimpleNamespace(
+                first_step=1,
+                partial_run_reason="",
+                partial_run_stopped=False,
+                previous_step_cfl=None,
+                previous_step_fluid_substeps=1,
+                rows=[],
+                sharp_coupling_state=sharp_coupling_state,
+            ),
+        )
+
+        with patch(
+            "cases.squid_soft_robot.step_loop._write_step_failure_artifacts"
+        ) as write_failure:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "post_solid:pressure_solve_failed.*"
+                "post_solid:unreached_component_rhs_incompatible",
+            ):
+                run_squid_step_loop(context)
+
+        write_failure.assert_called_once()
 
 
     def test_sharp_completed_step_gate_uses_downstream_jet_sections(self) -> None:
@@ -4226,48 +4361,50 @@ END-ISO-10303-21;
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
+        compact_sharp_advance_call = "".join(sharp_advance_call.split())
         self.assertIn(
             "far_pressure_region_id=settings.pressure_load_region_id",
-            sharp_advance_call,
+            compact_sharp_advance_call,
         )
         self.assertIn(
-            'far_pressure_pa=float(step_state["pressure_pa"])',
-            sharp_advance_call,
+            "far_pressure_pa=pressure_pa",
+            compact_sharp_advance_call,
         )
         self.assertIn(
-            "far_pressure_side_normal_sign=settings.pressure_far_side_normal_sign",
-            sharp_advance_call,
+            "far_pressure_side_normal_sign=(settings.pressure_far_side_normal_sign)",
+            compact_sharp_advance_call,
         )
         self.assertIn(
-            "pressure_outlet_zmin=settings.pressure_outlet_zmin_enabled",
-            sharp_advance_call,
+            "pressure_outlet_zmin=pressure_outlet_zmin_enabled",
+            compact_sharp_advance_call,
         )
         self.assertNotIn(
             "pressure_outlet_zmin=not args.disable_pressure_outlet_zmin",
-            sharp_advance_call,
+            compact_sharp_advance_call,
         )
         self.assertIn(
-            "far_pressure_inside_probe_max_multiplier="
-            "(\n                settings.far_pressure_inside_probe_max_multiplier",
-            sharp_advance_call,
+            "far_pressure_inside_probe_max_multiplier=(settings."
+            "far_pressure_inside_probe_max_multiplier)",
+            compact_sharp_advance_call,
         )
         self.assertIn(
-            "one_sided_pressure_region_id=settings.secondary_shell_region_id",
-            sharp_advance_call,
+            "one_sided_pressure_region_id=secondary_shell_region_id",
+            compact_sharp_advance_call,
         )
-        self.assertIn("one_sided_reference_pressure_pa=0.0", sharp_advance_call)
         self.assertIn(
-            "one_sided_probe_max_multiplier=(\n"
-            "                settings.one_sided_probe_max_multiplier",
-            sharp_advance_call,
+            "one_sided_reference_pressure_pa=0.0", compact_sharp_advance_call
+        )
+        self.assertIn(
+            "one_sided_probe_max_multiplier=(settings.one_sided_probe_max_multiplier)",
+            compact_sharp_advance_call,
         )
         default_args = parse_args([])
         self.assertEqual(default_args.far_pressure_inside_probe_max_multiplier, 12.0)
         self.assertEqual(default_args.one_sided_probe_max_multiplier, 12.0)
         step_loop_source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
-        sharp_pressure_setup = step_loop_source.split("def prepare_step(", 1)[
-            1
-        ].split("def evaluate_trial_once(", 1)[0]
+        sharp_pressure_setup = step_loop_source.split(
+            "def run_squid_step_loop(", 1
+        )[1].split("def advance_sharp_solid_substeps():", 1)[0]
         self.assertIn("pressure_schedule_step_end_pa(", sharp_pressure_setup)
         self.assertIn("current_time_s", sharp_pressure_setup)
         self.assertIn("spec.dt_s", sharp_pressure_setup)
@@ -4295,7 +4432,7 @@ END-ISO-10303-21;
             sharp_call,
         )
         self.assertIn("args.divergence_cleanup_relaxation", sharp_call)
-        self.assertIn('fluid_substeps=int(step_state["fluid_substeps"])', sharp_call)
+        self.assertIn("fluid_substeps=step_fluid_substeps", sharp_call)
         self.assertIn(
             "fluid_advection_scheme=str(args.fluid_advection_scheme)",
             sharp_call,
@@ -5490,17 +5627,17 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
+        compact_sharp_advance_call = "".join(sharp_advance_call.split())
         self.assertIn(
-            "two_sided_probe_max_multiplier=(\n"
-            "                settings.two_sided_probe_max_multiplier",
-            sharp_advance_call,
+            "two_sided_probe_max_multiplier=(settings.two_sided_probe_max_multiplier)",
+            compact_sharp_advance_call,
         )
         # The closure multiplier stays wired alongside it (the extension
         # complements the closure, it does not replace it).
         self.assertIn(
-            "far_pressure_inside_probe_max_multiplier="
-            "(\n                settings.far_pressure_inside_probe_max_multiplier",
-            sharp_advance_call,
+            "far_pressure_inside_probe_max_multiplier=(settings."
+            "far_pressure_inside_probe_max_multiplier)",
+            compact_sharp_advance_call,
         )
         runner_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         settings_construction = runner_source.split(
@@ -5528,19 +5665,20 @@ class SquidSharpTwoSidedExtendedWalkContractTests(unittest.TestCase):
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
+        compact_sharp_advance_call = "".join(sharp_advance_call.split())
 
         self.assertIn(
             "convert_internal_nodes_to_obstacles=False",
-            sharp_advance_call,
+            compact_sharp_advance_call,
         )
         self.assertIn(
-            "far_pressure_air_backed_probe_normal_sign=(\n"
-            "                settings.far_pressure_air_backed_probe_normal_sign",
-            sharp_advance_call,
+            "far_pressure_air_backed_probe_normal_sign=(settings."
+            "far_pressure_air_backed_probe_normal_sign)",
+            compact_sharp_advance_call,
         )
         self.assertIn(
-            "far_pressure_side_normal_sign=settings.pressure_far_side_normal_sign",
-            sharp_advance_call,
+            "far_pressure_side_normal_sign=(settings.pressure_far_side_normal_sign)",
+            compact_sharp_advance_call,
         )
         runner_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         settings_construction = runner_source.split(
@@ -5684,27 +5822,22 @@ class SquidClosureCoverageFloorGuardTests(unittest.TestCase):
         # the tri_mooney_shell_mpm construction already does.
         source = _read_squid_sources()
         step_loop_source = SQUID_STEP_LOOP_SOURCE.read_text(encoding="utf-8")
-        sharp_step_tail = step_loop_source.split("def commit_trial(", 1)[1].split(
-            "def publish_trial(",
-            1,
-        )[0]
-        sharp_guard_try = sharp_step_tail.split(
-            "candidate_rows = [*state.rows, row]\n        try:",
-            1,
-        )[1].split(
-            "except Exception as exc:",
-            1,
+        sharp_guard_tail = step_loop_source.split(
+            "        try:\n            _raise_for_step_numerical_guard(", 1
+        )[1]
+        sharp_guard_try = sharp_guard_tail.split(
+            "        except Exception as exc:", 1
         )[0]
         self.assertIn("_raise_for_step_solid_out_of_bounds_guard(row)", sharp_guard_try)
         self.assertIn("_raise_for_closure_coverage_floor(", sharp_guard_try)
         self.assertIn("args.closure_coverage_floor", sharp_guard_try)
         self.assertIn("args.closure_coverage_floor_patience", sharp_guard_try)
-        sharp_failure_handler = sharp_step_tail.split(
-            "except Exception as exc:",
-            1,
-        )[1].split("state.rows.append(row)", 1)[0]
+        sharp_failure_handler = sharp_guard_tail.split(
+            "        except Exception as exc:", 1
+        )[1].split("        previous_step_cfl =", 1)[0]
         self.assertIn("_write_step_failure_artifacts(", sharp_failure_handler)
-        self.assertNotIn("state.rows.append(row)", sharp_guard_try)
+        self.assertIn("rows=rows", sharp_failure_handler)
+        self.assertNotIn("rows.append(row)", sharp_guard_try)
         self.assertIn('"--closure-coverage-floor"', source)
         self.assertIn('"--closure-coverage-floor-patience"', source)
 
@@ -5761,31 +5894,32 @@ class SquidSharpAirBackedClosureContractTests(unittest.TestCase):
             "sharp_report = sharp_coupling_state.advance_mpm_step(",
             1,
         )[1].split("sharp_summary = hibm_mpm_sharp_step_summary", 1)[0]
+        compact_sharp_advance_call = "".join(sharp_advance_call.split())
         self.assertIn(
             "far_pressure_air_backed=settings.far_pressure_air_backed",
-            sharp_advance_call,
+            compact_sharp_advance_call,
         )
         # The closure wiring the air zone rides on stays in place.
         self.assertIn(
             "far_pressure_region_id=settings.pressure_load_region_id",
-            sharp_advance_call,
+            compact_sharp_advance_call,
         )
         self.assertIn(
             "far_pressure_barrier_region_id=settings.fixed_rim_region_id",
-            sharp_advance_call,
+            compact_sharp_advance_call,
         )
         self.assertIn(
-            'far_pressure_pa=float(step_state["pressure_pa"])', sharp_advance_call
+            "far_pressure_pa=pressure_pa", compact_sharp_advance_call
         )
         self.assertIn(
-            "far_pressure_air_backed_probe_normal_sign=(\n"
-            "                settings.far_pressure_air_backed_probe_normal_sign",
-            sharp_advance_call,
+            "far_pressure_air_backed_probe_normal_sign=(settings."
+            "far_pressure_air_backed_probe_normal_sign)",
+            compact_sharp_advance_call,
         )
         self.assertIn(
-            "far_pressure_inside_probe_max_multiplier="
-            "(\n                settings.far_pressure_inside_probe_max_multiplier",
-            sharp_advance_call,
+            "far_pressure_inside_probe_max_multiplier=(settings."
+            "far_pressure_inside_probe_max_multiplier)",
+            compact_sharp_advance_call,
         )
         runner_source = SQUID_RUNNER_SOURCE.read_text(encoding="utf-8")
         settings_construction = runner_source.split(

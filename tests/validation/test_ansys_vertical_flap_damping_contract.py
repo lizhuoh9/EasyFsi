@@ -35,3 +35,12 @@ def test_final_identity_records_native_and_solver_damping() -> None:
 
     assert identity["schema"] == "our_solver_final_native_fine_identity_v3"
     assert identity["structure_damping"] == EXPECTED_DAMPING_IDENTITY
+
+
+def test_final_identity_preserves_validated_tiny_unreached_cleanup() -> None:
+    assert (
+        final_contracts.FINAL_FINE_CONFIG_IDENTITY[
+            "flow_hibm_tiny_unreached_cleanup_component_cells"
+        ]
+        == 128
+    )

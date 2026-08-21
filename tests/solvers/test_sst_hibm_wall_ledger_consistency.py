@@ -172,6 +172,209 @@ class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
             atol=2.0e-6,
         )
 
+    def test_resolved_helmholtz_does_not_promote_algebraic_constraints_to_walls(
+        self,
+    ) -> None:
+        solver = _cuda_solver()
+        solver.configure_sst_2003(
+            inlet_velocity_mps=3.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=_OPEN_WALLS,
+            near_wall_treatment="resolved",
+        )
+        solver.set_velocity_dirichlet_boundary_authority("canonical")
+
+        exact_neighbor = (1, 2, 1)
+        wall_owners = ((0, 2, 1), exact_neighbor)
+        free_row = (1, 1, 1)
+        wall_speed_mps = 0.25
+        for wall_owner in wall_owners:
+            solver.velocity_dirichlet_boundary_active_component_mask[
+                wall_owner
+            ] = 7
+            solver.velocity_dirichlet_boundary_hard_fixed_component_mask[
+                wall_owner
+            ] = 7
+            solver.velocity_dirichlet_boundary_owned_component_mask[
+                wall_owner
+            ] = 7
+            solver.velocity_dirichlet_boundary_external_exact_component_mask[
+                wall_owner
+            ] = 0
+            solver.velocity_dirichlet_boundary_pressure_mobility[wall_owner] = (
+                0.0,
+                0.0,
+                0.0,
+            )
+            solver.velocity_dirichlet_boundary_component_enforcement_weight[
+                wall_owner
+            ] = (1.0, 1.0, 1.0)
+            solver.velocity_dirichlet_boundary_value_mps[wall_owner] = (
+                wall_speed_mps,
+                0.0,
+                0.0,
+            )
+
+        dt_s = 1.0e-4
+        molecular_nu_m2_s = 1.5e-5
+        solver.velocity.fill((2.25, 0.0, 0.0))
+        solver.sst_eddy_viscosity_pa_s.fill(0.0)
+        solver._prepare_sst_obstacle_interface_wall_target_masks_kernel(1)
+        solver._compute_muscl_momentum_dual_geometry_kernel()
+        solver._initialize_sst_momentum_helmholtz_component_kernel(0, 0, 0, 0)
+        base_diagonal = float(solver.fv_diag[free_row])
+        base_rhs = float(solver.cg_rhs[free_row])
+
+        solver._assemble_sst_momentum_helmholtz_axis_kernel(
+            solver.cg_mg_residual,
+            0,
+            1,
+            dt_s,
+            molecular_nu_m2_s,
+            0,
+            0,
+        )
+
+        # These fluid-fluid rows are algebraic HIBM interpolation constraints,
+        # not wall-normal geometry.  Resolved SST already receives the physical
+        # surface through its obstacle/wall-distance ledger, so both half
+        # patches must remain one ordinary shared diffusion edge here.
+        expected_shared_edge = (
+            dt_s
+            * molecular_nu_m2_s
+            * solver.dx
+            * solver.dz
+            / solver.dy
+        )
+        self.assertEqual(int(solver.bicgstab_t[exact_neighbor]), 1)
+        self.assertAlmostEqual(
+            float(solver.cg_mg_residual[free_row]),
+            expected_shared_edge,
+            delta=2.0e-14,
+        )
+        self.assertAlmostEqual(
+            float(solver.fv_diag[free_row]) - base_diagonal,
+            0.0,
+            delta=2.0e-14,
+        )
+        self.assertAlmostEqual(
+            float(solver.cg_rhs[free_row]) - base_rhs,
+            0.0,
+            delta=2.0e-14,
+        )
+
+    def test_correlation_partial_canonical_half_patch_is_not_also_a_shared_edge(
+        self,
+    ) -> None:
+        solver = _cuda_solver()
+        solver.configure_sst_2003(
+            inlet_velocity_mps=3.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=_OPEN_WALLS,
+            near_wall_treatment="fluent_correlation",
+        )
+        solver.set_velocity_dirichlet_boundary_authority("canonical")
+
+        # The x-MAC control volume at free_row has two half patches on its +y
+        # dual face.  Only the component-minus patch, stored at wall_owner, is
+        # a canonical wall.  The component-plus patch remains an ordinary
+        # fluid-fluid shared edge to free_neighbor.
+        wall_owner = (0, 2, 1)
+        free_row = (1, 1, 1)
+        free_neighbor = (1, 2, 1)
+        wall_speed_mps = 0.25
+        solver.velocity_dirichlet_boundary_active_component_mask[wall_owner] = 3
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask[
+            wall_owner
+        ] = 3
+        solver.velocity_dirichlet_boundary_owned_component_mask[wall_owner] = 3
+        solver.velocity_dirichlet_boundary_external_exact_component_mask[
+            wall_owner
+        ] = 0
+        solver.velocity_dirichlet_boundary_pressure_mobility[wall_owner] = (
+            0.0,
+            0.0,
+            1.0,
+        )
+        solver.velocity_dirichlet_boundary_component_enforcement_weight[
+            wall_owner
+        ] = (1.0, 1.0, 0.0)
+        solver.velocity_dirichlet_boundary_value_mps[wall_owner] = (
+            wall_speed_mps,
+            0.0,
+            0.0,
+        )
+
+        dt_s = 1.0e-4
+        molecular_nu_m2_s = 1.5e-5
+        wall_distance_m = 0.125
+        k_value = 0.25
+        omega_value = 20.0
+        relative_speed_mps = 2.0
+        solver.velocity.fill(
+            (wall_speed_mps + relative_speed_mps, 0.0, 0.0)
+        )
+        solver.sst_cell_center_velocity_mps.fill(
+            (wall_speed_mps + relative_speed_mps, 0.0, 0.0)
+        )
+        solver.sst_wall_distance_m.fill(wall_distance_m)
+        solver.sst_turbulent_kinetic_energy.fill(k_value)
+        solver.sst_specific_dissipation_rate.fill(omega_value)
+        solver.sst_eddy_viscosity_pa_s.fill(0.0)
+        solver._prepare_sst_obstacle_interface_wall_target_masks_kernel(1)
+        solver._compute_muscl_momentum_dual_geometry_kernel()
+        solver._initialize_sst_momentum_helmholtz_component_kernel(0, 0, 0, 0)
+        base_diagonal = float(solver.fv_diag[free_row])
+        base_rhs = float(solver.cg_rhs[free_row])
+
+        solver._assemble_sst_momentum_helmholtz_axis_kernel(
+            solver.cg_mg_residual,
+            0,
+            1,
+            dt_s,
+            molecular_nu_m2_s,
+            0,
+            0,
+        )
+
+        wall_reference = sst_wall_correlation(
+            relative_tangential_velocity=relative_speed_mps,
+            wall_distance=wall_distance_m,
+            turbulent_kinetic_energy=k_value,
+            specific_dissipation_rate=omega_value,
+            density=solver.rho,
+            kinematic_viscosity=molecular_nu_m2_s,
+        )
+        expected_wall_half_diagonal = (
+            dt_s
+            * (0.5 * solver.dx * solver.dz)
+            * float(wall_reference.kinematic_wall_traction_coefficient)
+        )
+        expected_free_half_edge = (
+            dt_s
+            * molecular_nu_m2_s
+            * (0.5 * solver.dx * solver.dz)
+            / solver.dy
+        )
+        self.assertEqual(int(solver.bicgstab_t[free_neighbor]), 1)
+        self.assertAlmostEqual(
+            float(solver.cg_mg_residual[free_row]),
+            expected_free_half_edge,
+            delta=2.0e-14,
+        )
+        self.assertAlmostEqual(
+            float(solver.fv_diag[free_row]) - base_diagonal,
+            expected_wall_half_diagonal,
+            delta=2.0e-14,
+        )
+        self.assertAlmostEqual(
+            float(solver.cg_rhs[free_row]) - base_rhs,
+            expected_wall_half_diagonal * wall_speed_mps,
+            delta=2.0e-14,
+        )
+
     def test_correlation_uses_canonical_hard_face_when_obstacle_mask_is_fluid(
         self,
     ) -> None:
@@ -658,6 +861,72 @@ class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
             target,
             rtol=0.0,
             atol=1.0e-7,
+        )
+
+    def test_muscl_moving_exact_patch_does_not_create_a_new_speed_extremum(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec(
+                bounds_min_m=(0.0, 0.0, 0.0),
+                bounds_max_m=(0.003, 0.000625, 0.005),
+                grid_nodes=(4, 8, 16),
+                density_kgm3=1.225,
+                viscosity_pa_s=1.5e-5,
+                dt_s=5.0e-4,
+            ),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        solver.set_velocity_dirichlet_boundary_authority("canonical")
+
+        free_velocity = np.array([0.0, 8.0, -30.0], dtype=np.float32)
+        wall_target = np.array([0.0, 0.08, -0.05], dtype=np.float32)
+        velocity = np.empty((4, 8, 16, 3), dtype=np.float32)
+        velocity[...] = free_velocity
+        active_mask = np.zeros((4, 8, 16), dtype=np.int32)
+        active_mask[:, 4, 8] = 7
+        targets = np.zeros((4, 8, 16, 3), dtype=np.float32)
+        targets[:, 4, 8] = wall_target
+        mobility = np.ones((4, 8, 16, 3), dtype=np.float32)
+        mobility[:, 4, 8] = 0.0
+        enforcement = np.zeros((4, 8, 16, 3), dtype=np.float32)
+        enforcement[:, 4, 8] = 1.0
+
+        solver.velocity.from_numpy(velocity)
+        solver.velocity_dirichlet_boundary_active_component_mask.from_numpy(
+            active_mask
+        )
+        solver.velocity_dirichlet_boundary_hard_fixed_component_mask.from_numpy(
+            active_mask
+        )
+        solver.velocity_dirichlet_boundary_owned_component_mask.from_numpy(
+            active_mask
+        )
+        solver.velocity_dirichlet_boundary_value_mps.from_numpy(targets)
+        solver.velocity_dirichlet_boundary_pressure_mobility.from_numpy(mobility)
+        solver.velocity_dirichlet_boundary_component_enforcement_weight.from_numpy(
+            enforcement
+        )
+        solver.prepare_and_seal_velocity_dirichlet_component_ledger()
+
+        initial_speed_max = float(np.linalg.norm(velocity, axis=-1).max())
+        solver.predict(
+            dt_s=5.0e-4,
+            advection_scheme="muscl_tvd",
+            kinematic_viscosity_m2_s=0.0,
+            no_slip_domain_walls=_OPEN_WALLS,
+        )
+
+        predicted = solver.velocity.to_numpy()
+        np.testing.assert_allclose(
+            predicted[:, 4, 8],
+            np.broadcast_to(wall_target, (4, 3)),
+            rtol=0.0,
+            atol=2.0e-6,
+        )
+        self.assertLessEqual(
+            float(np.linalg.norm(predicted, axis=-1).max()),
+            initial_speed_max + 2.0e-5,
         )
 
     def test_muscl_advection_rate_excludes_canonical_fluid_exact_rows(

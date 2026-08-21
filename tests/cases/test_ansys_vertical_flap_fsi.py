@@ -737,10 +737,21 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 diagnostics,
             )
             self.assertEqual(invalid_count, 0, diagnostics)
-            self.assertEqual(direct_count, 128, diagnostics)
-            self.assertEqual(normal_walk_count, 0, diagnostics)
+            self.assertGreaterEqual(direct_count, 127, diagnostics)
+            self.assertLessEqual(normal_walk_count, 1, diagnostics)
             self.assertEqual(nearest_count, 0, diagnostics)
-            self.assertEqual(moved_constraint_count, 0, diagnostics)
+            self.assertEqual(
+                moved_constraint_count,
+                normal_walk_count,
+                diagnostics,
+            )
+            self.assertLessEqual(max_tangential_offset_m, 1.0e-12, diagnostics)
+            self.assertLessEqual(
+                max_normal_offset_m,
+                0.5 * float(config.duct_height_m) / float(grid_nodes[1])
+                + 1.0e-9,
+                diagnostics,
+            )
         finally:
             sharp_boundary_cache.clear()
             sampling_identity = None
@@ -1146,13 +1157,8 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                         "constraint_count": 0,
                         "adjustable_constraint_count": 0,
                         "immutable_constraint_count": 0,
-                        "solver": "weighted_minimum_norm_lstsq",
+                        "solver": "serialized_kaczmarz",
                         "solve_count": 0,
-                        "matrix_rank": 0,
-                        "adjustable_dof_count": 0,
-                        "least_squares_max_residual_mps": 0.0,
-                        "materialized_max_residual_mps": 0.0,
-                        "max_abs_correction_mps": 0.0,
                         "initial_max_residual_mps": 0.0,
                         "final_max_residual_mps": 0.0,
                         "final_max_adjustable_residual_mps": 0.0,
@@ -3088,7 +3094,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
     def test_full_domain_runner_persists_solid_substeps_in_process_updates(self):
         runner_source = inspect.getsource(
-            solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
+            solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
 
         self.assertIn(

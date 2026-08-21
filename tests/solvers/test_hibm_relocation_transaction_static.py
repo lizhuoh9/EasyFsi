@@ -256,8 +256,8 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                 "_measure_marker_target_closure_kernel",
             ),
             (
-                "hibm_marker_closure_weighted_solve",
-                "_commit_marker_target_closure_candidate",
+                "hibm_marker_closure_kaczmarz_sweeps",
+                "_marker_target_closure_kaczmarz_sweep_kernel",
             ),
             (
                 "hibm_marker_closure_final_measure",
@@ -294,106 +294,75 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                                     placements.append((before, operation, after))
                 self.assertEqual(len(placements), 1, placements)
 
-        for prefix, operation_name, guard_test in (
-            (
-                "hibm_marker_closure_fallback_no_slip_identity",
-                "_prepare_no_slip_sampling_fallback_identity_kernel",
-                "unresolved_marker_count > 0",
-            ),
-            (
-                "hibm_marker_closure_weighted_solve",
-                "_commit_marker_target_closure_candidate",
-                "initial_adjustable_max_residual > closure_tolerance",
-            ),
-        ):
-            with self.subTest(conditional_stage=prefix):
-                guard = next(
-                    node
-                    for node in ast.walk(closure)
-                    if isinstance(node, ast.If)
-                    and ast.unparse(node.test) == guard_test
-                )
-                self.assertTrue(
-                    any(
-                        self._is_stage_observer_event(
-                            statement, f"{prefix}_before"
-                        )
-                        for statement in guard.body
-                    )
-                )
-                self.assertTrue(
-                    any(
-                        self._statement_calls_method(statement, operation_name)
-                        for statement in guard.body
-                    )
-                )
-                self.assertTrue(
-                    any(
-                        self._is_stage_observer_event(
-                            statement, f"{prefix}_after"
-                        )
-                        for statement in guard.body
-                    )
-                )
-
-    def test_marker_closure_uses_one_atomic_weighted_solve_before_commit(self) -> None:
-        module = ast.parse(self.source)
-        closure = next(
-            node
-            for node in ast.walk(module)
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "_close_owned_hard_targets_to_marker_constraints"
-        )
-        weighted_solve_calls = [
+        fallback_guard = next(
             node
             for node in ast.walk(closure)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "solve_weighted_marker_target_closure"
-        ]
-        self.assertEqual(len(weighted_solve_calls), 1)
-        private_candidate_writes = [
-            node
-            for node in ast.walk(closure)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_commit_marker_target_closure_candidate"
-        ]
-        self.assertEqual(len(private_candidate_writes), 1)
-        self.assertNotIn(
-            "_marker_target_closure_kaczmarz_sweeps_kernel",
-            ast.unparse(closure),
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "unresolved_marker_count > 0"
         )
+        self.assertTrue(
+            any(
+                self._statement_calls_method(
+                    statement,
+                    "_prepare_no_slip_sampling_fallback_identity_kernel",
+                )
+                for statement in fallback_guard.body
+            )
+        )
+        for suffix in ("before", "after"):
+            self.assertTrue(
+                any(
+                    self._is_stage_observer_event(
+                        statement,
+                        f"hibm_marker_closure_fallback_no_slip_identity_{suffix}",
+                    )
+                    for statement in fallback_guard.body
+                )
+            )
 
-    def test_marker_closure_candidate_transfer_is_packed_by_adjustable_dof(
+    def test_marker_closure_has_only_serialized_kaczmarz_device_solver(
         self,
     ) -> None:
         module = ast.parse(self.source)
-        commit = next(
-            node
+        functions = {
+            node.name: node
             for node in ast.walk(module)
             if isinstance(node, ast.FunctionDef)
-            and node.name == "_commit_marker_target_closure_candidate"
+        }
+        closure = functions["_close_owned_hard_targets_to_marker_constraints"]
+        keyword_only_arguments = {
+            argument.arg for argument in closure.args.kwonlyargs
+        }
+        self.assertNotIn("solver", keyword_only_arguments)
+        self.assertIn("max_iterations", keyword_only_arguments)
+        closure_source = ast.unparse(closure)
+        self.assertIn("serialized_kaczmarz", closure_source)
+        self.assertIn(
+            "_marker_target_closure_kaczmarz_sweep_kernel",
+            closure_source,
         )
-        source = ast.unparse(commit)
-        self.assertNotIn(
-            "velocity_dirichlet_marker_target_closure_value_mps.to_numpy",
-            source,
-        )
-        self.assertNotIn(
-            "velocity_dirichlet_component_face_claim_target_mps.to_numpy",
-            source,
-        )
-        self.assertNotIn(
-            "velocity_dirichlet_marker_target_closure_value_mps.from_numpy",
-            source,
-        )
-        self.assertNotIn(
-            "velocity_dirichlet_component_face_claim_target_mps.from_numpy",
-            source,
-        )
-        self.assertIn("_gather_marker_target_closure_candidate_kernel", source)
-        self.assertIn("_commit_marker_target_closure_candidate_kernel", source)
+        for removed_name in (
+            "weighted_minimum_norm_lstsq",
+            "solve_weighted_marker_target_closure",
+            "_marker_target_closure_linear_system",
+            "_commit_marker_target_closure_candidate",
+        ):
+            with self.subTest(removed_name=removed_name):
+                self.assertNotIn(removed_name, self.source)
+
+        ledger = functions["assemble_velocity_dirichlet_component_face_ledger"]
+        defaults = {
+            argument.arg: default
+            for argument, default in zip(
+                ledger.args.kwonlyargs,
+                ledger.args.kw_defaults,
+                strict=True,
+            )
+        }
+        self.assertNotIn("marker_compatibility_solver", defaults)
+        default_iterations = defaults["marker_compatibility_max_iterations"]
+        self.assertIsInstance(default_iterations, ast.Constant)
+        self.assertEqual(default_iterations.value, 64)
 
     @staticmethod
     def _statement_lists(node: ast.AST) -> list[list[ast.stmt]]:

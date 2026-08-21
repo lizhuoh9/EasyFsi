@@ -455,7 +455,7 @@ def test_postprocess_cli_forwards_explicit_fluent_force_history(tmp_path: Path) 
         ("config", "traction_tip_cap_pressure_enabled", True),
         ("config", "flow_hibm_dynamic_solid_volume_enabled", False),
         ("config", "update_fluid_obstacle_from_solid", False),
-        ("config", "flow_hibm_tiny_unreached_cleanup_component_cells", 128),
+        ("config", "flow_hibm_tiny_unreached_cleanup_component_cells", 0),
         ("config", "preflow_steps", 40),
         ("config", "preflow_convergence_mode", "single_step_legacy"),
         ("config", "preflow_stationary_min_steps", 19),

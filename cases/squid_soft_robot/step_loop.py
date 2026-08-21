@@ -217,6 +217,14 @@ def run_squid_step_loop(context: StepLoopContext) -> StepLoopResult:
                     args.diagnostic_disable_pressure_neumann_matrix_rows
                 ),
             )
+            projection_failure_reason = sharp_report_fluid_projection_failure_reason(
+                sharp_report
+            )
+            if projection_failure_reason:
+                raise RuntimeError(
+                    "sharp marker fixed point trial fluid projection failed "
+                    f"(reason={projection_failure_reason})"
+                )
             return sharp_report
 
         def restore_sharp_trial_state(
@@ -357,24 +365,6 @@ def run_squid_step_loop(context: StepLoopContext) -> StepLoopResult:
                 relaxation_history.append(float(relaxation))
                 iterations_used = iteration + 1
                 velocity_residual_norm_mps = residual_norm_mps
-                trial_projection_failure_reason = (
-                    sharp_report_fluid_projection_failure_reason(report)
-                )
-                if trial_projection_failure_reason:
-                    raise RuntimeError(
-                        "sharp marker fixed point trial fluid projection failed "
-                        f"(iteration={int(iterations_used)}, "
-                        f"reason={trial_projection_failure_reason}, "
-                        f"velocity_residual_l2_mps={float(residual_norm_mps):.6g}, "
-                        f"velocity_residual_max_mps={float(residual_max_mps):.6g}, "
-                        f"combined_residual_l2_mps={float(combined_residual_norm_mps):.6g}, "
-                        f"combined_residual_max_mps={float(combined_residual_max_mps):.6g}, "
-                        f"residual_history_mps={residual_history}, "
-                        f"residual_max_history_mps={residual_max_history}, "
-                        f"combined_residual_history_mps={combined_residual_history}, "
-                        f"combined_residual_max_history_mps={combined_residual_max_history}, "
-                        f"relaxation_history={relaxation_history})"
-                    )
                 if velocity_residual_norm_mps <= fsi_marker_coupling_tolerance_mps:
                     converged = True
                     break

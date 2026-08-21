@@ -492,6 +492,63 @@ class SSTCountAndCacheContracts(unittest.TestCase):
 
         self.assertEqual(solver._wall_distance_kernel_calls.count("segment"), 5)
 
+    def test_surface_geometry_does_not_reuse_voxel_propagated_base(self) -> None:
+        marker = _VectorField(
+            np.array(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)), dtype=np.float32)
+        )
+        segment = _VectorField(np.array(((0, 1, -1),), dtype=np.int32))
+        solver = self._cache_solver()
+
+        solver.prepare_sst_wall_distance()
+        solver.prepare_sst_wall_distance(
+            marker_position_m=marker,
+            marker_count=2,
+            projection_segment_indices=segment,
+            projection_segment_count=1,
+            inactive_axis=2,
+        )
+
+        self.assertEqual(
+            solver._wall_distance_kernel_calls,
+            ["initialize", "initialize", "segment"],
+        )
+
+    def test_continuous_sst_surface_distance_is_not_shortened_by_voxel_box(
+        self,
+    ) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4)),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+        obstacle = np.zeros((4, 4, 4), dtype=np.int32)
+        obstacle[0, 0, 0] = 1
+        solver.obstacle.from_numpy(obstacle)
+        solver.hibm_external_obstacle_topology_revision += 1
+        marker = ti.Vector.field(3, dtype=ti.f32, shape=2)
+        segment = ti.Vector.field(3, dtype=ti.i32, shape=1)
+        marker.from_numpy(
+            np.asarray(
+                ((0.125, 0.0, 0.25), (0.125, 0.25, 0.0)),
+                dtype=np.float32,
+            )
+        )
+        segment.from_numpy(np.asarray(((0, 1, -1),), dtype=np.int32))
+
+        solver.prepare_sst_wall_distance(
+            no_slip_domain_walls=(False,) * 6,
+            marker_position_m=marker,
+            marker_count=2,
+            projection_segment_indices=segment,
+            projection_segment_count=1,
+            inactive_axis=0,
+        )
+
+        actual_distance = float(solver.sst_wall_distance_m.to_numpy()[0, 1, 1])
+        exact_segment_distance = np.sqrt(0.25**2 + 0.25**2)
+        voxel_box_distance = np.sqrt(0.125**2 + 0.125**2)
+        self.assertAlmostEqual(actual_distance, exact_segment_distance, places=6)
+        self.assertNotAlmostEqual(actual_distance, voxel_box_distance, places=6)
+
     def test_moving_marker_reuses_obstacle_base_and_matches_full_rebuild(self) -> None:
         solver = CartesianFluidSolver(
             FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4)),

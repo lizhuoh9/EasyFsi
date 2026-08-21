@@ -121,13 +121,8 @@ def _healthy_canonical_device_report() -> dict[str, object]:
                 "constraint_count": 3,
                 "adjustable_constraint_count": 2,
                 "immutable_constraint_count": 1,
-                "solver": "weighted_minimum_norm_lstsq",
+                "solver": "serialized_kaczmarz",
                 "solve_count": 1,
-                "matrix_rank": 2,
-                "adjustable_dof_count": 4,
-                "least_squares_max_residual_mps": 2.0e-8,
-                "materialized_max_residual_mps": 4.0e-8,
-                "max_abs_correction_mps": 3.0e-4,
                 "initial_max_residual_mps": 2.0e-4,
                 "final_max_residual_mps": 5.0e-5,
                 "final_max_adjustable_residual_mps": 5.0e-7,
@@ -213,8 +208,21 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                     "preflow_converged": False,
                     "preflow_status": "max_steps",
                     "preflow_steps_completed": 200,
-                }
+                },
+                expected_mode="windowed_stationary",
             )
+
+    def test_preflow_report_mode_must_match_validated_config(self) -> None:
+        for reported_mode in (None, "windowed_stationry", "single_step_legacy"):
+            with self.subTest(reported_mode=reported_mode):
+                with self.assertRaisesRegex(RuntimeError, "convergence mode"):
+                    solid_mpm_fsi_runner._require_preflow_ready_for_fsi(
+                        {
+                            "preflow_convergence_mode": reported_mode,
+                            "preflow_converged": True,
+                        },
+                        expected_mode="windowed_stationary",
+                    )
 
     def test_official_runner_requires_a_fresh_complete_load_before_solid(self) -> None:
         with mock.patch.object(
@@ -233,8 +241,13 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                 )
 
         run_source = inspect.getsource(
-            solid_mpm_fsi_runner.prepare_rectangular_solid_marker_mpm_fsi_runtime
+            solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
+        self.assertIn(
+            "_require_preflow_ready_for_fsi(",
+            run_source,
+        )
+        self.assertIn("expected_mode=str(config.preflow_convergence_mode)", run_source)
         self.assertLess(
             run_source.index("_require_fresh_external_force_for_solid_step("),
             run_source.index("_advance_solid_substeps_batched("),
@@ -661,12 +674,65 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         self.assertIn('"canonical_velocity_dirichlet_report"', source)
         self.assertNotIn("HibmMpmVelocityDirichletBoundaryReport(", source)
 
+    def test_direct_runner_uses_the_only_serialized_kaczmarz_closure(
+        self,
+    ) -> None:
+        function = _function_node("_apply_hibm_sharp_marker_boundary_to_fluid")
+        builder_call = next(
+            call
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+            and _call_name(call)
+            == "assemble_velocity_dirichlet_component_face_ledger"
+        )
+        keywords = {keyword.arg: keyword.value for keyword in builder_call.keywords}
+        self.assertNotIn("marker_compatibility_solver", keywords)
+        iterations = keywords["marker_compatibility_max_iterations"]
+        self.assertIsInstance(iterations, ast.Constant)
+        self.assertEqual(iterations.value, 64)
+
     def test_canonical_health_accepts_a_sealed_device_measured_report(self) -> None:
         self.assertIsNone(
             solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
                 _healthy_canonical_runner_report()
             )
         )
+
+    def test_canonical_health_rejects_removed_weighted_closure(self) -> None:
+        report = _healthy_canonical_runner_report()
+        closure = report["canonical_velocity_dirichlet_report"][
+            "marker_target_closure"
+        ]
+        closure["solver"] = "weighted_minimum_norm_lstsq"
+        failure = (
+            solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(report)
+        )
+        self.assertIsNotNone(failure)
+        self.assertIn("solver is invalid", failure)
+
+    def test_canonical_health_rejects_removed_weighted_diagnostics(
+        self,
+    ) -> None:
+        for key in (
+            "matrix_rank",
+            "adjustable_dof_count",
+            "least_squares_max_residual_mps",
+            "materialized_max_residual_mps",
+            "max_abs_correction_mps",
+        ):
+            with self.subTest(key=key):
+                report = _healthy_canonical_runner_report()
+                closure = report["canonical_velocity_dirichlet_report"][
+                    "marker_target_closure"
+                ]
+                closure[key] = 0
+                failure = (
+                    solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+                        report
+                    )
+                )
+                self.assertIsNotNone(failure)
+                self.assertIn("unexpected key", failure)
 
     def test_canonical_health_rejects_removed_schema_versions(self) -> None:
         for schema_version in (2, 3, 4):
@@ -736,13 +802,6 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                 "adjustable residual",
                 lambda closure: closure.__setitem__(
                     "final_max_adjustable_residual_mps",
-                    2.0e-6,
-                ),
-            ),
-            (
-                "materialized residual",
-                lambda closure: closure.__setitem__(
-                    "materialized_max_residual_mps",
                     2.0e-6,
                 ),
             ),

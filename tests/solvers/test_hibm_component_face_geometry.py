@@ -13,6 +13,7 @@ from simulation_core import (
 )
 from tests.solvers._hibm_component_face_ledger_contracts import (
     CanonicalComponentFaceLedgerContractMixin,
+    _ComponentFaceClaim,
 )
 
 
@@ -83,42 +84,81 @@ class HibmComponentFaceGeometryTests(
         _relocation_source_linear_key_probe(self.component_face_boundary, result)
         self.assertEqual(int(result[None]), 33)
 
-    def test_marker_target_closure_candidate_uses_packed_device_scatter(
-        self,
-    ) -> None:
-        boundary = self.component_face_boundary
-        boundary.velocity_dirichlet_marker_target_closure_value_mps.fill(
-            (0.0, 0.0, 0.0)
+    def test_serialized_kaczmarz_marker_closure_executes_on_device(self) -> None:
+        marker_positions = (
+            (0.375, 0.30, 0.375),
+            (0.375, 0.45, 0.375),
         )
-        boundary.velocity_dirichlet_component_face_claim_target_mps.fill(
-            (0.0, 0.0, 0.0)
+        marker_velocities = (
+            (0.0, 1.0, 0.0),
+            (0.0, 2.0, 0.0),
+        )
+        self._load_component_face_claims(
+            (
+                _ComponentFaceClaim(
+                    source_row=(1, 0, 1),
+                    boundary_point_m=marker_positions[0],
+                    interior_point_m=(0.375, 0.30, 0.625),
+                    normal=(0.0, 0.0, 1.0),
+                    target_velocity_mps=marker_velocities[0],
+                    region_id=202,
+                ),
+                _ComponentFaceClaim(
+                    source_row=(1, 1, 1),
+                    boundary_point_m=marker_positions[1],
+                    interior_point_m=(0.375, 0.45, 0.625),
+                    normal=(0.0, 0.0, 1.0),
+                    target_velocity_mps=marker_velocities[1],
+                    region_id=202,
+                ),
+            )
+        )
+        self.component_face_markers.load_markers(
+            positions_m=marker_positions,
+            velocities_mps=marker_velocities,
+            normals=((0.0, 0.0, 1.0), (0.0, 0.0, 1.0)),
+            areas_m2=(0.02, 0.02),
+            region_ids=(202, 202),
         )
 
-        materialized_residual = boundary._commit_marker_target_closure_candidate(
-            keys=((1, 1, 1, 1),),
-            correction_mps=np.asarray((0.25,), dtype=np.float64),
-            matrix=np.asarray(((1.0,),), dtype=np.float64),
-            residual_mps=np.asarray((0.25,), dtype=np.float64),
-            closure_tolerance_mps=1.0e-6,
-        )
+        fluid = self.fluid
+        previous_authority = fluid.velocity_dirichlet_boundary_authority
+        try:
+            fluid.set_velocity_dirichlet_boundary_authority("canonical")
+            fluid._invalidate_velocity_dirichlet_component_ledger()
+            report = self._assemble_component_face_ledger(
+                close_marker_constraints=True,
+                marker_compatibility_max_iterations=64,
+                primary_region_id=101,
+                secondary_region_id=202,
+            )
+            closure = report["canonical_velocity_dirichlet_report"][
+                "marker_target_closure"
+            ]
 
-        self.assertEqual(materialized_residual, 0.0)
-        self.assertAlmostEqual(
-            float(
-                boundary.velocity_dirichlet_marker_target_closure_value_mps[
-                    1, 1, 1
-                ][1]
-            ),
-            0.25,
-        )
-        self.assertAlmostEqual(
-            float(
-                boundary.velocity_dirichlet_component_face_claim_target_mps[
-                    1, 1, 1
-                ][1]
-            ),
-            0.25,
-        )
+            self.assertEqual(closure["solver"], "serialized_kaczmarz")
+            self.assertEqual(closure["solve_count"], 1)
+            self.assertLessEqual(
+                closure["final_max_adjustable_residual_mps"],
+                closure["closure_tolerance_mps"],
+            )
+            self._prepare_and_seal_marker_mac_constraint_ledger()
+            sampled = np.asarray(
+                [
+                    self._numpy_sample_marker_mac_velocity(position)[1]
+                    for position in marker_positions
+                ],
+                dtype=np.float64,
+            )
+            np.testing.assert_allclose(
+                sampled,
+                (1.0, 2.0),
+                rtol=0.0,
+                atol=1.0e-5,
+            )
+        finally:
+            fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
+            fluid.clear_velocity_dirichlet_boundary_rows()
 
 if __name__ == "__main__":
     unittest.main()

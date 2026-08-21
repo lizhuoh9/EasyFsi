@@ -321,7 +321,7 @@ def _fine_solver_config(steps: int) -> dict[str, object]:
         "flow_hibm_marker_mac_constraint_iterations": 64,
         "flow_hibm_dynamic_solid_volume_enabled": True,
         "update_fluid_obstacle_from_solid": True,
-        "flow_hibm_tiny_unreached_cleanup_component_cells": 0,
+        "flow_hibm_tiny_unreached_cleanup_component_cells": 128,
         "preflow_steps": 200,
         "preflow_convergence_mode": "windowed_stationary",
         "preflow_stationary_min_steps": 20,

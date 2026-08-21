@@ -1870,9 +1870,8 @@ class CanonicalComponentFaceLedgerContractMixin:
             self.assertIsNone(
                 _canonical_marker_target_closure_health_failure(closure)
             )
-            self.assertEqual(closure["solver"], "weighted_minimum_norm_lstsq")
+            self.assertEqual(closure["solver"], "serialized_kaczmarz")
             self.assertEqual(closure["solve_count"], 1)
-            self.assertGreater(closure["matrix_rank"], 0)
             self.assertLessEqual(
                 closure["final_max_adjustable_residual_mps"],
                 closure["closure_tolerance_mps"],
@@ -3422,6 +3421,7 @@ class CanonicalComponentFaceLedgerContractMixin:
         *,
         interpolate_interior_velocity: bool = False,
         close_marker_constraints: bool = False,
+        marker_compatibility_max_iterations: int = 64,
         use_marker_geometry: bool = False,
         include_projection_vertex_count: bool = True,
         use_segment_fixture: bool = False,
@@ -3442,6 +3442,9 @@ class CanonicalComponentFaceLedgerContractMixin:
         if close_marker_constraints:
             marker_compatibility_arguments = {
                 "markers": markers,
+                "marker_compatibility_max_iterations": (
+                    marker_compatibility_max_iterations
+                ),
                 "marker_compatibility_absolute_tolerance_mps": 1.0e-5,
                 "marker_compatibility_closure_tolerance_mps": 1.0e-6,
                 "marker_compatibility_density_kgm3": float(fluid.rho),
@@ -6708,7 +6711,7 @@ class CanonicalComponentFaceLedgerContractMixin:
         # These contracts target claim arbitration and rollback.  Supplying
         # ``markers`` is required to expose the physical/projection partition
         # and pressure-owner roles, but a known conflict must not spend time in
-        # the later weighted closure solve.
+        # the later marker-target closure solve.
         boundary.__dict__[closure_method_name] = lambda **_kwargs: {}
         try:
             with self.assertRaisesRegex(
