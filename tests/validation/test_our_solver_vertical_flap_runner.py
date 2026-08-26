@@ -234,6 +234,405 @@ def test_dry_run_preserves_adaptive_default_and_explicit_fixed_override(
 
 
 @pytest.mark.parametrize(
+    ("coupling_args", "expected"),
+    (
+        (
+            (),
+            {
+                "coupling_mode": VerticalFlapFsiConfig.coupling_mode,
+                "initial_guess_mode": VerticalFlapFsiConfig.initial_guess_mode,
+                "fsi_coupling_max_iterations": (
+                    VerticalFlapFsiConfig.fsi_coupling_max_iterations
+                ),
+                "fsi_coupling_absolute_tolerance_mps": (
+                    VerticalFlapFsiConfig.fsi_coupling_absolute_tolerance_mps
+                ),
+                "fsi_coupling_relative_tolerance": (
+                    VerticalFlapFsiConfig.fsi_coupling_relative_tolerance
+                ),
+                "iqn_history_limit": VerticalFlapFsiConfig.iqn_history_limit,
+                "iqn_initial_picard_relaxation": (
+                    VerticalFlapFsiConfig.iqn_initial_picard_relaxation
+                ),
+                "iqn_svd_relative_cutoff": (
+                    VerticalFlapFsiConfig.iqn_svd_relative_cutoff
+                ),
+            },
+        ),
+        (
+            (
+                "--coupling-mode",
+                "iqn_ils",
+                "--initial-guess-mode",
+                "kalman",
+                "--initial-guess-kalman-q",
+                "1.0e-3",
+                "--initial-guess-kalman-r",
+                "1.0e-5",
+                "--fsi-max-iterations",
+                "9",
+                "--fsi-absolute-tolerance-mps",
+                "2.5e-5",
+                "--fsi-relative-tolerance",
+                "3.0e-4",
+                "--iqn-history-limit",
+                "5",
+                "--iqn-initial-picard-relaxation",
+                "0.25",
+                "--iqn-svd-relative-cutoff",
+                "2.0e-9",
+            ),
+            {
+                "coupling_mode": "iqn_ils",
+                "initial_guess_mode": "kalman",
+                "fsi_coupling_max_iterations": 9,
+                "fsi_coupling_absolute_tolerance_mps": 2.5e-5,
+                "fsi_coupling_relative_tolerance": 3.0e-4,
+                "iqn_history_limit": 5,
+                "iqn_initial_picard_relaxation": 0.25,
+                "iqn_svd_relative_cutoff": 2.0e-9,
+            },
+        ),
+    ),
+    ids=("defaults", "iqn-kalman"),
+)
+def test_dry_run_records_generic_iqn_controls_without_fallback(
+    tmp_path: Path,
+    coupling_args: tuple[str, ...],
+    expected: dict[str, object],
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "generic_iqn_controls"
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(RUNNER_PATH),
+                "--output-dir",
+                str(output_dir),
+                "--dry-run",
+                *coupling_args,
+            ],
+        ),
+    ):
+        assert runner.main() == 0
+
+    manifest = runner.json.loads(
+        (output_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    persisted_config = runner.json.loads(
+        (output_dir / "our_solver_config.json").read_text(encoding="utf-8")
+    )
+    for key, value in expected.items():
+        if isinstance(value, float):
+            assert manifest["config"][key] == pytest.approx(value)
+            assert persisted_config[key] == pytest.approx(value)
+        else:
+            assert manifest["config"][key] == value
+            assert persisted_config[key] == value
+
+
+def test_dry_run_persists_marker_compatibility_closure_tolerance_override(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "marker_compatibility_closure_tolerance"
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(RUNNER_PATH),
+                "--output-dir",
+                str(output_dir),
+                "--dry-run",
+                "--flow-hibm-marker-compatibility-closure-tolerance-mps",
+                "2.0e-6",
+            ],
+        ),
+    ):
+        assert runner.main() == 0
+
+    manifest = runner.json.loads(
+        (output_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    persisted_config = runner.json.loads(
+        (output_dir / "our_solver_config.json").read_text(encoding="utf-8")
+    )
+    field_name = "flow_hibm_marker_compatibility_closure_tolerance_mps"
+    assert manifest["config"][field_name] == pytest.approx(2.0e-6)
+    assert persisted_config[field_name] == pytest.approx(2.0e-6)
+
+
+def test_dry_run_applies_dt_override_before_initial_guess_kalman_config(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "dt_override"
+    dt_s = 2.5e-4
+    measurement_variance = 4.0e-4
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(RUNNER_PATH),
+                "--output-dir",
+                str(output_dir),
+                "--dry-run",
+                "--coupling-mode",
+                "iqn_ils",
+                "--dt-s",
+                str(dt_s),
+                "--initial-guess-mode",
+                "kalman",
+                "--initial-guess-kalman-q",
+                "1.0",
+                "--initial-guess-kalman-r",
+                str(measurement_variance),
+            ],
+        ),
+    ):
+        assert runner.main() == 0
+
+    manifest = runner.json.loads(
+        (output_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    persisted_config = runner.json.loads(
+        (output_dir / "our_solver_config.json").read_text(encoding="utf-8")
+    )
+    for config_payload in (manifest["config"], persisted_config):
+        assert config_payload["dt_s"] == pytest.approx(dt_s)
+        assert config_payload["initial_guess_kalman_config"][
+            "initial_rate_variance"
+        ] == pytest.approx(measurement_variance / dt_s**2)
+
+
+@pytest.mark.parametrize(
+    ("initial_guess_args", "expected_mode", "expected_kalman", "expected_oracle"),
+    (
+        (
+            (
+                "--coupling-mode",
+                "iqn_ils",
+                "--initial-guess-mode",
+                "kalman",
+                "--initial-guess-kalman-q",
+                "1.5e-3",
+                "--initial-guess-kalman-r",
+                "2.0e-5",
+                "--initial-guess-kalman-warmup-accepted-states",
+                "4",
+            ),
+            "kalman",
+            {
+                "rate_process_noise_spectral_density": 1.5e-3,
+                "measurement_variance": 2.0e-5,
+                "initial_value_variance": 2.0e-5,
+                "initial_rate_variance": 80.0,
+                "warmup_accepted_states": 4,
+            },
+            None,
+        ),
+        (
+            (
+                "--coupling-mode",
+                "iqn_ils",
+                "--initial-guess-mode",
+                "oracle_replay",
+                "--initial-guess-oracle-path",
+                "oracle_replay.npz",
+            ),
+            "oracle_replay",
+            None,
+            "oracle_replay.npz",
+        ),
+    ),
+    ids=("kalman", "oracle-replay"),
+)
+def test_dry_run_routes_initial_guess_inputs_independently_of_writeback(
+    tmp_path: Path,
+    initial_guess_args: tuple[str, ...],
+    expected_mode: str,
+    expected_kalman: dict[str, object] | None,
+    expected_oracle: str | None,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / expected_mode
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(RUNNER_PATH),
+                "--output-dir",
+                str(output_dir),
+                "--dry-run",
+                *initial_guess_args,
+            ],
+        ),
+    ):
+        assert runner.main() == 0
+
+    manifest = runner.json.loads(
+        (output_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    persisted = runner.json.loads(
+        (output_dir / "our_solver_config.json").read_text(encoding="utf-8")
+    )
+    for config_payload in (manifest["config"], persisted):
+        assert config_payload["initial_guess_mode"] == expected_mode
+        assert config_payload["kalman_writeback_mode"] == "off"
+        assert config_payload["initial_guess_oracle_path"] == expected_oracle
+        if expected_kalman is None:
+            assert config_payload["initial_guess_kalman_config"] is None
+        else:
+            for key, value in expected_kalman.items():
+                assert config_payload["initial_guess_kalman_config"][key] == pytest.approx(
+                    value
+                )
+
+
+@pytest.mark.parametrize(
+    "initial_guess_args",
+    (
+        ("--coupling-mode", "iqn_ils", "--initial-guess-mode", "kalman"),
+        (
+            "--coupling-mode",
+            "iqn_ils",
+            "--initial-guess-mode",
+            "oracle_replay",
+        ),
+        (
+            "--coupling-mode",
+            "iqn_ils",
+            "--initial-guess-mode",
+            "carry_forward",
+            "--initial-guess-kalman-q",
+            "1.0e-3",
+            "--initial-guess-kalman-r",
+            "1.0e-4",
+        ),
+        (
+            "--coupling-mode",
+            "iqn_ils",
+            "--initial-guess-mode",
+            "linear_extrapolation",
+            "--initial-guess-oracle-path",
+            "unexpected.npz",
+        ),
+    ),
+    ids=("kalman-missing-q-r", "oracle-missing-path", "non-kalman-q-r", "non-oracle-path"),
+)
+def test_initial_guess_cli_rejects_missing_and_unexpected_mode_inputs(
+    tmp_path: Path,
+    initial_guess_args: tuple[str, ...],
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "invalid_initial_guess"
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(RUNNER_PATH),
+                "--output-dir",
+                str(output_dir),
+                "--dry-run",
+                *initial_guess_args,
+            ],
+        ),
+    ):
+        with pytest.raises(ValueError):
+            runner.main()
+
+
+def test_oracle_producer_preflight_requires_completed_source_matched_q0(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    producer = tmp_path / "producer"
+    consumer = tmp_path / "consumer"
+    fields = producer / "step_fields"
+    fields.mkdir(parents=True)
+    source_hashes = {"simulation_core/example.py": "abc123"}
+    producer_config = replace(
+        VerticalFlapFsiConfig(),
+        step_count=2,
+        coupling_mode="iqn_ils",
+        initial_guess_mode="carry_forward",
+        kalman_writeback_mode="off",
+        preflow_snapshot_input_path="shared_snapshot",
+    )
+    consumer_config = replace(
+        producer_config,
+        initial_guess_mode="oracle_replay",
+        initial_guess_oracle_path=str(producer),
+    )
+    (producer / "run_manifest.json").write_text(
+        runner.json.dumps(
+            {
+                "run_label": "q0-producer",
+                "save_step_fields": True,
+                "config": runner.asdict(producer_config),
+                "source_sha256": source_hashes,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (producer / "progress.json").write_text(
+        runner.json.dumps({"status": "completed", "step_completed": 2}),
+        encoding="utf-8",
+    )
+    (producer / "our_solver_summary.json").write_text(
+        runner.json.dumps({"status": "completed", "step_count_completed": 2}),
+        encoding="utf-8",
+    )
+    for step in (1, 2):
+        np.savez(
+            fields / f"step_{step:04d}.npz",
+            marker_velocity_mps=np.full((4, 3), float(step), dtype=np.float32),
+        )
+
+    identity = runner._validate_initial_guess_oracle_producer(
+        producer_output=producer,
+        consumer_output=consumer,
+        consumer_config_payload=runner.asdict(consumer_config),
+        current_source_sha256=source_hashes,
+    )
+
+    assert identity["offline_oracle"] is True
+    assert identity["deployable"] is False
+    assert identity["producer_run_label"] == "q0-producer"
+    assert len(identity["trajectory_sha256"]) == 64
+    assert len(identity["frame_sha256"]) == 2
+
+    with pytest.raises(ValueError, match="source"):
+        runner._validate_initial_guess_oracle_producer(
+            producer_output=producer,
+            consumer_output=consumer,
+            consumer_config_payload=runner.asdict(consumer_config),
+            current_source_sha256={"simulation_core/example.py": "different"},
+        )
+
+
+@pytest.mark.parametrize(
     ("requested_substeps", "expected_mode"),
     ((None, "adaptive"), (1600, "fixed_override")),
 )
@@ -257,6 +656,44 @@ def test_summary_preserves_requested_solid_substep_mode(
 
     assert summary["solid_substeps"] == requested_substeps
     assert summary["solid_substeps_mode"] == expected_mode
+
+
+def test_summary_exposes_iqn_guess_and_all_trial_work_metrics(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    trial_work = {
+        "trial_count": 6,
+        "fluid_solve_count": 6,
+        "solid_macro_solve_count": 6,
+        "feedback_consumed_trial_count": 3,
+        "cg_iterations_total": 384,
+        "solid_substeps_executed_total": 891,
+    }
+    report_fields = {
+        "initial_guess_mode": "kalman",
+        "initial_guess_summary": {"mode": "kalman", "accepted_step_count": 2},
+        "hibm_fsi_coupling_iterations_total": 6,
+        "hibm_fsi_coupling_iterations_min": 3,
+        "hibm_fsi_coupling_iterations_max": 3,
+        "hibm_fsi_coupling_iterations_mean": 3.0,
+        "hibm_fsi_coupling_iterations_median": 3.0,
+        "hibm_fsi_coupling_iterations_p95": 3.0,
+        "hibm_fsi_coupling_rejected_trial_count_total": 4,
+        "hibm_fsi_trial_work_report": trial_work,
+    }
+
+    summary = runner._summary_from_report(
+        report={"history": [], **report_fields},
+        config=VerticalFlapFsiConfig(step_count=0),
+        output_dir=tmp_path,
+        elapsed_s=1.0,
+        solver_npz_summary=None,
+        run_label="iqn-metrics-contract",
+    )
+
+    for field, expected in report_fields.items():
+        assert summary[field] == expected
 
 
 def test_cli_percentile_flow_reporting_is_opt_in_and_persisted_in_manifest(
@@ -431,14 +868,15 @@ def test_direct_vertical_flap_config_preserves_validated_r13_physics() -> None:
     config = vertical_flap_case.selected_formulation_solver_config(step_count=50)
     dead_direct_fields = {
         "fsi_coupling_iterations",
-        "fsi_coupling_relative_tolerance",
-        "fsi_coupling_absolute_tolerance_mps",
         "fsi_coupling_initial_relaxation",
         "fsi_coupling_history_limit",
         "flow_post_solid_kinematic_projection_enabled",
     }
 
     assert dead_direct_fields.isdisjoint(config.__dataclass_fields__)
+    assert config.coupling_mode == "direct_explicit"
+    assert config.fsi_coupling_absolute_tolerance_mps == pytest.approx(0.0)
+    assert config.fsi_coupling_relative_tolerance == pytest.approx(1.0e-3)
     assert config.velocity_damping == pytest.approx(0.995)
     assert config.flow_sst_near_wall_treatment == "resolved"
     assert config.flow_symmetry_domain_walls == ("ymax",)

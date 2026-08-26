@@ -38,9 +38,18 @@ from .marker_mac_constraint import (
 from .interface_state import (
     MARKER_INTERFACE_STATE_FIELDS,
     capture_marker_interface_state,
+    marker_layout_identity,
     marker_trial_state,
     marker_velocity_state,
     restore_marker_interface_state,
+    validate_marker_interface_state,
+)
+from .macro_step_state import (
+    FLUID_MACRO_STATE_FIELDS,
+    SOLID_MACRO_STATE_FIELDS,
+    HostMacroStepState,
+    capture_host_macro_step_state,
+    restore_host_macro_step_state,
 )
 from .paper_requirements import (
     HibmMpmPaperRequirement,
@@ -104,10 +113,15 @@ __all__ = [
     "HibmMpmSurfaceMarkers",
     "HibmMpmSurfaceUpdateReport",
     "MARKER_INTERFACE_STATE_FIELDS",
+    "FLUID_MACRO_STATE_FIELDS",
+    "SOLID_MACRO_STATE_FIELDS",
+    "HostMacroStepState",
     "advance_hibm_mpm_sharp_mpm_step",
     "advance_hibm_mpm_sharp_neo_hookean_step",
     "assemble_hibm_mpm_sharp_fluid_to_mpm_loads",
     "capture_marker_interface_state",
+    "marker_layout_identity",
+    "capture_host_macro_step_state",
     "hibm_mpm_external_force_fresh_for_solid_step",
     "hibm_mpm_external_force_parts_fresh_for_solid_step",
     "hibm_mpm_paper_requirements",
@@ -116,4 +130,6 @@ __all__ = [
     "marker_trial_state",
     "marker_velocity_state",
     "restore_marker_interface_state",
+    "restore_host_macro_step_state",
+    "validate_marker_interface_state",
 ]

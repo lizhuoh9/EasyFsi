@@ -226,7 +226,7 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
             'if latest_feedback_constraint_report["fluid_projection_consumed_feedback"]:'
         )
         consumed_increment = loop_body.index(
-            "fluid_projection_consumed_feedback_count += 1",
+            "fluid_projection_consumed_feedback_trial_count += 1",
             consumed_condition,
         )
         self.assertLess(consumed_condition, consumed_increment)
@@ -287,8 +287,17 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
         source = _runner_source()
 
         self.assertIn("fluid_projection_consumed_feedback_count = 0", source)
+        self.assertIn(
+            "fluid_projection_consumed_feedback_trial_count = 0", source
+        )
         self.assertIn("fluid_projection_consumed_feedback_count += 1", source)
+        self.assertIn(
+            "fluid_projection_consumed_feedback_trial_count += 1", source
+        )
         self.assertIn('"fluid_projection_consumed_feedback_count"', source)
+        self.assertIn(
+            '"fluid_projection_consumed_feedback_trial_count"', source
+        )
         self.assertIn('"fluid_projection_consumed_feedback"', source)
 
     def test_runner_reports_feedback_constraint_metrics_per_step(self) -> None:

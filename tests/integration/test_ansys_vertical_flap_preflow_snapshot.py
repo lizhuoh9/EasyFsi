@@ -11,6 +11,9 @@ import pytest
 
 from benchmarks.official import solid_mpm_fsi_runner
 from cases.ansys_vertical_flap_fsi import selected_formulation_solver_config
+from simulation_core.coupling.interface_kalman_predictor import (
+    InterfaceKalmanConfig,
+)
 from simulation_core.fluids.preflow_snapshot import (
     PREFLOW_SNAPSHOT_FIELD_NAMES,
     PreflowSnapshot,
@@ -2175,6 +2178,14 @@ def test_preflow_snapshot_config_hash_excludes_fsi_only_and_path_fields():
         young_modulus_pa=2.0 * base.young_modulus_pa,
         solid_density_kgm3=1.5 * base.solid_density_kgm3,
         detailed_preflow_stage_progress=True,
+        initial_guess_mode="kalman",
+        initial_guess_kalman_config=InterfaceKalmanConfig(
+            rate_process_noise_spectral_density=1.0,
+            measurement_variance=2.0,
+            initial_value_variance=2.0,
+            initial_rate_variance=8.0,
+        ),
+        initial_guess_oracle_path="runs/q0_fsi08",
         preflow_snapshot_input_path="cache/input.npz",
         preflow_snapshot_output_path="cache/output.npz",
     )

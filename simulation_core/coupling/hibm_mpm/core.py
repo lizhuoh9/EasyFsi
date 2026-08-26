@@ -24361,6 +24361,7 @@ class HibmMpmIbBoundaryConditions:
                 "marker compatibility closure tolerance must be positive and no "
                 "greater than the absolute tolerance"
             )
+        sweep_tolerance = 0.9 * closure_tolerance
         if not math.isfinite(density) or density <= 0.0:
             raise ValueError("marker compatibility density must be positive")
         marker_count = int(markers.projection_vertex_count)
@@ -24489,64 +24490,76 @@ class HibmMpmIbBoundaryConditions:
                 f"failure_code={initial_failure_code}"
             )
         solve_count = 0
-        if initial_adjustable_max_residual > closure_tolerance:
-            if stage_observer is not None:
-                stage_observer("hibm_marker_closure_kaczmarz_sweeps_before")
-            for _ in range(sweeps_per_batch):
-                self._marker_target_closure_kaczmarz_sweep_kernel(
+        current_invalid_count = initial_invalid_count
+        current_failure_code = initial_failure_code
+        current_adjustable_max_residual = initial_adjustable_max_residual
+        for batch_index in range(4):
+            if (
+                current_invalid_count != 0
+                or current_failure_code != 0
+                or not math.isfinite(current_adjustable_max_residual)
+                or current_adjustable_max_residual <= closure_tolerance
+            ):
+                break
+            if batch_index == 0:
+                if stage_observer is not None:
+                    stage_observer("hibm_marker_closure_kaczmarz_sweeps_before")
+                for _ in range(sweeps_per_batch):
+                    self._marker_target_closure_kaczmarz_sweep_kernel(
+                        *measurement_arguments,
+                        sweep_tolerance,
+                    )
+                if stage_observer is not None:
+                    stage_observer("hibm_marker_closure_kaczmarz_sweeps_after")
+                if stage_observer is not None:
+                    stage_observer("hibm_marker_closure_final_measure_before")
+                self._measure_marker_target_closure_kernel(
                     *measurement_arguments,
-                    closure_tolerance,
+                    tolerance,
                 )
-            if stage_observer is not None:
-                stage_observer("hibm_marker_closure_kaczmarz_sweeps_after")
-            solve_count = 1
-        if stage_observer is not None:
-            stage_observer("hibm_marker_closure_final_measure_before")
-        self._measure_marker_target_closure_kernel(*measurement_arguments, tolerance)
-        if stage_observer is not None:
-            stage_observer("hibm_marker_closure_final_measure_after")
-        provisional_invalid_count = int(
-            self.report_velocity_dirichlet_marker_target_closure_invalid_count[
-                None
-            ]
-        )
-        provisional_failure_code = int(
-            self.report_velocity_dirichlet_marker_target_closure_failure_code[
-                None
-            ]
-        )
-        provisional_adjustable_max_residual = float(
-            self.report_velocity_dirichlet_marker_target_closure_max_adjustable_residual_mps[
-                None
-            ]
-        )
-        if (
-            provisional_invalid_count == 0
-            and provisional_failure_code == 0
-            and math.isfinite(provisional_adjustable_max_residual)
-            and provisional_adjustable_max_residual > closure_tolerance
-        ):
-            # A fixed primary budget can land immediately above the strict
-            # tolerance after harmless floating-point trajectory drift.  Keep
-            # the contract unchanged and spend one bounded recovery batch
-            # before failing the canonical transaction.
-            if stage_observer is not None:
-                stage_observer("hibm_marker_closure_recovery_sweeps_before")
-            for _ in range(sweeps_per_batch):
-                self._marker_target_closure_kaczmarz_sweep_kernel(
+                if stage_observer is not None:
+                    stage_observer("hibm_marker_closure_final_measure_after")
+            else:
+                if stage_observer is not None:
+                    stage_observer("hibm_marker_closure_recovery_sweeps_before")
+                for _ in range(sweeps_per_batch):
+                    self._marker_target_closure_kaczmarz_sweep_kernel(
+                        *measurement_arguments,
+                        sweep_tolerance,
+                    )
+                if stage_observer is not None:
+                    stage_observer("hibm_marker_closure_recovery_sweeps_after")
+                if stage_observer is not None:
+                    stage_observer("hibm_marker_closure_recovery_measure_before")
+                self._measure_marker_target_closure_kernel(
                     *measurement_arguments,
-                    closure_tolerance,
+                    tolerance,
                 )
-            if stage_observer is not None:
-                stage_observer("hibm_marker_closure_recovery_sweeps_after")
-            if stage_observer is not None:
-                stage_observer("hibm_marker_closure_recovery_measure_before")
-            self._measure_marker_target_closure_kernel(
-                *measurement_arguments,
-                tolerance,
+                if stage_observer is not None:
+                    stage_observer("hibm_marker_closure_recovery_measure_after")
+            solve_count += 1
+            current_invalid_count = int(
+                self.report_velocity_dirichlet_marker_target_closure_invalid_count[
+                    None
+                ]
             )
-            if stage_observer is not None:
-                stage_observer("hibm_marker_closure_recovery_measure_after")
+            current_failure_code = int(
+                self.report_velocity_dirichlet_marker_target_closure_failure_code[
+                    None
+                ]
+            )
+            current_adjustable_max_residual = float(
+                self.report_velocity_dirichlet_marker_target_closure_max_adjustable_residual_mps[
+                    None
+                ]
+            )
+            if (
+                current_invalid_count != 0
+                or current_failure_code != 0
+                or not math.isfinite(current_adjustable_max_residual)
+                or current_adjustable_max_residual <= closure_tolerance
+            ):
+                break
         constraint_count = int(
             self.report_velocity_dirichlet_marker_target_closure_constraint_count[None]
         )

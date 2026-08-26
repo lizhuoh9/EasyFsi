@@ -18,6 +18,10 @@ from simulation_core.coupling.active_kalman_writeback import (
     SOLID_PARTICLE_VELOCITY_OWNER,
     ActiveKalmanWritebackController,
 )
+from simulation_core.coupling.interface_initial_guess_controller import (
+    INITIAL_GUESS_MODES,
+    InterfaceInitialGuessController,
+)
 from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec
 from simulation_core.fluids.preflow_snapshot import (
     PREFLOW_SNAPSHOT_FIELD_NAMES,
@@ -32,7 +36,21 @@ from simulation_core.coupling.hibm_mpm import (
     HibmMpmIbNodeSearch,
     HibmMpmMarkerMacConstraintOperator,
     HibmMpmSurfaceMarkers,
+    capture_host_macro_step_state,
+    capture_marker_interface_state,
     hibm_mpm_external_force_parts_fresh_for_solid_step,
+    marker_layout_identity,
+    marker_trial_state,
+    restore_host_macro_step_state,
+    restore_marker_interface_state,
+)
+from simulation_core.drivers.generic_fsi_solver import (
+    FsiCouplingConfig,
+    FsiSolverConfig,
+    solve_fsi_runtime,
+)
+from simulation_core.drivers.hibm_mpm_marker_velocity_runtime import (
+    HibmMpmMarkerVelocityRuntime,
 )
 from simulation_core.solids.neo_hookean_mpm import (
     MpmOutOfBoundsError,
@@ -260,6 +278,161 @@ def _fsi_profile_summary(
             math.fsum(solid_wall_times)
         )
     return totals
+
+
+_FSI_TRIAL_WORK_COUNT_FIELDS = (
+    "cg_iterations_total",
+    "flow_momentum_advection_substeps_total",
+    "flow_sst_transport_substeps_total",
+    "solid_substeps_executed_total",
+)
+
+
+def _fsi_trial_work_summary(
+    reports: list[Mapping[str, object]],
+) -> dict[str, float | int]:
+    """Sum attempted work across every rejected and accepted FSI trial."""
+
+    wall_times = {
+        "flow_wall_time_s": [],
+        "hibm_wall_time_s": [],
+        "solid_wall_time_s": [],
+    }
+    counts = {field: 0 for field in _FSI_TRIAL_WORK_COUNT_FIELDS}
+    feedback_consumed_trial_count = 0
+    for trial_index, report in enumerate(reports, start=1):
+        for field, values in wall_times.items():
+            if field not in report:
+                raise ValueError(
+                    f"FSI trial {trial_index} work report is missing {field}"
+                )
+            values.append(
+                _profile_wall_time_value(
+                    report[field],
+                    field=f"trial {trial_index} {field}",
+                )
+            )
+        for field in _FSI_TRIAL_WORK_COUNT_FIELDS:
+            value = report.get(field)
+            if isinstance(value, (bool, np.bool_)):
+                raise ValueError(f"invalid FSI trial work field {field}")
+            try:
+                integer = int(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"invalid FSI trial work field {field}"
+                ) from exc
+            if integer < 0 or integer != value:
+                raise ValueError(f"invalid FSI trial work field {field}")
+            counts[field] += integer
+        feedback_consumed = report.get("feedback_consumed")
+        if not isinstance(feedback_consumed, (bool, np.bool_)):
+            raise ValueError("invalid FSI trial work field feedback_consumed")
+        feedback_consumed_trial_count += int(feedback_consumed)
+
+    trial_count = len(reports)
+    return {
+        "trial_count": trial_count,
+        "fluid_solve_count": trial_count,
+        "solid_macro_solve_count": trial_count,
+        "feedback_consumed_trial_count": feedback_consumed_trial_count,
+        "flow_wall_time_s_total": float(math.fsum(wall_times["flow_wall_time_s"])),
+        "hibm_wall_time_s_total": float(math.fsum(wall_times["hibm_wall_time_s"])),
+        "solid_wall_time_s_total": float(
+            math.fsum(wall_times["solid_wall_time_s"])
+        ),
+        **counts,
+    }
+
+
+def _fsi_coupling_iteration_summary(
+    iterations: list[int],
+) -> dict[str, float | int]:
+    """Summarize accepted macro-step IQN iteration counts."""
+
+    validated: list[int] = []
+    for value in iterations:
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError("coupling iterations must be positive integers")
+        try:
+            integer = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "coupling iterations must be positive integers"
+            ) from exc
+        if integer <= 0 or integer != value:
+            raise ValueError("coupling iterations must be positive integers")
+        validated.append(integer)
+    if not validated:
+        return {
+            "total": 0,
+            "minimum": 0,
+            "maximum": 0,
+            "mean": 0.0,
+            "median": 0.0,
+            "p95": 0.0,
+        }
+    return {
+        "total": sum(validated),
+        "minimum": min(validated),
+        "maximum": max(validated),
+        "mean": float(np.mean(validated)),
+        "median": float(np.median(validated)),
+        "p95": float(np.percentile(validated, 95)),
+    }
+
+
+def _load_initial_guess_oracle_replay(
+    producer_output: str | Path,
+    *,
+    expected_steps: int,
+) -> tuple[np.ndarray, ...]:
+    """Preload an immutable accepted marker-velocity trajectory for Q3."""
+
+    if isinstance(expected_steps, (bool, np.bool_)) or not isinstance(
+        expected_steps, Integral
+    ):
+        raise TypeError("expected_steps must be an integer")
+    step_count = int(expected_steps)
+    if step_count <= 0:
+        raise ValueError("expected_steps must be positive")
+    fields_dir = Path(producer_output).expanduser() / "step_fields"
+    replay: list[np.ndarray] = []
+    expected_shape: tuple[int, int] | None = None
+    for step in range(1, step_count + 1):
+        frame_name = f"step_{step:04d}.npz"
+        frame_path = fields_dir / frame_name
+        if not frame_path.is_file():
+            raise ValueError(f"oracle replay is missing {frame_name}")
+        try:
+            with np.load(frame_path, allow_pickle=False) as frame:
+                if "marker_velocity_mps" not in frame.files:
+                    raise ValueError("missing marker_velocity_mps")
+                values = np.asarray(frame["marker_velocity_mps"])
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"oracle replay frame {frame_name} is unreadable: {exc}"
+            ) from exc
+        if values.ndim != 2 or values.shape[1] != 3 or values.shape[0] <= 0:
+            raise ValueError(
+                f"oracle replay frame {frame_name} must have shape (count, 3)"
+            )
+        if not np.all(np.isfinite(values)):
+            raise ValueError(
+                f"oracle replay frame {frame_name} contains non-finite values"
+            )
+        shape = (int(values.shape[0]), int(values.shape[1]))
+        if expected_shape is None:
+            expected_shape = shape
+        elif shape != expected_shape:
+            raise ValueError(
+                f"oracle replay frame {frame_name} shape changed: "
+                f"{shape} != {expected_shape}"
+            )
+        immutable = np.ascontiguousarray(values, dtype=np.float64)
+        immutable.flags.writeable = False
+        replay.append(immutable)
+    return tuple(replay)
 
 
 def _hibm_stage_wall_time_sum(stage_wall_times: object) -> float:
@@ -1413,12 +1586,75 @@ def run_hibm_mpm_fsi(
     fluid_projection_count = 0
     fluid_projection_after_feedback_count = 0
     fluid_projection_consumed_feedback_count = 0
+    fluid_projection_consumed_feedback_trial_count = 0
     feedback_available_for_projection = False
     history: list[dict[str, object]] = []
     solid_step_execution_reports: list[dict[str, object]] = []
+    solid_trial_execution_reports: list[dict[str, object]] = []
+    coupling_step_reports: list[dict[str, object]] = []
+    coupling_trial_work_reports: list[dict[str, object]] = []
     final_flow_field_snapshot: dict[str, np.ndarray] = {}
     apply_feedback = bool(getattr(config, "apply_marker_feedback_to_fluid", True))
     sharp_boundary_cache: dict[str, object] = {}
+    coupling_mode = str(
+        getattr(config, "coupling_mode", "direct_explicit")
+    ).strip().lower()
+    initial_guess_mode = str(
+        getattr(config, "initial_guess_mode", "carry_forward")
+    ).strip().lower()
+    initial_guess_controller: InterfaceInitialGuessController | None = None
+    marker_reference_positions_m = None
+    if coupling_mode == "iqn_ils":
+        marker_reference_positions_m = np.asarray(
+            capture_marker_interface_state(markers)["x_gamma_m"],
+            dtype=np.float32,
+        ).copy()
+        oracle_replay = (
+            _load_initial_guess_oracle_replay(
+                str(config.initial_guess_oracle_path),
+                expected_steps=int(config.step_count),
+            )
+            if initial_guess_mode == "oracle_replay"
+            and int(config.step_count) > 0
+            else None
+        )
+        initial_guess_controller = InterfaceInitialGuessController(
+            initial_guess_mode,
+            kalman_config=(
+                config.initial_guess_kalman_config
+                if initial_guess_mode == "kalman"
+                else None
+            ),
+            oracle_replay=oracle_replay,
+        )
+
+    def current_marker_pressure_neumann_gradient_field() -> Any | None:
+        cache_entry = sharp_boundary_cache.get("hibm_sharp_marker_boundary")
+        if not isinstance(cache_entry, dict):
+            return None
+        ib_boundary = cache_entry.get("ib_boundary")
+        if ib_boundary is None:
+            return None
+        return getattr(
+            ib_boundary,
+            "marker_pressure_neumann_gradient_field",
+            None,
+        )
+
+    if coupling_mode == "iqn_ils" and int(config.step_count) > 0:
+        iqn_base_topology_report = _apply_hibm_sharp_marker_boundary_to_fluid(
+            markers,
+            fluid,
+            config,
+            update_pressure_gradient=True,
+            boundary_cache=sharp_boundary_cache,
+            topology_only=False,
+            measure_wall_times=profile_wall_time,
+        )
+        _require_hibm_velocity_dirichlet_health(
+            iqn_base_topology_report,
+            context="IQN-ILS accepted pre-step base assembly",
+        )
     export_final_flow_snapshot = bool(
         getattr(config, "export_final_flow_snapshot", False)
     )
@@ -1444,370 +1680,206 @@ def run_hibm_mpm_fsi(
         kalman_step_report = _empty_modified_physics_kalman_step_report(
             kalman_writeback_mode
         )
-        if _flow_driver_requires_full_field_reinitialize(flow_driver_mode):
-            _initialize_computed_flow(fluid, config)
-        feedback_available_before_projection = (
-            feedback_available_for_projection and apply_feedback
-        )
-        latest_feedback_constraint_report = _apply_marker_feedback_to_fluid(
-            markers,
-            fluid,
-            config,
-            feedback_available=feedback_available_before_projection,
-        )
-        latest_flow_report, flow_wall_time_s = (
-            _measure_taichi_operation_wall_time(
-                lambda: _flow_advance_current_step(
-                    fluid,
-                    config,
-                    markers=markers,
-                    sharp_boundary_cache=sharp_boundary_cache,
-                    flow_phase="fsi",
-                    step_index_local=step_index,
-                    step_index_global=len(preflow_history) + step_index,
-                    preflow_history=preflow_history,
-                    reset_pressure=(
-                        bool(
-                            getattr(
-                                config,
-                                "flow_reset_pressure_each_step",
-                                False,
-                            )
-                        )
-                        or (step_index == 0 and not preflow_history)
-                    ),
-                    measure_wall_times=profile_wall_time,
-                ),
-                enabled=profile_wall_time,
+        feedback_available_before_projection = False
+        flow_wall_time_s = 0.0
+        kalman_fluid_feedback_pressure_raw_min_pa = 0.0
+        kalman_fluid_feedback_pressure_raw_max_pa = 0.0
+        kalman_fluid_feedback_pressure_min_pa = 0.0
+        kalman_fluid_feedback_pressure_max_pa = 0.0
+        observer_flow_snapshot = None
+        snapshot_capture_wall_time_s = 0.0
+        kalman_solid_integrator_raw_max_speed_mps = 0.0
+        kalman_solid_accepted_max_speed_mps = 0.0
+        kalman_interface_raw_max_speed_mps = 0.0
+        kalman_interface_accepted_max_speed_mps = 0.0
+        latest_observer_topology_report: dict[str, object] = {}
+        trial_work_start_index = len(coupling_trial_work_reports)
+        initial_guess_step_report: dict[str, object] = {
+            "mode": initial_guess_mode,
+            "mode_used": (
+                "direct_explicit"
+                if coupling_mode == "direct_explicit"
+                else None
+            ),
+            "fallback_reason": None,
+            "offline_oracle": False,
+            "deployable": True,
+        }
+
+        def _run_hibm_mpm_coupling_trial() -> None:
+            nonlocal feedback_available_before_projection
+            nonlocal final_flow_field_snapshot
+            nonlocal flow_wall_time_s
+            nonlocal fluid_projection_after_feedback_count
+            nonlocal fluid_projection_consumed_feedback_trial_count
+            nonlocal fluid_projection_count
+            nonlocal kalman_adapter_wall_time_s
+            nonlocal kalman_fluid_feedback_pressure_max_pa
+            nonlocal kalman_fluid_feedback_pressure_min_pa
+            nonlocal kalman_fluid_feedback_pressure_raw_max_pa
+            nonlocal kalman_fluid_feedback_pressure_raw_min_pa
+            nonlocal kalman_interface_accepted_max_speed_mps
+            nonlocal kalman_interface_raw_max_speed_mps
+            nonlocal kalman_solid_accepted_max_speed_mps
+            nonlocal kalman_solid_integrator_raw_max_speed_mps
+            nonlocal latest_dynamic_obstacle_report
+            nonlocal latest_feedback_constraint_report
+            nonlocal latest_feedback_report
+            nonlocal latest_flow_report
+            nonlocal latest_force_report
+            nonlocal latest_observer_topology_report
+            nonlocal latest_scatter_report
+            nonlocal latest_solid_report
+            nonlocal latest_solid_step_report
+            nonlocal latest_stress_report
+            nonlocal observer_flow_snapshot
+            nonlocal snapshot_capture_wall_time_s
+            nonlocal solid_substep_cfl
+
+            if _flow_driver_requires_full_field_reinitialize(flow_driver_mode):
+                _initialize_computed_flow(fluid, config)
+            feedback_available_before_projection = (
+                feedback_available_for_projection and apply_feedback
             )
-        )
-        if kalman_controller is not None:
-            kalman_hook_started_s = time.perf_counter()
-            kalman_controller.begin_step(dt_s=float(config.dt_s))
-            kalman_adapter_wall_time_s += (
-                time.perf_counter() - kalman_hook_started_s
-            )
-        kalman_fluid_feedback_pressure_raw_min_pa = float(
-            latest_flow_report["pressure_min_pa"]
-        )
-        kalman_fluid_feedback_pressure_raw_max_pa = float(
-            latest_flow_report["pressure_max_pa"]
-        )
-        kalman_fluid_feedback_pressure_min_pa = (
-            kalman_fluid_feedback_pressure_raw_min_pa
-        )
-        kalman_fluid_feedback_pressure_max_pa = (
-            kalman_fluid_feedback_pressure_raw_max_pa
-        )
-        if (
-            kalman_controller is not None
-            and kalman_controller.enabled(FLUID_FSI_PRESSURE_FEEDBACK_OWNER)
-        ):
-            kalman_hook_started_s = time.perf_counter()
-            try:
-                raw_pressure_pa = _kalman_fluid_observation(fluid)
-                fluid_kalman_result = kalman_controller.observe(
-                    FLUID_FSI_PRESSURE_FEEDBACK_OWNER,
-                    raw_pressure_pa,
-                )
-                actual_pressure_pa = raw_pressure_pa
-                if fluid_kalman_result.writeback_values is not None:
-                    kalman_raw_writeback_targets[
-                        FLUID_FSI_PRESSURE_FEEDBACK_OWNER
-                    ] = np.ascontiguousarray(raw_pressure_pa, dtype=np.float64)
-                    actual_pressure_pa = _apply_kalman_fluid_writeback(
-                        fluid,
-                        fluid_kalman_result.writeback_values,
-                    )
-                kalman_fluid_feedback_pressure_raw_min_pa = float(
-                    np.min(raw_pressure_pa)
-                )
-                kalman_fluid_feedback_pressure_raw_max_pa = float(
-                    np.max(raw_pressure_pa)
-                )
-                kalman_fluid_feedback_pressure_min_pa = float(
-                    np.min(actual_pressure_pa)
-                )
-                kalman_fluid_feedback_pressure_max_pa = float(
-                    np.max(actual_pressure_pa)
-                )
-            except Exception:
-                _discard_modified_physics_kalman_step(
-                    kalman_controller,
-                    kalman_raw_writeback_targets,
-                    fluid=fluid,
-                    solid=solid,
-                    markers=markers,
-                )
-                raise
-            finally:
-                kalman_adapter_wall_time_s += (
-                    time.perf_counter() - kalman_hook_started_s
-                )
-        try:
-            snapshot_capture_wall_time_s = 0.0
-            observer_flow_snapshot = None
-            if step_observer is not None:
-                (
-                    observer_flow_snapshot,
-                    observer_snapshot_wall_time_s,
-                ) = _measure_taichi_operation_wall_time(
-                    lambda: _synchronized_flow_boundary_snapshot(
-                        _flow_parity_snapshot(
-                            fluid,
-                            immutable_geometry=immutable_flow_geometry,
-                        ),
-                        stage="pre_solid_projection",
-                    ),
-                    enabled=profile_wall_time,
-                )
-                snapshot_capture_wall_time_s = float(
-                    observer_snapshot_wall_time_s
-                )
-            if export_final_flow_snapshot and (
-                step_index + 1 == int(config.step_count)
-            ):
-                (
-                    final_flow_field_snapshot,
-                    final_snapshot_wall_time_s,
-                ) = _measure_taichi_operation_wall_time(
-                    lambda: _synchronized_flow_boundary_snapshot(
-                        _flow_field_snapshot(
-                            fluid,
-                            immutable_geometry=immutable_flow_geometry,
-                        ),
-                        stage="pre_solid_projection",
-                    ),
-                    enabled=profile_wall_time,
-                )
-                snapshot_capture_wall_time_s = float(
-                    math.fsum(
-                        (
-                            snapshot_capture_wall_time_s,
-                            final_snapshot_wall_time_s,
-                        )
-                    )
-                )
-        except Exception:
-            _discard_modified_physics_kalman_step(
-                kalman_controller,
-                kalman_raw_writeback_targets,
-                fluid=fluid,
-                solid=solid,
-                markers=markers,
-            )
-            raise
-        latest_feedback_constraint_report[
-            "no_slip_projected_residual_after_projection_mps"
-        ] = float(latest_flow_report["hibm_no_slip_max_residual_mps"])
-        fluid_projection_count += 1
-        if feedback_available_before_projection:
-            fluid_projection_after_feedback_count += 1
-        if latest_feedback_constraint_report["fluid_projection_consumed_feedback"]:
-            fluid_projection_consumed_feedback_count += 1
-        try:
-            latest_stress_report = _sample_stress_to_marker_forces(
+            latest_feedback_constraint_report = _apply_marker_feedback_to_fluid(
                 markers,
                 fluid,
                 config,
+                feedback_available=feedback_available_before_projection,
             )
-            latest_force_report = markers.aggregate_region_forces(
-                primary_region_id=PRIMARY_REGION_ID,
-                secondary_region_id=SECONDARY_REGION_ID,
-            )
-        except Exception:
-            _discard_modified_physics_kalman_step(
-                kalman_controller,
-                kalman_raw_writeback_targets,
-                fluid=fluid,
-                solid=solid,
-                markers=markers,
-            )
-            raise
-
-        def prepare_solid_external_force() -> tuple[Any, Any]:
-            clear_report = markers.clear_mpm_external_forces(
-                solid.external_force_n,
-                particle_count=solid.particle_count,
-            )
-            scatter_report = markers.scatter_marker_forces_to_mpm_particles(
-                solid.external_force_n,
-                solid.x,
-                particle_count=solid.particle_count,
-                support_radius_m=config.mpm_support_radius_m,
-                particle_position_generation=particle_position_generation,
-            )
-            _require_fresh_external_force_for_solid_step(
-                clear=clear_report,
-                scatter=scatter_report,
-                marker_forces=latest_force_report,
-                stress=latest_stress_report,
-                no_slip=latest_flow_report.get("hibm_no_slip_report"),
-                projection=latest_flow_report["projection_report"],
-            )
-            return clear_report, scatter_report
-
-        try:
-            latest_clear_report, latest_scatter_report = (
-                prepare_solid_external_force()
-            )
-        except Exception:
-            _discard_modified_physics_kalman_step(
-                kalman_controller,
-                kalman_raw_writeback_targets,
-                fluid=fluid,
-                solid=solid,
-                markers=markers,
-            )
-            raise
-
-        def retry_prepare_solid_external_force() -> None:
-            nonlocal latest_clear_report, latest_scatter_report
-            (
-                latest_clear_report,
-                latest_scatter_report,
-            ) = prepare_solid_external_force()
-
-        try:
-            latest_solid_step_report = _select_and_advance_solid_macro_step(
-                solid,
-                config,
-                mu_pa=mu_pa,
-                lambda_pa=lambda_pa,
-                retry_prepare=retry_prepare_solid_external_force,
-                particle_position_write_observer=record_particle_position_write,
-                profile_wall_time=profile_wall_time,
-            )
-        except Exception:
-            _discard_modified_physics_kalman_step(
-                kalman_controller,
-                kalman_raw_writeback_targets,
-                fluid=fluid,
-                solid=solid,
-                markers=markers,
-            )
-            raise
-        latest_solid_report = latest_solid_step_report["solid_report"]
-        solid_substep_cfl = {
-            key: value
-            for key, value in latest_solid_step_report.items()
-            if key != "solid_report"
-        }
-        solid_step_execution_reports.append(dict(solid_substep_cfl))
-        kalman_solid_integrator_raw_max_speed_mps = float(
-            latest_solid_report.max_speed_mps
-        )
-        kalman_solid_accepted_max_speed_mps = (
-            kalman_solid_integrator_raw_max_speed_mps
-        )
-        if (
-            kalman_controller is not None
-            and kalman_controller.enabled(SOLID_PARTICLE_VELOCITY_OWNER)
-        ):
-            kalman_hook_started_s = time.perf_counter()
-            try:
-                raw_solid_velocity_mps = _kalman_solid_observation(solid)
-                solid_kalman_result = kalman_controller.observe(
-                    SOLID_PARTICLE_VELOCITY_OWNER,
-                    raw_solid_velocity_mps,
-                )
-                actual_solid_velocity_mps = raw_solid_velocity_mps
-                if solid_kalman_result.writeback_values is not None:
-                    kalman_raw_writeback_targets[
-                        SOLID_PARTICLE_VELOCITY_OWNER
-                    ] = np.ascontiguousarray(
-                        solid.v.to_numpy(),
-                        dtype=np.float32,
-                    )
-                    actual_solid_velocity_mps = _apply_kalman_solid_writeback(
-                        solid,
-                        solid_kalman_result.writeback_values,
-                        fixed_mask=fixed_mask,
-                        enforce_plane_strain_x=bool(config.enforce_plane_strain_x),
-                    )
-                kalman_solid_accepted_max_speed_mps = float(
-                    np.max(np.linalg.norm(actual_solid_velocity_mps, axis=1))
-                )
-            except Exception:
-                _discard_modified_physics_kalman_step(
-                    kalman_controller,
-                    kalman_raw_writeback_targets,
-                    fluid=fluid,
-                    solid=solid,
-                    markers=markers,
-                )
-                raise
-            finally:
-                kalman_adapter_wall_time_s += (
-                    time.perf_counter() - kalman_hook_started_s
-                )
-        try:
-            latest_feedback_report = (
-                markers.update_surface_feedback_from_mpm_surface_particles(
-                    solid.x,
-                    solid.v,
-                    solid.surface_normal,
-                    solid.area_weight_m2,
-                    particle_count=solid.particle_count,
-                    support_radius_m=config.mpm_support_radius_m,
-                    dt_s=config.dt_s,
-                    preserve_marker_area=bool(
-                        getattr(
-                            config,
-                            "preserve_marker_area_during_surface_feedback",
-                            False,
-                        )
+            latest_flow_report, flow_wall_time_s = (
+                _measure_taichi_operation_wall_time(
+                    lambda: _flow_advance_current_step(
+                        fluid,
+                        config,
+                        markers=markers,
+                        sharp_boundary_cache=sharp_boundary_cache,
+                        flow_phase="fsi",
+                        step_index_local=step_index,
+                        step_index_global=len(preflow_history) + step_index,
+                        preflow_history=preflow_history,
+                        reset_pressure=(
+                            bool(
+                                getattr(
+                                    config,
+                                    "flow_reset_pressure_each_step",
+                                    False,
+                                )
+                            )
+                            or (step_index == 0 and not preflow_history)
+                        ),
+                        measure_wall_times=profile_wall_time,
                     ),
-                    particle_position_generation=particle_position_generation,
+                    enabled=profile_wall_time,
                 )
             )
-        except Exception:
-            _discard_modified_physics_kalman_step(
-                kalman_controller,
-                kalman_raw_writeback_targets,
-                fluid=fluid,
-                solid=solid,
-                markers=markers,
-            )
-            raise
-        raw_marker_velocity_mps = None
-        kalman_interface_raw_max_speed_mps = float(
-            latest_feedback_report.max_marker_speed_mps
-        )
-        kalman_interface_accepted_max_speed_mps = (
-            kalman_interface_raw_max_speed_mps
-        )
-        if (
-            kalman_controller is not None
-            and kalman_controller.enabled(INTERFACE_MARKER_VELOCITY_OWNER)
-        ):
-            kalman_hook_started_s = time.perf_counter()
-            try:
-                raw_marker_velocity_mps = _kalman_interface_observation(markers)
-                interface_kalman_result = kalman_controller.observe(
-                    INTERFACE_MARKER_VELOCITY_OWNER,
-                    raw_marker_velocity_mps,
+            if kalman_controller is not None:
+                kalman_hook_started_s = time.perf_counter()
+                kalman_controller.begin_step(dt_s=float(config.dt_s))
+                kalman_adapter_wall_time_s += (
+                    time.perf_counter() - kalman_hook_started_s
                 )
-                actual_marker_velocity_mps = raw_marker_velocity_mps
-                if interface_kalman_result.writeback_values is not None:
-                    kalman_raw_writeback_targets[
-                        INTERFACE_MARKER_VELOCITY_OWNER
-                    ] = np.ascontiguousarray(
-                        markers.v_gamma_mps.to_numpy(),
-                        dtype=np.float32,
+            kalman_fluid_feedback_pressure_raw_min_pa = float(
+                latest_flow_report["pressure_min_pa"]
+            )
+            kalman_fluid_feedback_pressure_raw_max_pa = float(
+                latest_flow_report["pressure_max_pa"]
+            )
+            kalman_fluid_feedback_pressure_min_pa = (
+                kalman_fluid_feedback_pressure_raw_min_pa
+            )
+            kalman_fluid_feedback_pressure_max_pa = (
+                kalman_fluid_feedback_pressure_raw_max_pa
+            )
+            if (
+                kalman_controller is not None
+                and kalman_controller.enabled(FLUID_FSI_PRESSURE_FEEDBACK_OWNER)
+            ):
+                kalman_hook_started_s = time.perf_counter()
+                try:
+                    raw_pressure_pa = _kalman_fluid_observation(fluid)
+                    fluid_kalman_result = kalman_controller.observe(
+                        FLUID_FSI_PRESSURE_FEEDBACK_OWNER,
+                        raw_pressure_pa,
                     )
-                    actual_marker_velocity_mps = (
-                        _apply_kalman_interface_writeback(
-                            markers,
-                            interface_kalman_result.writeback_values,
+                    actual_pressure_pa = raw_pressure_pa
+                    if fluid_kalman_result.writeback_values is not None:
+                        kalman_raw_writeback_targets[
+                            FLUID_FSI_PRESSURE_FEEDBACK_OWNER
+                        ] = np.ascontiguousarray(raw_pressure_pa, dtype=np.float64)
+                        actual_pressure_pa = _apply_kalman_fluid_writeback(
+                            fluid,
+                            fluid_kalman_result.writeback_values,
+                        )
+                    kalman_fluid_feedback_pressure_raw_min_pa = float(
+                        np.min(raw_pressure_pa)
+                    )
+                    kalman_fluid_feedback_pressure_raw_max_pa = float(
+                        np.max(raw_pressure_pa)
+                    )
+                    kalman_fluid_feedback_pressure_min_pa = float(
+                        np.min(actual_pressure_pa)
+                    )
+                    kalman_fluid_feedback_pressure_max_pa = float(
+                        np.max(actual_pressure_pa)
+                    )
+                except Exception:
+                    _discard_modified_physics_kalman_step(
+                        kalman_controller,
+                        kalman_raw_writeback_targets,
+                        fluid=fluid,
+                        solid=solid,
+                        markers=markers,
+                    )
+                    raise
+                finally:
+                    kalman_adapter_wall_time_s += (
+                        time.perf_counter() - kalman_hook_started_s
+                    )
+            try:
+                snapshot_capture_wall_time_s = 0.0
+                observer_flow_snapshot = None
+                if step_observer is not None:
+                    (
+                        observer_flow_snapshot,
+                        observer_snapshot_wall_time_s,
+                    ) = _measure_taichi_operation_wall_time(
+                        lambda: _synchronized_flow_boundary_snapshot(
+                            _flow_parity_snapshot(
+                                fluid,
+                                immutable_geometry=immutable_flow_geometry,
+                            ),
+                            stage="pre_solid_projection",
+                        ),
+                        enabled=profile_wall_time,
+                    )
+                    snapshot_capture_wall_time_s = float(
+                        observer_snapshot_wall_time_s
+                    )
+                if export_final_flow_snapshot and (
+                    step_index + 1 == int(config.step_count)
+                ):
+                    (
+                        final_flow_field_snapshot,
+                        final_snapshot_wall_time_s,
+                    ) = _measure_taichi_operation_wall_time(
+                        lambda: _synchronized_flow_boundary_snapshot(
+                            _flow_field_snapshot(
+                                fluid,
+                                immutable_geometry=immutable_flow_geometry,
+                            ),
+                            stage="pre_solid_projection",
+                        ),
+                        enabled=profile_wall_time,
+                    )
+                    snapshot_capture_wall_time_s = float(
+                        math.fsum(
+                            (
+                                snapshot_capture_wall_time_s,
+                                final_snapshot_wall_time_s,
+                            )
                         )
                     )
-                kalman_interface_raw_max_speed_mps = float(
-                    np.max(np.linalg.norm(raw_marker_velocity_mps, axis=1))
-                )
-                kalman_interface_accepted_max_speed_mps = float(
-                    np.max(np.linalg.norm(actual_marker_velocity_mps, axis=1))
-                )
             except Exception:
                 _discard_modified_physics_kalman_step(
                     kalman_controller,
@@ -1817,51 +1889,571 @@ def run_hibm_mpm_fsi(
                     markers=markers,
                 )
                 raise
-            finally:
-                kalman_adapter_wall_time_s += (
-                    time.perf_counter() - kalman_hook_started_s
-                )
-        try:
-            latest_dynamic_obstacle_report = _update_fluid_obstacle_from_solid(
-                fluid,
-                solid,
-                config,
-            )
-            latest_observer_topology_report = (
-                _apply_hibm_sharp_marker_boundary_to_fluid(
+            latest_feedback_constraint_report[
+                "no_slip_projected_residual_after_projection_mps"
+            ] = float(latest_flow_report["hibm_no_slip_max_residual_mps"])
+            fluid_projection_count += 1
+            if feedback_available_before_projection:
+                fluid_projection_after_feedback_count += 1
+            if latest_feedback_constraint_report["fluid_projection_consumed_feedback"]:
+                fluid_projection_consumed_feedback_trial_count += 1
+            try:
+                latest_stress_report = _sample_stress_to_marker_forces(
                     markers,
                     fluid,
                     config,
-                    update_pressure_gradient=False,
-                    boundary_cache=sharp_boundary_cache,
-                    # Rebuild rows as well as topology so the per-step and final
-                    # snapshots never combine the post-solid obstacle with the
-                    # previous fluid stage's boundary mask.  The resulting cache
-                    # also lets the next predictor reuse search and cleanup.
-                    topology_only=False,
-                    measure_wall_times=profile_wall_time,
                 )
+                latest_force_report = markers.aggregate_region_forces(
+                    primary_region_id=PRIMARY_REGION_ID,
+                    secondary_region_id=SECONDARY_REGION_ID,
+                )
+            except Exception:
+                _discard_modified_physics_kalman_step(
+                    kalman_controller,
+                    kalman_raw_writeback_targets,
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                )
+                raise
+
+            def prepare_solid_external_force() -> tuple[Any, Any]:
+                clear_report = markers.clear_mpm_external_forces(
+                    solid.external_force_n,
+                    particle_count=solid.particle_count,
+                )
+                scatter_report = markers.scatter_marker_forces_to_mpm_particles(
+                    solid.external_force_n,
+                    solid.x,
+                    particle_count=solid.particle_count,
+                    support_radius_m=config.mpm_support_radius_m,
+                    particle_position_generation=particle_position_generation,
+                )
+                _require_fresh_external_force_for_solid_step(
+                    clear=clear_report,
+                    scatter=scatter_report,
+                    marker_forces=latest_force_report,
+                    stress=latest_stress_report,
+                    no_slip=latest_flow_report.get("hibm_no_slip_report"),
+                    projection=latest_flow_report["projection_report"],
+                )
+                return clear_report, scatter_report
+
+            try:
+                latest_clear_report, latest_scatter_report = (
+                    prepare_solid_external_force()
+                )
+            except Exception:
+                _discard_modified_physics_kalman_step(
+                    kalman_controller,
+                    kalman_raw_writeback_targets,
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                )
+                raise
+
+            def retry_prepare_solid_external_force() -> None:
+                nonlocal latest_clear_report, latest_scatter_report
+                (
+                    latest_clear_report,
+                    latest_scatter_report,
+                ) = prepare_solid_external_force()
+
+            try:
+                latest_solid_step_report = _select_and_advance_solid_macro_step(
+                    solid,
+                    config,
+                    mu_pa=mu_pa,
+                    lambda_pa=lambda_pa,
+                    retry_prepare=retry_prepare_solid_external_force,
+                    particle_position_write_observer=record_particle_position_write,
+                    profile_wall_time=profile_wall_time,
+                )
+            except Exception:
+                _discard_modified_physics_kalman_step(
+                    kalman_controller,
+                    kalman_raw_writeback_targets,
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                )
+                raise
+            latest_solid_report = latest_solid_step_report["solid_report"]
+            solid_substep_cfl = {
+                key: value
+                for key, value in latest_solid_step_report.items()
+                if key != "solid_report"
+            }
+            solid_trial_execution_reports.append(dict(solid_substep_cfl))
+            kalman_solid_integrator_raw_max_speed_mps = float(
+                latest_solid_report.max_speed_mps
             )
-            _require_hibm_velocity_dirichlet_health(
-                latest_observer_topology_report,
-                context=f"FSI step {step_index + 1} post-solid observer assembly",
+            kalman_solid_accepted_max_speed_mps = (
+                kalman_solid_integrator_raw_max_speed_mps
             )
-        except Exception:
-            _discard_modified_physics_kalman_step(
-                kalman_controller,
-                kalman_raw_writeback_targets,
-                fluid=fluid,
-                solid=solid,
-                markers=markers,
+            if (
+                kalman_controller is not None
+                and kalman_controller.enabled(SOLID_PARTICLE_VELOCITY_OWNER)
+            ):
+                kalman_hook_started_s = time.perf_counter()
+                try:
+                    raw_solid_velocity_mps = _kalman_solid_observation(solid)
+                    solid_kalman_result = kalman_controller.observe(
+                        SOLID_PARTICLE_VELOCITY_OWNER,
+                        raw_solid_velocity_mps,
+                    )
+                    actual_solid_velocity_mps = raw_solid_velocity_mps
+                    if solid_kalman_result.writeback_values is not None:
+                        kalman_raw_writeback_targets[
+                            SOLID_PARTICLE_VELOCITY_OWNER
+                        ] = np.ascontiguousarray(
+                            solid.v.to_numpy(),
+                            dtype=np.float32,
+                        )
+                        actual_solid_velocity_mps = _apply_kalman_solid_writeback(
+                            solid,
+                            solid_kalman_result.writeback_values,
+                            fixed_mask=fixed_mask,
+                            enforce_plane_strain_x=bool(config.enforce_plane_strain_x),
+                        )
+                    kalman_solid_accepted_max_speed_mps = float(
+                        np.max(np.linalg.norm(actual_solid_velocity_mps, axis=1))
+                    )
+                except Exception:
+                    _discard_modified_physics_kalman_step(
+                        kalman_controller,
+                        kalman_raw_writeback_targets,
+                        fluid=fluid,
+                        solid=solid,
+                        markers=markers,
+                    )
+                    raise
+                finally:
+                    kalman_adapter_wall_time_s += (
+                        time.perf_counter() - kalman_hook_started_s
+                    )
+            try:
+                latest_feedback_report = (
+                    markers.update_surface_feedback_from_mpm_surface_particles(
+                        solid.x,
+                        solid.v,
+                        solid.surface_normal,
+                        solid.area_weight_m2,
+                        particle_count=solid.particle_count,
+                        support_radius_m=config.mpm_support_radius_m,
+                        dt_s=config.dt_s,
+                        preserve_marker_area=bool(
+                            getattr(
+                                config,
+                                "preserve_marker_area_during_surface_feedback",
+                                False,
+                            )
+                        ),
+                        particle_position_generation=particle_position_generation,
+                    )
+                )
+            except Exception:
+                _discard_modified_physics_kalman_step(
+                    kalman_controller,
+                    kalman_raw_writeback_targets,
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                )
+                raise
+            raw_marker_velocity_mps = None
+            kalman_interface_raw_max_speed_mps = float(
+                latest_feedback_report.max_marker_speed_mps
             )
-            raise
+            kalman_interface_accepted_max_speed_mps = (
+                kalman_interface_raw_max_speed_mps
+            )
+            if (
+                kalman_controller is not None
+                and kalman_controller.enabled(INTERFACE_MARKER_VELOCITY_OWNER)
+            ):
+                kalman_hook_started_s = time.perf_counter()
+                try:
+                    raw_marker_velocity_mps = _kalman_interface_observation(markers)
+                    interface_kalman_result = kalman_controller.observe(
+                        INTERFACE_MARKER_VELOCITY_OWNER,
+                        raw_marker_velocity_mps,
+                    )
+                    actual_marker_velocity_mps = raw_marker_velocity_mps
+                    if interface_kalman_result.writeback_values is not None:
+                        kalman_raw_writeback_targets[
+                            INTERFACE_MARKER_VELOCITY_OWNER
+                        ] = np.ascontiguousarray(
+                            markers.v_gamma_mps.to_numpy(),
+                            dtype=np.float32,
+                        )
+                        actual_marker_velocity_mps = (
+                            _apply_kalman_interface_writeback(
+                                markers,
+                                interface_kalman_result.writeback_values,
+                            )
+                        )
+                    kalman_interface_raw_max_speed_mps = float(
+                        np.max(np.linalg.norm(raw_marker_velocity_mps, axis=1))
+                    )
+                    kalman_interface_accepted_max_speed_mps = float(
+                        np.max(np.linalg.norm(actual_marker_velocity_mps, axis=1))
+                    )
+                except Exception:
+                    _discard_modified_physics_kalman_step(
+                        kalman_controller,
+                        kalman_raw_writeback_targets,
+                        fluid=fluid,
+                        solid=solid,
+                        markers=markers,
+                    )
+                    raise
+                finally:
+                    kalman_adapter_wall_time_s += (
+                        time.perf_counter() - kalman_hook_started_s
+                    )
+            try:
+                latest_dynamic_obstacle_report = _update_fluid_obstacle_from_solid(
+                    fluid,
+                    solid,
+                    config,
+                )
+                latest_observer_topology_report = (
+                    _apply_hibm_sharp_marker_boundary_to_fluid(
+                        markers,
+                        fluid,
+                        config,
+                        update_pressure_gradient=False,
+                        boundary_cache=sharp_boundary_cache,
+                        # Rebuild rows as well as topology so the per-step and final
+                        # snapshots never combine the post-solid obstacle with the
+                        # previous fluid stage's boundary mask.  The resulting cache
+                        # also lets the next predictor reuse search and cleanup.
+                        topology_only=False,
+                        measure_wall_times=profile_wall_time,
+                    )
+                )
+                _require_hibm_velocity_dirichlet_health(
+                    latest_observer_topology_report,
+                    context=f"FSI step {step_index + 1} post-solid observer assembly",
+                )
+                projection_report = latest_flow_report.get("projection_report")
+                if not isinstance(projection_report, Mapping):
+                    raise RuntimeError(
+                        "FSI trial flow report omitted projection_report"
+                    )
+                trial_hibm_wall_times = _fsi_step_hibm_wall_times(
+                    latest_flow_report,
+                    latest_observer_topology_report,
+                )
+                coupling_trial_work_reports.append(
+                    {
+                        "flow_wall_time_s": float(flow_wall_time_s),
+                        "hibm_wall_time_s": float(
+                            trial_hibm_wall_times["hibm_wall_time_s"]
+                        ),
+                        "solid_wall_time_s": float(
+                            solid_substep_cfl["solid_wall_time_s"]
+                        ),
+                        "cg_iterations_total": int(
+                            projection_report.get("cg_iterations_total", 0)
+                        ),
+                        "flow_momentum_advection_substeps_total": int(
+                            latest_flow_report.get(
+                                "flow_momentum_advection_substeps_total", 0
+                            )
+                        ),
+                        "flow_sst_transport_substeps_total": int(
+                            latest_flow_report.get(
+                                "flow_sst_transport_substeps_total", 0
+                            )
+                        ),
+                        "solid_substeps_executed_total": int(
+                            solid_substep_cfl["solid_substeps_executed_total"]
+                        ),
+                        "feedback_consumed": bool(
+                            latest_feedback_constraint_report[
+                                "fluid_projection_consumed_feedback"
+                            ]
+                        ),
+                    }
+                )
+            except Exception:
+                _discard_modified_physics_kalman_step(
+                    kalman_controller,
+                    kalman_raw_writeback_targets,
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                )
+                raise
+
+        if coupling_mode == "direct_explicit":
+            _run_hibm_mpm_coupling_trial()
+            coupling_step_report = {
+                "hibm_coupling_scheme": "explicit_loose",
+                "hibm_fsi_coupling_iterations_used": 1,
+                "hibm_fsi_coupling_converged": False,
+                "hibm_fsi_coupling_explicit_single_pass": True,
+                "hibm_fsi_coupling_rejected_trial_count": 0,
+                "hibm_fsi_coupling_residual_source": "unmeasured_single_pass",
+                "hibm_fsi_coupling_residual_norm_mps": None,
+                "hibm_fsi_coupling_tolerance_mps": None,
+                "hibm_fsi_coupling_residual_history_mps": [],
+                "hibm_fsi_coupling_tolerance_history_mps": [],
+                "hibm_fsi_coupling_relaxation_history": [],
+                "hibm_fsi_coupling_update_mode_history": [],
+                "hibm_fsi_coupling_iqn_rank_history": [],
+                "hibm_fsi_coupling_iqn_condition_number_history": [],
+                "hibm_fsi_coupling_iqn_fallback_count": 0,
+                "hibm_fsi_coupling_base_assembly_count": 0,
+            }
+        else:
+            if initial_guess_controller is None:
+                raise RuntimeError(
+                    "IQN-ILS initial-guess controller was not initialized"
+                )
+            marker_pressure_neumann_gradient_field = (
+                current_marker_pressure_neumann_gradient_field()
+            )
+            if marker_pressure_neumann_gradient_field is None:
+                raise RuntimeError(
+                    "IQN-ILS requires an initialized marker pressure-Neumann "
+                    "gradient field"
+                )
+
+            def capture_iqn_step_state():
+                return capture_host_macro_step_state(
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                    accepted_step_index=step_index,
+                    accepted_time_s=float(config.dt_s) * float(step_index),
+                    feedback_available_for_projection=(
+                        feedback_available_for_projection
+                    ),
+                    marker_pressure_neumann_gradient_field=(
+                        current_marker_pressure_neumann_gradient_field()
+                    ),
+                )
+
+            def restore_iqn_step_state(state, _context) -> None:
+                nonlocal feedback_available_for_projection
+                gradient_field = (
+                    current_marker_pressure_neumann_gradient_field()
+                    if state.marker_pressure_neumann_gradient is not None
+                    else None
+                )
+                restore_host_macro_step_state(
+                    state,
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                    marker_pressure_neumann_gradient_field=gradient_field,
+                    record_particle_position_write=(
+                        record_particle_position_write
+                    ),
+                )
+                feedback_available_for_projection = bool(
+                    state.feedback_available_for_projection
+                )
+                _invalidate_hibm_sharp_boundary_derived_cache(
+                    sharp_boundary_cache
+                )
+
+            def apply_iqn_marker_velocity_guess(
+                marker_base: Mapping[str, Any],
+                guess: np.ndarray,
+            ) -> None:
+                restore_marker_interface_state(
+                    markers,
+                    marker_trial_state(marker_base, guess),
+                )
+                # Restoring the accepted marker state advances its geometry
+                # revision, which intentionally retires pressure-pair anchors.
+                # Reseal them before this trial samples interface traction.
+                refresh_runtime_pressure_pair_anchors()
+                _invalidate_hibm_sharp_boundary_derived_cache(
+                    sharp_boundary_cache
+                )
+
+            def commit_iqn_case_step(_context, _trial, _coupling):
+                nonlocal feedback_available_for_projection
+                refresh_runtime_pressure_pair_anchors()
+                feedback_available_for_projection = True
+                return {}
+
+            iqn_runtime = HibmMpmMarkerVelocityRuntime(
+                capture_step_state=capture_iqn_step_state,
+                restore_step_state=restore_iqn_step_state,
+                prepare_step=lambda _context: None,
+                capture_marker_state=lambda: capture_marker_interface_state(
+                    markers
+                ),
+                apply_marker_velocity_guess=apply_iqn_marker_velocity_guess,
+                advance_trial=lambda _context, _trial_index: (
+                    _run_hibm_mpm_coupling_trial()
+                    or {
+                        "flow_report": latest_flow_report,
+                        "solid_step_report": latest_solid_step_report,
+                        "feedback_report": latest_feedback_report,
+                    }
+                ),
+                commit_case_step=commit_iqn_case_step,
+                finalize_case_run=lambda: {},
+                layout_identity=lambda: marker_layout_identity(
+                    markers,
+                    reference_positions_m=np.asarray(
+                        marker_reference_positions_m,
+                        dtype=np.float32,
+                    ),
+                    namespace=f"{case_id}:marker_velocity",
+                ),
+                begin_initial_guess_step=(
+                    lambda context, carry_forward, layout_id: (
+                        initial_guess_controller.begin_step(
+                            carry_forward,
+                            dt_s=float(context.dt_s),
+                            layout_id=layout_id,
+                        )
+                    )
+                ),
+                accept_initial_guess_step=(
+                    lambda _context, accepted, layout_id: (
+                        initial_guess_controller.accept_step(
+                            accepted,
+                            layout_id=layout_id,
+                        )
+                    )
+                ),
+                discard_initial_guess_step=(
+                    initial_guess_controller.discard_step
+                ),
+            )
+            generic_run = solve_fsi_runtime(
+                iqn_runtime,
+                FsiSolverConfig(
+                    step_count=1,
+                    time_step_s=float(config.dt_s),
+                    completed_step_offset=step_index,
+                    coupling=FsiCouplingConfig(
+                        max_iterations=int(
+                            config.fsi_coupling_max_iterations
+                        ),
+                        relative_tolerance=float(
+                            config.fsi_coupling_relative_tolerance
+                        ),
+                        absolute_tolerance_mps=float(
+                            config.fsi_coupling_absolute_tolerance_mps
+                        ),
+                        initial_relaxation=float(
+                            config.iqn_initial_picard_relaxation
+                        ),
+                        history_limit=int(config.iqn_history_limit),
+                        iqn_svd_relative_cutoff=float(
+                            config.iqn_svd_relative_cutoff
+                        ),
+                    ),
+                ),
+            )
+            if len(generic_run.history) != 1:
+                raise RuntimeError(
+                    "one ANSYS FSI physical step must commit exactly one "
+                    "generic runtime history row"
+                )
+            generic_row = dict(generic_run.history[0])
+            initial_guess_step_report = dict(
+                initial_guess_controller.report()
+            )
+            coupling_step_report = {
+                "hibm_coupling_scheme": "iterative_marker_velocity_iqn_ils",
+                "hibm_fsi_coupling_iterations_used": int(
+                    generic_row["fsi_coupling_iterations"]
+                ),
+                "hibm_fsi_coupling_converged": bool(
+                    generic_row["fsi_coupling_converged"]
+                ),
+                "hibm_fsi_coupling_explicit_single_pass": False,
+                "hibm_fsi_coupling_rejected_trial_count": max(
+                    int(generic_row["fsi_coupling_iterations"]) - 1,
+                    0,
+                ),
+                "hibm_fsi_coupling_residual_source": (
+                    "generic_marker_velocity_rms"
+                ),
+                "hibm_fsi_coupling_residual_norm_mps": float(
+                    generic_row["fsi_coupling_absolute_residual_mps"]
+                ),
+                "hibm_fsi_coupling_tolerance_mps": float(
+                    config.fsi_coupling_absolute_tolerance_mps
+                ),
+                "hibm_fsi_coupling_residual_history_mps": list(
+                    generic_row[
+                        "fsi_coupling_absolute_residual_history_mps"
+                    ]
+                ),
+                "hibm_fsi_coupling_tolerance_history_mps": [],
+                "hibm_fsi_coupling_relaxation_history": [],
+                "hibm_fsi_coupling_update_mode_history": list(
+                    generic_row["fsi_coupling_update_modes"]
+                ),
+                "hibm_fsi_coupling_iqn_rank_history": list(
+                    generic_row["fsi_iqn_rank_history"]
+                ),
+                "hibm_fsi_coupling_iqn_condition_number_history": list(
+                    generic_row["fsi_iqn_condition_number_history"]
+                ),
+                "hibm_fsi_coupling_iqn_fallback_count": int(
+                    generic_row["fsi_iqn_fallback_count"]
+                ),
+                "hibm_fsi_coupling_first_relative_residual": float(
+                    generic_row["fsi_coupling_first_relative_residual"]
+                ),
+                "hibm_fsi_coupling_first_absolute_residual_mps": float(
+                    generic_row[
+                        "fsi_coupling_first_absolute_residual_mps"
+                    ]
+                ),
+                "hibm_fsi_coupling_base_assembly_count": (
+                    1 if step_index == 0 else 0
+                ),
+            }
+        step_trial_work_summary = _fsi_trial_work_summary(
+            coupling_trial_work_reports[trial_work_start_index:]
+        )
+        expected_trial_count = int(
+            coupling_step_report["hibm_fsi_coupling_iterations_used"]
+        )
+        if any(
+            int(step_trial_work_summary[field]) != expected_trial_count
+            for field in (
+                "trial_count",
+                "fluid_solve_count",
+                "solid_macro_solve_count",
+            )
+        ):
+            raise RuntimeError(
+                "FSI trial-work ledger does not match coupling iterations: "
+                f"expected={expected_trial_count}, "
+                f"work={step_trial_work_summary}"
+            )
+        if bool(
+            latest_feedback_constraint_report[
+                "fluid_projection_consumed_feedback"
+            ]
+        ):
+            fluid_projection_consumed_feedback_count += 1
+        solid_step_execution_reports.append(dict(solid_substep_cfl))
+        coupling_step_reports.append(dict(coupling_step_report))
         try:
             step_hibm_wall_times = _fsi_step_hibm_wall_times(
                 latest_flow_report,
                 latest_observer_topology_report,
             )
             step_artifact_export_wall_time_s = 0.0
-            refresh_runtime_pressure_pair_anchors()
+            if coupling_mode == "direct_explicit":
+                refresh_runtime_pressure_pair_anchors()
         except Exception:
             _discard_modified_physics_kalman_step(
                 kalman_controller,
@@ -1926,6 +2518,47 @@ def run_hibm_mpm_fsi(
         history.append(
             {
                 "step": step_index + 1,
+                **coupling_step_report,
+                "initial_guess_report": dict(initial_guess_step_report),
+                "initial_guess_mode_requested": initial_guess_mode,
+                "initial_guess_mode_used": initial_guess_step_report.get(
+                    "mode_used"
+                ),
+                "initial_guess_fallback_reason": initial_guess_step_report.get(
+                    "fallback_reason"
+                ),
+                "initial_guess_prediction_rms_mps": (
+                    initial_guess_step_report.get(
+                        "last_prediction_rms_mps"
+                    )
+                ),
+                "initial_guess_prediction_bias_mps": (
+                    initial_guess_step_report.get("last_prediction_bias")
+                ),
+                "initial_guess_kalman_nis_mean": (
+                    initial_guess_step_report.get("last_nis_mean")
+                ),
+                "hibm_fsi_trial_work_report": dict(
+                    step_trial_work_summary
+                ),
+                "hibm_fsi_trial_cg_iterations_total": int(
+                    step_trial_work_summary["cg_iterations_total"]
+                ),
+                "hibm_fsi_trial_flow_momentum_advection_substeps_total": int(
+                    step_trial_work_summary[
+                        "flow_momentum_advection_substeps_total"
+                    ]
+                ),
+                "hibm_fsi_trial_flow_sst_transport_substeps_total": int(
+                    step_trial_work_summary[
+                        "flow_sst_transport_substeps_total"
+                    ]
+                ),
+                "hibm_fsi_trial_solid_substeps_executed_total": int(
+                    step_trial_work_summary[
+                        "solid_substeps_executed_total"
+                    ]
+                ),
                 "kalman_writeback_mode": kalman_writeback_mode,
                 "kalman_modified_physics": bool(kalman_controller is not None),
                 "kalman_step_report": kalman_step_report,
@@ -2537,6 +3170,103 @@ def run_hibm_mpm_fsi(
             time_s=float(config.dt_s) * float(step_index + 1),
             max_displacement_m=float(step_displacement["max_displacement_m"]),
         )
+    coupling_iterations = [
+        int(report["hibm_fsi_coupling_iterations_used"])
+        for report in coupling_step_reports
+    ]
+    coupling_rejected_trial_total = sum(
+        int(report["hibm_fsi_coupling_rejected_trial_count"])
+        for report in coupling_step_reports
+    )
+    trial_work_run_summary = _fsi_trial_work_summary(
+        coupling_trial_work_reports
+    )
+    coupling_iteration_summary = _fsi_coupling_iteration_summary(
+        coupling_iterations
+    )
+    coupling_iterations_total = int(coupling_iteration_summary["total"])
+    if any(
+        int(trial_work_run_summary[field]) != coupling_iterations_total
+        for field in (
+            "trial_count",
+            "fluid_solve_count",
+            "solid_macro_solve_count",
+        )
+    ):
+        raise RuntimeError(
+            "run-level FSI trial-work ledger does not match coupling "
+            f"iterations: iterations={coupling_iterations_total}, "
+            f"work={trial_work_run_summary}"
+        )
+    coupling_run_summary = {
+        "hibm_coupling_scheme": (
+            "explicit_loose"
+            if coupling_mode == "direct_explicit"
+            else "iterative_marker_velocity_iqn_ils"
+        ),
+        "hibm_fsi_accepted_macro_step_count": len(coupling_step_reports),
+        "hibm_fsi_coupling_iterations_total": coupling_iterations_total,
+        "hibm_fsi_coupling_iterations_min": int(
+            coupling_iteration_summary["minimum"]
+        ),
+        "hibm_fsi_coupling_iterations_max": int(
+            coupling_iteration_summary["maximum"]
+        ),
+        "hibm_fsi_coupling_iterations_mean": float(
+            coupling_iteration_summary["mean"]
+        ),
+        "hibm_fsi_coupling_iterations_median": float(
+            coupling_iteration_summary["median"]
+        ),
+        "hibm_fsi_coupling_iterations_p95": float(
+            coupling_iteration_summary["p95"]
+        ),
+        "hibm_fsi_coupling_rejected_trial_count_total": (
+            coupling_rejected_trial_total
+        ),
+        "hibm_fsi_coupling_fluid_solve_count": int(
+            trial_work_run_summary["fluid_solve_count"]
+        ),
+        "hibm_fsi_coupling_solid_macro_solve_count": int(
+            trial_work_run_summary["solid_macro_solve_count"]
+        ),
+        "hibm_fsi_coupling_converged_step_count": sum(
+            bool(report["hibm_fsi_coupling_converged"])
+            for report in coupling_step_reports
+        ),
+        "hibm_fsi_coupling_explicit_single_pass_step_count": sum(
+            bool(report["hibm_fsi_coupling_explicit_single_pass"])
+            for report in coupling_step_reports
+        ),
+        "solid_trial_substeps_executed_total": sum(
+            int(report.get("solid_substeps_executed_total", 0))
+            for report in solid_trial_execution_reports
+        ),
+        "hibm_fsi_trial_work_report": dict(trial_work_run_summary),
+        "hibm_fsi_trial_cg_iterations_total": int(
+            trial_work_run_summary["cg_iterations_total"]
+        ),
+        "hibm_fsi_trial_flow_momentum_advection_substeps_total": int(
+            trial_work_run_summary[
+                "flow_momentum_advection_substeps_total"
+            ]
+        ),
+        "hibm_fsi_trial_flow_sst_transport_substeps_total": int(
+            trial_work_run_summary["flow_sst_transport_substeps_total"]
+        ),
+        "hibm_fsi_trial_solid_substeps_executed_total": int(
+            trial_work_run_summary["solid_substeps_executed_total"]
+        ),
+        "hibm_fsi_trial_flow_wall_time_s_total": float(
+            trial_work_run_summary["flow_wall_time_s_total"]
+        ),
+        "hibm_fsi_trial_hibm_wall_time_s_total": float(
+            trial_work_run_summary["hibm_wall_time_s_total"]
+        ),
+        "hibm_fsi_trial_solid_wall_time_s_total": float(
+            trial_work_run_summary["solid_wall_time_s_total"]
+        ),
+    }
     solid_substep_summary = _solid_substep_run_summary(
         solid_step_execution_reports
     )
@@ -2601,6 +3331,21 @@ def run_hibm_mpm_fsi(
         "config": asdict(config),
         "taichi_runtime_identity": dict(runtime_identity),
         "profile_wall_time_enabled": bool(profile_wall_time),
+        **coupling_run_summary,
+        "initial_guess_mode": initial_guess_mode,
+        "initial_guess_summary": (
+            dict(initial_guess_controller.report())
+            if initial_guess_controller is not None
+            else {
+                "mode": initial_guess_mode,
+                "mode_used": "direct_explicit",
+                "offline_oracle": False,
+                "deployable": True,
+                "begin_count": 0,
+                "accepted_step_count": 0,
+                "discard_count": 0,
+            }
+        ),
         "kalman_writeback_mode": kalman_writeback_mode,
         "kalman_modified_physics": bool(kalman_controller is not None),
         "kalman_summary": (
@@ -2786,6 +3531,9 @@ def run_hibm_mpm_fsi(
         ),
         "fluid_projection_consumed_feedback_count": (
             fluid_projection_consumed_feedback_count
+        ),
+        "fluid_projection_consumed_feedback_trial_count": (
+            fluid_projection_consumed_feedback_trial_count
         ),
         "fluid_projection_consumed_feedback": latest_feedback_constraint_report[
             "fluid_projection_consumed_feedback"
@@ -3055,6 +3803,7 @@ def _preflow_only_report(
         "fluid_projection_consumed_feedback_count": int(
             bool(latest_preflow["fluid_marker_velocity_constraints_enabled"])
         ),
+        "fluid_projection_consumed_feedback_trial_count": 0,
         "fluid_projection_consumed_feedback": bool(
             latest_preflow["fluid_marker_velocity_constraints_enabled"]
         ),
@@ -3439,6 +4188,99 @@ def _preflow_snapshot_paths(config: Any) -> tuple[object | None, object | None]:
 
 
 def _validate_rectangular_solid_config(config: Any) -> None:
+    coupling_mode = str(
+        getattr(config, "coupling_mode", "direct_explicit")
+    ).strip().lower()
+    if coupling_mode not in {"direct_explicit", "iqn_ils"}:
+        raise ValueError(f"unsupported coupling_mode: {coupling_mode!r}")
+    fsi_max_iterations_raw = getattr(config, "fsi_coupling_max_iterations", 16)
+    if isinstance(fsi_max_iterations_raw, (bool, np.bool_)):
+        raise ValueError("fsi_max_iterations must be an integer")
+    fsi_max_iterations = int(fsi_max_iterations_raw)
+    if fsi_max_iterations != fsi_max_iterations_raw:
+        raise ValueError("fsi_max_iterations must be an integer")
+    if fsi_max_iterations <= 0:
+        raise ValueError("fsi_coupling_max_iterations must be positive")
+    initial_guess_mode = str(
+        getattr(config, "initial_guess_mode", "carry_forward")
+    ).strip().lower()
+    if initial_guess_mode not in INITIAL_GUESS_MODES:
+        raise ValueError(
+            "initial_guess_mode must be carry_forward, linear_extrapolation, "
+            "kalman, or oracle_replay"
+        )
+    absolute_tolerance = float(config.fsi_coupling_absolute_tolerance_mps)
+    if not math.isfinite(absolute_tolerance) or absolute_tolerance < 0.0:
+        raise ValueError(
+            "fsi_coupling_absolute_tolerance_mps must be finite and non-negative"
+        )
+    relative_tolerance = float(config.fsi_coupling_relative_tolerance)
+    if not math.isfinite(relative_tolerance) or relative_tolerance <= 0.0:
+        raise ValueError(
+            "fsi_coupling_relative_tolerance must be finite and positive"
+        )
+    initial_relaxation = float(config.iqn_initial_picard_relaxation)
+    if (
+        not math.isfinite(initial_relaxation)
+        or not 0.0 < initial_relaxation <= 1.0
+    ):
+        raise ValueError(
+            "iqn_initial_picard_relaxation must be finite and in (0, 1]"
+        )
+    iqn_history_limit = getattr(config, "iqn_history_limit")
+    if isinstance(iqn_history_limit, (bool, np.bool_)) or int(
+        iqn_history_limit
+    ) != iqn_history_limit or int(iqn_history_limit) <= 0:
+        raise ValueError("iqn_history_limit must be a positive integer")
+    svd_cutoff = float(config.iqn_svd_relative_cutoff)
+    if not math.isfinite(svd_cutoff) or not 0.0 < svd_cutoff <= 1.0:
+        raise ValueError("iqn_svd_relative_cutoff must be in (0, 1]")
+    if coupling_mode == "direct_explicit":
+        if initial_guess_mode != "carry_forward":
+            raise ValueError(
+                "direct_explicit requires initial_guess_mode='carry_forward'"
+            )
+    else:
+        if fsi_max_iterations < 2:
+            raise ValueError(
+                "iqn_ils requires fsi_coupling_max_iterations >= 2"
+            )
+        if str(getattr(config, "kalman_writeback_mode", "off")) != "off":
+            raise ValueError(
+                "iqn_ils requires modified-physics Kalman writeback off"
+            )
+    initial_guess_kalman_config = getattr(
+        config,
+        "initial_guess_kalman_config",
+        None,
+    )
+    initial_guess_oracle_path = getattr(
+        config,
+        "initial_guess_oracle_path",
+        None,
+    )
+    if initial_guess_mode == "kalman":
+        if initial_guess_kalman_config is None:
+            raise ValueError(
+                "initial_guess_mode='kalman' requires "
+                "initial_guess_kalman_config"
+            )
+    elif initial_guess_kalman_config is not None:
+        raise ValueError(
+            "initial_guess_kalman_config is only valid for kalman mode"
+        )
+    if initial_guess_mode == "oracle_replay":
+        if not isinstance(initial_guess_oracle_path, str) or not (
+            initial_guess_oracle_path.strip()
+        ):
+            raise ValueError(
+                "initial_guess_mode='oracle_replay' requires "
+                "initial_guess_oracle_path"
+            )
+    elif initial_guess_oracle_path is not None:
+        raise ValueError(
+            "initial_guess_oracle_path is only valid for oracle_replay mode"
+        )
     _modified_physics_kalman_configs(config)
     boundary_mode = str(
         getattr(
@@ -6119,7 +6961,7 @@ def _canonical_marker_target_closure_health_failure(
             "canonical marker-target closure count is negative: "
             f"{negative_counts[0]}"
         )
-    if counts["solve_count"] not in (0, 1):
+    if counts["solve_count"] > 4:
         return (
             "canonical marker-target closure solve count is invalid: "
             f"{counts['solve_count']}"
@@ -7171,6 +8013,40 @@ def _hibm_marker_mac_constraint_absolute_tolerance_mps(config: Any) -> float:
     return value
 
 
+def _hibm_marker_compatibility_closure_tolerance_mps(config: Any) -> float:
+    raw_value = getattr(
+        config,
+        "flow_hibm_marker_compatibility_closure_tolerance_mps",
+        1.0e-6,
+    )
+    if isinstance(raw_value, (bool, np.bool_)):
+        raise ValueError(
+            "flow_hibm_marker_compatibility_closure_tolerance_mps must be "
+            "finite and positive"
+        )
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "flow_hibm_marker_compatibility_closure_tolerance_mps must be "
+            "finite and positive"
+        ) from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            "flow_hibm_marker_compatibility_closure_tolerance_mps must be "
+            "finite and positive"
+        )
+    marker_mac_tolerance = _hibm_marker_mac_constraint_absolute_tolerance_mps(
+        config
+    )
+    if value > marker_mac_tolerance:
+        raise ValueError(
+            "flow_hibm_marker_compatibility_closure_tolerance_mps must not "
+            "exceed flow_hibm_marker_mac_constraint_absolute_tolerance_mps"
+        )
+    return value
+
+
 class _HibmPreProjectionVelocityProjector:
     """Bind the generic fluid projection protocol to marker-space HIBM Q."""
 
@@ -7688,6 +8564,9 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
     marker_mac_constraint_absolute_tolerance_mps = (
         _hibm_marker_mac_constraint_absolute_tolerance_mps(config)
     )
+    marker_compatibility_closure_tolerance_mps = (
+        _hibm_marker_compatibility_closure_tolerance_mps(config)
+    )
     # Resource identity is deliberately independent from the current marker
     # geometry and from search parameters.  Those values change frequently in
     # FSI but do not change the Taichi field shapes, so the allocated search,
@@ -8009,9 +8888,8 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             marker_compatibility_absolute_tolerance_mps=(
                 marker_mac_constraint_absolute_tolerance_mps
             ),
-            marker_compatibility_closure_tolerance_mps=min(
-                1.0e-6,
-                0.1 * marker_mac_constraint_absolute_tolerance_mps,
+            marker_compatibility_closure_tolerance_mps=(
+                marker_compatibility_closure_tolerance_mps
             ),
             marker_compatibility_density_kgm3=float(fluid.rho),
             primary_region_id=PRIMARY_REGION_ID,
@@ -10152,6 +11030,16 @@ _PREFLOW_SNAPSHOT_FSI_ONLY_CONFIG_FIELDS = frozenset(
         "kalman_interface_config",
         "kalman_fluid_config",
         "kalman_solid_config",
+        "coupling_mode",
+        "fsi_coupling_max_iterations",
+        "fsi_coupling_absolute_tolerance_mps",
+        "fsi_coupling_relative_tolerance",
+        "iqn_history_limit",
+        "iqn_initial_picard_relaxation",
+        "iqn_svd_relative_cutoff",
+        "initial_guess_mode",
+        "initial_guess_kalman_config",
+        "initial_guess_oracle_path",
         "detailed_preflow_stage_progress",
         "velocity_damping",
         "fixed_node_lock_policy",

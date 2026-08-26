@@ -716,8 +716,8 @@ def _optional_kalman_config(
     owner: str,
     dt_s: float,
 ) -> InterfaceKalmanConfig | None:
-    process_noise = getattr(args, f"kalman_{owner}_q")
-    measurement_variance = getattr(args, f"kalman_{owner}_r")
+    process_noise = getattr(args, f"kalman_{owner}_q", None)
+    measurement_variance = getattr(args, f"kalman_{owner}_r", None)
     if process_noise is None and measurement_variance is None:
         return None
     if process_noise is None or measurement_variance is None:
@@ -778,14 +778,192 @@ def _modified_physics_kalman_configs(
     return mode, configs["interface"], configs["fluid"], configs["solid"]
 
 
+def _initial_guess_inputs(
+    args: argparse.Namespace,
+    *,
+    dt_s: float,
+) -> tuple[InterfaceKalmanConfig | None, str | None]:
+    """Build exactly one first-guess input without enabling writeback."""
+
+    mode = str(getattr(args, "initial_guess_mode", "carry_forward"))
+    process_noise = getattr(args, "initial_guess_kalman_q", None)
+    measurement_variance = getattr(args, "initial_guess_kalman_r", None)
+    warmup = getattr(args, "initial_guess_kalman_warmup_accepted_states", None)
+    oracle_path = getattr(args, "initial_guess_oracle_path", None)
+    has_kalman_values = process_noise is not None or measurement_variance is not None
+
+    if mode == "kalman":
+        if process_noise is None or measurement_variance is None:
+            raise ValueError(
+                "initial_guess_mode='kalman' requires "
+                "--initial-guess-kalman-q and --initial-guess-kalman-r"
+            )
+        if oracle_path is not None:
+            raise ValueError(
+                "initial_guess_mode='kalman' does not use "
+                "--initial-guess-oracle-path"
+            )
+        measurement_variance = float(measurement_variance)
+        return (
+            InterfaceKalmanConfig(
+                rate_process_noise_spectral_density=float(process_noise),
+                measurement_variance=measurement_variance,
+                initial_value_variance=measurement_variance,
+                initial_rate_variance=measurement_variance / float(dt_s) ** 2,
+                warmup_accepted_states=(
+                    6 if warmup is None else int(warmup)
+                ),
+            ),
+            None,
+        )
+
+    if mode == "oracle_replay":
+        if oracle_path is None:
+            raise ValueError(
+                "initial_guess_mode='oracle_replay' requires "
+                "--initial-guess-oracle-path"
+            )
+        if has_kalman_values or warmup is not None:
+            raise ValueError(
+                "initial_guess_mode='oracle_replay' does not use "
+                "initial-guess Kalman parameters"
+            )
+        return None, str(oracle_path)
+
+    if has_kalman_values or warmup is not None:
+        raise ValueError(
+            f"initial_guess_mode={mode!r} does not use initial-guess Kalman "
+            "parameters"
+        )
+    if oracle_path is not None:
+        raise ValueError(
+            f"initial_guess_mode={mode!r} does not use "
+            "--initial-guess-oracle-path"
+        )
+    return None, None
+
+
+def _validate_initial_guess_oracle_producer(
+    *,
+    producer_output: str | Path,
+    consumer_output: str | Path,
+    consumer_config_payload: dict[str, Any],
+    current_source_sha256: dict[str, str],
+) -> dict[str, Any]:
+    """Validate and seal a completed Q0 trajectory before Q3 starts."""
+
+    producer = Path(producer_output).expanduser().resolve()
+    consumer = Path(consumer_output).expanduser().resolve()
+    if producer == consumer:
+        raise ValueError("oracle producer and consumer outputs must differ")
+
+    def read_mapping(name: str) -> dict[str, Any]:
+        path = producer / name
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"oracle producer has invalid {name}: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"oracle producer {name} must contain an object")
+        return payload
+
+    manifest = read_mapping("run_manifest.json")
+    progress = read_mapping("progress.json")
+    summary = read_mapping("our_solver_summary.json")
+    producer_config = manifest.get("config")
+    producer_sources = manifest.get("source_sha256")
+    if not isinstance(producer_config, dict):
+        raise ValueError("oracle producer manifest is missing config")
+    if not isinstance(producer_sources, dict) or not _json_values_equal(
+        producer_sources,
+        current_source_sha256,
+    ):
+        raise ValueError("oracle producer source identity does not match consumer")
+    if not bool(manifest.get("save_step_fields", False)):
+        raise ValueError("oracle producer did not save accepted step fields")
+    if progress.get("status") != "completed" or summary.get("status") != "completed":
+        raise ValueError("oracle producer is not terminal-complete")
+    if producer_config.get("coupling_mode") != "iqn_ils":
+        raise ValueError("oracle producer must use iqn_ils")
+    if producer_config.get("initial_guess_mode") != "carry_forward":
+        raise ValueError("oracle producer must be the Q0 carry-forward baseline")
+    if producer_config.get("kalman_writeback_mode") != "off":
+        raise ValueError("oracle producer must disable modified-physics writeback")
+
+    expected_steps = int(consumer_config_payload.get("step_count", 0))
+    if expected_steps <= 0:
+        raise ValueError("oracle consumer step_count must be positive")
+    if int(summary.get("step_count_completed", -1)) != expected_steps:
+        raise ValueError("oracle producer completed-step count does not match consumer")
+    if int(progress.get("step_completed", -1)) != expected_steps:
+        raise ValueError("oracle producer progress-step count does not match consumer")
+
+    comparable_producer = dict(producer_config)
+    comparable_consumer = dict(consumer_config_payload)
+    for field in ("initial_guess_mode", "initial_guess_oracle_path"):
+        comparable_producer.pop(field, None)
+        comparable_consumer.pop(field, None)
+    if not _json_values_equal(comparable_producer, comparable_consumer):
+        differing = sorted(
+            key
+            for key in set(comparable_producer) | set(comparable_consumer)
+            if not _json_values_equal(
+                comparable_producer.get(key),
+                comparable_consumer.get(key),
+            )
+        )
+        raise ValueError(
+            "oracle producer config does not match consumer: "
+            f"differing_fields={differing}"
+        )
+
+    fields_dir = producer / "step_fields"
+    expected_names = [
+        f"step_{step:04d}.npz" for step in range(1, expected_steps + 1)
+    ]
+    observed_names = sorted(path.name for path in fields_dir.glob("step_*.npz"))
+    if observed_names != expected_names:
+        raise ValueError(
+            "oracle producer step-field sequence mismatch: "
+            f"observed={observed_names}, expected={expected_names}"
+        )
+    trajectory_hasher = hashlib.sha256()
+    frame_hashes: dict[str, str] = {}
+    for frame_name in expected_names:
+        payload = (fields_dir / frame_name).read_bytes()
+        frame_digest = hashlib.sha256(payload).hexdigest()
+        frame_hashes[frame_name] = frame_digest
+        trajectory_hasher.update(frame_name.encode("utf-8"))
+        trajectory_hasher.update(bytes.fromhex(frame_digest))
+
+    return {
+        "offline_oracle": True,
+        "deployable": False,
+        "producer_output": str(producer),
+        "producer_run_label": str(manifest.get("run_label", "")),
+        "source_sha256": dict(producer_sources),
+        "frame_sha256": frame_hashes,
+        "trajectory_sha256": trajectory_hasher.hexdigest(),
+        "step_count": expected_steps,
+    }
+
+
 def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
     config = selected_formulation_solver_config(step_count=int(args.steps))
+    config = replace(
+        config,
+        dt_s=float(getattr(args, "dt_s", config.dt_s)),
+    )
     (
         kalman_mode,
         kalman_interface_config,
         kalman_fluid_config,
         kalman_solid_config,
     ) = _modified_physics_kalman_configs(args, dt_s=float(config.dt_s))
+    initial_guess_kalman_config, initial_guess_oracle_path = _initial_guess_inputs(
+        args,
+        dt_s=float(config.dt_s),
+    )
     config = replace(
         config,
         grid_nodes=tuple(int(v) for v in args.grid_nodes),
@@ -814,6 +992,52 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
             if args.solid_substeps is not None
             else None
         ),
+        coupling_mode=str(
+            getattr(args, "coupling_mode", config.coupling_mode)
+        ),
+        fsi_coupling_max_iterations=int(
+            getattr(
+                args,
+                "fsi_max_iterations",
+                config.fsi_coupling_max_iterations,
+            )
+        ),
+        fsi_coupling_absolute_tolerance_mps=float(
+            getattr(
+                args,
+                "fsi_absolute_tolerance_mps",
+                config.fsi_coupling_absolute_tolerance_mps,
+            )
+        ),
+        fsi_coupling_relative_tolerance=float(
+            getattr(
+                args,
+                "fsi_relative_tolerance",
+                config.fsi_coupling_relative_tolerance,
+            )
+        ),
+        iqn_history_limit=int(
+            getattr(args, "iqn_history_limit", config.iqn_history_limit)
+        ),
+        iqn_initial_picard_relaxation=float(
+            getattr(
+                args,
+                "iqn_initial_picard_relaxation",
+                config.iqn_initial_picard_relaxation,
+            )
+        ),
+        iqn_svd_relative_cutoff=float(
+            getattr(
+                args,
+                "iqn_svd_relative_cutoff",
+                config.iqn_svd_relative_cutoff,
+            )
+        ),
+        initial_guess_mode=str(
+            getattr(args, "initial_guess_mode", config.initial_guess_mode)
+        ),
+        initial_guess_kalman_config=initial_guess_kalman_config,
+        initial_guess_oracle_path=initial_guess_oracle_path,
         kalman_writeback_mode=kalman_mode,
         kalman_interface_config=kalman_interface_config,
         kalman_fluid_config=kalman_fluid_config,
@@ -855,6 +1079,13 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
         preflow_snapshot_input_path=getattr(args, "preflow_snapshot_in", None),
         preflow_snapshot_output_path=getattr(args, "preflow_snapshot_out", None),
         flow_hibm_sharp_search_radius_m=1.7e-3,
+        flow_hibm_marker_compatibility_closure_tolerance_mps=float(
+            getattr(
+                args,
+                "flow_hibm_marker_compatibility_closure_tolerance_mps",
+                config.flow_hibm_marker_compatibility_closure_tolerance_mps,
+            )
+        ),
         flow_report_include_percentiles=bool(
             getattr(args, "flow_report_percentiles", False)
         ),
@@ -1006,6 +1237,38 @@ def _summary_from_report(
         for field in profile_field_names
         if field in report
     }
+    experiment_metric_field_names = (
+        "initial_guess_mode",
+        "initial_guess_summary",
+        "hibm_coupling_scheme",
+        "hibm_fsi_accepted_macro_step_count",
+        "hibm_fsi_coupling_iterations_total",
+        "hibm_fsi_coupling_iterations_min",
+        "hibm_fsi_coupling_iterations_max",
+        "hibm_fsi_coupling_iterations_mean",
+        "hibm_fsi_coupling_iterations_median",
+        "hibm_fsi_coupling_iterations_p95",
+        "hibm_fsi_coupling_rejected_trial_count_total",
+        "hibm_fsi_coupling_fluid_solve_count",
+        "hibm_fsi_coupling_solid_macro_solve_count",
+        "hibm_fsi_coupling_converged_step_count",
+        "hibm_fsi_trial_work_report",
+        "hibm_fsi_trial_cg_iterations_total",
+        "hibm_fsi_trial_flow_momentum_advection_substeps_total",
+        "hibm_fsi_trial_flow_sst_transport_substeps_total",
+        "hibm_fsi_trial_solid_substeps_executed_total",
+        "hibm_fsi_trial_flow_wall_time_s_total",
+        "hibm_fsi_trial_hibm_wall_time_s_total",
+        "hibm_fsi_trial_solid_wall_time_s_total",
+        "fluid_projection_consumed_feedback_count",
+        "fluid_projection_consumed_feedback_trial_count",
+        "solid_trial_substeps_executed_total",
+    )
+    experiment_metrics = {
+        field: report[field]
+        for field in experiment_metric_field_names
+        if field in report
+    }
     return {
         "run_label": run_label,
         "status": status,
@@ -1046,6 +1309,7 @@ def _summary_from_report(
         "final_history": final_history,
         "solver_npz_summary": solver_npz_summary or {},
         "step_field_frame_count": len(list((output_dir / "step_fields").glob("step_*.npz"))),
+        **experiment_metrics,
         **profile_totals,
     }
 
@@ -1055,6 +1319,12 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--run-label", default="our_solver")
     parser.add_argument("--steps", type=int, default=2)
+    parser.add_argument(
+        "--dt-s",
+        type=float,
+        default=VerticalFlapFsiConfig.dt_s,
+        help="Physical FSI macro-step duration used by the formal experiment.",
+    )
     parser.add_argument(
         "--preflow-steps",
         type=int,
@@ -1107,6 +1377,19 @@ def main() -> int:
     parser.add_argument("--marker-count", type=int, default=12)
     parser.add_argument("--flow-projection-iterations", type=int, default=1080)
     parser.add_argument(
+        "--flow-hibm-marker-compatibility-closure-tolerance-mps",
+        type=float,
+        default=(
+            VerticalFlapFsiConfig
+            .flow_hibm_marker_compatibility_closure_tolerance_mps
+        ),
+        help=(
+            "Explicit research override for the hard HIBM marker compatibility "
+            "closure gate; it must remain positive and no larger than the "
+            "marker MAC absolute tolerance."
+        ),
+    )
+    parser.add_argument(
         "--flow-post-dirichlet-consistency-projections",
         type=int,
         default=1,
@@ -1145,6 +1428,77 @@ def main() -> int:
             "Optional fixed MPM substep count for controlled A/B reference "
             "runs. Omit it for the production per-macro adaptive selector."
         ),
+    )
+    parser.add_argument(
+        "--coupling-mode",
+        default=VerticalFlapFsiConfig.coupling_mode,
+        choices=("direct_explicit", "iqn_ils"),
+        help="Physical-step coupling route; direct_explicit remains the default.",
+    )
+    parser.add_argument(
+        "--initial-guess-mode",
+        default=VerticalFlapFsiConfig.initial_guess_mode,
+        choices=(
+            "carry_forward",
+            "linear_extrapolation",
+            "kalman",
+            "oracle_replay",
+        ),
+        help="Iteration-0 marker-velocity guess used only by IQN-ILS.",
+    )
+    parser.add_argument(
+        "--initial-guess-kalman-q",
+        type=float,
+        default=None,
+        help="First-guess Kalman rate-process-noise spectral density.",
+    )
+    parser.add_argument(
+        "--initial-guess-kalman-r",
+        type=float,
+        default=None,
+        help="First-guess Kalman measurement variance.",
+    )
+    parser.add_argument(
+        "--initial-guess-kalman-warmup-accepted-states",
+        type=int,
+        default=None,
+        help="Accepted-state warmup before the Kalman first-guess is active.",
+    )
+    parser.add_argument(
+        "--initial-guess-oracle-path",
+        type=str,
+        default=None,
+        help="Oracle first-guess replay artifact for upper-bound experiments.",
+    )
+    parser.add_argument(
+        "--fsi-max-iterations",
+        type=int,
+        default=VerticalFlapFsiConfig.fsi_coupling_max_iterations,
+    )
+    parser.add_argument(
+        "--fsi-absolute-tolerance-mps",
+        type=float,
+        default=VerticalFlapFsiConfig.fsi_coupling_absolute_tolerance_mps,
+    )
+    parser.add_argument(
+        "--fsi-relative-tolerance",
+        type=float,
+        default=VerticalFlapFsiConfig.fsi_coupling_relative_tolerance,
+    )
+    parser.add_argument(
+        "--iqn-history-limit",
+        type=int,
+        default=VerticalFlapFsiConfig.iqn_history_limit,
+    )
+    parser.add_argument(
+        "--iqn-initial-picard-relaxation",
+        type=float,
+        default=VerticalFlapFsiConfig.iqn_initial_picard_relaxation,
+    )
+    parser.add_argument(
+        "--iqn-svd-relative-cutoff",
+        type=float,
+        default=VerticalFlapFsiConfig.iqn_svd_relative_cutoff,
     )
     parser.add_argument(
         "--kalman-mode",
@@ -1301,6 +1655,7 @@ def main() -> int:
     )
     config: VerticalFlapFsiConfig | None = None
     config_payload: dict[str, Any] = {}
+    oracle_replay_identity: dict[str, Any] | None = None
     try:
         taichi_runtime = _configure_taichi_offline_cache(
             enabled=not bool(args.disable_taichi_offline_cache),
@@ -1321,6 +1676,17 @@ def main() -> int:
         )
         config = _build_config(args)
         config_payload = asdict(config)
+        source_sha256 = _source_hashes()
+        if (
+            config.initial_guess_mode == "oracle_replay"
+            and not bool(args.dry_run)
+        ):
+            oracle_replay_identity = _validate_initial_guess_oracle_producer(
+                producer_output=str(config.initial_guess_oracle_path),
+                consumer_output=output_dir,
+                consumer_config_payload=config_payload,
+                current_source_sha256=source_sha256,
+            )
         manifest = {
             "run_label": args.run_label,
             "repo_root": str(REPO_ROOT),
@@ -1342,7 +1708,8 @@ def main() -> int:
             "save_step_fields": bool(args.save_step_fields),
             "profile_wall_time": bool(args.profile_wall_time),
             "taichi_runtime": taichi_runtime,
-            "source_sha256": _source_hashes(),
+            "source_sha256": source_sha256,
+            "initial_guess_oracle_identity": oracle_replay_identity,
         }
         _write_json_atomic(output_dir / "run_manifest.json", manifest)
         _write_json_atomic(output_dir / "our_solver_config.json", config_payload)
@@ -1396,6 +1763,10 @@ def main() -> int:
         solver_elapsed_s = time.perf_counter() - solver_started_s
         elapsed_s = time.perf_counter() - start
         report = dict(report)
+        if oracle_replay_identity is not None:
+            report["initial_guess_oracle_identity"] = dict(
+                oracle_replay_identity
+            )
         history = list(report.get("history", []))
         post_solver_artifact_export_started_s = time.perf_counter()
         _write_history_csv(output_dir / "our_solver_history.csv", history)
@@ -1447,7 +1818,10 @@ def main() -> int:
         )
         if step_artifact_validation is not None:
             summary["step_artifact_validation"] = step_artifact_validation
-            summary["step_field_frame_count"] = step_artifact_validation["frame_count"]
+        if oracle_replay_identity is not None:
+            summary["initial_guess_oracle_identity"] = dict(
+                oracle_replay_identity
+            )
         _write_json_atomic(output_dir / "our_solver_summary.json", summary)
         terminal_elapsed_s = time.perf_counter() - start
         terminal_status = (

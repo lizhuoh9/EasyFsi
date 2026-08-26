@@ -8,6 +8,12 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from simulation_core.coupling.iqn_ils import (
+    IqnIlsAccelerator,
+    IqnIlsConfig,
+    IqnIlsUpdate,
+)
+
 
 RuntimeFactory = Callable[
     ["FsiProblem", "FsiSolverConfig", "DiagnosticsConfig"],
@@ -191,6 +197,10 @@ class FsiCouplingConfig:
     absolute_tolerance_mps: float = 0.0
     initial_relaxation: float = 0.5
     history_limit: int = 8
+    iqn_svd_relative_cutoff: float = 1.0e-10
+    iqn_max_condition_number: float = 1.0e10
+    iqn_max_coefficient_norm: float | None = None
+    iqn_max_update_ratio: float | None = 2.0
 
     def __post_init__(self) -> None:
         iterations = _strict_positive_integer(
@@ -216,6 +226,14 @@ class FsiCouplingConfig:
         if not 0.0 < relaxation <= 1.0:
             raise ValueError("initial_relaxation must be in (0, 1]")
         _strict_positive_integer(self.history_limit, name="history_limit")
+        IqnIlsConfig(
+            history_limit=int(self.history_limit),
+            initial_picard_relaxation=relaxation,
+            svd_relative_cutoff=self.iqn_svd_relative_cutoff,
+            max_condition_number=self.iqn_max_condition_number,
+            max_coefficient_norm=self.iqn_max_coefficient_norm,
+            max_update_ratio=self.iqn_max_update_ratio,
+        )
 
 
 @dataclass(frozen=True)
@@ -258,6 +276,11 @@ class FsiCouplingReport:
     relative_residual_history: tuple[float, ...]
     absolute_residual_history_mps: tuple[float, ...]
     update_modes: tuple[str, ...]
+    iqn_rank_history: tuple[int, ...] = ()
+    iqn_condition_number_history: tuple[float | None, ...] = ()
+    iqn_fallback_reasons: tuple[str | None, ...] = ()
+    iqn_update_limited_history: tuple[bool, ...] = ()
+    iqn_fallback_count: int = 0
 
 
 class FsiCouplingConvergenceError(RuntimeError):
@@ -444,6 +467,30 @@ def solve_fsi_runtime(
             "fsi_coupling_max_marker_residual_mps": (
                 coupling.max_marker_residual_mps
             ),
+            "fsi_coupling_first_relative_residual": (
+                coupling.relative_residual_history[0]
+            ),
+            "fsi_coupling_first_absolute_residual_mps": (
+                coupling.absolute_residual_history_mps[0]
+            ),
+            "fsi_coupling_relative_residual_history": list(
+                coupling.relative_residual_history
+            ),
+            "fsi_coupling_absolute_residual_history_mps": list(
+                coupling.absolute_residual_history_mps
+            ),
+            "fsi_coupling_update_modes": list(coupling.update_modes),
+            "fsi_iqn_rank_history": list(coupling.iqn_rank_history),
+            "fsi_iqn_condition_number_history": list(
+                coupling.iqn_condition_number_history
+            ),
+            "fsi_iqn_fallback_reasons": list(
+                coupling.iqn_fallback_reasons
+            ),
+            "fsi_iqn_update_limited_history": list(
+                coupling.iqn_update_limited_history
+            ),
+            "fsi_iqn_fallback_count": coupling.iqn_fallback_count,
         }
         history_rows.append(committed_row)
         publish_step = getattr(runtime, "publish_step", None)
@@ -483,13 +530,21 @@ def _solve_marker_velocity_step(
     except Exception as failure:
         _rollback_after_failure(runtime, context, failure)
         raise
-    guesses: list[np.ndarray] = []
-    candidates: list[np.ndarray] = []
-    residuals: list[np.ndarray] = []
     relative_history: list[float] = []
     absolute_history: list[float] = []
     max_marker_history: list[float] = []
     update_modes: list[str] = []
+    iqn_updates: list[IqnIlsUpdate] = []
+    accelerator = IqnIlsAccelerator(
+        IqnIlsConfig(
+            history_limit=int(config.history_limit),
+            initial_picard_relaxation=float(config.initial_relaxation),
+            svd_relative_cutoff=float(config.iqn_svd_relative_cutoff),
+            max_condition_number=float(config.iqn_max_condition_number),
+            max_coefficient_norm=config.iqn_max_coefficient_norm,
+            max_update_ratio=config.iqn_max_update_ratio,
+        )
+    )
     last_trial: FsiTrialResult | None = None
 
     try:
@@ -506,9 +561,6 @@ def _solve_marker_velocity_step(
                 )
             residual = candidate - guess
             metrics = _marker_velocity_residual_metrics(candidate, residual)
-            guesses.append(guess.reshape(-1).copy())
-            candidates.append(candidate.reshape(-1).copy())
-            residuals.append(residual.reshape(-1).copy())
             relative_history.append(metrics["relative_residual"])
             absolute_history.append(metrics["absolute_residual_mps"])
             max_marker_history.append(metrics["max_marker_residual_mps"])
@@ -529,20 +581,16 @@ def _solve_marker_velocity_step(
                     absolute_history=absolute_history,
                     max_marker_history=max_marker_history,
                     update_modes=update_modes,
+                    iqn_updates=iqn_updates,
                 )
                 return last_trial, report
 
             if _iteration_index + 1 == int(config.max_iterations):
                 break
-            guess, update_mode = _next_marker_velocity_guess(
-                guesses=guesses,
-                candidates=candidates,
-                residuals=residuals,
-                shape=guess.shape,
-                initial_relaxation=float(config.initial_relaxation),
-                history_limit=int(config.history_limit),
-            )
-            update_modes.append(update_mode)
+            iqn_update = accelerator.update(guess, candidate)
+            guess = iqn_update.next_guess
+            iqn_updates.append(iqn_update)
+            update_modes.append(iqn_update.mode)
     except Exception as failure:
         _rollback_after_failure(runtime, context, failure)
         raise
@@ -553,6 +601,7 @@ def _solve_marker_velocity_step(
         absolute_history=absolute_history,
         max_marker_history=max_marker_history,
         update_modes=update_modes,
+        iqn_updates=iqn_updates,
     )
     failure = FsiCouplingConvergenceError(context, report)
     _rollback_after_failure(runtime, context, failure)
@@ -577,6 +626,7 @@ def _coupling_report(
     absolute_history: Sequence[float],
     max_marker_history: Sequence[float],
     update_modes: Sequence[str],
+    iqn_updates: Sequence[IqnIlsUpdate],
 ) -> FsiCouplingReport:
     return FsiCouplingReport(
         iterations=len(relative_history),
@@ -589,53 +639,20 @@ def _coupling_report(
             float(value) for value in absolute_history
         ),
         update_modes=tuple(str(value) for value in update_modes),
+        iqn_rank_history=tuple(int(update.rank) for update in iqn_updates),
+        iqn_condition_number_history=tuple(
+            update.condition_number for update in iqn_updates
+        ),
+        iqn_fallback_reasons=tuple(
+            update.fallback_reason for update in iqn_updates
+        ),
+        iqn_update_limited_history=tuple(
+            bool(update.update_limited) for update in iqn_updates
+        ),
+        iqn_fallback_count=sum(
+            update.fallback_reason is not None for update in iqn_updates
+        ),
     )
-
-
-def _next_marker_velocity_guess(
-    *,
-    guesses: Sequence[np.ndarray],
-    candidates: Sequence[np.ndarray],
-    residuals: Sequence[np.ndarray],
-    shape: tuple[int, ...],
-    initial_relaxation: float,
-    history_limit: int,
-) -> tuple[np.ndarray, str]:
-    current_guess = guesses[-1]
-    current_candidate = candidates[-1]
-    current_residual = residuals[-1]
-    if len(residuals) < 2:
-        return (
-            current_guess + initial_relaxation * current_residual
-        ).reshape(shape), "picard"
-
-    pair_count = min(int(history_limit), len(residuals) - 1)
-    start = len(residuals) - pair_count - 1
-    residual_differences = np.column_stack(
-        [
-            residuals[index + 1] - residuals[index]
-            for index in range(start, len(residuals) - 1)
-        ]
-    )
-    candidate_differences = np.column_stack(
-        [
-            candidates[index + 1] - candidates[index]
-            for index in range(start, len(candidates) - 1)
-        ]
-    )
-    coefficients, _, rank, _ = np.linalg.lstsq(
-        residual_differences,
-        current_residual,
-        rcond=None,
-    )
-    if int(rank) == 0:
-        return (
-            current_guess + initial_relaxation * current_residual
-        ).reshape(shape), "picard"
-    proposal = current_candidate - candidate_differences @ coefficients
-    if not bool(np.all(np.isfinite(proposal))):
-        raise FloatingPointError("IQN-ILS produced a non-finite marker velocity")
-    return proposal.reshape(shape), "iqn_ils"
 
 
 def _marker_velocity_residual_metrics(

@@ -668,11 +668,56 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             "marker_compatibility_closure_tolerance_mps",
             "",
         )
-        self.assertIn("min(1e-06", closure_expression)
-        self.assertIn(
-            "0.1 * marker_mac_constraint_absolute_tolerance_mps",
+        self.assertEqual(
             closure_expression,
+            "marker_compatibility_closure_tolerance_mps",
         )
+
+    def test_marker_compatibility_closure_tolerance_is_explicit_and_bounded(
+        self,
+    ) -> None:
+        default_config = SimpleNamespace(
+            flow_hibm_marker_mac_constraint_absolute_tolerance_mps=1.0e-4,
+        )
+        self.assertEqual(
+            solid_mpm_fsi_runner._hibm_marker_compatibility_closure_tolerance_mps(
+                default_config
+            ),
+            1.0e-6,
+        )
+
+        research_override = SimpleNamespace(
+            flow_hibm_marker_mac_constraint_absolute_tolerance_mps=1.0e-4,
+            flow_hibm_marker_compatibility_closure_tolerance_mps=2.0e-6,
+        )
+        self.assertEqual(
+            solid_mpm_fsi_runner._hibm_marker_compatibility_closure_tolerance_mps(
+                research_override
+            ),
+            2.0e-6,
+        )
+
+        for invalid_value in (0.0, -1.0e-6, float("nan"), float("inf")):
+            with self.subTest(invalid_value=invalid_value):
+                invalid_config = SimpleNamespace(
+                    flow_hibm_marker_mac_constraint_absolute_tolerance_mps=1.0e-4,
+                    flow_hibm_marker_compatibility_closure_tolerance_mps=(
+                        invalid_value
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "finite and positive"):
+                    solid_mpm_fsi_runner._hibm_marker_compatibility_closure_tolerance_mps(
+                        invalid_config
+                    )
+
+        excessive_config = SimpleNamespace(
+            flow_hibm_marker_mac_constraint_absolute_tolerance_mps=1.0e-4,
+            flow_hibm_marker_compatibility_closure_tolerance_mps=1.1e-4,
+        )
+        with self.assertRaisesRegex(ValueError, "must not exceed"):
+            solid_mpm_fsi_runner._hibm_marker_compatibility_closure_tolerance_mps(
+                excessive_config
+            )
 
     def test_direct_runner_refreshes_pressure_gradient_at_ib_nodes(self) -> None:
         function = _function_node("_apply_hibm_sharp_marker_boundary_to_fluid")
@@ -823,6 +868,26 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         self.assertIsNone(
             solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(healthy)
         )
+        for solve_count in range(5):
+            with self.subTest(solve_count=solve_count):
+                report = copy.deepcopy(healthy)
+                report["canonical_velocity_dirichlet_report"][
+                    "marker_target_closure"
+                ]["solve_count"] = solve_count
+                self.assertIsNone(
+                    solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+                        report
+                    )
+                )
+        excessive_solve_count = copy.deepcopy(healthy)
+        excessive_solve_count["canonical_velocity_dirichlet_report"][
+            "marker_target_closure"
+        ]["solve_count"] = 5
+        failure = solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+            excessive_solve_count
+        )
+        self.assertIsNotNone(failure)
+        self.assertIn("solve count", failure.lower())
         mutations = (
             (
                 "disabled",

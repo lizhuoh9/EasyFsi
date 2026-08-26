@@ -4,8 +4,11 @@ import ast
 import inspect
 from dataclasses import replace
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch, sentinel
+
+import numpy as np
 
 from benchmarks.official import solid_mpm_fsi_runner as runner
 from cases.ansys_vertical_flap_fsi import (
@@ -496,6 +499,101 @@ class VerticalFlapStageThreeObservabilityContracts(unittest.TestCase):
                     ValueError, "flow_wall_time_s"
                 ):
                     runner._fsi_profile_summary([invalid_history])
+
+    def test_fsi_trial_work_summary_counts_rejected_and_accepted_trials(self) -> None:
+        reports = [
+            {
+                "flow_wall_time_s": 1.0,
+                "hibm_wall_time_s": 2.0,
+                "solid_wall_time_s": 3.0,
+                "cg_iterations_total": 3,
+                "flow_momentum_advection_substeps_total": 4,
+                "flow_sst_transport_substeps_total": 5,
+                "solid_substeps_executed_total": 6,
+                "feedback_consumed": False,
+            },
+            {
+                "flow_wall_time_s": 10.0,
+                "hibm_wall_time_s": 20.0,
+                "solid_wall_time_s": 30.0,
+                "cg_iterations_total": 30,
+                "flow_momentum_advection_substeps_total": 40,
+                "flow_sst_transport_substeps_total": 50,
+                "solid_substeps_executed_total": 60,
+                "feedback_consumed": True,
+            },
+        ]
+
+        summary = runner._fsi_trial_work_summary(reports)
+
+        self.assertEqual(summary["trial_count"], 2)
+        self.assertEqual(summary["fluid_solve_count"], 2)
+        self.assertEqual(summary["solid_macro_solve_count"], 2)
+        self.assertEqual(summary["feedback_consumed_trial_count"], 1)
+        self.assertEqual(summary["flow_wall_time_s_total"], 11.0)
+        self.assertEqual(summary["hibm_wall_time_s_total"], 22.0)
+        self.assertEqual(summary["solid_wall_time_s_total"], 33.0)
+        self.assertEqual(summary["cg_iterations_total"], 33)
+        self.assertEqual(summary["flow_momentum_advection_substeps_total"], 44)
+        self.assertEqual(summary["flow_sst_transport_substeps_total"], 55)
+        self.assertEqual(summary["solid_substeps_executed_total"], 66)
+
+        invalid = dict(reports[0])
+        invalid["cg_iterations_total"] = -1
+        with self.assertRaisesRegex(ValueError, "cg_iterations_total"):
+            runner._fsi_trial_work_summary([invalid])
+
+    def test_fsi_coupling_iteration_summary_reports_distribution(self) -> None:
+        summary = runner._fsi_coupling_iteration_summary([2, 3, 7, 8])
+
+        self.assertEqual(summary["total"], 20)
+        self.assertEqual(summary["minimum"], 2)
+        self.assertEqual(summary["maximum"], 8)
+        self.assertEqual(summary["mean"], 5.0)
+        self.assertEqual(summary["median"], 5.0)
+        self.assertEqual(summary["p95"], 7.85)
+
+        self.assertEqual(
+            runner._fsi_coupling_iteration_summary([]),
+            {
+                "total": 0,
+                "minimum": 0,
+                "maximum": 0,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95": 0.0,
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            runner._fsi_coupling_iteration_summary([1, 0])
+
+    def test_oracle_replay_loader_reads_complete_finite_accepted_trajectory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            producer = Path(temporary_dir)
+            fields = producer / "step_fields"
+            fields.mkdir()
+            first = np.arange(12, dtype=np.float32).reshape(4, 3)
+            second = first + 1.0
+            np.savez(fields / "step_0001.npz", marker_velocity_mps=first)
+            np.savez(fields / "step_0002.npz", marker_velocity_mps=second)
+
+            replay = runner._load_initial_guess_oracle_replay(
+                producer,
+                expected_steps=2,
+            )
+
+            self.assertEqual(len(replay), 2)
+            np.testing.assert_allclose(replay[0], first)
+            np.testing.assert_allclose(replay[1], second)
+            self.assertFalse(replay[0].flags.writeable)
+
+            (fields / "step_0002.npz").unlink()
+            with self.assertRaisesRegex(ValueError, "step_0002"):
+                runner._load_initial_guess_oracle_replay(
+                    producer,
+                    expected_steps=2,
+                )
 
     def test_fsi_hibm_profile_buckets_keep_three_stages_disjoint(self) -> None:
         pre_predictor = runner._empty_hibm_sharp_boundary_stage_wall_times()

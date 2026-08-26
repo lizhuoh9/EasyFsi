@@ -170,6 +170,17 @@ class VerticalFlapFsiConfig:
     solid_constitutive_model: str = "plane_stress_linear_elastic"
     dt_s: float = 5.0e-4
     step_count: int = 50
+    coupling_mode: str = "direct_explicit"
+    fsi_coupling_max_iterations: int = 16
+    fsi_coupling_absolute_tolerance_mps: float = 0.0
+    fsi_coupling_relative_tolerance: float = 1.0e-3
+    iqn_history_limit: int = 8
+    iqn_initial_picard_relaxation: float = 0.5
+    iqn_svd_relative_cutoff: float = 1.0e-10
+    # Initial-guess routing is independent of modified-physics writeback.
+    initial_guess_mode: str = "carry_forward"
+    initial_guess_kalman_config: InterfaceKalmanConfig | None = None
+    initial_guess_oracle_path: str | None = None
     # Explicitly modified-physics experiment.  ``off`` preserves the legacy
     # solver path and constructs no predictor; active modes write posterior
     # values only to their uniquely owned feedback/state field.
@@ -254,6 +265,9 @@ class VerticalFlapFsiConfig:
     ) = None
     flow_hibm_sharp_interpolate_velocity_rows: bool = False
     flow_hibm_marker_mac_constraint_iterations: int = 64
+    # Strict validation default.  Research campaigns may explicitly relax
+    # this fail-closed closure gate without changing the MAC solve tolerance.
+    flow_hibm_marker_compatibility_closure_tolerance_mps: float = 1.0e-6
     # Keep the moving physical flap volume independent of the narrow HIBM
     # interface-row search.  Validation launchers enable this together with
     # update_fluid_obstacle_from_solid after selecting a mesh-scaled envelope.
@@ -662,6 +676,66 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Solid mobility ratio used when marker velocity constraints are preserved.",
     )
     parser.add_argument(
+        "--coupling-mode",
+        default=VerticalFlapFsiConfig.coupling_mode,
+        choices=("direct_explicit", "iqn_ils"),
+        help="Direct one-pass reference or generic IQN-ILS coupling.",
+    )
+    parser.add_argument(
+        "--fsi-max-iterations",
+        type=int,
+        default=VerticalFlapFsiConfig.fsi_coupling_max_iterations,
+        help="Maximum same-time FSI coupling trials per physical macro step.",
+    )
+    parser.add_argument(
+        "--fsi-absolute-tolerance-mps",
+        type=float,
+        default=VerticalFlapFsiConfig.fsi_coupling_absolute_tolerance_mps,
+        help="Absolute marker-velocity coupling tolerance in m/s.",
+    )
+    parser.add_argument(
+        "--fsi-relative-tolerance",
+        type=float,
+        default=VerticalFlapFsiConfig.fsi_coupling_relative_tolerance,
+        help="Relative marker-velocity coupling tolerance.",
+    )
+    parser.add_argument(
+        "--iqn-history-limit",
+        type=int,
+        default=VerticalFlapFsiConfig.iqn_history_limit,
+        help="Maximum same-step IQN-ILS history pairs.",
+    )
+    parser.add_argument(
+        "--iqn-initial-picard-relaxation",
+        type=float,
+        default=VerticalFlapFsiConfig.iqn_initial_picard_relaxation,
+        help="Fixed Picard startup and IQN fallback relaxation.",
+    )
+    parser.add_argument(
+        "--iqn-svd-relative-cutoff",
+        type=float,
+        default=VerticalFlapFsiConfig.iqn_svd_relative_cutoff,
+        help="Relative singular-value cutoff for IQN-ILS history.",
+    )
+    parser.add_argument(
+        "--initial-guess-mode",
+        default=VerticalFlapFsiConfig.initial_guess_mode,
+        choices=("carry_forward", "linear_extrapolation"),
+        help=(
+            "First marker-velocity guess used by generic IQN-ILS. Kalman and "
+            "oracle replay experiments use the formal validation runner."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-modified-physics-kalman-writeback",
+        default=VerticalFlapFsiConfig.kalman_writeback_mode,
+        choices=("off",),
+        help=(
+            "The public smoke runner keeps posterior-state writeback off. Use "
+            "the formal validation runner for modified-physics experiments."
+        ),
+    )
+    parser.add_argument(
         "--export-final-flow-snapshot",
         action="store_true",
         help="Include the final structured pressure/velocity field in the report.",
@@ -679,6 +753,18 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
     report = run_ansys_vertical_flap_benchmark(
         VerticalFlapFsiConfig(
             step_count=args.steps,
+            coupling_mode=args.coupling_mode,
+            fsi_coupling_max_iterations=args.fsi_max_iterations,
+            fsi_coupling_absolute_tolerance_mps=(
+                args.fsi_absolute_tolerance_mps
+            ),
+            fsi_coupling_relative_tolerance=args.fsi_relative_tolerance,
+            iqn_history_limit=args.iqn_history_limit,
+            iqn_initial_picard_relaxation=(
+                args.iqn_initial_picard_relaxation
+            ),
+            iqn_svd_relative_cutoff=args.iqn_svd_relative_cutoff,
+            initial_guess_mode=args.initial_guess_mode,
             preflow_steps=args.preflow_steps,
             preflow_convergence_tolerance=args.preflow_convergence_tolerance,
             apply_marker_feedback_to_fluid=not args.disable_marker_feedback,
@@ -732,6 +818,9 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
             marker_velocity_constraint_blend=args.marker_velocity_constraint_blend,
             marker_velocity_constraint_solid_mobility_ratio=(
                 args.marker_velocity_constraint_solid_mobility_ratio
+            ),
+            kalman_writeback_mode=(
+                args.experimental_modified_physics_kalman_writeback
             ),
             export_final_flow_snapshot=args.export_final_flow_snapshot,
         )

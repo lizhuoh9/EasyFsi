@@ -598,7 +598,7 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
             def _begin_marker_geometry_write(self):
                 self.geometry_writes += 1
 
-            def _refresh_open_ribbon_tip_cap_projection_vertices(self):
+            def refresh_open_ribbon_tip_cap_projection_vertices(self):
                 self.tip_refreshes += 1
 
         markers = Markers()
@@ -613,7 +613,7 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
         restore_marker_interface_state(markers, state)
 
         self.assertEqual(markers.geometry_writes, 1)
-        self.assertEqual(markers.tip_refreshes, 1)
+        self.assertEqual(markers.tip_refreshes, 2)
         self.assertEqual(markers.marker_count, 2)
         self.assertEqual(markers.projection_vertex_count, 6)
         self.assertEqual(markers.projection_triangle_count, 4)

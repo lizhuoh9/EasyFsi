@@ -4,6 +4,11 @@ import ast
 import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+
+from simulation_core.coupling.hibm_mpm.core import (
+    HibmMpmIbBoundaryConditions,
+)
 
 
 CORE_PATH = (
@@ -373,6 +378,129 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
         ]
         self.assertIsInstance(default_iterations, ast.Constant)
         self.assertEqual(default_iterations.value, 64)
+
+    def test_marker_closure_uses_three_batches_when_third_batch_converges(
+        self,
+    ) -> None:
+        class ScalarField:
+            def __init__(self, value: float | int = 0) -> None:
+                self.value = value
+
+            def __getitem__(self, key):
+                self.assert_is_none(key)
+                return self.value
+
+            @staticmethod
+            def assert_is_none(key) -> None:
+                if key is not None:
+                    raise AssertionError(f"expected scalar field key None, got {key!r}")
+
+        residuals = iter((4.0e-6, 3.0e-6, 2.0e-6, 5.0e-7))
+        sweep_count = 0
+        sweep_tolerances: list[float] = []
+        stages: list[str] = []
+        placeholder = object()
+        report_fields = {
+            name: ScalarField()
+            for name in (
+                "constraint_count",
+                "adjustable_count",
+                "immutable_count",
+                "invalid_count",
+                "failure_code",
+                "max_residual_mps",
+                "max_adjustable_residual_mps",
+                "max_immutable_residual_mps",
+                "projection_only_evaluated_axis_count",
+                "projection_only_invalid_axis_count",
+                "projection_only_constraint_count",
+                "projection_only_max_residual_mps",
+            )
+        }
+
+        def measure(*_args) -> None:
+            residual = next(residuals)
+            report_fields["constraint_count"].value = 1
+            report_fields["adjustable_count"].value = 1
+            report_fields["max_residual_mps"].value = residual
+            report_fields["max_adjustable_residual_mps"].value = residual
+
+        def sweep(*_args) -> None:
+            nonlocal sweep_count
+            sweep_count += 1
+            sweep_tolerances.append(float(_args[-1]))
+
+        boundary = SimpleNamespace(
+            marker_capacity=1,
+            grid_nodes=(1, 1, 1),
+            velocity_dirichlet_marker_target_closure_sample_position_m=placeholder,
+            velocity_dirichlet_marker_target_closure_sample_valid=placeholder,
+            velocity_dirichlet_marker_target_closure_sample_source_code=placeholder,
+            velocity_dirichlet_marker_target_closure_sample_invalid_reason_code=placeholder,
+            velocity_dirichlet_marker_target_closure_marker_position_snapshot_m=placeholder,
+            velocity_dirichlet_marker_target_closure_marker_normal_snapshot=placeholder,
+            velocity_dirichlet_marker_target_closure_unresolved_marker_count=ScalarField(),
+            velocity_dirichlet_marker_target_closure_component_face_valid_mask=placeholder,
+            velocity_dirichlet_marker_target_closure_sampling_obstacle=placeholder,
+            _build_prospective_marker_target_closure_sampling_view_kernel=(
+                lambda *_args: None
+            ),
+            _measure_marker_target_closure_kernel=measure,
+            _marker_target_closure_kaczmarz_sweep_kernel=sweep,
+            **{
+                "report_velocity_dirichlet_marker_target_closure_"
+                f"{name}": field
+                for name, field in report_fields.items()
+            },
+        )
+        markers = SimpleNamespace(
+            projection_vertex_count=1,
+            marker_count=1,
+            v_gamma_mps=placeholder,
+            region_id=placeholder,
+            _prepare_no_slip_sampling_direct_identity_kernel=lambda *_args: None,
+            _prepare_no_slip_sampling_fallback_identity_kernel=lambda *_args: None,
+        )
+
+        report = (
+            HibmMpmIbBoundaryConditions
+            ._close_owned_hard_targets_to_marker_constraints(
+                boundary,
+                markers=markers,
+                iterations_per_batch=2,
+                absolute_tolerance_mps=1.0e-4,
+                closure_tolerance_mps=1.0e-6,
+                density_kgm3=1.0,
+                primary_region_id=101,
+                secondary_region_id=202,
+                velocity_dirichlet_active_component_mask=placeholder,
+                velocity_dirichlet_value_mps=placeholder,
+                velocity_dirichlet_hard_fixed_component_mask=placeholder,
+                velocity_dirichlet_external_exact_component_mask=placeholder,
+                velocity_dirichlet_owned_component_mask=placeholder,
+                obstacle_field=placeholder,
+                velocity_field=placeholder,
+                cell_face_x_m=placeholder,
+                cell_face_y_m=placeholder,
+                cell_face_z_m=placeholder,
+                cell_center_x_m=placeholder,
+                cell_center_y_m=placeholder,
+                cell_center_z_m=placeholder,
+                stage_observer=stages.append,
+            )
+        )
+
+        self.assertEqual(report["solve_count"], 3)
+        self.assertEqual(sweep_count, 6)
+        self.assertEqual(sweep_tolerances, [9.0e-7] * 6)
+        self.assertEqual(
+            stages.count("hibm_marker_closure_kaczmarz_sweeps_before"),
+            1,
+        )
+        self.assertEqual(
+            stages.count("hibm_marker_closure_recovery_sweeps_before"),
+            2,
+        )
 
     @staticmethod
     def _statement_lists(node: ast.AST) -> list[list[ast.stmt]]:

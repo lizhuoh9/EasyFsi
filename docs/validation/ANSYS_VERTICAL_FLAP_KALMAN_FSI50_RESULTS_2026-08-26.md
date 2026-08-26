@@ -80,6 +80,5 @@ warm baseline 第 50 步速度最大值 39.434994 m/s，压力范围
 
 当前 fixed1600/adaptive 正式 A/B 只有与当前 source map 不匹配的 FSI1；尚无
 当前源码匹配的 FSI2、FSI8、FSI50 和 comparison report。因此结果支持
-feature-branch WIP 备份和 Kalman 实验复核，不支持宣称 adaptive A/B 已完成，
-也不支持在该门槛补齐前合并 main。
-
+研究代码检查点和 Kalman 实验复核，但不支持宣称 adaptive A/B 已完成。本次
+代码发布不表示该数值门槛已经通过。

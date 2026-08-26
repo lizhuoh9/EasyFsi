@@ -149,7 +149,7 @@ class HibmComponentFaceGeometryTests(
             ]
 
             self.assertEqual(closure["solver"], "serialized_kaczmarz")
-            self.assertEqual(closure["solve_count"], 1)
+            self.assertEqual(closure["solve_count"], 2)
             self.assertIn(
                 "hibm_marker_closure_recovery_sweeps_before",
                 stages,

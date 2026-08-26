@@ -1503,14 +1503,133 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             unstable_report["solid_cfl_target"],
         )
 
+        explicit_count = expected_minimum + 1
         explicit = VerticalFlapFsiConfig(
             grid_nodes=(4, 320, 640),
-            solid_substeps=1200,
+            solid_substeps=explicit_count,
         )
         explicit_report = solid_mpm_fsi_runner.solid_substep_cfl_report(explicit)
 
-        self.assertEqual(explicit_report["solid_substeps_selected"], 1200)
+        self.assertEqual(
+            explicit_report["solid_substeps_selected"],
+            explicit_count,
+        )
         self.assertFalse(explicit_report["solid_substeps_auto_applied"])
+
+    def test_public_cli_routes_iqn_and_first_guess_controls(self):
+        fake_report = {
+            "max_displacement_m": 0.0,
+            "max_displacement_relative_error": 0.0,
+        }
+        with patch.object(
+            vertical_flap_case,
+            "run_ansys_vertical_flap_benchmark",
+            return_value=fake_report,
+        ) as run_mock:
+            vertical_flap_case.main(
+                [
+                    "--steps",
+                    "1",
+                    "--coupling-mode",
+                    "iqn_ils",
+                    "--fsi-max-iterations",
+                    "12",
+                    "--fsi-absolute-tolerance-mps",
+                    "1e-5",
+                    "--fsi-relative-tolerance",
+                    "2e-3",
+                    "--iqn-history-limit",
+                    "6",
+                    "--iqn-initial-picard-relaxation",
+                    "0.3",
+                    "--iqn-svd-relative-cutoff",
+                    "1e-9",
+                    "--initial-guess-mode",
+                    "linear_extrapolation",
+                    "--json",
+                ]
+            )
+
+        active_config = run_mock.call_args.args[0]
+        self.assertEqual(active_config.coupling_mode, "iqn_ils")
+        self.assertEqual(active_config.fsi_coupling_max_iterations, 12)
+        self.assertAlmostEqual(
+            active_config.fsi_coupling_absolute_tolerance_mps, 1.0e-5
+        )
+        self.assertAlmostEqual(
+            active_config.fsi_coupling_relative_tolerance, 2.0e-3
+        )
+        self.assertEqual(active_config.iqn_history_limit, 6)
+        self.assertAlmostEqual(active_config.iqn_initial_picard_relaxation, 0.3)
+        self.assertAlmostEqual(active_config.iqn_svd_relative_cutoff, 1.0e-9)
+        self.assertEqual(active_config.initial_guess_mode, "linear_extrapolation")
+        self.assertEqual(active_config.kalman_writeback_mode, "off")
+
+    def test_coupling_controls_default_to_legacy_explicit_path(self):
+        config = VerticalFlapFsiConfig()
+
+        self.assertEqual(config.coupling_mode, "direct_explicit")
+        self.assertEqual(config.fsi_coupling_max_iterations, 16)
+        self.assertAlmostEqual(config.fsi_coupling_absolute_tolerance_mps, 0.0)
+        self.assertAlmostEqual(config.fsi_coupling_relative_tolerance, 1.0e-3)
+        self.assertEqual(config.iqn_history_limit, 8)
+        self.assertAlmostEqual(config.iqn_initial_picard_relaxation, 0.5)
+        self.assertAlmostEqual(config.iqn_svd_relative_cutoff, 1.0e-10)
+        self.assertEqual(config.initial_guess_mode, "carry_forward")
+        self.assertIsNone(config.initial_guess_kalman_config)
+        self.assertIsNone(config.initial_guess_oracle_path)
+
+    def test_public_smoke_cli_rejects_experiment_only_kalman_modes(self):
+        parser = vertical_flap_case._build_parser()
+        rejected_arguments = (
+            ("--initial-guess-mode", "kalman"),
+            ("--initial-guess-mode", "oracle_replay"),
+            ("--experimental-modified-physics-kalman-writeback", "interface"),
+            ("--experimental-modified-physics-kalman-writeback", "fluid"),
+            ("--experimental-modified-physics-kalman-writeback", "solid"),
+            ("--experimental-modified-physics-kalman-writeback", "global"),
+        )
+
+        for arguments in rejected_arguments:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(arguments)
+
+    def test_coupling_routes_validate_direct_and_iqn_modes(self):
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            VerticalFlapFsiConfig()
+        )
+
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            replace(VerticalFlapFsiConfig(), coupling_mode="iqn_ils")
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported coupling_mode"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                replace(VerticalFlapFsiConfig(), coupling_mode="aitken")
+            )
+        with self.assertRaisesRegex(ValueError, "iqn_ils.*>= 2"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                replace(
+                    VerticalFlapFsiConfig(),
+                    coupling_mode="iqn_ils",
+                    fsi_coupling_max_iterations=1,
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "writeback off"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                replace(
+                    VerticalFlapFsiConfig(),
+                    coupling_mode="iqn_ils",
+                    kalman_writeback_mode="interface",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "direct_explicit.*carry_forward"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                replace(
+                    VerticalFlapFsiConfig(),
+                    initial_guess_mode="kalman",
+                )
+            )
 
     def test_preflow_controls_are_exposed_without_changing_default_smoke(self):
         config = VerticalFlapFsiConfig()
