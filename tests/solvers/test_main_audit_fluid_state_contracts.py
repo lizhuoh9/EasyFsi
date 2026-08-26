@@ -136,6 +136,25 @@ class FluidPublicBoundaryContracts(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     solver.predict()
 
+    def test_muscl_predict_skips_legacy_speed_reduction(self) -> None:
+        solver = self._bare_solver()
+        solver.dx = solver.dy = solver.dz = 1.0
+        solver.turbulence_model = "laminar"
+        solver._max_fluid_speed_kernel = _device_work_must_not_start
+
+        def stop_after_input_validation() -> None:
+            raise _SyntheticDeviceFailure("reached MUSCL transport")
+
+        solver._compute_muscl_momentum_dual_geometry_kernel = (
+            stop_after_input_validation
+        )
+
+        with self.assertRaisesRegex(
+            _SyntheticDeviceFailure,
+            "reached MUSCL transport",
+        ):
+            solver.predict(advection_scheme="muscl_tvd")
+
 
 class FluidTopologyInvalidationContracts(unittest.TestCase):
     @staticmethod

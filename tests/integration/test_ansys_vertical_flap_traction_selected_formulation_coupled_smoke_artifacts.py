@@ -5,6 +5,12 @@ import hashlib
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from cases.ansys_vertical_flap_fsi import VerticalFlapFsiConfig
+from validation_runs.ansys_vertical_flap_fsi.scripts import (
+    run_traction_selected_formulation_coupled_smoke as smoke,
+)
 
 
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
@@ -49,6 +55,37 @@ EXPECTED_RETIRED_BLOCKERS = ["coupled_fsi_validation_pending"]
 class AnsysVerticalFlapSelectedFormulationCoupledSmokeArtifactTests(
     unittest.TestCase
 ):
+    def test_solid_substep_request_preserves_auto_or_explicit_override_in_rows(self):
+        for configured_substeps in (None, 1600):
+            with self.subTest(configured_substeps=configured_substeps):
+                config = VerticalFlapFsiConfig(
+                    step_count=1,
+                    solid_substeps=configured_substeps,
+                )
+                with mock.patch.object(smoke, "_sha256_file", return_value="digest"):
+                    row = smoke._row_from_report(
+                        report={},
+                        config=config,
+                        scenario="contract",
+                        worker_mode="contract",
+                        reference_selection={"candidate_status": "reference"},
+                        fixed_solid={"candidate_status": "fixed"},
+                        shared_manifest={"field_sha256": "shared"},
+                    )
+                    blocked = smoke._blocked_row_from_exception(
+                        exc=RuntimeError("blocked"),
+                        config=config,
+                        scenario="contract",
+                        worker_mode="contract",
+                        reference_selection={"candidate_status": "reference"},
+                        fixed_solid={"candidate_status": "fixed"},
+                        shared_manifest={"field_sha256": "shared"},
+                    )
+
+                self.assertIs(row["solid_substeps"], configured_substeps)
+                self.assertIs(row["solid_substeps_selected"], configured_substeps)
+                self.assertIs(blocked["solid_substeps"], configured_substeps)
+
     def test_smoke_matrix_records_two_selected_formulation_rows(self):
         for path in (MATRIX_JSON, MATRIX_CSV, HISTORY_JSON, SUMMARY_MD, CHECKSUMS):
             self.assertTrue(path.exists(), path)

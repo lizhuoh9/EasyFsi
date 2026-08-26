@@ -143,6 +143,25 @@ class NeoHookeanOutOfBoundsGuardBatchTests(unittest.TestCase):
         self.assertEqual(state.last_report_host_reads, 1)
         self.assertEqual(state.last_out_of_bounds_guard_host_reads, 1)
 
+    def test_batch_accumulates_a_nonfinal_deformation_clamp(self) -> None:
+        state = self._state()
+        deformation = state.F.to_numpy()
+        deformation[0] = np.diag([1.0, 1.0, -1.0]).astype(np.float32)
+        state.F.from_numpy(deformation)
+
+        state.begin_out_of_bounds_guard_batch()
+        self._step_without_report(state)
+        self.assertEqual(state.last_report_host_reads, 0)
+
+        # The first step repairs the inverted F, so the final step itself has
+        # no clamp. The one final packed report must retain the earlier event.
+        self._step_without_report(state)
+        report = state.end_out_of_bounds_guard_batch()
+
+        self.assertEqual(report.deformation_clamp_count, 1)
+        self.assertEqual(state.last_report_host_reads, 1)
+        self.assertEqual(state.last_out_of_bounds_guard_host_reads, 1)
+
     def test_batch_sticky_guard_catches_transient_out_of_bounds_particle(self) -> None:
         state = self._state()
         in_bounds_positions = state.x.to_numpy()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sys
 import tempfile
 import unittest
@@ -563,6 +564,7 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
         self.assertEqual(
             fluid.calls,
             [
+                "save_state",
                 "clear_volume_source",
                 "add_zmax_velocity_inlet_volume_source:-8.0",
                 "apply_velocity_dirichlet_boundary_rows",
@@ -588,6 +590,11 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
             report["flow_predictor_projection_segment_dt_s"],
             2.5e-4,
         )
+        self.assertAlmostEqual(report["requested_macro_dt_s"], 5.0e-4)
+        self.assertAlmostEqual(report["fluid_accepted_time_s"], 5.0e-4)
+        self.assertEqual(report["fluid_rejected_trial_count"], 0)
+        self.assertEqual(report["fluid_remaining_unadvanced_time_s"], 0.0)
+        self.assertAlmostEqual(fluid.physical_time_s, 5.0e-4)
 
     def test_sustained_boundary_predictor_does_not_inject_volume_source(self):
         fluid = _FakePredictorFluid()
@@ -621,6 +628,7 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
         self.assertEqual(
             fluid.calls,
             [
+                "save_state",
                 "clear_volume_source",
                 "apply_velocity_dirichlet_boundary_rows",
                 "predict:0.00025:rk2",
@@ -639,6 +647,280 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
         self.assertEqual(report["flow_inlet_source_normal_velocity_mps"], 0.0)
         self.assertEqual(report["flow_predictor_projection_segment_count"], 2)
 
+    def test_failed_second_flow_segment_restores_the_outer_macro_state(self):
+        fluid = _FakePredictorFluid()
+        projection_count = 0
+        stable_resource_key = object()
+        boundary_cache: dict[str, object] = {
+            "hibm_sharp_marker_boundary": {
+                "cache_key": stable_resource_key,
+                "classified_topology_key": object(),
+                "search_report": {"stale": True},
+                "internal_obstacle_cell_count": 7,
+                "cleanup_report": {"stale": True},
+            }
+        }
+
+        def fail_second_projection(
+            fluid: _FakePredictorFluid,
+            config: object,
+            *,
+            reset_pressure: bool,
+            **projection_options: object,
+        ) -> dict[str, object]:
+            nonlocal projection_count
+            projection_count += 1
+            if projection_count == 2:
+                raise RuntimeError("pressure trial failed")
+            return _fake_project_current_flow(
+                fluid,
+                config,
+                reset_pressure=reset_pressure,
+                **projection_options,
+            )
+
+        config = SimpleNamespace(
+            dt_s=5.0e-4,
+            grid_nodes=(2, 2, 3),
+            inlet_velocity_mps=10.0,
+            flow_driver_mode="sustained_boundary_predictor",
+            flow_inlet_source_strength=1.0,
+            flow_inlet_source_profile="constant",
+            flow_inlet_source_ramp_steps=0,
+            flow_inlet_source_schedule_scope="global",
+            flow_advection_scheme="rk2",
+            flow_predictor_substeps=2,
+        )
+        original_project = fsi_runner._project_current_flow
+        try:
+            fsi_runner._project_current_flow = fail_second_projection
+            with self.assertRaisesRegex(RuntimeError, "pressure trial failed"):
+                fsi_runner._flow_advance_current_step(
+                    fluid,
+                    config,
+                    sharp_boundary_cache=boundary_cache,
+                    flow_phase="fsi",
+                    step_index_local=0,
+                    step_index_global=0,
+                    preflow_history=[],
+                    reset_pressure=False,
+                )
+        finally:
+            fsi_runner._project_current_flow = original_project
+
+        self.assertEqual(fluid.physical_time_s, 0.0)
+        self.assertEqual(fluid.calls[0], "save_state")
+        self.assertEqual(
+            fluid.calls[-2:],
+            ["restore_state", "invalidate_pressure_warmstart"],
+        )
+        self.assertEqual(
+            boundary_cache,
+            {
+                "hibm_sharp_marker_boundary": {"cache_key": stable_resource_key}
+            },
+        )
+
+    def test_flow_rollback_cleanup_attempts_every_step_and_preserves_original_cause(self):
+        fluid = _FakePredictorFluid()
+        fluid.restore_error = RuntimeError("restore cleanup failed")
+        stable_resource_key = object()
+        boundary_cache: dict[str, object] = {
+            "hibm_sharp_marker_boundary": {
+                "cache_key": stable_resource_key,
+                "classified_topology_key": object(),
+                "search_report": {"stale": True},
+            }
+        }
+
+        def fail_projection(*args: object, **kwargs: object) -> dict[str, object]:
+            del args, kwargs
+            raise ValueError("pressure trial failed")
+
+        config = SimpleNamespace(
+            dt_s=5.0e-4,
+            grid_nodes=(2, 2, 3),
+            inlet_velocity_mps=10.0,
+            flow_driver_mode="sustained_boundary_predictor",
+            flow_inlet_source_strength=1.0,
+            flow_inlet_source_profile="constant",
+            flow_inlet_source_ramp_steps=0,
+            flow_inlet_source_schedule_scope="global",
+            flow_advection_scheme="rk2",
+            flow_predictor_substeps=1,
+        )
+        original_project = fsi_runner._project_current_flow
+        try:
+            fsi_runner._project_current_flow = fail_projection
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "rollback cleanup failed",
+            ) as caught:
+                fsi_runner._flow_advance_current_step(
+                    fluid,
+                    config,
+                    sharp_boundary_cache=boundary_cache,
+                    flow_phase="fsi",
+                    step_index_local=0,
+                    step_index_global=0,
+                    preflow_history=[],
+                    reset_pressure=False,
+                )
+        finally:
+            fsi_runner._project_current_flow = original_project
+
+        self.assertIsInstance(caught.exception.__cause__, ValueError)
+        self.assertIn("pressure trial failed", str(caught.exception.__cause__))
+        self.assertIn("restore_state", fluid.calls)
+        self.assertIn("invalidate_pressure_warmstart", fluid.calls)
+        self.assertEqual(
+            boundary_cache,
+            {
+                "hibm_sharp_marker_boundary": {"cache_key": stable_resource_key}
+            },
+        )
+
+    def test_fsi_driver_guard_runs_before_the_mutating_step_loop(self):
+        config = SimpleNamespace(
+            dt_s=5.0e-4,
+            flow_driver_mode="reinitialize_inlet_each_step_diagnostic",
+        )
+        with self.assertRaisesRegex(RuntimeError, "physical macro time"):
+            fsi_runner._require_fsi_physical_flow_driver_mode(config)
+
+        run_source = inspect.getsource(fsi_runner.run_hibm_mpm_fsi)
+        guard_call = run_source.index("_require_fsi_physical_flow_driver_mode")
+        progress_call = run_source.index("_emit_run_progress")
+        step_loop = run_source.index("for step_index in range")
+        reinitialize_call = run_source.index(
+            "_flow_driver_requires_full_field_reinitialize",
+            step_loop,
+        )
+        self.assertLess(guard_call, progress_call)
+        self.assertLess(guard_call, step_loop)
+        self.assertLess(guard_call, reinitialize_call)
+
+    def test_fsi_projection_only_mode_fails_closed_without_physical_advance(self):
+        fluid = _FakePredictorFluid()
+        config = SimpleNamespace(
+            dt_s=5.0e-4,
+            grid_nodes=(2, 2, 3),
+            inlet_velocity_mps=10.0,
+            flow_driver_mode="projection_only",
+            flow_predictor_substeps=1,
+        )
+        original_project = fsi_runner._project_current_flow
+        try:
+            fsi_runner._project_current_flow = _fake_project_current_flow
+            with self.assertRaisesRegex(RuntimeError, "physical macro time"):
+                fsi_runner._flow_advance_current_step(
+                    fluid,
+                    config,
+                    flow_phase="fsi",
+                    step_index_local=0,
+                    step_index_global=0,
+                    preflow_history=[],
+                    reset_pressure=False,
+                )
+        finally:
+            fsi_runner._project_current_flow = original_project
+
+        self.assertEqual(fluid.physical_time_s, 0.0)
+        self.assertEqual(
+            fluid.calls[-2:],
+            ["restore_state", "invalidate_pressure_warmstart"],
+        )
+
+    def test_underadvanced_momentum_clock_rejects_and_restores_macro_state(self):
+        fluid = _FakePredictorFluid()
+        fluid.momentum_accepted_fraction = 0.5
+        config = SimpleNamespace(
+            dt_s=5.0e-4,
+            grid_nodes=(2, 2, 3),
+            inlet_velocity_mps=10.0,
+            flow_driver_mode="sustained_boundary_predictor",
+            flow_inlet_source_strength=1.0,
+            flow_inlet_source_profile="constant",
+            flow_inlet_source_ramp_steps=0,
+            flow_inlet_source_schedule_scope="global",
+            flow_advection_scheme="rk2",
+            flow_predictor_substeps=1,
+        )
+        original_project = fsi_runner._project_current_flow
+        try:
+            fsi_runner._project_current_flow = _fake_project_current_flow
+            with self.assertRaisesRegex(RuntimeError, "momentum advection"):
+                fsi_runner._flow_advance_current_step(
+                    fluid,
+                    config,
+                    flow_phase="fsi",
+                    step_index_local=0,
+                    step_index_global=0,
+                    preflow_history=[],
+                    reset_pressure=False,
+                )
+        finally:
+            fsi_runner._project_current_flow = original_project
+        self.assertEqual(fluid.physical_time_s, 0.0)
+
+    def test_pressure_iteration_count_does_not_change_accepted_physical_time(self):
+        config = SimpleNamespace(
+            dt_s=5.0e-4,
+            grid_nodes=(2, 2, 3),
+            inlet_velocity_mps=10.0,
+            flow_driver_mode="sustained_boundary_predictor",
+            flow_inlet_source_strength=1.0,
+            flow_inlet_source_profile="constant",
+            flow_inlet_source_ramp_steps=0,
+            flow_inlet_source_schedule_scope="global",
+            flow_advection_scheme="rk2",
+            flow_predictor_substeps=1,
+        )
+
+        def advance_with_projection_iterations(iteration_count: int) -> dict[str, object]:
+            fluid = _FakePredictorFluid()
+
+            def project_with_iteration_count(
+                fluid: _FakePredictorFluid,
+                config: object,
+                *,
+                reset_pressure: bool,
+                **projection_options: object,
+            ) -> dict[str, object]:
+                report = _fake_project_current_flow(
+                    fluid,
+                    config,
+                    reset_pressure=reset_pressure,
+                    **projection_options,
+                )
+                report["projection_report"] = {
+                    "cg_converged_all": True,
+                    "cg_iterations_total": int(iteration_count),
+                }
+                return report
+
+            original_project = fsi_runner._project_current_flow
+            try:
+                fsi_runner._project_current_flow = project_with_iteration_count
+                return fsi_runner._flow_advance_current_step(
+                    fluid,
+                    config,
+                    flow_phase="fsi",
+                    step_index_local=0,
+                    step_index_global=0,
+                    preflow_history=[],
+                    reset_pressure=False,
+                )
+            finally:
+                fsi_runner._project_current_flow = original_project
+
+        immediate = advance_with_projection_iterations(0)
+        iterative = advance_with_projection_iterations(19)
+        self.assertEqual(immediate["fluid_accepted_time_s"], config.dt_s)
+        self.assertEqual(iterative["fluid_accepted_time_s"], config.dt_s)
+        self.assertEqual(immediate["requested_macro_dt_s"], config.dt_s)
+        self.assertEqual(iterative["requested_macro_dt_s"], config.dt_s)
+
     def test_interleaved_segment_report_preserves_main_projection_and_topology_truth(self):
         combined = fsi_runner._combine_interleaved_flow_predictor_segment_reports(
             [
@@ -655,7 +937,17 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
                     "flow_main_projection_l2": 0.11,
                     "flow_main_projection_max_abs": 0.12,
                     "hibm_preassembly_topology_mutated": True,
+                    "hibm_pre_predictor_wall_time_s": 0.5,
+                    "hibm_projection_cycle_wall_time_s": 1.0,
                     "hibm_post_dirichlet_consistency_projection_count": 2,
+                    "requested_macro_dt_s": 2.5e-4,
+                    "fluid_accepted_time_s": 2.5e-4,
+                    "flow_momentum_advection_substeps_total": 1,
+                    "fluid_rejected_trial_count": 1,
+                    "fluid_remaining_unadvanced_time_s": 0.0,
+                    "flow_sst_requested_transport_time_s": 2.5e-4,
+                    "flow_sst_accepted_transport_time_s": 2.5e-4,
+                    "flow_sst_remaining_unadvanced_transport_time_s": 0.0,
                 },
                 {
                     "projection_report": {
@@ -670,7 +962,17 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
                     "flow_main_projection_l2": 0.21,
                     "flow_main_projection_max_abs": 0.22,
                     "hibm_preassembly_topology_mutated": False,
+                    "hibm_pre_predictor_wall_time_s": 1.5,
+                    "hibm_projection_cycle_wall_time_s": 2.0,
                     "hibm_post_dirichlet_consistency_projection_count": 1,
+                    "requested_macro_dt_s": 2.5e-4,
+                    "fluid_accepted_time_s": 2.5e-4,
+                    "flow_momentum_advection_substeps_total": 1,
+                    "fluid_rejected_trial_count": 2,
+                    "fluid_remaining_unadvanced_time_s": 0.0,
+                    "flow_sst_requested_transport_time_s": 2.5e-4,
+                    "flow_sst_accepted_transport_time_s": 2.5e-4,
+                    "flow_sst_remaining_unadvanced_transport_time_s": 0.0,
                 },
             ],
             configured_substeps=2,
@@ -687,6 +989,21 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
             combined["projection_report"]["cg_iterations_total"],
             10,
         )
+        self.assertAlmostEqual(combined["requested_macro_dt_s"], 5.0e-4)
+        self.assertAlmostEqual(combined["fluid_accepted_time_s"], 5.0e-4)
+        self.assertEqual(combined["fluid_rejected_trial_count"], 3)
+        self.assertEqual(combined["fluid_remaining_unadvanced_time_s"], 0.0)
+        self.assertEqual(combined["hibm_pre_predictor_wall_time_s"], 2.0)
+        self.assertEqual(combined["hibm_projection_cycle_wall_time_s"], 3.0)
+        self.assertEqual(
+            combined["flow_sst_requested_transport_time_s"],
+            5.0e-4,
+        )
+        self.assertEqual(
+            combined["flow_sst_accepted_transport_time_s"],
+            5.0e-4,
+        )
+        self.assertEqual(combined["flow_sst_remaining_unadvanced_transport_time_s"], 0.0)
         self.assertEqual(
             combined["flow_predictor_projection_segment_pre_projection_l2_max"],
             21.0,
@@ -714,6 +1031,90 @@ class OfficialFluent2WayReferenceImportTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_flow_transport_report_fields_persists_the_macro_time_audit(self):
+        macro_time_report = {
+            "requested_macro_dt_s": 5.0e-4,
+            "fluid_accepted_time_s": 5.0e-4,
+            "fluid_rejected_trial_count": 3,
+            "fluid_remaining_unadvanced_time_s": 0.0,
+        }
+        persisted = fsi_runner._flow_transport_report_fields(
+            {
+                **macro_time_report,
+                "unrelated_internal_value": 123,
+            }
+        )
+
+        self.assertEqual(persisted, macro_time_report)
+
+    def test_macro_time_accounting_requires_explicit_positive_substep_count(
+        self,
+    ):
+        with self.assertRaises(TypeError):
+            fsi_runner._macro_time_accounting_report(
+                requested_macro_dt_s=5.0e-4,
+                accepted_time_s=5.0e-4,
+                rejected_trial_count=0,
+                component="fluid",
+            )
+        for accepted_substep_count in (0, -1):
+            with self.subTest(accepted_substep_count=accepted_substep_count):
+                with self.assertRaisesRegex(ValueError, "must be positive"):
+                    fsi_runner._macro_time_accounting_report(
+                        requested_macro_dt_s=5.0e-4,
+                        accepted_time_s=5.0e-4,
+                        accepted_substep_count=accepted_substep_count,
+                        rejected_trial_count=0,
+                        component="fluid",
+                    )
+
+    def test_interleaved_segment_count_rejects_missing_or_extra_physical_steps(self):
+        segment_report = {
+            "projection_report": {
+                "pre_projection_l2": 0.0,
+                "pre_projection_max_abs": 0.0,
+                "projection_l2": 0.0,
+                "projection_max_abs": 0.0,
+                "cg_iterations_total": 0,
+            },
+            "flow_main_projection_pre_projection_l2": 0.0,
+            "flow_main_projection_pre_projection_max_abs": 0.0,
+            "flow_main_projection_l2": 0.0,
+            "flow_main_projection_max_abs": 0.0,
+            "requested_macro_dt_s": 2.5e-4,
+            "fluid_accepted_time_s": 2.5e-4,
+            "fluid_rejected_trial_count": 0,
+            "fluid_remaining_unadvanced_time_s": 0.0,
+        }
+        for segment_reports in (
+            [dict(segment_report)],
+            [dict(segment_report), dict(segment_report), dict(segment_report)],
+        ):
+            with self.subTest(segment_count=len(segment_reports)):
+                with self.assertRaisesRegex(ValueError, "exactly 2"):
+                    fsi_runner._combine_interleaved_flow_predictor_segment_reports(
+                        segment_reports,
+                        configured_substeps=2,
+                        segment_dt_s=2.5e-4,
+                        reset_pressure=False,
+                    )
+
+        missing_count_report = dict(segment_report)
+        counted_report = {
+            **segment_report,
+            "flow_momentum_advection_substeps_total": 1,
+        }
+        with self.assertRaisesRegex(
+            KeyError,
+            "flow_momentum_advection_substeps_total",
+        ):
+            fsi_runner._combine_interleaved_flow_predictor_segment_reports(
+                [missing_count_report, counted_report],
+                configured_substeps=2,
+                segment_dt_s=2.5e-4,
+                reset_pressure=False,
+            )
 
     def test_nested_projection_report_preserves_existing_all_flags(self):
         combined = fsi_runner._combine_flow_projection_reports(
@@ -960,6 +1361,14 @@ class _FakeField:
 class _FakePredictorFluid:
     def __init__(self, shape: tuple[int, int, int] = (2, 2, 3)) -> None:
         self.calls: list[str] = []
+        self.physical_time_s = 0.0
+        self._saved_physical_time_s: float | None = None
+        self.restore_error: Exception | None = None
+        self.momentum_accepted_fraction = 1.0
+        self._last_momentum_advection_scheme = "none"
+        self._last_momentum_advection_substeps = 0
+        self._last_momentum_advection_rejected_trial_count = 0
+        self._sst_last_momentum_helmholtz_rejected_trial_count = 0
         self.velocity_dirichlet_boundary_authority = "legacy"
         self.obstacle = _FakeField(np.zeros(shape, dtype=np.int32))
         self.velocity = _FakeField(np.zeros((*shape, 3), dtype=np.float32))
@@ -1006,6 +1415,21 @@ class _FakePredictorFluid:
         )
         self.project_kwargs: dict[str, object] = {}
 
+    def save_state(self) -> None:
+        self.calls.append("save_state")
+        self._saved_physical_time_s = float(self.physical_time_s)
+
+    def restore_state(self) -> None:
+        self.calls.append("restore_state")
+        if self.restore_error is not None:
+            raise self.restore_error
+        if self._saved_physical_time_s is None:
+            raise RuntimeError("fake fluid state was not saved")
+        self.physical_time_s = float(self._saved_physical_time_s)
+
+    def invalidate_pressure_warmstart(self) -> None:
+        self.calls.append("invalidate_pressure_warmstart")
+
     def clear_velocity_constraints(self) -> None:
         self.calls.append("clear_velocity_constraints")
         for field in (
@@ -1047,6 +1471,16 @@ class _FakePredictorFluid:
         no_slip_domain_walls: tuple[bool, bool, bool, bool, bool, bool] | None = None,
     ) -> None:
         self.calls.append(f"predict:{dt_s}:{advection_scheme}")
+        accepted_dt_s = float(dt_s) * float(self.momentum_accepted_fraction)
+        self.physical_time_s += float(dt_s)
+        self._last_momentum_advection_scheme = str(advection_scheme)
+        self._last_momentum_advection_substeps = 1
+        self._last_momentum_advection_rejected_trial_count = 0
+        self._last_momentum_advection_requested_time_s = float(dt_s)
+        self._last_momentum_advection_accepted_time_s = accepted_dt_s
+        self._last_momentum_advection_remaining_unadvanced_time_s = (
+            float(dt_s) - accepted_dt_s
+        )
 
     def project(self, **kwargs: object) -> dict[str, object]:
         self.calls.append("project")

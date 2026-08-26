@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
 import unittest
+from collections.abc import Mapping
 from unittest import mock
 
 import numpy as np
@@ -12,6 +13,7 @@ from simulation_core import (
     HibmMpmSurfaceMarkers,
     TaichiRuntimeConfig,
 )
+from simulation_core.diagnostics import time_stepping
 from simulation_core.fluids import CartesianGrid
 
 
@@ -28,6 +30,205 @@ def _report_value(report: object, name: str) -> object:
     if isinstance(report, Mapping):
         return report[name]
     return getattr(report, name)
+
+
+class FluidPhysicalTimeAccountingContracts(unittest.TestCase):
+    def test_roundoff_bound_accepts_33_ulp_tail_but_not_a_missing_slice(
+        self,
+    ) -> None:
+        requested_time_s = 5.0e-4
+        stable_dt_s = 1.948368241597658e-6
+        loop_stop_tolerance_s = max(requested_time_s * 1.0e-12, 1.0e-15)
+        remaining_dt_s = requested_time_s
+        accepted_dts_s: list[float] = []
+        while remaining_dt_s > loop_stop_tolerance_s:
+            trial_dt_s = min(remaining_dt_s, stable_dt_s)
+            accepted_dts_s.append(trial_dt_s)
+            remaining_dt_s = max(0.0, remaining_dt_s - trial_dt_s)
+
+        accepted_time_s = math.fsum(accepted_dts_s)
+        roundoff_tail_s = requested_time_s - accepted_time_s
+        tolerance_s = time_stepping.physical_time_roundoff_tolerance_s(
+            requested_time_s=requested_time_s,
+            accepted_time_s=accepted_time_s,
+            accepted_substep_count=len(accepted_dts_s),
+        )
+
+        self.assertEqual(len(accepted_dts_s), 257)
+        self.assertEqual(remaining_dt_s, 0.0)
+        self.assertEqual(roundoff_tail_s, 33.0 * math.ulp(requested_time_s))
+        self.assertGreater(roundoff_tail_s, 32.0 * math.ulp(requested_time_s))
+        self.assertLessEqual(roundoff_tail_s, tolerance_s)
+
+        missing_time_s = math.fsum(accepted_dts_s[:-1])
+        missing_tail_s = requested_time_s - missing_time_s
+        missing_tolerance_s = time_stepping.physical_time_roundoff_tolerance_s(
+            requested_time_s=requested_time_s,
+            accepted_time_s=missing_time_s,
+            accepted_substep_count=len(accepted_dts_s) - 1,
+        )
+        self.assertGreater(missing_tail_s, missing_tolerance_s)
+
+    def test_loop_remaining_time_must_be_exactly_zero_before_ledger_rebuild(
+        self,
+    ) -> None:
+        self.assertEqual(
+            time_stepping.require_zero_remaining_physical_time_s(
+                remaining_time_s=0.0,
+                component="test transport",
+            ),
+            0.0,
+        )
+        for remaining_time_s in (2.5e-16, -2.5e-16, math.nan):
+            with self.subTest(remaining_time_s=remaining_time_s):
+                with self.assertRaisesRegex(
+                    FloatingPointError,
+                    "left unadvanced physical time",
+                ):
+                    time_stepping.require_zero_remaining_physical_time_s(
+                        remaining_time_s=remaining_time_s,
+                        component="test transport",
+                    )
+
+    def test_roundoff_bound_rejects_invalid_inputs(self) -> None:
+        invalid_inputs = (
+            (math.nan, 5.0e-4, 1),
+            (5.0e-4, math.inf, 1),
+            (5.0e-4, 5.0e-4, True),
+            (5.0e-4, 5.0e-4, 0),
+            (5.0e-4, 5.0e-4, -1),
+            (5.0e-4, 5.0e-4, 1.5),
+        )
+        for (
+            requested_time_s,
+            accepted_time_s,
+            accepted_substep_count,
+        ) in invalid_inputs:
+            with self.subTest(
+                requested_time_s=requested_time_s,
+                accepted_time_s=accepted_time_s,
+                accepted_substep_count=accepted_substep_count,
+            ):
+                with self.assertRaises((TypeError, ValueError)):
+                    time_stepping.physical_time_roundoff_tolerance_s(
+                        requested_time_s=requested_time_s,
+                        accepted_time_s=accepted_time_s,
+                        accepted_substep_count=accepted_substep_count,
+                    )
+
+    def test_sst_rejects_first_substep_at_floor_before_transport_kernel(
+        self,
+    ) -> None:
+        solver = _cuda_solver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(4, 4, 4),
+                density_kgm3=1.0,
+                viscosity_pa_s=1.0e-5,
+                dt_s=5.0e-4,
+            )
+        )
+        solver.configure_sst_2003(
+            inlet_velocity_mps=1.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=_OPEN_WALLS,
+        )
+        transport_kernel_calls: list[float] = []
+
+        def enormous_advection_rate(
+            active_solver: CartesianFluidSolver,
+        ) -> float:
+            del active_solver
+            return 1.0e30
+
+        def forbid_transport_kernel(
+            active_solver: CartesianFluidSolver,
+            trial_dt_s: float,
+            *args: object,
+        ) -> None:
+            del active_solver
+            del args
+            transport_kernel_calls.append(float(trial_dt_s))
+            raise AssertionError("sub-floor SST trial reached the transport kernel")
+
+        with (
+            mock.patch.object(
+                CartesianFluidSolver,
+                "_muscl_scalar_face_advection_rate_kernel",
+                new=enormous_advection_rate,
+            ),
+            mock.patch.object(
+                CartesianFluidSolver,
+                "_advance_sst_transport_kernel",
+                new=forbid_transport_kernel,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                FloatingPointError,
+                "minimum representable physical substep",
+            ):
+                solver.advance_sst_transport(
+                    dt_s=5.0e-4,
+                    kinematic_viscosity_m2_s=1.0e-5,
+                    no_slip_domain_walls=_OPEN_WALLS,
+                    advection_scheme="muscl_tvd",
+                )
+
+        self.assertEqual(transport_kernel_calls, [])
+
+    def test_muscl_rejects_first_substep_at_floor_before_ssp_kernel(self) -> None:
+        solver = _cuda_solver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(4, 4, 4),
+                density_kgm3=1.0,
+                viscosity_pa_s=1.0e-5,
+                dt_s=5.0e-4,
+            )
+        )
+        solver.set_uniform_velocity((0.0, 0.0, 0.0))
+        ssp_kernel_calls: list[float] = []
+
+        def enormous_advection_rate(
+            active_solver: CartesianFluidSolver,
+        ) -> float:
+            del active_solver
+            return 1.0e30
+
+        def forbid_ssp_kernel(
+            active_solver: CartesianFluidSolver,
+            velocity_input: object,
+            trial_dt_s: float,
+            stage: int,
+            wall_flags: object,
+        ) -> None:
+            del active_solver, velocity_input, stage, wall_flags
+            ssp_kernel_calls.append(float(trial_dt_s))
+            raise AssertionError("sub-floor MUSCL trial reached the SSP kernel")
+
+        with (
+            mock.patch.object(
+                CartesianFluidSolver,
+                "_muscl_momentum_advection_rate_s",
+                new=enormous_advection_rate,
+            ),
+            mock.patch.object(
+                CartesianFluidSolver,
+                "_muscl_momentum_ssp_stage_kernel",
+                new=forbid_ssp_kernel,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "minimum representable physical substep",
+            ):
+                solver.predict(
+                    dt_s=5.0e-4,
+                    advection_scheme="muscl_tvd",
+                    kinematic_viscosity_m2_s=0.0,
+                    no_slip_domain_walls=_OPEN_WALLS,
+                )
+
+        self.assertEqual(ssp_kernel_calls, [])
 
 
 class CartesianFluidSSTTransportContracts(unittest.TestCase):
@@ -82,6 +283,147 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
             expected_mu_t_pa_s,
             rtol=2.0e-6,
         )
+
+    def test_sst_wall_state_validation_matches_full_diagnostics(self) -> None:
+        solver = _cuda_solver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(4, 4, 4),
+                density_kgm3=1.0,
+                viscosity_pa_s=1.0e-5,
+                dt_s=1.0e-4,
+            )
+        )
+        solver.configure_sst_2003(
+            inlet_velocity_mps=1.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=_OPEN_WALLS,
+        )
+
+        def assert_matching_invalid_count(expected: int) -> None:
+            fields_before = tuple(
+                field.to_numpy().copy()
+                for field in (
+                    solver.sst_turbulent_kinetic_energy,
+                    solver.sst_specific_dissipation_rate,
+                    solver.sst_eddy_viscosity_pa_s,
+                )
+            )
+            solver._apply_sst_wall_state_kernel(
+                1.0e-5,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+            wall_state_count = int(
+                solver.sst_reduction_nonfinite_or_nonpositive_count[None]
+            )
+            fields_after = tuple(
+                field.to_numpy()
+                for field in (
+                    solver.sst_turbulent_kinetic_energy,
+                    solver.sst_specific_dissipation_rate,
+                    solver.sst_eddy_viscosity_pa_s,
+                )
+            )
+            solver._sst_state_diagnostics_kernel()
+            full_diagnostics_count = int(
+                solver.sst_reduction_nonfinite_or_nonpositive_count[None]
+            )
+            self.assertEqual(wall_state_count, expected)
+            self.assertEqual(full_diagnostics_count, expected)
+            for before, after in zip(fields_before, fields_after, strict=True):
+                np.testing.assert_array_equal(after, before)
+
+        assert_matching_invalid_count(0)
+
+        k_state = solver.sst_turbulent_kinetic_energy.to_numpy()
+        omega_state = solver.sst_specific_dissipation_rate.to_numpy()
+        mu_t_state = solver.sst_eddy_viscosity_pa_s.to_numpy()
+        k_state[0, 0, 0] = -1.0
+        omega_state[1, 0, 0] = 0.0
+        mu_t_state[2, 0, 0] = -1.0
+        solver.sst_turbulent_kinetic_energy.from_numpy(k_state)
+        solver.sst_specific_dissipation_rate.from_numpy(omega_state)
+        solver.sst_eddy_viscosity_pa_s.from_numpy(mu_t_state)
+
+        assert_matching_invalid_count(3)
+
+    def test_coefficient_update_reduces_current_max_diffusivity(self) -> None:
+        solver = _cuda_solver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(4, 4, 4),
+                density_kgm3=1.2,
+                viscosity_pa_s=1.8e-5,
+                dt_s=1.0e-4,
+            )
+        )
+        solver.configure_sst_2003(
+            inlet_velocity_mps=1.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=_OPEN_WALLS,
+        )
+        solver.set_uniform_velocity((0.0, 0.0, 0.0))
+        molecular_nu_m2_s = 1.5e-5
+
+        solver._update_sst_coefficients_checked(molecular_nu_m2_s)
+
+        mu_t = solver.sst_eddy_viscosity_pa_s.to_numpy().astype(np.float64)
+        sigma_k = solver.sst_sigma_k.to_numpy().astype(np.float64)
+        sigma_omega = solver.sst_sigma_omega.to_numpy().astype(np.float64)
+        expected_max_diffusivity = molecular_nu_m2_s + float(
+            np.max(np.maximum(sigma_k, sigma_omega) * mu_t / solver.rho)
+        )
+        actual_max_diffusivity = float(
+            solver.sst_reduction_max_diffusivity_m2_s[None]
+        )
+
+        self.assertAlmostEqual(
+            actual_max_diffusivity,
+            expected_max_diffusivity,
+            places=10,
+        )
+
+    def test_combined_transport_copy_preserves_both_transaction_states(
+        self,
+    ) -> None:
+        solver = _cuda_solver(
+            FluidDomainSpec.unit_box(
+                grid_nodes=(4, 4, 4),
+                density_kgm3=1.0,
+                viscosity_pa_s=1.0e-5,
+                dt_s=1.0e-4,
+            )
+        )
+        solver.configure_sst_2003(
+            inlet_velocity_mps=1.0,
+            turbulence_intensity=0.05,
+            turbulent_viscosity_ratio=10.0,
+            no_slip_domain_walls=_OPEN_WALLS,
+        )
+        k_state = np.linspace(0.0, 1.0, 64, dtype=np.float32).reshape(4, 4, 4)
+        omega_state = np.linspace(
+            1.0,
+            2.0,
+            64,
+            dtype=np.float32,
+        ).reshape(4, 4, 4)
+        solver.sst_turbulent_kinetic_energy.from_numpy(k_state)
+        solver.sst_specific_dissipation_rate.from_numpy(omega_state)
+
+        solver._copy_sst_state_to_transport_base_and_prev_kernel()
+
+        for field, expected in (
+            (solver.sst_turbulent_kinetic_energy_transport_base, k_state),
+            (solver.sst_specific_dissipation_rate_transport_base, omega_state),
+            (solver.sst_turbulent_kinetic_energy_prev, k_state),
+            (solver.sst_specific_dissipation_rate_prev, omega_state),
+        ):
+            np.testing.assert_array_equal(field.to_numpy(), expected)
 
     def test_predictor_consumes_spatial_eddy_viscosity_not_its_scalar_mean(
         self,
@@ -280,6 +622,19 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
             1,
         )
 
+        self.assertEqual(
+            solver._sst_last_momentum_diffusion_requested_time_s,
+            1.0e-3,
+        )
+        self.assertEqual(
+            solver._sst_last_momentum_diffusion_accepted_time_s,
+            0.0,
+        )
+        self.assertEqual(
+            solver._sst_last_momentum_diffusion_remaining_unadvanced_time_s,
+            1.0e-3,
+        )
+
     def test_nonfatal_unsplit_trial_retries_from_transaction_base_and_commits(
         self,
     ) -> None:
@@ -345,12 +700,12 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
             active_solver.velocity.from_numpy(committed)
             return {
                 "converged": True,
-                "iterations": 3,
+                "iterations": 0,
                 "relative_residual": 1.0e-8,
                 "components": [
-                    {"component": 0, "converged": True, "iterations": 1},
-                    {"component": 1, "converged": True, "iterations": 2},
-                    {"component": 2, "converged": True, "iterations": 3},
+                    {"component": 0, "converged": True, "iterations": 0},
+                    {"component": 1, "converged": True, "iterations": 0},
+                    {"component": 2, "converged": True, "iterations": 0},
                 ],
             }
 
@@ -418,7 +773,7 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
         self.assertEqual(solver._sst_last_momentum_diffusion_substeps, 2)
         self.assertTrue(solver._sst_last_momentum_helmholtz_converged)
         self.assertEqual(solver._sst_last_momentum_helmholtz_iterations, 5)
-        self.assertEqual(solver._sst_last_momentum_helmholtz_iterations_total, 17)
+        self.assertEqual(solver._sst_last_momentum_helmholtz_iterations_total, 5)
         self.assertAlmostEqual(
             solver._sst_last_momentum_helmholtz_relative_residual,
             1.0e-8,
@@ -428,6 +783,18 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
             1,
         )
 
+        self.assertEqual(
+            solver._sst_last_momentum_diffusion_requested_time_s,
+            1.0e-3,
+        )
+        self.assertEqual(
+            solver._sst_last_momentum_diffusion_accepted_time_s,
+            1.0e-3,
+        )
+        self.assertEqual(
+            solver._sst_last_momentum_diffusion_remaining_unadvanced_time_s,
+            0.0,
+        )
     def test_sst_momentum_helmholtz_solve_is_unsplit_for_a_2d_neumann_mode(
         self,
     ) -> None:
@@ -1751,13 +2118,128 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
 
         self.assertEqual(int(report["rejected_transport_trial_count"]), 1)
         self.assertEqual(solver._sst_last_transport_rejected_trial_count, 1)
+        self.assertEqual(
+            report["requested_transport_time_s"],
+            1.0e-2,
+        )
+        self.assertEqual(
+            report["accepted_transport_time_s"],
+            5.0e-3 * int(report["explicit_transport_substeps"]),
+        )
+        self.assertEqual(report["remaining_unadvanced_transport_time_s"], 0.0)
         self.assertEqual(int(report["explicit_transport_substeps"]), 2)
+        # Accounting must be derived from committed slices, rather than echoing
+        # the request.  A rejected 0.01-s trial is excluded before the two
+        # accepted 0.005-s slices are summed.
+        with mock.patch(
+            "simulation_core.fluids.solver.math.fsum",
+            return_value=0.0,
+        ):
+            with self.assertRaisesRegex(
+                FloatingPointError,
+                "SST transport physical-time accounting",
+            ):
+                solver.advance_sst_transport(
+                    dt_s=1.0e-2,
+                    advection_scheme="muscl_tvd",
+                )
         self.assertTrue(
             np.all(np.isfinite(solver.sst_turbulent_kinetic_energy.to_numpy()))
         )
         self.assertTrue(
             np.all(solver.sst_turbulent_kinetic_energy.to_numpy() > 0.0)
         )
+
+    def test_sst_invalid_implicit_result_restores_and_retries_from_base(
+        self,
+    ) -> None:
+        spec = FluidDomainSpec.unit_box(
+            grid_nodes=(4, 4, 4),
+            density_kgm3=1.0,
+            viscosity_pa_s=1.0e-5,
+            dt_s=1.0e-2,
+        )
+        retried = _cuda_solver(spec)
+        reference = _cuda_solver(spec)
+        k_state = np.ones((4, 4, 4), dtype=np.float32)
+        k_state[1, 1, 1] = 4.0
+        omega_state = np.full((4, 4, 4), 0.5, dtype=np.float32)
+        for solver in (retried, reference):
+            solver.configure_sst_2003(
+                inlet_velocity_mps=1.0,
+                turbulence_intensity=0.05,
+                turbulent_viscosity_ratio=10.0,
+                no_slip_domain_walls=_OPEN_WALLS,
+            )
+            solver.set_uniform_velocity((0.0, 0.0, 0.0))
+            solver.sst_turbulent_kinetic_energy.from_numpy(k_state)
+            solver.sst_specific_dissipation_rate.from_numpy(omega_state)
+
+        original_wall_state_kernel = retried._apply_sst_wall_state_kernel
+        forced_rejections_remaining = 1
+
+        def reject_first_implicit_result(*args: object) -> None:
+            nonlocal forced_rejections_remaining
+            original_wall_state_kernel(*args)
+            if forced_rejections_remaining > 0:
+                forced_rejections_remaining -= 1
+                retried.sst_reduction_nonfinite_or_nonpositive_count[None] = 1
+
+        with mock.patch.object(
+            retried,
+            "_apply_sst_wall_state_kernel",
+            new=reject_first_implicit_result,
+        ):
+            retried_report = retried.advance_sst_transport(
+                dt_s=1.0e-2,
+                kinematic_viscosity_m2_s=1.0e-5,
+                no_slip_domain_walls=_OPEN_WALLS,
+                advection_scheme="muscl_tvd",
+            )
+        for _ in range(2):
+            reference.advance_sst_transport(
+                dt_s=5.0e-3,
+                kinematic_viscosity_m2_s=1.0e-5,
+                no_slip_domain_walls=_OPEN_WALLS,
+                advection_scheme="muscl_tvd",
+            )
+
+        self.assertEqual(forced_rejections_remaining, 0)
+        self.assertEqual(
+            int(retried_report["rejected_transport_trial_count"]),
+            1,
+        )
+        self.assertEqual(
+            int(retried_report["explicit_transport_substeps"]),
+            2,
+        )
+        self.assertEqual(
+            retried._sst_last_transport_rejected_trial_count,
+            1,
+        )
+        self.assertEqual(retried_report["requested_transport_time_s"], 1.0e-2)
+        self.assertEqual(retried_report["accepted_transport_time_s"], 1.0e-2)
+        self.assertEqual(retried_report["remaining_unadvanced_transport_time_s"], 0.0)
+        for retried_field, reference_field in (
+            (
+                retried.sst_turbulent_kinetic_energy,
+                reference.sst_turbulent_kinetic_energy,
+            ),
+            (
+                retried.sst_specific_dissipation_rate,
+                reference.sst_specific_dissipation_rate,
+            ),
+            (
+                retried.sst_eddy_viscosity_pa_s,
+                reference.sst_eddy_viscosity_pa_s,
+            ),
+        ):
+            np.testing.assert_allclose(
+                retried_field.to_numpy(),
+                reference_field.to_numpy(),
+                rtol=0.0,
+                atol=1.0e-7,
+            )
 
     def test_sst_transport_accepts_laminar_zero_k_without_retry(
         self,
@@ -2504,8 +2986,10 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
 
                 with mock.patch.object(
                     CartesianFluidSolver,
-                    "_update_sst_coefficients_checked",
-                    new=lambda _solver, _nu: None,
+                    "_update_sst_coefficients_from_prepared_inputs_checked",
+                    # Keep prescribed coefficients frozen while preserving
+                    # the former separate max-diffusivity reduction result.
+                    new=lambda _solver, molecular_nu: float(molecular_nu),
                 ):
                     solver.advance_sst_transport(
                         dt_s=1.0e-2,

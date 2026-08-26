@@ -20,6 +20,12 @@ RUNNER_PATH = (
     / "scripts"
     / "run_our_solver_vertical_flap.py"
 )
+_STEP_FRAME_UNUSED_FULL_GRID_FLOW_FIELDS = (
+    "hibm_base_obstacle",
+    "hibm_dynamic_solid_volume_obstacle",
+    "hibm_dynamic_solid_volume_external_carve",
+    "velocity_dirichlet_boundary_external_exact_component_mask",
+)
 
 
 def _load_runner_module():
@@ -221,6 +227,20 @@ def test_flow_geometry_cache_is_only_built_for_fsi_snapshot_exports(
     )
 
 
+def test_flow_parity_snapshot_skips_fields_unused_by_step_frame_output() -> None:
+    fluid, fields = _flow_snapshot_fluid()
+    snapshot = solid_runner._flow_parity_snapshot(fluid)
+
+    for field_name in _STEP_FRAME_UNUSED_FULL_GRID_FLOW_FIELDS:
+        assert field_name not in snapshot
+        assert fields[field_name].to_numpy_calls == 0
+
+    full_snapshot = solid_runner._flow_field_snapshot(fluid)
+    for field_name in _STEP_FRAME_UNUSED_FULL_GRID_FLOW_FIELDS:
+        assert field_name in full_snapshot
+        assert fields[field_name].to_numpy_calls == 1
+
+
 def test_flow_snapshots_reuse_read_only_immutable_geometry_without_redownload() -> None:
     fluid, fields = _flow_snapshot_fluid()
     immutable_geometry = solid_runner._immutable_flow_geometry_snapshot(
@@ -256,6 +276,8 @@ def test_flow_snapshots_reuse_read_only_immutable_geometry_without_redownload() 
             expected_calls = 1
         elif name == "pressure":
             expected_calls = 0
+        elif name in _STEP_FRAME_UNUSED_FULL_GRID_FLOW_FIELDS:
+            expected_calls = 1
         else:
             expected_calls = 3
         assert field.to_numpy_calls == expected_calls, name
@@ -283,8 +305,10 @@ def test_flow_snapshots_reuse_read_only_immutable_geometry_without_redownload() 
         expected_calls = 1 if name in partial_geometry else 0
         assert partial_fields[name].to_numpy_calls == expected_calls
     for name, field in partial_fields.items():
-        if name not in immutable_names and name != "pressure":
-            assert field.to_numpy_calls == 1, name
+        if name in immutable_names or name == "pressure":
+            continue
+        expected_calls = 0 if name in _STEP_FRAME_UNUSED_FULL_GRID_FLOW_FIELDS else 1
+        assert field.to_numpy_calls == expected_calls, name
     assert partial_fields["pressure"].to_numpy_calls == 0
     assert partial_parity["cell_center_y_m"] is partial_geometry["cell_center_y_m"]
     assert partial_parity["cell_center_z_m"] is partial_geometry["cell_center_z_m"]
@@ -414,6 +438,49 @@ def test_step_observer_persists_true_deformation_and_complete_history(
         "time_s": 5.0e-4,
     }
     assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_step_frame_ignores_unused_full_grid_flow_fields(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    baseline_path = tmp_path / "baseline.npz"
+    extra_fields_path = tmp_path / "extra_fields.npz"
+    baseline_snapshot = _snapshot()
+    shape = baseline_snapshot["pressure"].shape
+    snapshot_with_extra_fields = {
+        **baseline_snapshot,
+        "hibm_base_obstacle": np.full(shape, 1, dtype=np.int32),
+        "hibm_dynamic_solid_volume_obstacle": np.full(
+            shape, 2, dtype=np.int32
+        ),
+        "hibm_dynamic_solid_volume_external_carve": np.full(
+            shape, 3, dtype=np.int32
+        ),
+        "velocity_dirichlet_boundary_external_exact_component_mask": np.full(
+            shape, 4, dtype=np.int32
+        ),
+    }
+
+    for path, snapshot in (
+        (baseline_path, baseline_snapshot),
+        (extra_fields_path, snapshot_with_extra_fields),
+    ):
+        runner._save_step_frame_atomic(
+            path,
+            snapshot,
+            span_reduction="mean",
+            streamwise_velocity_sign=-1.0,
+            reverse_streamwise_axis=True,
+            streamwise_length_m=0.1,
+        )
+
+    with np.load(baseline_path, allow_pickle=False) as baseline, np.load(
+        extra_fields_path, allow_pickle=False
+    ) as extra_fields:
+        assert baseline.files == extra_fields.files
+        for key in baseline.files:
+            assert baseline[key].dtype == extra_fields[key].dtype
+            assert baseline[key].shape == extra_fields[key].shape
+            np.testing.assert_array_equal(baseline[key], extra_fields[key])
 
 
 def test_prepare_output_dir_rejects_nonempty_directory(tmp_path: Path) -> None:

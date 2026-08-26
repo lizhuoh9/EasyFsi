@@ -39,7 +39,7 @@ from validation_runs.ansys_vertical_flap_fsi.scripts.run_preflow_snapshot_one_st
 
 FLOW_FUNCTION_NAME = "_flow_advance_current_step"
 TRACTION_GATE_FUNCTION_NAME = "_require_fresh_external_force_for_solid_step"
-SOLID_UPDATE_FUNCTION_NAME = "_advance_solid_substeps_batched"
+SOLID_UPDATE_FUNCTION_NAME = "_select_and_advance_solid_macro_step"
 HIBM_HEALTH_FUNCTION_NAME = "_require_hibm_velocity_dirichlet_health"
 CHECKPOINT_FILENAME = "flow_stage_cache_checkpoint.json"
 PROGRESS_FILENAME = "flow_stage_cache_progress.json"

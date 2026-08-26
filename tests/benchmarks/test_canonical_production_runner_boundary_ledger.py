@@ -248,16 +248,18 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             run_source,
         )
         self.assertIn("expected_mode=str(config.preflow_convergence_mode)", run_source)
+        self.assertIn("_select_and_advance_solid_macro_step(", run_source)
+        self.assertNotIn("_advance_solid_substeps_batched(", run_source)
         self.assertLess(
             run_source.index("_require_fresh_external_force_for_solid_step("),
-            run_source.index("_advance_solid_substeps_batched("),
+            run_source.index("_select_and_advance_solid_macro_step("),
         )
 
-    def test_preflow_cold_jit_stage_progress_contract_is_host_only(self) -> None:
-        """Preflow must expose fine-grained runner stages without timing I/O."""
+    def test_preflow_detailed_stage_progress_is_opt_in_and_host_only(self) -> None:
+        """Default progress stays step-level; opt-in stages remain host-only."""
 
         preflow = _function_node("_run_fixed_solid_preflow")
-        advance = _function_node("_flow_advance_current_step")
+        advance = _function_node("_flow_advance_current_step_trial")
         boundary = _function_node("_apply_hibm_sharp_marker_boundary_to_fluid")
         self.assertIn("preflow_stage_observer", ast.unparse(advance.args))
         self.assertIn("stage_observer", ast.unparse(boundary.args))
@@ -300,7 +302,11 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         )
         preflow_source = ast.unparse(preflow)
         self.assertIn("phase='preflow_stage'", preflow_source)
-        self.assertIn("if progress_observer is not None", preflow_source)
+        detailed_stage_guard = (
+            "progress_observer is not None and bool(getattr(config, "
+            "'detailed_preflow_stage_progress', False))"
+        )
+        self.assertIn(detailed_stage_guard, preflow_source)
         self.assertIn(
             "preflow_stage_observer=preflow_stage_observer",
             preflow_source,
@@ -393,7 +399,7 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             call
             for call in ast.walk(advance)
             if isinstance(call, ast.Call)
-            and _call_name(call) == "_flow_advance_current_step"
+            and _call_name(call) == "_flow_advance_current_step_trial"
         ]
         self.assertEqual(len(recursive_calls), 1)
         recursive_observer_keywords = [
@@ -475,9 +481,27 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             node
             for node in ast.walk(preflow)
             if isinstance(node, ast.If)
-            and ast.unparse(node.test) == "progress_observer is not None"
+            and ast.unparse(node.test) == detailed_stage_guard
         )
         self.assertIn("preflow_stage_observer = emit_preflow_stage", ast.unparse(observer_guard))
+        preflow_loop = next(
+            node
+            for node in preflow.body
+            if isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "preflow_index"
+        )
+        step_started_call = preflow_loop.body[0]
+        self.assertIsInstance(step_started_call, ast.Expr)
+        self.assertEqual(_call_name(step_started_call.value), "_emit_run_progress")
+        self.assertIn("phase='preflow_step'", ast.unparse(step_started_call))
+        emit_completed_step = next(
+            node
+            for node in preflow.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "emit_completed_step"
+        )
+        self.assertIn("phase='preflow_step'", ast.unparse(emit_completed_step))
         timer_assignments = [
             node
             for node in ast.walk(preflow)
@@ -650,6 +674,33 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             closure_expression,
         )
 
+    def test_direct_runner_refreshes_pressure_gradient_at_ib_nodes(self) -> None:
+        function = _function_node("_apply_hibm_sharp_marker_boundary_to_fluid")
+        relevant_names = {
+            "build_from_search_device_fields",
+            "update_pressure_neumann_gradient_from_fluid_predictor_ib_nodes",
+            "assemble_pressure_neumann_matrix_rows",
+        }
+        call_lines = {
+            _call_name(call): int(call.lineno)
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+            and _call_name(call) in relevant_names
+        }
+        self.assertEqual(relevant_names, relevant_names & call_lines.keys())
+        self.assertLess(
+            call_lines["build_from_search_device_fields"],
+            call_lines[
+                "update_pressure_neumann_gradient_from_fluid_predictor_ib_nodes"
+            ],
+        )
+        self.assertLess(
+            call_lines[
+                "update_pressure_neumann_gradient_from_fluid_predictor_ib_nodes"
+            ],
+            call_lines["assemble_pressure_neumann_matrix_rows"],
+        )
+
     def test_prepare_and_seal_executes_the_full_dependency_order(self) -> None:
         fluid = _LifecycleFluid()
         solid_mpm_fsi_runner._prepare_and_seal_canonical_velocity_dirichlet_component_ledger(
@@ -687,7 +738,7 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         )
         keywords = {keyword.arg: keyword.value for keyword in builder_call.keywords}
         self.assertNotIn("marker_compatibility_solver", keywords)
-        iterations = keywords["marker_compatibility_max_iterations"]
+        iterations = keywords["marker_compatibility_iterations_per_batch"]
         self.assertIsInstance(iterations, ast.Constant)
         self.assertEqual(iterations.value, 64)
 

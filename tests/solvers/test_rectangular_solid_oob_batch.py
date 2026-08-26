@@ -54,9 +54,16 @@ class RectangularSolidOutOfBoundsBatchTests(unittest.TestCase):
             solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
 
-        self.assertIn(
-            "latest_solid_report = _advance_solid_substeps_batched(", source
+        self.assertIn("_select_and_advance_solid_macro_step(", source)
+        self.assertNotIn("_advance_solid_substeps_batched(", source)
+        controller_source = inspect.getsource(
+            solid_mpm_fsi_runner._select_and_advance_solid_macro_step
         )
+        retry_source = inspect.getsource(
+            solid_mpm_fsi_runner._advance_solid_macro_step_with_retries
+        )
+        self.assertIn("_advance_solid_macro_step_with_retries(", controller_source)
+        self.assertIn("_advance_solid_substeps_batched(", retry_source)
         self.assertNotIn("for _solid_substep in range(solid_substeps)", source)
 
     def test_success_preserves_substep_and_plane_enforcement_order(self) -> None:

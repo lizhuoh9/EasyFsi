@@ -399,6 +399,14 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             surface_force_support_radius_m(config),
         )
         self.assertLess(config.mpm_support_radius_m, 0.5 * config.flap_height_m)
+        self.assertEqual(
+            config.flow_driver_mode,
+            "sustained_boundary_predictor",
+        )
+        self.assertEqual(
+            config.preflow_flow_driver_mode,
+            "sustained_boundary_predictor",
+        )
 
     def test_selected_official_config_uses_bounded_marker_mac_failure_ceiling(self):
         config = selected_formulation_solver_config(step_count=50)
@@ -958,7 +966,9 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             solid_mpm_fsi_runner._validate_rectangular_solid_config(config)
 
     def test_sharp_boundary_is_refreshed_before_predictor_and_after_predictor(self):
-        source = inspect.getsource(solid_mpm_fsi_runner._flow_advance_current_step)
+        source = inspect.getsource(
+            solid_mpm_fsi_runner._flow_advance_current_step_trial
+        )
 
         pre_refresh = source.index("pre_predictor_sharp_boundary_report")
         predictor = source.index("fluid.predict(")
@@ -1003,7 +1013,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             solid_mpm_fsi_runner._apply_hibm_sharp_marker_boundary_to_fluid
         )
         advance_source = inspect.getsource(
-            solid_mpm_fsi_runner._flow_advance_current_step
+            solid_mpm_fsi_runner._flow_advance_current_step_trial
         )
 
         first_velocity_rows = boundary_source.index(
@@ -1136,13 +1146,20 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             (solid_max[0] - solid_min[0]) * (solid_max[2] - solid_min[2]),
         )
         boundary_report = (
-            solid_mpm_fsi_runner._marker_projection_boundary_report_fields(markers)
+            solid_mpm_fsi_runner._marker_projection_boundary_report_fields(
+                markers,
+                traction_tip_cap_pressure_enabled=False,
+            )
         )
         self.assertEqual(boundary_report["marker_physical_traction_count"], 6)
         self.assertEqual(boundary_report["marker_projection_vertex_count"], 10)
         self.assertEqual(boundary_report["marker_boundary_only_vertex_count"], 4)
         self.assertTrue(boundary_report["tip_cap_boundary_enabled"])
-        self.assertTrue(boundary_report["tip_cap_force_included"])
+        self.assertFalse(boundary_report["tip_cap_force_included"])
+        self.assertEqual(
+            boundary_report["tip_cap_traction_policy"],
+            "projection_only_no_traction",
+        )
         self.assertFalse(boundary_report["tip_cap_no_slip_closure_included"])
         self.assertEqual(
             boundary_report["tip_cap_no_slip_health_policy"],
@@ -1151,6 +1168,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         measured_boundary_report = (
             solid_mpm_fsi_runner._marker_projection_boundary_report_fields(
                 markers,
+                traction_tip_cap_pressure_enabled=False,
                 canonical_velocity_dirichlet_report={
                     "marker_target_closure": {
                         "enabled": True,
@@ -1188,8 +1206,15 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             ],
             12,
         )
+        included_boundary_report = (
+            solid_mpm_fsi_runner._marker_projection_boundary_report_fields(
+                markers,
+                traction_tip_cap_pressure_enabled=True,
+            )
+        )
+        self.assertTrue(included_boundary_report["tip_cap_force_included"])
         self.assertEqual(
-            boundary_report["tip_cap_traction_policy"],
+            included_boundary_report["tip_cap_traction_policy"],
             "one_sided_gauge_pressure_outward_normal",
         )
         self.assertEqual(markers.normals[:3], [(0.0, 0.0, 1.0)] * 3)
@@ -1279,7 +1304,8 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertEqual(single_markers.projection_segments, ((0, 1), (1, 2)))
         single_boundary_report = (
             solid_mpm_fsi_runner._marker_projection_boundary_report_fields(
-                single_markers
+                single_markers,
+                traction_tip_cap_pressure_enabled=False,
             )
         )
         self.assertEqual(single_boundary_report["marker_boundary_only_vertex_count"], 0)
@@ -2093,7 +2119,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
 
         advance_source = inspect.getsource(
-            solid_mpm_fsi_runner._flow_advance_current_step
+            solid_mpm_fsi_runner._flow_advance_current_step_trial
         )
         self.assertIn("add_zmax_velocity_inlet_volume_source", advance_source)
         self.assertIn("FLOW_DRIVER_SUSTAINED_BOUNDARY_PREDICTOR", advance_source)
@@ -2226,7 +2252,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             solid_mpm_fsi_runner._apply_hibm_sharp_marker_boundary_to_fluid
         )
         advance_source = inspect.getsource(
-            solid_mpm_fsi_runner._flow_advance_current_step
+            solid_mpm_fsi_runner._flow_advance_current_step_trial
         )
 
         self.assertIn("reuse_topology_from_previous_assembly", source)
@@ -2771,6 +2797,15 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             ):
                 self.predict_viscosities.append(kinematic_viscosity_m2_s)
                 self.predict_walls.append(no_slip_domain_walls)
+                requested_dt_s = float(dt_s)
+                self._last_momentum_advection_scheme = str(advection_scheme)
+                self._last_momentum_advection_substeps = 1
+                self._last_momentum_advection_rejected_trial_count = 0
+                self._last_momentum_advection_cfl = 0.0
+                self._last_momentum_advection_max_substep_cfl = 0.0
+                self._last_momentum_advection_requested_time_s = requested_dt_s
+                self._last_momentum_advection_accepted_time_s = requested_dt_s
+                self._last_momentum_advection_remaining_unadvanced_time_s = 0.0
                 return None
 
         config = VerticalFlapFsiConfig(
@@ -2802,7 +2837,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 return_value={"projection_report": {}},
             ),
         ):
-            report = solid_mpm_fsi_runner._flow_advance_current_step(
+            report = solid_mpm_fsi_runner._flow_advance_current_step_trial(
                 fake_fluid,
                 config,
                 flow_phase="fsi",
@@ -2895,6 +2930,15 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             ):
                 self.predict_viscosities.append(kinematic_viscosity_m2_s)
                 self.predict_walls.append(no_slip_domain_walls)
+                requested_dt_s = float(dt_s)
+                self._last_momentum_advection_scheme = str(advection_scheme)
+                self._last_momentum_advection_substeps = 1
+                self._last_momentum_advection_rejected_trial_count = 0
+                self._last_momentum_advection_cfl = 0.0
+                self._last_momentum_advection_max_substep_cfl = 0.0
+                self._last_momentum_advection_requested_time_s = requested_dt_s
+                self._last_momentum_advection_accepted_time_s = requested_dt_s
+                self._last_momentum_advection_remaining_unadvanced_time_s = 0.0
                 return None
 
         config = VerticalFlapFsiConfig(
@@ -2926,7 +2970,7 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 return_value={"projection_report": {}},
             ),
         ):
-            report = solid_mpm_fsi_runner._flow_advance_current_step(
+            report = solid_mpm_fsi_runner._flow_advance_current_step_trial(
                 fake_fluid,
                 config,
                 flow_phase="fsi",
@@ -3097,15 +3141,13 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             solid_mpm_fsi_runner.run_hibm_mpm_fsi
         )
 
-        self.assertIn(
-            'solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])',
-            runner_source,
-        )
+        self.assertIn("_select_and_advance_solid_macro_step(", runner_source)
+        self.assertNotIn("_advance_solid_substeps_batched(", runner_source)
         self.assertGreaterEqual(
             runner_source.count("support_radius_m=config.mpm_support_radius_m"),
             2,
         )
-        self.assertIn("solid_substeps=solid_substeps", runner_source)
+        self.assertIn("particle_position_write_observer=record_particle_position_write", runner_source)
 
     def test_full_domain_runner_has_official_style_stationary_preflow_option(self):
         parser_source = inspect.getsource(vertical_flap_case._build_parser)

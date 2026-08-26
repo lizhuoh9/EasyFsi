@@ -13,6 +13,9 @@ from benchmarks.official.official_benchmark_solver import (
 from benchmarks.official.solid_mpm_fsi_runner import (
     run_hibm_mpm_fsi,
 )
+from simulation_core.coupling.interface_kalman_predictor import (
+    InterfaceKalmanConfig,
+)
 from simulation_core.drivers.case_spec import FsiCaseSpec
 
 
@@ -167,6 +170,13 @@ class VerticalFlapFsiConfig:
     solid_constitutive_model: str = "plane_stress_linear_elastic"
     dt_s: float = 5.0e-4
     step_count: int = 50
+    # Explicitly modified-physics experiment.  ``off`` preserves the legacy
+    # solver path and constructs no predictor; active modes write posterior
+    # values only to their uniquely owned feedback/state field.
+    kalman_writeback_mode: str = "off"
+    kalman_interface_config: InterfaceKalmanConfig | None = None
+    kalman_fluid_config: InterfaceKalmanConfig | None = None
+    kalman_solid_config: InterfaceKalmanConfig | None = None
     grid_nodes: tuple[int, int, int] = (4, 32, 64)
     solid_particle_counts: tuple[int, int, int] = (1, 12, 4)
     marker_count: int = 12
@@ -185,11 +195,18 @@ class VerticalFlapFsiConfig:
     # Preserve the direct sharp pipeline that completed the validated 50 steps.
     velocity_damping: float = 0.995
     solid_velocity_transfer_flip_blend: float = 0.0
-    solid_substeps: int = 1600
-    solid_cfl_target: float = 0.5
+    # None is production auto mode; a positive count is an explicit A/B override.
+    solid_substeps: int | None = None
+    solid_max_substep_retries: int = 3
+    solid_max_automatic_substeps: int = 65536
+    solid_max_deformation_clamp_count_per_macro_step: int | None = 0
+    # A/B-calibrated Courant target: 0.5 was stable but under-resolved the
+    # vertical-flap tip trajectory; 0.14 keeps the selector state-adaptive.
+    solid_cfl_target: float = 0.14
     preflow_steps: int = 0
     preflow_convergence_tolerance: float = 0.0
     preflow_convergence_mode: str = "single_step_legacy"
+    detailed_preflow_stage_progress: bool = False
     preflow_stationary_min_steps: int = 20
     preflow_stationary_window_steps: int = 10
     preflow_stationary_consecutive_windows: int = 3
@@ -221,6 +238,7 @@ class VerticalFlapFsiConfig:
     flow_turbulence_outlet_face: str = "zmin"
     flow_sst_near_wall_treatment: str = "resolved"
     flow_sst_max_automatic_substeps: int = 4096
+    flow_report_include_percentiles: bool = False
     flow_predictor_no_slip_domain_walls: tuple[str, ...] = ("ymin",)
     flow_symmetry_domain_walls: tuple[str, ...] = ("ymax",)
     flow_ymin_no_slip_rows: int = 0
@@ -357,6 +375,8 @@ def selected_formulation_solver_config(
 ) -> VerticalFlapFsiConfig:
     config = VerticalFlapFsiConfig(
         step_count=step_count,
+        flow_driver_mode="sustained_boundary_predictor",
+        preflow_flow_driver_mode="sustained_boundary_predictor",
         flow_turbulence_model="sst_2003",
         flow_turbulence_intensity=0.05,
         flow_turbulent_viscosity_ratio=10.0,
@@ -410,16 +430,19 @@ def run_ansys_vertical_flap_benchmark(
     profile_wall_time: bool = False,
 ) -> dict[str, object]:
     cfg = with_local_surface_force_support(config or VerticalFlapFsiConfig())
-    runner = lambda active_config: run_hibm_mpm_fsi(
-        case_id=CASE_SPEC.case_id,
-        case_metadata=ANSYS_VERTICAL_FLAP_CASE_METADATA,
-        boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
-        reference_results=CASE_SPEC.reference_results,
-        config=active_config,
-        step_observer=step_observer,
-        progress_observer=progress_observer,
-        profile_wall_time=profile_wall_time,
-    )
+
+    def runner(active_config: VerticalFlapFsiConfig) -> dict[str, object]:
+        return run_hibm_mpm_fsi(
+            case_id=CASE_SPEC.case_id,
+            case_metadata=ANSYS_VERTICAL_FLAP_CASE_METADATA,
+            boundary_conditions=ANSYS_VERTICAL_FLAP_BOUNDARY_CONDITIONS,
+            reference_results=CASE_SPEC.reference_results,
+            config=active_config,
+            step_observer=step_observer,
+            progress_observer=progress_observer,
+            profile_wall_time=profile_wall_time,
+        )
+
     return run_official_fsi_benchmark(
         OfficialBenchmarkRunSpec(
             case_spec=CASE_SPEC,

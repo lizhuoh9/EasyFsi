@@ -373,8 +373,8 @@ def _row_from_report(
         "first_failed_gate": gate_result["first_failed_gate"],
         "first_failed_gate_value": gate_result["first_failed_gate_value"],
         "dt_s": float(config.dt_s),
-        "solid_substeps": int(config.solid_substeps),
-        "solid_substeps_selected": int(
+        "solid_substeps": config.solid_substeps,
+        "solid_substeps_selected": _optional_int(
             report.get("solid_substeps_selected", config.solid_substeps)
         ),
         "reference_formulation_candidate": REFERENCE_FORMULATION_CANDIDATE,
@@ -551,7 +551,7 @@ def _base_blocked_row(
         "first_failed_gate": first_failed_gate,
         "first_failed_gate_value": first_failed_gate_value,
         "dt_s": float(config.dt_s),
-        "solid_substeps": int(config.solid_substeps),
+        "solid_substeps": config.solid_substeps,
         "solid_substeps_selected": 0,
         "reference_formulation_candidate": REFERENCE_FORMULATION_CANDIDATE,
         "pressure_pair_policy_candidate": PRESSURE_PAIR_POLICY_CANDIDATE,
@@ -1244,6 +1244,10 @@ def _numeric(row: Mapping[str, Any], key: str, default: float = 0.0) -> float:
         return float(row.get(key, default))
     except (TypeError, ValueError):
         return default
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)
 
 
 def _max_numeric(values: Iterable[float]) -> float:

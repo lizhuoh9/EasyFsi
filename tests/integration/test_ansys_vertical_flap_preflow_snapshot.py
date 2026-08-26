@@ -326,6 +326,25 @@ def _exact_velocity_dirichlet_ledger_fake_methods() -> dict[str, object]:
     }
 
 
+class _TimeAuditedPredictorFluid(SimpleNamespace):
+    def predict(
+        self,
+        dt_s: float,
+        *,
+        advection_scheme: str,
+        **_kwargs: object,
+    ) -> None:
+        requested_dt_s = float(dt_s)
+        self._last_momentum_advection_scheme = str(advection_scheme)
+        self._last_momentum_advection_substeps = 1
+        self._last_momentum_advection_rejected_trial_count = 0
+        self._last_momentum_advection_cfl = 0.0
+        self._last_momentum_advection_max_substep_cfl = 0.0
+        self._last_momentum_advection_requested_time_s = requested_dt_s
+        self._last_momentum_advection_accepted_time_s = requested_dt_s
+        self._last_momentum_advection_remaining_unadvanced_time_s = 0.0
+
+
 def _healthy_preflow_report() -> dict[str, object]:
     return {
         "preflow_history": [
@@ -1333,6 +1352,7 @@ def test_flow_advance_publishes_terminal_consistency_velocity_diagnostics():
         }
 
     config = SimpleNamespace(
+        dt_s=5.0e-4,
         flow_solid_boundary_mode="hibm_sharp_marker_rows",
         flow_driver_mode="projection_only",
         flow_post_dirichlet_consistency_projection_iterations=1,
@@ -1379,7 +1399,7 @@ def test_flow_advance_publishes_terminal_consistency_velocity_diagnostics():
             return_value=None,
         ),
     ):
-        report = solid_mpm_fsi_runner._flow_advance_current_step(
+        report = solid_mpm_fsi_runner._flow_advance_current_step_trial(
             fluid,
             config,
             markers=object(),
@@ -1435,10 +1455,9 @@ def test_sustained_boundary_predictor_applies_velocity_only_soft_rows_once():
         air_viscosity_pa_s=1.8e-5,
         air_density_kgm3=1.225,
     )
-    fluid = SimpleNamespace(
+    fluid = _TimeAuditedPredictorFluid(
         clear_volume_source=lambda: None,
         apply_velocity_dirichlet_boundary_rows=lambda **_kwargs: None,
-        predict=lambda **_kwargs: None,
         **_exact_velocity_dirichlet_ledger_fake_methods(),
     )
     no_slip_report = {
@@ -1481,7 +1500,7 @@ def test_sustained_boundary_predictor_applies_velocity_only_soft_rows_once():
             return_value=None,
         ),
     ):
-        solid_mpm_fsi_runner._flow_advance_current_step(
+        solid_mpm_fsi_runner._flow_advance_current_step_trial(
             fluid,
             config,
             markers=object(),
@@ -1531,10 +1550,9 @@ def test_sustained_boundary_predictor_requires_explicit_topology_reuse_before_ma
         air_viscosity_pa_s=1.8e-5,
         air_density_kgm3=1.225,
     )
-    fluid = SimpleNamespace(
+    fluid = _TimeAuditedPredictorFluid(
         clear_volume_source=lambda: None,
         apply_velocity_dirichlet_boundary_rows=lambda **_kwargs: None,
-        predict=lambda **_kwargs: None,
         **_exact_velocity_dirichlet_ledger_fake_methods(),
     )
 
@@ -1557,7 +1575,7 @@ def test_sustained_boundary_predictor_requires_explicit_topology_reuse_before_ma
         patch.object(solid_mpm_fsi_runner, "_project_current_flow") as project,
     ):
         with pytest.raises(RuntimeError, match="topology"):
-            solid_mpm_fsi_runner._flow_advance_current_step(
+            solid_mpm_fsi_runner._flow_advance_current_step_trial(
                 fluid,
                 config,
                 markers=object(),
@@ -2156,6 +2174,7 @@ def test_preflow_snapshot_config_hash_excludes_fsi_only_and_path_fields():
         step_count=50,
         young_modulus_pa=2.0 * base.young_modulus_pa,
         solid_density_kgm3=1.5 * base.solid_density_kgm3,
+        detailed_preflow_stage_progress=True,
         preflow_snapshot_input_path="cache/input.npz",
         preflow_snapshot_output_path="cache/output.npz",
     )

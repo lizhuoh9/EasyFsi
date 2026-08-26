@@ -28,6 +28,7 @@ def _reset_runtime_state(monkeypatch) -> None:
         "_INITIALIZED_RANDOM_SEED": None,
         "_INITIALIZED_OFFLINE_CACHE": None,
         "_INITIALIZED_OFFLINE_CACHE_FILE_PATH": None,
+        "_INITIALIZED_STRICT_ARCH_VERIFIED": False,
     }.items():
         monkeypatch.setattr(runtime, name, value, raising=False)
     for name in _RUNTIME_ENVIRONMENT_NAMES:
@@ -43,6 +44,57 @@ def test_runtime_config_defaults_preserve_legacy_non_strict_api() -> None:
     assert config.offline_cache is None
     assert config.offline_cache_file_path is None
     assert config.strict_arch is False
+
+
+def test_runtime_identity_fails_closed_before_taichi_initialization() -> None:
+    with pytest.raises(RuntimeError, match="not initialized"):
+        runtime.taichi_runtime_identity()
+
+
+def test_runtime_identity_records_actual_strict_cuda_configuration() -> None:
+    actual_config = SimpleNamespace(
+        arch=runtime.ti.cuda,
+        default_fp=runtime.ti.f32,
+    )
+
+    with (
+        patch.object(runtime.ti, "cfg", actual_config),
+        patch.object(runtime.ti, "init"),
+    ):
+        runtime.init_taichi(
+            runtime.TaichiRuntimeConfig(arch="cuda", strict_arch=True)
+        )
+        identity = runtime.taichi_runtime_identity()
+
+    assert identity == {
+        "requested_arch": "cuda",
+        "actual_arch": "cuda",
+        "default_fp": "f32",
+        "random_seed": 0,
+        "offline_cache_identity": {
+            "enabled": True,
+            "file_path": None,
+        },
+        "strict_arch_verified": True,
+    }
+
+
+def test_runtime_identity_reads_actual_arch_instead_of_requested_arch() -> None:
+    actual_config = SimpleNamespace(
+        arch=runtime.ti.cpu,
+        default_fp=runtime.ti.f32,
+    )
+
+    with (
+        patch.object(runtime.ti, "cfg", actual_config),
+        patch.object(runtime.ti, "init"),
+    ):
+        runtime.init_taichi(runtime.TaichiRuntimeConfig(arch="cuda"))
+        identity = runtime.taichi_runtime_identity()
+
+    assert identity["requested_arch"] == "cuda"
+    assert identity["actual_arch"] == "cpu"
+    assert identity["strict_arch_verified"] is False
 
 
 def _publish_preinitialized_cpu_runtime(monkeypatch) -> None:

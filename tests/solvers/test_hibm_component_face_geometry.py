@@ -77,14 +77,12 @@ class HibmComponentFaceGeometryTests(
         cls.fluid.obstacle.fill(0)
         cls.fluid.clear_velocity_dirichlet_boundary_rows()
 
-    def test_relocation_source_linear_key_compiles_as_taichi_function(
+    def _load_serialized_kaczmarz_two_marker_case(
         self,
-    ) -> None:
-        result = ti.field(dtype=ti.i64, shape=())
-        _relocation_source_linear_key_probe(self.component_face_boundary, result)
-        self.assertEqual(int(result[None]), 33)
-
-    def test_serialized_kaczmarz_marker_closure_executes_on_device(self) -> None:
+    ) -> tuple[
+        tuple[tuple[float, float, float], ...],
+        tuple[tuple[float, float, float], ...],
+    ]:
         marker_positions = (
             (0.375, 0.30, 0.375),
             (0.375, 0.45, 0.375),
@@ -120,17 +118,31 @@ class HibmComponentFaceGeometryTests(
             areas_m2=(0.02, 0.02),
             region_ids=(202, 202),
         )
+        return marker_positions, marker_velocities
 
+    def test_relocation_source_linear_key_compiles_as_taichi_function(
+        self,
+    ) -> None:
+        result = ti.field(dtype=ti.i64, shape=())
+        _relocation_source_linear_key_probe(self.component_face_boundary, result)
+        self.assertEqual(int(result[None]), 33)
+
+    def test_serialized_kaczmarz_marker_closure_executes_on_device(self) -> None:
+        marker_positions, marker_velocities = (
+            self._load_serialized_kaczmarz_two_marker_case()
+        )
         fluid = self.fluid
         previous_authority = fluid.velocity_dirichlet_boundary_authority
         try:
             fluid.set_velocity_dirichlet_boundary_authority("canonical")
             fluid._invalidate_velocity_dirichlet_component_ledger()
+            stages: list[str] = []
             report = self._assemble_component_face_ledger(
                 close_marker_constraints=True,
-                marker_compatibility_max_iterations=64,
+                marker_compatibility_iterations_per_batch=8,
                 primary_region_id=101,
                 secondary_region_id=202,
+                stage_observer=stages.append,
             )
             closure = report["canonical_velocity_dirichlet_report"][
                 "marker_target_closure"
@@ -138,6 +150,14 @@ class HibmComponentFaceGeometryTests(
 
             self.assertEqual(closure["solver"], "serialized_kaczmarz")
             self.assertEqual(closure["solve_count"], 1)
+            self.assertIn(
+                "hibm_marker_closure_recovery_sweeps_before",
+                stages,
+            )
+            self.assertIn(
+                "hibm_marker_closure_recovery_measure_after",
+                stages,
+            )
             self.assertLessEqual(
                 closure["final_max_adjustable_residual_mps"],
                 closure["closure_tolerance_mps"],
@@ -156,6 +176,41 @@ class HibmComponentFaceGeometryTests(
                 rtol=0.0,
                 atol=1.0e-5,
             )
+        finally:
+            fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
+            fluid.clear_velocity_dirichlet_boundary_rows()
+
+    def test_serialized_kaczmarz_failed_recovery_preserves_ledger(self) -> None:
+        self._load_serialized_kaczmarz_two_marker_case()
+        fluid = self.fluid
+        previous_authority = fluid.velocity_dirichlet_boundary_authority
+        try:
+            fluid.set_velocity_dirichlet_boundary_authority("canonical")
+            fluid._invalidate_velocity_dirichlet_component_ledger()
+            ledger_before = self._canonical_ledger_bytes()
+            stages: list[str] = []
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "marker compatibility closure did not converge",
+            ):
+                self._assemble_component_face_ledger(
+                    close_marker_constraints=True,
+                    marker_compatibility_iterations_per_batch=1,
+                    primary_region_id=101,
+                    secondary_region_id=202,
+                    stage_observer=stages.append,
+                )
+
+            self.assertIn(
+                "hibm_marker_closure_recovery_sweeps_before",
+                stages,
+            )
+            self.assertIn(
+                "hibm_marker_closure_recovery_measure_after",
+                stages,
+            )
+            self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
         finally:
             fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
             fluid.clear_velocity_dirichlet_boundary_rows()

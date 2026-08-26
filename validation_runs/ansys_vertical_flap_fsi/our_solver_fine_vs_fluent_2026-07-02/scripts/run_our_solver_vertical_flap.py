@@ -35,9 +35,13 @@ DEFAULT_TAICHI_OFFLINE_CACHE_DIR = (
     / ".taichi_cache"
     / "ansys_vertical_flap_cuda_f32"
 )
+TAICHI_OFFLINE_CACHE_MAX_SIZE_BYTES = 512 * 1024 * 1024
+TAICHI_OFFLINE_CACHE_CLEANING_POLICY = "lru"
+TAICHI_OFFLINE_CACHE_CLEANING_FACTOR = 0.25
 
 from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     ANSYS_VERTICAL_FLAP_CASE_METADATA,
+    InterfaceKalmanConfig,
     VerticalFlapFsiConfig,
     run_ansys_vertical_flap_benchmark,
     selected_formulation_solver_config,
@@ -295,7 +299,10 @@ def _source_hashes() -> dict[str, str]:
         REPO_ROOT / "simulation_core",
         REPO_ROOT / "src" / "refactored" / "validation" / "ansys_vertical_flap_fsi",
     )
-    paths = {Path(__file__).resolve()}
+    paths = {
+        Path(__file__).resolve(),
+        REPO_ROOT / "tools" / "validation" / "compare_solid_substep_ab.py",
+    }
     for root in roots:
         if root.is_dir():
             paths.update(root.rglob("*.py"))
@@ -326,6 +333,15 @@ def _configure_taichi_offline_cache(
     os.environ["SIMULATION_TAICHI_OFFLINE_CACHE"] = (
         "1" if enabled else "0"
     )
+    os.environ["TI_OFFLINE_CACHE_MAX_SIZE_OF_FILES"] = str(
+        TAICHI_OFFLINE_CACHE_MAX_SIZE_BYTES
+    )
+    os.environ["TI_OFFLINE_CACHE_CLEANING_POLICY"] = (
+        TAICHI_OFFLINE_CACHE_CLEANING_POLICY
+    )
+    os.environ["TI_OFFLINE_CACHE_CLEANING_FACTOR"] = str(
+        TAICHI_OFFLINE_CACHE_CLEANING_FACTOR
+    )
     if enabled:
         resolved_cache_dir.mkdir(parents=True, exist_ok=True)
         os.environ[
@@ -342,6 +358,13 @@ def _configure_taichi_offline_cache(
         "offline_cache_file_path": (
             str(resolved_cache_dir) if enabled else ""
         ),
+        "offline_cache_max_size_bytes": (
+            TAICHI_OFFLINE_CACHE_MAX_SIZE_BYTES
+        ),
+        "offline_cache_cleaning_policy": (
+            TAICHI_OFFLINE_CACHE_CLEANING_POLICY
+        ),
+        "offline_cache_cleaning_factor": TAICHI_OFFLINE_CACHE_CLEANING_FACTOR,
     }
 
 
@@ -607,6 +630,7 @@ def _make_step_observer(
 
 
 def _write_history_csv(path: Path, history: list[dict[str, Any]]) -> None:
+    history = [dict(_json_safe(row)) for row in history]
     path.parent.mkdir(parents=True, exist_ok=True)
     if not history:
         path.write_text("", encoding="utf-8")
@@ -686,8 +710,82 @@ def _grid_summary(config: VerticalFlapFsiConfig) -> dict[str, Any]:
     }
 
 
+def _optional_kalman_config(
+    args: argparse.Namespace,
+    *,
+    owner: str,
+    dt_s: float,
+) -> InterfaceKalmanConfig | None:
+    process_noise = getattr(args, f"kalman_{owner}_q")
+    measurement_variance = getattr(args, f"kalman_{owner}_r")
+    if process_noise is None and measurement_variance is None:
+        return None
+    if process_noise is None or measurement_variance is None:
+        raise ValueError(
+            f"--kalman-{owner}-q and --kalman-{owner}-r must be provided together"
+        )
+    measurement_variance = float(measurement_variance)
+    return InterfaceKalmanConfig(
+        rate_process_noise_spectral_density=float(process_noise),
+        measurement_variance=measurement_variance,
+        initial_value_variance=measurement_variance,
+        initial_rate_variance=measurement_variance / float(dt_s) ** 2,
+        warmup_accepted_states=int(
+            getattr(args, "kalman_warmup_accepted_states", 6)
+        ),
+    )
+
+
+def _modified_physics_kalman_configs(
+    args: argparse.Namespace,
+    *,
+    dt_s: float,
+) -> tuple[
+    str,
+    InterfaceKalmanConfig | None,
+    InterfaceKalmanConfig | None,
+    InterfaceKalmanConfig | None,
+]:
+    mode = str(getattr(args, "kalman_mode", "off"))
+    configs = {
+        owner: _optional_kalman_config(args, owner=owner, dt_s=dt_s)
+        for owner in ("interface", "fluid", "solid")
+    }
+    required_owners = {
+        "off": (),
+        "interface": ("interface",),
+        "fluid": ("fluid",),
+        "solid": ("solid",),
+        "global": ("interface", "fluid", "solid"),
+    }[mode]
+    missing = [owner for owner in required_owners if configs[owner] is None]
+    if missing:
+        flags = ", ".join(
+            f"--kalman-{owner}-q/--kalman-{owner}-r" for owner in missing
+        )
+        raise ValueError(f"Kalman mode {mode!r} requires {flags}")
+    unexpected = [
+        owner
+        for owner, owner_config in configs.items()
+        if owner not in required_owners and owner_config is not None
+    ]
+    if unexpected:
+        flags = ", ".join(
+            f"--kalman-{owner}-q/--kalman-{owner}-r"
+            for owner in unexpected
+        )
+        raise ValueError(f"Kalman mode {mode!r} does not use {flags}")
+    return mode, configs["interface"], configs["fluid"], configs["solid"]
+
+
 def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
     config = selected_formulation_solver_config(step_count=int(args.steps))
+    (
+        kalman_mode,
+        kalman_interface_config,
+        kalman_fluid_config,
+        kalman_solid_config,
+    ) = _modified_physics_kalman_configs(args, dt_s=float(config.dt_s))
     config = replace(
         config,
         grid_nodes=tuple(int(v) for v in args.grid_nodes),
@@ -711,7 +809,15 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
         flow_pressure_solve_failure_policy=str(
             args.flow_pressure_solve_failure_policy
         ),
-        solid_substeps=int(args.solid_substeps),
+        solid_substeps=(
+            int(args.solid_substeps)
+            if args.solid_substeps is not None
+            else None
+        ),
+        kalman_writeback_mode=kalman_mode,
+        kalman_interface_config=kalman_interface_config,
+        kalman_fluid_config=kalman_fluid_config,
+        kalman_solid_config=kalman_solid_config,
         flow_driver_mode="sustained_boundary_predictor",
         # The exact external velocity-boundary ledger owns inlet topology.
         # A volume-source preflow driver would still double-drive this
@@ -743,9 +849,15 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
                 0.05,
             )
         ),
+        detailed_preflow_stage_progress=bool(
+            getattr(args, "detailed_preflow_stage_progress", False)
+        ),
         preflow_snapshot_input_path=getattr(args, "preflow_snapshot_in", None),
         preflow_snapshot_output_path=getattr(args, "preflow_snapshot_out", None),
         flow_hibm_sharp_search_radius_m=1.7e-3,
+        flow_report_include_percentiles=bool(
+            getattr(args, "flow_report_percentiles", False)
+        ),
         # The physical flap core is now represented independently by the MPM
         # volume mask.  HIBM only needs a narrow mesh-scaled interface band.
         flow_hibm_sharp_search_radius_xyz_m=(
@@ -847,13 +959,66 @@ def _summary_from_report(
     elapsed_s: float,
     solver_npz_summary: dict[str, Any] | None,
     run_label: str,
+    solver_elapsed_s: float | None = None,
+    post_solver_artifact_export_wall_time_s: float = 0.0,
+    pre_summary_artifact_elapsed_s: float | None = None,
+    require_runtime_identity: bool = False,
 ) -> dict[str, Any]:
     history = list(report.get("history", []))
     final_history = history[-1] if history else {}
+    status = "completed" if len(history) == int(config.step_count) else "blocked"
+    resolved_solver_elapsed_s = (
+        float(elapsed_s)
+        if solver_elapsed_s is None
+        else float(solver_elapsed_s)
+    )
+    resolved_pre_summary_artifact_elapsed_s = (
+        float(elapsed_s)
+        if pre_summary_artifact_elapsed_s is None
+        else float(pre_summary_artifact_elapsed_s)
+    )
+    profile_wall_time_enabled = report.get("profile_wall_time_enabled")
+    taichi_runtime_identity = report.get("taichi_runtime_identity")
+    if require_runtime_identity and status == "completed":
+        if not isinstance(profile_wall_time_enabled, bool):
+            raise ValueError(
+                "completed formal run report is missing profile wall-time identity"
+            )
+        if not isinstance(taichi_runtime_identity, dict) or not taichi_runtime_identity:
+            raise ValueError(
+                "completed formal run report is missing runtime identity"
+            )
+    profile_field_names = (
+        "flow_wall_time_s_total",
+        "solid_wall_time_s_total",
+        "hibm_pre_predictor_wall_time_s_total",
+        "hibm_projection_cycle_wall_time_s_total",
+        "hibm_post_solid_observer_wall_time_s_total",
+        "hibm_wall_time_s_total",
+        "snapshot_capture_wall_time_s_total",
+        "step_artifact_export_wall_time_s_total",
+        "kalman_filter_overhead_s_total",
+        "kalman_state_transfer_overhead_s_total",
+        "kalman_total_overhead_s_total",
+    )
+    profile_totals = {
+        field: float(report[field])
+        for field in profile_field_names
+        if field in report
+    }
     return {
         "run_label": run_label,
-        "status": "completed" if len(history) == int(config.step_count) else "blocked",
+        "status": status,
         "elapsed_s": float(elapsed_s),
+        "solver_elapsed_s": resolved_solver_elapsed_s,
+        "post_solver_artifact_export_wall_time_s": float(
+            post_solver_artifact_export_wall_time_s
+        ),
+        "pre_summary_artifact_elapsed_s": (
+            resolved_pre_summary_artifact_elapsed_s
+        ),
+        "profile_wall_time_enabled": profile_wall_time_enabled,
+        "taichi_runtime_identity": taichi_runtime_identity,
         "output_dir": str(output_dir),
         "step_count_requested": int(config.step_count),
         "step_count_completed": len(history),
@@ -863,7 +1028,15 @@ def _summary_from_report(
         "solid_particle_counts": list(config.solid_particle_counts),
         "marker_count": int(config.marker_count),
         "flow_projection_iterations": int(config.flow_projection_iterations),
-        "solid_substeps": int(config.solid_substeps),
+        "solid_substeps": config.solid_substeps,
+        "solid_substeps_mode": (
+            "adaptive" if config.solid_substeps is None else "fixed_override"
+        ),
+        "kalman_writeback_mode": str(config.kalman_writeback_mode),
+        "kalman_modified_physics": bool(
+            report.get("kalman_modified_physics", False)
+        ),
+        "kalman_summary": report.get("kalman_summary", {}),
         "max_displacement_m": report.get("max_displacement_m"),
         "max_displacement_relative_error": report.get(
             "max_displacement_relative_error"
@@ -873,6 +1046,7 @@ def _summary_from_report(
         "final_history": final_history,
         "solver_npz_summary": solver_npz_summary or {},
         "step_field_frame_count": len(list((output_dir / "step_fields").glob("step_*.npz"))),
+        **profile_totals,
     }
 
 
@@ -963,7 +1137,47 @@ def main() -> int:
         default="raise",
         choices=("raise", "report"),
     )
-    parser.add_argument("--solid-substeps", type=int, default=1600)
+    parser.add_argument(
+        "--solid-substeps",
+        type=int,
+        default=None,
+        help=(
+            "Optional fixed MPM substep count for controlled A/B reference "
+            "runs. Omit it for the production per-macro adaptive selector."
+        ),
+    )
+    parser.add_argument(
+        "--kalman-mode",
+        default="off",
+        choices=("off", "interface", "fluid", "solid", "global"),
+        help=(
+            "Modified-physics posterior writeback placement. 'off' constructs "
+            "no filter and preserves the unfiltered numerical path."
+        ),
+    )
+    parser.add_argument(
+        "--kalman-warmup-accepted-states",
+        type=int,
+        default=6,
+        help=(
+            "Accepted-state count required before writeback. Initialization "
+            "counts as one, so 6 means FSI steps 1-5 assimilate only and step "
+            "6 is the first active writeback."
+        ),
+    )
+    for owner in ("interface", "fluid", "solid"):
+        parser.add_argument(
+            f"--kalman-{owner}-q",
+            type=float,
+            default=None,
+            help=f"Frozen {owner} rate-process-noise spectral density.",
+        )
+        parser.add_argument(
+            f"--kalman-{owner}-r",
+            type=float,
+            default=None,
+            help=f"Frozen {owner} measurement variance.",
+        )
     parser.add_argument(
         "--flow-predictor-substeps",
         type=int,
@@ -1041,12 +1255,27 @@ def main() -> int:
         help="Force cold Taichi JIT compilation for diagnostic A/B runs.",
     )
     parser.add_argument(
+        "--detailed-preflow-stage-progress",
+        action="store_true",
+        help=(
+            "Persist fine-grained preflow stage progress. This diagnostic mode "
+            "adds durable filesystem writes; production runs keep only "
+            "step-level progress. Combine with --profile-wall-time for "
+            "synchronized per-stage timing."
+        ),
+    )
+    parser.add_argument(
         "--profile-wall-time",
         action="store_true",
         help=(
             "Enable synchronized GPU phase timing. This adds host/device "
             "barriers and is diagnostic-only."
         ),
+    )
+    parser.add_argument(
+        "--flow-report-percentiles",
+        action="store_true",
+        help="Include p99 and p99.9 flow-speed diagnostics in reports.",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -1077,6 +1306,13 @@ def main() -> int:
             enabled=not bool(args.disable_taichi_offline_cache),
             cache_dir=Path(args.taichi_offline_cache_dir),
         )
+        taichi_runtime = {
+            **taichi_runtime,
+            "requested_arch": "cuda",
+            "default_fp": "f32",
+            "random_seed": 0,
+            "strict_arch": True,
+        }
         progress_observer(
             {
                 "phase": "configuring",
@@ -1150,15 +1386,18 @@ def main() -> int:
         else None
     )
     try:
+        solver_started_s = time.perf_counter()
         report = run_ansys_vertical_flap_benchmark(
             config,
             step_observer=step_observer,
             progress_observer=progress_observer,
             profile_wall_time=bool(args.profile_wall_time),
         )
+        solver_elapsed_s = time.perf_counter() - solver_started_s
         elapsed_s = time.perf_counter() - start
         report = dict(report)
         history = list(report.get("history", []))
+        post_solver_artifact_export_started_s = time.perf_counter()
         _write_history_csv(output_dir / "our_solver_history.csv", history)
         _write_json(
             output_dir / "our_solver_report_compact.json",
@@ -1187,6 +1426,11 @@ def main() -> int:
                 output_dir,
                 expected_steps=int(config.step_count),
             )
+        post_solver_artifact_export_wall_time_s = (
+            time.perf_counter()
+            - post_solver_artifact_export_started_s
+        )
+        pre_summary_artifact_elapsed_s = time.perf_counter() - start
         summary = _summary_from_report(
             report=report,
             config=config,
@@ -1194,11 +1438,18 @@ def main() -> int:
             elapsed_s=elapsed_s,
             solver_npz_summary=solver_npz_summary,
             run_label=args.run_label,
+            solver_elapsed_s=solver_elapsed_s,
+            post_solver_artifact_export_wall_time_s=(
+                post_solver_artifact_export_wall_time_s
+            ),
+            pre_summary_artifact_elapsed_s=pre_summary_artifact_elapsed_s,
+            require_runtime_identity=True,
         )
         if step_artifact_validation is not None:
             summary["step_artifact_validation"] = step_artifact_validation
             summary["step_field_frame_count"] = step_artifact_validation["frame_count"]
         _write_json_atomic(output_dir / "our_solver_summary.json", summary)
+        terminal_elapsed_s = time.perf_counter() - start
         terminal_status = (
             "completed" if summary.get("status") == "completed" else "blocked"
         )
@@ -1210,7 +1461,7 @@ def main() -> int:
                 **progress,
                 "status": terminal_status,
                 "phase": terminal_status,
-                "elapsed_s": elapsed_s,
+                "elapsed_s": terminal_elapsed_s,
             },
         )
         print(json.dumps(_json_safe(summary), sort_keys=True))

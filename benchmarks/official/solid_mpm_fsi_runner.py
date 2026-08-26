@@ -5,11 +5,19 @@ import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
+from numbers import Integral
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from simulation_core.coupling.active_kalman_writeback import (
+    ACTIVE_KALMAN_MODE_OWNERS,
+    FLUID_FSI_PRESSURE_FEEDBACK_OWNER,
+    INTERFACE_MARKER_VELOCITY_OWNER,
+    SOLID_PARTICLE_VELOCITY_OWNER,
+    ActiveKalmanWritebackController,
+)
 from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec
 from simulation_core.fluids.preflow_snapshot import (
     PREFLOW_SNAPSHOT_FIELD_NAMES,
@@ -26,12 +34,22 @@ from simulation_core.coupling.hibm_mpm import (
     HibmMpmSurfaceMarkers,
     hibm_mpm_external_force_parts_fresh_for_solid_step,
 )
-from simulation_core.solids.neo_hookean_mpm import NeoHookeanMpmState
+from simulation_core.solids.neo_hookean_mpm import (
+    MpmOutOfBoundsError,
+    MpmRequiredRegionEmptyError,
+    NeoHookeanMpmState,
+)
 from simulation_core.coupling.pressure_sample_pairs import (
     PressureSamplePairMap,
     RuntimeAnchoredCellPairProvider,
 )
-from simulation_core.diagnostics.runtime import TaichiRuntimeConfig
+from simulation_core.diagnostics.runtime import (
+    TaichiRuntimeConfig,
+    taichi_runtime_identity,
+)
+from simulation_core.diagnostics.time_stepping import (
+    physical_time_roundoff_tolerance_s,
+)
 
 
 class PreflowSnapshotValidationError(ValueError):
@@ -167,11 +185,157 @@ def _measure_taichi_operation_wall_time(
     return result, elapsed_s
 
 
+def _capture_solid_positions_for_step(
+    solid: Any,
+    *,
+    profile_wall_time: bool,
+) -> tuple[np.ndarray, float]:
+    positions, wall_time_s = _measure_taichi_operation_wall_time(
+        lambda: solid.x.to_numpy()[: solid.particle_count],
+        enabled=profile_wall_time,
+    )
+    return positions, wall_time_s
+
+
+_FSI_PROFILE_REQUIRED_STEP_FIELDS = (
+    "flow_wall_time_s",
+    "snapshot_capture_wall_time_s",
+    "step_artifact_export_wall_time_s",
+    "hibm_pre_predictor_wall_time_s",
+    "hibm_projection_cycle_wall_time_s",
+    "hibm_post_solid_observer_wall_time_s",
+    "hibm_wall_time_s",
+)
+
+
+def _profile_wall_time_value(value: object, *, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"invalid FSI profile field {field}")
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"invalid FSI profile field {field}") from exc
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError(f"invalid FSI profile field {field}")
+    return result
+
+
+def _fsi_profile_summary(
+    history: list[Mapping[str, object]],
+) -> dict[str, float]:
+    """Sum only explicit per-FSI-step timing measurements."""
+
+    collected = {
+        field: [] for field in _FSI_PROFILE_REQUIRED_STEP_FIELDS
+    }
+    solid_wall_times: list[float] = []
+    solid_wall_time_complete = bool(history)
+    for step_index, step in enumerate(history, start=1):
+        for field in _FSI_PROFILE_REQUIRED_STEP_FIELDS:
+            if field not in step:
+                raise ValueError(
+                    f"FSI profile step {step_index} is missing {field}"
+                )
+            collected[field].append(
+                _profile_wall_time_value(
+                    step[field],
+                    field=f"step {step_index} {field}",
+                )
+            )
+        if "solid_wall_time_s" not in step:
+            solid_wall_time_complete = False
+            continue
+        solid_wall_times.append(
+            _profile_wall_time_value(
+                step["solid_wall_time_s"],
+                field=f"step {step_index} solid_wall_time_s",
+            )
+        )
+    totals = {
+        f"{field}_total": float(math.fsum(values))
+        for field, values in collected.items()
+    }
+    if solid_wall_time_complete:
+        totals["solid_wall_time_s_total"] = float(
+            math.fsum(solid_wall_times)
+        )
+    return totals
+
+
+def _hibm_stage_wall_time_sum(stage_wall_times: object) -> float:
+    return float(
+        math.fsum(
+            _normalized_hibm_sharp_boundary_stage_wall_times(
+                stage_wall_times
+            ).values()
+        )
+    )
+
+
+def _hibm_report_wall_time_s(
+    report: Mapping[str, object] | None,
+) -> float:
+    return _hibm_stage_wall_time_sum(
+        None
+        if report is None
+        else report.get("hibm_sharp_marker_boundary_stage_wall_time_s")
+    )
+
+
+def _fsi_step_hibm_wall_times(
+    flow_report: Mapping[str, object],
+    post_solid_observer_report: Mapping[str, object] | None,
+) -> dict[str, float]:
+    pre_predictor_source = flow_report.get("hibm_pre_predictor_wall_time_s")
+    if pre_predictor_source is None:
+        pre_predictor_source = _hibm_stage_wall_time_sum(
+            flow_report.get("hibm_pre_predictor_stage_wall_time_s")
+        )
+    projection_cycle_source = flow_report.get(
+        "hibm_projection_cycle_wall_time_s"
+    )
+    if projection_cycle_source is None:
+        projection_cycle_source = _hibm_stage_wall_time_sum(
+            flow_report.get(
+                "hibm_sharp_marker_boundary_total_stage_wall_time_s",
+                flow_report.get(
+                    "hibm_sharp_marker_boundary_stage_wall_time_s"
+                ),
+            )
+        )
+    pre_predictor_wall_time_s = _profile_wall_time_value(
+        pre_predictor_source,
+        field="hibm_pre_predictor_wall_time_s",
+    )
+    projection_cycle_wall_time_s = _profile_wall_time_value(
+        projection_cycle_source,
+        field="hibm_projection_cycle_wall_time_s",
+    )
+    post_solid_observer_wall_time_s = _hibm_report_wall_time_s(
+        post_solid_observer_report
+    )
+    return {
+        "hibm_pre_predictor_wall_time_s": pre_predictor_wall_time_s,
+        "hibm_projection_cycle_wall_time_s": projection_cycle_wall_time_s,
+        "hibm_post_solid_observer_wall_time_s": post_solid_observer_wall_time_s,
+        "hibm_wall_time_s": float(
+            math.fsum(
+                (
+                    pre_predictor_wall_time_s,
+                    projection_cycle_wall_time_s,
+                    post_solid_observer_wall_time_s,
+                )
+            )
+        ),
+    }
+
+
 def _measure_hibm_sharp_boundary_stage(
     stage_wall_times: dict[str, float],
     stage_name: str,
     operation: Callable[[], Any],
     *,
+    enabled: bool = True,
     clock: Callable[[], float] | None = None,
     synchronize: Callable[[], None] | None = None,
     excluded_wall_time: Callable[[], float] | None = None,
@@ -181,6 +345,8 @@ def _measure_hibm_sharp_boundary_stage(
             "unsupported HIBM sharp-boundary timing stage: "
             f"{stage_name!r}"
         )
+    if not enabled:
+        return operation()
     clock_fn = time.perf_counter if clock is None else clock
     synchronize_fn = (
         _synchronize_hibm_sharp_boundary_stage_timing
@@ -307,6 +473,9 @@ FLOW_DRIVER_SUSTAINED_BOUNDARY_PREDICTOR = "sustained_boundary_predictor"
 FLOW_DRIVER_SUSTAINED_SOURCE = "sustained_volume_source_inlet"
 FLOW_DRIVER_SUSTAINED_PREDICTOR = "sustained_inlet_predictor"
 FLOW_DRIVER_SHARP_REFERENCE = "sharp_hibm_mpm_reference"
+FLOW_DRIVER_PHYSICAL_PREDICTOR_MODES = frozenset(
+    {FLOW_DRIVER_SUSTAINED_BOUNDARY_PREDICTOR, FLOW_DRIVER_SUSTAINED_PREDICTOR}
+)
 FLOW_SOLID_BOUNDARY_CELL_OBSTACLE_LAYERS = "cell_obstacle_layers"
 FLOW_SOLID_BOUNDARY_HIBM_SHARP_MARKER_ROWS = "hibm_sharp_marker_rows"
 FLOW_SOLID_BOUNDARY_MODES = {
@@ -500,6 +669,538 @@ def _advance_particle_position_generation(current_generation: int) -> int:
     return int(current_generation) + 1
 
 
+class SolidTrialRejectedError(RuntimeError):
+    """A retryable numerical solid-trial rejection."""
+
+
+def _validated_solid_substep_override(config: Any) -> int | None:
+    requested_value = getattr(config, "solid_substeps", None)
+    if requested_value is None:
+        return None
+    if isinstance(requested_value, bool) or not isinstance(
+        requested_value,
+        Integral,
+    ):
+        raise ValueError(
+            "solid_substeps must be None for adaptive mode or a positive integer"
+        )
+    requested_substeps = int(requested_value)
+    if requested_substeps <= 0:
+        raise ValueError("solid_substeps must be positive when specified")
+    return requested_substeps
+def _validated_solid_controller_integer(
+    value: object,
+    *,
+    field_name: str,
+    minimum: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(f"{field_name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        qualifier = "positive" if minimum == 1 else "non-negative"
+        raise ValueError(f"{field_name} must be {qualifier}")
+    return result
+
+
+def _validated_solid_substep_dt_s(
+    requested_macro_dt_s: object,
+    solid_substeps: object,
+) -> float:
+    requested = float(requested_macro_dt_s)
+    if not math.isfinite(requested) or requested <= 0.0:
+        raise ValueError("solid requested macro dt must be finite and positive")
+    substeps = _validated_solid_controller_integer(
+        solid_substeps,
+        field_name="solid_substeps_selected",
+        minimum=1,
+    )
+    substep_dt_s = requested / float(substeps)
+    if not math.isfinite(substep_dt_s) or substep_dt_s <= 0.0:
+        raise ValueError(
+            "solid substep dt is not representable as a positive finite value: "
+            f"requested_macro_dt_s={requested:g}, solid_substeps={substeps}"
+        )
+    return substep_dt_s
+
+
+
+
+def _macro_time_accounting_report(
+    *,
+    requested_macro_dt_s: float,
+    accepted_time_s: float,
+    accepted_substep_count: int,
+    rejected_trial_count: int,
+    component: str,
+) -> dict[str, object]:
+    """Fail closed unless accepted physical time closes a macro step."""
+    requested = float(requested_macro_dt_s)
+    accepted = float(accepted_time_s)
+    rejected = int(rejected_trial_count)
+    if (
+        not math.isfinite(requested)
+        or not math.isfinite(accepted)
+        or requested <= 0.0
+        or accepted < 0.0
+        or rejected < 0
+    ):
+        raise ValueError(f"invalid {component} physical-time accounting")
+    tolerance = physical_time_roundoff_tolerance_s(
+        requested_time_s=requested,
+        accepted_time_s=accepted,
+        accepted_substep_count=accepted_substep_count,
+    )
+    remaining = requested - accepted
+    if abs(remaining) > tolerance:
+        raise RuntimeError(
+            f"{component} did not consume the requested physical macro time: "
+            f"requested_macro_dt_s={requested:g}, accepted_time_s={accepted:g}, "
+            f"remaining_unadvanced_time_s={remaining:g}"
+        )
+    prefix = str(component)
+    return {
+        "requested_macro_dt_s": requested,
+        f"{prefix}_accepted_time_s": accepted,
+        f"{prefix}_rejected_trial_count": rejected,
+        f"{prefix}_remaining_unadvanced_time_s": 0.0,
+    }
+
+
+def _validated_component_accepted_time(
+    *,
+    requested_time_s: float,
+    reported_requested_time_s: float,
+    accepted_time_s: float,
+    accepted_substep_count: int,
+    remaining_unadvanced_time_s: float,
+    rejected_trial_count: int,
+    component: str,
+) -> float:
+    """Validate one operator clock without adding it to macro physical time."""
+
+    requested = float(requested_time_s)
+    reported_requested = float(reported_requested_time_s)
+    accepted = float(accepted_time_s)
+    remaining = float(remaining_unadvanced_time_s)
+    rejected = int(rejected_trial_count)
+    _macro_time_accounting_report(
+        requested_macro_dt_s=requested,
+        accepted_time_s=reported_requested,
+        accepted_substep_count=1,
+        rejected_trial_count=0,
+        component=f"{component} request",
+    )
+    _macro_time_accounting_report(
+        requested_macro_dt_s=requested,
+        accepted_time_s=accepted,
+        accepted_substep_count=accepted_substep_count,
+        rejected_trial_count=rejected,
+        component=component,
+    )
+    tolerance = physical_time_roundoff_tolerance_s(
+        requested_time_s=requested,
+        accepted_time_s=accepted,
+        accepted_substep_count=accepted_substep_count,
+    )
+    if not math.isfinite(remaining) or abs(remaining) > tolerance:
+        raise RuntimeError(
+            f"{component} reported unadvanced physical time after acceptance: "
+            f"requested_time_s={requested:g}, accepted_time_s={accepted:g}, "
+            f"remaining_unadvanced_time_s={remaining:g}, "
+            f"tolerance_s={tolerance:g}"
+        )
+    return accepted
+
+
+def _require_healthy_solid_trial_report(report: Any, config: Any) -> None:
+    scalar_fields = (
+        "particle_spacing_m",
+        "grid_spacing_m",
+        "total_mass_kg",
+        "total_volume_m3",
+        "transfer_relative_error",
+        "max_speed_mps",
+        "max_abs_j",
+        "mean_radial_stretch",
+        "max_radial_stretch_error",
+    )
+    vector_fields = (
+        "primary_mean_displacement_m",
+        "primary_mean_velocity_mps",
+        "secondary_mean_displacement_m",
+        "secondary_mean_velocity_mps",
+        "particle_momentum_kg_mps",
+        "grid_momentum_kg_mps",
+        "external_force_n",
+    )
+    for field_name in (*scalar_fields, *vector_fields):
+        if not hasattr(report, field_name):
+            continue
+        raw_value = getattr(report, field_name)
+        values = raw_value if isinstance(raw_value, (tuple, list)) else (raw_value,)
+        if any(not math.isfinite(float(value)) for value in values):
+            raise SolidTrialRejectedError(
+                f"solid MPM trial reported non-finite {field_name}"
+            )
+    if hasattr(report, "max_abs_j") and float(report.max_abs_j) <= 0.0:
+        raise SolidTrialRejectedError(
+            "solid MPM trial reported non-positive maximum deformation Jacobian"
+        )
+    clamp_limit = getattr(
+        config,
+        "solid_max_deformation_clamp_count_per_macro_step",
+        None,
+    )
+    if clamp_limit is not None and hasattr(report, "deformation_clamp_count"):
+        limit = _validated_solid_controller_integer(
+            clamp_limit,
+            field_name="solid_max_deformation_clamp_count_per_macro_step",
+            minimum=0,
+        )
+        if int(report.deformation_clamp_count) > limit:
+            raise SolidTrialRejectedError(
+                "solid MPM trial exceeded the deformation-clamp limit: "
+                f"count={int(report.deformation_clamp_count)}, limit={limit}"
+            )
+
+
+def _select_and_advance_solid_macro_step(
+    solid: NeoHookeanMpmState,
+    config: Any,
+    *,
+    mu_pa: float,
+    lambda_pa: float,
+    retry_prepare: Callable[[], None],
+    particle_position_write_observer: Callable[[], None] | None = None,
+    profile_wall_time: bool = False,
+) -> dict[str, object]:
+    latest_selection: dict[str, object] = {}
+    selector_evaluation_count = 0
+
+    def select_from_accepted_state() -> int:
+        nonlocal latest_selection, selector_evaluation_count
+        accepted_speed_mps = float(solid.accepted_particle_max_speed())
+        latest_selection = dict(
+            solid_substep_cfl_report(
+                config,
+                max_particle_speed_mps=accepted_speed_mps,
+            )
+        )
+        latest_selection["solid_max_particle_speed_mps"] = accepted_speed_mps
+        selector_evaluation_count += 1
+        selected = _validated_solid_controller_integer(
+            latest_selection["solid_substeps_selected"],
+            field_name="solid_substeps_selected",
+            minimum=1,
+        )
+        max_substeps = _validated_solid_controller_integer(
+            getattr(config, "solid_max_automatic_substeps", 65536),
+            field_name="solid_max_automatic_substeps",
+            minimum=1,
+        )
+        if selected > max_substeps:
+            raise RuntimeError(
+                "solid selector exceeds solid_max_automatic_substeps: "
+                f"selected={selected}, maximum={max_substeps}"
+            )
+        return selected
+
+    def advance_selected_macro_step() -> tuple[int, dict[str, object]]:
+        initial_selected = select_from_accepted_state()
+        report = _advance_solid_macro_step_with_retries(
+            solid,
+            config,
+            selected_substeps=initial_selected,
+            mu_pa=mu_pa,
+            lambda_pa=lambda_pa,
+            retry_prepare=retry_prepare,
+            retry_selected_substeps=select_from_accepted_state,
+            particle_position_write_observer=particle_position_write_observer,
+            # The enclosing synchronized boundary covers the initial selector,
+            # accepted-state save, every trial/retry, and final commit.
+            profile_wall_time=False,
+        )
+        return initial_selected, report
+
+    if profile_wall_time:
+        (
+            (initial_selected_substeps, advance_report),
+            solid_wall_time_s,
+        ) = _measure_taichi_operation_wall_time(
+            advance_selected_macro_step,
+            enabled=True,
+        )
+    else:
+        macro_started_s = time.perf_counter()
+        initial_selected_substeps, advance_report = advance_selected_macro_step()
+        solid_wall_time_s = max(0.0, time.perf_counter() - macro_started_s)
+    advance_report["solid_wall_time_s"] = solid_wall_time_s
+    advance_report["solid_wall_time_synchronized"] = bool(profile_wall_time)
+    final_selected_substeps = int(advance_report["solid_substeps_selected"])
+    final_substep_dt_s = _validated_solid_substep_dt_s(
+        config.dt_s,
+        final_selected_substeps,
+    )
+    result = dict(latest_selection)
+    if {
+        "solid_elastic_wave_speed_mps",
+        "solid_max_particle_speed_mps",
+        "solid_min_grid_spacing_m",
+    }.issubset(result):
+        result["solid_estimated_cfl"] = (
+            (
+                float(result["solid_elastic_wave_speed_mps"])
+                + float(result["solid_max_particle_speed_mps"])
+            )
+            * final_substep_dt_s
+            / float(result["solid_min_grid_spacing_m"])
+        )
+    result.update(advance_report)
+    result["solid_substeps_initial_selected"] = initial_selected_substeps
+    result["solid_substeps_selected"] = final_selected_substeps
+    result["solid_substep_dt_s"] = final_substep_dt_s
+    result["solid_selector_evaluation_count"] = selector_evaluation_count
+    result["solid_selector_device_to_host_scalar_read_count"] = (
+        selector_evaluation_count
+    )
+    result["solid_retry_count"] = int(
+        result.get("solid_rejected_trial_count", 0)
+    )
+    return result
+
+
+def _solid_substep_run_summary(
+    step_reports: list[Mapping[str, object]],
+) -> dict[str, object]:
+    if not step_reports:
+        return {
+            "solid_substeps_total": 0,
+            "solid_substeps_min": 0,
+            "solid_substeps_max": 0,
+            "solid_substeps_mean": 0.0,
+            "solid_step_kernel_launch_count_total": 0,
+            "solid_selector_device_to_host_scalar_read_count_total": 0,
+            "solid_packed_report_device_to_host_transfer_count_total": 0,
+            "solid_guard_batch_count_total": 0,
+            "solid_accepted_substeps_total": 0,
+            "solid_substeps_selected_min": 0,
+            "solid_substeps_selected_max": 0,
+            "solid_substeps_selected_mean": 0.0,
+            "solid_retry_count_total": 0,
+            "solid_rejected_trial_count_total": 0,
+            "solid_wall_time_s": 0.0,
+        }
+    executed = [
+        int(
+            report.get(
+                "solid_substeps_executed_total",
+                report["solid_accepted_substep_count"],
+            )
+        )
+        for report in step_reports
+    ]
+    accepted = [
+        int(report["solid_accepted_substep_count"])
+        for report in step_reports
+    ]
+    retries = [
+        int(report.get("solid_retry_count", 0)) for report in step_reports
+    ]
+    rejected = [
+        int(report.get("solid_rejected_trial_count", 0))
+        for report in step_reports
+    ]
+    step_kernel_launches = [
+        int(
+            report.get(
+                "solid_step_kernel_launch_count",
+                report.get(
+                    "solid_substeps_executed_total",
+                    report["solid_accepted_substep_count"],
+                ),
+            )
+        )
+        for report in step_reports
+    ]
+    selector_host_reads = [
+        int(
+            report.get(
+                "solid_selector_device_to_host_scalar_read_count",
+                report.get("solid_selector_evaluation_count", 0),
+            )
+        )
+        for report in step_reports
+    ]
+    packed_report_transfers = [
+        int(report["solid_packed_report_device_to_host_transfer_count"])
+        for report in step_reports
+    ]
+    guard_batches = [
+        int(
+            report.get(
+                "solid_guard_batch_count",
+                int(report.get("solid_rejected_trial_count", 0)) + 1,
+            )
+        )
+        for report in step_reports
+    ]
+    return {
+        "solid_substeps_total": sum(executed),
+        "solid_substeps_min": min(executed),
+        "solid_substeps_max": max(executed),
+        "solid_substeps_mean": math.fsum(executed) / len(executed),
+        "solid_step_kernel_launch_count_total": sum(step_kernel_launches),
+        "solid_selector_device_to_host_scalar_read_count_total": sum(
+            selector_host_reads
+        ),
+        "solid_packed_report_device_to_host_transfer_count_total": sum(
+            packed_report_transfers
+        ),
+        "solid_guard_batch_count_total": sum(guard_batches),
+        "solid_accepted_substeps_total": sum(accepted),
+        "solid_substeps_selected_min": min(accepted),
+        "solid_substeps_selected_max": max(accepted),
+        "solid_substeps_selected_mean": math.fsum(accepted) / len(accepted),
+        "solid_retry_count_total": sum(retries),
+        "solid_rejected_trial_count_total": sum(rejected),
+        "solid_wall_time_s": math.fsum(
+            float(report.get("solid_wall_time_s", 0.0))
+            for report in step_reports
+        ),
+    }
+
+
+def _advance_solid_macro_step_with_retries(
+    solid: NeoHookeanMpmState,
+    config: Any,
+    *,
+    selected_substeps: int,
+    mu_pa: float,
+    lambda_pa: float,
+    retry_prepare: Callable[[], None],
+    retry_selected_substeps: Callable[[], int] | None = None,
+    particle_position_write_observer: Callable[[], None] | None = None,
+    profile_wall_time: bool = False,
+) -> dict[str, object]:
+    """Commit one full solid macro step or restore and retry a typed trial fault."""
+    substeps = _validated_solid_controller_integer(
+        selected_substeps,
+        field_name="selected_substeps",
+        minimum=1,
+    )
+    max_retries = _validated_solid_controller_integer(
+        getattr(config, "solid_max_substep_retries", 3),
+        field_name="solid_max_substep_retries",
+        minimum=0,
+    )
+    max_substeps = _validated_solid_controller_integer(
+        getattr(config, "solid_max_automatic_substeps", 65536),
+        field_name="solid_max_automatic_substeps",
+        minimum=1,
+    )
+    if substeps > max_substeps:
+        raise RuntimeError(
+            "initial solid selector exceeds solid_max_automatic_substeps"
+        )
+    requested_dt_s = float(config.dt_s)
+    _validated_solid_substep_dt_s(requested_dt_s, substeps)
+    solid.save_state()
+    rejected = 0
+    attempted_substeps = [0]
+    packed_report_transfer_attempts = [0]
+    if profile_wall_time:
+        _synchronize_hibm_sharp_boundary_stage_timing()
+    macro_started_s = time.perf_counter()
+    while True:
+        substep_dt_s = _validated_solid_substep_dt_s(
+            requested_dt_s,
+            substeps,
+        )
+        try:
+            report = _advance_solid_substeps_batched(
+                solid, config, solid_substeps=substeps,
+                solid_substep_dt_s=substep_dt_s, mu_pa=mu_pa,
+                lambda_pa=lambda_pa,
+                solid_substep_velocity_damping=_solid_substep_velocity_damping(
+                    config, solid_substeps=substeps
+                ),
+                particle_position_write_observer=particle_position_write_observer,
+                solid_substep_attempt_counter=attempted_substeps,
+                solid_packed_report_transfer_counter=(
+                    packed_report_transfer_attempts
+                ),
+            )
+            _require_healthy_solid_trial_report(report, config)
+        except (
+            SolidTrialRejectedError,
+            MpmOutOfBoundsError,
+            MpmRequiredRegionEmptyError,
+            FloatingPointError,
+        ) as error:
+            solid.restore_state()
+            if particle_position_write_observer is not None:
+                particle_position_write_observer()
+            rejected += 1
+            if rejected > max_retries:
+                raise RuntimeError(
+                    "solid MPM macro step could not commit after rollback retries"
+                ) from error
+            retry_prepare()
+            reselected = (
+                substeps
+                if retry_selected_substeps is None
+                else retry_selected_substeps()
+            )
+            validated_reselected = _validated_solid_controller_integer(
+                reselected,
+                field_name="restored-state solid selector result",
+                minimum=1,
+            )
+            candidate = max(2 * substeps, validated_reselected)
+            if candidate > max_substeps:
+                raise RuntimeError(
+                    "solid MPM retry exceeds solid_max_automatic_substeps"
+                ) from error
+            substeps = candidate
+            continue
+        except Exception:
+            # A non-retryable error may occur after a batch has advanced the
+            # particle fields. Preserve its original type and traceback, but
+            # restore the last accepted snapshot before it leaves this scope.
+            solid.restore_state()
+            if particle_position_write_observer is not None:
+                particle_position_write_observer()
+            raise
+        if profile_wall_time:
+            _synchronize_hibm_sharp_boundary_stage_timing()
+        solid_wall_time_s = max(
+            0.0, time.perf_counter() - macro_started_s
+        )
+        time_report = _macro_time_accounting_report(
+            requested_macro_dt_s=requested_dt_s,
+            accepted_time_s=float(substeps) * substep_dt_s,
+            accepted_substep_count=substeps,
+            rejected_trial_count=rejected,
+            component="solid",
+        )
+        return {
+            "solid_report": report,
+            "solid_substeps_selected": substeps,
+            "solid_accepted_substep_count": substeps,
+            "solid_substeps_executed_total": int(attempted_substeps[0]),
+            "solid_step_kernel_launch_count": int(attempted_substeps[0]),
+            "solid_guard_batch_count": rejected + 1,
+            "solid_packed_report_device_to_host_transfer_count": int(
+                packed_report_transfer_attempts[0]
+            ),
+            "solid_substep_dt_s": substep_dt_s,
+            "solid_wall_time_s": solid_wall_time_s,
+            "solid_wall_time_synchronized": bool(profile_wall_time),
+            **time_report,
+        }
+
+
 def _advance_solid_substeps_batched(
     solid: NeoHookeanMpmState,
     config: Any,
@@ -510,6 +1211,8 @@ def _advance_solid_substeps_batched(
     lambda_pa: float,
     solid_substep_velocity_damping: float,
     particle_position_write_observer: Callable[[], None] | None = None,
+    solid_substep_attempt_counter: list[int] | None = None,
+    solid_packed_report_transfer_counter: list[int] | None = None,
 ) -> Any:
     """Advance one FSI solid step with one fail-closed host guard read.
 
@@ -519,9 +1222,19 @@ def _advance_solid_substeps_batched(
     consume the advanced solid state.
     """
 
+    if solid_substep_attempt_counter is not None and len(
+        solid_substep_attempt_counter
+    ) != 1:
+        raise ValueError("solid_substep_attempt_counter must contain one integer")
+    if solid_packed_report_transfer_counter is not None and len(
+        solid_packed_report_transfer_counter
+    ) != 1:
+        raise ValueError("solid_packed_report_transfer_counter must contain one integer")
     solid.begin_out_of_bounds_guard_batch()
     try:
         for _solid_substep in range(solid_substeps):
+            if solid_substep_attempt_counter is not None:
+                solid_substep_attempt_counter[0] += 1
             solid.step(
                 dt_s=solid_substep_dt_s,
                 mu_pa=mu_pa,
@@ -550,6 +1263,8 @@ def _advance_solid_substeps_batched(
                 solid.enforce_rest_x_plane()
                 if particle_position_write_observer is not None:
                     particle_position_write_observer()
+        if solid_packed_report_transfer_counter is not None:
+            solid_packed_report_transfer_counter[0] += 1
         return solid.end_out_of_bounds_guard_batch()
     except BaseException:
         # end_out_of_bounds_guard_batch() closes its host lifecycle before its
@@ -576,12 +1291,17 @@ def run_hibm_mpm_fsi(
 ) -> dict[str, object]:
     """Run the canonical Cartesian rectangular-solid HIBM-MPM pipeline."""
     run_started_s = time.perf_counter()
+    _validate_rectangular_solid_config(config)
+    flow_driver_mode = (
+        _require_fsi_physical_flow_driver_mode(config)
+        if int(config.step_count) > 0
+        else _effective_flow_driver_mode(config, flow_phase="fsi")
+    )
     _emit_run_progress(
         progress_observer,
         run_started_s=run_started_s,
         phase="initialization_fluid_build",
     )
-    _validate_rectangular_solid_config(config)
     particle_position_generation = 0
 
     def record_particle_position_write() -> None:
@@ -592,6 +1312,7 @@ def run_hibm_mpm_fsi(
 
     runtime = TaichiRuntimeConfig(arch="cuda", strict_arch=True)
     fluid = _build_fluid(config, runtime)
+    runtime_identity = taichi_runtime_identity()
     _initialize_computed_flow(fluid, config)
     markers = _build_markers(config, runtime)
     anchor_install_report = _install_selected_pressure_pair_anchor_markers(
@@ -639,8 +1360,7 @@ def run_hibm_mpm_fsi(
     # does not re-fetch the whole rest array from the device every step
     rest_positions_m = solid.rest_x.to_numpy()[: solid.particle_count]
     mu_pa, lambda_pa = _lame_parameters(config)
-    solid_substep_cfl = solid_substep_cfl_report(config)
-    solid_substeps = int(solid_substep_cfl["solid_substeps_selected"])
+    solid_substep_cfl: dict[str, object] = {}
     solid_seeding = _enforce_solid_seeding_limit(config)
     preflow_report = _run_or_restore_fixed_solid_preflow(
         markers=markers,
@@ -658,14 +1378,35 @@ def run_hibm_mpm_fsi(
             preflow_report,
             expected_mode=str(config.preflow_convergence_mode),
         )
+    else:
+        preflow_accepted_speed_mps = float(solid.accepted_particle_max_speed())
+        solid_substep_cfl = dict(
+            solid_substep_cfl_report(
+                config,
+                max_particle_speed_mps=preflow_accepted_speed_mps,
+            )
+        )
+        solid_substep_cfl["solid_max_particle_speed_mps"] = preflow_accepted_speed_mps
     # A restored snapshot or the final fixed-solid HIBM assembly may replace
     # the obstacle view.  Seal anchors against that actual pre-FSI state.
     refresh_runtime_pressure_pair_anchors()
+    kalman_writeback_mode = _modified_physics_kalman_mode(config)
+    kalman_controller = (
+        _initialize_modified_physics_kalman_controller(
+            config,
+            fluid=fluid,
+            solid=solid,
+            markers=markers,
+        )
+        if int(config.step_count) > 0
+        else None
+    )
 
     latest_stress_report = None
     latest_force_report = None
     latest_scatter_report = None
     latest_solid_report = None
+    latest_solid_step_report = None
     latest_feedback_report = None
     latest_flow_report = None
     latest_feedback_constraint_report = None
@@ -674,9 +1415,9 @@ def run_hibm_mpm_fsi(
     fluid_projection_consumed_feedback_count = 0
     feedback_available_for_projection = False
     history: list[dict[str, object]] = []
+    solid_step_execution_reports: list[dict[str, object]] = []
     final_flow_field_snapshot: dict[str, np.ndarray] = {}
     apply_feedback = bool(getattr(config, "apply_marker_feedback_to_fluid", True))
-    flow_driver_mode = _effective_flow_driver_mode(config, flow_phase="fsi")
     sharp_boundary_cache: dict[str, object] = {}
     export_final_flow_snapshot = bool(
         getattr(config, "export_final_flow_snapshot", False)
@@ -695,6 +1436,14 @@ def run_hibm_mpm_fsi(
     )
 
     for step_index in range(config.step_count):
+        kalman_raw_writeback_targets: dict[str, np.ndarray] = {}
+        kalman_adapter_wall_time_s = 0.0
+        kalman_filter_wall_time_before_s = (
+            _kalman_controller_filter_wall_time_s(kalman_controller)
+        )
+        kalman_step_report = _empty_modified_physics_kalman_step_report(
+            kalman_writeback_mode
+        )
         if _flow_driver_requires_full_field_reinitialize(flow_driver_mode):
             _initialize_computed_flow(fluid, config)
         feedback_available_before_projection = (
@@ -706,42 +1455,148 @@ def run_hibm_mpm_fsi(
             config,
             feedback_available=feedback_available_before_projection,
         )
-        latest_flow_report = _flow_advance_current_step(
-            fluid,
-            config,
-            markers=markers,
-            sharp_boundary_cache=sharp_boundary_cache,
-            flow_phase="fsi",
-            step_index_local=step_index,
-            step_index_global=len(preflow_history) + step_index,
-            preflow_history=preflow_history,
-            reset_pressure=(
-                bool(getattr(config, "flow_reset_pressure_each_step", False))
-                or (step_index == 0 and not preflow_history)
-            ),
-            measure_wall_times=profile_wall_time,
-        )
-        observer_flow_snapshot = (
-            _synchronized_flow_boundary_snapshot(
-                _flow_parity_snapshot(
+        latest_flow_report, flow_wall_time_s = (
+            _measure_taichi_operation_wall_time(
+                lambda: _flow_advance_current_step(
                     fluid,
-                    immutable_geometry=immutable_flow_geometry,
+                    config,
+                    markers=markers,
+                    sharp_boundary_cache=sharp_boundary_cache,
+                    flow_phase="fsi",
+                    step_index_local=step_index,
+                    step_index_global=len(preflow_history) + step_index,
+                    preflow_history=preflow_history,
+                    reset_pressure=(
+                        bool(
+                            getattr(
+                                config,
+                                "flow_reset_pressure_each_step",
+                                False,
+                            )
+                        )
+                        or (step_index == 0 and not preflow_history)
+                    ),
+                    measure_wall_times=profile_wall_time,
                 ),
-                stage="pre_solid_projection",
+                enabled=profile_wall_time,
             )
-            if step_observer is not None
-            else None
         )
-        if export_final_flow_snapshot and (
-            step_index + 1 == int(config.step_count)
+        if kalman_controller is not None:
+            kalman_hook_started_s = time.perf_counter()
+            kalman_controller.begin_step(dt_s=float(config.dt_s))
+            kalman_adapter_wall_time_s += (
+                time.perf_counter() - kalman_hook_started_s
+            )
+        kalman_fluid_feedback_pressure_raw_min_pa = float(
+            latest_flow_report["pressure_min_pa"]
+        )
+        kalman_fluid_feedback_pressure_raw_max_pa = float(
+            latest_flow_report["pressure_max_pa"]
+        )
+        kalman_fluid_feedback_pressure_min_pa = (
+            kalman_fluid_feedback_pressure_raw_min_pa
+        )
+        kalman_fluid_feedback_pressure_max_pa = (
+            kalman_fluid_feedback_pressure_raw_max_pa
+        )
+        if (
+            kalman_controller is not None
+            and kalman_controller.enabled(FLUID_FSI_PRESSURE_FEEDBACK_OWNER)
         ):
-            final_flow_field_snapshot = _synchronized_flow_boundary_snapshot(
-                _flow_field_snapshot(
-                    fluid,
-                    immutable_geometry=immutable_flow_geometry,
-                ),
-                stage="pre_solid_projection",
+            kalman_hook_started_s = time.perf_counter()
+            try:
+                raw_pressure_pa = _kalman_fluid_observation(fluid)
+                fluid_kalman_result = kalman_controller.observe(
+                    FLUID_FSI_PRESSURE_FEEDBACK_OWNER,
+                    raw_pressure_pa,
+                )
+                actual_pressure_pa = raw_pressure_pa
+                if fluid_kalman_result.writeback_values is not None:
+                    kalman_raw_writeback_targets[
+                        FLUID_FSI_PRESSURE_FEEDBACK_OWNER
+                    ] = np.ascontiguousarray(raw_pressure_pa, dtype=np.float64)
+                    actual_pressure_pa = _apply_kalman_fluid_writeback(
+                        fluid,
+                        fluid_kalman_result.writeback_values,
+                    )
+                kalman_fluid_feedback_pressure_raw_min_pa = float(
+                    np.min(raw_pressure_pa)
+                )
+                kalman_fluid_feedback_pressure_raw_max_pa = float(
+                    np.max(raw_pressure_pa)
+                )
+                kalman_fluid_feedback_pressure_min_pa = float(
+                    np.min(actual_pressure_pa)
+                )
+                kalman_fluid_feedback_pressure_max_pa = float(
+                    np.max(actual_pressure_pa)
+                )
+            except Exception:
+                _discard_modified_physics_kalman_step(
+                    kalman_controller,
+                    kalman_raw_writeback_targets,
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                )
+                raise
+            finally:
+                kalman_adapter_wall_time_s += (
+                    time.perf_counter() - kalman_hook_started_s
+                )
+        try:
+            snapshot_capture_wall_time_s = 0.0
+            observer_flow_snapshot = None
+            if step_observer is not None:
+                (
+                    observer_flow_snapshot,
+                    observer_snapshot_wall_time_s,
+                ) = _measure_taichi_operation_wall_time(
+                    lambda: _synchronized_flow_boundary_snapshot(
+                        _flow_parity_snapshot(
+                            fluid,
+                            immutable_geometry=immutable_flow_geometry,
+                        ),
+                        stage="pre_solid_projection",
+                    ),
+                    enabled=profile_wall_time,
+                )
+                snapshot_capture_wall_time_s = float(
+                    observer_snapshot_wall_time_s
+                )
+            if export_final_flow_snapshot and (
+                step_index + 1 == int(config.step_count)
+            ):
+                (
+                    final_flow_field_snapshot,
+                    final_snapshot_wall_time_s,
+                ) = _measure_taichi_operation_wall_time(
+                    lambda: _synchronized_flow_boundary_snapshot(
+                        _flow_field_snapshot(
+                            fluid,
+                            immutable_geometry=immutable_flow_geometry,
+                        ),
+                        stage="pre_solid_projection",
+                    ),
+                    enabled=profile_wall_time,
+                )
+                snapshot_capture_wall_time_s = float(
+                    math.fsum(
+                        (
+                            snapshot_capture_wall_time_s,
+                            final_snapshot_wall_time_s,
+                        )
+                    )
+                )
+        except Exception:
+            _discard_modified_physics_kalman_step(
+                kalman_controller,
+                kalman_raw_writeback_targets,
+                fluid=fluid,
+                solid=solid,
+                markers=markers,
             )
+            raise
         latest_feedback_constraint_report[
             "no_slip_projected_residual_after_projection_mps"
         ] = float(latest_flow_report["hibm_no_slip_max_residual_mps"])
@@ -750,88 +1605,317 @@ def run_hibm_mpm_fsi(
             fluid_projection_after_feedback_count += 1
         if latest_feedback_constraint_report["fluid_projection_consumed_feedback"]:
             fluid_projection_consumed_feedback_count += 1
-        latest_stress_report = _sample_stress_to_marker_forces(
-            markers,
-            fluid,
-            config,
-        )
-        latest_force_report = markers.aggregate_region_forces(
-            primary_region_id=PRIMARY_REGION_ID,
-            secondary_region_id=SECONDARY_REGION_ID,
-        )
-        latest_clear_report = markers.clear_mpm_external_forces(
-            solid.external_force_n,
-            particle_count=solid.particle_count,
-        )
-        latest_scatter_report = markers.scatter_marker_forces_to_mpm_particles(
-            solid.external_force_n,
-            solid.x,
-            particle_count=solid.particle_count,
-            support_radius_m=config.mpm_support_radius_m,
-            particle_position_generation=particle_position_generation,
-        )
-        _require_fresh_external_force_for_solid_step(
-            clear=latest_clear_report,
-            scatter=latest_scatter_report,
-            marker_forces=latest_force_report,
-            stress=latest_stress_report,
-            no_slip=latest_flow_report.get("hibm_no_slip_report"),
-            projection=latest_flow_report["projection_report"],
-        )
-        solid_substep_dt_s = config.dt_s / float(solid_substeps)
-        solid_substep_velocity_damping = _solid_substep_velocity_damping(
-            config,
-            solid_substeps=solid_substeps,
-        )
-        latest_solid_report = _advance_solid_substeps_batched(
-            solid,
-            config,
-            solid_substeps=solid_substeps,
-            solid_substep_dt_s=solid_substep_dt_s,
-            mu_pa=mu_pa,
-            lambda_pa=lambda_pa,
-            solid_substep_velocity_damping=solid_substep_velocity_damping,
-            particle_position_write_observer=record_particle_position_write,
-        )
-        latest_feedback_report = markers.update_surface_feedback_from_mpm_surface_particles(
-            solid.x,
-            solid.v,
-            solid.surface_normal,
-            solid.area_weight_m2,
-            particle_count=solid.particle_count,
-            support_radius_m=config.mpm_support_radius_m,
-            dt_s=config.dt_s,
-            preserve_marker_area=bool(
-                getattr(config, "preserve_marker_area_during_surface_feedback", False)
-            ),
-            particle_position_generation=particle_position_generation,
-        )
-        latest_dynamic_obstacle_report = _update_fluid_obstacle_from_solid(
-            fluid,
-            solid,
-            config,
-        )
-        latest_observer_topology_report = (
-            _apply_hibm_sharp_marker_boundary_to_fluid(
+        try:
+            latest_stress_report = _sample_stress_to_marker_forces(
                 markers,
                 fluid,
                 config,
-                update_pressure_gradient=False,
-                boundary_cache=sharp_boundary_cache,
-                # Rebuild rows as well as topology so the per-step and final
-                # snapshots never combine the post-solid obstacle with the
-                # previous fluid stage's boundary mask.  The resulting cache
-                # also lets the next predictor reuse search and cleanup.
-                topology_only=False,
+            )
+            latest_force_report = markers.aggregate_region_forces(
+                primary_region_id=PRIMARY_REGION_ID,
+                secondary_region_id=SECONDARY_REGION_ID,
+            )
+        except Exception:
+            _discard_modified_physics_kalman_step(
+                kalman_controller,
+                kalman_raw_writeback_targets,
+                fluid=fluid,
+                solid=solid,
+                markers=markers,
+            )
+            raise
+
+        def prepare_solid_external_force() -> tuple[Any, Any]:
+            clear_report = markers.clear_mpm_external_forces(
+                solid.external_force_n,
+                particle_count=solid.particle_count,
+            )
+            scatter_report = markers.scatter_marker_forces_to_mpm_particles(
+                solid.external_force_n,
+                solid.x,
+                particle_count=solid.particle_count,
+                support_radius_m=config.mpm_support_radius_m,
+                particle_position_generation=particle_position_generation,
+            )
+            _require_fresh_external_force_for_solid_step(
+                clear=clear_report,
+                scatter=scatter_report,
+                marker_forces=latest_force_report,
+                stress=latest_stress_report,
+                no_slip=latest_flow_report.get("hibm_no_slip_report"),
+                projection=latest_flow_report["projection_report"],
+            )
+            return clear_report, scatter_report
+
+        try:
+            latest_clear_report, latest_scatter_report = (
+                prepare_solid_external_force()
+            )
+        except Exception:
+            _discard_modified_physics_kalman_step(
+                kalman_controller,
+                kalman_raw_writeback_targets,
+                fluid=fluid,
+                solid=solid,
+                markers=markers,
+            )
+            raise
+
+        def retry_prepare_solid_external_force() -> None:
+            nonlocal latest_clear_report, latest_scatter_report
+            (
+                latest_clear_report,
+                latest_scatter_report,
+            ) = prepare_solid_external_force()
+
+        try:
+            latest_solid_step_report = _select_and_advance_solid_macro_step(
+                solid,
+                config,
+                mu_pa=mu_pa,
+                lambda_pa=lambda_pa,
+                retry_prepare=retry_prepare_solid_external_force,
+                particle_position_write_observer=record_particle_position_write,
+                profile_wall_time=profile_wall_time,
+            )
+        except Exception:
+            _discard_modified_physics_kalman_step(
+                kalman_controller,
+                kalman_raw_writeback_targets,
+                fluid=fluid,
+                solid=solid,
+                markers=markers,
+            )
+            raise
+        latest_solid_report = latest_solid_step_report["solid_report"]
+        solid_substep_cfl = {
+            key: value
+            for key, value in latest_solid_step_report.items()
+            if key != "solid_report"
+        }
+        solid_step_execution_reports.append(dict(solid_substep_cfl))
+        kalman_solid_integrator_raw_max_speed_mps = float(
+            latest_solid_report.max_speed_mps
+        )
+        kalman_solid_accepted_max_speed_mps = (
+            kalman_solid_integrator_raw_max_speed_mps
+        )
+        if (
+            kalman_controller is not None
+            and kalman_controller.enabled(SOLID_PARTICLE_VELOCITY_OWNER)
+        ):
+            kalman_hook_started_s = time.perf_counter()
+            try:
+                raw_solid_velocity_mps = _kalman_solid_observation(solid)
+                solid_kalman_result = kalman_controller.observe(
+                    SOLID_PARTICLE_VELOCITY_OWNER,
+                    raw_solid_velocity_mps,
+                )
+                actual_solid_velocity_mps = raw_solid_velocity_mps
+                if solid_kalman_result.writeback_values is not None:
+                    kalman_raw_writeback_targets[
+                        SOLID_PARTICLE_VELOCITY_OWNER
+                    ] = np.ascontiguousarray(
+                        solid.v.to_numpy(),
+                        dtype=np.float32,
+                    )
+                    actual_solid_velocity_mps = _apply_kalman_solid_writeback(
+                        solid,
+                        solid_kalman_result.writeback_values,
+                        fixed_mask=fixed_mask,
+                        enforce_plane_strain_x=bool(config.enforce_plane_strain_x),
+                    )
+                kalman_solid_accepted_max_speed_mps = float(
+                    np.max(np.linalg.norm(actual_solid_velocity_mps, axis=1))
+                )
+            except Exception:
+                _discard_modified_physics_kalman_step(
+                    kalman_controller,
+                    kalman_raw_writeback_targets,
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                )
+                raise
+            finally:
+                kalman_adapter_wall_time_s += (
+                    time.perf_counter() - kalman_hook_started_s
+                )
+        try:
+            latest_feedback_report = (
+                markers.update_surface_feedback_from_mpm_surface_particles(
+                    solid.x,
+                    solid.v,
+                    solid.surface_normal,
+                    solid.area_weight_m2,
+                    particle_count=solid.particle_count,
+                    support_radius_m=config.mpm_support_radius_m,
+                    dt_s=config.dt_s,
+                    preserve_marker_area=bool(
+                        getattr(
+                            config,
+                            "preserve_marker_area_during_surface_feedback",
+                            False,
+                        )
+                    ),
+                    particle_position_generation=particle_position_generation,
+                )
+            )
+        except Exception:
+            _discard_modified_physics_kalman_step(
+                kalman_controller,
+                kalman_raw_writeback_targets,
+                fluid=fluid,
+                solid=solid,
+                markers=markers,
+            )
+            raise
+        raw_marker_velocity_mps = None
+        kalman_interface_raw_max_speed_mps = float(
+            latest_feedback_report.max_marker_speed_mps
+        )
+        kalman_interface_accepted_max_speed_mps = (
+            kalman_interface_raw_max_speed_mps
+        )
+        if (
+            kalman_controller is not None
+            and kalman_controller.enabled(INTERFACE_MARKER_VELOCITY_OWNER)
+        ):
+            kalman_hook_started_s = time.perf_counter()
+            try:
+                raw_marker_velocity_mps = _kalman_interface_observation(markers)
+                interface_kalman_result = kalman_controller.observe(
+                    INTERFACE_MARKER_VELOCITY_OWNER,
+                    raw_marker_velocity_mps,
+                )
+                actual_marker_velocity_mps = raw_marker_velocity_mps
+                if interface_kalman_result.writeback_values is not None:
+                    kalman_raw_writeback_targets[
+                        INTERFACE_MARKER_VELOCITY_OWNER
+                    ] = np.ascontiguousarray(
+                        markers.v_gamma_mps.to_numpy(),
+                        dtype=np.float32,
+                    )
+                    actual_marker_velocity_mps = (
+                        _apply_kalman_interface_writeback(
+                            markers,
+                            interface_kalman_result.writeback_values,
+                        )
+                    )
+                kalman_interface_raw_max_speed_mps = float(
+                    np.max(np.linalg.norm(raw_marker_velocity_mps, axis=1))
+                )
+                kalman_interface_accepted_max_speed_mps = float(
+                    np.max(np.linalg.norm(actual_marker_velocity_mps, axis=1))
+                )
+            except Exception:
+                _discard_modified_physics_kalman_step(
+                    kalman_controller,
+                    kalman_raw_writeback_targets,
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                )
+                raise
+            finally:
+                kalman_adapter_wall_time_s += (
+                    time.perf_counter() - kalman_hook_started_s
+                )
+        try:
+            latest_dynamic_obstacle_report = _update_fluid_obstacle_from_solid(
+                fluid,
+                solid,
+                config,
+            )
+            latest_observer_topology_report = (
+                _apply_hibm_sharp_marker_boundary_to_fluid(
+                    markers,
+                    fluid,
+                    config,
+                    update_pressure_gradient=False,
+                    boundary_cache=sharp_boundary_cache,
+                    # Rebuild rows as well as topology so the per-step and final
+                    # snapshots never combine the post-solid obstacle with the
+                    # previous fluid stage's boundary mask.  The resulting cache
+                    # also lets the next predictor reuse search and cleanup.
+                    topology_only=False,
+                    measure_wall_times=profile_wall_time,
+                )
+            )
+            _require_hibm_velocity_dirichlet_health(
+                latest_observer_topology_report,
+                context=f"FSI step {step_index + 1} post-solid observer assembly",
+            )
+        except Exception:
+            _discard_modified_physics_kalman_step(
+                kalman_controller,
+                kalman_raw_writeback_targets,
+                fluid=fluid,
+                solid=solid,
+                markers=markers,
+            )
+            raise
+        try:
+            step_hibm_wall_times = _fsi_step_hibm_wall_times(
+                latest_flow_report,
+                latest_observer_topology_report,
+            )
+            step_artifact_export_wall_time_s = 0.0
+            refresh_runtime_pressure_pair_anchors()
+        except Exception:
+            _discard_modified_physics_kalman_step(
+                kalman_controller,
+                kalman_raw_writeback_targets,
+                fluid=fluid,
+                solid=solid,
+                markers=markers,
+            )
+            raise
+        if kalman_controller is not None:
+            kalman_hook_started_s = time.perf_counter()
+            try:
+                kalman_step_report = dict(kalman_controller.commit_step())
+            except Exception:
+                _restore_modified_physics_kalman_targets(
+                    kalman_raw_writeback_targets,
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                )
+                raise
+            finally:
+                kalman_adapter_wall_time_s += (
+                    time.perf_counter() - kalman_hook_started_s
+                )
+            kalman_filter_wall_time_s = float(
+                _kalman_controller_filter_wall_time_s(kalman_controller)
+                - kalman_filter_wall_time_before_s
+            )
+            kalman_step_report["filter_wall_time_s"] = (
+                kalman_filter_wall_time_s
+            )
+            kalman_step_report["state_transfer_wall_time_s"] = float(
+                max(0.0, kalman_adapter_wall_time_s - kalman_filter_wall_time_s)
+            )
+            kalman_step_report["total_overhead_s"] = float(
+                kalman_adapter_wall_time_s
+            )
+        feedback_available_for_projection = True
+        (
+            step_solid_positions_m,
+            solid_position_snapshot_wall_time_s,
+        ) = _capture_solid_positions_for_step(
+            solid,
+            profile_wall_time=profile_wall_time,
+        )
+        snapshot_capture_wall_time_s = float(
+            math.fsum(
+                (
+                    snapshot_capture_wall_time_s,
+                    solid_position_snapshot_wall_time_s,
+                )
             )
         )
-        _require_hibm_velocity_dirichlet_health(
-            latest_observer_topology_report,
-            context=f"FSI step {step_index + 1} post-solid observer assembly",
-        )
-        refresh_runtime_pressure_pair_anchors()
-        feedback_available_for_projection = True
-        step_solid_positions_m = solid.x.to_numpy()[: solid.particle_count]
         step_displacement = _solid_displacement_report(
             solid,
             fixed_mask,
@@ -842,6 +1926,53 @@ def run_hibm_mpm_fsi(
         history.append(
             {
                 "step": step_index + 1,
+                "kalman_writeback_mode": kalman_writeback_mode,
+                "kalman_modified_physics": bool(kalman_controller is not None),
+                "kalman_step_report": kalman_step_report,
+                "kalman_filter_overhead_s": float(
+                    kalman_step_report.get("filter_wall_time_s", 0.0)
+                ),
+                "kalman_state_transfer_overhead_s": float(
+                    kalman_step_report.get("state_transfer_wall_time_s", 0.0)
+                ),
+                "kalman_total_overhead_s": float(
+                    kalman_step_report.get("total_overhead_s", 0.0)
+                ),
+                "kalman_projection_residual_state": (
+                    "raw_pre_kalman_projection"
+                ),
+                "kalman_fluid_feedback_pressure_raw_min_pa": (
+                    kalman_fluid_feedback_pressure_raw_min_pa
+                ),
+                "kalman_fluid_feedback_pressure_raw_max_pa": (
+                    kalman_fluid_feedback_pressure_raw_max_pa
+                ),
+                "kalman_fluid_feedback_pressure_min_pa": (
+                    kalman_fluid_feedback_pressure_min_pa
+                ),
+                "kalman_fluid_feedback_pressure_max_pa": (
+                    kalman_fluid_feedback_pressure_max_pa
+                ),
+                "kalman_solid_integrator_raw_max_speed_mps": (
+                    kalman_solid_integrator_raw_max_speed_mps
+                ),
+                "kalman_solid_accepted_max_speed_mps": (
+                    kalman_solid_accepted_max_speed_mps
+                ),
+                "kalman_interface_raw_max_speed_mps": (
+                    kalman_interface_raw_max_speed_mps
+                ),
+                "kalman_interface_accepted_max_speed_mps": (
+                    kalman_interface_accepted_max_speed_mps
+                ),
+                "flow_wall_time_s": float(flow_wall_time_s),
+                "snapshot_capture_wall_time_s": float(
+                    snapshot_capture_wall_time_s
+                ),
+                "step_artifact_export_wall_time_s": (
+                    step_artifact_export_wall_time_s
+                ),
+                **step_hibm_wall_times,
                 "apply_marker_feedback_to_fluid": apply_feedback,
                 "flow_driver_mode": latest_flow_report["flow_driver_mode"],
                 "flow_driver_diagnostic_only": latest_flow_report[
@@ -893,6 +2024,16 @@ def run_hibm_mpm_fsi(
                 "flow_predictor_no_slip_domain_walls": latest_flow_report[
                     "flow_predictor_no_slip_domain_walls"
                 ],
+                "flow_sst_transport_wall_time_s": float(
+                    latest_flow_report.get(
+                        "flow_sst_transport_wall_time_s", 0.0
+                    )
+                ),
+                "flow_momentum_predictor_wall_time_s": float(
+                    latest_flow_report.get(
+                        "flow_momentum_predictor_wall_time_s", 0.0
+                    )
+                ),
                 "flow_solid_boundary_mode": latest_flow_report[
                     "flow_solid_boundary_mode"
                 ],
@@ -1185,13 +2326,77 @@ def run_hibm_mpm_fsi(
                 ],
                 "fluid_speed_p99_mps": latest_flow_report["fluid_speed_p99_mps"],
                 "fluid_speed_p999_mps": latest_flow_report["fluid_speed_p999_mps"],
-                "pressure_min_pa": latest_flow_report["pressure_min_pa"],
-                "pressure_max_pa": latest_flow_report["pressure_max_pa"],
+                "pressure_min_pa": kalman_fluid_feedback_pressure_min_pa,
+                "pressure_max_pa": kalman_fluid_feedback_pressure_max_pa,
+                "projection_raw_pressure_min_pa": latest_flow_report[
+                    "pressure_min_pa"
+                ],
+                "projection_raw_pressure_max_pa": latest_flow_report[
+                    "pressure_max_pa"
+                ],
                 "flow_projection_report": latest_flow_report["projection_report"],
                 **_flow_projection_report_fields(latest_flow_report),
                 **_flow_source_report_fields(latest_flow_report),
                 **_flow_transport_report_fields(latest_flow_report),
-                "solid_substeps_selected": solid_substeps,
+                "solid_substep_cfl_report": dict(solid_substep_cfl),
+                "solid_substeps_selected": int(
+                    latest_solid_step_report["solid_substeps_selected"]
+                ),
+                "solid_substep_dt_s": float(
+                    latest_solid_step_report["solid_substep_dt_s"]
+                ),
+                "solid_estimated_cfl": float(
+                    latest_solid_step_report["solid_estimated_cfl"]
+                ),
+                "solid_elastic_wave_speed_mps": float(
+                    latest_solid_step_report["solid_elastic_wave_speed_mps"]
+                ),
+                "solid_max_particle_speed_mps": float(
+                    latest_solid_step_report["solid_max_particle_speed_mps"]
+                ),
+                "solid_accepted_time_s": float(
+                    latest_solid_step_report["solid_accepted_time_s"]
+                ),
+                "solid_remaining_unadvanced_time_s": float(
+                    latest_solid_step_report["solid_remaining_unadvanced_time_s"]
+                ),
+                "solid_rejected_trial_count": int(
+                    latest_solid_step_report["solid_rejected_trial_count"]
+                ),
+                "solid_retry_count": int(latest_solid_step_report["solid_retry_count"]),
+                "solid_accepted_substep_count": int(
+                    latest_solid_step_report["solid_accepted_substep_count"]
+                ),
+                "solid_substeps_executed_total": int(
+                    latest_solid_step_report["solid_substeps_executed_total"]
+                ),
+                "solid_step_kernel_launch_count": int(
+                    latest_solid_step_report["solid_step_kernel_launch_count"]
+                ),
+                "solid_selector_evaluation_count": int(
+                    latest_solid_step_report[
+                        "solid_selector_evaluation_count"
+                    ]
+                ),
+                "solid_selector_device_to_host_scalar_read_count": int(
+                    latest_solid_step_report[
+                        "solid_selector_device_to_host_scalar_read_count"
+                    ]
+                ),
+                "solid_packed_report_device_to_host_transfer_count": int(
+                    latest_solid_step_report[
+                        "solid_packed_report_device_to_host_transfer_count"
+                    ]
+                ),
+                "solid_guard_batch_count": int(
+                    latest_solid_step_report["solid_guard_batch_count"]
+                ),
+                "solid_wall_time_s": float(
+                    latest_solid_step_report["solid_wall_time_s"]
+                ),
+                "solid_wall_time_synchronized": bool(
+                    latest_solid_step_report["solid_wall_time_synchronized"]
+                ),
                 "solid_constitutive_model": str(
                     getattr(
                         config,
@@ -1205,13 +2410,15 @@ def run_hibm_mpm_fsi(
                 "solid_velocity_transfer_flip_blend": float(
                     getattr(config, "solid_velocity_transfer_flip_blend", 0.0)
                 ),
-                "solid_estimated_cfl": solid_substep_cfl["solid_estimated_cfl"],
                 "stress_valid_marker_count": latest_stress_report.valid_marker_count,
                 "stress_invalid_marker_count": (
                     latest_stress_report.invalid_marker_count
                 ),
                 **_marker_projection_boundary_report_fields(
                     markers,
+                    traction_tip_cap_pressure_enabled=(
+                        _traction_tip_cap_pressure_enabled(config)
+                    ),
                     canonical_velocity_dirichlet_report=latest_flow_report.get(
                         "canonical_velocity_dirichlet_report"
                     ),
@@ -1260,7 +2467,7 @@ def run_hibm_mpm_fsi(
                 "mpm_grid_out_of_bounds_particle_count": (
                     latest_solid_report.grid_out_of_bounds_particle_count
                 ),
-                "mpm_max_speed_mps": latest_solid_report.max_speed_mps,
+                "mpm_max_speed_mps": kalman_solid_accepted_max_speed_mps,
                 "mpm_deformation_clamp_count": (
                     latest_solid_report.deformation_clamp_count
                 ),
@@ -1276,11 +2483,11 @@ def run_hibm_mpm_fsi(
         if step_observer is not None:
             if observer_flow_snapshot is None:
                 raise RuntimeError("step observer flow snapshot was not captured")
-            step_observer(
-                step_index + 1,
-                float(config.dt_s) * float(step_index + 1),
-                dict(history[-1]),
-                _direct_step_observer_snapshot(
+            (
+                step_observer_snapshot,
+                direct_snapshot_wall_time_s,
+            ) = _measure_taichi_operation_wall_time(
+                lambda: _direct_step_observer_snapshot(
                     observer_flow_snapshot,
                     solid,
                     markers,
@@ -1289,7 +2496,38 @@ def run_hibm_mpm_fsi(
                     fixed_mask=fixed_mask,
                     tip_mask=tip_mask,
                 ),
+                enabled=profile_wall_time,
             )
+            snapshot_capture_wall_time_s = float(
+                math.fsum(
+                    (
+                        snapshot_capture_wall_time_s,
+                        direct_snapshot_wall_time_s,
+                    )
+                )
+            )
+            history[-1]["snapshot_capture_wall_time_s"] = (
+                snapshot_capture_wall_time_s
+            )
+            observer_started_s = (
+                time.perf_counter() if profile_wall_time else None
+            )
+            try:
+                step_observer(
+                    step_index + 1,
+                    float(config.dt_s) * float(step_index + 1),
+                    dict(history[-1]),
+                    step_observer_snapshot,
+                )
+            finally:
+                if observer_started_s is not None:
+                    observer_elapsed_s = max(
+                        0.0,
+                        time.perf_counter() - observer_started_s,
+                    )
+                    history[-1]["step_artifact_export_wall_time_s"] = (
+                        observer_elapsed_s
+                    )
 
         _emit_run_progress(
             progress_observer,
@@ -1299,6 +2537,9 @@ def run_hibm_mpm_fsi(
             time_s=float(config.dt_s) * float(step_index + 1),
             max_displacement_m=float(step_displacement["max_displacement_m"]),
         )
+    solid_substep_summary = _solid_substep_run_summary(
+        solid_step_execution_reports
+    )
     if config.step_count == 0 and preflow_history:
         return _preflow_only_report(
             case_id=case_id,
@@ -1311,7 +2552,10 @@ def run_hibm_mpm_fsi(
             fixed_mask=fixed_mask,
             tip_mask=tip_mask,
             solid_substep_cfl=solid_substep_cfl,
+            solid_substep_summary=solid_substep_summary,
             preflow_report=preflow_report,
+            runtime_identity=runtime_identity,
+            profile_wall_time=profile_wall_time,
         )
 
     if (
@@ -1355,6 +2599,37 @@ def run_hibm_mpm_fsi(
         "case": case_id,
         "case_metadata": dict(case_metadata),
         "config": asdict(config),
+        "taichi_runtime_identity": dict(runtime_identity),
+        "profile_wall_time_enabled": bool(profile_wall_time),
+        "kalman_writeback_mode": kalman_writeback_mode,
+        "kalman_modified_physics": bool(kalman_controller is not None),
+        "kalman_summary": (
+            kalman_controller.summary()
+            if kalman_controller is not None
+            else {
+                "mode": "off",
+                "modified_physics": False,
+                "owners": {},
+            }
+        ),
+        "kalman_filter_overhead_s_total": float(
+            math.fsum(
+                float(row.get("kalman_filter_overhead_s", 0.0))
+                for row in history
+            )
+        ),
+        "kalman_state_transfer_overhead_s_total": float(
+            math.fsum(
+                float(row.get("kalman_state_transfer_overhead_s", 0.0))
+                for row in history
+            )
+        ),
+        "kalman_total_overhead_s_total": float(
+            math.fsum(
+                float(row.get("kalman_total_overhead_s", 0.0))
+                for row in history
+            )
+        ),
         "flow_solution_mode": FLOW_SOLUTION_MODE,
         "streamwise_axis": AXIS_NAMES[STREAMWISE_AXIS_INDEX],
         "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
@@ -1416,6 +2691,9 @@ def run_hibm_mpm_fsi(
         "marker_projection_segment_count": int(markers.projection_segment_count),
         **_marker_projection_boundary_report_fields(
             markers,
+            traction_tip_cap_pressure_enabled=(
+                _traction_tip_cap_pressure_enabled(config)
+            ),
             canonical_velocity_dirichlet_report=latest_flow_report.get(
                 "canonical_velocity_dirichlet_report"
             ),
@@ -1434,8 +2712,34 @@ def run_hibm_mpm_fsi(
         ],
         "solid_min_grid_spacing_m": solid_substep_cfl["solid_min_grid_spacing_m"],
         "solid_cfl_target": solid_substep_cfl["solid_cfl_target"],
+        "solid_substep_dt_s": solid_substep_cfl["solid_substep_dt_s"],
+        "solid_max_particle_speed_mps": solid_substep_cfl[
+            "solid_max_particle_speed_mps"
+        ],
+        "solid_accepted_time_s": solid_substep_cfl["solid_accepted_time_s"],
+        "solid_remaining_unadvanced_time_s": solid_substep_cfl[
+            "solid_remaining_unadvanced_time_s"
+        ],
+        "solid_rejected_trial_count": solid_substep_cfl[
+            "solid_rejected_trial_count"
+        ],
+        "solid_retry_count": solid_substep_cfl["solid_retry_count"],
+        "solid_accepted_substep_count": solid_substep_cfl[
+            "solid_accepted_substep_count"
+        ],
+        "solid_substeps_executed_last_step": solid_substep_cfl[
+            "solid_substeps_executed_total"
+        ],
+        **solid_substep_summary,
         "computed_result_sources": {
-            "pressure_pa": "fluid.fsi_pressure",
+            "pressure_pa": (
+                "filtered fluid.fsi_pressure feedback state"
+                if kalman_controller is not None
+                and kalman_controller.enabled(
+                    FLUID_FSI_PRESSURE_FEEDBACK_OWNER
+                )
+                else "fluid.fsi_pressure"
+            ),
             "local_velocity_peak_mps": "max(norm(fluid.velocity))",
             "fluid_interface_force_n": "HIBM marker traction integral",
             "max_displacement_m": "solid.x-rest_x",
@@ -1457,8 +2761,10 @@ def run_hibm_mpm_fsi(
         **_flow_transport_report_fields(latest_flow_report),
         "flow_obstacle_cell_count": latest_flow_report["obstacle_cell_count"],
         "flow_fluid_cell_count": latest_flow_report["fluid_cell_count"],
-        "computed_pressure_min_pa": latest_flow_report["pressure_min_pa"],
-        "computed_pressure_max_pa": latest_flow_report["pressure_max_pa"],
+        "computed_pressure_min_pa": kalman_fluid_feedback_pressure_min_pa,
+        "computed_pressure_max_pa": kalman_fluid_feedback_pressure_max_pa,
+        "projection_raw_pressure_min_pa": latest_flow_report["pressure_min_pa"],
+        "projection_raw_pressure_max_pa": latest_flow_report["pressure_max_pa"],
         "pressure_sign_convention": latest_flow_report["pressure_sign_convention"],
         "local_velocity_peak_mps": local_velocity_peak_mps,
         "fluid_speed_p99_mps": latest_flow_report["fluid_speed_p99_mps"],
@@ -1573,6 +2879,7 @@ def run_hibm_mpm_fsi(
             include_face_diagnostics=True,
         ),
         "pressure_pair_anchor_pair_map": pressure_pair_anchor_pair_map,
+        **_fsi_profile_summary(history),
         "history": history,
         "max_displacement_m": max_displacement,
         "reference_max_displacement_m": reference_displacement,
@@ -1599,7 +2906,10 @@ def _preflow_only_report(
     fixed_mask: np.ndarray,
     tip_mask: np.ndarray,
     solid_substep_cfl: Mapping[str, object],
+    solid_substep_summary: Mapping[str, object],
     preflow_report: Mapping[str, object],
+    runtime_identity: Mapping[str, object],
+    profile_wall_time: bool,
 ) -> dict[str, object]:
     preflow_history = list(preflow_report["preflow_history"])
     latest_preflow = dict(preflow_history[-1])
@@ -1624,6 +2934,8 @@ def _preflow_only_report(
         "case": case_id,
         "case_metadata": dict(case_metadata),
         "config": asdict(config),
+        "taichi_runtime_identity": dict(runtime_identity),
+        "profile_wall_time_enabled": bool(profile_wall_time),
         "flow_solution_mode": FLOW_SOLUTION_MODE,
         "streamwise_axis": AXIS_NAMES[STREAMWISE_AXIS_INDEX],
         "out_of_plane_axis": AXIS_NAMES[OUT_OF_PLANE_AXIS_INDEX],
@@ -1685,6 +2997,9 @@ def _preflow_only_report(
         "marker_projection_segment_count": int(markers.projection_segment_count),
         **_marker_projection_boundary_report_fields(
             markers,
+            traction_tip_cap_pressure_enabled=(
+                _traction_tip_cap_pressure_enabled(config)
+            ),
             canonical_velocity_dirichlet_report=latest_preflow.get(
                 "canonical_velocity_dirichlet_report"
             ),
@@ -1702,6 +3017,7 @@ def _preflow_only_report(
         ],
         "solid_min_grid_spacing_m": solid_substep_cfl["solid_min_grid_spacing_m"],
         "solid_cfl_target": solid_substep_cfl["solid_cfl_target"],
+        **dict(solid_substep_summary),
         "computed_result_sources": {
             "pressure_pa": "fluid.fsi_pressure",
             "local_velocity_peak_mps": "max(norm(fluid.velocity))",
@@ -2123,6 +3439,7 @@ def _preflow_snapshot_paths(config: Any) -> tuple[object | None, object | None]:
 
 
 def _validate_rectangular_solid_config(config: Any) -> None:
+    _modified_physics_kalman_configs(config)
     boundary_mode = str(
         getattr(
             config,
@@ -2525,8 +3842,26 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         )
     if config.dt_s <= 0.0:
         raise ValueError("dt_s must be positive")
-    if config.solid_substeps <= 0:
-        raise ValueError("solid_substeps must be positive")
+    _validated_solid_substep_override(config)
+    _validated_solid_controller_integer(
+        getattr(config, "solid_max_substep_retries", 3),
+        field_name="solid_max_substep_retries",
+        minimum=0,
+    )
+    _validated_solid_controller_integer(
+        getattr(config, "solid_max_automatic_substeps", 65536),
+        field_name="solid_max_automatic_substeps",
+        minimum=1,
+    )
+    solid_clamp_limit = getattr(
+        config, "solid_max_deformation_clamp_count_per_macro_step", None
+    )
+    if solid_clamp_limit is not None:
+        _validated_solid_controller_integer(
+            solid_clamp_limit,
+            field_name="solid_max_deformation_clamp_count_per_macro_step",
+            minimum=0,
+        )
     solid_velocity_transfer_flip_blend = float(
         getattr(config, "solid_velocity_transfer_flip_blend", 0.0)
     )
@@ -2759,33 +4094,82 @@ def _lame_parameters(config: Any) -> tuple[float, float]:
     return mu, lam
 
 
-def solid_substep_cfl_report(config: Any) -> dict[str, object]:
-    mu, lam = _lame_parameters(config)
-    wave_speed_mps = math.sqrt(
-        (lam + 2.0 * mu) / float(config.solid_density_kgm3)
+def solid_substep_cfl_report(
+    config: Any,
+    *,
+    max_particle_speed_mps: float = 0.0,
+) -> dict[str, object]:
+    """Select a full-macro-step solid substep count from accepted state."""
+    requested_dt_s = float(config.dt_s)
+    cfl_target = float(
+        getattr(config, "solid_cfl_target", DEFAULT_SOLID_CFL_TARGET)
     )
-    min_spacing_m = min(_solid_mpm_grid_spacing_m(config))
-    cfl_target = float(getattr(config, "solid_cfl_target", DEFAULT_SOLID_CFL_TARGET))
-    requested_substeps = int(config.solid_substeps)
+    accepted_speed_mps = float(max_particle_speed_mps)
+    if (
+        not math.isfinite(requested_dt_s)
+        or requested_dt_s <= 0.0
+        or not math.isfinite(cfl_target)
+        or cfl_target <= 0.0
+        or not math.isfinite(accepted_speed_mps)
+        or accepted_speed_mps < 0.0
+    ):
+        raise ValueError(
+            "dt_s and solid_cfl_target must be positive finite and "
+            "max_particle_speed_mps must be finite and non-negative"
+        )
+    try:
+        mu, lam = _lame_parameters(config)
+        density_kgm3 = float(config.solid_density_kgm3)
+        wave_speed_mps = math.sqrt((lam + 2.0 * mu) / density_kgm3)
+        min_spacing_m = min(_solid_mpm_grid_spacing_m(config))
+    except (ArithmeticError, ValueError, OverflowError) as error:
+        raise ValueError("invalid solid material or MPM spacing") from error
+    if (
+        not math.isfinite(wave_speed_mps)
+        or wave_speed_mps <= 0.0
+        or not math.isfinite(min_spacing_m)
+        or min_spacing_m <= 0.0
+    ):
+        raise ValueError(
+            "solid material wave speed and MPM spacing must be positive finite"
+        )
+    requested_substeps = _validated_solid_substep_override(config)
     cfl_minimum = max(
         1,
         int(
             math.ceil(
-                wave_speed_mps
-                * float(config.dt_s)
+                (wave_speed_mps + accepted_speed_mps)
+                * requested_dt_s
                 / (cfl_target * min_spacing_m)
             )
         ),
     )
-    selected_substeps = max(requested_substeps, cfl_minimum)
-    substep_dt_s = float(config.dt_s) / float(selected_substeps)
-    estimated_cfl = wave_speed_mps * substep_dt_s / min_spacing_m
+    selected_substeps = (
+        cfl_minimum
+        if requested_substeps is None
+        else max(requested_substeps, cfl_minimum)
+    )
+    substep_dt_s = _validated_solid_substep_dt_s(
+        requested_dt_s,
+        selected_substeps,
+    )
+    estimated_cfl = (
+        (wave_speed_mps + accepted_speed_mps)
+        * substep_dt_s
+        / min_spacing_m
+    )
     return {
         "solid_substeps_requested": requested_substeps,
+        "solid_substeps_mode": (
+            "adaptive" if requested_substeps is None else "fixed_override"
+        ),
         "solid_substeps_cfl_minimum": cfl_minimum,
         "solid_substeps_selected": selected_substeps,
-        "solid_substeps_auto_applied": selected_substeps != requested_substeps,
+        "solid_substeps_auto_applied": (
+            requested_substeps is None or selected_substeps != requested_substeps
+        ),
         "solid_elastic_wave_speed_mps": wave_speed_mps,
+        "solid_accepted_max_particle_speed_mps": accepted_speed_mps,
         "solid_min_grid_spacing_m": min_spacing_m,
         "solid_cfl_target": cfl_target,
         "solid_estimated_cfl": estimated_cfl,
@@ -6274,6 +7658,7 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
     boundary_cache: dict[str, object] | None = None,
     reuse_topology_from_previous_assembly: bool = False,
     topology_only: bool = False,
+    measure_wall_times: bool = False,
     stage_observer: Callable[[str], None] | None = None,
 ) -> dict[str, object]:
     if not _use_hibm_sharp_marker_boundary(config):
@@ -6537,6 +7922,22 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             ib_boundary.marker_pressure_neumann_gradient_field
         ),
     )
+    if update_pressure_gradient:
+        ib_boundary.update_pressure_neumann_gradient_from_fluid_predictor_ib_nodes(
+            velocity_field=fluid.velocity,
+            obstacle_field=fluid.obstacle,
+            search=ib_search,
+            cell_face_x_m=fluid.cell_face_x_m,
+            cell_face_y_m=fluid.cell_face_y_m,
+            cell_face_z_m=fluid.cell_face_z_m,
+            cell_center_x_m=fluid.cell_center_x_m,
+            cell_center_y_m=fluid.cell_center_y_m,
+            cell_center_z_m=fluid.cell_center_z_m,
+            grid_nodes=fluid.grid.grid_nodes,
+            density_kgm3=float(config.air_density_kgm3),
+            dt_s=float(config.dt_s),
+        )
+
     def assemble_velocity_rows() -> dict[str, object]:
         authority = str(fluid.velocity_dirichlet_boundary_authority)
         interpolate_interior_velocity = bool(
@@ -6604,7 +8005,7 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             marker_region_id=markers.region_id,
             surface_projection_inactive_axis=OUT_OF_PLANE_AXIS_INDEX,
             markers=markers,
-            marker_compatibility_max_iterations=64,
+            marker_compatibility_iterations_per_batch=64,
             marker_compatibility_absolute_tolerance_mps=(
                 marker_mac_constraint_absolute_tolerance_mps
             ),
@@ -6618,6 +8019,7 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             interpolate_interior_velocity=interpolate_interior_velocity,
             stage_observer=canonical_ledger_stage_observer,
             ),
+            enabled=measure_wall_times,
             excluded_wall_time=(
                 (lambda: canonical_ledger_observer_wall_time_s)
                 if canonical_ledger_stage_observer is not None
@@ -6630,6 +8032,7 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             lambda: _prepare_and_seal_canonical_velocity_dirichlet_component_ledger(
                 fluid
             ),
+            enabled=measure_wall_times,
         )
         return _canonical_hibm_velocity_dirichlet_report_fields(
             builder_result,
@@ -6660,6 +8063,7 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
             lambda: fluid.mark_hibm_pressure_outlet_disconnected_nonprojectable_cells(
                 pressure_outlet_zmin=True,
             ),
+            enabled=measure_wall_times,
         )
 
     def rebuild_velocity_rows_after_topology_mutation() -> None:
@@ -6800,6 +8204,7 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
         cell_center_z_m=fluid.cell_center_z_m,
         grid_nodes=fluid.grid.grid_nodes,
         ),
+        enabled=measure_wall_times,
     )
     if stage_observer is not None:
         stage_observer("hibm_boundary_build_after")
@@ -7095,9 +8500,59 @@ def _combine_interleaved_flow_predictor_segment_reports(
 ) -> dict[str, object]:
     """Combine full projection reports from interleaved physical segments."""
 
-    if not segment_reports:
-        raise ValueError("interleaved predictor requires at least one segment report")
+    if configured_substeps <= 0:
+        raise ValueError("configured_substeps must be positive")
+    if not math.isfinite(segment_dt_s) or segment_dt_s <= 0.0:
+        raise ValueError("segment_dt_s must be finite and positive")
+    if len(segment_reports) != configured_substeps:
+        raise ValueError(
+            "interleaved predictor requires exactly "
+            f"{configured_substeps} segment reports, got {len(segment_reports)}"
+        )
+    for segment_report in segment_reports:
+        _macro_time_accounting_report(
+            requested_macro_dt_s=float(segment_dt_s),
+            accepted_time_s=float(
+                segment_report.get("requested_macro_dt_s", math.nan)
+            ),
+            accepted_substep_count=1,
+            rejected_trial_count=0,
+            component="fluid segment request",
+        )
+        _macro_time_accounting_report(
+            requested_macro_dt_s=float(segment_dt_s),
+            accepted_time_s=float(
+                segment_report.get("fluid_accepted_time_s", math.nan)
+            ),
+            accepted_substep_count=segment_report[
+                "flow_momentum_advection_substeps_total"
+            ],
+            rejected_trial_count=int(
+                segment_report.get("fluid_rejected_trial_count", -1)
+            ),
+            component="fluid",
+        )
     combined = dict(segment_reports[-1])
+    combined.update(
+        _macro_time_accounting_report(
+            requested_macro_dt_s=math.fsum(
+                float(segment_dt_s) for _ in range(configured_substeps)
+            ),
+            accepted_time_s=math.fsum(
+                float(report["fluid_accepted_time_s"])
+                for report in segment_reports
+            ),
+            accepted_substep_count=sum(
+                int(report["flow_momentum_advection_substeps_total"])
+                for report in segment_reports
+            ),
+            rejected_trial_count=sum(
+                int(report["fluid_rejected_trial_count"])
+                for report in segment_reports
+            ),
+            component="fluid",
+        )
+    )
     segment_projection_reports = [
         dict(report.get("projection_report", {})) for report in segment_reports
     ]
@@ -7110,15 +8565,36 @@ def _combine_interleaved_flow_predictor_segment_reports(
         "flow_sst_transport_rejected_trial_count_total",
         "flow_momentum_advection_substeps_total",
         "flow_momentum_advection_rejected_trial_count_total",
+        "flow_sst_momentum_helmholtz_rejected_trial_count_total",
     ):
         if any(key in report for report in segment_reports):
             combined[key] = sum(int(report.get(key, 0)) for report in segment_reports)
     for key in (
         "flow_sst_transport_wall_time_s",
         "flow_momentum_predictor_wall_time_s",
+        "hibm_pre_predictor_wall_time_s",
+        "hibm_projection_cycle_wall_time_s",
     ):
         if any(key in report for report in segment_reports):
-            combined[key] = sum(
+            combined[key] = math.fsum(
+                float(report.get(key, 0.0)) for report in segment_reports
+            )
+    for key in (
+        "flow_sst_transport_requested_time_s",
+        "flow_sst_transport_accepted_time_s",
+        "flow_sst_transport_remaining_unadvanced_time_s",
+        "flow_momentum_advection_requested_time_s",
+        "flow_momentum_advection_accepted_time_s",
+        "flow_momentum_advection_remaining_unadvanced_time_s",
+        "flow_sst_momentum_diffusion_requested_time_s",
+        "flow_sst_momentum_diffusion_accepted_time_s",
+        "flow_sst_momentum_diffusion_remaining_unadvanced_time_s",
+        "flow_sst_requested_transport_time_s",
+        "flow_sst_accepted_transport_time_s",
+        "flow_sst_remaining_unadvanced_transport_time_s",
+    ):
+        if any(key in report for report in segment_reports):
+            combined[key] = math.fsum(
                 float(report.get(key, 0.0)) for report in segment_reports
             )
     for key in (
@@ -7219,7 +8695,109 @@ def _combine_interleaved_flow_predictor_segment_reports(
     return combined
 
 
+def _invalidate_hibm_sharp_boundary_derived_cache(
+    boundary_cache: dict[str, object] | None,
+) -> None:
+    if boundary_cache is None:
+        return
+    cache_entry = boundary_cache.get("hibm_sharp_marker_boundary")
+    if not isinstance(cache_entry, dict):
+        return
+    for key in (
+        "classified_topology_key",
+        "search_report",
+        "internal_obstacle_cell_count",
+        "cleanup_report",
+    ):
+        cache_entry.pop(key, None)
+
+
 def _flow_advance_current_step(
+    fluid: CartesianFluidSolver,
+    config: Any,
+    *,
+    markers: HibmMpmSurfaceMarkers | None = None,
+    sharp_boundary_cache: dict[str, object] | None = None,
+    flow_phase: str,
+    step_index_local: int,
+    step_index_global: int,
+    preflow_history: list[dict[str, object]],
+    reset_pressure: bool,
+    measure_wall_times: bool = False,
+    preflow_stage_observer: Callable[[str], None] | None = None,
+) -> dict[str, object]:
+    """Advance one all-or-nothing fluid macro step."""
+
+    fluid.save_state()
+    try:
+        mode = (
+            _require_fsi_physical_flow_driver_mode(config)
+            if str(flow_phase) == "fsi"
+            else _effective_flow_driver_mode(config, flow_phase=flow_phase)
+        )
+        report = _flow_advance_current_step_trial(
+            fluid,
+            config,
+            markers=markers,
+            sharp_boundary_cache=sharp_boundary_cache,
+            flow_phase=flow_phase,
+            step_index_local=step_index_local,
+            step_index_global=step_index_global,
+            preflow_history=preflow_history,
+            reset_pressure=reset_pressure,
+            measure_wall_times=measure_wall_times,
+            preflow_stage_observer=preflow_stage_observer,
+        )
+        if mode in FLOW_DRIVER_PHYSICAL_PREDICTOR_MODES:
+            report.update(
+                _macro_time_accounting_report(
+                    requested_macro_dt_s=float(config.dt_s),
+                    accepted_time_s=float(
+                        report.get("fluid_accepted_time_s", math.nan)
+                    ),
+                    accepted_substep_count=report[
+                        "flow_momentum_advection_substeps_total"
+                    ],
+                    rejected_trial_count=int(
+                        report.get("fluid_rejected_trial_count", -1)
+                    ),
+                    component="fluid",
+                )
+            )
+        return report
+    except Exception as original_error:
+        cleanup_errors: list[tuple[str, Exception]] = []
+        for cleanup_name, cleanup in (
+            ("restore_state", fluid.restore_state),
+            (
+                "invalidate_pressure_warmstart",
+                fluid.invalidate_pressure_warmstart,
+            ),
+            (
+                "invalidate_hibm_sharp_boundary_derived_cache",
+                lambda: _invalidate_hibm_sharp_boundary_derived_cache(
+                    sharp_boundary_cache
+                ),
+            ),
+        ):
+            try:
+                cleanup()
+            except Exception as cleanup_error:
+                cleanup_errors.append((cleanup_name, cleanup_error))
+        if cleanup_errors:
+            cleanup_summary = "; ".join(
+                f"{name}: {type(error).__name__}: {error}"
+                for name, error in cleanup_errors
+            )
+            raise RuntimeError(
+                "fluid macro rollback cleanup failed after "
+                f"{type(original_error).__name__}: {original_error}; "
+                f"cleanup errors: {cleanup_summary}"
+            ) from original_error
+        raise
+
+
+def _flow_advance_current_step_trial(
     fluid: CartesianFluidSolver,
     config: Any,
     *,
@@ -7237,15 +8815,14 @@ def _flow_advance_current_step(
         getattr(config, "flow_predictor_substeps", 1)
     )
     mode = _effective_flow_driver_mode(config, flow_phase=flow_phase)
-    predictor_modes = {
-        FLOW_DRIVER_SUSTAINED_BOUNDARY_PREDICTOR,
-        FLOW_DRIVER_SUSTAINED_PREDICTOR,
-    }
-    if configured_predictor_substeps > 1 and mode in predictor_modes:
+    if (
+        configured_predictor_substeps > 1
+        and mode in FLOW_DRIVER_PHYSICAL_PREDICTOR_MODES
+    ):
         segment_dt_s = float(config.dt_s) / float(configured_predictor_substeps)
         segment_config = _FlowPredictorSegmentConfig(config, dt_s=segment_dt_s)
         segment_reports = [
-            _flow_advance_current_step(
+            _flow_advance_current_step_trial(
                 fluid,
                 segment_config,
                 markers=markers,
@@ -7307,6 +8884,7 @@ def _flow_advance_current_step(
             update_pressure_gradient=False,
             boundary_cache=sharp_boundary_cache,
             reuse_topology_from_previous_assembly=True,
+            measure_wall_times=measure_wall_times,
             stage_observer=preflow_stage_observer,
         )
     )
@@ -7317,6 +8895,14 @@ def _flow_advance_current_step(
         context=(
             f"{flow_phase} step {step_index_local} pre-predictor assembly"
         ),
+    )
+    pre_predictor_stage_wall_time_s = (
+        _hibm_sharp_boundary_stage_wall_times_from_report(
+            pre_predictor_sharp_boundary_report
+        )
+    )
+    pre_predictor_wall_time_s = _hibm_stage_wall_time_sum(
+        pre_predictor_stage_wall_time_s
     )
     pre_predictor_ledger_generation = None
     if velocity_only_soft_rows:
@@ -7341,6 +8927,13 @@ def _flow_advance_current_step(
     momentum_advection_max_substep_cfl = 0.0
     sst_transport_wall_time_s = 0.0
     momentum_predictor_wall_time_s = 0.0
+    sst_transport_requested_time_parts_s: list[float] = []
+    sst_transport_accepted_time_parts_s: list[float] = []
+    momentum_advection_requested_time_parts_s: list[float] = []
+    momentum_advection_accepted_time_parts_s: list[float] = []
+    momentum_diffusion_requested_time_parts_s: list[float] = []
+    momentum_diffusion_accepted_time_parts_s: list[float] = []
+    momentum_diffusion_rejected_trial_count_total = 0
     if turbulence_model == "sst_2003" and markers is not None:
         if preflow_stage_observer is not None:
             preflow_stage_observer("sst_wall_distance_before")
@@ -7461,11 +9054,49 @@ def _flow_advance_current_step(
                         preflow_stage_observer("sst_transport_after")
                     sst_transport_wall_time_s += current_sst_wall_time_s
                     sst_transport_report = dict(current_sst_report)
+                    current_sst_rejected_trial_count = int(
+                        current_sst_report.get(
+                            "rejected_transport_trial_count",
+                            0,
+                        )
+                    )
+                    current_sst_accepted_time_s = (
+                        _validated_component_accepted_time(
+                            requested_time_s=predictor_dt_s,
+                            reported_requested_time_s=float(
+                                current_sst_report.get(
+                                    "requested_transport_time_s",
+                                    math.nan,
+                                )
+                            ),
+                            accepted_time_s=float(
+                                current_sst_report.get(
+                                    "accepted_transport_time_s",
+                                    math.nan,
+                                )
+                            ),
+                            accepted_substep_count=current_sst_report[
+                                "diffusion_substeps"
+                            ],
+                            remaining_unadvanced_time_s=float(
+                                current_sst_report.get(
+                                    "remaining_unadvanced_transport_time_s",
+                                    math.nan,
+                                )
+                            ),
+                            rejected_trial_count=current_sst_rejected_trial_count,
+                            component="fluid SST transport",
+                        )
+                    )
+                    sst_transport_requested_time_parts_s.append(predictor_dt_s)
+                    sst_transport_accepted_time_parts_s.append(
+                        current_sst_accepted_time_s
+                    )
                     sst_transport_substeps_total += int(
                         current_sst_report["diffusion_substeps"]
                     )
-                    sst_transport_rejected_trial_count_total += int(
-                        current_sst_report.get("rejected_transport_trial_count", 0)
+                    sst_transport_rejected_trial_count_total += (
+                        current_sst_rejected_trial_count
                     )
                     sst_transport_diffusion_cfl_max = max(
                         sst_transport_diffusion_cfl_max,
@@ -7495,18 +9126,106 @@ def _flow_advance_current_step(
                 if preflow_stage_observer is not None:
                     preflow_stage_observer("momentum_predictor_after")
                 momentum_predictor_wall_time_s += current_predictor_wall_time_s
-                momentum_advection_scheme = str(
-                    getattr(fluid, "_last_momentum_advection_scheme", advection_scheme)
-                )
-                momentum_advection_substeps_total += int(
-                    getattr(fluid, "_last_momentum_advection_substeps", 1)
-                )
-                momentum_advection_rejected_trial_count_total += int(
+                current_momentum_rejected_trial_count = int(
                     getattr(
                         fluid,
                         "_last_momentum_advection_rejected_trial_count",
                         0,
                     )
+                )
+                current_momentum_accepted_time_s = (
+                    _validated_component_accepted_time(
+                        requested_time_s=predictor_dt_s,
+                        reported_requested_time_s=float(
+                            getattr(
+                                fluid,
+                                "_last_momentum_advection_requested_time_s",
+                                math.nan,
+                            )
+                        ),
+                        accepted_time_s=float(
+                            getattr(
+                                fluid,
+                                "_last_momentum_advection_accepted_time_s",
+                                math.nan,
+                            )
+                        ),
+                        accepted_substep_count=(
+                            fluid._last_momentum_advection_substeps
+                        ),
+                        remaining_unadvanced_time_s=float(
+                            getattr(
+                                fluid,
+                                "_last_momentum_advection_remaining_unadvanced_time_s",
+                                math.nan,
+                            )
+                        ),
+                        rejected_trial_count=current_momentum_rejected_trial_count,
+                        component="fluid momentum advection",
+                    )
+                )
+                momentum_advection_requested_time_parts_s.append(predictor_dt_s)
+                momentum_advection_accepted_time_parts_s.append(
+                    current_momentum_accepted_time_s
+                )
+                if turbulence_model == "sst_2003":
+                    current_diffusion_rejected_trial_count = int(
+                        getattr(
+                            fluid,
+                            "_sst_last_momentum_helmholtz_rejected_trial_count",
+                            0,
+                        )
+                    )
+                    current_diffusion_accepted_time_s = (
+                        _validated_component_accepted_time(
+                            requested_time_s=predictor_dt_s,
+                            reported_requested_time_s=float(
+                                getattr(
+                                    fluid,
+                                    "_sst_last_momentum_diffusion_requested_time_s",
+                                    math.nan,
+                                )
+                            ),
+                            accepted_time_s=float(
+                                getattr(
+                                    fluid,
+                                    "_sst_last_momentum_diffusion_accepted_time_s",
+                                    math.nan,
+                                )
+                            ),
+                            accepted_substep_count=(
+                                fluid._sst_last_momentum_diffusion_substeps
+                            ),
+                            remaining_unadvanced_time_s=float(
+                                getattr(
+                                    fluid,
+                                    "_sst_last_momentum_diffusion_remaining_unadvanced_time_s",
+                                    math.nan,
+                                )
+                            ),
+                            rejected_trial_count=(
+                                current_diffusion_rejected_trial_count
+                            ),
+                            component="fluid momentum diffusion",
+                        )
+                    )
+                    momentum_diffusion_requested_time_parts_s.append(
+                        predictor_dt_s
+                    )
+                    momentum_diffusion_accepted_time_parts_s.append(
+                        current_diffusion_accepted_time_s
+                    )
+                    momentum_diffusion_rejected_trial_count_total += (
+                        current_diffusion_rejected_trial_count
+                    )
+                momentum_advection_scheme = str(
+                    getattr(fluid, "_last_momentum_advection_scheme", advection_scheme)
+                )
+                momentum_advection_substeps_total += int(
+                    fluid._last_momentum_advection_substeps
+                )
+                momentum_advection_rejected_trial_count_total += (
+                    current_momentum_rejected_trial_count
                 )
                 momentum_advection_cfl_max = max(
                     momentum_advection_cfl_max,
@@ -7553,6 +9272,29 @@ def _flow_advance_current_step(
     else:  # pragma: no cover - protected by config validation.
         raise RuntimeError(f"unsupported flow_driver_mode: {mode!r}")
 
+    sst_transport_requested_time_s = math.fsum(
+        sst_transport_requested_time_parts_s
+    )
+    sst_transport_accepted_time_s = math.fsum(
+        sst_transport_accepted_time_parts_s
+    )
+    momentum_advection_requested_time_s = math.fsum(
+        momentum_advection_requested_time_parts_s
+    )
+    momentum_advection_accepted_time_s = math.fsum(
+        momentum_advection_accepted_time_parts_s
+    )
+    momentum_diffusion_requested_time_s = math.fsum(
+        momentum_diffusion_requested_time_parts_s
+    )
+    momentum_diffusion_accepted_time_s = math.fsum(
+        momentum_diffusion_accepted_time_parts_s
+    )
+    fluid_rejected_trial_count = (
+        sst_transport_rejected_trial_count_total
+        + momentum_advection_rejected_trial_count_total
+        + momentum_diffusion_rejected_trial_count_total
+    )
     driver_report.update(
         {
             "flow_turbulence_model": turbulence_model,
@@ -7566,11 +9308,32 @@ def _flow_advance_current_step(
             "flow_sst_transport_rejected_trial_count_total": int(
                 sst_transport_rejected_trial_count_total
             ),
+            "flow_sst_transport_requested_time_s": float(
+                sst_transport_requested_time_s
+            ),
+            "flow_sst_transport_accepted_time_s": float(
+                sst_transport_accepted_time_s
+            ),
+            "flow_sst_transport_remaining_unadvanced_time_s": float(
+                sst_transport_requested_time_s - sst_transport_accepted_time_s
+            ),
+            "flow_sst_momentum_diffusion_requested_time_s": float(
+                momentum_diffusion_requested_time_s
+            ),
+            "flow_sst_momentum_diffusion_accepted_time_s": float(
+                momentum_diffusion_accepted_time_s
+            ),
+            "flow_sst_momentum_diffusion_remaining_unadvanced_time_s": float(
+                momentum_diffusion_requested_time_s
+                - momentum_diffusion_accepted_time_s
+            ),
             "flow_sst_transport_diffusion_cfl_max": float(
                 sst_transport_diffusion_cfl_max
             ),
             "flow_sst_momentum_diffusion_substeps_last": int(
-                getattr(fluid, "_sst_last_momentum_diffusion_substeps", 0)
+                fluid._sst_last_momentum_diffusion_substeps
+                if turbulence_model == "sst_2003"
+                else 0
             ),
             "flow_sst_momentum_diffusion_integrator": str(
                 getattr(fluid, "_sst_last_momentum_diffusion_integrator", "none")
@@ -7605,12 +9368,25 @@ def _flow_advance_current_step(
                     0,
                 )
             ),
+            "flow_sst_momentum_helmholtz_rejected_trial_count_total": int(
+                momentum_diffusion_rejected_trial_count_total
+            ),
             "flow_momentum_advection_scheme": momentum_advection_scheme,
             "flow_momentum_advection_substeps_total": int(
                 momentum_advection_substeps_total
             ),
             "flow_momentum_advection_rejected_trial_count_total": int(
                 momentum_advection_rejected_trial_count_total
+            ),
+            "flow_momentum_advection_requested_time_s": float(
+                momentum_advection_requested_time_s
+            ),
+            "flow_momentum_advection_accepted_time_s": float(
+                momentum_advection_accepted_time_s
+            ),
+            "flow_momentum_advection_remaining_unadvanced_time_s": float(
+                momentum_advection_requested_time_s
+                - momentum_advection_accepted_time_s
             ),
             "flow_momentum_advection_cfl_max": float(
                 momentum_advection_cfl_max
@@ -7641,6 +9417,7 @@ def _flow_advance_current_step(
         update_pressure_gradient=True,
         boundary_cache=sharp_boundary_cache,
         reuse_topology_from_previous_assembly=True,
+        measure_wall_times=measure_wall_times,
         stage_observer=preflow_stage_observer,
     )
     if preflow_stage_observer is not None:
@@ -7813,6 +9590,7 @@ def _flow_advance_current_step(
             update_pressure_gradient=False,
             boundary_cache=sharp_boundary_cache,
             reuse_topology_from_previous_assembly=True,
+            measure_wall_times=measure_wall_times,
             stage_observer=preflow_stage_observer,
         )
         if preflow_stage_observer is not None:
@@ -8010,6 +9788,22 @@ def _flow_advance_current_step(
                 ),
             }
         )
+    flow_report["hibm_pre_predictor_stage_wall_time_s"] = dict(
+        pre_predictor_stage_wall_time_s
+    )
+    flow_report["hibm_pre_predictor_wall_time_s"] = float(
+        pre_predictor_wall_time_s
+    )
+    projection_cycle_stage_wall_time_s = flow_report.get(
+        "hibm_sharp_marker_boundary_total_stage_wall_time_s",
+        flow_report.get(
+            "hibm_sharp_marker_boundary_stage_wall_time_s",
+            {},
+        ),
+    )
+    flow_report["hibm_projection_cycle_wall_time_s"] = (
+        _hibm_stage_wall_time_sum(projection_cycle_stage_wall_time_s)
+    )
     flow_report["hibm_sharp_marker_boundary_pre_predictor_refreshed"] = bool(
         pre_predictor_sharp_boundary_report.get(
             "hibm_sharp_marker_boundary_enabled",
@@ -8066,6 +9860,26 @@ def _flow_advance_current_step(
         if configured_velocity_inlet_zmax is None
         else bool(configured_velocity_inlet_zmax)
     )
+    if predictor_applied:
+        flow_report.update(
+            _macro_time_accounting_report(
+                requested_macro_dt_s=float(config.dt_s),
+                accepted_time_s=float(momentum_advection_accepted_time_s),
+                accepted_substep_count=momentum_advection_substeps_total,
+                rejected_trial_count=int(fluid_rejected_trial_count),
+                component="fluid",
+            )
+        )
+    else:
+        requested_macro_dt_s = float(config.dt_s)
+        flow_report.update(
+            {
+                "requested_macro_dt_s": requested_macro_dt_s,
+                "fluid_accepted_time_s": 0.0,
+                "fluid_rejected_trial_count": 0,
+                "fluid_remaining_unadvanced_time_s": requested_macro_dt_s,
+            }
+        )
     return flow_report
 
 
@@ -8077,6 +9891,21 @@ def _effective_flow_driver_mode(config: Any, *, flow_phase: str = "fsi") -> str:
         if preflow_mode is not None and str(preflow_mode):
             return str(preflow_mode)
     return str(getattr(config, "flow_driver_mode", FLOW_DRIVER_PROJECTION_ONLY))
+
+
+def _require_fsi_physical_flow_driver_mode(config: Any) -> str:
+    """Reject FSI modes that do not advance the requested physical time."""
+
+    mode = _effective_flow_driver_mode(config, flow_phase="fsi")
+    if mode not in FLOW_DRIVER_PHYSICAL_PREDICTOR_MODES:
+        _macro_time_accounting_report(
+            requested_macro_dt_s=float(config.dt_s),
+            accepted_time_s=0.0,
+            accepted_substep_count=1,
+            rejected_trial_count=0,
+            component="fluid",
+        )
+    return mode
 
 
 def _flow_driver_requires_full_field_reinitialize(mode: str) -> bool:
@@ -8319,6 +10148,11 @@ _PREFLOW_SNAPSHOT_FSI_ONLY_CONFIG_FIELDS = frozenset(
         "solid_substeps",
         "solid_cfl_target",
         "solid_velocity_transfer_flip_blend",
+        "kalman_writeback_mode",
+        "kalman_interface_config",
+        "kalman_fluid_config",
+        "kalman_solid_config",
+        "detailed_preflow_stage_progress",
         "velocity_damping",
         "fixed_node_lock_policy",
         "displacement_tolerance",
@@ -9610,7 +11444,9 @@ def _run_fixed_solid_preflow(
         )
         observer_wall_time_s = 0.0
         preflow_stage_observer: Callable[[str], None] | None = None
-        if progress_observer is not None:
+        if progress_observer is not None and bool(
+            getattr(config, "detailed_preflow_stage_progress", False)
+        ):
             def emit_preflow_stage(preflow_stage: str) -> None:
                 nonlocal observer_wall_time_s
                 observer_started_s = time.perf_counter()
@@ -10006,6 +11842,9 @@ def _run_fixed_solid_preflow(
             "stress_invalid_marker_count": stress_report.invalid_marker_count,
             **_marker_projection_boundary_report_fields(
                 markers,
+                traction_tip_cap_pressure_enabled=(
+                    _traction_tip_cap_pressure_enabled(config)
+                ),
                 canonical_velocity_dirichlet_report=flow_report.get(
                     "canonical_velocity_dirichlet_report"
                 ),
@@ -10652,13 +12491,6 @@ def _flow_parity_snapshot(
         "pressure": _fluid_feedback_pressure_numpy(fluid),
         "velocity": fluid.velocity.to_numpy(),
         "obstacle": fluid.obstacle.to_numpy(),
-        "hibm_base_obstacle": fluid.hibm_base_obstacle.to_numpy(),
-        "hibm_dynamic_solid_volume_obstacle": (
-            fluid.hibm_dynamic_solid_volume_obstacle.to_numpy()
-        ),
-        "hibm_dynamic_solid_volume_external_carve": (
-            fluid.hibm_dynamic_solid_volume_external_carve.to_numpy()
-        ),
         "velocity_dirichlet_boundary_active": (
             fluid.velocity_dirichlet_boundary_active.to_numpy()
         ),
@@ -10670,9 +12502,6 @@ def _flow_parity_snapshot(
         ),
         "velocity_dirichlet_boundary_hard_fixed_component_mask": (
             fluid.velocity_dirichlet_boundary_hard_fixed_component_mask.to_numpy()
-        ),
-        "velocity_dirichlet_boundary_external_exact_component_mask": (
-            fluid.velocity_dirichlet_boundary_external_exact_component_mask.to_numpy()
         ),
         "velocity_dirichlet_boundary_owned_row": (
             fluid.velocity_dirichlet_boundary_owned_row.to_numpy()
@@ -10801,6 +12630,269 @@ def _fluid_feedback_pressure_field(fluid: CartesianFluidSolver):
 
 def _fluid_feedback_pressure_numpy(fluid: CartesianFluidSolver) -> np.ndarray:
     return _fluid_feedback_pressure_field(fluid).to_numpy()
+
+
+_ACTIVE_KALMAN_CONFIG_FIELDS = {
+    INTERFACE_MARKER_VELOCITY_OWNER: "kalman_interface_config",
+    FLUID_FSI_PRESSURE_FEEDBACK_OWNER: "kalman_fluid_config",
+    SOLID_PARTICLE_VELOCITY_OWNER: "kalman_solid_config",
+}
+
+
+def _modified_physics_kalman_mode(config: Any) -> str:
+    mode = str(getattr(config, "kalman_writeback_mode", "off"))
+    if mode not in ACTIVE_KALMAN_MODE_OWNERS:
+        raise ValueError(f"unsupported kalman_writeback_mode: {mode!r}")
+    return mode
+
+
+def _modified_physics_kalman_configs(config: Any) -> dict[str, object]:
+    mode = _modified_physics_kalman_mode(config)
+    enabled = ACTIVE_KALMAN_MODE_OWNERS[mode]
+    all_configs = {
+        owner: getattr(config, field_name, None)
+        for owner, field_name in _ACTIVE_KALMAN_CONFIG_FIELDS.items()
+    }
+    unexpected = [
+        owner
+        for owner, owner_config in all_configs.items()
+        if owner not in enabled and owner_config is not None
+    ]
+    if unexpected:
+        raise ValueError(
+            f"Kalman mode {mode!r} has unused configs for {unexpected!r}"
+        )
+    configs = {owner: all_configs[owner] for owner in enabled}
+    missing = [owner for owner in enabled if configs.get(owner) is None]
+    if missing:
+        raise ValueError(
+            f"Kalman mode {mode!r} is missing configs for {missing!r}"
+        )
+    return configs
+
+
+def _kalman_fluid_observation(fluid: CartesianFluidSolver) -> np.ndarray:
+    if not hasattr(fluid, "fsi_pressure"):
+        raise RuntimeError(
+            "modified-physics fluid Kalman requires fluid.fsi_pressure"
+        )
+    values = np.asarray(fluid.fsi_pressure.to_numpy(), dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        raise RuntimeError("raw fluid.fsi_pressure observation must be finite")
+    return values
+
+
+def _kalman_solid_observation(solid: NeoHookeanMpmState) -> np.ndarray:
+    particle_count = int(solid.particle_count)
+    values = np.asarray(solid.v.to_numpy()[:particle_count], dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        raise RuntimeError("raw solid velocity observation must be finite")
+    return values
+
+
+def _kalman_interface_observation(
+    markers: HibmMpmSurfaceMarkers,
+) -> np.ndarray:
+    marker_count = int(markers.marker_count)
+    values = np.asarray(
+        markers.v_gamma_mps.to_numpy()[:marker_count],
+        dtype=np.float64,
+    )
+    if not np.all(np.isfinite(values)):
+        raise RuntimeError("raw marker velocity observation must be finite")
+    return values
+
+
+def _finite_kalman_values(
+    values: object,
+    *,
+    expected_shape: tuple[int, ...],
+    name: str,
+    dtype: object = np.float32,
+) -> np.ndarray:
+    candidate = np.asarray(values, dtype=np.float64)
+    if tuple(candidate.shape) != tuple(expected_shape):
+        raise RuntimeError(
+            f"{name} shape changed: expected={expected_shape!r}, "
+            f"actual={tuple(candidate.shape)!r}"
+        )
+    if not np.all(np.isfinite(candidate)):
+        raise RuntimeError(f"{name} must be finite before f32 writeback")
+    converted = np.ascontiguousarray(candidate, dtype=dtype)
+    if not np.all(np.isfinite(converted)):
+        raise RuntimeError(f"{name} overflowed during writeback conversion")
+    return converted
+
+
+def _apply_kalman_fluid_writeback(
+    fluid: CartesianFluidSolver,
+    filtered_pressure_pa: object,
+) -> np.ndarray:
+    if not hasattr(fluid, "fsi_pressure"):
+        raise RuntimeError(
+            "modified-physics fluid Kalman requires fluid.fsi_pressure"
+    )
+    field = fluid.fsi_pressure
+    field_shape = getattr(field, "shape", None)
+    expected_shape = (
+        tuple(int(value) for value in field_shape)
+        if field_shape is not None
+        else tuple(np.asarray(filtered_pressure_pa).shape)
+    )
+    field_dtype_name = str(getattr(field, "dtype", "")).lower()
+    target_dtype = np.float64 if "f64" in field_dtype_name else np.float32
+    converted = _finite_kalman_values(
+        filtered_pressure_pa,
+        expected_shape=expected_shape,
+        name="filtered fluid.fsi_pressure",
+        dtype=target_dtype,
+    )
+    field.from_numpy(converted)
+    return converted.astype(np.float64, copy=True)
+
+
+def _apply_kalman_solid_writeback(
+    solid: NeoHookeanMpmState,
+    filtered_velocity_mps: object,
+    *,
+    fixed_mask: np.ndarray,
+    enforce_plane_strain_x: bool,
+) -> np.ndarray:
+    particle_count = int(solid.particle_count)
+    full_velocity = np.asarray(solid.v.to_numpy()).copy()
+    converted = _finite_kalman_values(
+        filtered_velocity_mps,
+        expected_shape=(particle_count, 3),
+        name="filtered solid velocity",
+    )
+    fixed = np.asarray(fixed_mask, dtype=bool)[:particle_count]
+    if tuple(fixed.shape) != (particle_count,):
+        raise RuntimeError("solid fixed mask shape changed during Kalman writeback")
+    converted[fixed] = 0.0
+    if bool(enforce_plane_strain_x):
+        converted[:, 0] = 0.0
+    full_velocity[:particle_count] = converted
+    solid.v.from_numpy(np.ascontiguousarray(full_velocity, dtype=np.float32))
+    return converted.astype(np.float64, copy=True)
+
+
+def _refresh_kalman_interface_derived_vertices(
+    markers: HibmMpmSurfaceMarkers,
+) -> None:
+    if getattr(markers, "_open_ribbon_tip_cap_binding", None) is not None:
+        markers.refresh_open_ribbon_tip_cap_projection_vertices()
+
+
+def _apply_kalman_interface_writeback(
+    markers: HibmMpmSurfaceMarkers,
+    filtered_velocity_mps: object,
+) -> np.ndarray:
+    marker_count = int(markers.marker_count)
+    full_velocity = np.asarray(markers.v_gamma_mps.to_numpy()).copy()
+    converted = _finite_kalman_values(
+        filtered_velocity_mps,
+        expected_shape=(marker_count, 3),
+        name="filtered marker velocity",
+    )
+    full_velocity[:marker_count] = converted
+    markers.v_gamma_mps.from_numpy(
+        np.ascontiguousarray(full_velocity, dtype=np.float32)
+    )
+    _refresh_kalman_interface_derived_vertices(markers)
+    return converted.astype(np.float64, copy=True)
+
+
+def _initialize_modified_physics_kalman_controller(
+    config: Any,
+    *,
+    fluid: CartesianFluidSolver,
+    solid: NeoHookeanMpmState,
+    markers: HibmMpmSurfaceMarkers,
+) -> ActiveKalmanWritebackController | None:
+    mode = _modified_physics_kalman_mode(config)
+    if mode == "off":
+        return None
+    configs = _modified_physics_kalman_configs(config)
+    observations: dict[str, np.ndarray] = {}
+    for owner in ACTIVE_KALMAN_MODE_OWNERS[mode]:
+        if owner == FLUID_FSI_PRESSURE_FEEDBACK_OWNER:
+            observations[owner] = _kalman_fluid_observation(fluid)
+        elif owner == SOLID_PARTICLE_VELOCITY_OWNER:
+            observations[owner] = _kalman_solid_observation(solid)
+        elif owner == INTERFACE_MARKER_VELOCITY_OWNER:
+            observations[owner] = _kalman_interface_observation(markers)
+        else:  # pragma: no cover - static owner table is exhaustively tested
+            raise RuntimeError(f"unsupported active Kalman owner: {owner!r}")
+    return ActiveKalmanWritebackController(
+        mode=mode,
+        configs=configs,
+        initial_observations=observations,
+    )
+
+
+def _empty_modified_physics_kalman_step_report(mode: str) -> dict[str, object]:
+    return {
+        "mode": mode,
+        "modified_physics": False,
+        "owners": {},
+        "filter_wall_time_s": 0.0,
+        "state_transfer_wall_time_s": 0.0,
+        "total_overhead_s": 0.0,
+    }
+
+
+def _kalman_controller_filter_wall_time_s(
+    controller: ActiveKalmanWritebackController | None,
+) -> float:
+    if controller is None:
+        return 0.0
+    summary = controller.summary()
+    return float(
+        math.fsum(
+            float(owner_report.get("filter_wall_time_s", 0.0))
+            for owner_report in summary.get("owners", {}).values()
+        )
+    )
+
+
+def _restore_modified_physics_kalman_targets(
+    raw_targets: Mapping[str, np.ndarray],
+    *,
+    fluid: CartesianFluidSolver,
+    solid: NeoHookeanMpmState,
+    markers: HibmMpmSurfaceMarkers,
+) -> None:
+    if FLUID_FSI_PRESSURE_FEEDBACK_OWNER in raw_targets:
+        fluid.fsi_pressure.from_numpy(raw_targets[FLUID_FSI_PRESSURE_FEEDBACK_OWNER])
+    if SOLID_PARTICLE_VELOCITY_OWNER in raw_targets:
+        solid.v.from_numpy(raw_targets[SOLID_PARTICLE_VELOCITY_OWNER])
+    if INTERFACE_MARKER_VELOCITY_OWNER in raw_targets:
+        markers.v_gamma_mps.from_numpy(
+            raw_targets[INTERFACE_MARKER_VELOCITY_OWNER]
+        )
+        _refresh_kalman_interface_derived_vertices(markers)
+
+
+def _discard_modified_physics_kalman_step(
+    controller: ActiveKalmanWritebackController | None,
+    raw_targets: Mapping[str, np.ndarray],
+    *,
+    fluid: CartesianFluidSolver,
+    solid: NeoHookeanMpmState,
+    markers: HibmMpmSurfaceMarkers,
+) -> None:
+    if controller is None:
+        return
+    try:
+        _restore_modified_physics_kalman_targets(
+            raw_targets,
+            fluid=fluid,
+            solid=solid,
+            markers=markers,
+        )
+    finally:
+        if controller.has_active_step:
+            controller.discard_step()
 
 
 def _apply_marker_feedback_to_fluid(
@@ -11019,6 +13111,13 @@ def _flow_transport_report_fields(report: Any) -> dict[str, object]:
         key: value
         for key, value in report.items()
         if key == "flow_turbulence_model"
+        or key
+        in {
+            "requested_macro_dt_s",
+            "fluid_accepted_time_s",
+            "fluid_rejected_trial_count",
+            "fluid_remaining_unadvanced_time_s",
+        }
         or key.startswith("flow_sst_")
         or key.startswith("flow_momentum_advection_")
     }
@@ -11154,6 +13253,7 @@ def _marker_traction_report_fields(
 def _marker_projection_boundary_report_fields(
     markers: HibmMpmSurfaceMarkers,
     *,
+    traction_tip_cap_pressure_enabled: bool,
     canonical_velocity_dirichlet_report: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     physical_count = int(markers.marker_count)
@@ -11200,6 +13300,9 @@ def _marker_projection_boundary_report_fields(
         and closure_evaluated_axis_count == 3 * boundary_only_count
         and closure_invalid_axis_count == 0
     )
+    tip_cap_force_included = bool(
+        tip_cap_enabled and traction_tip_cap_pressure_enabled
+    )
     return {
         "marker_physical_traction_count": physical_count,
         "marker_projection_vertex_count": projection_count,
@@ -11208,9 +13311,11 @@ def _marker_projection_boundary_report_fields(
         "tip_cap_boundary_region_id": (
             TIP_CAP_BOUNDARY_REGION_ID if tip_cap_enabled else None
         ),
-        "tip_cap_force_included": tip_cap_enabled,
+        "tip_cap_force_included": tip_cap_force_included,
         "tip_cap_traction_policy": (
             "one_sided_gauge_pressure_outward_normal"
+            if tip_cap_force_included
+            else "projection_only_no_traction"
             if tip_cap_enabled
             else "not_applicable"
         ),

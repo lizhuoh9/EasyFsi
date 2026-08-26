@@ -516,7 +516,8 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
         self.assertFalse(
             hasattr(solid_mpm_fsi_runner, "_step_observer_snapshot")
         )
-        self.assertIn("solid_substeps=solid_substeps", direct_source)
+        self.assertIn("_select_and_advance_solid_macro_step(", direct_source)
+        self.assertNotIn("solid_substeps=solid_substeps", direct_source)
         self.assertIn("flow_predictor_substeps", case_source)
         self.assertNotIn("runtime_executor", case_source)
         self.assertNotIn("explicit_loose", case_source)

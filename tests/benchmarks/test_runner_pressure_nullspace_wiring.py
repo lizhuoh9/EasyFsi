@@ -10,7 +10,7 @@ from benchmarks.official.solid_mpm_fsi_runner import (
     FLOW_PROJECTION_REPORT_KEYS,
     _HibmPreProjectionVelocityProjector,
     _combine_flow_projection_reports,
-    _flow_advance_current_step,
+    _flow_advance_current_step_trial,
     _project_current_flow,
 )
 
@@ -174,7 +174,7 @@ class RunnerPressureNullspaceWiringTests(unittest.TestCase):
 
     def test_sharp_main_and_consistency_share_q_and_pressure_projector(self) -> None:
         function = ast.parse(
-            textwrap.dedent(inspect.getsource(_flow_advance_current_step))
+            textwrap.dedent(inspect.getsource(_flow_advance_current_step_trial))
         ).body[0]
         projection_calls = [
             node

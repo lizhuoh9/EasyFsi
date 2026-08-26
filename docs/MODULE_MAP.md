@@ -105,9 +105,14 @@ Shared snapshot and rollback state lives in
 `coupling/hibm_mpm/interface_state.py`. Generic adapters must invalidate a
 previous transaction before a new snapshot, arm rollback only after every
 pre-mutation snapshot succeeds, and clear the transaction after commit or
-rollback. The direct ANSYS path instead has one accepted physical evaluation per
-step and retains its own fail-closed pressure, ledger, no-slip, traction, MPM,
-and SST health gates.
+rollback. The direct ANSYS path instead owns one accepted macro transaction per
+FSI step. Within that transaction, accepted fluid and solid physical substeps
+must each consume exactly `dt_s`; rejected CFL, positivity, Helmholtz, pressure,
+or MPM trials contribute zero accepted time and restore the accepted state.
+Pressure/PCG/Helmholtz and FSI coupling iterations may stop at residual
+convergence because they are algebraic work at one physical time, but they must
+not truncate either component's remaining physical time. The path retains its
+own fail-closed pressure, ledger, no-slip, traction, MPM, and SST health gates.
 
 Changing which adapter a validated case uses is a numerical behavior change.
 It requires a fresh source-matched preflow snapshot and staged CUDA

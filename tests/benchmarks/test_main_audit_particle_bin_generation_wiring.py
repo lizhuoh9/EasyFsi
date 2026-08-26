@@ -171,7 +171,7 @@ class ParticleBinGenerationWiringTests(unittest.TestCase):
                 "particle_position_generation",
             ),
             (
-                "_advance_solid_substeps_batched",
+                "_select_and_advance_solid_macro_step",
                 "particle_position_write_observer",
                 "record_particle_position_write",
             ),
@@ -199,6 +199,40 @@ class ParticleBinGenerationWiringTests(unittest.TestCase):
         self.assertEqual(
             forwarded_generation.id,
             "particle_position_generation",
+        )
+
+        selector = _function("_select_and_advance_solid_macro_step")
+        selector_call = next(
+            node
+            for node in ast.walk(selector)
+            if isinstance(node, ast.Call)
+            and _call_name(node) == "_advance_solid_macro_step_with_retries"
+        )
+        selector_observer = _keyword(
+            selector_call,
+            "particle_position_write_observer",
+        )
+        self.assertIsInstance(selector_observer, ast.Name)
+        self.assertEqual(
+            selector_observer.id,
+            "particle_position_write_observer",
+        )
+
+        retry = _function("_advance_solid_macro_step_with_retries")
+        retry_call = next(
+            node
+            for node in ast.walk(retry)
+            if isinstance(node, ast.Call)
+            and _call_name(node) == "_advance_solid_substeps_batched"
+        )
+        retry_observer = _keyword(
+            retry_call,
+            "particle_position_write_observer",
+        )
+        self.assertIsInstance(retry_observer, ast.Name)
+        self.assertEqual(
+            retry_observer.id,
+            "particle_position_write_observer",
         )
 
     def test_current_solid_position_mutation_inventory_is_explicit(self) -> None:
@@ -231,6 +265,7 @@ class ParticleBinGenerationWiringTests(unittest.TestCase):
                     "initialize_box": 1,
                     "step": 1,
                     "enforce_rest_x_plane": 1,
+                    "restore_state": 2,
                 }
             ),
         )

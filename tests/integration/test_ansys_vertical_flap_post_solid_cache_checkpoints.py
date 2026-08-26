@@ -337,14 +337,14 @@ def test_existing_solid_target_does_not_require_health_callable(
     cache.mkdir()
     runner = SimpleNamespace(
         _flow_advance_current_step=lambda *_args, **_kwargs: None,
-        _advance_solid_substeps_batched=lambda *_args, **_kwargs: None,
+        _select_and_advance_solid_macro_step=lambda *_args, **_kwargs: None,
     )
     seen = _run(
         module,
         tmp_path,
         monkeypatch,
         runner,
-        lambda: runner._advance_solid_substeps_batched(object(), object()),
+        lambda: runner._select_and_advance_solid_macro_step(object(), object()),
         _FakeTaichi(cache),
         target_stage="solid_update_after",
     )

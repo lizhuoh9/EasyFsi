@@ -80,6 +80,5 @@ class CflSubstepControllerTests(unittest.TestCase):
             3,
         )
 
-
 if __name__ == "__main__":
     unittest.main()

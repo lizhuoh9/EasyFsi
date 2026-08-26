@@ -477,7 +477,7 @@ def _run_runtime_flow_advance(
             },
         ),
     ):
-        return solid_mpm_fsi_runner._flow_advance_current_step(
+        return solid_mpm_fsi_runner._flow_advance_current_step_trial(
             fluid,
             config,
             markers=object(),
@@ -1346,7 +1346,7 @@ class GenericRunnerQpLifecycleContracts(unittest.TestCase):
                 self.assertFalse(_calls(branch, phase))
 
     def test_main_and_every_configured_consistency_projection_receive_q(self) -> None:
-        advance = _top_level_function(RUNNER_PATH, "_flow_advance_current_step")
+        advance = _top_level_function(RUNNER_PATH, "_flow_advance_current_step_trial")
         qp_calls = _calls(advance, "_project_current_flow")
         self.assertEqual(
             len(qp_calls),

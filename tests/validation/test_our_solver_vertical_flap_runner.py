@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +54,21 @@ def _load_runner_module():
     return module
 
 
+def test_source_hashes_include_solid_substep_ab_comparator() -> None:
+    runner = _load_runner_module()
+    comparator = REPO_ROOT / "tools" / "validation" / "compare_solid_substep_ab.py"
+
+    source_hashes = runner._source_hashes()
+    comparator_key = comparator.relative_to(REPO_ROOT).as_posix()
+
+    assert comparator_key in source_hashes
+    comparator_digest = source_hashes[comparator_key]
+    assert len(comparator_digest) == 64
+    assert comparator_digest == comparator_digest.lower()
+    assert all(character in "0123456789abcdef" for character in comparator_digest)
+    assert comparator_digest == hashlib.sha256(comparator.read_bytes()).hexdigest()
+
+
 def test_grid_summary_reports_the_actual_modeled_half_domain_resolution() -> None:
     runner = _load_runner_module()
     config = VerticalFlapFsiConfig(grid_nodes=(4, 256, 320))
@@ -64,6 +80,42 @@ def test_grid_summary_reports_the_actual_modeled_half_domain_resolution() -> Non
     assert summary["cell_size_m"]["wall_normal_modeled_half_height"] == pytest.approx(
         0.02 / 256
     )
+
+
+@pytest.mark.parametrize(
+    "solid_args",
+    [
+        ["--solid-substep-mode", "fixed"],
+        [
+            "--solid-substep-convergence-tolerance",
+            "0.01",
+        ],
+    ],
+)
+def test_cli_rejects_removed_solid_substep_controls_before_creating_run_dir(
+    tmp_path,
+    monkeypatch,
+    solid_args,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "must_not_exist"
+    monkeypatch.setattr(
+        runner.sys,
+        "argv",
+        [
+            str(RUNNER_PATH),
+            "--output-dir",
+            str(output_dir),
+            "--dry-run",
+            *solid_args,
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.main()
+
+    assert exc_info.value.code == 2
+    assert not output_dir.exists()
 
 
 def test_cli_rejects_snapshot_input_and_output_before_creating_run_dir(
@@ -91,6 +143,226 @@ def test_cli_rejects_snapshot_input_and_output_before_creating_run_dir(
 
     assert exc_info.value.code == 2
     assert not output_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [
+        ([], False),
+        (["--detailed-preflow-stage-progress"], True),
+    ],
+    ids=("default", "explicit"),
+)
+def test_cli_detailed_preflow_stage_progress_is_opt_in(
+    tmp_path: Path,
+    extra_args: list[str],
+    expected: bool,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / f"detailed_preflow_{expected}"
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(
+            runner,
+            "_configure_taichi_offline_cache",
+            return_value={"offline_cache_enabled": False},
+        ),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(RUNNER_PATH),
+                "--output-dir",
+                str(output_dir),
+                "--dry-run",
+                *extra_args,
+            ],
+        ),
+    ):
+        assert runner.main() == 0
+
+    config = runner.json.loads(
+        (output_dir / "our_solver_config.json").read_text("utf-8")
+    )
+    manifest = runner.json.loads(
+        (output_dir / "run_manifest.json").read_text("utf-8")
+    )
+    assert config["detailed_preflow_stage_progress"] is expected
+    assert manifest["config"]["detailed_preflow_stage_progress"] is expected
+
+
+@pytest.mark.parametrize(
+    ("solid_substeps_args", "expected_solid_substeps"),
+    (
+        ((), None),
+        (("--solid-substeps", "1600"), 1600),
+    ),
+)
+def test_dry_run_preserves_adaptive_default_and_explicit_fixed_override(
+    tmp_path: Path,
+    monkeypatch,
+    solid_substeps_args: tuple[str, ...],
+    expected_solid_substeps: int | None,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / (
+        "adaptive" if expected_solid_substeps is None else "fixed"
+    )
+    monkeypatch.setattr(
+        runner.sys,
+        "argv",
+        [
+            str(RUNNER_PATH),
+            "--output-dir",
+            str(output_dir),
+            "--dry-run",
+            *solid_substeps_args,
+        ],
+    )
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+    ):
+        assert runner.main() == 0
+
+    manifest = runner.json.loads(
+        (output_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["config"]["solid_substeps"] == expected_solid_substeps
+
+
+@pytest.mark.parametrize(
+    ("requested_substeps", "expected_mode"),
+    ((None, "adaptive"), (1600, "fixed_override")),
+)
+def test_summary_preserves_requested_solid_substep_mode(
+    tmp_path: Path,
+    requested_substeps: int | None,
+    expected_mode: str,
+) -> None:
+    runner = _load_runner_module()
+    summary = runner._summary_from_report(
+        report={"history": []},
+        config=VerticalFlapFsiConfig(
+            step_count=0,
+            solid_substeps=requested_substeps,
+        ),
+        output_dir=tmp_path,
+        elapsed_s=1.25,
+        solver_npz_summary=None,
+        run_label="substep-mode-contract",
+    )
+
+    assert summary["solid_substeps"] == requested_substeps
+    assert summary["solid_substeps_mode"] == expected_mode
+
+
+def test_cli_percentile_flow_reporting_is_opt_in_and_persisted_in_manifest(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "percentile_manifest"
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(RUNNER_PATH),
+                "--output-dir",
+                str(output_dir),
+                "--dry-run",
+                "--flow-report-percentiles",
+            ],
+        ),
+    ):
+        assert runner.main() == 0
+
+    manifest = runner.json.loads(
+        (output_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["config"]["flow_report_include_percentiles"] is True
+
+
+def test_summary_exposes_profile_totals_and_elapsed_phase_boundaries(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    profile_totals = {
+        "flow_wall_time_s_total": 1.0,
+        "solid_wall_time_s_total": 2.0,
+        "hibm_wall_time_s_total": 3.0,
+        "snapshot_capture_wall_time_s_total": 4.0,
+        "step_artifact_export_wall_time_s_total": 5.0,
+    }
+
+    runtime_identity = {"arch": "cuda", "default_fp": "f32"}
+    summary = runner._summary_from_report(
+        report={
+            "history": [],
+            "profile_wall_time_enabled": True,
+            "taichi_runtime_identity": runtime_identity,
+            **profile_totals,
+        },
+        config=VerticalFlapFsiConfig(step_count=0),
+        output_dir=tmp_path,
+        elapsed_s=10.0,
+        solver_elapsed_s=6.0,
+        post_solver_artifact_export_wall_time_s=3.0,
+        pre_summary_artifact_elapsed_s=10.0,
+        solver_npz_summary=None,
+        run_label="profile-summary-contract",
+    )
+
+    assert summary["elapsed_s"] == pytest.approx(10.0)
+    assert summary["solver_elapsed_s"] == pytest.approx(6.0)
+    assert summary["post_solver_artifact_export_wall_time_s"] == pytest.approx(3.0)
+    assert summary["pre_summary_artifact_elapsed_s"] == pytest.approx(10.0)
+    assert summary["profile_wall_time_enabled"] is True
+    assert summary["taichi_runtime_identity"] == runtime_identity
+    for key, value in profile_totals.items():
+        assert summary[key] == pytest.approx(value)
+
+
+def test_main_uses_solver_post_export_and_artifact_ready_elapsed_boundaries() -> None:
+    source = RUNNER_PATH.read_text(encoding="utf-8")
+    main_source = source[source.index("def main() -> int:") :]
+
+    solver_start = main_source.index("solver_started_s = time.perf_counter()")
+    solver_call = main_source.index("report = run_ansys_vertical_flap_benchmark(")
+    solver_elapsed = main_source.index(
+        "solver_elapsed_s = time.perf_counter() - solver_started_s"
+    )
+    post_export_start = main_source.index(
+        "post_solver_artifact_export_started_s = time.perf_counter()"
+    )
+    post_export_elapsed = main_source.index(
+        "post_solver_artifact_export_wall_time_s = ("
+    )
+    pre_summary_elapsed = main_source.index(
+        "pre_summary_artifact_elapsed_s = time.perf_counter() - start"
+    )
+    summary_call = main_source.index("summary = _summary_from_report(")
+    summary_write = main_source.index(
+        "_write_json_atomic(output_dir / \"our_solver_summary.json\", summary)"
+    )
+    terminal_elapsed = main_source.index(
+        "terminal_elapsed_s = time.perf_counter() - start"
+    )
+
+    assert solver_start < solver_call < solver_elapsed < post_export_start
+    assert post_export_start < post_export_elapsed < pre_summary_elapsed < summary_call
+    assert summary_call < summary_write < terminal_elapsed
+    assert "elapsed_s=elapsed_s" in main_source[summary_call:]
+    assert "solver_elapsed_s=solver_elapsed_s" in main_source[summary_call:]
+    assert "post_solver_artifact_export_wall_time_s=(" in main_source[summary_call:]
+    assert "pre_summary_artifact_elapsed_s=pre_summary_artifact_elapsed_s" in main_source[summary_call:]
+    assert '"elapsed_s": terminal_elapsed_s' in main_source[summary_call:]
+    assert "total_elapsed_s" not in main_source
 
 
 def test_fine_config_uses_dynamic_solid_volume_and_validated_direct_hibm_band() -> None:
@@ -282,6 +554,9 @@ def test_taichi_cache_configuration_is_isolated_and_reusable(
         "SIMULATION_TAICHI_OFFLINE_CACHE_FILE_PATH",
         raising=False,
     )
+    monkeypatch.setenv("TI_OFFLINE_CACHE_MAX_SIZE_OF_FILES", "4096")
+    monkeypatch.setenv("TI_OFFLINE_CACHE_CLEANING_POLICY", "never")
+    monkeypatch.setenv("TI_OFFLINE_CACHE_CLEANING_FACTOR", "1.0")
 
     report = runner._configure_taichi_offline_cache(
         enabled=True,
@@ -295,10 +570,19 @@ def test_taichi_cache_configuration_is_isolated_and_reusable(
         runner.os.environ["SIMULATION_TAICHI_OFFLINE_CACHE_FILE_PATH"]
         == str(cache_dir.resolve())
     )
+    assert (
+        runner.os.environ["TI_OFFLINE_CACHE_MAX_SIZE_OF_FILES"]
+        == str(512 * 1024 * 1024)
+    )
+    assert runner.os.environ["TI_OFFLINE_CACHE_CLEANING_POLICY"] == "lru"
+    assert runner.os.environ["TI_OFFLINE_CACHE_CLEANING_FACTOR"] == "0.25"
     assert report == {
         "configuration_state": "requested_before_taichi_init",
         "offline_cache_enabled": True,
         "offline_cache_file_path": str(cache_dir.resolve()),
+        "offline_cache_max_size_bytes": 512 * 1024 * 1024,
+        "offline_cache_cleaning_policy": "lru",
+        "offline_cache_cleaning_factor": 0.25,
     }
 
 
@@ -476,6 +760,12 @@ def test_campaign_readme_has_the_exact_unique_output_command() -> None:
     for fragment in required_fragments:
         assert fragment in readme
     assert "our_solver\\production" not in readme
+    production_command = readme.split("```powershell", 1)[1].split("```", 1)[0]
+    assert "--solid-substeps 1600" not in production_command
+    assert (
+        "fixed1600 A/B reference override" in readme
+        and "production per-macro adaptive selector" in readme
+    )
 
 
 def test_formal_cli_uses_one_fixed_solver_route() -> None:
@@ -516,6 +806,30 @@ def test_json_safe_rejects_disagreeing_force_unit_aliases() -> None:
                 "marker_action_reaction_residual_n": 9.0,
             }
         )
+
+
+def test_history_csv_uses_the_same_canonical_force_aliases_as_compact_json(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    history_path = tmp_path / "history.csv"
+
+    runner._write_history_csv(
+        history_path,
+        [
+            {
+                "marker_action_reaction_residual_N": 1.25,
+                "marker_action_reaction_residual_n": 1.25,
+                "scatter_action_reaction_residual_N": 2.5,
+                "scatter_action_reaction_residual_n": 2.5,
+            }
+        ],
+    )
+
+    assert history_path.read_text(encoding="utf-8").splitlines() == [
+        "marker_action_reaction_residual_N,scatter_action_reaction_residual_N",
+        "1.25,2.5",
+    ]
 
 
 def test_main_records_post_run_artifact_validation_failure(tmp_path: Path) -> None:
@@ -672,6 +986,8 @@ def test_main_treats_empty_final_snapshot_as_absent_after_loaded_preflow(
     snapshot_prefix = tmp_path / "preflow_state"
     report = {
         "history": [],
+        "profile_wall_time_enabled": False,
+        "taichi_runtime_identity": {"arch": "cuda"},
         "preflow_history": [{"preflow_step": 40}],
         "preflow_steps_completed": 40,
         "preflow_snapshot_loaded": True,
@@ -890,3 +1206,105 @@ def test_main_records_keyboard_interrupt_without_marking_failure(
     assert progress["status"] == "interrupted"
     assert progress["error_type"] == "KeyboardInterrupt"
     assert not (output_dir / "failure.json").exists()
+
+
+def test_dry_run_manifest_records_cuda_runtime_identity(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "runtime_identity_manifest"
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(
+            runner,
+            "_configure_taichi_offline_cache",
+            return_value={"offline_cache_enabled": True},
+        ),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(runner.__file__),
+                "--output-dir",
+                str(output_dir),
+                "--dry-run",
+            ],
+        ),
+    ):
+        assert runner.main() == 0
+
+    manifest = runner.json.loads(
+        (output_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["taichi_runtime"] == {
+        "offline_cache_enabled": True,
+        "requested_arch": "cuda",
+        "default_fp": "f32",
+        "random_seed": 0,
+        "strict_arch": True,
+    }
+
+
+def test_completed_formal_summary_requires_and_persists_runtime_report_fields(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    identity = {
+        "arch": "cuda",
+        "default_fp": "f32",
+        "random_seed": 0,
+        "strict_arch": True,
+    }
+
+    with pytest.raises(ValueError, match="runtime identity"):
+        runner._summary_from_report(
+            report={
+                "history": [{"step": 1}],
+                "profile_wall_time_enabled": False,
+            },
+            config=VerticalFlapFsiConfig(step_count=1),
+            output_dir=tmp_path,
+            elapsed_s=1.0,
+            solver_npz_summary=None,
+            run_label="missing-runtime-identity",
+            require_runtime_identity=True,
+        )
+
+    summary = runner._summary_from_report(
+        report={
+            "history": [{"step": 1}],
+            "profile_wall_time_enabled": True,
+            "taichi_runtime_identity": identity,
+        },
+        config=VerticalFlapFsiConfig(step_count=1),
+        output_dir=tmp_path,
+        elapsed_s=1.0,
+        solver_npz_summary=None,
+        run_label="runtime-identity",
+        require_runtime_identity=True,
+        pre_summary_artifact_elapsed_s=1.5,
+    )
+
+    assert summary["profile_wall_time_enabled"] is True
+    assert summary["taichi_runtime_identity"] == identity
+    assert summary["pre_summary_artifact_elapsed_s"] == pytest.approx(1.5)
+    assert "total_elapsed_s" not in summary
+
+
+def test_main_uses_pre_summary_and_terminal_elapsed_boundaries() -> None:
+    source = RUNNER_PATH.read_text(encoding="utf-8")
+    main_source = source[source.index("def main() -> int:") :]
+
+    summary_write = main_source.index(
+        "_write_json_atomic(output_dir / \"our_solver_summary.json\", summary)"
+    )
+    pre_summary_elapsed = main_source.index(
+        "pre_summary_artifact_elapsed_s = time.perf_counter() - start"
+    )
+    terminal_elapsed = main_source.index(
+        "terminal_elapsed_s = time.perf_counter() - start"
+    )
+
+    assert pre_summary_elapsed < summary_write < terminal_elapsed
+    assert "pre_summary_artifact_elapsed_s=pre_summary_artifact_elapsed_s" in main_source
+    assert '"elapsed_s": terminal_elapsed_s' in main_source
+    assert "total_elapsed_s" not in main_source

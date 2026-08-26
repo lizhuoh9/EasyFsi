@@ -28,6 +28,7 @@ _INITIALIZED_FP: str | None = None
 _INITIALIZED_RANDOM_SEED: int | None = None
 _INITIALIZED_OFFLINE_CACHE: bool | None = None
 _INITIALIZED_OFFLINE_CACHE_FILE_PATH: str | None = None
+_INITIALIZED_STRICT_ARCH_VERIFIED = False
 _INIT_LOCK = threading.RLock()
 
 
@@ -107,6 +108,74 @@ def _assert_actual_runtime_arch(requested_arch: str) -> None:
         )
 
 
+def _actual_runtime_arch_name() -> str:
+    actual_arch = getattr(ti.cfg, "arch", None)
+    for name in (
+        "cuda",
+        "cpu",
+        "x64",
+        "arm64",
+        "metal",
+        "opengl",
+        "vulkan",
+        "dx11",
+        "amdgpu",
+        "gpu",
+    ):
+        candidate = getattr(ti, name, None)
+        if candidate is not None and actual_arch == candidate:
+            return name
+    raise RuntimeError(
+        "Taichi runtime reports an unrecognized actual arch: "
+        f"{actual_arch!r}"
+    )
+
+
+def _actual_runtime_default_fp_name() -> str:
+    actual_default_fp = getattr(ti.cfg, "default_fp", None)
+    if actual_default_fp == ti.f32:
+        return "f32"
+    if actual_default_fp == ti.f64:
+        return "f64"
+    raise RuntimeError(
+        "Taichi runtime reports an unrecognized actual default_fp: "
+        f"{actual_default_fp!r}"
+    )
+
+
+def taichi_runtime_identity() -> dict[str, object]:
+    """Return the initialized Taichi runtime identity for persisted evidence.
+
+    This is deliberately unavailable before ``init_taichi`` has published a
+    successful initialization: an inferred or requested identity is not valid
+    execution provenance.
+    """
+
+    with _INIT_LOCK:
+        if (
+            not _INITIALIZED
+            or _INITIALIZED_ARCH is None
+            or _INITIALIZED_RANDOM_SEED is None
+            or _INITIALIZED_OFFLINE_CACHE is None
+        ):
+            raise RuntimeError(
+                "Taichi runtime identity is unavailable because Taichi is not initialized"
+            )
+        if _INITIALIZED_STRICT_ARCH_VERIFIED:
+            _assert_actual_runtime_arch(_INITIALIZED_ARCH)
+        return {
+            "requested_arch": _INITIALIZED_ARCH,
+            "actual_arch": _actual_runtime_arch_name(),
+            "default_fp": _actual_runtime_default_fp_name(),
+            "random_seed": _INITIALIZED_RANDOM_SEED,
+            "offline_cache_identity": {
+                "enabled": _INITIALIZED_OFFLINE_CACHE,
+                "file_path": _INITIALIZED_OFFLINE_CACHE_FILE_PATH,
+            },
+            "strict_arch_verified": _INITIALIZED_STRICT_ARCH_VERIFIED,
+        }
+
+
 def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
     """Initialize Taichi once for the simulation core.
 
@@ -141,10 +210,12 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
     global _INITIALIZED_RANDOM_SEED
     global _INITIALIZED_OFFLINE_CACHE
     global _INITIALIZED_OFFLINE_CACHE_FILE_PATH
+    global _INITIALIZED_STRICT_ARCH_VERIFIED
     with _INIT_LOCK:
         if _INITIALIZED:
             if cfg.strict_arch:
                 _assert_actual_runtime_arch(requested_arch)
+                _INITIALIZED_STRICT_ARCH_VERIFIED = True
             if (
                 not implicit_default_request
                 and _INITIALIZED_ARCH is not None
@@ -212,3 +283,4 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
         _INITIALIZED_RANDOM_SEED = requested_random_seed
         _INITIALIZED_OFFLINE_CACHE = offline_cache
         _INITIALIZED_OFFLINE_CACHE_FILE_PATH = offline_cache_file_path
+        _INITIALIZED_STRICT_ARCH_VERIFIED = bool(cfg.strict_arch)

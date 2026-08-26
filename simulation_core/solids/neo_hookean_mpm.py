@@ -109,6 +109,14 @@ def _unit_interval_float(value: float, name: str) -> float:
     return result
 
 
+class MpmOutOfBoundsError(RuntimeError):
+    """A completed MPM trial left too many particles outside its background grid."""
+
+
+class MpmRequiredRegionEmptyError(RuntimeError):
+    """A completed MPM trial lost a required shell region from the grid."""
+
+
 def _raise_if_out_of_bounds_exceeds_tolerance(
     particle_count: int,
     grid_out_of_bounds_particle_count: int,
@@ -121,7 +129,7 @@ def _raise_if_out_of_bounds_exceeds_tolerance(
     # all, even when a caller accidentally configures an excessive tolerance.
     all_particles_out_of_bounds = particles > 0 and out_of_bounds >= particles
     if all_particles_out_of_bounds or out_of_bounds > int(tolerance):
-        raise RuntimeError(
+        raise MpmOutOfBoundsError(
             f"{out_of_bounds} of {particles} MPM particles "
             "are outside the background grid; refusing to advance a partial solid"
         )
@@ -133,9 +141,13 @@ def _raise_if_required_shell_region_empty(
     secondary_count: int,
 ) -> None:
     if primary_count <= 0:
-        raise RuntimeError("primary shell region has no in-grid MPM particles")
+        raise MpmRequiredRegionEmptyError(
+            "primary shell region has no in-grid MPM particles"
+        )
     if secondary_count <= 0:
-        raise RuntimeError("secondary shell region has no in-grid MPM particles")
+        raise MpmRequiredRegionEmptyError(
+            "secondary shell region has no in-grid MPM particles"
+        )
 
 
 @dataclass(frozen=True)
@@ -260,6 +272,7 @@ class NeoHookeanMpmState:
         self.report_particle_momentum_square_sum = ti.field(dtype=ti.f32, shape=())
         self.report_transfer_relative_error = ti.field(dtype=ti.f32, shape=())
         self.report_max_speed_mps = ti.field(dtype=ti.f32, shape=())
+        self.accepted_particle_max_speed_mps = ti.field(dtype=ti.f32, shape=())
         self.report_max_abs_j = ti.field(dtype=ti.f32, shape=())
         self.report_deformation_clamp_count = ti.field(dtype=ti.i32, shape=())
         self.report_radial_stretch_sum = ti.field(dtype=ti.f32, shape=())
@@ -273,6 +286,13 @@ class NeoHookeanMpmState:
         # ordinary non-batched step), so a particle that briefly escapes and
         # later re-enters cannot disappear from the final safety decision.
         self.out_of_bounds_guard_batch_max_particle_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
+        # Device-resident total deformation-clamp count over the same batch.
+        # The per-step counter is reset inside _step_kernel(), while this
+        # sticky total is reset only before an ordinary step or at batch begin.
+        self.deformation_clamp_guard_batch_total_count = ti.field(
             dtype=ti.i32,
             shape=(),
         )
@@ -820,6 +840,7 @@ class NeoHookeanMpmState:
     @ti.kernel
     def _reset_out_of_bounds_guard_batch_kernel(self):
         self.out_of_bounds_guard_batch_max_particle_count[None] = 0
+        self.deformation_clamp_guard_batch_total_count[None] = 0
 
     @ti.func
     def _atomic_add_vector(self, field, value):
@@ -1264,11 +1285,14 @@ class NeoHookeanMpmState:
             self.out_of_bounds_guard_batch_max_particle_count[None],
             self.report_grid_out_of_bounds_particle_count[None],
         )
+        self.deformation_clamp_guard_batch_total_count[None] += (
+            self.report_deformation_clamp_count[None]
+        )
         self.report_count_snapshot[None] = ti.Vector(
             [
                 self.report_active_grid_nodes[None],
                 self.out_of_bounds_guard_batch_max_particle_count[None],
-                self.report_deformation_clamp_count[None],
+                self.deformation_clamp_guard_batch_total_count[None],
                 self.report_radial_stretch_count[None],
                 self.report_primary_count[None],
                 self.report_secondary_count[None],
@@ -1441,6 +1465,23 @@ class NeoHookeanMpmState:
             self.F[p] = self.saved_F[p]
             self._update_surface_geometry_from_deformation(p)
             self.external_force_n[p] = ti.Vector([0.0, 0.0, 0.0])
+
+    @ti.kernel
+    def _accepted_particle_max_speed_kernel(self, particle_count: ti.i32):
+        self.accepted_particle_max_speed_mps[None] = 0.0
+        for p in range(particle_count):
+            ti.atomic_max(
+                self.accepted_particle_max_speed_mps[None],
+                self.v[p].norm(),
+            )
+
+    def accepted_particle_max_speed(self) -> float:
+        """Return one host scalar reduction from the current accepted particle state."""
+        self._accepted_particle_max_speed_kernel(int(self.particle_count))
+        speed_mps = float(self.accepted_particle_max_speed_mps[None])
+        if not math.isfinite(speed_mps) or speed_mps < 0.0:
+            raise FloatingPointError("accepted particle maximum speed is invalid")
+        return speed_mps
 
     def save_state(self) -> None:
         if self.particle_count <= 0:

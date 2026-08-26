@@ -5,6 +5,12 @@ import hashlib
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from cases.ansys_vertical_flap_fsi import VerticalFlapFsiConfig
+from validation_runs.ansys_vertical_flap_fsi.scripts import (
+    run_traction_selected_formulation_coupled_step50 as step50,
+)
 
 
 ROOT = Path("validation_runs") / "ansys_vertical_flap_fsi"
@@ -55,6 +61,38 @@ EXPECTED_RETIRED_BLOCKERS = ["long_coupled_validation_pending"]
 class AnsysVerticalFlapSelectedFormulationCoupledStep50ArtifactTests(
     unittest.TestCase
 ):
+    def test_solid_substep_request_preserves_auto_or_explicit_override_in_rows(self):
+        for configured_substeps in (None, 1600):
+            with self.subTest(configured_substeps=configured_substeps):
+                config = VerticalFlapFsiConfig(
+                    step_count=1,
+                    solid_substeps=configured_substeps,
+                )
+                with mock.patch.object(step50, "_sha256_file", return_value="digest"):
+                    row = step50._row_from_report(
+                        report={},
+                        config=config,
+                        scenario="contract",
+                        worker_mode="contract",
+                        reference_selection={"candidate_status": "reference"},
+                        fixed_solid={"candidate_status": "fixed"},
+                        shared_manifest={"field_sha256": "shared"},
+                        source_smoke={"candidate_status": "smoke"},
+                    )
+                    blocked = step50._blocked_row_from_exception(
+                        exc=RuntimeError("blocked"),
+                        config=config,
+                        scenario="contract",
+                        worker_mode="contract",
+                        reference_selection={"candidate_status": "reference"},
+                        fixed_solid={"candidate_status": "fixed"},
+                        shared_manifest={"field_sha256": "shared"},
+                    )
+
+                self.assertIs(row["solid_substeps"], configured_substeps)
+                self.assertIs(row["solid_substeps_selected"], configured_substeps)
+                self.assertIs(blocked["solid_substeps"], configured_substeps)
+
     def test_step50_matrix_records_three_staged_rows(self):
         for path in (MATRIX_JSON, MATRIX_CSV, HISTORY_JSON, SUMMARY_MD, CHECKSUMS):
             self.assertTrue(path.exists(), path)

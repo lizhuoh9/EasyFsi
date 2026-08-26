@@ -15,9 +15,12 @@
 
 按下面顺序阅读：
 
-1. [`refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md`](refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md)
-2. [`VALIDATION.md`](VALIDATION.md) 中对应的运行与证据说明
-3. [`../validation_runs/README.md`](../validation_runs/README.md) 中的验证产物索引
+1. [`refactoring/ADAPTIVE_SOLID_SUBSTEPS_PERFORMANCE_KALMAN_THREAD_HANDOFF_2026-08-24.md`](refactoring/ADAPTIVE_SOLID_SUBSTEPS_PERFORMANCE_KALMAN_THREAD_HANDOFF_2026-08-24.md)
+   - [`validation/ANSYS_VERTICAL_FLAP_SOLID_SUBSTEP_AB_GATES_2026-08-25.md`](validation/ANSYS_VERTICAL_FLAP_SOLID_SUBSTEP_AB_GATES_2026-08-25.md)：fixed1600/adaptive 结果生成前锁定的门槛与命令。
+   - [`validation/ANSYS_VERTICAL_FLAP_KALMAN_FSI50_RESULTS_2026-08-26.md`](validation/ANSYS_VERTICAL_FLAP_KALMAN_FSI50_RESULTS_2026-08-26.md)：五模式 modified-physics FSI50、迭代次数、warm baseline 耗时与发布边界。
+2. [`refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md`](refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md)
+3. [`VALIDATION.md`](VALIDATION.md) 中对应的运行与证据说明
+4. [`../validation_runs/README.md`](../validation_runs/README.md) 中的验证产物索引
 
 关键实现入口：
 

@@ -29,7 +29,6 @@ if (Test-Path -LiteralPath $out) { throw "Refusing to reuse output directory: $o
   --preflow-steps 40 `
   --flow-cg-preconditioner fv_multigrid `
   --flow-pressure-solve-failure-policy raise `
-  --solid-substeps 1600 `
   --flow-predictor-substeps 64 `
   --hibm-search-radius-m 0.0017 `
   --span-reduction mean `
@@ -37,6 +36,18 @@ if (Test-Path -LiteralPath $out) { throw "Refusing to reuse output directory: $o
   --save-step-fields
 ```
 
+Omitting `--solid-substeps` uses the production per-macro adaptive selector.
+For a paired fixed1600 A/B reference override, append
+`--solid-substeps 1600` while keeping the source, backend, snapshot, time step,
+mesh, material parameters, solver tolerances, and output settings identical.
+
 The runner writes `run_manifest.json`, `our_solver_config.json`, and
 `progress.json` inside that unique output directory. Historical launch records
 below `our_solver/` are provenance only and are not executable instructions.
+Production runs persist preflow progress at step boundaries by default. Use
+`--detailed-preflow-stage-progress` only to diagnose a stalled stage: it restores
+the fine-grained progress stream and adds durable filesystem writes. It does not
+itself add host/device barriers; combine it with `--profile-wall-time` only when
+synchronized per-stage timing is required. `--profile-wall-time` is likewise
+diagnostic-only and adds synchronization barriers. Neither option belongs in a
+performance measurement; keep both disabled and use outer wall time.

@@ -590,7 +590,7 @@ def test_solid_checkpoint_follows_guarded_return_and_preserves_prior_callables(
     runner = SimpleNamespace(
         _flow_advance_current_step=flow,
         _require_fresh_external_force_for_solid_step=traction,
-        _advance_solid_substeps_batched=solid,
+        _select_and_advance_solid_macro_step=solid,
     )
     identities = (flow, traction, solid)
     seen: dict[str, Any] = {}
@@ -605,10 +605,12 @@ def test_solid_checkpoint_follows_guarded_return_and_preserves_prior_callables(
             projection={},
         )
         try:
-            return runner._advance_solid_substeps_batched(
-                object(), object(), solid_substeps=1, solid_substep_dt_s=0.1,
-                mu_pa=1.0, lambda_pa=2.0,
-                solid_substep_velocity_damping=1.0,
+            return runner._select_and_advance_solid_macro_step(
+                object(),
+                object(),
+                mu_pa=1.0,
+                lambda_pa=2.0,
+                retry_prepare=lambda: None,
             )
         except Exception:
             events.append(("solid_sentinel", None))
@@ -628,7 +630,7 @@ def test_solid_checkpoint_follows_guarded_return_and_preserves_prior_callables(
     assert (
         runner._flow_advance_current_step,
         runner._require_fresh_external_force_for_solid_step,
-        runner._advance_solid_substeps_batched,
+        runner._select_and_advance_solid_macro_step,
     ) == identities
 
 
@@ -652,16 +654,18 @@ def test_solid_exception_remains_primary_and_restores_all_callables(
     runner = SimpleNamespace(
         _flow_advance_current_step=flow,
         _require_fresh_external_force_for_solid_step=traction,
-        _advance_solid_substeps_batched=solid,
+        _select_and_advance_solid_macro_step=solid,
     )
     seen: dict[str, Any] = {}
 
     def invoke() -> Any:
-        return runner._advance_solid_substeps_batched(
-            object(), object(), solid_substeps=1, solid_substep_dt_s=0.1,
-            mu_pa=1.0, lambda_pa=2.0, solid_substep_velocity_damping=1.0,
+        return runner._select_and_advance_solid_macro_step(
+            object(),
+            object(),
+            mu_pa=1.0,
+            lambda_pa=2.0,
+            retry_prepare=lambda: None,
         )
-
     fake = _FakeTaichi(cache_dir, reset_error=RuntimeError("secondary reset"))
     monkeypatch.setattr(module, "_load_runner_module", lambda: runner)
     monkeypatch.setattr(module, "_load_taichi_control", fake.control)
@@ -682,8 +686,9 @@ def test_solid_exception_remains_primary_and_restores_all_callables(
     assert (
         runner._flow_advance_current_step,
         runner._require_fresh_external_force_for_solid_step,
-        runner._advance_solid_substeps_batched,
+        runner._select_and_advance_solid_macro_step,
     ) == (flow, traction, solid)
+    assert not (tmp_path / "checkpoint-output" / module.CHECKPOINT_FILENAME).exists()
 
 
 @pytest.mark.parametrize(
@@ -707,10 +712,10 @@ def test_solid_wrappers_restore_on_cache_finalization_failure(
     runner = SimpleNamespace(
         _flow_advance_current_step=passthrough,
         _require_fresh_external_force_for_solid_step=passthrough,
-        _advance_solid_substeps_batched=passthrough,
+        _select_and_advance_solid_macro_step=passthrough,
     )
     seen: dict[str, Any] = {}
-    invoke = lambda: runner._advance_solid_substeps_batched(object(), object())
+    invoke = lambda: runner._select_and_advance_solid_macro_step(object(), object())
     fake = _FakeTaichi(
         cache_dir, sync_error=sync_error, reset_error=reset_error
     )
@@ -730,7 +735,7 @@ def test_solid_wrappers_restore_on_cache_finalization_failure(
     assert (
         runner._flow_advance_current_step,
         runner._require_fresh_external_force_for_solid_step,
-        runner._advance_solid_substeps_batched,
+        runner._select_and_advance_solid_macro_step,
     ) == (passthrough, passthrough, passthrough)
     assert not (tmp_path / "checkpoint-output" / module.CHECKPOINT_FILENAME).exists()
 

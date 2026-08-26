@@ -260,6 +260,14 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                 "_marker_target_closure_kaczmarz_sweep_kernel",
             ),
             (
+                "hibm_marker_closure_recovery_sweeps",
+                "_marker_target_closure_kaczmarz_sweep_kernel",
+            ),
+            (
+                "hibm_marker_closure_recovery_measure",
+                "_measure_marker_target_closure_kernel",
+            ),
+            (
                 "hibm_marker_closure_final_measure",
                 "_measure_marker_target_closure_kernel",
             ),
@@ -334,7 +342,7 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
             argument.arg for argument in closure.args.kwonlyargs
         }
         self.assertNotIn("solver", keyword_only_arguments)
-        self.assertIn("max_iterations", keyword_only_arguments)
+        self.assertIn("iterations_per_batch", keyword_only_arguments)
         closure_source = ast.unparse(closure)
         self.assertIn("serialized_kaczmarz", closure_source)
         self.assertIn(
@@ -360,7 +368,9 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
             )
         }
         self.assertNotIn("marker_compatibility_solver", defaults)
-        default_iterations = defaults["marker_compatibility_max_iterations"]
+        default_iterations = defaults[
+            "marker_compatibility_iterations_per_batch"
+        ]
         self.assertIsInstance(default_iterations, ast.Constant)
         self.assertEqual(default_iterations.value, 64)
 

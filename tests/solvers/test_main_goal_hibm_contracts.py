@@ -47,7 +47,15 @@ def _select_storage_probe(
     result_i32: ti.template(),
     result_f32: ti.template(),
 ):
-    valid, storage, alpha, error_code = (
+    (
+        valid,
+        storage,
+        alpha,
+        error_code,
+        _pair_valid,
+        _pair_storage,
+        _pair_alpha,
+    ) = (
         boundary._select_canonical_component_face_storage_device(
             ti.Vector([0, 1, 1]),
             1,

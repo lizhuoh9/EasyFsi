@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from dataclasses import replace
 from pathlib import Path
 import unittest
@@ -182,7 +183,7 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
         )
 
     def test_each_predictor_substep_advances_sst_before_momentum(self) -> None:
-        function = _runner_function("_flow_advance_current_step")
+        function = _runner_function("_flow_advance_current_step_trial")
         predictor_loop = next(
             node
             for node in ast.walk(function)
@@ -221,7 +222,7 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
         self.assertEqual(advection_keyword.value.id, "advection_scheme")
 
     def test_sst_stage_observer_synchronizes_before_timing_callback_io(self) -> None:
-        function = _runner_function("_flow_advance_current_step")
+        function = _runner_function("_flow_advance_current_step_trial")
         observer = next(
             node
             for node in ast.walk(function)
@@ -244,7 +245,7 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
     def test_flow_report_exposes_sst_model_and_automatic_substep_diagnostics(
         self,
     ) -> None:
-        function = _runner_function("_flow_advance_current_step")
+        function = _runner_function("_flow_advance_current_step_trial")
         report_keys = {
             key.value
             for node in ast.walk(function)
@@ -295,6 +296,23 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
             }.issubset(report_keys)
         )
 
+    def test_fsi_history_rows_expose_predictor_wall_times(self) -> None:
+        function = _runner_function("run_hibm_mpm_fsi")
+        report_keys = {
+            key.value
+            for node in ast.walk(function)
+            if isinstance(node, ast.Dict)
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+
+        self.assertTrue(
+            {
+                "flow_sst_transport_wall_time_s",
+                "flow_momentum_predictor_wall_time_s",
+            }.issubset(report_keys)
+        )
+
     def test_synchronized_timing_is_opt_in(self) -> None:
         events: list[str] = []
 
@@ -308,6 +326,66 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
         self.assertIs(result, sentinel.result)
         self.assertEqual(elapsed_s, 0.0)
         self.assertEqual(events, ["operation"])
+
+    def test_hibm_stage_timing_is_opt_in(self) -> None:
+        events: list[str] = []
+        stage_wall_times = runner._empty_hibm_sharp_boundary_stage_wall_times()
+
+        result = runner._measure_hibm_sharp_boundary_stage(
+            stage_wall_times,
+            "canonical_ledger_build",
+            lambda: events.append("operation") or sentinel.result,
+            enabled=False,
+            synchronize=lambda: events.append("sync"),
+            clock=MagicMock(side_effect=[10.0, 12.0]),
+        )
+
+        self.assertIs(result, sentinel.result)
+        self.assertEqual(events, ["operation"])
+        self.assertEqual(stage_wall_times["canonical_ledger_build"], 0.0)
+
+    def test_hibm_stage_timing_uses_existing_profile_switch(self) -> None:
+        def named_calls(function_name: str, called_name: str) -> list[ast.Call]:
+            function = _runner_function(function_name)
+            return [
+                node
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == called_name
+            ]
+
+        measured_calls = named_calls(
+            "_apply_hibm_sharp_marker_boundary_to_fluid",
+            "_measure_hibm_sharp_boundary_stage",
+        )
+        self.assertGreaterEqual(len(measured_calls), 4)
+        for call in measured_calls:
+            enabled = next(
+                keyword.value
+                for keyword in call.keywords
+                if keyword.arg == "enabled"
+            )
+            self.assertIsInstance(enabled, ast.Name)
+            self.assertEqual(enabled.id, "measure_wall_times")
+
+        for function_name, expected_flag in (
+            ("_flow_advance_current_step_trial", "measure_wall_times"),
+            ("run_hibm_mpm_fsi", "profile_wall_time"),
+        ):
+            apply_calls = named_calls(
+                function_name,
+                "_apply_hibm_sharp_marker_boundary_to_fluid",
+            )
+            self.assertGreaterEqual(len(apply_calls), 1)
+            for call in apply_calls:
+                flag = next(
+                    keyword.value
+                    for keyword in call.keywords
+                    if keyword.arg == "measure_wall_times"
+                )
+                self.assertIsInstance(flag, ast.Name)
+                self.assertEqual(flag.id, expected_flag)
 
     def test_synchronized_timing_closes_failed_operation_and_preserves_error(
         self,
@@ -355,6 +433,113 @@ class VerticalFlapSstRunnerContracts(unittest.TestCase):
             {key: value for key, value in report.items() if key != "unrelated"},
         )
         self.assertEqual(runner._flow_transport_report_fields(None), {})
+
+
+class VerticalFlapStageThreeObservabilityContracts(unittest.TestCase):
+    def test_percentile_flow_reporting_is_opt_in_and_forwarded(self) -> None:
+        self.assertFalse(VerticalFlapFsiConfig().flow_report_include_percentiles)
+
+        function = _runner_function("_project_current_flow")
+        flow_state_calls = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_flow_state_report"
+        ]
+        self.assertEqual(len(flow_state_calls), 1)
+        include_percentiles = next(
+            keyword.value
+            for keyword in flow_state_calls[0].keywords
+            if keyword.arg == "include_percentiles"
+        )
+        self.assertIn("flow_report_include_percentiles", ast.unparse(include_percentiles))
+
+    def test_fsi_profile_summary_totals_only_explicit_per_step_measurements(
+        self,
+    ) -> None:
+        fields = (
+            "flow_wall_time_s",
+            "snapshot_capture_wall_time_s",
+            "step_artifact_export_wall_time_s",
+            "hibm_pre_predictor_wall_time_s",
+            "hibm_projection_cycle_wall_time_s",
+            "hibm_post_solid_observer_wall_time_s",
+            "hibm_wall_time_s",
+        )
+        history = [
+            {field: float(index + 1) for index, field in enumerate(fields)},
+            {field: float(2 * (index + 1)) for index, field in enumerate(fields)},
+        ]
+
+        summary = runner._fsi_profile_summary(history)
+
+        for index, field in enumerate(fields):
+            self.assertEqual(summary[f"{field}_total"], 3.0 * (index + 1))
+
+        incomplete = dict(history[0])
+        incomplete.pop("hibm_wall_time_s")
+        with self.assertRaisesRegex(ValueError, "hibm_wall_time_s"):
+            runner._fsi_profile_summary([incomplete])
+
+        zero_summary = runner._fsi_profile_summary(
+            [{field: 0.0 for field in fields}]
+        )
+        for field in fields:
+            self.assertEqual(zero_summary[f"{field}_total"], 0.0)
+
+        for invalid in (-1.0, float("nan"), float("inf")):
+            with self.subTest(invalid=invalid):
+                invalid_history = dict(history[0])
+                invalid_history["flow_wall_time_s"] = invalid
+                with self.assertRaisesRegex(
+                    ValueError, "flow_wall_time_s"
+                ):
+                    runner._fsi_profile_summary([invalid_history])
+
+    def test_fsi_hibm_profile_buckets_keep_three_stages_disjoint(self) -> None:
+        pre_predictor = runner._empty_hibm_sharp_boundary_stage_wall_times()
+        projection = runner._empty_hibm_sharp_boundary_stage_wall_times()
+        post_solid = runner._empty_hibm_sharp_boundary_stage_wall_times()
+        pre_predictor["canonical_ledger_build"] = 1.0
+        projection["canonical_prepare_seal"] = 2.0
+        post_solid["pressure_neumann_assembly"] = 3.0
+
+        buckets = runner._fsi_step_hibm_wall_times(
+            {
+                "hibm_pre_predictor_stage_wall_time_s": pre_predictor,
+                "hibm_sharp_marker_boundary_total_stage_wall_time_s": projection,
+            },
+            {
+                "hibm_sharp_marker_boundary_stage_wall_time_s": post_solid,
+            },
+        )
+
+        self.assertEqual(buckets["hibm_pre_predictor_wall_time_s"], 1.0)
+        self.assertEqual(buckets["hibm_projection_cycle_wall_time_s"], 2.0)
+        self.assertEqual(buckets["hibm_post_solid_observer_wall_time_s"], 3.0)
+        self.assertEqual(buckets["hibm_wall_time_s"], 6.0)
+
+    def test_fsi_runner_wires_profiled_stages_and_artifact_timing(self) -> None:
+        source = inspect.getsource(runner.run_hibm_mpm_fsi)
+
+        required_fragments = (
+            "latest_flow_report, flow_wall_time_s = (",
+            "snapshot_capture_wall_time_s",
+            "step_artifact_export_wall_time_s",
+            "_fsi_step_hibm_wall_times(",
+            '"flow_wall_time_s": float(flow_wall_time_s)',
+            '"snapshot_capture_wall_time_s": float(',
+            '"step_artifact_export_wall_time_s": (',
+            "**_fsi_profile_summary(history)",
+        )
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, source)
+
+        direct_snapshot_index = source.index("_direct_step_observer_snapshot(")
+        observer_callback_index = source.index("step_observer(", direct_snapshot_index)
+        self.assertLess(direct_snapshot_index, observer_callback_index)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,11 @@ from simulation_core.coupling.pressure_interface import (
     PRESSURE_INTERFACE_COUPLING_SLOT_COUNT,
 )
 from simulation_core.diagnostics.runtime import TaichiRuntimeConfig, init_taichi
+from simulation_core.diagnostics.time_stepping import (
+    minimum_admissible_physical_substep_s,
+    physical_time_roundoff_tolerance_s,
+    require_zero_remaining_physical_time_s,
+)
 
 
 PREDICTOR_ADVECTION_CFL_FAIL_FAST_LIMIT = 10.0
@@ -909,6 +914,9 @@ class CartesianFluidSolver:
         self._sst_last_momentum_diffusion_integrator = "none"
         self._sst_last_momentum_diffusion_substeps = 0
         self._sst_last_momentum_diffusion_cfl = 0.0
+        self._sst_last_momentum_diffusion_requested_time_s = 0.0
+        self._sst_last_momentum_diffusion_accepted_time_s = 0.0
+        self._sst_last_momentum_diffusion_remaining_unadvanced_time_s = 0.0
         self._sst_last_momentum_helmholtz_converged = True
         self._sst_last_momentum_helmholtz_iterations = 0
         self._sst_last_momentum_helmholtz_iterations_total = 0
@@ -919,6 +927,9 @@ class CartesianFluidSolver:
         self._last_momentum_advection_cfl = 0.0
         self._last_momentum_advection_max_substep_cfl = 0.0
         self._last_momentum_advection_rejected_trial_count = 0
+        self._last_momentum_advection_requested_time_s = 0.0
+        self._last_momentum_advection_accepted_time_s = 0.0
+        self._last_momentum_advection_remaining_unadvanced_time_s = 0.0
         self._transport_max_automatic_substeps = 4096
         self._sst_max_automatic_substeps = 4096
         self.sst_turbulent_kinetic_energy = ti.field(dtype=ti.f32, shape=shape)
@@ -10191,6 +10202,7 @@ class CartesianFluidSolver:
         self,
         molecular_nu_m2_s: ti.f32,
     ):
+        self.sst_reduction_max_diffusivity_m2_s[None] = molecular_nu_m2_s
         self.sst_reduction_eddy_viscosity_cap_count[None] = 0
         for i, j, k in self.sst_turbulent_kinetic_energy:
             if self.obstacle[i, j, k] != 0:
@@ -10277,13 +10289,34 @@ class CartesianFluidSolver:
                 self.sst_beta[i, j, k] = f1 * 0.075 + (1.0 - f1) * 0.0828
                 self.sst_gamma[i, j, k] = f1 * (5.0 / 9.0) + (1.0 - f1) * 0.44
                 self.sst_strain_rate_magnitude_s[i, j, k] = strain
+                ti.atomic_max(
+                    self.sst_reduction_max_diffusivity_m2_s[None],
+                    ti.cast(
+                        ti.max(
+                            self._sst_k_diffusivity(
+                                i, j, k, molecular_nu_m2_s
+                            ),
+                            self._sst_omega_diffusivity(
+                                i, j, k, molecular_nu_m2_s
+                            ),
+                        ),
+                        ti.f64,
+                    ),
+                )
 
-    def _update_sst_coefficients_checked(self, molecular_nu_m2_s: float) -> None:
+    def _prepare_sst_coefficient_inputs(self) -> None:
+        """Prepare velocity and boundary inputs shared by coefficient updates."""
+
         canonical_authority = self._velocity_dirichlet_boundary_authority_code()
         self._prepare_sst_obstacle_interface_wall_target_masks_kernel(
             canonical_authority
         )
         self._reconstruct_sst_cell_center_velocity_from_mac_kernel(self.velocity)
+
+    def _update_sst_coefficients_from_prepared_inputs_checked(
+        self,
+        molecular_nu_m2_s: float,
+    ) -> float:
         self._update_sst_coefficients_kernel(float(molecular_nu_m2_s))
         cap_count = int(self.sst_reduction_eddy_viscosity_cap_count[None])
         if cap_count:
@@ -10291,6 +10324,16 @@ class CartesianFluidSolver:
                 "SST eddy-viscosity overflow guard was reached; refusing a "
                 f"silently capped closure state: cap_cell_count={cap_count}"
             )
+        max_diffusivity = float(
+            self.sst_reduction_max_diffusivity_m2_s[None]
+        )
+        return max_diffusivity
+
+    def _update_sst_coefficients_checked(self, molecular_nu_m2_s: float) -> None:
+        self._prepare_sst_coefficient_inputs()
+        self._update_sst_coefficients_from_prepared_inputs_checked(
+            molecular_nu_m2_s
+        )
 
     def _sst_explicit_candidate_invalid_count_host(self) -> int:
         """Read the one scalar fail-closed flag produced by an SST trial."""
@@ -10324,14 +10367,18 @@ class CartesianFluidSolver:
             )
 
     @ti.kernel
-    def _copy_sst_state_to_transport_base_kernel(self):
+    def _copy_sst_state_to_transport_base_and_prev_kernel(self):
         for i, j, k in self.sst_turbulent_kinetic_energy:
-            self.sst_turbulent_kinetic_energy_transport_base[i, j, k] = (
-                self.sst_turbulent_kinetic_energy[i, j, k]
-            )
-            self.sst_specific_dissipation_rate_transport_base[i, j, k] = (
-                self.sst_specific_dissipation_rate[i, j, k]
-            )
+            k_value = self.sst_turbulent_kinetic_energy[i, j, k]
+            omega = self.sst_specific_dissipation_rate[i, j, k]
+            self.sst_turbulent_kinetic_energy_transport_base[
+                i, j, k
+            ] = k_value
+            self.sst_specific_dissipation_rate_transport_base[
+                i, j, k
+            ] = omega
+            self.sst_turbulent_kinetic_energy_prev[i, j, k] = k_value
+            self.sst_specific_dissipation_rate_prev[i, j, k] = omega
 
     @ti.kernel
     def _restore_sst_state_from_transport_base_kernel(self):
@@ -13251,7 +13298,7 @@ class CartesianFluidSolver:
         self._prepare_sst_obstacle_interface_wall_target_masks_kernel(
             canonical_authority
         )
-        if self.sst_near_wall_correlation_enabled[None] != 0:
+        if self._sst_near_wall_treatment == "fluent_correlation":
             # Refresh the local fluid velocity before freezing correlation wall
             # traction coefficients for this Helmholtz solve.
             self._reconstruct_sst_cell_center_velocity_from_mac_kernel(self.velocity)
@@ -13528,6 +13575,7 @@ class CartesianFluidSolver:
         no_slip_zmin: ti.i32,
         no_slip_zmax: ti.i32,
     ):
+        self.sst_reduction_nonfinite_or_nonpositive_count[None] = 0
         for i, j, k in self.sst_turbulent_kinetic_energy:
             # Wall conditions live on physical finite-volume faces in the
             # transport flux.  Only genuinely solid storage cells are reset;
@@ -13542,23 +13590,33 @@ class CartesianFluidSolver:
                     )
                 )
                 self.sst_eddy_viscosity_pa_s[i, j, k] = 0.0
-
-    @ti.kernel
-    def _sst_max_diffusivity_kernel(self, molecular_nu_m2_s: ti.f32) -> ti.f64:
-        self.sst_reduction_max_diffusivity_m2_s[None] = molecular_nu_m2_s
-        for i, j, k in self.sst_turbulent_kinetic_energy:
-            if self.obstacle[i, j, k] == 0:
-                ti.atomic_max(
-                    self.sst_reduction_max_diffusivity_m2_s[None],
-                    ti.cast(
-                        ti.max(
-                            self._sst_k_diffusivity(i, j, k, molecular_nu_m2_s),
-                            self._sst_omega_diffusivity(i, j, k, molecular_nu_m2_s),
-                        ),
-                        ti.f64,
-                    ),
+            else:
+                k_value = ti.cast(
+                    self.sst_turbulent_kinetic_energy[i, j, k], ti.f64
                 )
-        return self.sst_reduction_max_diffusivity_m2_s[None]
+                omega = ti.cast(
+                    self.sst_specific_dissipation_rate[i, j, k], ti.f64
+                )
+                mu_t = ti.cast(self.sst_eddy_viscosity_pa_s[i, j, k], ti.f64)
+                if not self._sst_state_values_are_valid(k_value, omega, mu_t):
+                    ti.atomic_add(
+                        self.sst_reduction_nonfinite_or_nonpositive_count[None],
+                        1,
+                    )
+
+    @ti.func
+    def _sst_state_values_are_valid(self, k_value, omega, mu_t):
+        return (
+            k_value == k_value
+            and omega == omega
+            and mu_t == mu_t
+            and k_value >= 0.0
+            and omega > 0.0
+            and mu_t >= 0.0
+            and ti.abs(k_value) < 1.0e300
+            and ti.abs(omega) < 1.0e300
+            and ti.abs(mu_t) < 1.0e300
+        )
 
     @ti.kernel
     def _sst_state_diagnostics_kernel(self):
@@ -13573,17 +13631,7 @@ class CartesianFluidSolver:
                 k_value = ti.cast(self.sst_turbulent_kinetic_energy[i, j, k], ti.f64)
                 omega = ti.cast(self.sst_specific_dissipation_rate[i, j, k], ti.f64)
                 mu_t = ti.cast(self.sst_eddy_viscosity_pa_s[i, j, k], ti.f64)
-                valid = (
-                    k_value == k_value
-                    and omega == omega
-                    and mu_t == mu_t
-                    and k_value >= 0.0
-                    and omega > 0.0
-                    and mu_t >= 0.0
-                    and ti.abs(k_value) < 1.0e300
-                    and ti.abs(omega) < 1.0e300
-                    and ti.abs(mu_t) < 1.0e300
-                )
+                valid = self._sst_state_values_are_valid(k_value, omega, mu_t)
                 if not valid:
                     ti.atomic_add(
                         self.sst_reduction_nonfinite_or_nonpositive_count[None],
@@ -13681,6 +13729,12 @@ class CartesianFluidSolver:
         wall_flag_codes = tuple(1 if flag else 0 for flag in wall_flags)
         wall_omega_guard_count = 0
         wall_omega_target_max_s = 0.0
+        # Velocity, obstacle topology, and boundary authority remain fixed
+        # throughout this SST transport transaction.  Prepare them once for
+        # every coefficient refresh and for the correlation guard below.
+        observe_initial_transport_stage("coefficient_input_prepare_before")
+        self._prepare_sst_coefficient_inputs()
+        observe_initial_transport_stage("coefficient_input_prepare_after")
         observe_initial_transport_stage("wall_target_guard_before")
         if self._sst_near_wall_treatment == "resolved":
             self._sst_wall_omega_guard_kernel(float(nu_m2_s), *wall_flag_codes)
@@ -13699,11 +13753,6 @@ class CartesianFluidSolver:
                     f"limit_s={SST_WALL_OMEGA_NUMERICAL_LIMIT_S:g}"
                 )
         else:
-            canonical_authority = self._velocity_dirichlet_boundary_authority_code()
-            self._prepare_sst_obstacle_interface_wall_target_masks_kernel(
-                canonical_authority
-            )
-            self._reconstruct_sst_cell_center_velocity_from_mac_kernel(self.velocity)
             self._sst_correlation_wall_omega_guard_kernel(float(nu_m2_s))
             wall_omega_guard_count = int(
                 self.sst_reduction_wall_omega_guard_count[None]
@@ -13739,23 +13788,26 @@ class CartesianFluidSolver:
         advection_rate_s = float(self._muscl_scalar_face_advection_rate_kernel())
         observe_initial_transport_stage("advection_rate_after")
         remaining_dt_s = float(step_dt_s)
+        minimum_transport_substep_s = minimum_admissible_physical_substep_s(
+            requested_time_s=float(step_dt_s)
+        )
         initial_diffusion_cfl = 0.0
         initial_total_cfl = 0.0
         maximum_diffusivity_seen = 0.0
         maximum_substep_advection_cfl = 0.0
         maximum_implicit_diffusion_cfl = 0.0
         rejected_trial_count_total = 0
-        while remaining_dt_s > max(step_dt_s * 1.0e-12, 1.0e-15):
+        accepted_transport_trial_dts_s: list[float] = []
+        while remaining_dt_s > minimum_transport_substep_s:
             # Freeze mu_t/sigma for one complete x-y-z LOD factorization.  It
             # is refreshed before the next explicit slice, never between axes.
             observe_initial_transport_stage("coefficient_update_before")
-            self._update_sst_coefficients_checked(float(nu_m2_s))
-            observe_initial_transport_stage("coefficient_update_after")
-            observe_initial_transport_stage("max_diffusivity_before")
-            max_diffusivity = float(
-                self._sst_max_diffusivity_kernel(float(nu_m2_s))
+            max_diffusivity = (
+                self._update_sst_coefficients_from_prepared_inputs_checked(
+                    float(nu_m2_s)
+                )
             )
-            observe_initial_transport_stage("max_diffusivity_after")
+            observe_initial_transport_stage("coefficient_update_after")
             maximum_diffusivity_seen = max(maximum_diffusivity_seen, max_diffusivity)
             diffusion_rate_s = 2.0 * max_diffusivity * inverse_spacing_squared_sum
             explicit_total_rate_s = advection_rate_s
@@ -13771,6 +13823,14 @@ class CartesianFluidSolver:
                 if explicit_total_rate_s <= 0.0
                 else min(remaining_dt_s, 0.90 / explicit_total_rate_s)
             )
+            if stable_dt_s <= minimum_transport_substep_s:
+                raise FloatingPointError(
+                    "SST IMEX transport reached the minimum representable "
+                    "physical substep before trial execution: "
+                    f"stable_dt_s={stable_dt_s:g}, "
+                    f"remaining_dt_s={remaining_dt_s:g}, "
+                    f"advection_rate_s={advection_rate_s:g}"
+                )
             if explicit_transport_substeps >= self._sst_max_automatic_substeps:
                 raise ValueError(
                     "SST explicit transport substeps exceed the configured "
@@ -13779,16 +13839,21 @@ class CartesianFluidSolver:
                     f"current_advection_rate_s={advection_rate_s:g}, "
                     f"implicit_diffusion_cfl={diffusion_rate_s * stable_dt_s:g}"
                 )
-            observe_initial_transport_stage("transport_base_copy_before")
-            self._copy_sst_state_to_transport_base_kernel()
-            observe_initial_transport_stage("transport_base_copy_after")
+            observe_initial_transport_stage("transport_state_copy_before")
+            self._copy_sst_state_to_transport_base_and_prev_kernel()
+            observe_initial_transport_stage("transport_state_copy_after")
             trial_dt_s = float(stable_dt_s)
             consecutive_trial_retries = 0
             while True:
                 current_advection_cfl = advection_rate_s * trial_dt_s
-                observe_initial_transport_stage("previous_state_copy_before")
-                self._copy_sst_state_to_prev_kernel()
-                observe_initial_transport_stage("previous_state_copy_after")
+                if consecutive_trial_retries > 0:
+                    observe_initial_transport_stage(
+                        "retry_previous_state_copy_before"
+                    )
+                    self._copy_sst_state_to_prev_kernel()
+                    observe_initial_transport_stage(
+                        "retry_previous_state_copy_after"
+                    )
                 if scheme == "muscl_tvd":
                     observe_initial_transport_stage("muscl_reconstruction_before")
                     self._prepare_muscl_sst_reconstruction()
@@ -13852,17 +13917,10 @@ class CartesianFluidSolver:
                         float(nu_m2_s),
                         *wall_flag_codes,
                     )
-                    observe_initial_transport_stage("wall_state_after")
-                    observe_initial_transport_stage(
-                        "accepted_state_diagnostics_before"
-                    )
-                    self._sst_state_diagnostics_kernel()
                     accepted_state_invalid_count = int(
                         self.sst_reduction_nonfinite_or_nonpositive_count[None]
                     )
-                    observe_initial_transport_stage(
-                        "accepted_state_diagnostics_after"
-                    )
+                    observe_initial_transport_stage("wall_state_after")
                     if accepted_state_invalid_count:
                         trial_failure = "implicit_result_positivity"
 
@@ -13907,7 +13965,7 @@ class CartesianFluidSolver:
                         f"trial_advection_cfl={current_advection_cfl:g}"
                     )
                 trial_dt_s *= 0.5
-                if trial_dt_s <= max(step_dt_s * 1.0e-12, 1.0e-15):
+                if trial_dt_s <= minimum_transport_substep_s:
                     raise FloatingPointError(
                         "SST IMEX automatic positivity retry reached the "
                         "minimum representable physical substep: "
@@ -13922,10 +13980,50 @@ class CartesianFluidSolver:
                 diffusion_rate_s * trial_dt_s,
             )
             explicit_transport_substeps += 1
+            accepted_transport_trial_dts_s.append(float(trial_dt_s))
             remaining_dt_s = max(0.0, remaining_dt_s - trial_dt_s)
+        require_zero_remaining_physical_time_s(
+            remaining_time_s=remaining_dt_s,
+            component="SST transport",
+        )
+        accepted_transport_time_s = math.fsum(accepted_transport_trial_dts_s)
+        remaining_unadvanced_transport_time_s = (
+            float(step_dt_s) - accepted_transport_time_s
+        )
+        if (
+            not math.isfinite(accepted_transport_time_s)
+            or not math.isfinite(remaining_unadvanced_transport_time_s)
+        ):
+            raise FloatingPointError(
+                "SST transport physical-time accounting is non-finite: "
+                f"requested_transport_time_s={step_dt_s:g}, "
+                f"accepted_transport_time_s={accepted_transport_time_s:g}"
+            )
+        transport_time_tolerance_s = physical_time_roundoff_tolerance_s(
+            requested_time_s=float(step_dt_s),
+            accepted_time_s=accepted_transport_time_s,
+            accepted_substep_count=len(accepted_transport_trial_dts_s),
+        )
+        if abs(remaining_unadvanced_transport_time_s) > transport_time_tolerance_s:
+            raise FloatingPointError(
+                "SST transport physical-time accounting did not close: "
+                f"requested_transport_time_s={step_dt_s:g}, "
+                f"accepted_transport_time_s={accepted_transport_time_s:g}, "
+                "remaining_unadvanced_transport_time_s="
+                f"{remaining_unadvanced_transport_time_s:g}, "
+                f"tolerance_s={transport_time_tolerance_s:g}"
+            )
+        reported_remaining_unadvanced_transport_time_s = (
+            0.0
+            if abs(remaining_unadvanced_transport_time_s)
+            <= transport_time_tolerance_s
+            else remaining_unadvanced_transport_time_s
+        )
         if stage_observer is not None:
             stage_observer("final_coefficient_update_before")
-        self._update_sst_coefficients_checked(float(nu_m2_s))
+        self._update_sst_coefficients_from_prepared_inputs_checked(
+            float(nu_m2_s)
+        )
         if stage_observer is not None:
             stage_observer("final_coefficient_update_after")
             stage_observer("final_state_diagnostics_before")
@@ -14009,6 +14107,11 @@ class CartesianFluidSolver:
             # Kept for downstream schema compatibility.  It now counts IMEX
             # transport slices, not explicit diffusion-stability substeps.
             "diffusion_substeps": int(explicit_transport_substeps),
+            "requested_transport_time_s": float(step_dt_s),
+            "accepted_transport_time_s": float(accepted_transport_time_s),
+            "remaining_unadvanced_transport_time_s": float(
+                reported_remaining_unadvanced_transport_time_s
+            ),
             "explicit_transport_substeps": int(explicit_transport_substeps),
             "rejected_transport_trial_count": int(rejected_trial_count_total),
             "implicit_diffusion_directional_solves": int(
@@ -15603,22 +15706,26 @@ class CartesianFluidSolver:
         )
         if not math.isfinite(nu_m2_s) or nu_m2_s < 0.0:
             raise ValueError("kinematic_viscosity_m2_s must be finite and non-negative")
+        self._last_momentum_advection_requested_time_s = float(step_dt_s)
+        self._last_momentum_advection_accepted_time_s = 0.0
+        self._last_momentum_advection_remaining_unadvanced_time_s = float(step_dt_s)
         self._require_velocity_dirichlet_component_ledger_sealed()
-        max_speed_mps = float(self._max_fluid_speed_kernel())
-        advection_cfl = max_speed_mps * step_dt_s / max(
-            min(self.dx, self.dy, self.dz),
-            1.0e-30,
-        )
-        if scheme != "muscl_tvd" and (
-            not math.isfinite(advection_cfl)
-            or advection_cfl > PREDICTOR_ADVECTION_CFL_FAIL_FAST_LIMIT
-        ):
-            raise ValueError(
-                "velocity field is too large for explicit predictor advection "
-                "stability; "
-                f"advection_cfl={advection_cfl:g}, "
-                f"limit={PREDICTOR_ADVECTION_CFL_FAIL_FAST_LIMIT:g}"
+        if scheme != "muscl_tvd":
+            max_speed_mps = float(self._max_fluid_speed_kernel())
+            advection_cfl = max_speed_mps * step_dt_s / max(
+                min(self.dx, self.dy, self.dz),
+                1.0e-30,
             )
+            if (
+                not math.isfinite(advection_cfl)
+                or advection_cfl > PREDICTOR_ADVECTION_CFL_FAIL_FAST_LIMIT
+            ):
+                raise ValueError(
+                    "velocity field is too large for explicit predictor advection "
+                    "stability; "
+                    f"advection_cfl={advection_cfl:g}, "
+                    f"limit={PREDICTOR_ADVECTION_CFL_FAIL_FAST_LIMIT:g}"
+                )
         diffusion_cfl = 2.0 * nu_m2_s * step_dt_s * (
             1.0 / max(self.dx * self.dx, 1.0e-30)
             + 1.0 / max(self.dy * self.dy, 1.0e-30)
@@ -15659,11 +15766,16 @@ class CartesianFluidSolver:
             # automatic substeps, so prepare this full-grid geometry once.
             self._compute_muscl_momentum_dual_geometry_kernel()
             remaining_advection_dt_s = float(step_dt_s)
+            minimum_advection_substep_s = minimum_admissible_physical_substep_s(
+                requested_time_s=float(step_dt_s)
+            )
             advection_substeps = 0
             rejected_stage_trials = 0
             conservative_cfl = 0.0
             maximum_substep_cfl = 0.0
-            while remaining_advection_dt_s > max(step_dt_s * 1.0e-12, 1.0e-15):
+            reusable_base_rate_s: float | None = None
+            accepted_advection_trial_dts_s: list[float] = []
+            while remaining_advection_dt_s > minimum_advection_substep_s:
                 if advection_substeps >= self._transport_max_automatic_substeps:
                     raise ValueError(
                         "MUSCL momentum advection substeps exceed the configured "
@@ -15674,12 +15786,18 @@ class CartesianFluidSolver:
                 consecutive_stage_retries = 0
                 while True:
                     self._copy_velocity_to_transport_base_kernel()
-                    self._compute_muscl_momentum_fluxes(
-                        self.velocity_transport_base,
-                        wall_flag_codes,
-                        dual_geometry_prepared=True,
-                    )
-                    advection_rate_s = self._muscl_momentum_advection_rate_s()
+                    if reusable_base_rate_s is None:
+                        self._compute_muscl_momentum_fluxes(
+                            self.velocity_transport_base,
+                            wall_flag_codes,
+                            dual_geometry_prepared=True,
+                        )
+                        advection_rate_s = (
+                            self._muscl_momentum_advection_rate_s()
+                        )
+                    else:
+                        advection_rate_s = reusable_base_rate_s
+                        reusable_base_rate_s = None
                     if (
                         not math.isfinite(advection_rate_s)
                         or advection_rate_s < 0.0
@@ -15700,6 +15818,15 @@ class CartesianFluidSolver:
                             MUSCL_MOMENTUM_INITIAL_CFL_TARGET / advection_rate_s,
                         )
                     )
+                    if advection_dt_s <= minimum_advection_substep_s:
+                        raise ValueError(
+                            "MUSCL SSP-RK2 reached the minimum representable "
+                            "physical substep before trial execution: "
+                            f"advection_dt_s={advection_dt_s:g}, "
+                            "remaining_advection_dt_s="
+                            f"{remaining_advection_dt_s:g}, "
+                            f"advection_rate_s={advection_rate_s:g}"
+                        )
                     self._muscl_momentum_ssp_stage_kernel(
                         self.velocity_transport_base,
                         float(advection_dt_s),
@@ -15779,9 +15906,15 @@ class CartesianFluidSolver:
                             stage_cfl,
                             final_cfl,
                         )
+                        # The accepted final state is the next slice's exact
+                        # transport base.  Its flux fields and rate are already
+                        # resident, so reuse them once instead of rebuilding
+                        # the same state before the next SSP-RK2 stage.
+                        reusable_base_rate_s = final_rate_s
                         break
 
                     self._restore_velocity_from_transport_base_kernel()
+                    reusable_base_rate_s = None
                     consecutive_stage_retries += 1
                     rejected_stage_trials += 1
                     if (
@@ -15807,9 +15940,7 @@ class CartesianFluidSolver:
                             * MUSCL_MOMENTUM_STAGE_CFL_LIMIT
                             / retry_rate_s,
                         )
-                    if stage_dt_cap_s <= max(
-                        step_dt_s * 1.0e-12, 1.0e-15
-                    ):
+                    if stage_dt_cap_s <= minimum_advection_substep_s:
                         raise ValueError(
                             "MUSCL SSP-RK2 automatic CFL retry reached the "
                             "minimum representable physical substep: "
@@ -15819,9 +15950,47 @@ class CartesianFluidSolver:
                         )
 
                 advection_substeps += 1
+                accepted_advection_trial_dts_s.append(float(advection_dt_s))
                 remaining_advection_dt_s = max(
                     0.0, remaining_advection_dt_s - advection_dt_s
                 )
+            require_zero_remaining_physical_time_s(
+                remaining_time_s=remaining_advection_dt_s,
+                component="MUSCL momentum advection",
+            )
+            accepted_advection_time_s = math.fsum(accepted_advection_trial_dts_s)
+            remaining_unadvanced_advection_time_s = (
+                float(step_dt_s) - accepted_advection_time_s
+            )
+            if (
+                not math.isfinite(accepted_advection_time_s)
+                or not math.isfinite(remaining_unadvanced_advection_time_s)
+            ):
+                raise FloatingPointError(
+                    "MUSCL momentum advection physical-time accounting is non-finite: "
+                    f"requested_advection_time_s={step_dt_s:g}, "
+                    f"accepted_advection_time_s={accepted_advection_time_s:g}"
+                )
+            advection_time_tolerance_s = physical_time_roundoff_tolerance_s(
+                requested_time_s=float(step_dt_s),
+                accepted_time_s=accepted_advection_time_s,
+                accepted_substep_count=len(accepted_advection_trial_dts_s),
+            )
+            if abs(remaining_unadvanced_advection_time_s) > advection_time_tolerance_s:
+                raise FloatingPointError(
+                    "MUSCL momentum advection physical-time accounting did not close: "
+                    f"requested_advection_time_s={step_dt_s:g}, "
+                    f"accepted_advection_time_s={accepted_advection_time_s:g}, "
+                    "remaining_unadvanced_advection_time_s="
+                    f"{remaining_unadvanced_advection_time_s:g}, "
+                    f"tolerance_s={advection_time_tolerance_s:g}"
+                )
+            reported_remaining_unadvanced_advection_time_s = (
+                0.0
+                if abs(remaining_unadvanced_advection_time_s)
+                <= advection_time_tolerance_s
+                else remaining_unadvanced_advection_time_s
+            )
             self._last_momentum_advection_scheme = "muscl_tvd"
             self._last_momentum_advection_substeps = int(advection_substeps)
             self._last_momentum_advection_cfl = float(conservative_cfl)
@@ -15830,6 +15999,12 @@ class CartesianFluidSolver:
             )
             self._last_momentum_advection_rejected_trial_count = int(
                 rejected_stage_trials
+            )
+            self._last_momentum_advection_accepted_time_s = float(
+                accepted_advection_time_s
+            )
+            self._last_momentum_advection_remaining_unadvanced_time_s = float(
+                reported_remaining_unadvanced_advection_time_s
             )
         else:
             self._copy_velocity_to_prev_kernel()
@@ -15849,8 +16024,15 @@ class CartesianFluidSolver:
             self._last_momentum_advection_cfl = float(advection_cfl)
             self._last_momentum_advection_max_substep_cfl = float(advection_cfl)
             self._last_momentum_advection_rejected_trial_count = 0
+            self._last_momentum_advection_accepted_time_s = float(step_dt_s)
+            self._last_momentum_advection_remaining_unadvanced_time_s = 0.0
 
         if self.turbulence_model == "sst_2003":
+            self._sst_last_momentum_diffusion_requested_time_s = float(step_dt_s)
+            self._sst_last_momentum_diffusion_accepted_time_s = 0.0
+            self._sst_last_momentum_diffusion_remaining_unadvanced_time_s = (
+                float(step_dt_s)
+            )
             if scheme != "muscl_tvd":
                 # The MUSCL path prepares these fixed obstacle/grid volumes
                 # before its SSP loop.  Euler and RK2 still use the same
@@ -16000,6 +16182,49 @@ class CartesianFluidSolver:
                     raise
 
                 if trial_converged:
+                    accepted_diffusion_time_s = math.fsum(
+                        [float(trial_substep_dt_s)] * int(helmholtz_substeps)
+                    )
+                    remaining_unadvanced_diffusion_time_s = (
+                        float(step_dt_s) - accepted_diffusion_time_s
+                    )
+                    if (
+                        not math.isfinite(accepted_diffusion_time_s)
+                        or not math.isfinite(remaining_unadvanced_diffusion_time_s)
+                    ):
+                        self._restore_velocity_from_transport_base_kernel()
+                        raise FloatingPointError(
+                            "SST momentum Helmholtz physical-time accounting "
+                            "is non-finite: "
+                            f"requested_diffusion_time_s={step_dt_s:g}, "
+                            f"accepted_diffusion_time_s={accepted_diffusion_time_s:g}"
+                        )
+                    diffusion_time_tolerance_s = physical_time_roundoff_tolerance_s(
+                        requested_time_s=float(step_dt_s),
+                        accepted_time_s=accepted_diffusion_time_s,
+                        accepted_substep_count=int(helmholtz_substeps),
+                    )
+                    if (
+                        abs(remaining_unadvanced_diffusion_time_s)
+                        > diffusion_time_tolerance_s
+                    ):
+                        self._restore_velocity_from_transport_base_kernel()
+                        raise FloatingPointError(
+                            "SST momentum Helmholtz physical-time accounting "
+                            "did not close: "
+                            f"requested_diffusion_time_s={step_dt_s:g}, "
+                            "accepted_diffusion_time_s="
+                            f"{accepted_diffusion_time_s:g}, "
+                            "remaining_unadvanced_diffusion_time_s="
+                            f"{remaining_unadvanced_diffusion_time_s:g}, "
+                            f"tolerance_s={diffusion_time_tolerance_s:g}"
+                        )
+                    reported_remaining_unadvanced_diffusion_time_s = (
+                        0.0
+                        if abs(remaining_unadvanced_diffusion_time_s)
+                        <= diffusion_time_tolerance_s
+                        else remaining_unadvanced_diffusion_time_s
+                    )
                     helmholtz_relative_residual_max = float(
                         trial_relative_residual_max
                     )
@@ -16082,6 +16307,12 @@ class CartesianFluidSolver:
             )
             self._sst_last_momentum_helmholtz_rejected_trial_count = int(
                 helmholtz_rejected_trials
+            )
+            self._sst_last_momentum_diffusion_accepted_time_s = float(
+                accepted_diffusion_time_s
+            )
+            self._sst_last_momentum_diffusion_remaining_unadvanced_time_s = float(
+                reported_remaining_unadvanced_diffusion_time_s
             )
         elif scheme == "muscl_tvd" and nu_m2_s > 0.0:
             diffusion_substeps = max(1, int(math.ceil(diffusion_cfl / 0.45)))

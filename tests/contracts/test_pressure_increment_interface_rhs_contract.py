@@ -100,7 +100,7 @@ class PressureIncrementInterfaceRhsContracts(unittest.TestCase):
         self.assertEqual(len(wrapper_project_calls), 1)
         self.assertIn(MODE_ARGUMENT, _keywords(wrapper_project_calls[0]))
 
-        advance = _top_level_function(RUNNER_PATH, "_flow_advance_current_step")
+        advance = _top_level_function(RUNNER_PATH, "_flow_advance_current_step_trial")
         calls = _calls(advance, "_project_current_flow")
         self.assertEqual(len(calls), 2)
         consistency_calls = [

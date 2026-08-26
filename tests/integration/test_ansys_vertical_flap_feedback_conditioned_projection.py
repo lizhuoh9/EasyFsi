@@ -114,7 +114,7 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
             6.25,
         )
 
-    def test_sharp_feedback_does_not_stamp_legacy_collocated_constraints(self) -> None:
+    def test_sharp_feedback_reports_whether_current_rows_consume_feedback(self) -> None:
         class FakeFluid:
             velocity_dirichlet_boundary_authority = "canonical"
 
@@ -124,21 +124,115 @@ class AnsysVerticalFlapFeedbackConditionedProjectionTests(unittest.TestCase):
             region_id=object(),
             marker_count=8,
         )
-        report = _apply_marker_feedback_to_fluid(
-            markers,
-            FakeFluid(),
-            SimpleNamespace(flow_solid_boundary_mode="hibm_sharp_marker_rows"),
-            feedback_available=True,
+        for feedback_available in (False, True):
+            with self.subTest(feedback_available=feedback_available):
+                report = _apply_marker_feedback_to_fluid(
+                    markers,
+                    FakeFluid(),
+                    SimpleNamespace(
+                        flow_solid_boundary_mode="hibm_sharp_marker_rows"
+                    ),
+                    feedback_available=feedback_available,
+                )
+
+                self.assertEqual(
+                    report["fluid_marker_feedback_enforcement_mode"],
+                    "hibm_sharp_reconstructed_rows",
+                )
+                self.assertIs(
+                    report["fluid_projection_consumed_feedback"],
+                    feedback_available,
+                )
+                self.assertEqual(
+                    report["fluid_feedback_constraint_marker_count"],
+                    8 if feedback_available else 0,
+                )
+
+    def test_sharp_feedback_with_no_markers_never_reports_consumption(self) -> None:
+        markers = SimpleNamespace(
+            x_gamma_m=object(),
+            v_gamma_mps=object(),
+            region_id=object(),
+            marker_count=0,
+        )
+        fluid = SimpleNamespace(
+            velocity_dirichlet_boundary_authority="canonical"
+        )
+        config = SimpleNamespace(
+            flow_solid_boundary_mode="hibm_sharp_marker_rows"
         )
 
-        self.assertEqual(
-            report["fluid_marker_feedback_enforcement_mode"],
-            "hibm_sharp_reconstructed_rows",
+        for feedback_available in (False, True):
+            report = _apply_marker_feedback_to_fluid(
+                markers,
+                fluid,
+                config,
+                feedback_available=feedback_available,
+            )
+
+            self.assertFalse(report["fluid_projection_consumed_feedback"])
+            self.assertEqual(
+                report["fluid_feedback_constraint_marker_count"],
+                0,
+            )
+
+    def test_feedback_becomes_available_only_after_post_solid_row_refresh(self) -> None:
+        source = _runner_source()
+        loop_start = source.index("for step_index in range(config.step_count):")
+        loop_body = _fsi_loop_body(source)
+
+        self.assertIn(
+            "feedback_available_for_projection = False",
+            source[:loop_start],
         )
-        self.assertTrue(report["fluid_projection_consumed_feedback"])
+        availability_gate = loop_body.index(
+            "feedback_available_before_projection = ("
+        )
+        feedback_apply = loop_body.index("_apply_marker_feedback_to_fluid(")
+        flow_projection = loop_body.index("_flow_advance_current_step(")
+        solid_feedback = loop_body.index(
+            "markers.update_surface_feedback_from_mpm_surface_particles("
+        )
+        row_refresh = loop_body.index(
+            "latest_observer_topology_report = (",
+            solid_feedback,
+        )
+        feedback_ready = loop_body.index(
+            "feedback_available_for_projection = True",
+            row_refresh,
+        )
+        history_append = loop_body.index("history.append(", feedback_ready)
+
+        self.assertLess(availability_gate, feedback_apply)
+        self.assertLess(feedback_apply, flow_projection)
+        self.assertLess(flow_projection, solid_feedback)
+        self.assertLess(solid_feedback, row_refresh)
+        self.assertLess(row_refresh, feedback_ready)
+        self.assertLess(feedback_ready, history_append)
+        self.assertIn(
+            "feedback_available_for_projection and apply_feedback",
+            loop_body[availability_gate:feedback_apply],
+        )
+        self.assertIn(
+            "feedback_available=feedback_available_before_projection",
+            loop_body[feedback_apply:flow_projection],
+        )
+
+        self.assertNotIn(
+            "feedback_available_for_projection = False",
+            loop_body,
+        )
+        consumed_condition = loop_body.index(
+            'if latest_feedback_constraint_report["fluid_projection_consumed_feedback"]:'
+        )
+        consumed_increment = loop_body.index(
+            "fluid_projection_consumed_feedback_count += 1",
+            consumed_condition,
+        )
+        self.assertLess(consumed_condition, consumed_increment)
 
     def test_sharp_flow_adds_accumulating_consistency_projection(self) -> None:
-        body = _function_body(_runner_source(), "def _flow_advance_current_step(")
+        body = _function_body(_runner_source(), "def _flow_advance_current_step_trial(")
 
         main_project = body.index("main_flow_report = _project_current_flow(")
         reassembly = body.index(

@@ -583,8 +583,10 @@ class CartesianFluidMusclTransportContracts(unittest.TestCase):
 
         with mock.patch.object(
             CartesianFluidSolver,
-            "_update_sst_coefficients_checked",
-            new=lambda _solver, _nu: None,
+            "_update_sst_coefficients_from_prepared_inputs_checked",
+            # Preserve the former separate max-diffusivity reduction while
+            # keeping this test's prescribed coefficient fields frozen.
+            new=lambda _solver, molecular_nu: float(molecular_nu),
         ):
             solver.advance_sst_transport(
                 dt_s=dt_s,
@@ -663,6 +665,48 @@ class CartesianFluidMusclTransportContracts(unittest.TestCase):
             delta=max(1.0e-5, 2.0e-6 * initial_integral),
         )
 
+    def test_muscl_momentum_reuses_committed_final_flux_for_next_substep(
+        self,
+    ) -> None:
+        solver = _cuda_solver(grid_nodes=(4, 4, 8), dt_s=0.1)
+        solver.set_uniform_velocity((0.0, 0.0, 0.0))
+
+        original_flux_builder = (
+            CartesianFluidSolver._compute_muscl_momentum_fluxes
+        )
+        flux_call_count = 0
+
+        def counted_flux_builder(
+            active_solver: CartesianFluidSolver,
+            *args: object,
+            **kwargs: object,
+        ) -> None:
+            nonlocal flux_call_count
+            flux_call_count += 1
+            original_flux_builder(active_solver, *args, **kwargs)
+
+        with (
+            mock.patch.object(
+                CartesianFluidSolver,
+                "_compute_muscl_momentum_fluxes",
+                new=counted_flux_builder,
+            ),
+            mock.patch.object(
+                CartesianFluidSolver,
+                "_muscl_momentum_advection_rate_s",
+                new=lambda _solver: 10.0,
+            ),
+        ):
+            solver.predict(
+                dt_s=0.1,
+                advection_scheme="muscl_tvd",
+                kinematic_viscosity_m2_s=0.0,
+            )
+
+        substeps = solver._last_momentum_advection_substeps
+        self.assertGreater(substeps, 1)
+        self.assertEqual(flux_call_count, 2 * substeps + 1)
+
     def test_muscl_momentum_retries_a_stage_cfl_spike(self) -> None:
         solver = _cuda_solver(grid_nodes=(4, 4, 8), dt_s=0.1)
         solver.set_uniform_velocity((0.0, 0.0, 0.0))
@@ -694,9 +738,37 @@ class CartesianFluidMusclTransportContracts(unittest.TestCase):
             solver._last_momentum_advection_rejected_trial_count,
             1,
         )
+        self.assertEqual(solver._last_momentum_advection_requested_time_s, 0.1)
+        self.assertEqual(solver._last_momentum_advection_accepted_time_s, 0.1)
+        self.assertEqual(
+            solver._last_momentum_advection_remaining_unadvanced_time_s,
+            0.0,
+        )
         self.assertLessEqual(
             solver._last_momentum_advection_max_substep_cfl,
             0.900001,
+        )
+        # A rejected 0.09-s trial is not accepted physical time.  Force only
+        # the committed-slice sum to under-report so the real MUSCL path must
+        # fail closed instead of echoing the requested dt in its audit fields.
+        with mock.patch(
+            "simulation_core.fluids.solver.math.fsum",
+            return_value=0.0,
+        ):
+            with self.assertRaisesRegex(
+                FloatingPointError,
+                "MUSCL momentum advection physical-time accounting",
+            ):
+                solver.predict(
+                    dt_s=0.1,
+                    advection_scheme="muscl_tvd",
+                    kinematic_viscosity_m2_s=0.0,
+                )
+        self.assertEqual(solver._last_momentum_advection_requested_time_s, 0.1)
+        self.assertEqual(solver._last_momentum_advection_accepted_time_s, 0.0)
+        self.assertEqual(
+            solver._last_momentum_advection_remaining_unadvanced_time_s,
+            0.1,
         )
         self.assertTrue(np.all(np.isfinite(solver.velocity.to_numpy())))
 
@@ -732,6 +804,12 @@ class CartesianFluidMusclTransportContracts(unittest.TestCase):
         self.assertEqual(
             solver._last_momentum_advection_rejected_trial_count,
             1,
+        )
+        self.assertEqual(solver._last_momentum_advection_requested_time_s, 0.1)
+        self.assertEqual(solver._last_momentum_advection_accepted_time_s, 0.1)
+        self.assertEqual(
+            solver._last_momentum_advection_remaining_unadvanced_time_s,
+            0.0,
         )
         self.assertLessEqual(
             solver._last_momentum_advection_max_substep_cfl,
