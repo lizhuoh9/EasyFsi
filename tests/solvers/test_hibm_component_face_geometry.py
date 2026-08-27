@@ -215,5 +215,174 @@ class HibmComponentFaceGeometryTests(
             fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
             fluid.clear_velocity_dirichlet_boundary_rows()
 
+    def test_projection_only_topology25_dual_clamped_seam_reconstructs_and_rejects_mismatches_atomically(
+        self,
+    ) -> None:
+        """One global-25 C0 seam admits only its co-located moving endpoint."""
+
+        fixture_class = type(self)
+        previous_fixture = (
+            fixture_class.segment_component_face_boundary,
+            fixture_class.segment_component_face_search,
+            fixture_class.segment_component_face_markers,
+        )
+        fixture_class.segment_component_face_boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=self._GRID_NODES,
+            marker_capacity=28,
+        )
+        fixture_class.segment_component_face_search = HibmMpmIbNodeSearch(
+            grid_nodes=self._GRID_NODES,
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=28,
+        )
+        fixture_class.segment_component_face_markers = HibmMpmSurfaceMarkers(
+            marker_capacity=28
+        )
+        target = (1, 1, 1)
+        direct_rows = ((1, 1, 0), (1, 1, 1))
+        closure_name = "_close_owned_hard_targets_to_marker_constraints"
+
+        def load_fixture(mutation: str | None = None) -> tuple[
+            HibmMpmIbBoundaryConditions,
+            HibmMpmSurfaceMarkers,
+        ]:
+            self._load_component_face_claims(
+                (
+                    _ComponentFaceClaim(
+                        direct_rows[0],
+                        (0.375, 0.375, 0.25),
+                        (0.375, 0.375, 0.125),
+                        (0.0, 0.0, -1.0),
+                        (0.0, 0.0, 0.30),
+                        101,
+                    ),
+                    _ComponentFaceClaim(
+                        direct_rows[1],
+                        (0.375, 0.375, 0.25),
+                        (0.375, 0.375, 0.625),
+                        (0.0, 0.0, 1.0),
+                        (0.0, 0.0, 0.30),
+                        303,
+                    ),
+                ),
+                use_segment_fixture=True,
+            )
+            boundary = fixture_class.segment_component_face_boundary
+            search = fixture_class.segment_component_face_search
+            markers = fixture_class.segment_component_face_markers
+            markers.load_markers(
+                positions_m=((0.375, 0.10, 0.10),),
+                velocities_mps=((0.0, 0.0, 0.30),),
+                normals=((0.0, 0.0, -1.0),),
+                areas_m2=(0.5,),
+                region_ids=(101,),
+            )
+            for marker_index, position, region_id, owner in (
+                (1, (0.375, 0.20, 0.10), 101, 0),
+                (2, (0.375, 0.20, 0.10), 303, 2),
+                (3, (0.375, 0.20, 0.00), 303, 3),
+            ):
+                markers.x_gamma_m[marker_index] = position
+                markers.v_gamma_mps[marker_index] = (0.0, 0.0, 0.30)
+                markers.n_gamma[marker_index] = (0.0, 0.0, 1.0)
+                markers.A_gamma_m2[marker_index] = 0.0
+                markers.region_id[marker_index] = region_id
+                markers.projection_vertex_pressure_owner_index[marker_index] = owner
+            for marker_index in range(4, 28):
+                markers.x_gamma_m[marker_index] = (
+                    0.50 + 0.01 * (marker_index - 4),
+                    0.75,
+                    0.75,
+                )
+                markers.v_gamma_mps[marker_index] = (0.0, 0.0, 0.0)
+                markers.n_gamma[marker_index] = (0.0, 0.0, 1.0)
+                markers.A_gamma_m2[marker_index] = 0.0
+                markers.region_id[marker_index] = 404
+                markers.projection_vertex_pressure_owner_index[marker_index] = (
+                    marker_index
+                )
+            if mutation == "far_out":
+                markers.x_gamma_m[1] = (0.375, -1.0, 0.10)
+                markers.x_gamma_m[2] = (0.375, -1.0, 0.10)
+            elif mutation == "velocity_mismatch":
+                markers.v_gamma_mps[2] = (0.0, 0.0, 0.31)
+            markers.projection_vertex_count = 28
+            markers.set_projection_segments(
+                ((0, 1), (2, 3))
+                + tuple((marker, marker + 1) for marker in range(4, 27))
+            )
+            search.nearest_marker[direct_rows[0]] = 1
+            search.node_projection_marker_indices[direct_rows[0]] = (0, 1, -1)
+            search.node_projection_marker_weights[direct_rows[0]] = (0.0, 1.0, 0.0)
+            search.nearest_marker[direct_rows[1]] = 2
+            search.node_projection_marker_indices[direct_rows[1]] = (2, 3, -1)
+            search.node_projection_marker_weights[direct_rows[1]] = (1.0, 0.0, 0.0)
+            return boundary, markers
+
+        def assemble() -> dict[str, object]:
+            return self._assemble_component_face_ledger(
+                close_marker_constraints=True,
+                use_marker_geometry=True,
+                use_segment_fixture=True,
+                surface_projection_inactive_axis=0,
+                primary_region_id=101,
+                secondary_region_id=303,
+            )["canonical_velocity_dirichlet_report"]
+
+        try:
+            boundary, markers = load_fixture()
+            self.assertEqual(int(markers.projection_vertex_count), 28)
+            self.assertEqual(int(markers.projection_segment_count), 25)
+            self.assertTrue(
+                np.array_equal(
+                    markers.x_gamma_m.to_numpy()[1],
+                    markers.x_gamma_m.to_numpy()[2],
+                )
+            )
+            self.assertGreater(0.375 - 0.20, 0.125)
+            self.assertGreater(0.25 - 0.10, 0.125)
+            boundary.__dict__[closure_name] = lambda **_kwargs: {}
+            try:
+                report = assemble()
+            finally:
+                boundary.__dict__.pop(closure_name, None)
+            self.assertEqual(int(report["claim_conflict_count"]), 0)
+            self.assertEqual(
+                int(report["projection_only_region_seam_merged_count"]), 1
+            )
+            self.assertEqual(
+                int(report["direct_geometry_reconstructed_component_count"]), 1
+            )
+            state = self._canonical_component_state(target, self._Z_AXIS)
+            self.assertTrue(state["active"] and state["owned"])
+            self.assertAlmostEqual(float(state["value_mps"]), 0.30, places=6)
+
+            for mutation in ("far_out", "velocity_mismatch"):
+                with self.subTest(mutation=mutation):
+                    boundary, _markers = load_fixture(mutation)
+                    ledger_before = self._canonical_ledger_bytes()
+                    boundary.__dict__[closure_name] = lambda **_kwargs: {}
+                    try:
+                        with self.assertRaises(RuntimeError):
+                            assemble()
+                    finally:
+                        boundary.__dict__.pop(closure_name, None)
+                    self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+                    self.assertEqual(
+                        int(
+                            boundary.report_velocity_dirichlet_component_face_projection_only_region_seam_merged_count[
+                                None
+                            ]
+                        ),
+                        0,
+                    )
+        finally:
+            (
+                fixture_class.segment_component_face_boundary,
+                fixture_class.segment_component_face_search,
+                fixture_class.segment_component_face_markers,
+            ) = previous_fixture
+
 if __name__ == "__main__":
     unittest.main()

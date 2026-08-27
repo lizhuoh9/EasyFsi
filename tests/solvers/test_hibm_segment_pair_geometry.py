@@ -3364,5 +3364,44 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             self.assertEqual(cone_integer[0:2], (1, 1))
             self.assertEqual(cone_integer[4], 0)
 
+    def test_projection_only_shared_endpoint_repair_is_topology_gated(
+        self,
+    ) -> None:
+        """The local terminal repair admits only the proven C0 seam case."""
+
+        helper_name = (
+            "_canonical_component_face_projection_only_shared_endpoint_target"
+        )
+        self.assertTrue(
+            hasattr(HibmMpmIbBoundaryConditions, helper_name),
+            msg="the bounded shared-endpoint seam helper is missing",
+        )
+        helper = getattr(HibmMpmIbBoundaryConditions, helper_name)
+        helper_source = textwrap.dedent(inspect.getsource(helper))
+        required_helper_terms = (
+            "mac_component_grid_coordinate(",
+            "projection_segment_count",
+            "projection_segment_topology_available",
+            "authors_are_component_axis_pair",
+            "first_segment_endpoint_clamped",
+            "second_segment_endpoint_clamped",
+            "first_candidate != second_candidate",
+            "coincident_endpoint_count == 1",
+            "first_endpoint_incident_count == 1",
+            "second_endpoint_incident_count == 1",
+            "endpoint_union_incident_count == 2",
+            "first_registered_count == 1",
+            "second_registered_count == 1",
+        )
+        for term in required_helper_terms:
+            self.assertIn(term, helper_source)
+
+        reconstruct_source = textwrap.dedent(
+            inspect.getsource(
+                HibmMpmIbBoundaryConditions._reconstruct_velocity_dirichlet_component_face_segment_claims_kernel
+            )
+        )
+        self.assertEqual(reconstruct_source.count(helper_name), 1)
+
 if __name__ == "__main__":
     unittest.main()

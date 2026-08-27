@@ -51,6 +51,7 @@ from .reports import (
     HibmMpmSurfaceUpdateReport,
 )
 from .mac_stencil import (
+    mac_component_grid_coordinate,
     mac_component_stencil_base_fraction,
     mac_component_valid_weight,
     mac_stencil_weight,
@@ -17115,6 +17116,160 @@ class HibmMpmIbBoundaryConditions:
         )
 
     @ti.func
+    def _canonical_component_face_projection_only_shared_endpoint_target(
+        self,
+        target,
+        component_axis,
+        projection_only_region_seam: ti.i32,
+        seam_topology_valid: ti.i32,
+        authors_are_component_axis_pair: ti.i32,
+        first_author_valid: ti.i32,
+        second_author_valid: ti.i32,
+        first_indices,
+        second_indices,
+        first_segment_endpoint_clamped: ti.i32,
+        second_segment_endpoint_clamped: ti.i32,
+        projection_segment_indices: ti.template(),
+        projection_segment_count: ti.i32,
+        projection_segment_topology_available: ti.i32,
+        marker_position_m: ti.template(),
+        marker_velocity_mps: ti.template(),
+        marker_capacity: ti.i32,
+        surface_projection_inactive_axis: ti.i32,
+        cell_face_x_m: ti.template(),
+        cell_face_y_m: ti.template(),
+        cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(),
+        cell_center_y_m: ti.template(),
+        cell_center_z_m: ti.template(),
+        nx: ti.i32,
+        ny: ti.i32,
+        nz: ti.i32,
+    ):
+        """Admit one clamped C0 seam endpoint only with complete topology."""
+
+        valid = 0
+        shared_endpoint_target = 0.0
+        first_registered_count = 0
+        second_registered_count = 0
+        coincident_endpoint_count = 0
+        first_endpoint_marker = -1
+        second_endpoint_marker = -1
+        first_endpoint_incident_count = 0
+        second_endpoint_incident_count = 0
+        endpoint_union_incident_count = 0
+        dual_endpoint_support = 0.0
+        if (
+            projection_only_region_seam
+            and seam_topology_valid != 0
+            and self.velocity_dirichlet_component_face_claim_count[target][
+                component_axis
+            ]
+            == 2
+            and authors_are_component_axis_pair != 0
+            and first_author_valid != 0
+            and second_author_valid != 0
+            and first_indices.z == -1
+            and second_indices.z == -1
+            and first_segment_endpoint_clamped != 0
+            and second_segment_endpoint_clamped != 0
+            and projection_segment_topology_available != 0
+        ):
+            for first_endpoint_slot in ti.static(range(2)):
+                first_candidate = first_indices.x
+                if first_endpoint_slot == 1:
+                    first_candidate = first_indices.y
+                for second_endpoint_slot in ti.static(range(2)):
+                    second_candidate = second_indices.x
+                    if second_endpoint_slot == 1:
+                        second_candidate = second_indices.y
+                    if (
+                        first_candidate >= 0
+                        and first_candidate < marker_capacity
+                        and second_candidate >= 0
+                        and second_candidate < marker_capacity
+                        and first_candidate != second_candidate
+                    ):
+                        separation = (
+                            marker_position_m[first_candidate]
+                            - marker_position_m[second_candidate]
+                        )
+                        component_velocity_difference = ti.abs(
+                            marker_velocity_mps[first_candidate][component_axis]
+                            - marker_velocity_mps[second_candidate][component_axis]
+                        )
+                        if (
+                            separation.dot(separation) <= 1.0e-18
+                            and component_velocity_difference <= 1.0e-6
+                        ):
+                            coincident_endpoint_count += 1
+                            first_endpoint_marker = first_candidate
+                            second_endpoint_marker = second_candidate
+            for segment_index in range(projection_segment_count):
+                registered = projection_segment_indices[segment_index]
+                if (
+                    (registered.x == first_indices.x and registered.y == first_indices.y)
+                    or (registered.x == first_indices.y and registered.y == first_indices.x)
+                ):
+                    first_registered_count += 1
+                if (
+                    (registered.x == second_indices.x and registered.y == second_indices.y)
+                    or (registered.x == second_indices.y and registered.y == second_indices.x)
+                ):
+                    second_registered_count += 1
+                if (
+                    registered.x == first_endpoint_marker
+                    or registered.y == first_endpoint_marker
+                ):
+                    first_endpoint_incident_count += 1
+                if (
+                    registered.x == second_endpoint_marker
+                    or registered.y == second_endpoint_marker
+                ):
+                    second_endpoint_incident_count += 1
+                if (
+                    registered.x == first_endpoint_marker
+                    or registered.y == first_endpoint_marker
+                    or registered.x == second_endpoint_marker
+                    or registered.y == second_endpoint_marker
+                ):
+                    endpoint_union_incident_count += 1
+            raw_coordinate = mac_component_grid_coordinate(
+                marker_position_m[first_endpoint_marker],
+                component_axis,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+                cell_center_x_m,
+                cell_center_y_m,
+                cell_center_z_m,
+                nx,
+                ny,
+                nz,
+            )
+            dual_endpoint_support = 1.0
+            for axis in ti.static(range(3)):
+                if axis != surface_projection_inactive_axis:
+                    dual_endpoint_support *= ti.max(
+                        0.0,
+                        1.0 - ti.abs(raw_coordinate[axis] - target[axis]),
+                    )
+        if (
+            first_registered_count == 1
+            and second_registered_count == 1
+            and coincident_endpoint_count == 1
+            and first_endpoint_incident_count == 1
+            and second_endpoint_incident_count == 1
+            and endpoint_union_incident_count == 2
+            and dual_endpoint_support > 0.0
+        ):
+            valid = 1
+            shared_endpoint_target = marker_velocity_mps[first_endpoint_marker][
+                component_axis
+            ]
+        return valid, shared_endpoint_target
+
+    @ti.func
     def _canonical_component_face_conflict_linear_key(
         self,
         target,
@@ -21956,6 +22111,7 @@ class HibmMpmIbBoundaryConditions:
                 shared_endpoint_marker = -1
                 first_author_valid = 0
                 second_author_valid = 0
+                seam_topology_valid = 0
                 if reconstruction_valid != 0:
                     first_indices = node_projection_marker_indices[first_author]
                     second_indices = node_projection_marker_indices[second_author]
@@ -22709,6 +22865,42 @@ class HibmMpmIbBoundaryConditions:
                                 or second_segment_endpoint_clamped != 0
                             ):
                                 endpoint_support_failure = 1
+                            (
+                                shared_endpoint_reconstruction_valid,
+                                shared_endpoint_target,
+                            ) = self._canonical_component_face_projection_only_shared_endpoint_target(
+                                target,
+                                component_axis,
+                                projection_only_region_seam,
+                                seam_topology_valid,
+                                authors_are_component_axis_pair,
+                                first_author_valid,
+                                second_author_valid,
+                                first_indices,
+                                second_indices,
+                                first_segment_endpoint_clamped,
+                                second_segment_endpoint_clamped,
+                                projection_segment_indices,
+                                projection_segment_count,
+                                projection_segment_topology_available,
+                                marker_position_m,
+                                marker_velocity_mps,
+                                marker_capacity,
+                                surface_projection_inactive_axis,
+                                cell_face_x_m,
+                                cell_face_y_m,
+                                cell_face_z_m,
+                                cell_center_x_m,
+                                cell_center_y_m,
+                                cell_center_z_m,
+                                nx,
+                                ny,
+                                nz,
+                            )
+                            if shared_endpoint_reconstruction_valid != 0:
+                                reconstruction_valid = 1
+                                endpoint_support_failure = 0
+                                reconstructed_target = shared_endpoint_target
                         elif first_segment_valid == 0:
                             reconstructed_target = second_segment_target
                             reconstructed_region = second_segment_region
