@@ -4,6 +4,7 @@ import json
 import math
 import time
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import asdict
 from numbers import Integral
 from pathlib import Path
@@ -46,7 +47,11 @@ from simulation_core.coupling.hibm_mpm import (
 )
 from simulation_core.drivers.generic_fsi_solver import (
     FsiCouplingConfig,
+    FsiCouplingConvergenceError,
+    FsiCouplingReport,
     FsiSolverConfig,
+    FsiStepContext,
+    solve_fsi_step,
     solve_fsi_runtime,
 )
 from simulation_core.drivers.hibm_mpm_marker_velocity_runtime import (
@@ -67,6 +72,18 @@ from simulation_core.diagnostics.runtime import (
 )
 from simulation_core.diagnostics.time_stepping import (
     physical_time_roundoff_tolerance_s,
+)
+
+IQN_KALMAN_ORACLE_INTERPOLATION_DEFAULT_ALPHAS = (
+    0.0,
+    0.25,
+    0.5,
+    0.75,
+    0.9,
+    0.95,
+    0.975,
+    0.99,
+    1.0,
 )
 
 
@@ -433,6 +450,131 @@ def _load_initial_guess_oracle_replay(
         immutable.flags.writeable = False
         replay.append(immutable)
     return tuple(replay)
+
+
+def _iqn_kalman_oracle_interpolation_config(
+    config: Any,
+) -> dict[str, object] | None:
+    """Validate the explicitly offline, no-commit alpha-sweep request."""
+
+    target = getattr(config, "iqn_kalman_oracle_interpolation_target_step", None)
+    oracle_path = getattr(
+        config, "iqn_kalman_oracle_interpolation_oracle_path", None
+    )
+    alphas = tuple(
+        getattr(
+            config,
+            "iqn_kalman_oracle_interpolation_alphas",
+            IQN_KALMAN_ORACLE_INTERPOLATION_DEFAULT_ALPHAS,
+        )
+    )
+    if target is None:
+        if oracle_path is not None or alphas != IQN_KALMAN_ORACLE_INTERPOLATION_DEFAULT_ALPHAS:
+            raise ValueError(
+                "Kalman-Oracle interpolation oracle path and alphas require "
+                "a target step"
+            )
+        return None
+    if isinstance(target, (bool, np.bool_)) or int(target) != target:
+        raise ValueError("Kalman-Oracle interpolation target step must be an integer")
+    target_step = int(target)
+    if target_step <= 0 or target_step > int(config.step_count):
+        raise ValueError("Kalman-Oracle interpolation target step is out of range")
+    if str(config.coupling_mode) != "iqn_ils" or str(config.initial_guess_mode) != "kalman":
+        raise ValueError(
+            "Kalman-Oracle interpolation requires iqn_ils with a Kalman first guess"
+        )
+    if str(getattr(config, "kalman_writeback_mode", "off")) != "off":
+        raise ValueError("Kalman-Oracle interpolation requires kalman_writeback_mode=''off''")
+    if bool(getattr(config, "iqn_reuse_previous_step_history", False)):
+        raise ValueError(
+            "Kalman-Oracle interpolation probe isolates initial-guess "
+            "interpolation and requires iqn_reuse_previous_step_history=False"
+        )
+    if not isinstance(oracle_path, str) or not oracle_path.strip():
+        raise ValueError("Kalman-Oracle interpolation requires an oracle path")
+    if not alphas:
+        raise ValueError("Kalman-Oracle interpolation alphas must be non-empty")
+    converted = tuple(float(alpha) for alpha in alphas)
+    if not all(math.isfinite(alpha) and 0.0 <= alpha <= 1.0 for alpha in converted):
+        raise ValueError("Kalman-Oracle interpolation alphas must be finite in [0, 1]")
+    if tuple(sorted(converted)) != converted or len(set(converted)) != len(converted):
+        raise ValueError("Kalman-Oracle interpolation alphas must be strictly increasing")
+    return {
+        "target_step": target_step,
+        "oracle_path": oracle_path,
+        "alphas": converted,
+        "offline_oracle": True,
+        "deployable": False,
+    }
+
+
+def _mixed_iqn_kalman_oracle_guess(
+    kalman_guess: np.ndarray,
+    oracle_velocity: np.ndarray,
+    alpha: float,
+) -> np.ndarray:
+    """Return the fixed alpha blend without mutating either endpoint."""
+
+    kalman = np.asarray(kalman_guess, dtype=np.float64)
+    oracle = np.asarray(oracle_velocity, dtype=np.float64)
+    if kalman.ndim != 2 or kalman.shape[1] != 3 or kalman.shape != oracle.shape:
+        raise ValueError("Kalman and oracle marker velocities must share shape (count, 3)")
+    if not np.all(np.isfinite(kalman)) or not np.all(np.isfinite(oracle)):
+        raise ValueError("Kalman and oracle marker velocities must be finite")
+    weight = float(alpha)
+    if not math.isfinite(weight) or not 0.0 <= weight <= 1.0:
+        raise ValueError("alpha must be finite in [0, 1]")
+    return np.ascontiguousarray((1.0 - weight) * kalman + weight * oracle)
+
+
+def _accepted_iqn_trial_vector_arrays(
+    coupling: FsiCouplingReport,
+    *,
+    context: FsiStepContext,
+    layout_sha256: str,
+) -> dict[str, np.ndarray]:
+    """Return one committed IQN step's opt-in trial-vector artifact payload."""
+
+    traces = (
+        coupling.trial_guess_history_mps,
+        coupling.trial_candidate_history_mps,
+        coupling.trial_residual_history_mps,
+    )
+    if not coupling.converged or any(trace is None for trace in traces):
+        raise RuntimeError("accepted IQN trial-vector trace is unavailable")
+    guess, candidate, residual = (
+        np.asarray(trace, dtype=np.float64) for trace in traces
+    )
+    if (
+        guess.ndim != 3
+        or guess.shape[0] != int(coupling.iterations)
+        or guess.shape[1] <= 0
+        or guess.shape[2] != 3
+        or candidate.shape != guess.shape
+        or residual.shape != guess.shape
+    ):
+        raise RuntimeError(
+            "accepted IQN trial vectors must share finite shape "
+            "(iterations, marker_count, 3)"
+        )
+    if not all(np.all(np.isfinite(trace)) for trace in (guess, candidate, residual)):
+        raise RuntimeError("accepted IQN trial vectors must be finite")
+    if not np.array_equal(residual, candidate - guess):
+        raise RuntimeError("accepted IQN trial residual must equal candidate - guess")
+    layout = str(layout_sha256)
+    if len(layout) != 64 or any(character not in "0123456789abcdef" for character in layout):
+        raise RuntimeError("accepted IQN marker layout identity must be lowercase SHA-256")
+    return {
+        "iqn_trial_guess_mps": np.ascontiguousarray(guess),
+        "iqn_trial_candidate_mps": np.ascontiguousarray(candidate),
+        "iqn_trial_residual_mps": np.ascontiguousarray(residual),
+        "iqn_trial_index": np.arange(int(coupling.iterations), dtype=np.int64),
+        "iqn_trial_layout_sha256": np.asarray(layout),
+        "iqn_trial_step": np.asarray(int(context.step), dtype=np.int64),
+        "iqn_trial_time_s": np.asarray(float(context.time_s), dtype=np.float64),
+        "iqn_trial_dt_s": np.asarray(float(context.dt_s), dtype=np.float64),
+    }
 
 
 def _hibm_stage_wall_time_sum(stage_wall_times: object) -> float:
@@ -1593,6 +1735,9 @@ def run_hibm_mpm_fsi(
     solid_trial_execution_reports: list[dict[str, object]] = []
     coupling_step_reports: list[dict[str, object]] = []
     coupling_trial_work_reports: list[dict[str, object]] = []
+    research_probe_trial_work_reports: list[dict[str, object]] = []
+    research_probe_solid_trial_reports: list[dict[str, object]] = []
+    research_probe_active = False
     final_flow_field_snapshot: dict[str, np.ndarray] = {}
     apply_feedback = bool(getattr(config, "apply_marker_feedback_to_fluid", True))
     sharp_boundary_cache: dict[str, object] = {}
@@ -1602,7 +1747,22 @@ def run_hibm_mpm_fsi(
     initial_guess_mode = str(
         getattr(config, "initial_guess_mode", "carry_forward")
     ).strip().lower()
+    record_iqn_trial_vectors = bool(
+        getattr(step_observer, "record_iqn_trial_vectors", False)
+    )
+    if record_iqn_trial_vectors and coupling_mode != "iqn_ils":
+        raise ValueError("IQN trial-vector export requires coupling_mode='iqn_ils'")
     initial_guess_controller: InterfaceInitialGuessController | None = None
+    prior_iqn_secant_history = None
+    research_probe_config = _iqn_kalman_oracle_interpolation_config(config)
+    research_probe_oracle = (
+        _load_initial_guess_oracle_replay(
+            str(research_probe_config["oracle_path"]),
+            expected_steps=int(config.step_count),
+        )
+        if research_probe_config is not None
+        else None
+    )
     marker_reference_positions_m = None
     if coupling_mode == "iqn_ils":
         marker_reference_positions_m = np.asarray(
@@ -1672,6 +1832,7 @@ def run_hibm_mpm_fsi(
     )
 
     for step_index in range(config.step_count):
+        accepted_iqn_trial_vectors: dict[str, np.ndarray] | None = None
         kalman_raw_writeback_targets: dict[str, np.ndarray] = {}
         kalman_adapter_wall_time_s = 0.0
         kalman_filter_wall_time_before_s = (
@@ -1839,7 +2000,7 @@ def run_hibm_mpm_fsi(
             try:
                 snapshot_capture_wall_time_s = 0.0
                 observer_flow_snapshot = None
-                if step_observer is not None:
+                if step_observer is not None and not research_probe_active:
                     (
                         observer_flow_snapshot,
                         observer_snapshot_wall_time_s,
@@ -1856,7 +2017,7 @@ def run_hibm_mpm_fsi(
                     snapshot_capture_wall_time_s = float(
                         observer_snapshot_wall_time_s
                     )
-                if export_final_flow_snapshot and (
+                if not research_probe_active and export_final_flow_snapshot and (
                     step_index + 1 == int(config.step_count)
                 ):
                     (
@@ -1892,11 +2053,12 @@ def run_hibm_mpm_fsi(
             latest_feedback_constraint_report[
                 "no_slip_projected_residual_after_projection_mps"
             ] = float(latest_flow_report["hibm_no_slip_max_residual_mps"])
-            fluid_projection_count += 1
-            if feedback_available_before_projection:
-                fluid_projection_after_feedback_count += 1
-            if latest_feedback_constraint_report["fluid_projection_consumed_feedback"]:
-                fluid_projection_consumed_feedback_trial_count += 1
+            if not research_probe_active:
+                fluid_projection_count += 1
+                if feedback_available_before_projection:
+                    fluid_projection_after_feedback_count += 1
+                if latest_feedback_constraint_report["fluid_projection_consumed_feedback"]:
+                    fluid_projection_consumed_feedback_trial_count += 1
             try:
                 latest_stress_report = _sample_stress_to_marker_forces(
                     markers,
@@ -1985,7 +2147,10 @@ def run_hibm_mpm_fsi(
                 for key, value in latest_solid_step_report.items()
                 if key != "solid_report"
             }
-            solid_trial_execution_reports.append(dict(solid_substep_cfl))
+            if research_probe_active:
+                research_probe_solid_trial_reports.append(dict(solid_substep_cfl))
+            else:
+                solid_trial_execution_reports.append(dict(solid_substep_cfl))
             kalman_solid_integrator_raw_max_speed_mps = float(
                 latest_solid_report.max_speed_mps
             )
@@ -2147,7 +2312,11 @@ def run_hibm_mpm_fsi(
                     latest_flow_report,
                     latest_observer_topology_report,
                 )
-                coupling_trial_work_reports.append(
+                (
+                    research_probe_trial_work_reports
+                    if research_probe_active
+                    else coupling_trial_work_reports
+                ).append(
                     {
                         "flow_wall_time_s": float(flow_wall_time_s),
                         "hibm_wall_time_s": float(
@@ -2280,8 +2449,22 @@ def run_hibm_mpm_fsi(
 
             def commit_iqn_case_step(_context, _trial, _coupling):
                 nonlocal feedback_available_for_projection
+                nonlocal accepted_iqn_trial_vectors
                 refresh_runtime_pressure_pair_anchors()
                 feedback_available_for_projection = True
+                if record_iqn_trial_vectors:
+                    accepted_iqn_trial_vectors = _accepted_iqn_trial_vector_arrays(
+                        _coupling,
+                        context=_context,
+                        layout_sha256=marker_layout_identity(
+                            markers,
+                            reference_positions_m=np.asarray(
+                                marker_reference_positions_m,
+                                dtype=np.float32,
+                            ),
+                            namespace=f"{case_id}:marker_velocity",
+                        ),
+                    )
                 return {}
 
             iqn_runtime = HibmMpmMarkerVelocityRuntime(
@@ -2331,6 +2514,99 @@ def run_hibm_mpm_fsi(
                     initial_guess_controller.discard_step
                 ),
             )
+            if (
+                research_probe_config is not None
+                and int(research_probe_config["target_step"]) == step_index + 1
+            ):
+                assert research_probe_oracle is not None
+                assert initial_guess_controller is not None
+                context = FsiStepContext(
+                    step=step_index + 1,
+                    step_index=step_index,
+                    time_s=float(step_index + 1) * float(config.dt_s),
+                    dt_s=float(config.dt_s),
+                )
+                accepted_base = capture_iqn_step_state()
+                marker_base = capture_marker_interface_state(markers)
+                layout_id = marker_layout_identity(
+                    markers,
+                    reference_positions_m=np.asarray(marker_reference_positions_m, dtype=np.float32),
+                    namespace=f"{case_id}:marker_velocity",
+                )
+                preview_controller = deepcopy(initial_guess_controller)
+                kalman_guess = preview_controller.begin_step(
+                    marker_base["v_gamma_mps"],
+                    dt_s=float(config.dt_s),
+                    layout_id=layout_id,
+                )
+                preview_controller.discard_step()
+                oracle_velocity = research_probe_oracle[step_index]
+                probe_rows: list[dict[str, object]] = []
+                probe_anchor_refresh_before = pressure_pair_anchor_runtime_refresh_count
+                probe_started_s = time.perf_counter()
+                try:
+                    for alpha in research_probe_config["alphas"]:
+                        restore_iqn_step_state(accepted_base, context)
+                        probe_work_start = len(research_probe_trial_work_reports)
+                        probe_solid_start = len(research_probe_solid_trial_reports)
+                        mixed_guess = _mixed_iqn_kalman_oracle_guess(
+                            kalman_guess, oracle_velocity, float(alpha)
+                        )
+                        probe_runtime = deepcopy(iqn_runtime)
+                        probe_runtime._begin_initial_guess_step = (
+                            lambda _context, _carry, _layout, guess=mixed_guess: guess.copy()
+                        )
+                        probe_runtime._accept_initial_guess_step = (
+                            lambda _context, _accepted, _layout: None
+                        )
+                        probe_runtime._discard_initial_guess_step = lambda: None
+                        research_probe_active = True
+                        try:
+                            _trial, coupling = solve_fsi_step(
+                                probe_runtime,
+                                context,
+                                FsiCouplingConfig(
+                                    max_iterations=int(config.fsi_coupling_max_iterations),
+                                    relative_tolerance=float(config.fsi_coupling_relative_tolerance),
+                                    absolute_tolerance_mps=float(config.fsi_coupling_absolute_tolerance_mps),
+                                    initial_relaxation=float(config.iqn_initial_picard_relaxation),
+                                    history_limit=int(config.iqn_history_limit),
+                                    iqn_svd_relative_cutoff=float(config.iqn_svd_relative_cutoff),
+                                ),
+                            )
+                            probe_rows.append({"alpha": float(alpha), "converged": bool(coupling.converged), "iterations": int(coupling.iterations), "relative_residual_history": list(coupling.relative_residual_history), "absolute_residual_history_mps": list(coupling.absolute_residual_history_mps), "candidate_velocity_rms_history_mps": list(coupling.candidate_velocity_rms_history_mps), "max_marker_residual_history_mps": list(coupling.max_marker_residual_history_mps), "effective_tolerance_history_mps": list(coupling.effective_tolerance_history_mps), "residual_to_effective_tolerance_history": list(coupling.residual_to_effective_tolerance_history), "update_mode_history": list(coupling.update_modes), "iqn_rank_history": list(coupling.iqn_rank_history), "iqn_condition_number_history": list(coupling.iqn_condition_number_history), "iqn_fallback_reasons": list(coupling.iqn_fallback_reasons), "iqn_fallback_count": int(coupling.iqn_fallback_count), "iqn_update_limited_history": list(coupling.iqn_update_limited_history), "trial_work": _fsi_trial_work_summary(research_probe_trial_work_reports[probe_work_start:]), "solid_trial_reports": research_probe_solid_trial_reports[probe_solid_start:]})
+                        except FsiCouplingConvergenceError as error:
+                            probe_rows.append({"alpha": float(alpha), "converged": False, "iterations": len(research_probe_trial_work_reports[probe_work_start:]), "error": repr(error), "trial_work": _fsi_trial_work_summary(research_probe_trial_work_reports[probe_work_start:]), "solid_trial_reports": research_probe_solid_trial_reports[probe_solid_start:]})
+                        finally:
+                            research_probe_active = False
+                            probe_runtime.rollback_step(context)
+                    restore_iqn_step_state(accepted_base, context)
+                finally:
+                    restore_iqn_step_state(accepted_base, context)
+                return {
+                    "case": case_id,
+                    "status": "research_probe_terminal",
+                    "config": asdict(config),
+                    "history": history,
+                    "research_probe_terminal": True,
+                    "offline_oracle": True,
+                    "deployable": False,
+                    "accepted_step_count": step_index,
+                    "accepted_time_s": float(step_index) * float(config.dt_s),
+                    "research_probe_wall_time_s": time.perf_counter() - probe_started_s,
+                    "research_probe_rows": probe_rows,
+                    "research_probe_trial_work": research_probe_trial_work_reports,
+                    "computed_result_sources": {
+                        "research_probe_rows": (
+                            "same accepted HostMacroStepState; uncommitted "
+                            "solve_fsi_step Kalman-Oracle alpha sweep"
+                        ),
+                    },
+                    "research_probe_anchor_refresh_delta": (
+                        pressure_pair_anchor_runtime_refresh_count
+                        - probe_anchor_refresh_before
+                    ),
+                }
             generic_run = solve_fsi_runtime(
                 iqn_runtime,
                 FsiSolverConfig(
@@ -2354,9 +2630,22 @@ def run_hibm_mpm_fsi(
                         iqn_svd_relative_cutoff=float(
                             config.iqn_svd_relative_cutoff
                         ),
+                        record_trial_vectors=record_iqn_trial_vectors,
+                        iqn_reuse_previous_step_history=bool(
+                            getattr(
+                                config,
+                                "iqn_reuse_previous_step_history",
+                                False,
+                            )
+                        ),
                     ),
                 ),
+                prior_iqn_secant_history=prior_iqn_secant_history,
             )
+            if bool(
+                getattr(config, "iqn_reuse_previous_step_history", False)
+            ):
+                prior_iqn_secant_history = generic_run.next_iqn_secant_history
             if len(generic_run.history) != 1:
                 raise RuntimeError(
                     "one ANSYS FSI physical step must commit exactly one "
@@ -2368,6 +2657,30 @@ def run_hibm_mpm_fsi(
             )
             coupling_step_report = {
                 "hibm_coupling_scheme": "iterative_marker_velocity_iqn_ils",
+                "hibm_iqn_reuse": {
+                    "enabled": bool(generic_row["fsi_iqn_reuse_enabled"]),
+                    "used": bool(generic_row["fsi_iqn_reuse_used"]),
+                    "reset_reason": generic_row["fsi_iqn_reuse_reset_reason"],
+                    "source_step": generic_row["fsi_iqn_reuse_source_step"],
+                    "imported_pair_count": int(
+                        generic_row["fsi_iqn_reuse_imported_pair_count"]
+                    ),
+                    "local_pair_count": int(
+                        generic_row["fsi_iqn_reuse_local_pair_count"]
+                    ),
+                    "retained_pair_count": int(
+                        generic_row["fsi_iqn_reuse_retained_pair_count"]
+                    ),
+                    "first_update_mode": generic_row[
+                        "fsi_iqn_reuse_first_update_mode"
+                    ],
+                    "prior_initial_residual_norm": generic_row[
+                        "fsi_iqn_reuse_prior_initial_residual_norm"
+                    ],
+                    "first_residual_norm": generic_row[
+                        "fsi_iqn_reuse_first_residual_norm"
+                    ],
+                },
                 "hibm_fsi_coupling_iterations_used": int(
                     generic_row["fsi_coupling_iterations"]
                 ),
@@ -2391,6 +2704,39 @@ def run_hibm_mpm_fsi(
                 "hibm_fsi_coupling_residual_history_mps": list(
                     generic_row[
                         "fsi_coupling_absolute_residual_history_mps"
+                    ]
+                ),
+                "hibm_fsi_coupling_relative_residual_history": list(
+                    generic_row["fsi_coupling_relative_residual_history"]
+                ),
+                "hibm_fsi_coupling_absolute_residual_history_mps": list(
+                    generic_row[
+                        "fsi_coupling_absolute_residual_history_mps"
+                    ]
+                ),
+                "hibm_fsi_coupling_candidate_velocity_rms_history_mps": list(
+                    generic_row[
+                        "fsi_coupling_candidate_velocity_rms_history_mps"
+                    ]
+                ),
+                "hibm_fsi_coupling_max_marker_residual_history_mps": list(
+                    generic_row[
+                        "fsi_coupling_max_marker_residual_history_mps"
+                    ]
+                ),
+                "hibm_fsi_coupling_relative_tolerance_equivalent_history_mps": list(
+                    generic_row[
+                        "fsi_coupling_relative_tolerance_equivalent_history_mps"
+                    ]
+                ),
+                "hibm_fsi_coupling_effective_tolerance_history_mps": list(
+                    generic_row[
+                        "fsi_coupling_effective_tolerance_history_mps"
+                    ]
+                ),
+                "hibm_fsi_coupling_residual_to_effective_tolerance_history": list(
+                    generic_row[
+                        "fsi_coupling_residual_to_effective_tolerance_history"
                     ]
                 ),
                 "hibm_fsi_coupling_tolerance_history_mps": [],
@@ -3131,6 +3477,15 @@ def run_hibm_mpm_fsi(
                 ),
                 enabled=profile_wall_time,
             )
+            if record_iqn_trial_vectors:
+                if accepted_iqn_trial_vectors is None:
+                    raise RuntimeError(
+                        "accepted IQN step did not produce a trial-vector trace"
+                    )
+                step_observer_snapshot = {
+                    **step_observer_snapshot,
+                    **accepted_iqn_trial_vectors,
+                }
             snapshot_capture_wall_time_s = float(
                 math.fsum(
                     (
@@ -4093,15 +4448,25 @@ def _is_selected_traction_formulation_coupled_smoke(config: Any) -> bool:
     if not bool(getattr(config, "allow_selected_traction_formulation_coupled_smoke", False)):
         return False
     max_selected_step_count = (
-        50
+        250
         if bool(
             getattr(
                 config,
-                "allow_selected_traction_formulation_coupled_long_validation",
+                "allow_selected_traction_formulation_coupled_research_250",
                 False,
             )
         )
-        else 10
+        else (
+            50
+            if bool(
+                getattr(
+                    config,
+                    "allow_selected_traction_formulation_coupled_long_validation",
+                    False,
+                )
+            )
+            else 10
+        )
     )
     return (
         0 < int(getattr(config, "step_count", 0)) <= max_selected_step_count
@@ -4281,6 +4646,7 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         raise ValueError(
             "initial_guess_oracle_path is only valid for oracle_replay mode"
         )
+    _iqn_kalman_oracle_interpolation_config(config)
     _modified_physics_kalman_configs(config)
     boundary_mode = str(
         getattr(
@@ -6698,6 +7064,7 @@ CANONICAL_HIBM_VELOCITY_DIRICHLET_NUMERIC_DEVICE_REPORT_KEYS = (
     "duplicate_claim_component_count",
     "direct_geometry_reconstructed_component_count",
     "direct_geometry_one_sided_component_count",
+    "segment_supported_pair_route_fallback_count",
     "max_compatible_direct_target_spread_mps",
     "final_active_component_count",
     "final_owned_component_count",
@@ -11037,9 +11404,13 @@ _PREFLOW_SNAPSHOT_FSI_ONLY_CONFIG_FIELDS = frozenset(
         "iqn_history_limit",
         "iqn_initial_picard_relaxation",
         "iqn_svd_relative_cutoff",
+        "iqn_reuse_previous_step_history",
         "initial_guess_mode",
         "initial_guess_kalman_config",
         "initial_guess_oracle_path",
+        "iqn_kalman_oracle_interpolation_target_step",
+        "iqn_kalman_oracle_interpolation_oracle_path",
+        "iqn_kalman_oracle_interpolation_alphas",
         "detailed_preflow_stage_progress",
         "velocity_damping",
         "fixed_node_lock_policy",

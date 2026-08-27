@@ -9,6 +9,261 @@ import numpy as np
 
 
 class UnifiedFsiSolverCoreTests(unittest.TestCase):
+    def test_reuse_second_update_fallback_is_reported_and_snapshot_is_limited(self) -> None:
+        from simulation_core.coupling.iqn_ils import IqnIlsConfig, IqnIlsSecantHistory
+        from simulation_core.drivers.generic_fsi_solver import (
+            FsiCouplingConfig,
+            FsiSolverConfig,
+            FsiTrialResult,
+            _accepted_iqn_secant_history,
+            solve_fsi_runtime,
+        )
+
+        class FallbackRuntime:
+            def __init__(self) -> None:
+                self.trials = 0
+
+            def marker_layout_identity(self):
+                return "toy-layout"
+
+            def begin_step(self, context):
+                self.trials = 0
+                return np.zeros((1, 3), dtype=np.float64)
+
+            def evaluate_trial(self, context, marker_velocity_guess_mps):
+                self.trials += 1
+                candidate = (
+                    np.asarray([[0.5, 0.0, 0.0]])
+                    if self.trials == 1
+                    else (
+                        np.asarray([[1.75, 0.0, 0.0]])
+                        if self.trials == 2
+                        else np.asarray(marker_velocity_guess_mps)
+                    )
+                )
+                return FsiTrialResult(marker_velocity_mps=candidate)
+
+            def commit_step(self, context, trial, coupling):
+                return {}
+
+            def rollback_step(self, context):
+                raise AssertionError("the toy step converges")
+
+            def finalize_run(self):
+                return {}
+
+        iqn_config = IqnIlsConfig(history_limit=2)
+        prior = IqnIlsSecantHistory(
+            delta_residual=np.asarray([[1.0], [0.0], [0.0]]),
+            delta_candidate=np.asarray([[0.5], [0.0], [0.0]]),
+            source_step=1,
+            layout_id="toy-layout",
+            dt_s=0.1,
+            marker_shape=(1, 3),
+            config_signature=iqn_config.signature,
+            terminal_residual_norm=1.0,
+        )
+        result = solve_fsi_runtime(
+            FallbackRuntime(),
+            FsiSolverConfig(
+                step_count=1,
+                completed_step_offset=1,
+                time_step_s=0.1,
+                coupling=FsiCouplingConfig(
+                    max_iterations=3,
+                    absolute_tolerance_mps=0.2,
+                    history_limit=2,
+                    iqn_reuse_previous_step_history=True,
+                ),
+            ),
+            prior_iqn_secant_history=prior,
+        )
+        row = result.history[0]
+        self.assertEqual(row["fsi_coupling_update_modes"][0], "iqn_ils_reuse")
+        self.assertEqual(row["fsi_iqn_reuse_reset_reason"], "rank_deficient_history")
+
+        limited = _accepted_iqn_secant_history(
+            context=type("Context", (), {"step": 3, "dt_s": 0.1})(),
+            config=IqnIlsConfig(history_limit=2),
+            layout_id="toy-layout",
+            trial_candidates=[np.full((1, 3), value) for value in range(4)],
+            trial_residuals=[np.full((1, 3), value) for value in range(4)],
+        )
+        assert limited is not None
+        self.assertEqual(limited.pair_count, 2)
+        self.assertLessEqual(row["fsi_iqn_reuse_imported_pair_count"], 2)
+        self.assertLessEqual(row["fsi_iqn_reuse_local_pair_count"], 2)
+        self.assertLessEqual(row["fsi_iqn_reuse_retained_pair_count"], 2)
+
+    def test_reuse_snapshots_only_accepted_local_secants_and_bypasses_picard(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import (
+            FsiCouplingConfig,
+            FsiSolverConfig,
+            FsiTrialResult,
+            solve_fsi_runtime,
+        )
+
+        class ReuseRuntime:
+            def __init__(self, *, fail_commit: bool = False) -> None:
+                self.trials = 0
+                self.fail_commit = fail_commit
+                self.rollbacks = 0
+
+            def marker_layout_identity(self):
+                return "toy-layout"
+
+            def begin_step(self, context):
+                self.trials = 0
+                return np.zeros((1, 3), dtype=np.float64)
+
+            def evaluate_trial(self, context, marker_velocity_guess_mps):
+                self.trials += 1
+                candidate = (
+                    np.ones((1, 3), dtype=np.float64)
+                    if self.trials == 1
+                    else np.full((1, 3), 0.6, dtype=np.float64)
+                )
+                return FsiTrialResult(marker_velocity_mps=candidate)
+
+            def commit_step(self, context, trial, coupling):
+                if self.fail_commit:
+                    raise RuntimeError("synthetic commit failure")
+                return {}
+
+            def rollback_step(self, context):
+                self.rollbacks += 1
+
+            def finalize_run(self):
+                return {}
+
+        config = FsiSolverConfig(
+            step_count=1,
+            time_step_s=0.1,
+            coupling=FsiCouplingConfig(
+                max_iterations=3,
+                absolute_tolerance_mps=0.2,
+                iqn_reuse_previous_step_history=True,
+            ),
+        )
+        first = solve_fsi_runtime(ReuseRuntime(), config)
+        prior = first.next_iqn_secant_history
+        self.assertIsNotNone(prior)
+        assert prior is not None
+        self.assertEqual(prior.source_step, 1)
+        self.assertEqual(prior.pair_count, 1)
+        self.assertGreater(
+            prior.initial_residual_norm,
+            prior.terminal_residual_norm,
+        )
+        self.assertIsNone(
+            first.history[0].get("trial_guess_history_mps")
+        )
+
+        resumed = solve_fsi_runtime(
+            ReuseRuntime(),
+            FsiSolverConfig(
+                step_count=1,
+                completed_step_offset=1,
+                time_step_s=0.1,
+                coupling=config.coupling,
+            ),
+            prior_iqn_secant_history=prior,
+        )
+        self.assertEqual(
+            resumed.history[0]["fsi_coupling_update_modes"],
+            ["iqn_ils_reuse"],
+        )
+        self.assertTrue(resumed.history[0]["fsi_iqn_reuse_used"])
+
+        retained_before = prior.delta_residual.copy()
+        failing = ReuseRuntime(fail_commit=True)
+        with self.assertRaisesRegex(RuntimeError, "synthetic commit failure"):
+            solve_fsi_runtime(
+                failing,
+                FsiSolverConfig(
+                    step_count=1,
+                    completed_step_offset=1,
+                    time_step_s=0.1,
+                    coupling=config.coupling,
+                ),
+                prior_iqn_secant_history=prior,
+            )
+        np.testing.assert_array_equal(prior.delta_residual, retained_before)
+        self.assertEqual(failing.rollbacks, 1)
+
+    def test_reuse_growth_gate_rejects_only_a_larger_initial_residual(self) -> None:
+        from simulation_core.coupling.iqn_ils import IqnIlsConfig, IqnIlsSecantHistory
+        from simulation_core.drivers.generic_fsi_solver import (
+            FsiCouplingConfig,
+            FsiSolverConfig,
+            FsiTrialResult,
+            solve_fsi_runtime,
+        )
+
+        class SpikeRuntime:
+            def __init__(self) -> None:
+                self.trials = 0
+
+            def marker_layout_identity(self):
+                return "toy-layout"
+
+            def begin_step(self, context):
+                self.trials = 0
+                return np.zeros((1, 3), dtype=np.float64)
+
+            def evaluate_trial(self, context, marker_velocity_guess_mps):
+                self.trials += 1
+                candidate = (
+                    np.ones((1, 3), dtype=np.float64)
+                    if self.trials == 1
+                    else np.asarray(marker_velocity_guess_mps, dtype=np.float64)
+                )
+                return FsiTrialResult(marker_velocity_mps=candidate)
+
+            def commit_step(self, context, trial, coupling):
+                return {}
+
+            def rollback_step(self, context):
+                raise AssertionError("the Picard fallback converges")
+
+            def finalize_run(self):
+                return {}
+
+        iqn_config = IqnIlsConfig()
+        prior = IqnIlsSecantHistory(
+            delta_residual=np.asarray([[1.0], [0.0], [0.0]]),
+            delta_candidate=np.asarray([[0.5], [0.0], [0.0]]),
+            source_step=1,
+            layout_id="toy-layout",
+            dt_s=0.1,
+            marker_shape=(1, 3),
+            config_signature=iqn_config.signature,
+            terminal_residual_norm=1.0e-9,
+            initial_residual_norm=0.1,
+        )
+        result = solve_fsi_runtime(
+            SpikeRuntime(),
+            FsiSolverConfig(
+                step_count=1,
+                completed_step_offset=1,
+                time_step_s=0.1,
+                coupling=FsiCouplingConfig(
+                    max_iterations=3,
+                    absolute_tolerance_mps=0.2,
+                    iqn_reuse_previous_step_history=True,
+                ),
+            ),
+            prior_iqn_secant_history=prior,
+        )
+
+        row = result.history[0]
+        self.assertEqual(row["fsi_coupling_update_modes"], ["picard"])
+        self.assertEqual(row["fsi_iqn_reuse_reset_reason"], "residual_growth_limit")
+        self.assertEqual(
+            row["fsi_iqn_reuse_prior_initial_residual_norm"], 0.1
+        )
+        self.assertGreater(row["fsi_iqn_reuse_first_residual_norm"], 0.4)
+
     def test_solve_fsi_owns_physical_steps_and_marker_velocity_iterations(self) -> None:
         from simulation_core.drivers.generic_fsi_solver import (
             DiagnosticsConfig,
@@ -122,6 +377,168 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
         self.assertEqual(result.diagnostics["interface_unknown"], "marker_velocity_mps")
         self.assertEqual(result.diagnostics["coupling_accelerator"], "iqn_ils")
 
+    def test_coupling_history_records_threshold_audit_without_changing_or_stop_rule(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import (
+            FsiCouplingConfig,
+            FsiSolverConfig,
+            FsiTrialResult,
+            solve_fsi_runtime,
+        )
+
+        class ThresholdAuditRuntime:
+            def __init__(self) -> None:
+                self.trial_count = 0
+
+            def begin_step(self, context):
+                return np.zeros((1, 3), dtype=np.float64)
+
+            def evaluate_trial(self, context, marker_velocity_guess_mps):
+                self.trial_count += 1
+                candidate_x = 1.0 if self.trial_count == 1 else 0.6
+                return FsiTrialResult(
+                    marker_velocity_mps=np.array(
+                        [[candidate_x, 0.0, 0.0]], dtype=np.float64
+                    )
+                )
+
+            def commit_step(self, context, trial, coupling):
+                return {}
+
+            def rollback_step(self, context):
+                raise AssertionError("the absolute branch must converge")
+
+            def finalize_run(self):
+                return {}
+
+        result = solve_fsi_runtime(
+            ThresholdAuditRuntime(),
+            FsiSolverConfig(
+                step_count=1,
+                time_step_s=0.1,
+                coupling=FsiCouplingConfig(
+                    max_iterations=2,
+                    relative_tolerance=0.1,
+                    absolute_tolerance_mps=0.5,
+                    initial_relaxation=0.5,
+                ),
+            ),
+        )
+
+        row = result.history[0]
+        self.assertEqual(row["fsi_coupling_iterations"], 2)
+        self.assertEqual(len(row["fsi_coupling_update_modes"]), 1)
+        np.testing.assert_allclose(
+            row["fsi_coupling_relative_residual_history"],
+            [1.0, 1.0 / 6.0],
+        )
+        np.testing.assert_allclose(
+            row["fsi_coupling_absolute_residual_history_mps"],
+            [1.0, 0.1],
+        )
+        np.testing.assert_allclose(
+            row["fsi_coupling_candidate_velocity_rms_history_mps"],
+            [1.0, 0.6],
+        )
+        np.testing.assert_allclose(
+            row["fsi_coupling_max_marker_residual_history_mps"],
+            [1.0, 0.1],
+        )
+        np.testing.assert_allclose(
+            row["fsi_coupling_relative_tolerance_equivalent_history_mps"],
+            [0.1, 0.06],
+        )
+        np.testing.assert_allclose(
+            row["fsi_coupling_effective_tolerance_history_mps"],
+            [0.5, 0.5],
+        )
+        np.testing.assert_allclose(
+            row["fsi_coupling_residual_to_effective_tolerance_history"],
+            [2.0, 0.2],
+        )
+
+    def test_trial_vector_capture_is_opt_in_and_matches_the_accepted_coupling_trials(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import (
+            FsiCouplingConfig,
+            FsiSolverConfig,
+            FsiTrialResult,
+            solve_fsi_runtime,
+        )
+
+        class TrialVectorRuntime:
+            def __init__(self) -> None:
+                self.trial_count = 0
+                self.accepted_report = None
+
+            def begin_step(self, context):
+                return np.zeros((1, 3), dtype=np.float64)
+
+            def evaluate_trial(self, context, marker_velocity_guess_mps):
+                self.trial_count += 1
+                candidate_x = 1.0 if self.trial_count == 1 else 0.6
+                return FsiTrialResult(
+                    marker_velocity_mps=np.array(
+                        [[candidate_x, 0.0, 0.0]], dtype=np.float64
+                    )
+                )
+
+            def commit_step(self, context, trial, coupling):
+                self.accepted_report = coupling
+                return {}
+
+            def rollback_step(self, context):
+                raise AssertionError("the recorded step must converge")
+
+            def finalize_run(self):
+                return {}
+
+        default_runtime = TrialVectorRuntime()
+        solve_fsi_runtime(
+            default_runtime,
+            FsiSolverConfig(
+                step_count=1,
+                time_step_s=0.1,
+                coupling=FsiCouplingConfig(
+                    max_iterations=2,
+                    relative_tolerance=0.1,
+                    absolute_tolerance_mps=0.5,
+                    initial_relaxation=0.5,
+                ),
+            ),
+        )
+        assert default_runtime.accepted_report is not None
+        self.assertIsNone(default_runtime.accepted_report.trial_guess_history_mps)
+        self.assertIsNone(default_runtime.accepted_report.trial_candidate_history_mps)
+        self.assertIsNone(default_runtime.accepted_report.trial_residual_history_mps)
+
+        recorded_runtime = TrialVectorRuntime()
+        solve_fsi_runtime(
+            recorded_runtime,
+            FsiSolverConfig(
+                step_count=1,
+                time_step_s=0.1,
+                coupling=FsiCouplingConfig(
+                    max_iterations=2,
+                    relative_tolerance=0.1,
+                    absolute_tolerance_mps=0.5,
+                    initial_relaxation=0.5,
+                    record_trial_vectors=True,
+                ),
+            ),
+        )
+        assert recorded_runtime.accepted_report is not None
+        np.testing.assert_allclose(
+            recorded_runtime.accepted_report.trial_guess_history_mps,
+            [[[0.0, 0.0, 0.0]], [[0.5, 0.0, 0.0]]],
+        )
+        np.testing.assert_allclose(
+            recorded_runtime.accepted_report.trial_candidate_history_mps,
+            [[[1.0, 0.0, 0.0]], [[0.6, 0.0, 0.0]]],
+        )
+        np.testing.assert_allclose(
+            recorded_runtime.accepted_report.trial_residual_history_mps,
+            [[[1.0, 0.0, 0.0]], [[0.1, 0.0, 0.0]]],
+        )
+
     def test_nonconverged_step_rolls_back_and_never_commits(self) -> None:
         from simulation_core.drivers.generic_fsi_solver import (
             FsiCouplingConfig,
@@ -135,6 +552,7 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.commits = 0
                 self.rollbacks = 0
+                self.published_steps = 0
 
             def begin_step(self, context):
                 return np.zeros((1, 3), dtype=np.float64)
@@ -153,6 +571,9 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
             def rollback_step(self, context):
                 self.rollbacks += 1
 
+            def publish_step(self, context, committed_row):
+                self.published_steps += 1
+
             def finalize_run(self):
                 raise AssertionError("a failed run must not finalize")
 
@@ -167,12 +588,14 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
                         max_iterations=3,
                         relative_tolerance=1.0e-12,
                         initial_relaxation=0.5,
+                        record_trial_vectors=True,
                     ),
                 ),
             )
 
         self.assertEqual(runtime.rollbacks, 1)
         self.assertEqual(runtime.commits, 0)
+        self.assertEqual(runtime.published_steps, 0)
         self.assertEqual(caught.exception.report.iterations, 3)
         self.assertEqual(len(caught.exception.report.update_modes), 2)
 
@@ -493,7 +916,8 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
         case_source = inspect.getsource(ansys_vertical_flap_fsi)
 
         self.assertIn("for step_index in range(config.step_count)", direct_source)
-        self.assertNotIn("solve_fsi_runtime(", direct_source)
+        self.assertIn("solve_fsi_runtime(", direct_source)
+        self.assertIn("research_probe_terminal", direct_source)
         self.assertIn("run_hibm_mpm_fsi(", case_source)
         self.assertFalse(
             hasattr(

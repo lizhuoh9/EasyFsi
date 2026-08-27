@@ -153,3 +153,45 @@ strict-CUDA FSI50 快速学术实验；四组均完成 50/50 accepted steps：
 的正式 50 步比较，不构成 Fluent parity，也没有完成 adaptive solid 与
 fixed1600 的 source-matched A/B。因此不得据此声称完整物理模型验证、Fluent
 一致性或 adaptive-solid 性能收益。
+
+## 8. r20 source-matched 17 ms 延伸记录（未完成 FSI50）
+
+r20 使用 fresh strict-CUDA preflow 和同一 snapshot，dtype 为 `f32`；run identity
+为 `ansys_vf__segment_supported_face_dt5e4__20260827__r20`。证据目录为
+`validation_runs/ansys_vertical_flap_fsi/our_solver_vs_native_fluent_fine_2026-07-10/runs/ansys_vf__segment_supported_face_dt5e4__20260827__r20__preflow`、
+`validation_runs/solver_soaks/ansys_vf__segment_supported_face_dt5e4__20260827__r20__snapshot`，
+以及：
+
+- `validation_runs/ansys_vertical_flap_fsi/our_solver_vs_native_fluent_fine_2026-07-10/runs/ansys_vf__segment_supported_face_dt5e4__20260827__r20__q0_carry__fsi50`
+- `validation_runs/ansys_vertical_flap_fsi/our_solver_vs_native_fluent_fine_2026-07-10/runs/ansys_vf__segment_supported_face_dt5e4__20260827__r20__h1_k3__fsi34`
+- `validation_runs/ansys_vertical_flap_fsi/our_solver_vs_native_fluent_fine_2026-07-10/runs/ansys_vf__segment_supported_face_dt5e4__20260827__r20__h3_k3_reuse__fsi34`
+
+这三组 FSI 都从该 r20 snapshot 启动，而非从 `step_fields/*.npz` 重启。
+
+Q0 请求 50 步但只 accepted `34/50`，即 `17 ms`；第 35 步 fail closed。失败时
+side--cap 几何本身合法，但两个 segment 都是 endpoint unsupported，ratio 分别为
+`1.719075` 与 `1.007575`。此证据的结论是 `DO_NOT_PATCH`：它不是 25 ms 结果，
+也不应以放宽阈值、改变 endpoint 语义或其他补丁来把该失败伪装为完成。
+
+在相同 snapshot 上，H1（Kalman）和 H3（Kalman 加 accepted-only previous-step
+IQN secant reuse）均在相同 strict-CUDA/f32 条件下完成前 34 个 accepted steps；
+34 步内三组的完整 physical-time audit 和 artifact 中记录的 health fields 均通过；
+这些 step history 未序列化 explicit OOB，故 OOB 未由本批 artifact 独立闭合。
+累计工作量如下：
+
+| 组 | Coupling iterations | Rejected trials | CG iterations | Momentum substeps | SST substeps | MPM substeps |
+|---|---:|---:|---:|---:|---:|---:|
+| Q0 | 103 | 69 | 6672 | 4443 | 3314 | 15350 |
+| H1 | 103 | 69 | 6688 | 4443 | 3314 | 15350 |
+| H3 | 81 | 47 | 5280 | 3487 | 2615 | 12070 |
+
+H3 在 33 个后续物理步复用 accepted IQN history，且没有 history reset。相对 H1，
+H3 的 trial work 减少 `21.36%`；单次 raw simulation wall-time speedup 为
+`1.139x`，以生成 artifact 的 mtime 推得的 warm proxy 为 `1.299x`。后者只是
+排除首次 CUDA/JIT/cache 成本的 artifact-mtime proxy，不能替代 raw wall time。
+H1/H3 的 velocity 序列最大 NRMSE 约为 `1.4e-5`，在这 34 步窗口内未显示出明显
+物理解偏离。
+
+因此 r20 仅支持“在已完成的 17 ms prefix 内，H3 减少 IQN/solver work 并保持
+H1 相近状态”的研究性观察。Q0 FSI50 未完成；没有 25 ms 完成、没有 Fluent
+parity，也没有完成本协议的正式 FSI50 加速结论。

@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -91,6 +92,17 @@ STEP_FRAME_DIAGNOSTIC_KEYS = (
     "boundary_topology_stage",
     "flow_boundary_state_synchronized",
     "structure_geometry_stage",
+)
+
+IQN_TRIAL_VECTOR_STEP_KEYS = (
+    "iqn_trial_guess_mps",
+    "iqn_trial_candidate_mps",
+    "iqn_trial_residual_mps",
+    "iqn_trial_index",
+    "iqn_trial_layout_sha256",
+    "iqn_trial_step",
+    "iqn_trial_time_s",
+    "iqn_trial_dt_s",
 )
 
 _JSON_CANONICAL_KEY_ALIASES = {
@@ -476,7 +488,17 @@ def _save_step_frame_atomic(
     streamwise_velocity_sign: float,
     reverse_streamwise_axis: bool,
     streamwise_length_m: float,
+    save_iqn_trial_vectors: bool = False,
 ) -> dict[str, Any]:
+    if save_iqn_trial_vectors:
+        missing_trial_vectors = sorted(
+            set(IQN_TRIAL_VECTOR_STEP_KEYS) - set(snapshot)
+        )
+        if missing_trial_vectors:
+            raise ValueError(
+                "accepted IQN step snapshot is missing trial-vector fields: "
+                f"{missing_trial_vectors}"
+            )
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent,
@@ -508,6 +530,11 @@ def _save_step_frame_atomic(
                     for key in STEP_FRAME_DIAGNOSTIC_KEYS
                     if key in snapshot
                 },
+                **{
+                    key: np.asarray(snapshot[key])
+                    for key in IQN_TRIAL_VECTOR_STEP_KEYS
+                    if save_iqn_trial_vectors
+                },
             },
         )
         temporary.replace(path)
@@ -521,6 +548,7 @@ def _validate_step_artifacts(
     output_dir: Path,
     *,
     expected_steps: int,
+    require_iqn_trial_vectors: bool = False,
 ) -> dict[str, Any]:
     expected_frame_names = [f"step_{step:04d}.npz" for step in range(1, expected_steps + 1)]
     expected_history_names = [
@@ -547,6 +575,11 @@ def _validate_step_artifacts(
                     (
                         set(STEP_FRAME_STRUCTURE_KEYS)
                         | set(STEP_FRAME_DIAGNOSTIC_KEYS)
+                        | (
+                            set(IQN_TRIAL_VECTOR_STEP_KEYS)
+                            if require_iqn_trial_vectors
+                            else set()
+                        )
                     )
                     - set(frame.files)
                 )
@@ -554,6 +587,8 @@ def _validate_step_artifacts(
                     raise ValueError(f"missing required step fields: {missing}")
                 for key in frame.files:
                     np.asarray(frame[key])
+                if require_iqn_trial_vectors:
+                    _validate_iqn_trial_vector_frame(frame, expected_step=step)
         except Exception as exc:
             raise RuntimeError(f"unreadable step frame {frame_name}: {exc}") from exc
         try:
@@ -570,6 +605,42 @@ def _validate_step_artifacts(
     }
 
 
+def _validate_iqn_trial_vector_frame(frame: Any, *, expected_step: int) -> None:
+    guess = np.asarray(frame["iqn_trial_guess_mps"], dtype=np.float64)
+    candidate = np.asarray(frame["iqn_trial_candidate_mps"], dtype=np.float64)
+    residual = np.asarray(frame["iqn_trial_residual_mps"], dtype=np.float64)
+    if (
+        guess.ndim != 3
+        or guess.shape[0] <= 0
+        or guess.shape[1] <= 0
+        or guess.shape[2] != 3
+        or candidate.shape != guess.shape
+        or residual.shape != guess.shape
+    ):
+        raise ValueError("IQN trial vectors must share shape (T, M, 3)")
+    if not all(np.all(np.isfinite(values)) for values in (guess, candidate, residual)):
+        raise ValueError("IQN trial vectors must be finite")
+    if not np.array_equal(residual, candidate - guess):
+        raise ValueError("IQN trial residual must equal candidate - guess")
+    trial_index = np.asarray(frame["iqn_trial_index"], dtype=np.int64)
+    if not np.array_equal(
+        trial_index,
+        np.arange(guess.shape[0], dtype=np.int64),
+    ):
+        raise ValueError("IQN trial index must be contiguous and zero-based")
+    layout = str(np.asarray(frame["iqn_trial_layout_sha256"]).item())
+    if len(layout) != 64 or any(character not in "0123456789abcdef" for character in layout):
+        raise ValueError("IQN trial layout identity must be lowercase SHA-256")
+    if int(np.asarray(frame["iqn_trial_step"]).item()) != int(expected_step):
+        raise ValueError("IQN trial step identity does not match its frame")
+    time_s = float(np.asarray(frame["iqn_trial_time_s"]).item())
+    dt_s = float(np.asarray(frame["iqn_trial_dt_s"]).item())
+    if not math.isfinite(time_s) or time_s <= 0.0:
+        raise ValueError("IQN trial physical time must be positive finite")
+    if not math.isfinite(dt_s) or dt_s <= 0.0:
+        raise ValueError("IQN trial dt must be positive finite")
+
+
 def _make_step_observer(
     *,
     output_dir: Path,
@@ -577,6 +648,7 @@ def _make_step_observer(
     streamwise_velocity_sign: float,
     reverse_streamwise_axis: bool,
     streamwise_length_m: float = 0.1,
+    save_iqn_trial_vectors: bool = False,
 ):
     fields_dir = output_dir / "step_fields"
     progress_path = output_dir / "progress.json"
@@ -595,6 +667,7 @@ def _make_step_observer(
             streamwise_velocity_sign=float(streamwise_velocity_sign),
             reverse_streamwise_axis=bool(reverse_streamwise_axis),
             streamwise_length_m=float(streamwise_length_m),
+            save_iqn_trial_vectors=bool(save_iqn_trial_vectors),
         )
         _write_json_atomic(
             output_dir / "step_history" / f"step_{int(step_index):04d}.json",
@@ -626,6 +699,7 @@ def _make_step_observer(
         _write_json_atomic(progress_path, next_progress)
         print(json.dumps(_json_safe(next_progress), sort_keys=True), flush=True)
 
+    observe.record_iqn_trial_vectors = bool(save_iqn_trial_vectors)
     return observe
 
 
@@ -788,28 +862,65 @@ def _initial_guess_inputs(
     mode = str(getattr(args, "initial_guess_mode", "carry_forward"))
     process_noise = getattr(args, "initial_guess_kalman_q", None)
     measurement_variance = getattr(args, "initial_guess_kalman_r", None)
+    process_noise_xyz = getattr(args, "initial_guess_kalman_q_xyz", None)
+    measurement_variance_xyz = getattr(
+        args, "initial_guess_kalman_r_xyz", None
+    )
     warmup = getattr(args, "initial_guess_kalman_warmup_accepted_states", None)
     oracle_path = getattr(args, "initial_guess_oracle_path", None)
-    has_kalman_values = process_noise is not None or measurement_variance is not None
+    has_scalar_values = (
+        process_noise is not None or measurement_variance is not None
+    )
+    has_xyz_values = (
+        process_noise_xyz is not None or measurement_variance_xyz is not None
+    )
+    has_kalman_values = has_scalar_values or has_xyz_values
 
     if mode == "kalman":
-        if process_noise is None or measurement_variance is None:
+        if has_scalar_values and has_xyz_values:
+            raise ValueError(
+                "initial-guess Kalman scalar and xyz Q/R cannot be mixed"
+            )
+        if has_xyz_values:
+            if process_noise_xyz is None or measurement_variance_xyz is None:
+                raise ValueError(
+                    "initial_guess_mode='kalman' requires both "
+                    "--initial-guess-kalman-q-xyz and "
+                    "--initial-guess-kalman-r-xyz"
+                )
+            selected_process_noise = tuple(
+                float(value) for value in process_noise_xyz
+            )
+            selected_measurement_variance = tuple(
+                float(value) for value in measurement_variance_xyz
+            )
+            initial_rate_variance = tuple(
+                value / float(dt_s) ** 2
+                for value in selected_measurement_variance
+            )
+        elif process_noise is None or measurement_variance is None:
             raise ValueError(
                 "initial_guess_mode='kalman' requires "
-                "--initial-guess-kalman-q and --initial-guess-kalman-r"
+                "either scalar --initial-guess-kalman-q/r or xyz "
+                "--initial-guess-kalman-q-xyz/r-xyz"
+            )
+        else:
+            selected_process_noise = float(process_noise)
+            selected_measurement_variance = float(measurement_variance)
+            initial_rate_variance = (
+                selected_measurement_variance / float(dt_s) ** 2
             )
         if oracle_path is not None:
             raise ValueError(
                 "initial_guess_mode='kalman' does not use "
                 "--initial-guess-oracle-path"
             )
-        measurement_variance = float(measurement_variance)
         return (
             InterfaceKalmanConfig(
-                rate_process_noise_spectral_density=float(process_noise),
-                measurement_variance=measurement_variance,
-                initial_value_variance=measurement_variance,
-                initial_rate_variance=measurement_variance / float(dt_s) ** 2,
+                rate_process_noise_spectral_density=selected_process_noise,
+                measurement_variance=selected_measurement_variance,
+                initial_value_variance=selected_measurement_variance,
+                initial_rate_variance=initial_rate_variance,
                 warmup_accepted_states=(
                     6 if warmup is None else int(warmup)
                 ),
@@ -900,7 +1011,14 @@ def _validate_initial_guess_oracle_producer(
 
     comparable_producer = dict(producer_config)
     comparable_consumer = dict(consumer_config_payload)
-    for field in ("initial_guess_mode", "initial_guess_oracle_path"):
+    for field in (
+        "initial_guess_mode",
+        "initial_guess_oracle_path",
+        "initial_guess_kalman_config",
+        "iqn_kalman_oracle_interpolation_target_step",
+        "iqn_kalman_oracle_interpolation_oracle_path",
+        "iqn_kalman_oracle_interpolation_alphas",
+    ):
         comparable_producer.pop(field, None)
         comparable_consumer.pop(field, None)
     if not _json_values_equal(comparable_producer, comparable_consumer):
@@ -1033,11 +1151,33 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
                 config.iqn_svd_relative_cutoff,
             )
         ),
+        iqn_reuse_previous_step_history=bool(
+            getattr(
+                args,
+                "iqn_reuse_previous_step_history",
+                config.iqn_reuse_previous_step_history,
+            )
+        ),
         initial_guess_mode=str(
             getattr(args, "initial_guess_mode", config.initial_guess_mode)
         ),
         initial_guess_kalman_config=initial_guess_kalman_config,
         initial_guess_oracle_path=initial_guess_oracle_path,
+        iqn_kalman_oracle_interpolation_target_step=(
+            int(getattr(args, "research_iqn_kalman_oracle_interpolation_target_step", None))
+            if getattr(args, "research_iqn_kalman_oracle_interpolation_target_step", None) is not None
+            else None
+        ),
+        iqn_kalman_oracle_interpolation_oracle_path=(
+            str(getattr(args, "research_iqn_kalman_oracle_interpolation_oracle_path", None))
+            if getattr(args, "research_iqn_kalman_oracle_interpolation_oracle_path", None) is not None
+            else None
+        ),
+        iqn_kalman_oracle_interpolation_alphas=(
+            tuple(float(value) for value in getattr(args, "research_iqn_kalman_oracle_interpolation_alphas", None))
+            if getattr(args, "research_iqn_kalman_oracle_interpolation_alphas", None) is not None
+            else VerticalFlapFsiConfig.iqn_kalman_oracle_interpolation_alphas
+        ),
         kalman_writeback_mode=kalman_mode,
         kalman_interface_config=kalman_interface_config,
         kalman_fluid_config=kalman_fluid_config,
@@ -1459,6 +1599,22 @@ def main() -> int:
         help="First-guess Kalman measurement variance.",
     )
     parser.add_argument(
+        "--initial-guess-kalman-q-xyz",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("QX", "QY", "QZ"),
+        help="Per-axis first-guess Kalman rate-process spectral densities.",
+    )
+    parser.add_argument(
+        "--initial-guess-kalman-r-xyz",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("RX", "RY", "RZ"),
+        help="Per-axis first-guess Kalman measurement variances.",
+    )
+    parser.add_argument(
         "--initial-guess-kalman-warmup-accepted-states",
         type=int,
         default=None,
@@ -1469,6 +1625,25 @@ def main() -> int:
         type=str,
         default=None,
         help="Oracle first-guess replay artifact for upper-bound experiments.",
+    )
+    parser.add_argument(
+        "--research-iqn-kalman-oracle-interpolation-target-step",
+        type=int,
+        default=None,
+        help="Offline no-commit Kalman-Oracle alpha sweep target macro step.",
+    )
+    parser.add_argument(
+        "--research-iqn-kalman-oracle-interpolation-oracle-path",
+        type=str,
+        default=None,
+        help="Source-matched completed Q0 producer used only by the offline sweep.",
+    )
+    parser.add_argument(
+        "--research-iqn-kalman-oracle-interpolation-alphas",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Strictly increasing alpha values in [0, 1] for the offline sweep.",
     )
     parser.add_argument(
         "--fsi-max-iterations",
@@ -1499,6 +1674,11 @@ def main() -> int:
         "--iqn-svd-relative-cutoff",
         type=float,
         default=VerticalFlapFsiConfig.iqn_svd_relative_cutoff,
+    )
+    parser.add_argument(
+        "--iqn-reuse-previous-step-history",
+        action="store_true",
+        help="Research-only: reuse immutable IQN secants from the prior accepted step.",
     )
     parser.add_argument(
         "--kalman-mode",
@@ -1640,7 +1820,19 @@ def main() -> int:
             "each completed FSI step."
         ),
     )
+    parser.add_argument(
+        "--save-iqn-trial-vectors",
+        action="store_true",
+        help=(
+            "Research-only accepted-step export of IQN trial guess, candidate, "
+            "and residual vectors into each step NPZ."
+        ),
+    )
     args = parser.parse_args()
+    if args.save_iqn_trial_vectors and not args.save_step_fields:
+        parser.error("--save-iqn-trial-vectors requires --save-step-fields")
+    if args.save_iqn_trial_vectors and args.coupling_mode != "iqn_ils":
+        parser.error("--save-iqn-trial-vectors requires --coupling-mode iqn_ils")
 
     output_dir = Path(args.output_dir).resolve()
     _prepare_output_dir(output_dir)
@@ -1678,11 +1870,16 @@ def main() -> int:
         config_payload = asdict(config)
         source_sha256 = _source_hashes()
         if (
-            config.initial_guess_mode == "oracle_replay"
+            (config.initial_guess_mode == "oracle_replay"
+            or config.iqn_kalman_oracle_interpolation_target_step is not None)
             and not bool(args.dry_run)
         ):
             oracle_replay_identity = _validate_initial_guess_oracle_producer(
-                producer_output=str(config.initial_guess_oracle_path),
+                producer_output=str(
+                    config.initial_guess_oracle_path
+                    if config.initial_guess_mode == "oracle_replay"
+                    else config.iqn_kalman_oracle_interpolation_oracle_path
+                ),
                 consumer_output=output_dir,
                 consumer_config_payload=config_payload,
                 current_source_sha256=source_sha256,
@@ -1706,6 +1903,7 @@ def main() -> int:
             "grid": _grid_summary(config),
             "dry_run": bool(args.dry_run),
             "save_step_fields": bool(args.save_step_fields),
+            "save_iqn_trial_vectors": bool(args.save_iqn_trial_vectors),
             "profile_wall_time": bool(args.profile_wall_time),
             "taichi_runtime": taichi_runtime,
             "source_sha256": source_sha256,
@@ -1748,6 +1946,7 @@ def main() -> int:
             streamwise_velocity_sign=float(args.streamwise_velocity_sign),
             reverse_streamwise_axis=not bool(args.no_reverse_streamwise_axis),
             streamwise_length_m=float(config.duct_length_m),
+            save_iqn_trial_vectors=bool(args.save_iqn_trial_vectors),
         )
         if args.save_step_fields
         else None
@@ -1763,6 +1962,35 @@ def main() -> int:
         solver_elapsed_s = time.perf_counter() - solver_started_s
         elapsed_s = time.perf_counter() - start
         report = dict(report)
+        if report.get("status") == "research_probe_terminal":
+            if oracle_replay_identity is not None:
+                report["initial_guess_oracle_identity"] = dict(
+                    oracle_replay_identity
+                )
+            _write_history_csv(output_dir / "our_solver_history.csv", list(report["history"]))
+            if step_observer is not None:
+                _validate_step_artifacts(
+                    output_dir,
+                    expected_steps=int(report["accepted_step_count"]),
+                    require_iqn_trial_vectors=bool(args.save_iqn_trial_vectors),
+                )
+            research_probe_elapsed_s = time.perf_counter() - start
+            progress_observer({"status": "research_probe_terminal", "phase": "research_probe_terminal", "elapsed_s": research_probe_elapsed_s})
+            _write_json(output_dir / "our_solver_report_compact.json", report)
+            _write_json(
+                output_dir / "our_solver_summary.json",
+                {
+                    "status": "research_probe_terminal",
+                    "offline_oracle": True,
+                    "deployable": False,
+                    "accepted_step_count": int(report["accepted_step_count"]),
+                    "accepted_time_s": float(report["accepted_time_s"]),
+                    "research_probe_wall_time_s": float(report["research_probe_wall_time_s"]),
+                    "raw_elapsed_s_including_probe": research_probe_elapsed_s,
+                    "initial_guess_oracle_identity": report.get("initial_guess_oracle_identity"),
+                },
+            )
+            return 0
         if oracle_replay_identity is not None:
             report["initial_guess_oracle_identity"] = dict(
                 oracle_replay_identity
@@ -1796,6 +2024,7 @@ def main() -> int:
             step_artifact_validation = _validate_step_artifacts(
                 output_dir,
                 expected_steps=int(config.step_count),
+                require_iqn_trial_vectors=bool(args.save_iqn_trial_vectors),
             )
         post_solver_artifact_export_wall_time_s = (
             time.perf_counter()

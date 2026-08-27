@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import math
 from typing import NamedTuple
@@ -9403,6 +9404,247 @@ class CanonicalComponentFaceLedgerContractMixin:
             self.fluid.cell_face_z_m.from_numpy(original_faces)
             self.fluid.cell_center_z_m.from_numpy(original_centers)
 
+    def test_direct_segment_pair_route_falls_back_only_to_supported_face(
+        self,
+    ) -> None:
+        """A direct/shadow pair follows its one supported finite-segment route."""
+
+        fluid = self.fluid
+        original_y_faces = fluid.cell_face_y_m.to_numpy().copy()
+        original_y_centers = fluid.cell_center_y_m.to_numpy().copy()
+        original_z_faces = fluid.cell_face_z_m.to_numpy().copy()
+        original_z_centers = fluid.cell_center_z_m.to_numpy().copy()
+        try:
+            y_faces = np.asarray((0.0, 0.49, 0.50, 0.75, 1.0), dtype=np.float32)
+            z_faces = np.asarray((0.199, 0.20, 0.40, 0.60, 0.80), dtype=np.float32)
+            fluid.cell_face_y_m.from_numpy(y_faces)
+            fluid.cell_center_y_m.from_numpy(
+                (0.5 * (y_faces[:-1] + y_faces[1:])).astype(np.float32)
+            )
+            fluid.cell_face_z_m.from_numpy(z_faces)
+            fluid.cell_center_z_m.from_numpy(
+                (0.5 * (z_faces[:-1] + z_faces[1:])).astype(np.float32)
+            )
+            source = (1, 1, 1)
+            shadow = (1, 0, 1)
+            default_face = source
+            alternate_face = (1, 1, 2)
+            self._load_component_face_claims(
+                (
+                    _ComponentFaceClaim(
+                        source_row=source,
+                        boundary_point_m=(0.375, 0.52, 0.20),
+                        interior_point_m=(0.375, 0.47, 0.60),
+                        normal=(0.0, -0.10, 0.05),
+                        target_velocity_mps=(0.0, 0.0, 2.0),
+                        region_id=303,
+                    ),
+                ),
+                use_segment_fixture=True,
+            )
+            markers = self.segment_component_face_markers
+            search = self.segment_component_face_search
+            markers.load_markers(
+                positions_m=((0.375, 0.52, 0.20), (0.375, 0.62, 0.40)),
+                velocities_mps=((0.0, 0.0, 2.0), (0.0, 0.0, 2.0)),
+                normals=((0.0, -0.10, 0.05),) * 2,
+                areas_m2=(0.5, 0.5),
+                region_ids=(303, 303),
+            )
+            markers.set_projection_segments(((0, 1),))
+            search.nearest_marker[source] = 0
+            search.node_projection_marker_indices[source] = (0, 1, -1)
+            search.node_projection_marker_weights[source] = (1.0, 0.0, 0.0)
+            search._last_search_support_radius_xyz_m = (0.5, 0.5, 0.5)
+            search._last_search_support_anisotropic = False
+            search._last_search_inactive_axis = 0
+
+            # Compact 4^3 analogue of the production direct/shadow pair:
+            # the fluid direct row and transverse obstacle shadow share one
+            # source slot, segment, region, and candidate z-face route.
+            fluid.obstacle[shadow] = 1
+            boundary = self.segment_component_face_boundary
+            boundary.active_ib_node[shadow] = 1
+            boundary.velocity_dirichlet_mps_field[shadow] = (0.0, 0.0, 2.0)
+            boundary.pressure_neumann_normal_field[shadow] = (
+                0.0,
+                -0.10,
+                0.05,
+            )
+            search.node_boundary_point_m[shadow] = (0.375, 0.52, 0.20)
+            search.node_interior_fluid_point_m[shadow] = (0.375, 0.47, 0.60)
+            search.nearest_marker[shadow] = 0
+            search.node_projection_marker_indices[shadow] = (0, 1, -1)
+            search.node_projection_marker_weights[shadow] = (1.0, 0.0, 0.0)
+
+            materialize_method_name = (
+                "_materialize_canonical_velocity_dirichlet_relocation_winners_kernel"
+            )
+            original_materialize = getattr(boundary, materialize_method_name)
+
+            def materialize_then_publish_shadow(
+                *args: object,
+                **kwargs: object,
+            ) -> None:
+                original_materialize(*args, **kwargs)
+                boundary.velocity_dirichlet_relocation_shadow_source_row[source] = (
+                    shadow
+                )
+                boundary.velocity_dirichlet_relocation_shadow_storage_base_row[
+                    source
+                ] = source
+                boundary.velocity_dirichlet_relocation_shadow_sample_point_m[
+                    source
+                ] = (0.375, 0.47, 0.60)
+                boundary.velocity_dirichlet_relocation_shadow_sample_velocity_mps[
+                    source
+                ] = (0.0, 0.0, 2.0)
+                boundary.velocity_dirichlet_relocation_shadow_reconstruction_alpha[
+                    source
+                ] = 0.0
+                boundary.velocity_dirichlet_relocation_shadow_claim_valid[source] = 1
+
+            observed: dict[str, object] = {}
+
+            def capture_claim_prepare(stage_name: str) -> None:
+                if stage_name == "hibm_velocity_row_claim_prepare_after":
+                    observed["default_count"] = int(
+                        boundary.velocity_dirichlet_component_face_claim_count[
+                            default_face
+                        ][self._Z_AXIS]
+                    )
+                    observed["alternate_count"] = int(
+                        boundary.velocity_dirichlet_component_face_claim_count[
+                            alternate_face
+                        ][self._Z_AXIS]
+                    )
+                    observed["alternate_authors"] = tuple(
+                        int(value)
+                        for value in (
+                            boundary.velocity_dirichlet_component_face_segment_first_author_linear_key[
+                                alternate_face[0],
+                                alternate_face[1],
+                                alternate_face[2],
+                                self._Z_AXIS,
+                            ],
+                            boundary.velocity_dirichlet_component_face_segment_second_author_linear_key[
+                                alternate_face[0],
+                                alternate_face[1],
+                                alternate_face[2],
+                                self._Z_AXIS,
+                            ],
+                        )
+                    )
+
+            boundary.__dict__[materialize_method_name] = (
+                materialize_then_publish_shadow
+            )
+            try:
+                # A shadow with a mismatched target and normal cannot prove
+                # the shared alternate route.  The direct author must remain
+                # on the original face so its normal target conflict fails
+                # atomically instead of being split across two faces.
+                ledger_before_contaminated_shadow = self._canonical_ledger_bytes()
+                boundary.velocity_dirichlet_mps_field[shadow] = (
+                    0.0,
+                    0.0,
+                    3.0,
+                )
+                boundary.pressure_neumann_normal_field[shadow] = (
+                    0.0,
+                    1.0,
+                    0.0,
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"conflicting canonical component-face claims \(target\)",
+                ):
+                    self._assemble_component_face_ledger(
+                        interpolate_interior_velocity=False,
+                        use_marker_geometry=True,
+                        use_segment_fixture=True,
+                        provide_marker_topology=True,
+                        surface_projection_inactive_axis=0,
+                        primary_region_id=101,
+                        secondary_region_id=202,
+                    )
+                self.assertEqual(
+                    self._canonical_ledger_bytes(),
+                    ledger_before_contaminated_shadow,
+                )
+                self.assertFalse(
+                    self._canonical_component_state(
+                        default_face,
+                        self._Z_AXIS,
+                    )["active"]
+                )
+                self.assertFalse(
+                    self._canonical_component_state(
+                        alternate_face,
+                        self._Z_AXIS,
+                    )["active"]
+                )
+                boundary.velocity_dirichlet_mps_field[shadow] = (
+                    0.0,
+                    0.0,
+                    2.0,
+                )
+                boundary.pressure_neumann_normal_field[shadow] = (
+                    0.0,
+                    -0.10,
+                    0.05,
+                )
+                result = self._assemble_component_face_ledger(
+                    interpolate_interior_velocity=False,
+                    use_marker_geometry=True,
+                    use_segment_fixture=True,
+                    provide_marker_topology=True,
+                    surface_projection_inactive_axis=0,
+                    primary_region_id=101,
+                    secondary_region_id=202,
+                    stage_observer=capture_claim_prepare,
+                )
+            finally:
+                boundary.__dict__.pop(materialize_method_name, None)
+
+            report = result["canonical_velocity_dirichlet_report"]
+            default_state = self._canonical_component_state(default_face, self._Z_AXIS)
+            alternate_state = self._canonical_component_state(
+                alternate_face,
+                self._Z_AXIS,
+            )
+            self.assertFalse(default_state["active"])
+            self.assertTrue(alternate_state["active"])
+            self.assertTrue(alternate_state["owned"])
+            self.assertEqual(int(alternate_state["region_id"]), 303)
+            self.assertEqual(observed["default_count"], 0)
+            self.assertEqual(observed["alternate_count"], 2)
+            self.assertEqual(
+                set(observed["alternate_authors"]),
+                {
+                    (source[0] * self._GRID_NODES[1] + source[1])
+                    * self._GRID_NODES[2]
+                    + source[2],
+                    (shadow[0] * self._GRID_NODES[1] + shadow[1])
+                    * self._GRID_NODES[2]
+                    + shadow[2],
+                },
+            )
+            self.assertEqual(
+                int(report["segment_supported_pair_route_fallback_count"]),
+                1,
+            )
+            self.assertEqual(
+                int(result["segment_supported_pair_route_fallback_count"]),
+                1,
+            )
+            self.assertEqual(int(report["direct_geometry_one_sided_component_count"]), 0)
+        finally:
+            fluid.cell_face_y_m.from_numpy(original_y_faces)
+            fluid.cell_center_y_m.from_numpy(original_y_centers)
+            fluid.cell_face_z_m.from_numpy(original_z_faces)
+            fluid.cell_center_z_m.from_numpy(original_z_centers)
+
     def test_identical_inactive_axis_segment_provenance_collapses_exactly(
         self,
     ) -> None:
@@ -9639,14 +9881,22 @@ class CanonicalComponentFaceLedgerContractMixin:
 
             with self.assertRaisesRegex(
                 RuntimeError,
-                r"one-sided canonical component-face direct geometry",
-            ):
+                r"one-sided canonical component-face direct geometry.*"
+                r"first_one_sided=.*finite-segment endpoint-support",
+            ) as failure:
                 self._assemble_component_face_ledger(
                     use_marker_geometry=True,
                     use_segment_fixture=True,
                 )
 
             self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+            diagnostic = ast.literal_eval(
+                str(failure.exception).split("first_one_sided=", 1)[1]
+            )
+            ratio = float(diagnostic["clamp_overrun_support_ratio"])
+            self.assertTrue(math.isfinite(ratio))
+            self.assertGreater(ratio, 1.0 + 1.0e-5)
+            self.assertIn("first_one_sided", str(failure.exception))
         finally:
             self.fluid.cell_face_z_m.from_numpy(original_faces)
             self.fluid.cell_center_z_m.from_numpy(original_centers)
@@ -9679,11 +9929,18 @@ class CanonicalComponentFaceLedgerContractMixin:
 
         with self.assertRaisesRegex(
             RuntimeError,
-            r"one-sided canonical component-face direct geometry",
-        ):
+            r"one-sided canonical component-face direct geometry.*"
+            r"first_one_sided=.*direct-axis interpolation",
+        ) as failure:
             self._assemble_component_face_ledger()
 
         self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+        diagnostic = ast.literal_eval(
+            str(failure.exception).split("first_one_sided=", 1)[1]
+        )
+        raw_weight = float(diagnostic["raw_interpolation_weight"])
+        self.assertTrue(raw_weight < 0.0 or raw_weight > 1.0)
+        self.assertIn("first_one_sided", str(failure.exception))
         self.assertEqual(
             int(
                 self.component_face_boundary

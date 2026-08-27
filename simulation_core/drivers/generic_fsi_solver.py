@@ -11,6 +11,7 @@ import numpy as np
 from simulation_core.coupling.iqn_ils import (
     IqnIlsAccelerator,
     IqnIlsConfig,
+    IqnIlsSecantHistory,
     IqnIlsUpdate,
 )
 
@@ -201,6 +202,9 @@ class FsiCouplingConfig:
     iqn_max_condition_number: float = 1.0e10
     iqn_max_coefficient_norm: float | None = None
     iqn_max_update_ratio: float | None = 2.0
+    record_trial_vectors: bool = False
+    iqn_reuse_previous_step_history: bool = False
+    iqn_reuse_residual_growth_limit_factor: float = 4.0
 
     def __post_init__(self) -> None:
         iterations = _strict_positive_integer(
@@ -233,6 +237,24 @@ class FsiCouplingConfig:
             max_condition_number=self.iqn_max_condition_number,
             max_coefficient_norm=self.iqn_max_coefficient_norm,
             max_update_ratio=self.iqn_max_update_ratio,
+        )
+        if not isinstance(self.record_trial_vectors, (bool, np.bool_)):
+            raise TypeError("record_trial_vectors must be a boolean")
+        object.__setattr__(
+            self,
+            "record_trial_vectors",
+            bool(self.record_trial_vectors),
+        )
+        if not isinstance(self.iqn_reuse_previous_step_history, (bool, np.bool_)):
+            raise TypeError("iqn_reuse_previous_step_history must be a boolean")
+        object.__setattr__(
+            self,
+            "iqn_reuse_previous_step_history",
+            bool(self.iqn_reuse_previous_step_history),
+        )
+        _finite_positive_float(
+            self.iqn_reuse_residual_growth_limit_factor,
+            name="iqn_reuse_residual_growth_limit_factor",
         )
 
 
@@ -276,11 +298,30 @@ class FsiCouplingReport:
     relative_residual_history: tuple[float, ...]
     absolute_residual_history_mps: tuple[float, ...]
     update_modes: tuple[str, ...]
+    candidate_velocity_rms_history_mps: tuple[float, ...] = ()
+    max_marker_residual_history_mps: tuple[float, ...] = ()
+    relative_tolerance_equivalent_history_mps: tuple[float, ...] = ()
+    effective_tolerance_history_mps: tuple[float, ...] = ()
+    residual_to_effective_tolerance_history: tuple[float, ...] = ()
     iqn_rank_history: tuple[int, ...] = ()
     iqn_condition_number_history: tuple[float | None, ...] = ()
     iqn_fallback_reasons: tuple[str | None, ...] = ()
     iqn_update_limited_history: tuple[bool, ...] = ()
     iqn_fallback_count: int = 0
+    trial_guess_history_mps: np.ndarray | None = None
+    trial_candidate_history_mps: np.ndarray | None = None
+    trial_residual_history_mps: np.ndarray | None = None
+    iqn_reuse_enabled: bool = False
+    iqn_reuse_used: bool = False
+    iqn_reuse_reset_reason: str | None = None
+    iqn_reuse_source_step: int | None = None
+    iqn_reuse_imported_pair_count: int = 0
+    iqn_reuse_local_pair_count: int = 0
+    iqn_reuse_retained_pair_count: int = 0
+    iqn_reuse_first_update_mode: str | None = None
+    iqn_reuse_prior_initial_residual_norm: float | None = None
+    iqn_reuse_first_residual_norm: float | None = None
+    accepted_iqn_secant_history: IqnIlsSecantHistory | None = None
 
 
 class FsiCouplingConvergenceError(RuntimeError):
@@ -388,6 +429,7 @@ class FsiRunResult:
 class FsiRuntimeRun:
     history: tuple[Mapping[str, Any], ...]
     finalization: Mapping[str, Any]
+    next_iqn_secant_history: IqnIlsSecantHistory | None = None
 
 
 def solve_fsi(
@@ -431,10 +473,13 @@ def solve_fsi(
 def solve_fsi_runtime(
     runtime: FsiRuntime,
     solver_config: FsiSolverConfig,
+    *,
+    prior_iqn_secant_history: IqnIlsSecantHistory | None = None,
 ) -> FsiRuntimeRun:
     """Run the sole physical-step loop for an initialized FSI runtime."""
 
     history_rows: list[dict[str, Any]] = []
+    next_iqn_secant_history = prior_iqn_secant_history
     completed_step_offset = int(solver_config.completed_step_offset)
     for local_step_index in range(int(solver_config.step_count)):
         step_index = completed_step_offset + local_step_index
@@ -448,6 +493,7 @@ def solve_fsi_runtime(
             runtime,
             context,
             solver_config.coupling,
+            prior_iqn_secant_history=next_iqn_secant_history,
         )
         try:
             runtime_row = dict(runtime.commit_step(context, trial, coupling))
@@ -479,6 +525,21 @@ def solve_fsi_runtime(
             "fsi_coupling_absolute_residual_history_mps": list(
                 coupling.absolute_residual_history_mps
             ),
+            "fsi_coupling_candidate_velocity_rms_history_mps": list(
+                coupling.candidate_velocity_rms_history_mps
+            ),
+            "fsi_coupling_max_marker_residual_history_mps": list(
+                coupling.max_marker_residual_history_mps
+            ),
+            "fsi_coupling_relative_tolerance_equivalent_history_mps": list(
+                coupling.relative_tolerance_equivalent_history_mps
+            ),
+            "fsi_coupling_effective_tolerance_history_mps": list(
+                coupling.effective_tolerance_history_mps
+            ),
+            "fsi_coupling_residual_to_effective_tolerance_history": list(
+                coupling.residual_to_effective_tolerance_history
+            ),
             "fsi_coupling_update_modes": list(coupling.update_modes),
             "fsi_iqn_rank_history": list(coupling.iqn_rank_history),
             "fsi_iqn_condition_number_history": list(
@@ -491,7 +552,23 @@ def solve_fsi_runtime(
                 coupling.iqn_update_limited_history
             ),
             "fsi_iqn_fallback_count": coupling.iqn_fallback_count,
+            "fsi_iqn_reuse_enabled": coupling.iqn_reuse_enabled,
+            "fsi_iqn_reuse_used": coupling.iqn_reuse_used,
+            "fsi_iqn_reuse_reset_reason": coupling.iqn_reuse_reset_reason,
+            "fsi_iqn_reuse_source_step": coupling.iqn_reuse_source_step,
+            "fsi_iqn_reuse_imported_pair_count": coupling.iqn_reuse_imported_pair_count,
+            "fsi_iqn_reuse_local_pair_count": coupling.iqn_reuse_local_pair_count,
+            "fsi_iqn_reuse_retained_pair_count": coupling.iqn_reuse_retained_pair_count,
+            "fsi_iqn_reuse_first_update_mode": coupling.iqn_reuse_first_update_mode,
+            "fsi_iqn_reuse_prior_initial_residual_norm": (
+                coupling.iqn_reuse_prior_initial_residual_norm
+            ),
+            "fsi_iqn_reuse_first_residual_norm": (
+                coupling.iqn_reuse_first_residual_norm
+            ),
         }
+        if coupling.iqn_reuse_enabled:
+            next_iqn_secant_history = coupling.accepted_iqn_secant_history
         history_rows.append(committed_row)
         publish_step = getattr(runtime, "publish_step", None)
         if publish_step is not None:
@@ -503,6 +580,7 @@ def solve_fsi_runtime(
     return FsiRuntimeRun(
         history=tuple(history_rows),
         finalization=dict(runtime.finalize_run()),
+        next_iqn_secant_history=next_iqn_secant_history,
     )
 
 
@@ -510,16 +588,25 @@ def solve_fsi_step(
     runtime: FsiRuntime,
     context: FsiStepContext,
     coupling_config: FsiCouplingConfig,
+    *,
+    prior_iqn_secant_history: IqnIlsSecantHistory | None = None,
 ) -> tuple[FsiTrialResult, FsiCouplingReport]:
     """Solve one physical step with the canonical marker-velocity fixed point."""
 
-    return _solve_marker_velocity_step(runtime, context, coupling_config)
+    return _solve_marker_velocity_step(
+        runtime,
+        context,
+        coupling_config,
+        prior_iqn_secant_history=prior_iqn_secant_history,
+    )
 
 
 def _solve_marker_velocity_step(
     runtime: FsiRuntime,
     context: FsiStepContext,
     config: FsiCouplingConfig,
+    *,
+    prior_iqn_secant_history: IqnIlsSecantHistory | None,
 ) -> tuple[FsiTrialResult, FsiCouplingReport]:
     try:
         initial_marker_velocity = runtime.begin_step(context)
@@ -532,20 +619,55 @@ def _solve_marker_velocity_step(
         raise
     relative_history: list[float] = []
     absolute_history: list[float] = []
+    candidate_velocity_rms_history: list[float] = []
     max_marker_history: list[float] = []
+    relative_tolerance_equivalent_history: list[float] = []
+    effective_tolerance_history: list[float] = []
+    residual_to_effective_tolerance_history: list[float] = []
     update_modes: list[str] = []
     iqn_updates: list[IqnIlsUpdate] = []
-    accelerator = IqnIlsAccelerator(
-        IqnIlsConfig(
-            history_limit=int(config.history_limit),
-            initial_picard_relaxation=float(config.initial_relaxation),
-            svd_relative_cutoff=float(config.iqn_svd_relative_cutoff),
-            max_condition_number=float(config.iqn_max_condition_number),
-            max_coefficient_norm=config.iqn_max_coefficient_norm,
-            max_update_ratio=config.iqn_max_update_ratio,
-        )
+    trial_guess_history: list[np.ndarray] | None = (
+        [] if config.record_trial_vectors else None
     )
+    trial_candidate_history: list[np.ndarray] | None = (
+        [] if config.record_trial_vectors else None
+    )
+    trial_residual_history: list[np.ndarray] | None = (
+        [] if config.record_trial_vectors else None
+    )
+    local_trial_guesses: list[np.ndarray] = []
+    local_trial_candidates: list[np.ndarray] = []
+    local_trial_residuals: list[np.ndarray] = []
+    iqn_config = IqnIlsConfig(
+        history_limit=int(config.history_limit),
+        initial_picard_relaxation=float(config.initial_relaxation),
+        svd_relative_cutoff=float(config.iqn_svd_relative_cutoff),
+        max_condition_number=float(config.iqn_max_condition_number),
+        max_coefficient_norm=config.iqn_max_coefficient_norm,
+        max_update_ratio=config.iqn_max_update_ratio,
+    )
+    layout_id: str | None = None
+    reuse_reset_reason: str | None = None
+    retained_history: IqnIlsSecantHistory | None = None
+    if config.iqn_reuse_previous_step_history:
+        layout_id, reuse_reset_reason = _runtime_marker_layout_identity(runtime)
+        retained_history, mismatch_reason = _usable_retained_iqn_history(
+            prior_iqn_secant_history,
+            context=context,
+            marker_shape=guess.shape,
+            layout_id=layout_id,
+            config=iqn_config,
+        )
+        if mismatch_reason is not None:
+            reuse_reset_reason = mismatch_reason
+    imported_pair_count = (
+        0
+        if retained_history is None
+        else min(int(iqn_config.history_limit), retained_history.pair_count)
+    )
+    accelerator = IqnIlsAccelerator(iqn_config, retained_history=retained_history)
     last_trial: FsiTrialResult | None = None
+    first_residual_norm: float | None = None
 
     try:
         for _iteration_index in range(int(config.max_iterations)):
@@ -560,11 +682,59 @@ def _solve_marker_velocity_step(
                     f"{candidate.shape} != {guess.shape}"
                 )
             residual = candidate - guess
+            if _iteration_index == 0:
+                first_residual_norm = float(np.linalg.norm(residual))
+            local_trial_guesses.append(np.array(guess, dtype=np.float64, copy=True))
+            local_trial_candidates.append(
+                np.array(candidate, dtype=np.float64, copy=True)
+            )
+            local_trial_residuals.append(
+                np.array(residual, dtype=np.float64, copy=True)
+            )
+            if trial_guess_history is not None:
+                assert trial_candidate_history is not None
+                assert trial_residual_history is not None
+                trial_guess_history.append(np.array(guess, dtype=np.float64, copy=True))
+                trial_candidate_history.append(
+                    np.array(candidate, dtype=np.float64, copy=True)
+                )
+                trial_residual_history.append(
+                    np.array(residual, dtype=np.float64, copy=True)
+                )
             metrics = _marker_velocity_residual_metrics(candidate, residual)
             relative_history.append(metrics["relative_residual"])
             absolute_history.append(metrics["absolute_residual_mps"])
+            candidate_velocity_rms_history.append(
+                metrics["candidate_velocity_rms_mps"]
+            )
             max_marker_history.append(metrics["max_marker_residual_mps"])
+            relative_tolerance_equivalent = float(
+                config.relative_tolerance
+            ) * max(metrics["candidate_velocity_rms_mps"], 1.0e-30)
+            effective_tolerance = max(
+                float(config.absolute_tolerance_mps),
+                relative_tolerance_equivalent,
+            )
+            relative_tolerance_equivalent_history.append(
+                relative_tolerance_equivalent
+            )
+            effective_tolerance_history.append(effective_tolerance)
+            residual_to_effective_tolerance_history.append(
+                metrics["absolute_residual_mps"] / effective_tolerance
+            )
             last_trial = trial
+
+            if (
+                _iteration_index == 0
+                and retained_history is not None
+                and first_residual_norm is not None
+                and first_residual_norm
+                > float(config.iqn_reuse_residual_growth_limit_factor)
+                * float(retained_history.initial_residual_norm)
+            ):
+                accelerator.discard_retained_history()
+                retained_history = None
+                reuse_reset_reason = "residual_growth_limit"
 
             absolute_hit = bool(
                 float(config.absolute_tolerance_mps) > 0.0
@@ -579,9 +749,48 @@ def _solve_marker_velocity_step(
                     converged=True,
                     relative_history=relative_history,
                     absolute_history=absolute_history,
+                    candidate_velocity_rms_history=candidate_velocity_rms_history,
                     max_marker_history=max_marker_history,
+                    relative_tolerance_equivalent_history=(
+                        relative_tolerance_equivalent_history
+                    ),
+                    effective_tolerance_history=effective_tolerance_history,
+                    residual_to_effective_tolerance_history=(
+                        residual_to_effective_tolerance_history
+                    ),
                     update_modes=update_modes,
                     iqn_updates=iqn_updates,
+                    trial_guess_history=trial_guess_history,
+                    trial_candidate_history=trial_candidate_history,
+                    trial_residual_history=trial_residual_history,
+                    iqn_reuse_enabled=bool(config.iqn_reuse_previous_step_history),
+                    iqn_reuse_used=bool(
+                        update_modes and update_modes[0] == "iqn_ils_reuse"
+                    ),
+                    iqn_reuse_reset_reason=reuse_reset_reason,
+                    iqn_reuse_source_step=(
+                        None
+                        if prior_iqn_secant_history is None
+                        else prior_iqn_secant_history.source_step
+                    ),
+                    iqn_reuse_imported_pair_count=imported_pair_count,
+                    iqn_reuse_local_pair_count=min(
+                        int(iqn_config.history_limit),
+                        max(0, len(local_trial_residuals) - 1),
+                    ),
+                    accepted_iqn_secant_history=_accepted_iqn_secant_history(
+                        context=context,
+                        config=iqn_config,
+                        layout_id=layout_id,
+                        trial_candidates=local_trial_candidates,
+                        trial_residuals=local_trial_residuals,
+                    ),
+                    iqn_reuse_prior_initial_residual_norm=(
+                        None
+                        if prior_iqn_secant_history is None
+                        else prior_iqn_secant_history.initial_residual_norm
+                    ),
+                    iqn_reuse_first_residual_norm=first_residual_norm,
                 )
                 return last_trial, report
 
@@ -591,6 +800,12 @@ def _solve_marker_velocity_step(
             guess = iqn_update.next_guess
             iqn_updates.append(iqn_update)
             update_modes.append(iqn_update.mode)
+            if (
+                iqn_update.fallback_reason is not None
+                and accelerator.last_matrix_contains_retained
+            ):
+                retained_history = None
+                reuse_reset_reason = iqn_update.fallback_reason
     except Exception as failure:
         _rollback_after_failure(runtime, context, failure)
         raise
@@ -599,9 +814,38 @@ def _solve_marker_velocity_step(
         converged=False,
         relative_history=relative_history,
         absolute_history=absolute_history,
+        candidate_velocity_rms_history=candidate_velocity_rms_history,
         max_marker_history=max_marker_history,
+        relative_tolerance_equivalent_history=(
+            relative_tolerance_equivalent_history
+        ),
+        effective_tolerance_history=effective_tolerance_history,
+        residual_to_effective_tolerance_history=(
+            residual_to_effective_tolerance_history
+        ),
         update_modes=update_modes,
         iqn_updates=iqn_updates,
+        trial_guess_history=trial_guess_history,
+        trial_candidate_history=trial_candidate_history,
+        trial_residual_history=trial_residual_history,
+        iqn_reuse_enabled=bool(config.iqn_reuse_previous_step_history),
+        iqn_reuse_used=bool(update_modes and update_modes[0] == "iqn_ils_reuse"),
+        iqn_reuse_reset_reason=reuse_reset_reason,
+        iqn_reuse_source_step=(
+            None if prior_iqn_secant_history is None else prior_iqn_secant_history.source_step
+        ),
+        iqn_reuse_imported_pair_count=imported_pair_count,
+        iqn_reuse_local_pair_count=min(
+            int(iqn_config.history_limit),
+            max(0, len(local_trial_residuals) - 1),
+        ),
+        accepted_iqn_secant_history=None,
+        iqn_reuse_prior_initial_residual_norm=(
+            None
+            if prior_iqn_secant_history is None
+            else prior_iqn_secant_history.initial_residual_norm
+        ),
+        iqn_reuse_first_residual_norm=first_residual_norm,
     )
     failure = FsiCouplingConvergenceError(context, report)
     _rollback_after_failure(runtime, context, failure)
@@ -624,9 +868,25 @@ def _coupling_report(
     converged: bool,
     relative_history: Sequence[float],
     absolute_history: Sequence[float],
+    candidate_velocity_rms_history: Sequence[float],
     max_marker_history: Sequence[float],
+    relative_tolerance_equivalent_history: Sequence[float],
+    effective_tolerance_history: Sequence[float],
+    residual_to_effective_tolerance_history: Sequence[float],
     update_modes: Sequence[str],
     iqn_updates: Sequence[IqnIlsUpdate],
+    trial_guess_history: Sequence[np.ndarray] | None,
+    trial_candidate_history: Sequence[np.ndarray] | None,
+    trial_residual_history: Sequence[np.ndarray] | None,
+    iqn_reuse_enabled: bool,
+    iqn_reuse_used: bool,
+    iqn_reuse_reset_reason: str | None,
+    iqn_reuse_source_step: int | None,
+    iqn_reuse_imported_pair_count: int,
+    iqn_reuse_local_pair_count: int,
+    accepted_iqn_secant_history: IqnIlsSecantHistory | None,
+    iqn_reuse_prior_initial_residual_norm: float | None,
+    iqn_reuse_first_residual_norm: float | None,
 ) -> FsiCouplingReport:
     return FsiCouplingReport(
         iterations=len(relative_history),
@@ -637,6 +897,21 @@ def _coupling_report(
         relative_residual_history=tuple(float(value) for value in relative_history),
         absolute_residual_history_mps=tuple(
             float(value) for value in absolute_history
+        ),
+        candidate_velocity_rms_history_mps=tuple(
+            float(value) for value in candidate_velocity_rms_history
+        ),
+        max_marker_residual_history_mps=tuple(
+            float(value) for value in max_marker_history
+        ),
+        relative_tolerance_equivalent_history_mps=tuple(
+            float(value) for value in relative_tolerance_equivalent_history
+        ),
+        effective_tolerance_history_mps=tuple(
+            float(value) for value in effective_tolerance_history
+        ),
+        residual_to_effective_tolerance_history=tuple(
+            float(value) for value in residual_to_effective_tolerance_history
         ),
         update_modes=tuple(str(value) for value in update_modes),
         iqn_rank_history=tuple(int(update.rank) for update in iqn_updates),
@@ -652,7 +927,128 @@ def _coupling_report(
         iqn_fallback_count=sum(
             update.fallback_reason is not None for update in iqn_updates
         ),
+        trial_guess_history_mps=_stack_trial_vector_history(trial_guess_history),
+        trial_candidate_history_mps=_stack_trial_vector_history(
+            trial_candidate_history
+        ),
+        trial_residual_history_mps=_stack_trial_vector_history(
+            trial_residual_history
+        ),
+        iqn_reuse_enabled=bool(iqn_reuse_enabled),
+        iqn_reuse_used=bool(iqn_reuse_used),
+        iqn_reuse_reset_reason=iqn_reuse_reset_reason,
+        iqn_reuse_source_step=iqn_reuse_source_step,
+        iqn_reuse_imported_pair_count=int(iqn_reuse_imported_pair_count),
+        iqn_reuse_local_pair_count=int(iqn_reuse_local_pair_count),
+        iqn_reuse_retained_pair_count=(
+            0
+            if accepted_iqn_secant_history is None
+            else accepted_iqn_secant_history.pair_count
+        ),
+        iqn_reuse_first_update_mode=(
+            None if not update_modes else str(update_modes[0])
+        ),
+        iqn_reuse_prior_initial_residual_norm=(
+            None
+            if iqn_reuse_prior_initial_residual_norm is None
+            else float(iqn_reuse_prior_initial_residual_norm)
+        ),
+        iqn_reuse_first_residual_norm=(
+            None
+            if iqn_reuse_first_residual_norm is None
+            else float(iqn_reuse_first_residual_norm)
+        ),
+        accepted_iqn_secant_history=accepted_iqn_secant_history,
     )
+
+
+def _runtime_marker_layout_identity(
+    runtime: FsiRuntime,
+) -> tuple[str | None, str | None]:
+    identity = getattr(runtime, "marker_layout_identity", None)
+    if not callable(identity):
+        return None, "layout_identity_unavailable"
+    try:
+        layout_id = str(identity()).strip()
+    except Exception:
+        return None, "layout_identity_unavailable"
+    if not layout_id:
+        return None, "layout_identity_unavailable"
+    return layout_id, None
+
+
+def _usable_retained_iqn_history(
+    history: IqnIlsSecantHistory | None,
+    *,
+    context: FsiStepContext,
+    marker_shape: tuple[int, ...],
+    layout_id: str | None,
+    config: IqnIlsConfig,
+) -> tuple[IqnIlsSecantHistory | None, str | None]:
+    if history is None:
+        return None, None
+    if layout_id is None or history.layout_id != layout_id:
+        return None, "layout_identity_mismatch"
+    if history.source_step != context.step - 1:
+        return None, "source_step_mismatch"
+    if history.marker_shape != marker_shape:
+        return None, "marker_shape_mismatch"
+    if history.dt_s != float(context.dt_s):
+        return None, "dt_mismatch"
+    if history.config_signature != config.signature:
+        return None, "config_mismatch"
+    return history, None
+
+
+def _accepted_iqn_secant_history(
+    *,
+    context: FsiStepContext,
+    config: IqnIlsConfig,
+    layout_id: str | None,
+    trial_candidates: Sequence[np.ndarray],
+    trial_residuals: Sequence[np.ndarray],
+) -> IqnIlsSecantHistory | None:
+    if layout_id is None or len(trial_residuals) < 2:
+        return None
+    first_pair_index = max(
+        0,
+        len(trial_residuals) - 1 - int(config.history_limit),
+    )
+    candidate_columns = np.column_stack(
+        [
+            np.asarray(trial_candidates[index + 1]).reshape(-1)
+            - np.asarray(trial_candidates[index]).reshape(-1)
+            for index in range(first_pair_index, len(trial_candidates) - 1)
+        ]
+    )
+    residual_columns = np.column_stack(
+        [
+            np.asarray(trial_residuals[index + 1]).reshape(-1)
+            - np.asarray(trial_residuals[index]).reshape(-1)
+            for index in range(first_pair_index, len(trial_residuals) - 1)
+        ]
+    )
+    return IqnIlsSecantHistory(
+        delta_residual=residual_columns,
+        delta_candidate=candidate_columns,
+        source_step=int(context.step),
+        layout_id=layout_id,
+        dt_s=float(context.dt_s),
+        marker_shape=tuple(trial_residuals[-1].shape),
+        config_signature=config.signature,
+        terminal_residual_norm=float(np.linalg.norm(trial_residuals[-1])),
+        initial_residual_norm=float(np.linalg.norm(trial_residuals[0])),
+    )
+
+
+def _stack_trial_vector_history(
+    values: Sequence[np.ndarray] | None,
+) -> np.ndarray | None:
+    if values is None:
+        return None
+    stacked = np.ascontiguousarray(np.stack(tuple(values), axis=0), dtype=np.float64)
+    stacked.flags.writeable = False
+    return stacked
 
 
 def _marker_velocity_residual_metrics(
@@ -665,6 +1061,7 @@ def _marker_velocity_residual_metrics(
     velocity_scale = float(np.sqrt(np.mean(squared_marker_velocity)))
     return {
         "absolute_residual_mps": absolute_residual,
+        "candidate_velocity_rms_mps": velocity_scale,
         "max_marker_residual_mps": float(
             np.sqrt(squared_marker_residual).max(initial=0.0)
         ),

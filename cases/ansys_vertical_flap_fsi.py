@@ -177,10 +177,26 @@ class VerticalFlapFsiConfig:
     iqn_history_limit: int = 8
     iqn_initial_picard_relaxation: float = 0.5
     iqn_svd_relative_cutoff: float = 1.0e-10
+    iqn_reuse_previous_step_history: bool = False
     # Initial-guess routing is independent of modified-physics writeback.
     initial_guess_mode: str = "carry_forward"
     initial_guess_kalman_config: InterfaceKalmanConfig | None = None
     initial_guess_oracle_path: str | None = None
+    # Offline research probe: solve one target macro step repeatedly from the
+    # same accepted in-memory base, without committing any probe trial.
+    iqn_kalman_oracle_interpolation_target_step: int | None = None
+    iqn_kalman_oracle_interpolation_oracle_path: str | None = None
+    iqn_kalman_oracle_interpolation_alphas: tuple[float, ...] = (
+        0.0,
+        0.25,
+        0.5,
+        0.75,
+        0.9,
+        0.95,
+        0.975,
+        0.99,
+        1.0,
+    )
     # Explicitly modified-physics experiment.  ``off`` preserves the legacy
     # solver path and constructs no predictor; active modes write posterior
     # values only to their uniquely owned feedback/state field.
@@ -315,6 +331,7 @@ class VerticalFlapFsiConfig:
     traction_viscosity_pa_s: float = 0.0
     allow_selected_traction_formulation_coupled_smoke: bool = False
     allow_selected_traction_formulation_coupled_long_validation: bool = False
+    allow_selected_traction_formulation_coupled_research_250: bool = False
     export_final_flow_snapshot: bool = False
     enforce_plane_strain_x: bool = False
     # Opt-in guard (2026-07-03 fine-flap ejection audit): refuse to run when
@@ -432,6 +449,7 @@ def selected_formulation_solver_config(
         ),
         allow_selected_traction_formulation_coupled_smoke=True,
         allow_selected_traction_formulation_coupled_long_validation=True,
+        allow_selected_traction_formulation_coupled_research_250=True,
     )
     return with_local_surface_force_support(config)
 

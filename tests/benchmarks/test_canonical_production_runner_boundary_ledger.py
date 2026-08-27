@@ -1098,6 +1098,30 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
             solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(report)
         )
 
+    def test_canonical_health_accepts_segment_supported_pair_route_counter(
+        self,
+    ) -> None:
+        key = "segment_supported_pair_route_fallback_count"
+        report = _healthy_canonical_runner_report()
+        report["canonical_velocity_dirichlet_report"][key] = 1
+        self.assertIsNone(
+            solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(report)
+        )
+
+        for invalid_value in (True, -1, 0.5, "1"):
+            with self.subTest(invalid_value=invalid_value):
+                invalid_report = _healthy_canonical_runner_report()
+                invalid_report["canonical_velocity_dirichlet_report"][key] = (
+                    invalid_value
+                )
+                failure = (
+                    solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+                        invalid_report
+                    )
+                )
+                self.assertIsNotNone(failure)
+                self.assertIn("count", failure.lower())
+
     def test_canonical_health_cross_checks_direct_geometry_metrics(self) -> None:
         healthy = _healthy_canonical_runner_report()
         healthy_device = healthy["canonical_velocity_dirichlet_report"]

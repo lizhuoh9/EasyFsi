@@ -4,10 +4,169 @@ import unittest
 
 import numpy as np
 
-from simulation_core.coupling.iqn_ils import IqnIlsAccelerator, IqnIlsConfig
+from simulation_core.coupling.iqn_ils import (
+    IqnIlsAccelerator,
+    IqnIlsConfig,
+    IqnIlsSecantHistory,
+)
 
 
 class IqnIlsAcceleratorTests(unittest.TestCase):
+    def test_retained_history_drives_the_first_update_without_picard(self) -> None:
+        config = IqnIlsConfig(max_update_ratio=None)
+        retained = IqnIlsSecantHistory(
+            delta_residual=np.asarray([[1.0], [0.0], [0.0]]),
+            delta_candidate=np.asarray([[0.5], [0.0], [0.0]]),
+            source_step=1,
+            layout_id="layout-a",
+            dt_s=0.1,
+            marker_shape=(1, 3),
+            config_signature=config.signature,
+            terminal_residual_norm=1.0,
+        )
+        accelerator = IqnIlsAccelerator(config, retained_history=retained)
+
+        update = accelerator.update(
+            np.zeros((1, 3)),
+            np.asarray([[0.5, 0.0, 0.0]]),
+        )
+
+        self.assertEqual(update.mode, "iqn_ils_reuse")
+        self.assertEqual(update.history_pair_count, 1)
+        self.assertEqual(update.rank, 1)
+        np.testing.assert_allclose(update.next_guess, [[0.25, 0.0, 0.0]])
+
+    def test_no_retained_history_keeps_first_update_picard(self) -> None:
+        accelerator = IqnIlsAccelerator(
+            IqnIlsConfig(initial_picard_relaxation=0.25)
+        )
+
+        update = accelerator.update(np.zeros((1, 3)), np.ones((1, 3)))
+
+        self.assertEqual(update.mode, "picard")
+        self.assertEqual(update.history_pair_count, 0)
+
+    def test_retained_history_is_immutable_and_has_no_endpoint_alias(self) -> None:
+        delta_residual = np.ones((3, 1), dtype=np.float64)
+        delta_candidate = np.full((3, 1), 2.0, dtype=np.float64)
+        config = IqnIlsConfig()
+        history = IqnIlsSecantHistory(
+            delta_residual=delta_residual,
+            delta_candidate=delta_candidate,
+            source_step=1,
+            layout_id="layout-a",
+            dt_s=0.1,
+            marker_shape=(1, 3),
+            config_signature=config.signature,
+            terminal_residual_norm=1.0,
+        )
+        delta_residual[:] = 99.0
+        delta_candidate[:] = 99.0
+
+        self.assertFalse(history.delta_residual.flags.writeable)
+        self.assertFalse(history.delta_candidate.flags.writeable)
+        np.testing.assert_array_equal(history.delta_residual, 1.0)
+        np.testing.assert_array_equal(history.delta_candidate, 2.0)
+        with self.assertRaises(ValueError):
+            history.delta_residual[:] = 0.0
+
+    def test_retained_history_validates_shape_and_finiteness(self) -> None:
+        config = IqnIlsConfig()
+        common = {
+            "delta_candidate": np.ones((3, 1)),
+            "source_step": 1,
+            "layout_id": "layout-a",
+            "dt_s": 0.1,
+            "marker_shape": (1, 3),
+            "config_signature": config.signature,
+            "terminal_residual_norm": 1.0,
+        }
+        with self.assertRaisesRegex(ValueError, "finite"):
+            IqnIlsSecantHistory(
+                delta_residual=np.asarray([[np.nan], [0.0], [0.0]]),
+                **common,
+            )
+        with self.assertRaisesRegex(ValueError, "shape"):
+            IqnIlsSecantHistory(
+                delta_residual=np.ones((6, 1)),
+                **common,
+            )
+
+    def test_retained_history_limit_prefers_newer_local_secants(self) -> None:
+        config = IqnIlsConfig(history_limit=1, max_update_ratio=None)
+        retained = IqnIlsSecantHistory(
+            delta_residual=np.asarray([[1.0], [0.0], [0.0]]),
+            delta_candidate=np.asarray([[0.5], [0.0], [0.0]]),
+            source_step=1,
+            layout_id="layout-a",
+            dt_s=0.1,
+            marker_shape=(1, 3),
+            config_signature=config.signature,
+            terminal_residual_norm=1.0,
+        )
+        accelerator = IqnIlsAccelerator(config, retained_history=retained)
+        accelerator.update(np.zeros((1, 3)), np.asarray([[0.5, 0.0, 0.0]]))
+        update = accelerator.update(
+            np.asarray([[0.25, 0.0, 0.0]]),
+            np.asarray([[0.375, 0.0, 0.0]]),
+        )
+
+        self.assertEqual(update.mode, "iqn_ils")
+        self.assertEqual(update.history_pair_count, 1)
+
+    def test_second_update_discards_retained_history_after_rank_fallback(self) -> None:
+        config = IqnIlsConfig(history_limit=2, max_update_ratio=None)
+        retained = IqnIlsSecantHistory(
+            delta_residual=np.asarray([[1.0], [0.0], [0.0]]),
+            delta_candidate=np.asarray([[0.5], [0.0], [0.0]]),
+            source_step=1,
+            layout_id="layout-a",
+            dt_s=0.1,
+            marker_shape=(1, 3),
+            config_signature=config.signature,
+            terminal_residual_norm=1.0,
+        )
+        accelerator = IqnIlsAccelerator(config, retained_history=retained)
+
+        first = accelerator.update(
+            np.zeros((1, 3)), np.asarray([[0.5, 0.0, 0.0]])
+        )
+        second = accelerator.update(
+            np.zeros((1, 3)), np.asarray([[1.5, 0.0, 0.0]])
+        )
+
+        self.assertEqual(first.mode, "iqn_ils_reuse")
+        self.assertEqual(second.mode, "picard")
+        self.assertEqual(second.fallback_reason, "rank_deficient_history")
+        self.assertFalse(accelerator.has_retained_history)
+
+    def test_second_update_discards_retained_history_after_update_limit(self) -> None:
+        config = IqnIlsConfig(history_limit=2, max_update_ratio=0.5)
+        retained = IqnIlsSecantHistory(
+            delta_residual=np.asarray([[1.0], [0.0], [0.0]]),
+            delta_candidate=np.asarray([[0.5], [0.0], [0.0]]),
+            source_step=1,
+            layout_id="layout-a",
+            dt_s=0.1,
+            marker_shape=(1, 3),
+            config_signature=config.signature,
+            terminal_residual_norm=1.0,
+        )
+        accelerator = IqnIlsAccelerator(config, retained_history=retained)
+        first = accelerator.update(
+            np.zeros((1, 3)), np.asarray([[0.5, 0.0, 0.0]])
+        )
+        second = accelerator.update(
+            np.asarray([[0.0, 9.0, 0.0]]),
+            np.asarray([[0.5, 10.0, 0.0]]),
+        )
+
+        self.assertEqual(first.mode, "iqn_ils_reuse")
+        self.assertEqual(second.mode, "picard")
+        self.assertTrue(second.update_limited)
+        self.assertEqual(second.fallback_reason, "reuse_update_limited")
+        self.assertFalse(accelerator.has_retained_history)
+
     def test_first_update_is_fixed_picard_and_reset_clears_history(self) -> None:
         accelerator = IqnIlsAccelerator(
             IqnIlsConfig(initial_picard_relaxation=0.25)

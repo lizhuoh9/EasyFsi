@@ -44,7 +44,7 @@ def test_module_has_no_solver_taichi_or_case_dependency() -> None:
     }
 
 
-def _config(**overrides: float | int) -> InterfaceKalmanConfig:
+def _config(**overrides: object) -> InterfaceKalmanConfig:
     values = {
         "rate_process_noise_spectral_density": 0.3,
         "measurement_variance": 0.2,
@@ -83,6 +83,77 @@ def test_config_is_frozen_and_validates_numerical_parameters() -> None:
             _config(warmup_accepted_states=invalid_warmup)
     with pytest.raises(TypeError, match="warmup_accepted_states"):
         _config(warmup_accepted_states=True)
+
+
+def test_config_accepts_xyz_covariances_and_rejects_invalid_specs() -> None:
+    config = _config(
+        rate_process_noise_spectral_density=(0.1, 0.2, 0.3),
+        measurement_variance=(0.4, 0.5, 0.6),
+        initial_value_variance=(0.7, 0.8, 0.9),
+        initial_rate_variance=(1.0, 1.1, 1.2),
+    )
+
+    assert config.rate_process_noise_spectral_density == (0.1, 0.2, 0.3)
+    assert config.measurement_variance == (0.4, 0.5, 0.6)
+    assert config.initial_value_variance == (0.7, 0.8, 0.9)
+    assert config.initial_rate_variance == (1.0, 1.1, 1.2)
+
+    with pytest.raises(ValueError, match="measurement_variance.*three"):
+        _config(measurement_variance=(0.1, 0.2))
+    with pytest.raises(ValueError, match="measurement_variance"):
+        _config(measurement_variance=(0.1, 0.0, 0.3))
+    with pytest.raises(ValueError, match="initial_value_variance"):
+        _config(initial_value_variance=(0.1, np.nan, 0.3))
+    with pytest.raises(TypeError, match="initial_rate_variance"):
+        _config(initial_rate_variance=(0.1, True, 0.3))
+
+
+def test_xyz_covariances_broadcast_over_markers_and_preserve_axis_scaling() -> None:
+    config = _config(
+        rate_process_noise_spectral_density=(0.0, 0.3, 3.0),
+        measurement_variance=(0.1, 0.2, 0.4),
+        initial_value_variance=(0.4, 0.5, 0.6),
+        initial_rate_variance=(0.7, 0.8, 0.9),
+    )
+    predictor = InterfaceKalmanPredictor(config)
+    predictor.initialize(np.zeros((2, 3)), layout_id="markers:v1")
+
+    initial = predictor.committed_estimate()
+    np.testing.assert_allclose(
+        initial.value_variances,
+        np.array([[0.4, 0.5, 0.6], [0.4, 0.5, 0.6]]),
+    )
+    np.testing.assert_allclose(
+        initial.rate_variances,
+        np.array([[0.7, 0.8, 0.9], [0.7, 0.8, 0.9]]),
+    )
+
+    prediction = predictor.predict_trial(dt=0.2, layout_id="markers:v1")
+    process_noise_scale = np.array([0.0, 0.3, 3.0])
+    expected_value_variance = (
+        np.array([0.4, 0.5, 0.6])
+        + 0.2**2 * np.array([0.7, 0.8, 0.9])
+        + process_noise_scale * 0.2**3 / 3.0
+    )
+    np.testing.assert_allclose(
+        prediction.value_variances,
+        np.broadcast_to(expected_value_variance, (2, 3)),
+    )
+
+    update = predictor.update_trial(
+        np.ones((2, 3)), layout_id="markers:v1"
+    )
+    expected_innovation_variance = (
+        expected_value_variance + np.array([0.1, 0.2, 0.4])
+    )
+    np.testing.assert_allclose(
+        update.innovation_variances,
+        np.broadcast_to(expected_innovation_variance, (2, 3)),
+    )
+
+    mismatched = InterfaceKalmanPredictor(config)
+    with pytest.raises(ValueError, match="last dimension"):
+        mismatched.initialize(np.zeros((2, 2)), layout_id="markers:v2")
 
 
 def test_initialize_copies_values_preserves_shape_and_promotes_float64() -> None:

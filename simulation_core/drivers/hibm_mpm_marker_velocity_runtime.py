@@ -261,6 +261,11 @@ class HibmMpmMarkerVelocityRuntime:
     def finalize_run(self) -> Mapping[str, Any]:
         return dict(self._finalize_case_run())
 
+    def marker_layout_identity(self) -> str:
+        """Read-only identity seam for accepted-step IQN secant reuse."""
+
+        return self._current_layout_id()
+
     def _require_active_step(self) -> None:
         if not self._step_transaction_ready:
             raise RuntimeError("HIBM-MPM physical-step transaction is not active")

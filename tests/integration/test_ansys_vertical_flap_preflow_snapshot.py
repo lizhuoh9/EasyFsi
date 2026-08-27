@@ -2186,6 +2186,10 @@ def test_preflow_snapshot_config_hash_excludes_fsi_only_and_path_fields():
             initial_rate_variance=8.0,
         ),
         initial_guess_oracle_path="runs/q0_fsi08",
+        iqn_reuse_previous_step_history=True,
+        iqn_kalman_oracle_interpolation_target_step=8,
+        iqn_kalman_oracle_interpolation_oracle_path="runs/q0_fsi08",
+        iqn_kalman_oracle_interpolation_alphas=(0.0, 0.5, 1.0),
         preflow_snapshot_input_path="cache/input.npz",
         preflow_snapshot_output_path="cache/output.npz",
     )

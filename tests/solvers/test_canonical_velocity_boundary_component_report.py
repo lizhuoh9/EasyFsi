@@ -13,6 +13,7 @@ CANONICAL_SCHEMA_THREE_REPORT_KEYS = (
     "duplicate_claim_component_count",
     "direct_geometry_reconstructed_component_count",
     "direct_geometry_one_sided_component_count",
+    "segment_supported_pair_route_fallback_count",
     "max_compatible_direct_target_spread_mps",
     "final_active_component_count",
     "final_owned_component_count",

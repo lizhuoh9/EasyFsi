@@ -1997,6 +1997,33 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 allow_selected_traction_formulation_coupled_long_validation=True,
             )
         )
+        with self.assertRaisesRegex(ValueError, "fixed-solid diagnostics only"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                replace(
+                    selected_coupled_smoke,
+                    step_count=250,
+                    allow_selected_traction_formulation_coupled_long_validation=True,
+                )
+            )
+        selected_research_250 = replace(
+            selected_coupled_smoke,
+            step_count=250,
+            allow_selected_traction_formulation_coupled_research_250=True,
+        )
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            selected_research_250
+        )
+        with self.assertRaisesRegex(ValueError, "fixed-solid diagnostics only"):
+            solid_mpm_fsi_runner._validate_rectangular_solid_config(
+                replace(selected_research_250, step_count=251)
+            )
+        formal_research_250 = selected_formulation_solver_config(step_count=250)
+        self.assertTrue(
+            formal_research_250.allow_selected_traction_formulation_coupled_research_250
+        )
+        solid_mpm_fsi_runner._validate_rectangular_solid_config(
+            formal_research_250
+        )
         with self.assertRaisesRegex(
             ValueError,
             "fixed-solid diagnostics only|traction_one_sided_pressure_pair_policy",

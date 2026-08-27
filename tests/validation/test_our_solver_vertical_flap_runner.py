@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import inspect
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,6 +81,61 @@ def test_grid_summary_reports_the_actual_modeled_half_domain_resolution() -> Non
     assert summary["cell_size_m"]["wall_normal_modeled_half_height"] == pytest.approx(
         0.02 / 256
     )
+
+
+def test_accepted_iqn_trial_vector_arrays_preserve_trace_and_step_identity() -> None:
+    from simulation_core.drivers.generic_fsi_solver import (
+        FsiCouplingReport,
+        FsiStepContext,
+    )
+
+    guesses = np.asarray(
+        [[[0.0, 0.0, 0.0]], [[0.5, 0.0, 0.0]]], dtype=np.float64
+    )
+    candidates = np.asarray(
+        [[[1.0, 0.0, 0.0]], [[0.6, 0.0, 0.0]]], dtype=np.float64
+    )
+    report = FsiCouplingReport(
+        iterations=2,
+        converged=True,
+        relative_residual=0.1,
+        absolute_residual_mps=0.1,
+        max_marker_residual_mps=0.1,
+        relative_residual_history=(1.0, 0.1),
+        absolute_residual_history_mps=(1.0, 0.1),
+        update_modes=("picard",),
+        trial_guess_history_mps=guesses,
+        trial_candidate_history_mps=candidates,
+        trial_residual_history_mps=candidates - guesses,
+    )
+    context = FsiStepContext(step=8, step_index=7, time_s=8.0e-4, dt_s=1.0e-4)
+
+    arrays = solid_mpm_fsi_runner._accepted_iqn_trial_vector_arrays(
+        report,
+        context=context,
+        layout_sha256="a" * 64,
+    )
+
+    assert set(arrays) == {
+        "iqn_trial_guess_mps",
+        "iqn_trial_candidate_mps",
+        "iqn_trial_residual_mps",
+        "iqn_trial_index",
+        "iqn_trial_layout_sha256",
+        "iqn_trial_step",
+        "iqn_trial_time_s",
+        "iqn_trial_dt_s",
+    }
+    np.testing.assert_array_equal(arrays["iqn_trial_guess_mps"], guesses)
+    np.testing.assert_array_equal(arrays["iqn_trial_candidate_mps"], candidates)
+    np.testing.assert_array_equal(
+        arrays["iqn_trial_residual_mps"], candidates - guesses
+    )
+    np.testing.assert_array_equal(arrays["iqn_trial_index"], [0, 1])
+    assert arrays["iqn_trial_layout_sha256"].item() == "a" * 64
+    assert arrays["iqn_trial_step"].item() == 8
+    assert arrays["iqn_trial_time_s"].item() == pytest.approx(8.0e-4)
+    assert arrays["iqn_trial_dt_s"].item() == pytest.approx(1.0e-4)
 
 
 @pytest.mark.parametrize(
@@ -190,6 +246,68 @@ def test_cli_detailed_preflow_stage_progress_is_opt_in(
     )
     assert config["detailed_preflow_stage_progress"] is expected
     assert manifest["config"]["detailed_preflow_stage_progress"] is expected
+
+
+def test_iqn_trial_vector_export_cli_is_explicit_and_iqn_only(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+
+    with patch.object(
+        runner.sys,
+        "argv",
+        [
+            str(RUNNER_PATH),
+            "--output-dir",
+            str(tmp_path / "missing_step_fields"),
+            "--dry-run",
+            "--save-iqn-trial-vectors",
+            "--coupling-mode",
+            "iqn_ils",
+        ],
+    ):
+        with pytest.raises(SystemExit):
+            runner.main()
+
+    with patch.object(
+        runner.sys,
+        "argv",
+        [
+            str(RUNNER_PATH),
+            "--output-dir",
+            str(tmp_path / "not_iqn"),
+            "--dry-run",
+            "--save-step-fields",
+            "--save-iqn-trial-vectors",
+        ],
+    ):
+        with pytest.raises(SystemExit):
+            runner.main()
+
+    output_dir = tmp_path / "enabled"
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(RUNNER_PATH),
+                "--output-dir",
+                str(output_dir),
+                "--dry-run",
+                "--save-step-fields",
+                "--save-iqn-trial-vectors",
+                "--coupling-mode",
+                "iqn_ils",
+            ],
+        ),
+    ):
+        assert runner.main() == 0
+
+    manifest = runner.json.loads(
+        (output_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["save_step_fields"] is True
+    assert manifest["save_iqn_trial_vectors"] is True
 
 
 @pytest.mark.parametrize(
@@ -336,6 +454,47 @@ def test_dry_run_records_generic_iqn_controls_without_fallback(
             assert persisted_config[key] == value
 
 
+def test_research_probe_default_alphas_are_explicit() -> None:
+    assert solid_mpm_fsi_runner.IQN_KALMAN_ORACLE_INTERPOLATION_DEFAULT_ALPHAS == (
+        0.0,
+        0.25,
+        0.5,
+        0.75,
+        0.9,
+        0.95,
+        0.975,
+        0.99,
+        1.0,
+    )
+
+
+def test_research_probe_dry_run_persists_controls(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "probe_dry_run"
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+        patch.object(runner.sys, "argv", [str(RUNNER_PATH), "--output-dir", str(output_dir), "--dry-run", "--coupling-mode", "iqn_ils", "--initial-guess-mode", "kalman", "--initial-guess-kalman-q", "1e-3", "--initial-guess-kalman-r", "1e-5", "--research-iqn-kalman-oracle-interpolation-target-step", "8", "--research-iqn-kalman-oracle-interpolation-oracle-path", "q0", "--research-iqn-kalman-oracle-interpolation-alphas", "0", "0.5", "1"]),
+    ):
+        assert runner.main() == 0
+    manifest = runner.json.loads((output_dir / "run_manifest.json").read_text())
+    assert manifest["dry_run"] is True
+    assert manifest["config"]["iqn_kalman_oracle_interpolation_alphas"] == [0.0, 0.5, 1.0]
+
+
+def test_research_probe_uses_transactional_fresh_runtime_contract() -> None:
+    source = inspect.getsource(solid_mpm_fsi_runner.run_hibm_mpm_fsi)
+    assert "preview_controller = deepcopy(initial_guess_controller)" in source
+    assert "probe_runtime = deepcopy(iqn_runtime)" in source
+    assert "solve_fsi_step(" in source
+    assert "probe_runtime.rollback_step(context)" in source
+    assert "step_observer is not None and not research_probe_active" in source
+    assert "not research_probe_active and export_final_flow_snapshot" in source
+    assert "restore_iqn_step_state(accepted_base, context)" in source
+    assert chr(34) + "accepted_step_count" + chr(34) + ": step_index" in source
+    assert chr(34) + "research_probe_terminal" + chr(34) + ": True" in source
+
+
 def test_dry_run_persists_marker_compatibility_closure_tolerance_override(
     tmp_path: Path,
 ) -> None:
@@ -449,6 +608,37 @@ def test_dry_run_applies_dt_override_before_initial_guess_kalman_config(
                 "--coupling-mode",
                 "iqn_ils",
                 "--initial-guess-mode",
+                "kalman",
+                "--initial-guess-kalman-q-xyz",
+                "1.0e-3",
+                "2.0e-3",
+                "3.0e-3",
+                "--initial-guess-kalman-r-xyz",
+                "2.0e-5",
+                "3.0e-5",
+                "4.0e-5",
+                "--initial-guess-kalman-warmup-accepted-states",
+                "4",
+            ),
+            "kalman",
+            {
+                "rate_process_noise_spectral_density": [
+                    1.0e-3,
+                    2.0e-3,
+                    3.0e-3,
+                ],
+                "measurement_variance": [2.0e-5, 3.0e-5, 4.0e-5],
+                "initial_value_variance": [2.0e-5, 3.0e-5, 4.0e-5],
+                "initial_rate_variance": [80.0, 120.0, 160.0],
+                "warmup_accepted_states": 4,
+            },
+            None,
+        ),
+        (
+            (
+                "--coupling-mode",
+                "iqn_ils",
+                "--initial-guess-mode",
                 "oracle_replay",
                 "--initial-guess-oracle-path",
                 "oracle_replay.npz",
@@ -458,7 +648,7 @@ def test_dry_run_applies_dt_override_before_initial_guess_kalman_config(
             "oracle_replay.npz",
         ),
     ),
-    ids=("kalman", "oracle-replay"),
+    ids=("kalman-scalar", "kalman-xyz", "oracle-replay"),
 )
 def test_dry_run_routes_initial_guess_inputs_independently_of_writeback(
     tmp_path: Path,
@@ -530,12 +720,47 @@ def test_dry_run_routes_initial_guess_inputs_independently_of_writeback(
             "--coupling-mode",
             "iqn_ils",
             "--initial-guess-mode",
+            "kalman",
+            "--initial-guess-kalman-q-xyz",
+            "1.0e-3",
+            "2.0e-3",
+            "3.0e-3",
+        ),
+        (
+            "--coupling-mode",
+            "iqn_ils",
+            "--initial-guess-mode",
+            "kalman",
+            "--initial-guess-kalman-q",
+            "1.0e-3",
+            "--initial-guess-kalman-r",
+            "1.0e-4",
+            "--initial-guess-kalman-q-xyz",
+            "1.0e-3",
+            "2.0e-3",
+            "3.0e-3",
+            "--initial-guess-kalman-r-xyz",
+            "1.0e-4",
+            "2.0e-4",
+            "3.0e-4",
+        ),
+        (
+            "--coupling-mode",
+            "iqn_ils",
+            "--initial-guess-mode",
             "linear_extrapolation",
             "--initial-guess-oracle-path",
             "unexpected.npz",
         ),
     ),
-    ids=("kalman-missing-q-r", "oracle-missing-path", "non-kalman-q-r", "non-oracle-path"),
+    ids=(
+        "kalman-missing-q-r",
+        "oracle-missing-path",
+        "non-kalman-q-r",
+        "kalman-xyz-missing-r",
+        "kalman-mixed-scalar-xyz",
+        "non-oracle-path",
+    ),
 )
 def test_initial_guess_cli_rejects_missing_and_unexpected_mode_inputs(
     tmp_path: Path,
@@ -1042,6 +1267,7 @@ def test_step_observer_writes_a_frame_and_atomic_progress(tmp_path: Path) -> Non
         streamwise_velocity_sign=-1.0,
         reverse_streamwise_axis=True,
     )
+    assert observer.record_iqn_trial_vectors is False
     shape = (1, 2, 3)
     y = np.broadcast_to(
         np.asarray([0.005, 0.015], dtype=np.float64)[None, :, None],
@@ -1062,6 +1288,19 @@ def test_step_observer_writes_a_frame_and_atomic_progress(tmp_path: Path) -> Non
         "velocity_dirichlet_boundary_enforcement_weight": np.zeros(
             shape, dtype=np.float64
         ),
+        "velocity_dirichlet_boundary_hard_fixed_component_mask": np.zeros(
+            shape, dtype=np.int32
+        ),
+        "velocity_dirichlet_boundary_owned_row": np.zeros(
+            shape, dtype=np.int32
+        ),
+        "velocity_dirichlet_boundary_marker_region_id": np.zeros(
+            shape, dtype=np.int32
+        ),
+        "flow_solution_stage": np.asarray("synthetic_post_projection"),
+        "boundary_topology_stage": np.asarray("synthetic_current_geometry"),
+        "flow_boundary_state_synchronized": np.asarray(True),
+        "structure_geometry_stage": np.asarray("synthetic_accepted"),
         "cell_center_y_m": y,
         "cell_center_z_m": z,
         "solid_position_m": np.asarray(
@@ -1083,6 +1322,17 @@ def test_step_observer_writes_a_frame_and_atomic_progress(tmp_path: Path) -> Non
         "marker_area_m2": np.asarray([2.5e-6], dtype=np.float64),
         "marker_region_id": np.asarray([1], dtype=np.int32),
     }
+    trial_vectors = {
+        "iqn_trial_guess_mps": np.zeros((2, 1, 3), dtype=np.float64),
+        "iqn_trial_candidate_mps": np.ones((2, 1, 3), dtype=np.float64),
+        "iqn_trial_residual_mps": np.ones((2, 1, 3), dtype=np.float64),
+        "iqn_trial_index": np.asarray([0, 1], dtype=np.int64),
+        "iqn_trial_layout_sha256": np.asarray("a" * 64),
+        "iqn_trial_step": np.asarray(1, dtype=np.int64),
+        "iqn_trial_time_s": np.asarray(5.0e-4, dtype=np.float64),
+        "iqn_trial_dt_s": np.asarray(5.0e-4, dtype=np.float64),
+    }
+    snapshot.update(trial_vectors)
 
     observer(
         1,
@@ -1101,6 +1351,32 @@ def test_step_observer_writes_a_frame_and_atomic_progress(tmp_path: Path) -> Non
     assert progress["elapsed_s"] == pytest.approx(12.5)
     assert progress["taichi_runtime"] == {"offline_cache_enabled": True}
     assert progress["initialization_wall_time_s"] == pytest.approx(4.0)
+    with np.load(
+        tmp_path / "step_fields" / "step_0001.npz", allow_pickle=False
+    ) as frame:
+        assert set(trial_vectors).isdisjoint(frame.files)
+
+    trial_output = tmp_path / "with_trial_vectors"
+    trial_observer = runner._make_step_observer(
+        output_dir=trial_output,
+        span_reduction="mean",
+        streamwise_velocity_sign=-1.0,
+        reverse_streamwise_axis=True,
+        save_iqn_trial_vectors=True,
+    )
+    assert trial_observer.record_iqn_trial_vectors is True
+    trial_observer(1, 5.0e-4, {"max_displacement_m": 1.25e-4}, snapshot)
+    with np.load(
+        trial_output / "step_fields" / "step_0001.npz", allow_pickle=False
+    ) as frame:
+        assert set(trial_vectors).issubset(frame.files)
+        for key, expected in trial_vectors.items():
+            np.testing.assert_array_equal(frame[key], expected)
+    assert runner._validate_step_artifacts(
+        trial_output,
+        expected_steps=1,
+        require_iqn_trial_vectors=True,
+    )["status"] == "passed"
 
 
 def test_atomic_json_retries_transient_windows_replace_denial(

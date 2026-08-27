@@ -26,6 +26,8 @@ import numpy as np
 
 INTERFACE_KALMAN_SNAPSHOT_SCHEMA_VERSION = 1
 
+CovarianceSpec = float | tuple[float, float, float]
+
 
 @dataclass(frozen=True)
 class InterfaceKalmanConfig:
@@ -42,10 +44,10 @@ class InterfaceKalmanConfig:
     this predictor instance.
     """
 
-    rate_process_noise_spectral_density: float
-    measurement_variance: float
-    initial_value_variance: float
-    initial_rate_variance: float
+    rate_process_noise_spectral_density: CovarianceSpec
+    measurement_variance: CovarianceSpec
+    initial_value_variance: CovarianceSpec
+    initial_rate_variance: CovarianceSpec
     warmup_accepted_states: int = 5
 
     def __post_init__(self) -> None:
@@ -54,16 +56,18 @@ class InterfaceKalmanConfig:
             "initial_value_variance",
             "initial_rate_variance",
         ):
-            value = _finite_real(name, getattr(self, name))
-            if value < 0.0:
-                raise ValueError(f"{name} must be non-negative")
+            value = _covariance_spec(
+                name,
+                getattr(self, name),
+                positive=False,
+            )
             object.__setattr__(self, name, value)
 
-        measurement_variance = _finite_real(
-            "measurement_variance", self.measurement_variance
+        measurement_variance = _covariance_spec(
+            "measurement_variance",
+            self.measurement_variance,
+            positive=True,
         )
-        if measurement_variance <= 0.0:
-            raise ValueError("measurement_variance must be positive")
         object.__setattr__(
             self, "measurement_variance", measurement_variance
         )
@@ -395,17 +399,23 @@ class InterfaceKalmanPredictor:
         transition = np.array(
             [[1.0, time_step], [0.0, 1.0]], dtype=np.float64
         )
-        process_noise = self.config.rate_process_noise_spectral_density * np.array(
+        process_noise_template = np.array(
             [
                 [time_step**3 / 3.0, time_step**2 / 2.0],
                 [time_step**2 / 2.0, time_step],
             ],
             dtype=np.float64,
         )
+        process_noise_scale = _covariance_values_for_shape(
+            self.config.rate_process_noise_spectral_density,
+            self._require_shape(),
+            name="rate_process_noise_spectral_density",
+        )
         predicted_mean = committed.mean @ transition.T
         predicted_covariance = (
             transition @ committed.covariance @ transition.T
-            + process_noise[None, :, :]
+            + process_noise_scale[:, None, None]
+            * process_noise_template[None, :, :]
         )
         predicted_covariance = _symmetrized(predicted_covariance)
         predicted = _EstimatorState(
@@ -442,8 +452,13 @@ class InterfaceKalmanPredictor:
             innovation = measurement - prior.mean[:, 0]
         if not np.all(np.isfinite(innovation)):
             raise RuntimeError("Kalman innovation must be finite")
+        measurement_variance = _covariance_values_for_shape(
+            self.config.measurement_variance,
+            self._require_shape(),
+            name="measurement_variance",
+        )
         innovation_variance = (
-            prior.covariance[:, 0, 0] + self.config.measurement_variance
+            prior.covariance[:, 0, 0] + measurement_variance
         )
         if not np.all(np.isfinite(innovation_variance)) or np.any(
             innovation_variance <= 0.0
@@ -462,7 +477,7 @@ class InterfaceKalmanPredictor:
             identity_minus_kh
             @ prior.covariance
             @ np.swapaxes(identity_minus_kh, -1, -2)
-            + self.config.measurement_variance
+            + measurement_variance[:, None, None]
             * gain[:, :, None]
             * gain[:, None, :]
         )
@@ -530,8 +545,16 @@ class InterfaceKalmanPredictor:
 
         mean = np.column_stack((values.reshape(-1), rates.reshape(-1)))
         covariance = np.zeros((values.size, 2, 2), dtype=np.float64)
-        covariance[:, 0, 0] = self.config.initial_value_variance
-        covariance[:, 1, 1] = self.config.initial_rate_variance
+        covariance[:, 0, 0] = _covariance_values_for_shape(
+            self.config.initial_value_variance,
+            shape,
+            name="initial_value_variance",
+        )
+        covariance[:, 1, 1] = _covariance_values_for_shape(
+            self.config.initial_rate_variance,
+            shape,
+            name="initial_rate_variance",
+        )
         return (
             _EstimatorState(
                 mean=mean,
@@ -587,6 +610,49 @@ def _finite_real(name: str, value: Any) -> float:
     if not math.isfinite(result):
         raise ValueError(f"{name} must be finite")
     return result
+
+
+def _covariance_spec(
+    name: str,
+    value: Any,
+    *,
+    positive: bool,
+) -> CovarianceSpec:
+    if isinstance(value, tuple):
+        if len(value) != 3:
+            raise ValueError(
+                f"{name} xyz covariance must contain exactly three values"
+            )
+        converted: CovarianceSpec = tuple(
+            _finite_real(f"{name}[{axis}]", component)
+            for axis, component in enumerate(value)
+        )
+        components = converted
+    else:
+        converted = _finite_real(name, value)
+        components = (converted,)
+    if positive:
+        if any(component <= 0.0 for component in components):
+            raise ValueError(f"{name} must be positive")
+    elif any(component < 0.0 for component in components):
+        raise ValueError(f"{name} must be non-negative")
+    return converted
+
+
+def _covariance_values_for_shape(
+    spec: CovarianceSpec,
+    shape: tuple[int, ...],
+    *,
+    name: str,
+) -> np.ndarray:
+    if isinstance(spec, tuple):
+        if not shape or shape[-1] != 3:
+            raise ValueError(
+                f"{name} xyz covariance requires a field with last dimension 3"
+            )
+        values = np.broadcast_to(np.asarray(spec, dtype=np.float64), shape)
+        return np.array(values, dtype=np.float64, copy=True).reshape(-1)
+    return np.full(int(np.prod(shape, dtype=np.int64)), spec, dtype=np.float64)
 
 
 def _finite_array(

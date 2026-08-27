@@ -43,6 +43,49 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
         self.assertIn('"pressure_max_pa"', history_body)
         self.assertIn('"flow_projection_report"', history_body)
 
+    def test_iqn_runner_maps_generic_threshold_audit_histories(self) -> None:
+        source = _runner_source()
+        mapping_start = source.index(
+            "coupling_step_report = {",
+            source.index("generic_run = solve_fsi_runtime("),
+        )
+        mapping_end = source.index("\n        step_trial_work_summary", mapping_start)
+        mapping_body = source[mapping_start:mapping_end]
+
+        expected_history_fields = (
+            (
+                "fsi_coupling_relative_residual_history",
+                "hibm_fsi_coupling_relative_residual_history",
+            ),
+            (
+                "fsi_coupling_absolute_residual_history_mps",
+                "hibm_fsi_coupling_absolute_residual_history_mps",
+            ),
+            (
+                "fsi_coupling_candidate_velocity_rms_history_mps",
+                "hibm_fsi_coupling_candidate_velocity_rms_history_mps",
+            ),
+            (
+                "fsi_coupling_max_marker_residual_history_mps",
+                "hibm_fsi_coupling_max_marker_residual_history_mps",
+            ),
+            (
+                "fsi_coupling_relative_tolerance_equivalent_history_mps",
+                "hibm_fsi_coupling_relative_tolerance_equivalent_history_mps",
+            ),
+            (
+                "fsi_coupling_effective_tolerance_history_mps",
+                "hibm_fsi_coupling_effective_tolerance_history_mps",
+            ),
+            (
+                "fsi_coupling_residual_to_effective_tolerance_history",
+                "hibm_fsi_coupling_residual_to_effective_tolerance_history",
+            ),
+        )
+        for generic_field, runner_field in expected_history_fields:
+            self.assertIn(generic_field, mapping_body)
+            self.assertIn(runner_field, mapping_body)
+
     def test_closed_loop_solver_must_project_fluid_inside_fsi_loop(self) -> None:
         loop_body = _fsi_loop_body(_runner_source())
         stress_index = loop_body.index("_sample_stress_to_marker_forces(")
@@ -52,6 +95,7 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
             for token in (
                 "fluid.project(",
                 "_project_current_flow(",
+
                 "_flow_advance_current_step(",
                 "_recompute_current_flow(",
                 "_project_flow_for_step(",
@@ -64,6 +108,27 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
             "FSI loop must project or recompute fluid before stress sampling",
         )
         self.assertLess(min(recompute_indices), stress_index)
+
+    def test_research_probe_rejects_iqn_history_reuse(self) -> None:
+        source = _runner_source()
+        config_start = source.index(
+            "def _iqn_kalman_oracle_interpolation_config("
+        )
+        config_end = source.index("\ndef _mixed_iqn_kalman_oracle_guess(", config_start)
+        config_body = source[config_start:config_end]
+
+        self.assertIn(
+            'getattr(config, "iqn_reuse_previous_step_history", False)',
+            config_body,
+        )
+        self.assertIn(
+            "Kalman-Oracle interpolation probe isolates initial-guess ",
+            config_body,
+        )
+        self.assertIn(
+            "interpolation and requires iqn_reuse_previous_step_history=False",
+            config_body,
+        )
 
     def test_one_partitioned_trial_is_extracted_with_acceptance_outside(self) -> None:
         source = _runner_source()
@@ -123,11 +188,37 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
         self.assertIsNotNone(loop_body)
         self.assertIn("HibmMpmMarkerVelocityRuntime(", loop_body)
         self.assertIn("solve_fsi_runtime(", loop_body)
-        self.assertNotIn("solve_fsi_step(", loop_body)
+        self.assertIn("solve_fsi_step(", loop_body)
+        probe_index = loop_body.index("research_probe_terminal")
+        self.assertLess(loop_body.index("solve_fsi_step("), probe_index)
         self.assertNotIn("iqn_runtime.commit_step(", loop_body)
         self.assertNotIn("run_strong_coupling_iterations(", loop_body)
         self.assertNotIn("aitken", loop_body.lower())
         self.assertNotIn("solid_step_execution_reports.append", trial_body)
+
+    def test_research_probe_terminal_satisfies_official_report_contract(self) -> None:
+        source = _runner_source()
+        tree = ast.parse(source)
+        run_function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "run_hibm_mpm_fsi"
+        )
+        terminal_returns = []
+        for node in ast.walk(run_function):
+            if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Dict):
+                continue
+            keys = {
+                key.value
+                for key in node.value.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            if "research_probe_terminal" in keys:
+                terminal_returns.append(keys)
+
+        self.assertEqual(len(terminal_returns), 1)
+        self.assertIn("computed_result_sources", terminal_returns[0])
 
     def test_iqn_trial_reseals_pressure_pair_anchors_without_accepting_feedback(self) -> None:
         source = _runner_source()
