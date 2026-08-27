@@ -879,6 +879,23 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                         report
                     )
                 )
+        topology_mutation_report = copy.deepcopy(healthy)
+        topology_mutation_closure = topology_mutation_report[
+            "canonical_velocity_dirichlet_report"
+        ]["marker_target_closure"]
+        topology_mutation_closure.update(
+            {
+                "constraint_count": 83,
+                "adjustable_constraint_count": 83,
+                "immutable_constraint_count": 0,
+                "solve_count": 15,
+            }
+        )
+        self.assertIsNone(
+            solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+                topology_mutation_report
+            )
+        )
         excessive_solve_count = copy.deepcopy(healthy)
         excessive_solve_count["canonical_velocity_dirichlet_report"][
             "marker_target_closure"

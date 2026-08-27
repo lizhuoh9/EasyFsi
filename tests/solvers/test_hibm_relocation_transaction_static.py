@@ -379,7 +379,7 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
         self.assertIsInstance(default_iterations, ast.Constant)
         self.assertEqual(default_iterations.value, 64)
 
-    def test_marker_closure_uses_three_batches_when_third_batch_converges(
+    def test_marker_closure_uses_five_batches_when_fifth_batch_converges(
         self,
     ) -> None:
         class ScalarField:
@@ -395,7 +395,7 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                 if key is not None:
                     raise AssertionError(f"expected scalar field key None, got {key!r}")
 
-        residuals = iter((4.0e-6, 3.0e-6, 2.0e-6, 5.0e-7))
+        residuals = iter((6.0e-6, 5.0e-6, 4.0e-6, 3.0e-6, 2.0e-6, 5.0e-7))
         sweep_count = 0
         sweep_tolerances: list[float] = []
         stages: list[str] = []
@@ -420,8 +420,8 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
 
         def measure(*_args) -> None:
             residual = next(residuals)
-            report_fields["constraint_count"].value = 1
-            report_fields["adjustable_count"].value = 1
+            report_fields["constraint_count"].value = 5
+            report_fields["adjustable_count"].value = 5
             report_fields["max_residual_mps"].value = residual
             report_fields["max_adjustable_residual_mps"].value = residual
 
@@ -490,16 +490,16 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(report["solve_count"], 3)
-        self.assertEqual(sweep_count, 6)
-        self.assertEqual(sweep_tolerances, [9.0e-7] * 6)
+        self.assertEqual(report["solve_count"], 5)
+        self.assertEqual(sweep_count, 10)
+        self.assertEqual(sweep_tolerances, [9.0e-7] * 10)
         self.assertEqual(
             stages.count("hibm_marker_closure_kaczmarz_sweeps_before"),
             1,
         )
         self.assertEqual(
             stages.count("hibm_marker_closure_recovery_sweeps_before"),
-            2,
+            4,
         )
 
     @staticmethod

@@ -104,6 +104,7 @@ HIBM_COMPONENT_FACE_SEGMENT_MODE_INACTIVE_AXIS_DOUBLE_RELOCATION_FACE_FIRST = 64
 HIBM_NO_SLIP_SAMPLE_INVALID_REASON_NONE = 0
 HIBM_NO_SLIP_SAMPLE_INVALID_REASON_OUTSIDE_HALF_OPEN_DOMAIN = 1
 HIBM_NO_SLIP_SAMPLE_INVALID_REASON_NO_COMPLETE_MAC_SUPPORT = 2
+HIBM_MARKER_TARGET_CLOSURE_MIN_BATCH_COUNT = 4
 
 
 @dataclasses.dataclass(frozen=True)
@@ -25308,6 +25309,11 @@ class HibmMpmIbBoundaryConditions:
                 None
             ]
         )
+        initial_adjustable_count = int(
+            self.report_velocity_dirichlet_marker_target_closure_adjustable_count[
+                None
+            ]
+        )
         initial_invalid_count = int(
             self.report_velocity_dirichlet_marker_target_closure_invalid_count[None]
         )
@@ -25325,7 +25331,15 @@ class HibmMpmIbBoundaryConditions:
         current_invalid_count = initial_invalid_count
         current_failure_code = initial_failure_code
         current_adjustable_max_residual = initial_adjustable_max_residual
-        for batch_index in range(4):
+        # Easy systems still stop after their first successful measurement.
+        # Topology mutations may make the same consistent system converge more
+        # slowly, so bound recovery by the measured problem size instead of a
+        # fixed four-batch wall.
+        max_batch_count = max(
+            HIBM_MARKER_TARGET_CLOSURE_MIN_BATCH_COUNT,
+            initial_adjustable_count,
+        )
+        for batch_index in range(max_batch_count):
             if (
                 current_invalid_count != 0
                 or current_failure_code != 0

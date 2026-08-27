@@ -7328,10 +7328,11 @@ def _canonical_marker_target_closure_health_failure(
             "canonical marker-target closure count is negative: "
             f"{negative_counts[0]}"
         )
-    if counts["solve_count"] > 4:
+    max_solve_count = max(4, counts["adjustable_constraint_count"])
+    if counts["solve_count"] > max_solve_count:
         return (
             "canonical marker-target closure solve count is invalid: "
-            f"{counts['solve_count']}"
+            f"{counts['solve_count']} > {max_solve_count}"
         )
     if (
         counts["adjustable_constraint_count"]
