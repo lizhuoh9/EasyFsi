@@ -20,6 +20,7 @@
    - [`validation/ANSYS_VERTICAL_FLAP_KALMAN_FSI50_RESULTS_2026-08-26.md`](validation/ANSYS_VERTICAL_FLAP_KALMAN_FSI50_RESULTS_2026-08-26.md)：五模式 modified-physics FSI50、迭代次数、warm baseline 耗时与发布边界。
    - [`validation/ANSYS_VERTICAL_FLAP_IQN_KALMAN_ACCELERATION_PROTOCOL_2026-08-26.md`](validation/ANSYS_VERTICAL_FLAP_IQN_KALMAN_ACCELERATION_PROTOCOL_2026-08-26.md)：Kalman 只作下一物理步首猜、IQN-ILS 强耦合的结果前锁定协议；与 modified-physics 写回实验分离。
    - [`validation/ANSYS_VERTICAL_FLAP_IQN_KALMAN_R20_WORKLOG_2026-08-27.md`](validation/ANSYS_VERTICAL_FLAP_IQN_KALMAN_R20_WORKLOG_2026-08-27.md)：r20 的 source-matched 17 ms prefix、H1/H3 work ledger、fail-closed seam 证据和未闭合验证边界。
+   - [`validation/ANSYS_VERTICAL_FLAP_MARKER_CLOSURE_R28_WORKLOG_2026-08-27.md`](validation/ANSYS_VERTICAL_FLAP_MARKER_CLOSURE_R28_WORKLOG_2026-08-27.md)：r23--r28 closure 预算修复、真实分钟级 profile、exact 36-step PASS 与 41/50 新 target-conflict 边界。
 2. [`refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md`](refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md)
 3. [`VALIDATION.md`](VALIDATION.md) 中对应的运行与证据说明
 4. [`../validation_runs/README.md`](../validation_runs/README.md) 中的验证产物索引
