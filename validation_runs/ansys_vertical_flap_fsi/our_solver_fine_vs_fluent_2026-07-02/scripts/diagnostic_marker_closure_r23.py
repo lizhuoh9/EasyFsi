@@ -8,6 +8,7 @@ process.  It does not change geometry, velocities, tolerances, or sweep counts.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import functools
 from hashlib import sha256
 import json
@@ -244,6 +245,30 @@ def _parse_args(argv: Sequence[str]) -> tuple[Path, list[str]]:
     return args.closure_trace_output, runner_args
 
 
+@contextmanager
+def repo_root_on_sys_path():
+    repo_root = next(
+        (
+            parent
+            for parent in Path(__file__).resolve().parents
+            if (parent / "simulation_core").is_dir()
+            and (parent / "cases").is_dir()
+        ),
+        None,
+    )
+    if repo_root is None:
+        raise RuntimeError("could not locate repository root for diagnostic replay")
+    repo_root_text = str(repo_root)
+    inserted = repo_root_text not in sys.path
+    if inserted:
+        sys.path.insert(0, repo_root_text)
+    try:
+        yield
+    finally:
+        if inserted and repo_root_text in sys.path:
+            sys.path.remove(repo_root_text)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     trace_path, runner_args = _parse_args(
         sys.argv[1:] if argv is None else argv
@@ -252,24 +277,25 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise FileExistsError(
             f"refusing to overwrite closure trace: {trace_path}"
         )
-    from simulation_core.coupling.hibm_mpm.core import (
-        HibmMpmIbBoundaryConditions,
-    )
+    with repo_root_on_sys_path():
+        from simulation_core.coupling.hibm_mpm.core import (
+            HibmMpmIbBoundaryConditions,
+        )
 
-    method_name = "_close_owned_hard_targets_to_marker_constraints"
-    original_close = getattr(HibmMpmIbBoundaryConditions, method_name)
-    setattr(
-        HibmMpmIbBoundaryConditions,
-        method_name,
-        make_traced_close(original_close, trace_path),
-    )
-    original_argv = sys.argv
-    sys.argv = [str(_RUNNER), *runner_args]
-    try:
-        runpy.run_path(str(_RUNNER), run_name="__main__")
-    finally:
-        sys.argv = original_argv
-        setattr(HibmMpmIbBoundaryConditions, method_name, original_close)
+        method_name = "_close_owned_hard_targets_to_marker_constraints"
+        original_close = getattr(HibmMpmIbBoundaryConditions, method_name)
+        setattr(
+            HibmMpmIbBoundaryConditions,
+            method_name,
+            make_traced_close(original_close, trace_path),
+        )
+        original_argv = sys.argv
+        sys.argv = [str(_RUNNER), *runner_args]
+        try:
+            runpy.run_path(str(_RUNNER), run_name="__main__")
+        finally:
+            sys.argv = original_argv
+            setattr(HibmMpmIbBoundaryConditions, method_name, original_close)
 
 
 if __name__ == "__main__":

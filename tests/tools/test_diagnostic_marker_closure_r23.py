@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -198,3 +199,16 @@ def test_nonfinite_measurement_is_standard_json_with_explicit_field(tmp_path):
     assert payload["nonfinite_fields"] == [
         "measurement_trajectory[0].max_adjustable_residual_mps"
     ]
+
+
+def test_repo_root_context_adds_and_restores_import_path(monkeypatch):
+    module = _module()
+    repo_root = str(Path(__file__).resolve().parents[2])
+    original_path = [entry for entry in sys.path if entry != repo_root]
+    monkeypatch.setattr(sys, "path", list(original_path))
+
+    with module.repo_root_on_sys_path():
+        assert sys.path[0] == repo_root
+        assert (Path(sys.path[0]) / "simulation_core").is_dir()
+
+    assert sys.path == original_path
