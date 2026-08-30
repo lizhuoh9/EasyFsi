@@ -40,6 +40,7 @@ VELOCITY_VMAX_MPS = 31.0
 NONLEGACY_EXACT50_STRICT_PRESSURE_PROFILES = frozenset((
     "current_iqn_adaptive",
     "current_iqn_adaptive_material_reference",
+    "kalman_iqn_reuse_material_reference",
 ))
 FRAME_RE = re.compile(r"^step_(?P<step>\d{4})\.npz$")
 STEP_HISTORY_RE = re.compile(r"^step_(?P<step>\d{4})\.json$")
@@ -141,10 +142,16 @@ def validate_comparison_profile_entry(
     """Reject bypasses before profile-local final-identity validation."""
     if comparison_profile not in NONLEGACY_EXACT50_STRICT_PRESSURE_PROFILES:
         return
-    label = (
-        "current IQN" if comparison_profile == "current_iqn_adaptive"
-        else "material-reference IQN"
-    )
+    if comparison_profile == "current_iqn_adaptive":
+        label = "current IQN"
+    elif comparison_profile == "current_iqn_adaptive_material_reference":
+        label = "material-reference IQN"
+    elif comparison_profile == "kalman_iqn_reuse_material_reference":
+        label = "Kalman/IQN-reuse material-reference"
+    else:  # pragma: no cover - guarded by the strict-profile set above.
+        raise AssertionError(
+            f"unhandled strict comparison profile: {comparison_profile}"
+        )
     if expected_steps != DEFAULT_EXPECTED_STEPS:
         raise NativeFineComparisonError(f"{label} profile requires exactly 50 steps")
     if pressure_semantics_mode != "strict":

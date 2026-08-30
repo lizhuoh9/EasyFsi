@@ -52,6 +52,9 @@ from .native_fine_contracts import (
     validate_partial_diagnostic_step_histories,
 )
 from .current_iqn_adaptive_fine_contracts import validate_current_iqn_adaptive_fine50
+from .kalman_iqn_reuse_fine_contracts import (
+    validate_kalman_iqn_reuse_material_reference_fine50,
+)
 from .material_reference_fine_contracts import validate_material_reference_fine50
 from .native_fine_rendering import (
     DeformedGeometryContractError,
@@ -70,6 +73,7 @@ COMPARISON_PROFILES = frozenset((
     "legacy_final",
     "current_iqn_adaptive",
     "current_iqn_adaptive_material_reference",
+    "kalman_iqn_reuse_material_reference",
 ))
 DIRECT_STEP_END_STAGES = {
     "flow_solution_stage": "pre_solid_projection",
@@ -425,7 +429,7 @@ def postprocess_native_fine_comparison(
                 our_manifest, our_summary, histories, load_trace,
                 pressure_semantics_mode=pressure_semantics_mode,
             )
-        else:
+        elif comparison_profile == "current_iqn_adaptive_material_reference":
             histories = [_read_json(path)["history"] for path in step_history_paths]
             def load_trace(step: int) -> dict[str, np.ndarray]:
                 with np.load(frame_paths[step - 1], allow_pickle=False) as frame:
@@ -434,6 +438,17 @@ def postprocess_native_fine_comparison(
                 our_manifest, our_summary, histories, load_trace,
                 pressure_semantics_mode=pressure_semantics_mode,
             )
+        elif comparison_profile == "kalman_iqn_reuse_material_reference":
+            histories = [_read_json(path)["history"] for path in step_history_paths]
+            def load_trace(step: int) -> dict[str, np.ndarray]:
+                with np.load(frame_paths[step - 1], allow_pickle=False) as frame:
+                    return {key: np.asarray(frame[key]) for key in frame.files}
+            final_run_identity_contract = validate_kalman_iqn_reuse_material_reference_fine50(
+                our_manifest, our_summary, histories, load_trace,
+                pressure_semantics_mode=pressure_semantics_mode,
+            )
+        else:  # pragma: no cover - guarded by COMPARISON_PROFILES above.
+            raise AssertionError(f"unhandled comparison profile: {comparison_profile}")
     else:
         step_history_contract = validate_partial_diagnostic_step_histories(
             step_history_paths,

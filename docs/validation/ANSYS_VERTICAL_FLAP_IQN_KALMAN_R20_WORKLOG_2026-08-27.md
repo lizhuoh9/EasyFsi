@@ -106,3 +106,101 @@ Fluent parity 或正式加速主张。下一步是对双 unsupported side--cap s
 root-cause investigation；只有得到不改变 strict geometry 语义的最小根因修复后，
 才运行 fresh source-matched preflow、FSI1/FSI2/FSI8/FSI50 gates，并重做 matched
 Q0/H1/H3 验证。
+
+## 2026-08-30 r51 H3 exact50 延续
+
+本节是后续证据，不改写上面的 r20 历史边界。权威 WSL 工作树为
+`/home/zhuohengli/worktrees/HIBM-MPM-r21-validation`，branch
+`codex/closure-diagnostic-r23`，本轮起始 HEAD
+`deef2f3cdc4274f593eda885298a3a7092f0517f`。方法为逐轴 Kalman iteration-0
+首猜、accepted-only previous-step IQN secant reuse、zero preflow、细网格，且
+`kalman_writeback_mode=off`、`kalman_modified_physics=false`。
+
+canonical artifact root：
+
+`validation_runs/solver_soaks/ansys_vf__kalman_iqnreuse_nopreflow__fine__20260830__r51__h3`
+
+完成 50 步的 resume attempt：
+
+`validation_runs/solver_soaks/ansys_vf__kalman_iqnreuse_nopreflow__fine__20260830__r51__h3__resume50__attempt1`
+
+结果为 strict-CUDA `50/50`，最终物理时间 `0.025 s`；50 个 `step_fields`、50 个
+`step_history`、accepted checkpoint/journal 和双根 provenance 均通过。每步 fluid
+和 solid 均完整消费 `dt_s=5e-4 s`。50 步内 pressure failure、CG breakdown、MPM
+OOB、deformation clamp、solid retry/reject、invalid marker/pressure row 均为零。
+canonical closure 最大 `9.89631758e-7 < 1.1e-6 m/s`，no-slip 最大
+`5.03263873e-5 < 1e-4 m/s`，CG 最大 exact relative residual
+`9.75780797e-7 < 1e-6`。step 42 的 target/claim/alpha/region conflict 均为零。
+这些证据证明当前工况的 50 步稳定完成，不推出任意工况或 5000 步保证。
+
+### Accepted-state Kalman 与 IQN reuse 审计
+
+新增 strict comparator profile
+`kalman_iqn_reuse_material_reference_fine50_v2`；最终 contract SHA256 为
+`79dcf7de150de618fedff4b9710186a1750003a91d790ca23b4043c039b9cd74`。
+它从 raw trial guess/candidate/residual 独立重建 retained/local secant 矩阵，重放
+`lstsq`、rank、condition、update limit、fallback、next guess 和第一残差；同时逐步
+验证 Kalman accepted-state 计数、warmup 边界、上一接受步 source、retained/imported
+pair count 及 initial-residual 链。任何 reset 必须由 raw replay 证明；
+`residual_growth_limit` 必须严格满足
+`first_residual > 4 * prior_initial_residual`，并优先于 reuse update。profile 还锁定
+marker-target closure 的 `1e-4/1.1e-6 m/s` 两级容差、四类 residual 和 invalid-axis
+count，不改变 pressure、target tolerance 或 Fluent 诊断阈值。
+
+真实 r51 结果中，Kalman 在 step 1--5 warmup，step 6--50 使用预测，共 45 步；
+writeback 全程关闭。previous-step IQN history 在 48 步使用。step 24 因
+`0.5574506631 > 4 * 0.1098353843` 安全丢弃复用历史、回退 Picard 后仍收敛接受，
+step 25 恢复复用。首猜 RMSE 均值约 `0.0198655 m/s`；NIS 均值约 `73.2825`，范围
+`4.1025--225.0764`。高 NIS 表明协方差仍未统计标定，不能把 Kalman 称为已校准。
+
+严格匹配的 FSI8 Q2/H3 仅改变 previous-step IQN reuse：H3 coupling trials
+`24 -> 21`（`-12.5%`），rejected trials `16 -> 13`（`-18.75%`），CG work
+`-12.40%`，warm wall time 单次观测改善 `13.11%`；对应 8 步主要数值 NRMSE 为
+`2.96e-7--3.55e-4`。没有身份完全一致的 Q0/Q2 FSI50，因此不声明正式 50 步
+加速比。r51 两次进程的实际 summary 合计约 `40.54 min`；剔除冷 JIT 后 48 个
+warm steps 平均约 `40.756 s/步`，5000 步仅按线性 warm 外推仍约 `56.6 h`。
+
+### 锁定 Fluent fresh50 离线诊断
+
+最终输出 bundle：
+
+`validation_runs/ansys_vertical_flap_fsi/our_solver_vs_native_fluent_fine_2026-07-10/runs/kalman_iqnreuse_nopreflow_r51_fsi50_20260830_r3`
+
+`comparison_report.json` 状态为 `diagnostic_complete`；exact50、dual-root checkpoint、
+strict pressure semantics、材料参考伴随审计和 H3 v2 方法身份均通过。bundle 的
+`CHECKSUMS.sha256` 全部通过。保留的 5% diagnostic gate 失败；按 10%高一致性参考，
+主要 waveform/field NRMSE 为下表。r1/r2 是最终 v2 contract 前的中间 bundle，保留
+用于审计但不再作为当前结论来源。
+
+| 指标 | r51 H3 相对锁定 Fluent | 10%参考 |
+|---|---:|---|
+| transverse velocity `v` | `4.28%` | 通过 |
+| final speed field | `13.21%` | 未通过 |
+| gauge pressure | `19.19%` | 未通过 |
+| tip mean-vector displacement | `22.69%` | 未通过 |
+| whole-solid max displacement | `24.40%` | 未通过 |
+| streamwise interface force | `35.94%` | 未通过 |
+| transverse interface force | `57.84%` | 未通过 |
+| out-of-plane force leakage | `0.0%` | 通过 |
+
+峰值相位误差并非所有位移分量都接近：tip norm、whole-solid max 和 tip streamwise
+均为 `1/50=2%`，但 tip transverse 为 `23/50=46%`。因此只能说前三个特定标量的
+峰值步接近，不能泛称“位移振荡相位接近”。wake 速度、压力幅值、位移幅值及力历史
+仍有显著差异。Fluent 是 2-D intrinsic structure，本求解器是 3-D-equivalent slab
+MPM，并且本次 H3 为 zero preflow；这些是解释差异的模型/初态因素，不是自动豁免。
+当前不能声称 10%数值一致、Fluent parity，或用 Fluent 作为绝对真值。
+
+### 本轮测试边界
+
+- H3 v2 contract（含生产 `IqnIlsAccelerator` 生成的 50 步 raw trace fixture）：
+  `47 passed in 185.58 s`。
+- current-IQN、material-reference、native comparison/hardening/pressure/campaign 和 H3
+  七文件矩阵：`283 passed, 3 skipped in 391.04 s`。三个 skip 是可选 coarse/legacy
+  Fluent 输入未提供，不是数值失败。
+- IQN-ILS 与统一求解器核心：修正 checkpoint-resume 主循环上线后遗留的旧源码字符串
+  断言，结果为 `31 passed, 17 subtests passed in 5.85 s`；未改 runner 或数值实现。
+- 独立只读审查结论 `ship`，无 P0/P1；确认 raw replay 与生产运算次序一致、测试不是
+  手填 update 的假绿路径、closure 与 growth 边界均 fail-closed。
+
+这些是聚焦回归和离线比较证据，不是全仓测试、80%全仓覆盖、5000 步 soak 或 Fluent
+parity 声明。

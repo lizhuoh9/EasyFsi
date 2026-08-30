@@ -158,11 +158,17 @@ def validate_iqn_trial_vector_frame(
              f"IQN frame {step} RMS overflow")
     effective = 1e-3 * np.maximum(candidate_rms, 1e-30)
     return {"T": len(guess), "M": marker_count, "layout": layout,
+            "first_residual_l2": float(np.linalg.norm(residual[0])),
             "regions": regions.tolist(), "residual": residual_rms.tolist(),
-            "candidate": candidate_rms.tolist(), "effective": effective.tolist()}
+            "candidate": candidate_rms.tolist(), "effective": effective.tolist(),
+            "_trial_guess": guess, "_trial_candidate": candidate,
+            "_trial_residual": residual}
 
 
-def _history_vectors(history: Mapping[str, Any], trace: Mapping[str, Any], step: int) -> None:
+def _history_vectors(
+    history: Mapping[str, Any], trace: Mapping[str, Any], step: int, *,
+    allowed_update_modes: frozenset[str] = frozenset(("picard", "iqn_ils")),
+) -> None:
     count = trace["T"]
     used = _integer(history.get("hibm_fsi_coupling_iterations_used"), "iterations", minimum=1)
     _require(used == count, f"history {step} iterations disagree with raw trial count")
@@ -183,18 +189,22 @@ def _history_vectors(history: Mapping[str, Any], trace: Mapping[str, Any], step:
     modes = history.get("hibm_fsi_coupling_update_mode_history")
     ranks = history.get("hibm_fsi_coupling_iqn_rank_history")
     _require(isinstance(modes, list) and len(modes) == count - 1
-             and all(mode in {"picard", "iqn_ils"} for mode in modes),
-             f"history {step} has invalid non-reuse update modes")
+             and all(mode in allowed_update_modes for mode in modes),
+             f"history {step} has invalid IQN update modes")
     _require(isinstance(ranks, list) and len(ranks) == count - 1,
              f"history {step} has invalid rank history")
     for rank, mode in zip(ranks, modes):
-        _require(_integer(rank, "IQN rank") <= 8 and (mode != "iqn_ils" or rank > 0),
+        _require(_integer(rank, "IQN rank") <= 8
+                 and (mode not in {"iqn_ils", "iqn_ils_reuse"} or rank > 0),
                  f"history {step} has impossible IQN rank")
     fallback = _integer(history.get("hibm_fsi_coupling_iqn_fallback_count"), "IQN fallback count")
     _require(fallback <= modes.count("picard"), f"history {step} invalid IQN fallback count")
 
 
-def _history(history: Mapping[str, Any], trace: Mapping[str, Any], step: int) -> None:
+def _history_common(
+    history: Mapping[str, Any], trace: Mapping[str, Any], step: int, *,
+    allowed_update_modes: frozenset[str],
+) -> Mapping[str, Any]:
     _require(_integer(history.get("step"), "history step", minimum=1) == step,
              f"history {step} step identity changed")
     for key, expected in (
@@ -214,20 +224,35 @@ def _history(history: Mapping[str, Any], trace: Mapping[str, Any], step: int) ->
              and history.get("hibm_fsi_coupling_converged") is True,
              f"history {step} is not a converged IQN route")
     reuse = _mapping(history.get("hibm_iqn_reuse"), "IQN reuse report")
+    _history_vectors(
+        history, trace, step, allowed_update_modes=allowed_update_modes,
+    )
+    return reuse
+
+
+def _history(history: Mapping[str, Any], trace: Mapping[str, Any], step: int) -> None:
+    reuse = _history_common(
+        history, trace, step,
+        allowed_update_modes=frozenset(("picard", "iqn_ils")),
+    )
     _require(reuse.get("enabled") is False and reuse.get("used") is False,
              f"history {step} reused previous-step IQN history")
-    _history_vectors(history, trace, step)
 
 
-def validate_current_iqn_adaptive_fine50(
+def _validate_iqn_adaptive_fine50(
     manifest: Mapping[str, Any], summary: Mapping[str, Any],
     histories: Sequence[Mapping[str, Any]],
     trial_frames: Sequence[Mapping[str, Any]] | Callable[[int], Mapping[str, Any]],
     *, pressure_semantics_mode: str,
+    config_identity: Mapping[str, Any],
+    profile_id: str,
+    profile_contract_sha256: str,
+    schema: str,
+    history_validator: Callable[[Mapping[str, Any], Mapping[str, Any], int], None],
 ) -> dict[str, Any]:
     _require(pressure_semantics_mode == "strict", "current IQN profile requires strict pressure")
     config = _mapping(manifest.get("config"), "manifest config")
-    for key, expected in CURRENT_IQN_ADAPTIVE_FINE_CONFIG_IDENTITY.items():
+    for key, expected in config_identity.items():
         _require(key in config and _identity_values_equal(config[key], expected),
                  f"current IQN fine identity mismatch for config {key}")
     for key, expected in (
@@ -255,13 +280,35 @@ def validate_current_iqn_adaptive_fine50(
         )
         _require(regions is None or regions == trace["regions"], "physical marker region order changed")
         layout, regions = trace["layout"], trace["regions"]
-        _history(_mapping(history, f"history {step}"), trace, step)
-        traces.append({key: value for key, value in trace.items() if key != "regions"})
+        history_validator(_mapping(history, f"history {step}"), trace, step)
+        traces.append({
+            key: value for key, value in trace.items()
+            if key not in {"regions", "first_residual_l2", "_trial_guess",
+                           "_trial_candidate", "_trial_residual"}
+        })
     return {
-        "schema": "current_iqn_adaptive_fine50_identity_v3", "status": "passed",
-        "comparison_profile": PROFILE_ID, "profile_contract_sha256": PROFILE_CONTRACT_SHA256,
+        "schema": schema, "status": "passed",
+        "comparison_profile": profile_id,
+        "profile_contract_sha256": profile_contract_sha256,
         "legacy_final_identity_satisfied": False, "legacy_final_acceptance_claimed": False,
         "requires_iqn_trial_vectors": True, "physical_marker_count": marker_count,
         "physical_marker_count_cross_check": "config_and_exported_arrays",
         "marker_layout_sha256": layout, "trial_trace_reports": traces,
     }
+
+
+def validate_current_iqn_adaptive_fine50(
+    manifest: Mapping[str, Any], summary: Mapping[str, Any],
+    histories: Sequence[Mapping[str, Any]],
+    trial_frames: Sequence[Mapping[str, Any]] | Callable[[int], Mapping[str, Any]],
+    *, pressure_semantics_mode: str,
+) -> dict[str, Any]:
+    return _validate_iqn_adaptive_fine50(
+        manifest, summary, histories, trial_frames,
+        pressure_semantics_mode=pressure_semantics_mode,
+        config_identity=CURRENT_IQN_ADAPTIVE_FINE_CONFIG_IDENTITY,
+        profile_id=PROFILE_ID,
+        profile_contract_sha256=PROFILE_CONTRACT_SHA256,
+        schema="current_iqn_adaptive_fine50_identity_v3",
+        history_validator=_history,
+    )

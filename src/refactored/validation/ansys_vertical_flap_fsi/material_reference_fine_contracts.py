@@ -146,14 +146,18 @@ def _material_audit(audit: Mapping[str, Any], *, identity: str, label: str) -> d
     return report
 
 
-def validate_material_reference_fine50(
+def _validate_material_reference_fine50(
     manifest: Mapping[str, Any], summary: Mapping[str, Any],
     histories: Sequence[Mapping[str, Any]],
     trial_frames: Sequence[Mapping[str, Any]] | Callable[[int], Mapping[str, Any]],
     *, pressure_semantics_mode: str,
+    base_validator: Callable[..., dict[str, Any]],
+    profile_id: str,
+    profile_contract_sha256: str,
+    schema: str,
 ) -> dict[str, Any]:
-    """Validate the current IQN contract plus immutable material audit evidence."""
-    base = validate_current_iqn_adaptive_fine50(
+    """Compose one IQN identity contract with immutable material evidence."""
+    base = base_validator(
         manifest, summary, histories, trial_frames,
         pressure_semantics_mode=pressure_semantics_mode,
     )
@@ -180,10 +184,11 @@ def validate_material_reference_fine50(
     _require(summary_audit == history_reports[-1],
              "summary material audit differs from the final accepted history")
     return {
-        "schema": "current_iqn_adaptive_material_reference_fine50_identity_v1",
+        **base,
+        "schema": schema,
         "status": "passed",
-        "comparison_profile": PROFILE_ID,
-        "profile_contract_sha256": PROFILE_CONTRACT_SHA256,
+        "comparison_profile": profile_id,
+        "profile_contract_sha256": profile_contract_sha256,
         "legacy_final_identity_satisfied": False,
         "legacy_final_acceptance_claimed": False,
         "requires_iqn_trial_vectors": True,
@@ -196,3 +201,23 @@ def validate_material_reference_fine50(
         "material_history_audit_reports": history_reports,
         "summary_material_audit": summary_audit,
     }
+
+
+def validate_material_reference_fine50(
+    manifest: Mapping[str, Any], summary: Mapping[str, Any],
+    histories: Sequence[Mapping[str, Any]],
+    trial_frames: Sequence[Mapping[str, Any]] | Callable[[int], Mapping[str, Any]],
+    *, pressure_semantics_mode: str,
+) -> dict[str, Any]:
+    """Validate the current IQN contract plus material-reference evidence."""
+    return _validate_material_reference_fine50(
+        manifest,
+        summary,
+        histories,
+        trial_frames,
+        pressure_semantics_mode=pressure_semantics_mode,
+        base_validator=validate_current_iqn_adaptive_fine50,
+        profile_id=PROFILE_ID,
+        profile_contract_sha256=PROFILE_CONTRACT_SHA256,
+        schema="current_iqn_adaptive_material_reference_fine50_identity_v1",
+    )

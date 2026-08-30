@@ -906,7 +906,7 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
             generic_fsi_solver.FsiSolverConfig.__dataclass_fields__,
         )
 
-    def test_ansys_uses_only_the_validated_direct_loop(self) -> None:
+    def test_ansys_uses_only_the_validated_resume_aware_direct_loop(self) -> None:
         from benchmarks.official import solid_mpm_fsi_runner
         from cases import ansys_vertical_flap_fsi
 
@@ -915,7 +915,11 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
         )
         case_source = inspect.getsource(ansys_vertical_flap_fsi)
 
-        self.assertIn("for step_index in range(config.step_count)", direct_source)
+        self.assertIn("checkpoint_resume_step = 0", direct_source)
+        self.assertIn(
+            "for step_index in range(checkpoint_resume_step, config.step_count)",
+            direct_source,
+        )
         self.assertIn("solve_fsi_runtime(", direct_source)
         self.assertIn("research_probe_terminal", direct_source)
         self.assertIn("run_hibm_mpm_fsi(", case_source)

@@ -93,6 +93,65 @@ def _history(step, trace):
     }
 
 
+def _validated_frame(step=1, count=2):
+    trace = _trial(step, count)
+    return {
+        **trace,
+        "marker_position_m": np.zeros((128, 3), dtype=np.float64),
+        "marker_velocity_mps": trace["iqn_trial_candidate_mps"][-1].copy(),
+        "marker_normal": np.ones((128, 3), dtype=np.float64),
+        "marker_area_m2": np.ones(128, dtype=np.float64),
+        "marker_region_id": np.repeat(np.array([101, 202], dtype=np.int64), 64),
+    }
+
+
+def test_validate_iqn_trial_vector_frame_keeps_private_raw_trial_arrays():
+    frame = _validated_frame()
+    trace = profile.validate_iqn_trial_vector_frame(
+        frame, step=1, marker_count=128, layout_sha256=None,
+    )
+
+    for private_key, frame_key in (
+        ("_trial_guess", "iqn_trial_guess_mps"),
+        ("_trial_candidate", "iqn_trial_candidate_mps"),
+        ("_trial_residual", "iqn_trial_residual_mps"),
+    ):
+        assert isinstance(trace[private_key], np.ndarray)
+        np.testing.assert_array_equal(trace[private_key], frame[frame_key])
+
+
+def test_public_trial_trace_reports_do_not_leak_private_raw_trial_arrays(current_inputs):
+    our, _, _ = current_inputs
+    manifest = _read(our / "run_manifest.json")
+    summary = _read(our / "our_solver_summary.json")
+    histories = [
+        _read(our / "step_history" / f"step_{step:04d}.json")["history"]
+        for step in range(1, 51)
+    ]
+    frames = []
+    for step in range(1, 51):
+        with np.load(our / "step_fields" / f"step_{step:04d}.npz", allow_pickle=False) as bundle:
+            frames.append({key: np.array(bundle[key], copy=True) for key in bundle.files})
+    report = profile._validate_iqn_adaptive_fine50(
+        manifest, summary, histories, frames,
+        pressure_semantics_mode="strict",
+        config_identity=profile.CURRENT_IQN_ADAPTIVE_FINE_CONFIG_IDENTITY,
+        profile_id=profile.PROFILE_ID,
+        profile_contract_sha256=profile.PROFILE_CONTRACT_SHA256,
+        schema="current_iqn_adaptive_fine50_identity_v3",
+        history_validator=profile._history,
+    )
+    traces = report["trial_trace_reports"]
+
+    private_keys = {"_trial_guess", "_trial_candidate", "_trial_residual"}
+    assert all(private_keys.isdisjoint(trace) for trace in traces)
+    assert all(
+        not isinstance(value, np.ndarray)
+        for trace in traces
+        for value in trace.values()
+    )
+
+
 @pytest.fixture
 def current_inputs(tmp_path, monkeypatch):
     our, fluent = fixture._synthetic_inputs(tmp_path, steps=50)
