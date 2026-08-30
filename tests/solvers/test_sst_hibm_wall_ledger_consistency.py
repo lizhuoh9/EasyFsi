@@ -93,7 +93,7 @@ class _CanonicalHibmWallProbe:
     @ti.kernel
     def evaluate_wall_normal_velocity_derivative(self, solver: ti.template()):
         self.velocity_derivative[None] = (
-            solver._sst_cell_center_velocity_derivative_y(1, 1, 1)
+            solver._sst_cell_center_velocity_derivative_y(1, 1, 1, 0, 2)
         )
 
     @ti.kernel
@@ -222,7 +222,7 @@ class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
         solver.sst_eddy_viscosity_pa_s.fill(0.0)
         solver._prepare_sst_obstacle_interface_wall_target_masks_kernel(1)
         solver._compute_muscl_momentum_dual_geometry_kernel()
-        solver._initialize_sst_momentum_helmholtz_component_kernel(0, 0, 0, 0)
+        solver._initialize_sst_momentum_helmholtz_component_kernel(0, 0, 2)
         base_diagonal = float(solver.fv_diag[free_row])
         base_rhs = float(solver.cg_rhs[free_row])
 
@@ -234,6 +234,8 @@ class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
             molecular_nu_m2_s,
             0,
             0,
+            0,
+            2,
         )
 
         # These fluid-fluid rows are algebraic HIBM interpolation constraints,
@@ -325,7 +327,7 @@ class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
         solver.sst_eddy_viscosity_pa_s.fill(0.0)
         solver._prepare_sst_obstacle_interface_wall_target_masks_kernel(1)
         solver._compute_muscl_momentum_dual_geometry_kernel()
-        solver._initialize_sst_momentum_helmholtz_component_kernel(0, 0, 0, 0)
+        solver._initialize_sst_momentum_helmholtz_component_kernel(0, 0, 2)
         base_diagonal = float(solver.fv_diag[free_row])
         base_rhs = float(solver.cg_rhs[free_row])
 
@@ -337,6 +339,8 @@ class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
             molecular_nu_m2_s,
             0,
             0,
+            0,
+            2,
         )
 
         wall_reference = sst_wall_correlation(
@@ -559,7 +563,7 @@ class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
 
         solver._prepare_sst_obstacle_interface_wall_target_masks_kernel(1)
         solver._compute_muscl_momentum_dual_geometry_kernel()
-        solver._initialize_sst_momentum_helmholtz_component_kernel(0, 0, 0, 0)
+        solver._initialize_sst_momentum_helmholtz_component_kernel(0, 0, 2)
         base_diagonal = float(solver.fv_diag[current])
         base_rhs = float(solver.cg_rhs[current])
         solver._assemble_sst_momentum_helmholtz_axis_kernel(
@@ -570,6 +574,8 @@ class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
             molecular_nu,
             0,
             0,
+            0,
+            2,
         )
 
         reference = sst_wall_correlation(
@@ -633,7 +639,7 @@ class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
 
         # The component-normal canonical MAC owner is an exact identity too;
         # the implicit solve must not move it before terminal reclamping.
-        solver._initialize_sst_momentum_helmholtz_component_kernel(1, 0, 0, 0)
+        solver._initialize_sst_momentum_helmholtz_component_kernel(1, 0, 2)
         self.assertEqual(int(solver.bicgstab_t[exact_neighbor]), 2)
         self.assertAlmostEqual(
             float(solver.cg_mg_rhs[exact_neighbor]),
@@ -697,6 +703,8 @@ class SSTCanonicalHibmWallLedgerContracts(unittest.TestCase):
             1.5e-5,
             0,
             1,
+            0,
+            2,
         )
         divergence = solver.sst_momentum_transpose_divergence_cell_mps2.to_numpy()
         self.assertAlmostEqual(float(divergence[1, 1, 1, 0]), 0.0, delta=1.0e-12)

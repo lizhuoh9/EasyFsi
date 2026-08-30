@@ -9,8 +9,9 @@ trials and failed macro-steps cannot advance its history or its Kalman state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import math
-from numbers import Real
+from numbers import Integral, Real
 from typing import Any, Sequence
 
 import numpy as np
@@ -18,6 +19,7 @@ import numpy as np
 from simulation_core.coupling.interface_kalman_predictor import (
     InterfaceKalmanConfig,
     InterfaceKalmanPredictor,
+    InterfaceKalmanSnapshot,
     InterfaceKalmanUpdate,
 )
 
@@ -32,6 +34,9 @@ INITIAL_GUESS_MODES = frozenset(
 )
 
 
+INTERFACE_INITIAL_GUESS_SNAPSHOT_SCHEMA_VERSION = 1
+
+
 @dataclass(frozen=True)
 class _ActiveStep:
     dt_s: float
@@ -40,6 +45,154 @@ class _ActiveStep:
     mode_used: str
     fallback_reason: str | None
     kalman_prediction_used: bool
+
+
+@dataclass(frozen=True)
+class InterfaceInitialGuessSnapshot:
+    """Typed accepted-boundary state for one initial-guess controller."""
+
+    schema_version: int
+    mode: str
+    kalman_config: InterfaceKalmanConfig | None
+    oracle_replay: tuple[np.ndarray, ...]
+    oracle_replay_hash: str
+    oracle_cursor: int
+    layout_id: str | None
+    shape: tuple[int, ...] | None
+    latest_accepted: np.ndarray | None
+    previous_accepted: np.ndarray | None
+    previous_dt_s: float | None
+    accepted_step_count: int
+    begin_count: int
+    discard_count: int
+    last_prediction_rms_mps: float | None
+    last_prediction_bias: float | None
+    last_nis_mean: float | None
+    last_mode_used: str | None
+    last_fallback_reason: str | None
+    last_kalman_prediction_used: bool
+    kalman_snapshot: InterfaceKalmanSnapshot | None
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.schema_version, (bool, np.bool_))
+            or not isinstance(self.schema_version, Integral)
+        ):
+            raise TypeError("snapshot schema_version must be an integer")
+        if int(self.schema_version) != INTERFACE_INITIAL_GUESS_SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError("unsupported initial-guess snapshot schema_version")
+        object.__setattr__(self, "schema_version", int(self.schema_version))
+        if not isinstance(self.mode, str) or self.mode not in INITIAL_GUESS_MODES:
+            raise ValueError("snapshot mode is invalid")
+        if self.mode == "kalman":
+            if not isinstance(self.kalman_config, InterfaceKalmanConfig):
+                raise TypeError("kalman snapshot requires kalman_config")
+        elif self.kalman_config is not None:
+            raise ValueError("non-Kalman snapshot must not have kalman_config")
+        replay = tuple(
+            _finite_values(entry, name="snapshot oracle_replay entry")
+            for entry in self.oracle_replay
+        )
+        if self.mode == "oracle_replay":
+            if not replay:
+                raise ValueError("oracle snapshot requires replay entries")
+        elif replay:
+            raise ValueError("non-oracle snapshot must not have replay entries")
+        replay_hash = _oracle_replay_hash(replay)
+        if self.oracle_replay_hash != replay_hash:
+            raise ValueError("snapshot oracle_replay_hash does not match replay")
+        cursor = _nonnegative_integer("oracle_cursor", self.oracle_cursor)
+        accepted = _nonnegative_integer(
+            "accepted_step_count", self.accepted_step_count
+        )
+        begin = _nonnegative_integer("begin_count", self.begin_count)
+        discard = _nonnegative_integer("discard_count", self.discard_count)
+        if accepted + discard != begin:
+            raise ValueError("snapshot step counters are inconsistent")
+        if self.mode == "oracle_replay":
+            if cursor != accepted or cursor > len(replay):
+                raise ValueError("oracle snapshot cursor is inconsistent")
+        elif cursor != 0:
+            raise ValueError("non-oracle snapshot must have zero cursor")
+        layout = None if self.layout_id is None else _validated_layout_id(self.layout_id)
+        shape = _snapshot_shape(self.shape)
+        latest = _snapshot_array(self.latest_accepted, "latest_accepted", shape)
+        previous = _snapshot_array(
+            self.previous_accepted, "previous_accepted", shape
+        )
+        previous_dt = (
+            None
+            if self.previous_dt_s is None
+            else _positive_finite_real("previous_dt_s", self.previous_dt_s)
+        )
+        cold = layout is None or shape is None
+        if cold:
+            if (
+                layout is not None
+                or shape is not None
+                or latest is not None
+                or previous is not None
+                or previous_dt is not None
+                or self.kalman_snapshot is not None
+                or accepted
+                or begin
+                or discard
+                or cursor
+            ):
+                raise ValueError("cold snapshot has accepted payload")
+        else:
+            if latest is None:
+                raise ValueError("initialized snapshot requires latest_accepted")
+            if accepted == 0:
+                if previous is not None or previous_dt is not None:
+                    raise ValueError("unaccepted snapshot has previous history")
+            elif previous is None or previous_dt is None:
+                raise ValueError("accepted snapshot requires previous history")
+        if self.mode == "kalman" and not cold:
+            if not isinstance(self.kalman_snapshot, InterfaceKalmanSnapshot):
+                raise TypeError("initialized Kalman snapshot requires predictor")
+            if self.kalman_snapshot.config != self.kalman_config:
+                raise ValueError("Kalman snapshot config does not match")
+            if (
+                self.kalman_snapshot.layout_id != layout
+                or tuple(self.kalman_snapshot.values.shape) != shape
+                or self.kalman_snapshot.accepted_state_count != accepted + 1
+            ):
+                raise ValueError("Kalman snapshot state is inconsistent")
+        elif self.kalman_snapshot is not None:
+            raise ValueError("unexpected Kalman predictor state")
+        for name in (
+            "last_prediction_rms_mps",
+            "last_prediction_bias",
+            "last_nis_mean",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _finite_real(name, value)
+        if (
+            self.last_mode_used is not None
+            and self.last_mode_used not in INITIAL_GUESS_MODES
+        ):
+            raise ValueError("snapshot last_mode_used is invalid")
+        if not isinstance(self.last_kalman_prediction_used, (bool, np.bool_)):
+            raise TypeError("last_kalman_prediction_used must be boolean")
+        object.__setattr__(
+            self, "oracle_replay", tuple(_read_only_copy(entry) for entry in replay)
+        )
+        object.__setattr__(self, "layout_id", layout)
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "latest_accepted", latest)
+        object.__setattr__(self, "previous_accepted", previous)
+        object.__setattr__(self, "previous_dt_s", previous_dt)
+        object.__setattr__(self, "oracle_cursor", cursor)
+        object.__setattr__(self, "accepted_step_count", accepted)
+        object.__setattr__(self, "begin_count", begin)
+        object.__setattr__(self, "discard_count", discard)
+
+    def validate(self) -> None:
+        """Revalidate mutable-array payloads before restore."""
+
+        self.__post_init__()
 
 
 class InterfaceInitialGuessController:
@@ -216,6 +369,100 @@ class InterfaceInitialGuessController:
             "last_nis_mean": self._last_nis_mean,
         }
 
+
+    def snapshot(self) -> InterfaceInitialGuessSnapshot:
+        """Capture exact host-only accepted state at a transaction boundary."""
+
+        if self._active is not None:
+            raise RuntimeError(
+                "cannot snapshot while an initial-guess step is active"
+            )
+        return InterfaceInitialGuessSnapshot(
+            schema_version=INTERFACE_INITIAL_GUESS_SNAPSHOT_SCHEMA_VERSION,
+            mode=self.mode,
+            kalman_config=(
+                self._kalman.config if self._kalman is not None else None
+            ),
+            oracle_replay=self._oracle_replay,
+            oracle_replay_hash=_oracle_replay_hash(self._oracle_replay),
+            oracle_cursor=self._oracle_cursor,
+            layout_id=self._layout_id,
+            shape=self._shape,
+            latest_accepted=self._latest_accepted,
+            previous_accepted=self._previous_accepted,
+            previous_dt_s=self._previous_dt_s,
+            accepted_step_count=self._accepted_step_count,
+            begin_count=self._begin_count,
+            discard_count=self._discard_count,
+            last_prediction_rms_mps=self._last_prediction_rms_mps,
+            last_prediction_bias=self._last_prediction_bias,
+            last_nis_mean=self._last_nis_mean,
+            last_mode_used=self._last_mode_used,
+            last_fallback_reason=self._last_fallback_reason,
+            last_kalman_prediction_used=self._last_kalman_prediction_used,
+            kalman_snapshot=(
+                self._kalman.snapshot()
+                if self._kalman is not None and self._layout_id is not None
+                else None
+            ),
+        )
+
+    def restore(self, snapshot: InterfaceInitialGuessSnapshot) -> None:
+        """Atomically install a validated accepted-boundary snapshot."""
+
+        if self._active is not None:
+            raise RuntimeError(
+                "cannot restore while an initial-guess step is active"
+            )
+        if not isinstance(snapshot, InterfaceInitialGuessSnapshot):
+            raise TypeError("snapshot must be an InterfaceInitialGuessSnapshot")
+        snapshot.validate()
+        if snapshot.mode != self.mode:
+            raise ValueError("snapshot mode does not match controller mode")
+        config = self._kalman.config if self._kalman is not None else None
+        if snapshot.kalman_config != config:
+            raise ValueError(
+                "snapshot Kalman config does not match controller config"
+            )
+        if snapshot.oracle_replay_hash != _oracle_replay_hash(self._oracle_replay):
+            raise ValueError(
+                "snapshot oracle_replay does not match controller replay"
+            )
+        if self._layout_id is not None and (
+            snapshot.layout_id != self._layout_id
+            or snapshot.shape != self._shape
+        ):
+            raise ValueError(
+                "snapshot layout or shape does not match controller state"
+            )
+
+        restored_kalman: InterfaceKalmanPredictor | None = None
+        if config is not None:
+            restored_kalman = InterfaceKalmanPredictor(config)
+            if snapshot.kalman_snapshot is not None:
+                restored_kalman.restore(snapshot.kalman_snapshot)
+        latest = _copy_or_none(snapshot.latest_accepted)
+        previous = _copy_or_none(snapshot.previous_accepted)
+
+        self._kalman = restored_kalman
+        self._oracle_cursor = snapshot.oracle_cursor
+        self._layout_id = snapshot.layout_id
+        self._shape = snapshot.shape
+        self._latest_accepted = latest
+        self._previous_accepted = previous
+        self._previous_dt_s = snapshot.previous_dt_s
+        self._accepted_step_count = snapshot.accepted_step_count
+        self._begin_count = snapshot.begin_count
+        self._discard_count = snapshot.discard_count
+        self._last_prediction_rms_mps = snapshot.last_prediction_rms_mps
+        self._last_prediction_bias = snapshot.last_prediction_bias
+        self._last_nis_mean = snapshot.last_nis_mean
+        self._last_mode_used = snapshot.last_mode_used
+        self._last_fallback_reason = snapshot.last_fallback_reason
+        self._last_kalman_prediction_used = bool(
+            snapshot.last_kalman_prediction_used
+        )
+
     def _validate_or_initialize_layout(
         self,
         values: np.ndarray,
@@ -345,8 +592,65 @@ def _read_only_copy(values: np.ndarray) -> np.ndarray:
     return copy
 
 
+def _copy_or_none(values: np.ndarray | None) -> np.ndarray | None:
+    return None if values is None else _read_only_copy(values)
+
+
+def _nonnegative_integer(name: str, value: Any) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    converted = int(value)
+    if converted < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return converted
+
+
+def _snapshot_shape(shape: Any) -> tuple[int, ...] | None:
+    if shape is None:
+        return None
+    if not isinstance(shape, tuple):
+        raise TypeError("snapshot shape must be a tuple")
+    result = tuple(_nonnegative_integer("snapshot shape entry", value) for value in shape)
+    if any(value == 0 for value in result):
+        raise ValueError("snapshot shape entries must be positive")
+    return result
+
+
+def _snapshot_array(
+    values: Any, name: str, shape: tuple[int, ...] | None
+) -> np.ndarray | None:
+    if values is None:
+        return None
+    if shape is None:
+        raise ValueError(f"{name} requires snapshot shape")
+    return _read_only_copy(_finite_values(values, name=name, expected_shape=shape))
+
+
+def _finite_real(name: str, value: Any) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+def _oracle_replay_hash(replay: Sequence[np.ndarray]) -> str:
+    digest = hashlib.sha256()
+    for entry in replay:
+        values = np.asarray(entry, dtype=np.float64)
+        digest.update(repr(tuple(values.shape)).encode("ascii"))
+        digest.update(values.tobytes(order="C"))
+    return digest.hexdigest()
+
+
 def _root_mean_square(values: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(values, dtype=np.float64))))
 
 
-__all__ = ["INITIAL_GUESS_MODES", "InterfaceInitialGuessController"]
+__all__ = [
+    "INITIAL_GUESS_MODES",
+    "INTERFACE_INITIAL_GUESS_SNAPSHOT_SCHEMA_VERSION",
+    "InterfaceInitialGuessController",
+    "InterfaceInitialGuessSnapshot",
+]

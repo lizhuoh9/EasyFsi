@@ -40,13 +40,19 @@ from .native_fine_contracts import (
     _validate_native_fluent_bundle,
     _validate_run_contracts,
     _vector,
+    discover_canonical_solver_frame_prefix,
+    discover_canonical_solver_step_history_prefix,
     discover_solver_frames,
     discover_solver_step_histories,
     sha256_file,
     validate_final_solver_step_histories,
+    validate_comparison_profile_entry,
+    validate_dual_root_solver_artifact_prefix,
     validate_fluent_residual_histories,
     validate_partial_diagnostic_step_histories,
 )
+from .current_iqn_adaptive_fine_contracts import validate_current_iqn_adaptive_fine50
+from .material_reference_fine_contracts import validate_material_reference_fine50
 from .native_fine_rendering import (
     DeformedGeometryContractError,
     build_gif,
@@ -60,6 +66,11 @@ from .native_fine_rendering import (
 
 REPORT_SCHEMA = "our_solver_vs_native_fluent_fine_diagnostic_v2"
 PRESSURE_SEMANTICS_MODES = frozenset(("legacy_compatible", "strict"))
+COMPARISON_PROFILES = frozenset((
+    "legacy_final",
+    "current_iqn_adaptive",
+    "current_iqn_adaptive_material_reference",
+))
 DIRECT_STEP_END_STAGES = {
     "flow_solution_stage": "pre_solid_projection",
     "boundary_topology_stage": "pre_solid_projection",
@@ -259,6 +270,8 @@ def postprocess_native_fine_comparison(
     gif_max_width_px: int = 1600,
     pressure_semantics_mode: str = "legacy_compatible",
     fluent_force_history_path: str | Path | None = None,
+    comparison_profile: str = "legacy_final",
+    our_canonical_artifact_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Generate a native-only, offline diagnostic comparison bundle."""
 
@@ -272,8 +285,20 @@ def postprocess_native_fine_comparison(
         raise ValueError(
             "pressure_semantics_mode must be 'legacy_compatible' or 'strict'"
         )
+    if comparison_profile not in COMPARISON_PROFILES:
+        raise ValueError("unknown comparison profile")
+    validate_comparison_profile_entry(
+        comparison_profile,
+        expected_steps=expected_steps,
+        pressure_semantics_mode=pressure_semantics_mode,
+    )
 
     our_run_dir = Path(our_run_dir).resolve()
+    canonical_artifact_dir = (
+        None
+        if our_canonical_artifact_dir is None
+        else Path(our_canonical_artifact_dir).resolve()
+    )
     fluent_postprocess_dir = Path(fluent_postprocess_dir).resolve()
     output_dir = Path(output_dir).resolve()
     _reject_legacy_reference_path(fluent_postprocess_dir)
@@ -294,6 +319,7 @@ def postprocess_native_fine_comparison(
         our_progress,
         fluent_summary,
         expected_steps=expected_steps,
+        comparison_profile=comparison_profile,
     )
     _validate_native_fluent_bundle(
         fluent_postprocess_dir,
@@ -302,7 +328,35 @@ def postprocess_native_fine_comparison(
         expected_steps=expected_steps,
     )
 
-    frame_paths = discover_solver_frames(our_run_dir, expected_steps=expected_steps)
+    our_history_path = our_run_dir / "our_solver_history.csv"
+    our_rows = read_typed_csv(our_history_path)
+    dual_root_artifact_contract: dict[str, Any] | None = None
+    if canonical_artifact_dir is None:
+        frame_paths = discover_solver_frames(our_run_dir, expected_steps=expected_steps)
+        step_history_paths = discover_solver_step_histories(
+            our_run_dir,
+            expected_steps=expected_steps,
+        )
+    else:
+        dual_root_artifact_contract = validate_dual_root_solver_artifact_prefix(
+            attempt_root=our_run_dir,
+            canonical_artifact_root=canonical_artifact_dir,
+            expected_steps=expected_steps,
+            aggregate_rows=our_rows,
+        )
+        canonical_head_step = int(
+            dual_root_artifact_contract["canonical_head_step"]
+        )
+        frame_paths = discover_canonical_solver_frame_prefix(
+            canonical_artifact_dir,
+            expected_steps=expected_steps,
+            canonical_head_step=canonical_head_step,
+        )
+        step_history_paths = discover_canonical_solver_step_history_prefix(
+            canonical_artifact_dir,
+            expected_steps=expected_steps,
+            canonical_head_step=canonical_head_step,
+        )
     synchronized_time_layer_contract = validate_synchronized_solver_time_layer(
         frame_paths
     )
@@ -312,11 +366,6 @@ def postprocess_native_fine_comparison(
         native_fluent_fields_path=fluent_fields_path,
         mode=pressure_semantics_mode,
     )
-    step_history_paths = discover_solver_step_histories(
-        our_run_dir,
-        expected_steps=expected_steps,
-    )
-    our_history_path = our_run_dir / "our_solver_history.csv"
     fluent_structure_path = (
         fluent_postprocess_dir / "histories" / "structure_displacement_history.csv"
     )
@@ -326,7 +375,6 @@ def postprocess_native_fine_comparison(
     fluent_residual_summary_path = (
         fluent_postprocess_dir / "histories" / "residual_snapshot_summary.csv"
     )
-    our_rows = read_typed_csv(our_history_path)
     fluent_structure_rows = read_typed_csv(fluent_structure_path)
     fluent_velocity_rows = read_typed_csv(fluent_velocity_path)
     fluent_pressure_rows = read_typed_csv(fluent_pressure_path)
@@ -366,10 +414,26 @@ def postprocess_native_fine_comparison(
             expected_steps=expected_steps,
             dt_s=dt_s,
         )
-        final_run_identity_contract = _validate_final_run_identity(
-            our_manifest,
-            our_summary,
-        )
+        if comparison_profile == "legacy_final":
+            final_run_identity_contract = _validate_final_run_identity(our_manifest, our_summary)
+        elif comparison_profile == "current_iqn_adaptive":
+            histories = [_read_json(path)["history"] for path in step_history_paths]
+            def load_trace(step: int) -> dict[str, np.ndarray]:
+                with np.load(frame_paths[step - 1], allow_pickle=False) as frame:
+                    return {key: np.asarray(frame[key]) for key in frame.files}
+            final_run_identity_contract = validate_current_iqn_adaptive_fine50(
+                our_manifest, our_summary, histories, load_trace,
+                pressure_semantics_mode=pressure_semantics_mode,
+            )
+        else:
+            histories = [_read_json(path)["history"] for path in step_history_paths]
+            def load_trace(step: int) -> dict[str, np.ndarray]:
+                with np.load(frame_paths[step - 1], allow_pickle=False) as frame:
+                    return {key: np.asarray(frame[key]) for key in frame.files}
+            final_run_identity_contract = validate_material_reference_fine50(
+                our_manifest, our_summary, histories, load_trace,
+                pressure_semantics_mode=pressure_semantics_mode,
+            )
     else:
         step_history_contract = validate_partial_diagnostic_step_histories(
             step_history_paths,
@@ -464,6 +528,7 @@ def postprocess_native_fine_comparison(
     write_csv(force_csv, force_rows)
     input_manifest = _input_manifest(
         our_run_dir=our_run_dir,
+        our_canonical_artifact_dir=canonical_artifact_dir,
         fluent_postprocess_dir=fluent_postprocess_dir,
         frame_paths=frame_paths,
         step_history_paths=step_history_paths,
@@ -504,11 +569,21 @@ def postprocess_native_fine_comparison(
         "parity_claimed": False,
         "legacy_puma_reference_used": False,
         "comparison_role": "native_fine_cross_model_diagnostic",
+        "comparison_profile": comparison_profile,
+        "legacy_final_acceptance_claimed": (
+            comparison_profile == "legacy_final"
+            and expected_steps == DEFAULT_EXPECTED_STEPS
+            and final_run_identity_contract.get("status") == "passed"
+            and five_percent_diagnostic_gate.get("status") == "passed"
+        ),
         "step_count": expected_steps,
         "dt_s": dt_s,
         "final_time_s": expected_steps * dt_s,
         "velocity_display_range_mps": [VELOCITY_VMIN_MPS, velocity_vmax_mps],
         "our_run_dir": str(our_run_dir),
+        "our_canonical_artifact_dir": (
+            None if canonical_artifact_dir is None else str(canonical_artifact_dir)
+        ),
         "native_fluent_postprocess_dir": str(fluent_postprocess_dir),
         "output_dir": str(output_dir),
         "native_fluent_reference_contract": {
@@ -518,6 +593,7 @@ def postprocess_native_fine_comparison(
             "old_puma_or_adapted_reference_rejected": True,
         },
         "step_history_contract": step_history_contract,
+        "dual_root_artifact_contract": dual_root_artifact_contract,
         "final_run_identity_contract": final_run_identity_contract,
         "fluent_residual_history_contract": fluent_residual_history_contract,
         "deformed_geometry_contract": deformed_geometry_contract,
@@ -1045,7 +1121,8 @@ def write_checksums(output_dir: str | Path) -> Path:
     for path in sorted(output_dir.rglob("*")):
         if path.is_file() and path != checksum_path:
             rows.append(f"{sha256_file(path)}  {path.relative_to(output_dir).as_posix()}")
-    checksum_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    with checksum_path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(rows) + "\n")
     return checksum_path
 
 
@@ -1241,6 +1318,7 @@ def _validate_fluent_fields(fields: Mapping[str, np.ndarray]) -> None:
 def _input_manifest(
     *,
     our_run_dir: Path,
+    our_canonical_artifact_dir: Path | None,
     fluent_postprocess_dir: Path,
     frame_paths: Sequence[Path],
     step_history_paths: Sequence[Path],
@@ -1257,6 +1335,12 @@ def _input_manifest(
         *step_history_paths,
         *additional_paths,
     ]
+    if our_canonical_artifact_dir is not None:
+        paths.extend((
+            our_run_dir / "metadata.json",
+            our_canonical_artifact_dir / "run_manifest.json",
+            our_canonical_artifact_dir / "checkpoint.json",
+        ))
     return {
         "schema": "our_solver_vs_native_fluent_fine_inputs_v2",
         "expected_steps": expected_steps,
@@ -1265,6 +1349,12 @@ def _input_manifest(
         "legacy_reference_used": False,
         "solver_step_field_count": len(frame_paths),
         "solver_step_history_count": len(step_history_paths),
+        "our_run_root": str(our_run_dir),
+        "our_canonical_artifact_root": (
+            None
+            if our_canonical_artifact_dir is None
+            else str(our_canonical_artifact_dir)
+        ),
         "inputs": [
             {"path": str(path), "sha256": sha256_file(path), "size_bytes": path.stat().st_size}
             for path in paths

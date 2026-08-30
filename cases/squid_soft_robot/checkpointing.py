@@ -768,6 +768,10 @@ def _checkpoint_field_array(
         raise ValueError(
             f"checkpoint {key!r} shape mismatch: {value.shape} != {expected.shape}"
         )
+    if key.startswith("solid_") and value.dtype != expected.dtype:
+        raise ValueError(
+            f"checkpoint {key!r} dtype mismatch: {value.dtype} != {expected.dtype}"
+        )
     try:
         decoded = value.astype(expected.dtype, copy=True)
     except (TypeError, ValueError, OverflowError) as exc:

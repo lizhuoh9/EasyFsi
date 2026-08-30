@@ -41,6 +41,8 @@ def _probe_zmin_transpose_boundary_gradient(
         0,
         no_slip_zmin << 4,
         0,
+        0,
+        2,
     )
     for component in ti.static(range(3)):
         output[component] = gradient[component]

@@ -12,6 +12,12 @@ from typing import Any
 
 import numpy as np
 
+from simulation_core.coupling.accepted_fsi_checkpoint import (
+    AcceptedFsiState,
+    load_accepted_fsi_checkpoint,
+    validate_accepted_fsi_state,
+    write_accepted_fsi_checkpoint,
+)
 from simulation_core.coupling.active_kalman_writeback import (
     ACTIVE_KALMAN_MODE_OWNERS,
     FLUID_FSI_PRESSURE_FEEDBACK_OWNER,
@@ -23,6 +29,7 @@ from simulation_core.coupling.interface_initial_guess_controller import (
     INITIAL_GUESS_MODES,
     InterfaceInitialGuessController,
 )
+from simulation_core.coupling.iqn_ils import IqnIlsConfig
 from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec
 from simulation_core.fluids.preflow_snapshot import (
     PREFLOW_SNAPSHOT_FIELD_NAMES,
@@ -44,6 +51,7 @@ from simulation_core.coupling.hibm_mpm import (
     marker_trial_state,
     restore_host_macro_step_state,
     restore_marker_interface_state,
+    validate_marker_interface_state,
 )
 from simulation_core.drivers.generic_fsi_solver import (
     FsiCouplingConfig,
@@ -66,6 +74,7 @@ from simulation_core.coupling.pressure_sample_pairs import (
     PressureSamplePairMap,
     RuntimeAnchoredCellPairProvider,
 )
+from simulation_core.diagnostics.checkpoint_store import read_checkpoint_head
 from simulation_core.diagnostics.runtime import (
     TaichiRuntimeConfig,
     taichi_runtime_identity,
@@ -1590,6 +1599,12 @@ def _advance_solid_substeps_batched(
         raise
 
 
+def _accepted_fsi_history_time_s(*, step_index: int, dt_s: float) -> float:
+    """Canonical accepted physical time for the production history row."""
+
+    return float(dt_s) * float(step_index + 1)
+
+
 def run_hibm_mpm_fsi(
     *,
     case_id: str,
@@ -1607,6 +1622,23 @@ def run_hibm_mpm_fsi(
     """Run the canonical Cartesian rectangular-solid HIBM-MPM pipeline."""
     run_started_s = time.perf_counter()
     _validate_rectangular_solid_config(config)
+    _validate_material_surface_transfer_config(config)
+    checkpoint_input_path, checkpoint_output_path = _fsi_checkpoint_paths(config)
+    checkpoint_expected_generation = (
+        _fsi_checkpoint_generation_pin(config, checkpoint_input_path)
+        if checkpoint_input_path is not None
+        else None
+    )
+    checkpoint_observer_identity = (
+        _fsi_checkpoint_observer_identity(step_observer)
+        if checkpoint_output_path is not None else None
+    )
+    checkpoint_identity = None
+    checkpoint_loaded = None
+    checkpoint_generation = None
+    checkpoint_history_tail = None
+    checkpoint_resume_step = 0
+    checkpoint_terminal_fields: dict[str, object] = {}
     flow_driver_mode = (
         _require_fsi_physical_flow_driver_mode(config)
         if int(config.step_count) > 0
@@ -1625,7 +1657,18 @@ def run_hibm_mpm_fsi(
             particle_position_generation
         )
 
-    runtime = TaichiRuntimeConfig(arch="cuda", strict_arch=True)
+    runtime = TaichiRuntimeConfig(
+        arch="cuda",
+        default_fp="f32",
+        default_ip="i32",
+        random_seed=0,
+        cfg_optimization=False,
+        opt_level=1,
+        advanced_optimization=True,
+        fast_math=True,
+        debug=False,
+        strict_arch=True,
+    )
     fluid = _build_fluid(config, runtime)
     runtime_identity = taichi_runtime_identity()
     _initialize_computed_flow(fluid, config)
@@ -1657,6 +1700,7 @@ def run_hibm_mpm_fsi(
         pressure_pair_anchor_runtime_refresh_count = next_refresh_count
 
     solid = _build_solid(config, runtime)
+    material_transfer_report = _configure_material_surface_transfer(markers, solid, config)
     record_particle_position_write()
     # Install the physical MPM volume before fixed-solid preflow.  In sharp
     # mode it is stored in a dedicated layer; the first HIBM assembly then
@@ -1677,16 +1721,35 @@ def run_hibm_mpm_fsi(
     mu_pa, lambda_pa = _lame_parameters(config)
     solid_substep_cfl: dict[str, object] = {}
     solid_seeding = _enforce_solid_seeding_limit(config)
-    preflow_report = _run_or_restore_fixed_solid_preflow(
-        markers=markers,
-        fluid=fluid,
-        solid=solid,
-        config=config,
-        progress_observer=progress_observer,
-        run_started_s=run_started_s,
-        profile_wall_time=profile_wall_time,
-        particle_position_generation=particle_position_generation,
-    )
+    if checkpoint_output_path is not None:
+        checkpoint_identity = _fsi_checkpoint_identity(
+            markers=markers, fluid=fluid, solid=solid, config=config,
+        )
+    if checkpoint_input_path is not None:
+        checkpoint_loaded = load_accepted_fsi_checkpoint(
+            checkpoint_input_path, expected_identity=checkpoint_identity,
+            target_step_count=int(config.step_count),
+            expected_generation=checkpoint_expected_generation,
+        )
+        _validate_fsi_checkpoint_runner_state(checkpoint_loaded.state.runner_state)
+        _validate_fsi_checkpoint_records(checkpoint_loaded.records)
+        saved_outbox = checkpoint_loaded.state.runner_state["observer_outbox"]
+        if checkpoint_loaded.state.runner_state["observer_identity"] != checkpoint_observer_identity:
+            raise ValueError("checkpoint observer identity differs from the original destination")
+        if saved_outbox is not None and saved_outbox["step"] != checkpoint_loaded.state.macro_state.accepted_step_index:
+            raise ValueError("checkpoint observer outbox is not the accepted step")
+        preflow_report = deepcopy(checkpoint_loaded.state.runner_state["preflow_report"])
+    else:
+        preflow_report = _run_or_restore_fixed_solid_preflow(
+            markers=markers,
+            fluid=fluid,
+            solid=solid,
+            config=config,
+            progress_observer=progress_observer,
+            run_started_s=run_started_s,
+            profile_wall_time=profile_wall_time,
+            particle_position_generation=particle_position_generation,
+        )
     preflow_history = preflow_report["preflow_history"]
     if int(config.step_count) > 0:
         _require_preflow_ready_for_fsi(
@@ -1801,7 +1864,82 @@ def run_hibm_mpm_fsi(
             None,
         )
 
-    if coupling_mode == "iqn_ils" and int(config.step_count) > 0:
+    if checkpoint_loaded is not None:
+        accepted_state = checkpoint_loaded.state
+        _validate_fsi_checkpoint_iqn_history(accepted_state.iqn_history, config)
+        saved_runner = accepted_state.runner_state
+        if (initial_guess_controller is None) != (accepted_state.initial_guess_state is None):
+            raise ValueError("checkpoint initial-guess controller presence differs")
+        if (kalman_controller is None) != (accepted_state.kalman_state is None):
+            raise ValueError("checkpoint active-Kalman controller presence differs")
+        if initial_guess_controller is not None:
+            expected_layout = marker_layout_identity(
+                markers, reference_positions_m=marker_reference_positions_m,
+                namespace=f"{case_id}:marker_velocity",
+            )
+            if accepted_state.initial_guess_state.layout_id != expected_layout:
+                raise ValueError("checkpoint interface layout identity differs")
+            initial_guess_controller.restore(accepted_state.initial_guess_state)
+            if not np.array_equal(marker_reference_positions_m, accepted_state.marker_reference_positions_m):
+                raise ValueError("checkpoint marker reference positions differ")
+            marker_reference_positions_m = accepted_state.marker_reference_positions_m.copy()
+        if kalman_controller is not None:
+            kalman_controller.restore(accepted_state.kalman_state)
+        if accepted_state.macro_state.marker_pressure_neumann_gradient is not None:
+            sharp_boundary_cache["hibm_sharp_marker_boundary"] = _allocate_hibm_sharp_resources(markers, config)
+        _restore_accepted_fsi_runtime_state(
+            accepted_state, fluid=fluid, solid=solid, markers=markers,
+            gradient_field=current_marker_pressure_neumann_gradient_field(),
+        )
+        prior_iqn_secant_history = accepted_state.iqn_history
+        feedback_available_for_projection = accepted_state.macro_state.feedback_available_for_projection
+        particle_position_generation = int(saved_runner["particle_position_generation"])
+        markers.marker_geometry_revision = int(saved_runner["marker_geometry_revision"])
+        pressure_pair_anchor_runtime_refresh_count = int(saved_runner["pressure_pair_anchor_runtime_refresh_count"])
+        anchor_install_report = dict(saved_runner["anchor_install_report"])
+        pressure_pair_anchor_pair_map = dict(saved_runner["pressure_pair_anchor_pair_map"])
+        # Rebind derived anchors to the new runtime without inventing another
+        # accepted step or inflating the persisted refresh counter.
+        rebound_anchors = _refresh_runtime_pressure_pair_anchor_markers(
+            markers, fluid, config, refresh_count=pressure_pair_anchor_runtime_refresh_count,
+        )
+        if rebound_anchors is not None:
+            anchor_install_report, pair_map = rebound_anchors
+            pressure_pair_anchor_pair_map = dict(pair_map.as_diagnostics())
+        fluid_projection_count = int(saved_runner["fluid_projection_count"])
+        fluid_projection_after_feedback_count = int(saved_runner["fluid_projection_after_feedback_count"])
+        fluid_projection_consumed_feedback_count = int(saved_runner["fluid_projection_consumed_feedback_count"])
+        fluid_projection_consumed_feedback_trial_count = int(saved_runner["fluid_projection_consumed_feedback_trial_count"])
+        latest_stress_report = saved_runner["latest_stress_report"]
+        latest_force_report = saved_runner["latest_force_report"]
+        latest_scatter_report = saved_runner["latest_scatter_report"]
+        latest_solid_report = saved_runner["latest_solid_report"]
+        latest_solid_step_report = saved_runner["latest_solid_step_report"]
+        latest_feedback_report = saved_runner["latest_feedback_report"]
+        latest_flow_report = saved_runner["latest_flow_report"]
+        latest_feedback_constraint_report = saved_runner["latest_feedback_constraint_report"]
+        latest_dynamic_obstacle_report = saved_runner["latest_dynamic_obstacle_report"]
+        solid_substep_cfl = saved_runner["solid_substep_cfl"]
+        final_flow_field_snapshot = saved_runner["final_flow_field_snapshot"]
+        checkpoint_terminal_fields = saved_runner["terminal_fields"]
+        kalman_fluid_feedback_pressure_min_pa = checkpoint_terminal_fields["computed_pressure_min_pa"]
+        kalman_fluid_feedback_pressure_max_pa = checkpoint_terminal_fields["computed_pressure_max_pa"]
+        history = [dict(record["history_row"]) for record in checkpoint_loaded.records]
+        def restored_reports(name: str) -> list[dict[str, object]]:
+            return [dict(report) for record in checkpoint_loaded.records for report in record[name]]
+        solid_step_execution_reports = restored_reports("solid_step_execution_reports")
+        solid_trial_execution_reports = restored_reports("solid_trial_execution_reports")
+        coupling_step_reports = restored_reports("coupling_step_reports")
+        coupling_trial_work_reports = restored_reports("coupling_trial_work_reports")
+        checkpoint_resume_step = accepted_state.macro_state.accepted_step_index
+        checkpoint_generation = checkpoint_loaded.generation
+        checkpoint_history_tail = checkpoint_loaded.history_tail
+        _replay_fsi_checkpoint_observer(saved_runner, step_observer)
+        _emit_run_progress(
+            progress_observer, run_started_s=run_started_s, phase="fsi_checkpoint_restored",
+            step_completed=checkpoint_resume_step, time_s=accepted_state.macro_state.accepted_time_s,
+        )
+    if coupling_mode == "iqn_ils" and int(config.step_count) > 0 and checkpoint_loaded is None:
         iqn_base_topology_report = _apply_hibm_sharp_marker_boundary_to_fluid(
             markers,
             fluid,
@@ -1831,7 +1969,14 @@ def run_hibm_mpm_fsi(
         else None
     )
 
-    for step_index in range(config.step_count):
+    checkpoint_report_lists = {
+        "solid_step_execution_reports": solid_step_execution_reports,
+        "solid_trial_execution_reports": solid_trial_execution_reports,
+        "coupling_step_reports": coupling_step_reports,
+        "coupling_trial_work_reports": coupling_trial_work_reports,
+    }
+    for step_index in range(checkpoint_resume_step, config.step_count):
+        checkpoint_report_offsets = {name: len(reports) for name, reports in checkpoint_report_lists.items()}
         accepted_iqn_trial_vectors: dict[str, np.ndarray] | None = None
         kalman_raw_writeback_targets: dict[str, np.ndarray] = {}
         kalman_adapter_wall_time_s = 0.0
@@ -2090,6 +2235,7 @@ def run_hibm_mpm_fsi(
                     particle_count=solid.particle_count,
                     support_radius_m=config.mpm_support_radius_m,
                     particle_position_generation=particle_position_generation,
+                    particle_velocity_mps=solid.v,
                 )
                 _require_fresh_external_force_for_solid_step(
                     clear=clear_report,
@@ -2200,22 +2346,10 @@ def run_hibm_mpm_fsi(
                     )
             try:
                 latest_feedback_report = (
-                    markers.update_surface_feedback_from_mpm_surface_particles(
+                    markers.update_material_surface_from_mpm_particles(
                         solid.x,
                         solid.v,
-                        solid.surface_normal,
-                        solid.area_weight_m2,
                         particle_count=solid.particle_count,
-                        support_radius_m=config.mpm_support_radius_m,
-                        dt_s=config.dt_s,
-                        preserve_marker_area=bool(
-                            getattr(
-                                config,
-                                "preserve_marker_area_during_surface_feedback",
-                                False,
-                            )
-                        ),
-                        particle_position_generation=particle_position_generation,
                     )
                 )
             except Exception:
@@ -2864,6 +2998,7 @@ def run_hibm_mpm_fsi(
         history.append(
             {
                 "step": step_index + 1,
+                "time_s": _accepted_fsi_history_time_s(step_index=step_index, dt_s=float(config.dt_s)),
                 **coupling_step_report,
                 "initial_guess_report": dict(initial_guess_step_report),
                 "initial_guess_mode_requested": initial_guess_mode,
@@ -3430,6 +3565,7 @@ def run_hibm_mpm_fsi(
                 **anchor_install_report,
                 **_scatter_report_fields(latest_scatter_report),
                 "mpm_external_force_n": latest_solid_report.external_force_n,
+                **_solid_reaction_report_fields(latest_solid_report),
                 "mpm_primary_mean_velocity_mps": (
                     latest_solid_report.primary_mean_velocity_mps
                 ),
@@ -3459,6 +3595,7 @@ def run_hibm_mpm_fsi(
                 ],
             }
         )
+        step_observer_snapshot = None
         if step_observer is not None:
             if observer_flow_snapshot is None:
                 raise RuntimeError("step observer flow snapshot was not captured")
@@ -3467,36 +3604,99 @@ def run_hibm_mpm_fsi(
                 direct_snapshot_wall_time_s,
             ) = _measure_taichi_operation_wall_time(
                 lambda: _direct_step_observer_snapshot(
-                    observer_flow_snapshot,
-                    solid,
-                    markers,
+                    observer_flow_snapshot, solid, markers,
                     solid_positions_m=step_solid_positions_m,
                     solid_rest_positions_m=rest_positions_m,
-                    fixed_mask=fixed_mask,
-                    tip_mask=tip_mask,
+                    fixed_mask=fixed_mask, tip_mask=tip_mask,
                 ),
                 enabled=profile_wall_time,
             )
             if record_iqn_trial_vectors:
                 if accepted_iqn_trial_vectors is None:
-                    raise RuntimeError(
-                        "accepted IQN step did not produce a trial-vector trace"
-                    )
-                step_observer_snapshot = {
-                    **step_observer_snapshot,
-                    **accepted_iqn_trial_vectors,
-                }
-            snapshot_capture_wall_time_s = float(
-                math.fsum(
-                    (
-                        snapshot_capture_wall_time_s,
-                        direct_snapshot_wall_time_s,
-                    )
-                )
+                    raise RuntimeError("accepted IQN step did not produce a trial-vector trace")
+                step_observer_snapshot = {**step_observer_snapshot, **accepted_iqn_trial_vectors}
+            snapshot_capture_wall_time_s = float(math.fsum((
+                snapshot_capture_wall_time_s, direct_snapshot_wall_time_s,
+            )))
+            history[-1]["snapshot_capture_wall_time_s"] = snapshot_capture_wall_time_s
+        checkpoint_outbox = (
+            None if step_observer_snapshot is None else {
+                "step": step_index + 1,
+                "time_s": float(config.dt_s) * float(step_index + 1),
+                "history_row": dict(history[-1]),
+                "snapshot": step_observer_snapshot,
+            }
+        )
+        if checkpoint_output_path is not None:
+            # This is the accepted physical/controller boundary. Publish before
+            # calling external observers so an observer interruption is resumable.
+            macro_state = capture_host_macro_step_state(
+                fluid=fluid, solid=solid, markers=markers,
+                accepted_step_index=step_index + 1,
+                accepted_time_s=float(config.dt_s) * float(step_index + 1),
+                feedback_available_for_projection=feedback_available_for_projection,
+                marker_pressure_neumann_gradient_field=current_marker_pressure_neumann_gradient_field(),
             )
-            history[-1]["snapshot_capture_wall_time_s"] = (
-                snapshot_capture_wall_time_s
+            checkpoint_terminal_fields = _fsi_checkpoint_terminal_diagnostics(
+                markers, config, latest_flow_report,
+                pressure_min_pa=kalman_fluid_feedback_pressure_min_pa,
+                pressure_max_pa=kalman_fluid_feedback_pressure_max_pa,
             )
+            runner_state = {
+                "dt_s": float(config.dt_s), "coupling_mode": coupling_mode,
+                "preflow_report": preflow_report,
+                "particle_position_generation": particle_position_generation,
+                "marker_geometry_revision": int(markers.marker_geometry_revision),
+                "pressure_pair_anchor_runtime_refresh_count": pressure_pair_anchor_runtime_refresh_count,
+                "fluid_projection_count": fluid_projection_count,
+                "fluid_projection_after_feedback_count": fluid_projection_after_feedback_count,
+                "fluid_projection_consumed_feedback_count": fluid_projection_consumed_feedback_count,
+                "fluid_projection_consumed_feedback_trial_count": fluid_projection_consumed_feedback_trial_count,
+                "latest_stress_report": latest_stress_report,
+                "latest_force_report": latest_force_report,
+                "latest_scatter_report": latest_scatter_report,
+                "latest_solid_report": latest_solid_report,
+                "latest_solid_step_report": latest_solid_step_report,
+                "latest_feedback_report": latest_feedback_report,
+                "latest_flow_report": latest_flow_report,
+                "latest_feedback_constraint_report": latest_feedback_constraint_report,
+                "latest_dynamic_obstacle_report": latest_dynamic_obstacle_report,
+                "solid_substep_cfl": solid_substep_cfl,
+                "final_flow_field_snapshot": final_flow_field_snapshot,
+                "terminal_fields": checkpoint_terminal_fields,
+                "anchor_install_report": anchor_install_report,
+                "pressure_pair_anchor_pair_map": pressure_pair_anchor_pair_map,
+                "observer_identity": checkpoint_observer_identity,
+                "observer_outbox": checkpoint_outbox,
+            }
+            state = AcceptedFsiState(
+                macro_state=macro_state,
+                fluid_boundary_fields=_capture_preflow_snapshot_fields(fluid),
+                velocity_boundary_authority=str(fluid.velocity_dirichlet_boundary_authority),
+                ledger_generation=int(fluid.velocity_dirichlet_component_ledger_generation),
+                marker_reference_positions_m=marker_reference_positions_m,
+                initial_guess_state=None if initial_guess_controller is None else initial_guess_controller.snapshot(),
+                kalman_state=None if kalman_controller is None else kalman_controller.snapshot(),
+                iqn_history=prior_iqn_secant_history, runner_state=runner_state,
+            )
+            record = {
+                "history_row": dict(history[-1]),
+                **{name: [dict(report) for report in entries[checkpoint_report_offsets[name]:]]
+                   for name, entries in checkpoint_report_lists.items()},
+            }
+            committed = _commit_accepted_fsi_checkpoint(
+                checkpoint_output_path, state=state, identity=checkpoint_identity,
+                record=record, previous_tail=checkpoint_history_tail,
+                expected_generation=checkpoint_generation,
+            )
+            checkpoint_generation = committed.generation
+            checkpoint_history_tail = committed.history_tail
+            _emit_run_progress(
+                progress_observer, run_started_s=run_started_s,
+                phase="fsi_checkpoint_committed", step_completed=step_index + 1,
+                time_s=float(config.dt_s) * float(step_index + 1),
+            )
+        if step_observer is not None:
             observer_started_s = (
                 time.perf_counter() if profile_wall_time else None
             )
@@ -3626,7 +3826,7 @@ def run_hibm_mpm_fsi(
         solid_step_execution_reports
     )
     if config.step_count == 0 and preflow_history:
-        return _preflow_only_report(
+        return {**_preflow_only_report(
             case_id=case_id,
             case_metadata=case_metadata,
             boundary_conditions=boundary_conditions,
@@ -3641,7 +3841,7 @@ def run_hibm_mpm_fsi(
             preflow_report=preflow_report,
             runtime_identity=runtime_identity,
             profile_wall_time=profile_wall_time,
-        )
+        ), "material_transfer_configuration": material_transfer_report}
 
     if (
         latest_stress_report is None
@@ -3683,6 +3883,7 @@ def run_hibm_mpm_fsi(
     return {
         "case": case_id,
         "case_metadata": dict(case_metadata),
+        "material_transfer_configuration": material_transfer_report,
         "config": asdict(config),
         "taichi_runtime_identity": dict(runtime_identity),
         "profile_wall_time_enabled": bool(profile_wall_time),
@@ -3789,14 +3990,17 @@ def run_hibm_mpm_fsi(
             "segments" if int(markers.projection_segment_count) > 0 else "points"
         ),
         "marker_projection_segment_count": int(markers.projection_segment_count),
-        **_marker_projection_boundary_report_fields(
-            markers,
-            traction_tip_cap_pressure_enabled=(
-                _traction_tip_cap_pressure_enabled(config)
-            ),
-            canonical_velocity_dirichlet_report=latest_flow_report.get(
-                "canonical_velocity_dirichlet_report"
-            ),
+        **(
+            checkpoint_terminal_fields["projection_boundary"]
+            if checkpoint_terminal_fields else _marker_projection_boundary_report_fields(
+                markers,
+                traction_tip_cap_pressure_enabled=(
+                    _traction_tip_cap_pressure_enabled(config)
+                ),
+                canonical_velocity_dirichlet_report=latest_flow_report.get(
+                    "canonical_velocity_dirichlet_report"
+                ),
+            )
         ),
         "flow_projection_iterations_actual": int(config.flow_projection_iterations),
         "solid_seeding_report": solid_seeding,
@@ -3958,13 +4162,17 @@ def run_hibm_mpm_fsi(
         "total_marker_force_n": latest_force_report.total_marker_force_n,
         **_marker_force_report_fields(latest_force_report),
         **_stress_sampling_report_fields(latest_stress_report),
-        **_marker_traction_report_fields(markers, include_face_diagnostics=True),
+        **(
+            checkpoint_terminal_fields["traction"] if checkpoint_terminal_fields
+            else _marker_traction_report_fields(markers, include_face_diagnostics=True)
+        ),
         **anchor_install_report,
         "scatter_invalid_marker_count": latest_scatter_report.invalid_marker_count,
         "scatter_active_marker_count": latest_scatter_report.active_marker_count,
         "scatter_active_particle_count": latest_scatter_report.active_pair_count,
         **_scatter_report_fields(latest_scatter_report),
         "mpm_external_force_n": latest_solid_report.external_force_n,
+        **_solid_reaction_report_fields(latest_solid_report),
         "surface_feedback_updated_marker_count": (
             latest_feedback_report.updated_marker_count
         ),
@@ -3974,14 +4182,29 @@ def run_hibm_mpm_fsi(
         "surface_feedback_max_marker_displacement_m": (
             latest_feedback_report.max_marker_displacement_m
         ),
-        "final_stress_marker_diagnostics": markers.stress_marker_diagnostics(),
-        "final_stress_face_diagnostics": markers.stress_face_diagnostics(
-            primary_region_id=PRIMARY_REGION_ID,
-            secondary_region_id=SECONDARY_REGION_ID,
-            streamwise_axis_index=STREAMWISE_AXIS_INDEX,
-            include_face_diagnostics=True,
+        "final_stress_marker_diagnostics": (
+            checkpoint_terminal_fields["final_stress_marker_diagnostics"]
+            if checkpoint_terminal_fields else markers.stress_marker_diagnostics()
+        ),
+        "final_stress_face_diagnostics": (
+            checkpoint_terminal_fields["final_stress_face_diagnostics"]
+            if checkpoint_terminal_fields else markers.stress_face_diagnostics(
+                primary_region_id=PRIMARY_REGION_ID,
+                secondary_region_id=SECONDARY_REGION_ID,
+                streamwise_axis_index=STREAMWISE_AXIS_INDEX,
+                include_face_diagnostics=True,
+            )
         ),
         "pressure_pair_anchor_pair_map": pressure_pair_anchor_pair_map,
+        "fsi_checkpoint_enabled": checkpoint_output_path is not None,
+        "fsi_checkpoint_resume_step": checkpoint_resume_step,
+        "fsi_checkpoint_durable_accepted_step": (
+            0 if checkpoint_history_tail is None else checkpoint_history_tail.step
+        ),
+        "fsi_checkpoint_generation": checkpoint_generation,
+        "fsi_checkpoint_path": (
+            None if checkpoint_output_path is None else str(checkpoint_output_path)
+        ),
         **_fsi_profile_summary(history),
         "history": history,
         "max_displacement_m": max_displacement,
@@ -4541,6 +4764,295 @@ def traction_formulation_supported(config: Any) -> tuple[bool, str]:
     return True, "supported"
 
 
+_FSI_CHECKPOINT_REPORT_LISTS = (
+    "solid_step_execution_reports", "solid_trial_execution_reports",
+    "coupling_step_reports", "coupling_trial_work_reports",
+)
+_FSI_CHECKPOINT_COUNTERS = (
+    "particle_position_generation", "marker_geometry_revision",
+    "pressure_pair_anchor_runtime_refresh_count", "fluid_projection_count",
+    "fluid_projection_after_feedback_count", "fluid_projection_consumed_feedback_count",
+    "fluid_projection_consumed_feedback_trial_count",
+)
+_FSI_CHECKPOINT_MAPPING_REPORTS = (
+    "preflow_report", "latest_solid_step_report", "latest_flow_report",
+    "latest_feedback_constraint_report", "latest_dynamic_obstacle_report",
+    "solid_substep_cfl", "final_flow_field_snapshot", "terminal_fields",
+    "anchor_install_report", "pressure_pair_anchor_pair_map",
+)
+
+
+def _fsi_checkpoint_observer_identity(observer: Any | None) -> str | None:
+    if observer is None:
+        return None
+    if getattr(observer, "checkpoint_replay_safe", False) is not True:
+        raise ValueError("checkpoint observer must explicitly support idempotent replay")
+    identity = getattr(observer, "checkpoint_identity", None)
+    if not isinstance(identity, str) or not identity.strip():
+        raise ValueError("checkpoint observer requires a stable destination identity")
+    return identity
+
+
+def _validate_fsi_checkpoint_outbox(value: Mapping[str, object]) -> None:
+    identity, outbox = value["observer_identity"], value["observer_outbox"]
+    if identity is None:
+        if outbox is not None:
+            raise ValueError("checkpoint observer outbox requires a destination identity")
+        return
+    if not isinstance(identity, str) or not identity.strip():
+        raise ValueError("checkpoint observer destination identity is invalid")
+    if not isinstance(outbox, Mapping) or set(outbox) != {"step", "time_s", "history_row", "snapshot"}:
+        raise ValueError("checkpoint observer outbox is incomplete")
+    step = outbox["step"]
+    if type(step) is not int or step <= 0:
+        raise ValueError("checkpoint observer step is invalid")
+    if not isinstance(outbox["history_row"], Mapping) or outbox["history_row"].get("step") != step:
+        raise ValueError("checkpoint observer history step differs")
+    if not isinstance(outbox["snapshot"], Mapping) or not outbox["snapshot"]:
+        raise ValueError("checkpoint observer snapshot is incomplete")
+    expected_time = step * value["dt_s"]
+    actual_time = outbox["time_s"]
+    if not isinstance(actual_time, (int, float)) or isinstance(actual_time, bool) or not math.isfinite(actual_time):
+        raise ValueError("checkpoint observer time is invalid")
+    if abs(actual_time - expected_time) > 4 * max(math.ulp(actual_time), math.ulp(expected_time)):
+        raise ValueError("checkpoint observer time differs from accepted physical time")
+
+
+def _replay_fsi_checkpoint_observer(value: Mapping[str, object], observer: Any | None) -> None:
+    if value["observer_identity"] != _fsi_checkpoint_observer_identity(observer):
+        raise ValueError("checkpoint observer identity differs from its saved destination")
+    outbox = value["observer_outbox"]
+    if outbox is None:
+        return
+    # Always replay the last accepted outbox. The explicitly opted-in observer
+    # must atomically replace its own step files without appending duplicates.
+    observer(outbox["step"], outbox["time_s"], dict(outbox["history_row"]), dict(outbox["snapshot"]))
+
+
+def _validate_fsi_checkpoint_iqn_history(history, config) -> None:
+    """A strict restart never silently drops incompatible accepted secants."""
+
+    if history is None:
+        return
+    if not bool(getattr(config, "iqn_reuse_previous_step_history", False)):
+        raise ValueError("checkpoint IQN history exists while reuse is disabled")
+    defaults = FsiCouplingConfig()
+    expected = IqnIlsConfig(
+        history_limit=int(config.iqn_history_limit),
+        initial_picard_relaxation=float(config.iqn_initial_picard_relaxation),
+        svd_relative_cutoff=float(config.iqn_svd_relative_cutoff),
+        max_condition_number=defaults.iqn_max_condition_number,
+        max_coefficient_norm=defaults.iqn_max_coefficient_norm,
+        max_update_ratio=defaults.iqn_max_update_ratio,
+    )
+    if tuple(history.config_signature) != expected.signature:
+        raise ValueError("checkpoint IQN configuration signature differs from live algorithm")
+
+
+def _validate_fsi_checkpoint_runner_state(value: object) -> None:
+    from simulation_core.coupling.hibm_mpm import reports
+    from simulation_core.solids.neo_hookean_mpm import NeoHookeanMpmReport
+
+    typed_reports = {
+        "latest_stress_report": reports.HibmMpmFluidStressSampleReport,
+        "latest_force_report": reports.HibmMpmSurfaceMarkerForceReport,
+        "latest_scatter_report": reports.HibmMpmMpmForceScatterReport,
+        "latest_solid_report": NeoHookeanMpmReport,
+        "latest_feedback_report": reports.HibmMpmSurfaceUpdateReport,
+    }
+    required = {
+        "dt_s", "coupling_mode", *_FSI_CHECKPOINT_COUNTERS,
+        *_FSI_CHECKPOINT_MAPPING_REPORTS, *typed_reports, "observer_identity", "observer_outbox",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("FSI checkpoint runner metadata schema is incomplete")
+    _validate_fsi_checkpoint_outbox(value)
+    for name in _FSI_CHECKPOINT_COUNTERS:
+        count = value[name]
+        if isinstance(count, (bool, np.bool_)) or not isinstance(count, Integral) or count < 0:
+            raise ValueError(f"FSI checkpoint runner counter {name} is invalid")
+    for name in _FSI_CHECKPOINT_MAPPING_REPORTS:
+        if not isinstance(value[name], Mapping):
+            raise ValueError(f"FSI checkpoint runner report {name} is invalid")
+    for name, report_type in typed_reports.items():
+        if not isinstance(value[name], report_type):
+            raise ValueError(f"FSI checkpoint runner report {name} has invalid type")
+    terminal = value["terminal_fields"]
+    if set(terminal) != {
+        "computed_pressure_min_pa", "computed_pressure_max_pa", "traction",
+        "projection_boundary", "final_stress_marker_diagnostics", "final_stress_face_diagnostics",
+    }:
+        raise ValueError("FSI checkpoint terminal report is incomplete")
+    for name in ("computed_pressure_min_pa", "computed_pressure_max_pa"):
+        number = terminal[name]
+        if isinstance(number, (bool, np.bool_)) or not isinstance(number, (int, float, np.number)) or not math.isfinite(number):
+            raise ValueError("FSI checkpoint terminal pressure is invalid")
+    for name in ("traction", "projection_boundary", "final_stress_face_diagnostics"):
+        if not isinstance(terminal[name], Mapping):
+            raise ValueError(f"FSI checkpoint terminal {name} is invalid")
+    diagnostics = terminal["final_stress_marker_diagnostics"]
+    if not isinstance(diagnostics, (tuple, list)) or any(not isinstance(row, Mapping) for row in diagnostics):
+        raise ValueError("FSI checkpoint terminal marker diagnostics are invalid")
+
+
+def _validate_fsi_checkpoint_records(records: object, *, first_step: int = 1) -> None:
+    if not isinstance(records, (tuple, list)):
+        raise ValueError("FSI checkpoint records must be an ordered sequence")
+    for step, record in enumerate(records, start=first_step):
+        if not isinstance(record, Mapping) or set(record) != {"history_row", *_FSI_CHECKPOINT_REPORT_LISTS}:
+            raise ValueError("FSI checkpoint history record schema is incomplete")
+        row = record["history_row"]
+        if not isinstance(row, Mapping) or type(row.get("step")) is not int or row["step"] != step:
+            raise ValueError("FSI checkpoint history is not a contiguous accepted prefix")
+        for name in _FSI_CHECKPOINT_REPORT_LISTS:
+            entries = record[name]
+            if not isinstance(entries, (tuple, list)) or any(not isinstance(entry, Mapping) for entry in entries):
+                raise ValueError(f"FSI checkpoint history {name} is invalid")
+        if len(record["solid_step_execution_reports"]) != 1 or len(record["coupling_step_reports"]) != 1:
+            raise ValueError("FSI checkpoint must record exactly one accepted macro step")
+        coupling = record["coupling_step_reports"][0]
+        iterations = coupling.get("hibm_fsi_coupling_iterations_used")
+        if type(iterations) is not int or iterations < 1:
+            raise ValueError("FSI checkpoint accepted coupling iteration count is invalid")
+        if len(record["solid_trial_execution_reports"]) != iterations:
+            raise ValueError("FSI checkpoint solid trial history is incomplete")
+        if _fsi_trial_work_summary(list(record["coupling_trial_work_reports"]))["trial_count"] != iterations:
+            raise ValueError("FSI checkpoint work history is incomplete")
+
+
+class FsiCheckpointCommitError(RuntimeError):
+    """Accepted physics exists in memory but was not durably published."""
+
+    def __init__(self, message: str, *, diagnostics: Mapping[str, object]) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics)
+
+
+def _commit_accepted_fsi_checkpoint(
+    path: Path, *, state: AcceptedFsiState, identity: Mapping[str, str],
+    record: Mapping[str, object], previous_tail: Any, expected_generation: str | None,
+) -> Any:
+    _validate_fsi_checkpoint_runner_state(state.runner_state)
+    _validate_fsi_checkpoint_records((record,), first_step=state.macro_state.accepted_step_index)
+    outbox = state.runner_state.get("observer_outbox")
+    if outbox is not None and outbox["step"] != state.macro_state.accepted_step_index:
+        raise ValueError("checkpoint observer outbox is not the accepted step")
+    try:
+        return write_accepted_fsi_checkpoint(
+            path, state=state, identity=identity, record=record,
+            previous_tail=previous_tail, expected_generation=expected_generation,
+        )
+    except Exception as exc:
+        raise FsiCheckpointCommitError(
+            "accepted FSI step could not be saved; resume the last durable checkpoint",
+            diagnostics={
+                "checkpoint_failure_kind": "persistence",
+                "in_memory_accepted_step": state.macro_state.accepted_step_index,
+                "durable_accepted_step": 0 if previous_tail is None else previous_tail.step,
+                "checkpoint_path": str(path),
+            },
+        ) from exc
+
+
+def _fsi_checkpoint_terminal_diagnostics(
+    markers: Any, config: Any, flow_report: Mapping[str, object],
+    *, pressure_min_pa: float, pressure_max_pa: float,
+) -> dict[str, object]:
+    return {
+        "computed_pressure_min_pa": pressure_min_pa,
+        "computed_pressure_max_pa": pressure_max_pa,
+        "traction": _marker_traction_report_fields(markers, include_face_diagnostics=True),
+        "projection_boundary": _marker_projection_boundary_report_fields(
+            markers, traction_tip_cap_pressure_enabled=_traction_tip_cap_pressure_enabled(config),
+            canonical_velocity_dirichlet_report=flow_report.get("canonical_velocity_dirichlet_report"),
+        ),
+        "final_stress_marker_diagnostics": markers.stress_marker_diagnostics(),
+        "final_stress_face_diagnostics": markers.stress_face_diagnostics(
+            primary_region_id=PRIMARY_REGION_ID, secondary_region_id=SECONDARY_REGION_ID,
+            streamwise_axis_index=STREAMWISE_AXIS_INDEX, include_face_diagnostics=True,
+        ),
+    }
+
+
+def _fsi_checkpoint_paths(config: Any) -> tuple[Path | None, Path | None]:
+    def manifest_path(value: object) -> Path | None:
+        if value is None:
+            return None
+        if not isinstance(value, (str, Path)) or not str(value).strip():
+            raise ValueError("FSI checkpoint path must be a non-empty path")
+        path = Path(value).expanduser().resolve()
+        if path.suffix.lower() == ".npz":
+            raise ValueError("a field-export npz is not a complete FSI checkpoint")
+        return path if path.suffix == ".json" else path.with_suffix(".json")
+
+    input_path = manifest_path(getattr(config, "fsi_checkpoint_input_path", None))
+    output_path = manifest_path(getattr(config, "fsi_checkpoint_output_path", None))
+    if input_path is None and output_path is None:
+        return None, None
+    if isinstance(config.step_count, (bool, np.bool_)) or not isinstance(config.step_count, Integral) or config.step_count <= 0:
+        raise ValueError("FSI checkpointing requires a positive total step count")
+    if getattr(config, "iqn_kalman_oracle_interpolation_target_step", None) is not None:
+        raise ValueError("FSI checkpointing does not support offline no-commit research probes")
+    if input_path is not None:
+        if any(getattr(config, name, None) is not None for name in (
+            "preflow_snapshot_input_path", "preflow_snapshot_output_path",
+        )):
+            raise ValueError("complete FSI checkpoint input cannot be combined with preflow snapshot paths")
+        if output_path is not None and output_path != input_path:
+            raise ValueError("FSI checkpoint input/output must use the same prefix; implicit forks are not supported")
+        if not input_path.is_file():
+            raise FileNotFoundError(f"FSI checkpoint manifest does not exist: {input_path}")
+        output_path = input_path
+    elif output_path.is_file():
+        raise FileExistsError(f"FSI checkpoint already exists; resume explicitly: {output_path}")
+    return input_path, output_path
+
+
+def _fsi_checkpoint_generation_pin(config: Any, input_path: Path) -> str:
+    configured = getattr(config, "fsi_checkpoint_expected_generation", None)
+    if configured is not None:
+        return configured
+    head = read_checkpoint_head(input_path)
+    if head is None:
+        raise ValueError("complete accepted FSI checkpoint manifest is required")
+    return head.generation
+
+
+def _fsi_checkpoint_config_payload(config: Any) -> dict[str, object]:
+    payload = asdict(config) if hasattr(config, "__dataclass_fields__") else dict(vars(config))
+    operational = {
+        "step_count", "fsi_checkpoint_input_path", "fsi_checkpoint_output_path",
+        "fsi_checkpoint_expected_generation",
+        "preflow_snapshot_input_path", "preflow_snapshot_output_path",
+    }
+    return {key: value for key, value in payload.items() if key not in operational}
+
+
+def _fsi_checkpoint_identity(*, markers: Any, fluid: Any, solid: Any, config: Any) -> dict[str, str]:
+    runtime_identity = taichi_runtime_identity()
+    payload = _fsi_checkpoint_config_payload(config)
+    if str(getattr(config, "initial_guess_mode", "carry_forward")) == "oracle_replay":
+        # The complete declared trajectory is part of the experiment identity.
+        # Extending that trajectory is not a transparent continuation.
+        import hashlib
+        digest = hashlib.sha256()
+        frames = Path(config.initial_guess_oracle_path).expanduser() / "step_fields"
+        for step in range(1, int(config.step_count) + 1):
+            frame = frames / f"step_{step:04d}.npz"
+            digest.update(frame.name.encode("utf-8"))
+            digest.update(frame.read_bytes())
+        payload["oracle_trajectory_sha256"] = digest.hexdigest()
+    identity = PreflowSnapshotIdentity.from_inputs(
+        config={**payload, "taichi_runtime_identity": {
+            name: runtime_identity[name]
+            for name in ("actual_arch", "default_fp", "random_seed", "compiler_configuration")
+        }},
+        sources=_preflow_snapshot_source_payload(),
+        geometry=_preflow_snapshot_geometry_payload(fluid=fluid, markers=markers, solid=solid),
+    )
+    return asdict(identity)
+
+
 def _preflow_snapshot_paths(config: Any) -> tuple[object | None, object | None]:
     input_path = getattr(config, "preflow_snapshot_input_path", None)
     output_path = getattr(config, "preflow_snapshot_output_path", None)
@@ -4662,6 +5174,7 @@ def _validate_rectangular_solid_config(config: Any) -> None:
         )
 
     _preflow_snapshot_paths(config)
+    _fsi_checkpoint_paths(config)
     _preflow_traction_readiness_mode(config)
     solid_boundary_mode = _flow_solid_boundary_mode(config)
     if solid_boundary_mode not in FLOW_SOLID_BOUNDARY_MODES:
@@ -6113,6 +6626,19 @@ def _initialize_computed_flow(
     return _initialize_inlet_flow(fluid, config)
 
 
+def _flow_physical_face_flux_topology(config: Any) -> tuple[bool, bool | None]:
+    """Resolve the one runner-owned exterior normal-flux topology contract."""
+    configured_zmax = getattr(config, "flow_projection_velocity_inlet_zmax", None)
+    if configured_zmax is not None and not isinstance(
+        configured_zmax, (bool, np.bool_)
+    ):
+        raise ValueError("flow_projection_velocity_inlet_zmax must be bool or None")
+    return (
+        bool(getattr(config, "flow_pressure_outlet_enabled", True)),
+        None if configured_zmax is None else bool(configured_zmax),
+    )
+
+
 def _project_current_flow(
     fluid: CartesianFluidSolver,
     config: Any,
@@ -6128,22 +6654,8 @@ def _project_current_flow(
     pre_projection_velocity_projector: object | None = None,
     pressure_velocity_nullspace_projector: object | None = None,
 ) -> dict[str, object]:
-    configured_velocity_inlet_zmax = getattr(
-        config,
-        "flow_projection_velocity_inlet_zmax",
-        None,
-    )
-    if configured_velocity_inlet_zmax is not None and not isinstance(
-        configured_velocity_inlet_zmax,
-        (bool, np.bool_),
-    ):
-        raise ValueError(
-            "flow_projection_velocity_inlet_zmax must be bool or None"
-        )
-    velocity_inlet_zmax = (
-        None
-        if configured_velocity_inlet_zmax is None
-        else bool(configured_velocity_inlet_zmax)
+    pressure_outlet_enabled, velocity_inlet_zmax = _flow_physical_face_flux_topology(
+        config
     )
     effective_preserve_velocity_constraints = (
         bool(getattr(config, "preserve_marker_velocity_constraints", True))
@@ -6156,9 +6668,6 @@ def _project_current_flow(
             "flow_hibm_tiny_unreached_cleanup_component_cells",
             0,
         )
-    )
-    pressure_outlet_enabled = bool(
-        getattr(config, "flow_pressure_outlet_enabled", True)
     )
     sharp_reachability_prepared = bool(
         _use_hibm_sharp_marker_boundary(config) and pressure_outlet_enabled
@@ -8893,6 +9402,101 @@ def _hibm_sharp_interior_probe_distance_xyz_m(
     return values
 
 
+def _hibm_sharp_resource_key(markers: Any, config: Any) -> tuple[object, ...]:
+    bounds_min, bounds_max = _domain_bounds(config)
+    return (
+        tuple(config.grid_nodes), tuple(float(v) for v in bounds_min),
+        tuple(float(v) for v in bounds_max),
+        max(int(getattr(markers, "marker_capacity", 0)), int(markers.marker_count), 1),
+        int(_hibm_marker_mac_constraint_iterations(config)),
+        float(_hibm_marker_mac_constraint_absolute_tolerance_mps(config)),
+    )
+
+
+def _allocate_hibm_sharp_resources(markers: Any, config: Any) -> dict[str, object]:
+    """Allocate derived workspaces without classifying or publishing geometry."""
+    key = _hibm_sharp_resource_key(markers, config)
+    nodes, bounds_min, bounds_max, capacity, iterations, tolerance = key
+    runtime = TaichiRuntimeConfig(arch="cuda")
+    return {
+        "cache_key": key,
+        "markers_owner": markers,
+        "ib_search": HibmMpmIbNodeSearch(
+            grid_nodes=nodes, bounds_min_m=bounds_min, bounds_max_m=bounds_max,
+            marker_capacity=capacity, runtime=runtime,
+        ),
+        "ib_boundary": HibmMpmIbBoundaryConditions(
+            grid_nodes=nodes, marker_capacity=capacity, runtime=runtime,
+        ),
+        "pre_projection_velocity_projector": _HibmPreProjectionVelocityProjector(
+            markers=markers,
+            operator=HibmMpmMarkerMacConstraintOperator(grid_nodes=nodes, marker_capacity=capacity),
+            max_iterations=iterations, absolute_tolerance_mps=tolerance,
+        ),
+    }
+
+
+def _restore_accepted_fsi_runtime_state(
+    state: AcceptedFsiState, *, fluid: Any, solid: Any, markers: Any,
+    gradient_field: Any | None,
+) -> None:
+    validate_accepted_fsi_state(state)
+    macro = state.macro_state
+    if int(solid.particle_count) != macro.solid_particle_count:
+        raise ValueError("checkpoint solid particle count differs from runtime")
+    # Check every runtime destination, including the last ledger field, before
+    # the first restore write. A backend failure later aborts this new runtime.
+    for owner, fields in (
+        (solid, macro.solid_fields), (fluid, macro.fluid_fields),
+        (fluid, state.fluid_boundary_fields),
+    ):
+        for name, proposed in fields.items():
+            field = getattr(owner, name, None)
+            if field is None or not callable(getattr(field, "from_numpy", None)):
+                raise ValueError(f"checkpoint runtime field {name!r} is unavailable")
+            current = np.asarray(field.to_numpy())
+            if current.shape != proposed.shape or current.dtype != proposed.dtype:
+                raise ValueError(f"checkpoint runtime field {name!r} shape/dtype differs")
+    validate_marker_interface_state(markers, macro.marker_state)
+    if getattr(markers, "material_surface_binding_identity", None) is not None:
+        markers.validate_accepted_material_surface_state(
+            macro.marker_state,
+            particle_positions_m=macro.solid_fields["x"],
+            particle_velocities_mps=macro.solid_fields["v"],
+        )
+    _snapshot_auxiliary_restore_inputs(
+        fluid, pressure=state.fluid_boundary_fields["pressure"],
+    )
+    if (macro.marker_pressure_neumann_gradient is None) != (gradient_field is None):
+        raise ValueError("checkpoint marker-gradient field presence differs")
+    if gradient_field is not None:
+        current = np.asarray(gradient_field.to_numpy())[:macro.marker_projection_vertex_count]
+        proposed = macro.marker_pressure_neumann_gradient
+        if current.shape != proposed.shape or current.dtype != proposed.dtype:
+            raise ValueError("checkpoint marker-gradient shape/dtype differs")
+    if str(fluid.velocity_dirichlet_boundary_authority) != state.velocity_boundary_authority:
+        raise ValueError("checkpoint boundary authority differs")
+    if state.velocity_boundary_authority == "canonical":
+        _canonical_snapshot_restore_prepare_plan(fluid)
+    restore_host_macro_step_state(
+        macro, fluid=fluid, solid=solid, markers=markers,
+        marker_pressure_neumann_gradient_field=gradient_field,
+    )
+    # Macro rollback clears canonical authority. Install/seal the accepted
+    # ledger afterwards; reversing these two calls would erase saved targets.
+    _restore_preflow_snapshot_fields(
+        fluid, state.fluid_boundary_fields,
+        velocity_dirichlet_boundary_authority=state.velocity_boundary_authority,
+        velocity_dirichlet_component_ledger_generation=state.ledger_generation,
+    )
+    # Preflow import infers these flags from its fixed-solid payload. A full
+    # accepted FSI checkpoint instead owns their exact saved values.
+    fluid._sst_wall_distance_valid = macro.fluid_host_metadata["sst_wall_distance_valid"]
+    fluid.hibm_dynamic_solid_volume_enabled = macro.fluid_host_metadata[
+        "hibm_dynamic_solid_volume_enabled"
+    ]
+
+
 def _apply_hibm_sharp_marker_boundary_to_fluid(
     markers: HibmMpmSurfaceMarkers | None,
     fluid: CartesianFluidSolver,
@@ -8939,14 +9543,7 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
     # geometry and from search parameters.  Those values change frequently in
     # FSI but do not change the Taichi field shapes, so the allocated search,
     # boundary, and projection objects remain reusable.
-    resource_cache_key = (
-        tuple(config.grid_nodes),
-        tuple(float(value) for value in bounds_min),
-        tuple(float(value) for value in bounds_max),
-        int(marker_capacity),
-        int(marker_mac_constraint_iterations),
-        float(marker_mac_constraint_absolute_tolerance_mps),
-    )
+    resource_cache_key = _hibm_sharp_resource_key(markers, config)
     # Classified topology has a stricter identity.  In particular, marker
     # count alone cannot detect an in-place moving surface, so the marker-owned
     # geometry revision participates in every topology reuse decision.  The
@@ -9015,39 +9612,10 @@ def _apply_hibm_sharp_marker_boundary_to_fluid(
     else:
         if stage_observer is not None:
             stage_observer("hibm_resource_allocate_before")
-        runtime = TaichiRuntimeConfig(arch="cuda")
-        ib_search = HibmMpmIbNodeSearch(
-            grid_nodes=tuple(config.grid_nodes),
-            bounds_min_m=bounds_min,
-            bounds_max_m=bounds_max,
-            marker_capacity=marker_capacity,
-            runtime=runtime,
-        )
-        ib_boundary = HibmMpmIbBoundaryConditions(
-            grid_nodes=tuple(config.grid_nodes),
-            marker_capacity=marker_capacity,
-            runtime=runtime,
-        )
-        pre_projection_velocity_projector = _HibmPreProjectionVelocityProjector(
-            markers=markers,
-            operator=HibmMpmMarkerMacConstraintOperator(
-                grid_nodes=tuple(config.grid_nodes),
-                marker_capacity=marker_capacity,
-            ),
-            max_iterations=marker_mac_constraint_iterations,
-            absolute_tolerance_mps=(
-                marker_mac_constraint_absolute_tolerance_mps
-            ),
-        )
-        cache_entry = {
-            "cache_key": resource_cache_key,
-            "markers_owner": markers,
-            "ib_search": ib_search,
-            "ib_boundary": ib_boundary,
-            "pre_projection_velocity_projector": (
-                pre_projection_velocity_projector
-            ),
-        }
+        cache_entry = _allocate_hibm_sharp_resources(markers, config)
+        ib_search = cache_entry["ib_search"]
+        ib_boundary = cache_entry["ib_boundary"]
+        pre_projection_velocity_projector = cache_entry["pre_projection_velocity_projector"]
         if boundary_cache is not None:
             boundary_cache["hibm_sharp_marker_boundary"] = cache_entry
         if stage_observer is not None:
@@ -10162,6 +10730,9 @@ def _flow_advance_current_step_trial(
         )
 
     turbulence_model = _flow_turbulence_model(config)
+    pressure_outlet_zmin, velocity_inlet_zmax = _flow_physical_face_flux_topology(
+        config
+    )
     sst_transport_report: dict[str, object] = {}
     sst_transport_substeps_total = 0
     sst_transport_rejected_trial_count_total = 0
@@ -10284,6 +10855,8 @@ def _flow_advance_current_step_trial(
                                 predictor_no_slip_domain_walls
                             ),
                             advection_scheme=advection_scheme,
+                            pressure_outlet_zmin=pressure_outlet_zmin,
+                            velocity_inlet_zmax=velocity_inlet_zmax,
                             stage_observer=sst_stage_observer,
                         ),
                         enabled=measure_wall_times,
@@ -10365,6 +10938,8 @@ def _flow_advance_current_step_trial(
                             no_slip_domain_walls=(
                                 predictor_no_slip_domain_walls
                             ),
+                            pressure_outlet_zmin=pressure_outlet_zmin,
+                            velocity_inlet_zmax=velocity_inlet_zmax,
                         ),
                         enabled=measure_wall_times,
                     )
@@ -11420,6 +11995,9 @@ _PREFLOW_SNAPSHOT_FSI_ONLY_CONFIG_FIELDS = frozenset(
         "export_final_flow_snapshot",
         "preflow_snapshot_input_path",
         "preflow_snapshot_output_path",
+        "fsi_checkpoint_input_path",
+        "fsi_checkpoint_output_path",
+        "fsi_checkpoint_expected_generation",
     }
 )
 
@@ -11662,6 +12240,36 @@ def _rollback_preflow_snapshot_restore(
         )
 
 
+def _snapshot_auxiliary_restore_inputs(
+    fluid: Any, *, pressure: np.ndarray,
+) -> tuple[dict[str, Any], dict[str, np.ndarray], dict[str, Any], dict[str, np.ndarray]]:
+    """Preflight mirrors and derived APIs before any owner is mutated."""
+    mirror_fields: dict[str, Any] = {}
+    mirror_backups: dict[str, np.ndarray] = {}
+    for name in ("pressure_accum", "pressure_tmp"):
+        field = getattr(fluid, name, None)
+        if field is None:
+            continue
+        if not callable(getattr(field, "to_numpy", None)) or not callable(getattr(field, "from_numpy", None)):
+            raise ValueError(f"snapshot pressure mirror {name!r} is incomplete")
+        current = np.asarray(field.to_numpy()).copy()
+        if current.shape != pressure.shape or current.dtype != pressure.dtype:
+            raise ValueError(f"preflow snapshot runtime field {name!r} shape/dtype mismatch")
+        mirror_fields[name] = field
+        mirror_backups[name] = current
+    derived_fields: dict[str, Any] = {}
+    derived_backups: dict[str, np.ndarray] = {}
+    for name in ("hibm_no_slip_sampling_obstacle", "hibm_no_slip_component_face_valid_mask"):
+        field = getattr(fluid, name, None)
+        if field is None:
+            continue
+        if not callable(getattr(field, "to_numpy", None)) or not callable(getattr(field, "from_numpy", None)):
+            raise ValueError(f"preflow snapshot derived runtime field {name!r} is incomplete")
+        derived_fields[name] = field
+        derived_backups[name] = np.asarray(field.to_numpy()).copy()
+    return mirror_fields, mirror_backups, derived_fields, derived_backups
+
+
 def _restore_preflow_snapshot_fields(
     fluid: Any,
     fields: Mapping[str, np.ndarray],
@@ -11719,20 +12327,9 @@ def _restore_preflow_snapshot_fields(
         runtime_fields[name] = runtime_field
         runtime_backups[name] = current
 
-    mirror_fields: dict[str, Any] = {}
-    mirror_backups: dict[str, np.ndarray] = {}
-    for name in ("pressure_accum", "pressure_tmp"):
-        runtime_field = getattr(fluid, name, None)
-        if runtime_field is None:
-            continue
-        current = np.asarray(runtime_field.to_numpy()).copy()
-        proposed = validated_fields["pressure"]
-        if current.shape != proposed.shape or current.dtype != proposed.dtype:
-            raise ValueError(
-                f"preflow snapshot runtime field {name!r} shape/dtype mismatch"
-            )
-        mirror_fields[name] = runtime_field
-        mirror_backups[name] = current
+    mirror_fields, mirror_backups, derived_fields, derived_backups = (
+        _snapshot_auxiliary_restore_inputs(fluid, pressure=validated_fields["pressure"])
+    )
 
     metadata_names = (
         "velocity_dirichlet_component_ledger_generation",
@@ -11747,24 +12344,6 @@ def _restore_preflow_snapshot_fields(
     metadata_backup = {
         name: getattr(fluid, name, missing) for name in metadata_names
     }
-
-    derived_fields: dict[str, Any] = {}
-    derived_backups: dict[str, np.ndarray] = {}
-    for name in (
-        "hibm_no_slip_sampling_obstacle",
-        "hibm_no_slip_component_face_valid_mask",
-    ):
-        runtime_field = getattr(fluid, name, None)
-        if runtime_field is None:
-            continue
-        to_numpy = getattr(runtime_field, "to_numpy", None)
-        from_numpy = getattr(runtime_field, "from_numpy", None)
-        if not callable(to_numpy) or not callable(from_numpy):
-            raise ValueError(
-                f"preflow snapshot derived runtime field {name!r} is incomplete"
-            )
-        derived_fields[name] = runtime_field
-        derived_backups[name] = np.asarray(to_numpy()).copy()
 
     canonical_prepare_plan = (
         _canonical_snapshot_restore_prepare_plan(fluid)
@@ -11943,6 +12522,11 @@ def _preflow_snapshot_geometry_payload(
         "solid_rest_position_m": solid.rest_x.to_numpy()[:solid_count],
         "solid_fixed_particle": solid.fixed_particle.to_numpy()[:solid_count],
     }
+    material_identity = getattr(markers, "material_surface_binding_identity", None)
+    if material_identity is not None:
+        geometry["material_surface_binding_identity"] = np.frombuffer(
+            str(material_identity).encode("ascii"), dtype=np.uint8,
+        ).copy()
     return {name: np.asarray(value) for name, value in geometry.items()}
 
 
@@ -11953,8 +12537,20 @@ def _preflow_snapshot_identity(
     solid: Any,
     config: Any,
 ) -> PreflowSnapshotIdentity:
+    runtime_identity = taichi_runtime_identity()
     return PreflowSnapshotIdentity.from_inputs(
-        config=_preflow_snapshot_config_payload(config),
+        config={
+            **_preflow_snapshot_config_payload(config),
+            # Cache location and request flags do not alter the numerical state.
+            # Actual compiler settings do: never infer them for an old snapshot.
+            "taichi_runtime_identity": {
+                name: runtime_identity[name]
+                for name in (
+                    "actual_arch", "default_fp", "random_seed",
+                    "compiler_configuration",
+                )
+            },
+        },
         sources=_preflow_snapshot_source_payload(),
         geometry=_preflow_snapshot_geometry_payload(
             fluid=fluid,
@@ -12816,6 +13412,7 @@ def _run_fixed_solid_preflow(
             particle_count=solid.particle_count,
             support_radius_m=config.mpm_support_radius_m,
             particle_position_generation=particle_position_generation,
+            particle_velocity_mps=solid.v,
         )
         if profile_wall_time:
             _synchronize_hibm_sharp_boundary_stage_timing()
@@ -14613,7 +15210,81 @@ def _scatter_report_fields(report: Any) -> dict[str, object]:
         "scatter_action_reaction_residual_N": float(
             report.action_reaction_residual_n
         ),
+        **{
+            name: getattr(report, name, None)
+            for name in (
+                "material_transfer_verified", "material_binding_identity",
+                "force_roundoff_bound_n", "torque_residual_n_m", "torque_roundoff_bound_n_m",
+                "material_power_residual_w", "material_power_roundoff_bound_w",
+            )
+        },
     }
+
+
+def _solid_reaction_report_fields(report: Any) -> dict[str, object]:
+    """Export support and damping diagnostics without changing their semantics.
+
+    ``direct_fixed_external_force_n`` is the fixed-particle external force from
+    the final physical substep.  The four impulse vectors are accumulated over
+    the accepted FSI solid-substep batch.  This helper intentionally requires
+    the new report attributes: a legacy report must not be represented as a
+    zero or verified diagnostic.
+    """
+
+    try:
+        direct_force = report.direct_fixed_external_force_n
+        support_impulse = report.support_reaction_impulse_n_s
+        support_angular_impulse = report.support_reaction_angular_impulse_n_m_s
+        damping_impulse = report.damping_impulse_n_s
+        damping_angular_impulse = report.damping_angular_impulse_n_m_s
+    except AttributeError as error:
+        raise ValueError(
+            "MPM support/damping diagnostics are missing from the solid report"
+        ) from error
+    if any(
+        value is None
+        for value in (
+            direct_force,
+            support_impulse,
+            support_angular_impulse,
+            damping_impulse,
+            damping_angular_impulse,
+        )
+    ):
+        raise ValueError(
+            "MPM support/damping diagnostics are unmeasured in the solid report"
+        )
+    return {
+        "mpm_direct_fixed_external_force_n": tuple(direct_force),
+        "mpm_support_reaction_impulse_n_s": tuple(support_impulse),
+        "mpm_support_reaction_angular_impulse_n_m_s": tuple(
+            support_angular_impulse
+        ),
+        "mpm_damping_impulse_n_s": tuple(damping_impulse),
+        "mpm_damping_angular_impulse_n_m_s": tuple(damping_angular_impulse),
+    }
+
+
+def _validate_material_surface_transfer_config(config: Any) -> None:
+    if str(getattr(config, "surface_transfer_method", "")) != "cartesian_reference_adjoint_v1":
+        raise ValueError("surface_transfer_method must be cartesian_reference_adjoint_v1")
+    if not bool(getattr(config, "preserve_marker_area_during_surface_feedback", False)):
+        raise ValueError("material surface transfer requires the fixed reference-area policy")
+    offset = float(getattr(config, "traction_marker_face_offset_cells", 0.0))
+    if not math.isfinite(offset) or offset != 0.0:
+        raise ValueError("material markers must be on the physical surface; offset pressure probes instead")
+    if str(getattr(config, "kalman_writeback_mode", "off")) in {"interface", "global"}:
+        raise ValueError("material surface velocity must equal W*v; interface Kalman writeback is incompatible")
+
+
+def _configure_material_surface_transfer(markers: Any, solid: Any, config: Any) -> dict[str, object]:
+    _validate_material_surface_transfer_config(config)
+    count = int(solid.particle_count)
+    return markers.configure_material_surface_binding(
+        particle_reference_positions_m=solid.rest_x.to_numpy()[:count],
+        particle_mass_kg=solid.mass_kg.to_numpy()[:count],
+        inactive_axis=0,
+    )
 
 
 def _build_markers(

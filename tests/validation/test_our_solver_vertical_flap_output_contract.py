@@ -490,7 +490,7 @@ def test_prepare_output_dir_rejects_nonempty_directory(tmp_path: Path) -> None:
     (output_dir / "stale.json").write_text("{}", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="non-empty"):
-        runner._prepare_output_dir(output_dir)
+        runner._prepare_output_dir(output_dir, resume=False)
 
 
 def test_step_artifact_gate_requires_exact_contiguous_readable_pairs(

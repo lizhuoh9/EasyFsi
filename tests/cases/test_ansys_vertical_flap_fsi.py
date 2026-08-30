@@ -2940,6 +2940,8 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 advection_scheme="euler",
                 kinematic_viscosity_m2_s=None,
                 no_slip_domain_walls=None,
+                pressure_outlet_zmin: bool = False,
+                velocity_inlet_zmax: bool | None = None,
             ):
                 self.predict_viscosities.append(kinematic_viscosity_m2_s)
                 self.predict_walls.append(no_slip_domain_walls)
@@ -3073,6 +3075,8 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                 advection_scheme="euler",
                 kinematic_viscosity_m2_s=None,
                 no_slip_domain_walls=None,
+                pressure_outlet_zmin: bool = False,
+                velocity_inlet_zmax: bool | None = None,
             ):
                 self.predict_viscosities.append(kinematic_viscosity_m2_s)
                 self.predict_walls.append(no_slip_domain_walls)

@@ -72,7 +72,7 @@ def _single_particle_constitutive_stress_map(
         density_kgm3=density_kgm3,
     )
     state.F.from_numpy(
-        np.asarray(deformation_gradient, dtype=np.float32).reshape(1, 3, 3)
+        np.asarray(deformation_gradient, dtype=np.float64).reshape(1, 3, 3)
     )
 
     state.step(
@@ -731,6 +731,9 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
         initial_v = state.v.to_numpy()
         initial_c = state.C.to_numpy()
         initial_f = state.F.to_numpy()
+        initial_f[0, 0, 0] = 1.0 + math.ldexp(1.0, -35)
+        initial_f[0, 0, 1] = math.ldexp(1.0, -35)
+        state.F.from_numpy(initial_f)
         state.save_state()
 
         state.x.from_numpy(initial_x + np.array([0.001, -0.002, 0.003], dtype=np.float32))
@@ -739,7 +742,7 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
         )
         state.v.from_numpy(np.ones_like(initial_v, dtype=np.float32))
         state.C.from_numpy(np.ones_like(initial_c, dtype=np.float32))
-        state.F.from_numpy(np.full_like(initial_f, 2.0, dtype=np.float32))
+        state.F.from_numpy(np.full_like(initial_f, 2.0))
         state.external_force_n.from_numpy(np.ones_like(state.external_force_n.to_numpy(), dtype=np.float32))
         state.restore_state()
 
@@ -750,7 +753,8 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
         )
         np.testing.assert_allclose(state.v.to_numpy(), initial_v, atol=1.0e-8)
         np.testing.assert_allclose(state.C.to_numpy(), initial_c, atol=1.0e-8)
-        np.testing.assert_allclose(state.F.to_numpy(), initial_f, atol=1.0e-8)
+        self.assertEqual(state.F.to_numpy().dtype, np.dtype(np.float64))
+        np.testing.assert_array_equal(state.F.to_numpy(), initial_f)
         np.testing.assert_allclose(
             state.external_force_n.to_numpy(),
             np.zeros_like(state.external_force_n.to_numpy()),
@@ -977,7 +981,7 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
                     [0.0, 0.0, -1.0],
                 ]
             ],
-            dtype=np.float32,
+            dtype=np.float64,
         )
         state.F.from_numpy(inverted_f)
 
@@ -1015,7 +1019,7 @@ class NeoHookeanMpmStateTests(unittest.TestCase):
                     [0.0, 0.0, 0.5],
                 ]
             ],
-            dtype=np.float32,
+            dtype=np.float64,
         )
         state.F.from_numpy(inverted_stretch)
 
@@ -2174,7 +2178,7 @@ class NeoHookeanFixedRegionConstraintTests(unittest.TestCase):
         loaded_x[1] += np.array([1.0e-3, -5.0e-4, 2.0e-4], dtype=np.float32)
         loaded_v = np.zeros((2, 3), dtype=np.float32)
         loaded_v[1] = np.array([0.2, -0.1, 0.05], dtype=np.float32)
-        loaded_f = np.tile(np.eye(3, dtype=np.float32), (2, 1, 1))
+        loaded_f = np.tile(np.eye(3, dtype=np.float64), (2, 1, 1))
         loaded_f[1, 0, 1] = 0.25
         state.x.from_numpy(loaded_x)
         state.v.from_numpy(loaded_v)

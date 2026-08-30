@@ -1385,22 +1385,30 @@ def test_atomic_json_retries_transient_windows_replace_denial(
 ) -> None:
     runner = _load_runner_module()
     path = tmp_path / "progress.json"
-    original_replace = runner.Path.replace
+    original_replace = runner.os.replace
     attempts = 0
+    temporary_paths: list[Path] = []
+    target_paths: list[Path] = []
 
-    def flaky_replace(temporary: Path, target: Path) -> Path:
+    def flaky_replace(temporary, target) -> None:
         nonlocal attempts
         attempts += 1
+        temporary_paths.append(Path(temporary))
+        target_paths.append(Path(target))
         if attempts < 3:
-            raise PermissionError(5, "synthetic Windows sharing violation")
-        return original_replace(temporary, target)
+            error = PermissionError(13, "synthetic Windows sharing violation")
+            error.winerror = 5
+            raise error
+        original_replace(temporary, target)
 
-    monkeypatch.setattr(runner.Path, "replace", flaky_replace)
+    monkeypatch.setattr(runner.os, "replace", flaky_replace)
     monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
 
     runner._write_json_atomic(path, {"status": "running", "step": 63})
 
     assert attempts == 3
+    assert temporary_paths == [temporary_paths[0]] * 3
+    assert target_paths == [path] * 3
     assert runner.json.loads(path.read_text("utf-8")) == {
         "status": "running",
         "step": 63,
@@ -1415,25 +1423,36 @@ def test_atomic_json_replace_exhaustion_preserves_target_and_cleans_up(
     runner = _load_runner_module()
     path = tmp_path / "progress.json"
     path.write_text('{"status":"old"}', encoding="utf-8")
+    previous_bytes = path.read_bytes()
     attempts = 0
     sleeps: list[float] = []
     close_calls: list[int] = []
+    temporary_paths: list[Path] = []
+    target_paths: list[Path] = []
 
-    def denied_replace(_temporary: Path, _target: Path) -> Path:
+    def denied_replace(temporary, target) -> None:
         nonlocal attempts
         attempts += 1
-        raise PermissionError(5, f"synthetic denial {attempts}")
+        temporary_paths.append(Path(temporary))
+        target_paths.append(Path(target))
+        error = PermissionError(13, f"synthetic denial {attempts}")
+        error.winerror = 5
+        raise error
 
-    monkeypatch.setattr(runner.Path, "replace", denied_replace)
+    monkeypatch.setattr(runner.os, "replace", denied_replace)
     monkeypatch.setattr(runner.time, "sleep", sleeps.append)
     monkeypatch.setattr(runner.os, "close", close_calls.append)
 
-    with pytest.raises(PermissionError, match="synthetic denial 20"):
+    with pytest.raises(PermissionError, match="synthetic denial 8"):
         runner._write_json_atomic(path, {"status": "new"})
 
-    assert attempts == runner.ATOMIC_REPLACE_ATTEMPTS
-    assert sleeps == [runner.ATOMIC_REPLACE_BACKOFF_S] * 19
+    assert attempts == 8
+    assert sleeps == [0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.32]
+    assert sum(sleeps) == pytest.approx(0.95)
+    assert temporary_paths == [temporary_paths[0]] * 8
+    assert target_paths == [path] * 8
     assert close_calls == []
+    assert path.read_bytes() == previous_bytes
     assert runner.json.loads(path.read_text("utf-8")) == {"status": "old"}
     assert list(tmp_path.glob(".progress.json.*.tmp")) == []
 

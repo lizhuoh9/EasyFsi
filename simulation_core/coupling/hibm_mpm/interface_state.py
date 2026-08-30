@@ -43,6 +43,9 @@ def capture_marker_interface_state(markers: Any) -> dict[str, Any]:
             None if binding is None else tuple(binding)
         ),
     }
+    material_identity = getattr(markers, "material_surface_binding_identity", None)
+    if material_identity is not None:
+        state[_MARKER_GEOMETRY_STATE_KEY]["material_surface_binding_identity"] = material_identity
     return state
 
 
@@ -121,6 +124,10 @@ def marker_layout_identity(
     _update_layout_digest(digest, primitive_indices[:primitive_count])
     binding = getattr(markers, "_open_ribbon_tip_cap_binding", None)
     digest.update(repr(None if binding is None else tuple(binding)).encode("utf-8"))
+    material_identity = getattr(markers, "material_surface_binding_identity", None)
+    if material_identity is not None:
+        digest.update(b"material_surface_binding_identity")
+        digest.update(str(material_identity).encode("ascii"))
     return digest.hexdigest()
 
 
@@ -214,6 +221,9 @@ def _validated_marker_restore_inputs(
     dict[str, tuple[Any, np.ndarray, np.ndarray]],
 ]:
     raw_geometry = _marker_geometry_state(state)
+    material_identity = getattr(markers, "material_surface_binding_identity", None)
+    if raw_geometry.get("material_surface_binding_identity") != material_identity:
+        raise ValueError("material surface binding identity differs from restore state")
     try:
         count = int(raw_geometry["marker_count"])
         projection_vertex_count = int(raw_geometry["projection_vertex_count"])
@@ -238,6 +248,19 @@ def _validated_marker_restore_inputs(
             "open_ribbon_tip_cap_binding"
         ],
     }
+    if material_identity is not None:
+        transfer = markers._material_surface_transfer
+        bound_counts = {
+            "marker_count": transfer.marker_count,
+            "projection_vertex_count": transfer._projection_vertex_count,
+            "projection_triangle_count": 0,
+            "projection_segment_count": transfer._projection_segment_count,
+        }
+        for name, expected in bound_counts.items():
+            if geometry[name] != expected:
+                raise ValueError("material surface bound topology differs from restore state")
+        if geometry["open_ribbon_tip_cap_binding"] != transfer.cap_binding:
+            raise ValueError("material surface bound cap differs from restore state")
     refresh_tip_cap = _tip_cap_projection_refresh_callback(
         markers,
         marker_count=count,

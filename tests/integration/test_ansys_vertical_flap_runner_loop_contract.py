@@ -268,7 +268,18 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
         }
         self.assertEqual(
             keywords,
-            {"arch": "cuda", "strict_arch": True},
+            {
+                "arch": "cuda",
+                "default_fp": "f32",
+                "default_ip": "i32",
+                "random_seed": 0,
+                "cfg_optimization": False,
+                "opt_level": 1,
+                "advanced_optimization": True,
+                "fast_math": True,
+                "debug": False,
+                "strict_arch": True,
+            },
         )
         fluid_build = next(
             node

@@ -243,6 +243,9 @@ class VerticalFlapFsiConfig:
     preflow_traction_readiness_mode: str = "flow_only"
     preflow_snapshot_input_path: str | None = None
     preflow_snapshot_output_path: str | None = None
+    fsi_checkpoint_input_path: str | None = None
+    fsi_checkpoint_output_path: str | None = None
+    fsi_checkpoint_expected_generation: str | None = None
     apply_marker_feedback_to_fluid: bool = True
     flow_reset_pressure_each_step: bool = False
     flow_reinitialize_inlet_each_step: bool = False
@@ -310,9 +313,11 @@ class VerticalFlapFsiConfig:
     traction_pressure_sampling_mode: str = "two_sided_pressure_jump"
     traction_include_viscous: bool = False
     traction_tip_cap_pressure_enabled: bool = False
-    traction_marker_face_offset_cells: float = 0.51
-    traction_pressure_probe_origin_mode: str = "marker_position"
-    traction_pressure_probe_origin_offset_cells: float | None = None
+    # Material markers belong on the physical solid. Only pressure probes
+    # retain the outward sampling offset; they are not material degrees of freedom.
+    traction_marker_face_offset_cells: float = 0.0
+    traction_pressure_probe_origin_mode: str = "physical_face_offset"
+    traction_pressure_probe_origin_offset_cells: float | None = 0.51
     traction_pressure_probe_start_offset_cells: float | None = None
     traction_pressure_probe_ladder_spacing_cells: float = 0.5
     traction_pressure_probe_ladder_rung_count: int = 5
@@ -342,6 +347,7 @@ class VerticalFlapFsiConfig:
     enforce_solid_seeding_limit: bool = False
     solid_seeding_max_spacing_cells: float = 1.5
     preserve_marker_area_during_surface_feedback: bool = True
+    surface_transfer_method: str = "cartesian_reference_adjoint_v1"
     mpm_support_radius_m: float = 0.006
     displacement_tolerance: float = 0.05
     velocity_peak_tolerance: float = 0.05
@@ -492,6 +498,14 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Run the ANSYS vertical-flap two-way FSI smoke benchmark."
     )
     parser.add_argument("--steps", type=int, default=VerticalFlapFsiConfig.step_count)
+    parser.add_argument(
+        "--fsi-checkpoint-in",
+        help="Resume from a complete accepted FSI checkpoint prefix.",
+    )
+    parser.add_argument(
+        "--fsi-checkpoint-out",
+        help="Save every accepted complete FSI state under this prefix.",
+    )
     parser.add_argument(
         "--preflow-steps",
         type=int,
@@ -771,6 +785,8 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
     report = run_ansys_vertical_flap_benchmark(
         VerticalFlapFsiConfig(
             step_count=args.steps,
+            fsi_checkpoint_input_path=args.fsi_checkpoint_in,
+            fsi_checkpoint_output_path=args.fsi_checkpoint_out,
             coupling_mode=args.coupling_mode,
             fsi_coupling_max_iterations=args.fsi_max_iterations,
             fsi_coupling_absolute_tolerance_mps=(

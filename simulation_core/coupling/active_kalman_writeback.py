@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from numbers import Integral, Real
 import time
 from typing import Any
 
@@ -37,6 +38,9 @@ ACTIVE_KALMAN_MODE_OWNERS = {
         SOLID_PARTICLE_VELOCITY_OWNER,
     ),
 }
+
+
+ACTIVE_KALMAN_WRITEBACK_SNAPSHOT_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,120 @@ class _OwnerMetrics:
     nis_mean_sum: float = 0.0
     nis_max: float = 0.0
     filter_wall_time_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class ActiveKalmanOwnerMetricsSnapshot:
+    trial_count: int
+    accepted_update_count: int
+    commit_count: int
+    writeback_count: int
+    rollback_count: int
+    prediction_rmse_sum: float
+    carry_forward_rmse_sum: float
+    prediction_bias_sum: float
+    posterior_delta_rmse_sum: float
+    nis_mean_sum: float
+    nis_max: float
+    filter_wall_time_s: float
+
+    def __post_init__(self) -> None:
+        for name in (
+            "trial_count",
+            "accepted_update_count",
+            "commit_count",
+            "writeback_count",
+            "rollback_count",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                value, Integral
+            ):
+                raise TypeError(f"{name} must be an integer")
+            value = int(value)
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+            object.__setattr__(self, name, value)
+        for name in (
+            "prediction_rmse_sum",
+            "carry_forward_rmse_sum",
+            "prediction_bias_sum",
+            "posterior_delta_rmse_sum",
+            "nis_mean_sum",
+            "nis_max",
+            "filter_wall_time_s",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+                raise TypeError(f"{name} must be a real number")
+            value = float(value)
+            if not np.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            object.__setattr__(self, name, value)
+        if (
+            self.writeback_count > self.commit_count
+            or self.commit_count > self.accepted_update_count
+            or self.accepted_update_count > self.trial_count
+        ):
+            raise ValueError("owner metric counts are inconsistent")
+
+
+@dataclass(frozen=True)
+class ActiveKalmanWritebackSnapshot:
+    """Typed accepted-boundary state for every active Kalman owner."""
+
+    schema_version: int
+    mode: str
+    enabled_owners: tuple[str, ...]
+    configs: tuple[tuple[str, InterfaceKalmanConfig], ...]
+    predictor_snapshots: tuple[tuple[str, InterfaceKalmanSnapshot], ...]
+    owner_metrics: tuple[tuple[str, ActiveKalmanOwnerMetricsSnapshot], ...]
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.schema_version, (bool, np.bool_))
+            or not isinstance(self.schema_version, Integral)
+        ):
+            raise TypeError("snapshot schema_version must be an integer")
+        if int(self.schema_version) != ACTIVE_KALMAN_WRITEBACK_SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError("unsupported active-Kalman snapshot schema_version")
+        object.__setattr__(self, "schema_version", int(self.schema_version))
+        if not isinstance(self.mode, str) or self.mode not in ACTIVE_KALMAN_MODE_OWNERS:
+            raise ValueError("snapshot mode is invalid")
+        expected = ACTIVE_KALMAN_MODE_OWNERS[self.mode]
+        if self.enabled_owners != expected:
+            raise ValueError("snapshot enabled owners do not match mode")
+        for name, values, expected_type in (
+            ("configs", self.configs, InterfaceKalmanConfig),
+            ("predictor_snapshots", self.predictor_snapshots, InterfaceKalmanSnapshot),
+            ("owner_metrics", self.owner_metrics, ActiveKalmanOwnerMetricsSnapshot),
+        ):
+            if tuple(owner for owner, _ in values) != expected:
+                raise ValueError(f"snapshot {name} owner keys do not match mode")
+            if not all(isinstance(value, expected_type) for _, value in values):
+                raise TypeError(f"snapshot {name} have invalid values")
+        for (owner, config), (_, predictor), (_, metrics) in zip(
+            self.configs, self.predictor_snapshots, self.owner_metrics
+        ):
+            if predictor.config != config or predictor.layout_id != owner:
+                raise ValueError("snapshot predictor identity is inconsistent")
+            accepted_state_updates = predictor.accepted_state_count - 1
+            if (
+                metrics.accepted_update_count != accepted_state_updates
+                or metrics.commit_count != accepted_state_updates
+            ):
+                raise ValueError(
+                    "snapshot owner metrics do not match predictor accepted state"
+                )
+        if self.enabled_owners and len(
+            {metrics.commit_count for _, metrics in self.owner_metrics}
+        ) != 1:
+            raise ValueError("snapshot enabled-owner commit counts are inconsistent")
+
+    def validate(self) -> None:
+        """Revalidate nested snapshots before restoration."""
+
+        self.__post_init__()
 
 
 class ActiveKalmanWritebackController:
@@ -384,6 +502,80 @@ class ActiveKalmanWritebackController:
             "owners": owner_reports,
         }
 
+
+    def snapshot(self) -> ActiveKalmanWritebackSnapshot:
+        """Capture predictor and metric state at an accepted boundary."""
+
+        if self.has_active_step:
+            raise RuntimeError(
+                "cannot snapshot while a Kalman macro-step is active"
+            )
+        return ActiveKalmanWritebackSnapshot(
+            schema_version=ACTIVE_KALMAN_WRITEBACK_SNAPSHOT_SCHEMA_VERSION,
+            mode=self.mode,
+            enabled_owners=self.enabled_owners,
+            configs=tuple(
+                (owner, self._predictors[owner].config)
+                for owner in self.enabled_owners
+            ),
+            predictor_snapshots=tuple(
+                (owner, self._predictors[owner].snapshot())
+                for owner in self.enabled_owners
+            ),
+            owner_metrics=tuple(
+                (owner, _metrics_snapshot(self._metrics[owner]))
+                for owner in self.enabled_owners
+            ),
+        )
+
+    def restore(self, snapshot: ActiveKalmanWritebackSnapshot) -> None:
+        """Atomically restore predictors and all cumulative metrics."""
+
+        if self.has_active_step:
+            raise RuntimeError(
+                "cannot restore while a Kalman macro-step is active"
+            )
+        if not isinstance(snapshot, ActiveKalmanWritebackSnapshot):
+            raise TypeError("snapshot must be an ActiveKalmanWritebackSnapshot")
+        snapshot.validate()
+        if (
+            snapshot.mode != self.mode
+            or snapshot.enabled_owners != self.enabled_owners
+        ):
+            raise ValueError(
+                "snapshot mode or enabled owners do not match controller"
+            )
+
+        restored_predictors: dict[str, InterfaceKalmanPredictor] = {}
+        restored_metrics: dict[str, _OwnerMetrics] = {}
+        for (owner, config), (_, predictor_snapshot), (
+            _,
+            metric_snapshot,
+        ) in zip(
+            snapshot.configs,
+            snapshot.predictor_snapshots,
+            snapshot.owner_metrics,
+        ):
+            current = self._predictors[owner]
+            if config != current.config:
+                raise ValueError(
+                    "snapshot config does not match controller config"
+                )
+            current_snapshot = current.snapshot()
+            if tuple(predictor_snapshot.values.shape) != tuple(
+                current_snapshot.values.shape
+            ):
+                raise ValueError(
+                    "snapshot predictor shape does not match controller shape"
+                )
+            predictor = InterfaceKalmanPredictor(config)
+            predictor.restore(predictor_snapshot)
+            restored_predictors[owner] = predictor
+            restored_metrics[owner] = _metrics_from_snapshot(metric_snapshot)
+
+        self._predictors = restored_predictors
+        self._metrics = restored_metrics
+
     def _restore_step(self, *, count_rollback: bool) -> None:
         snapshots = self._step_snapshots
         if snapshots is None:
@@ -446,11 +638,48 @@ def _read_only_float64(values: Any) -> np.ndarray:
     return result
 
 
+def _metrics_snapshot(metrics: _OwnerMetrics) -> ActiveKalmanOwnerMetricsSnapshot:
+    return ActiveKalmanOwnerMetricsSnapshot(
+        trial_count=metrics.trial_count,
+        accepted_update_count=metrics.accepted_update_count,
+        commit_count=metrics.commit_count,
+        writeback_count=metrics.writeback_count,
+        rollback_count=metrics.rollback_count,
+        prediction_rmse_sum=metrics.prediction_rmse_sum,
+        carry_forward_rmse_sum=metrics.carry_forward_rmse_sum,
+        prediction_bias_sum=metrics.prediction_bias_sum,
+        posterior_delta_rmse_sum=metrics.posterior_delta_rmse_sum,
+        nis_mean_sum=metrics.nis_mean_sum,
+        nis_max=metrics.nis_max,
+        filter_wall_time_s=metrics.filter_wall_time_s,
+    )
+
+
+def _metrics_from_snapshot(snapshot: ActiveKalmanOwnerMetricsSnapshot) -> _OwnerMetrics:
+    return _OwnerMetrics(
+        trial_count=snapshot.trial_count,
+        accepted_update_count=snapshot.accepted_update_count,
+        commit_count=snapshot.commit_count,
+        writeback_count=snapshot.writeback_count,
+        rollback_count=snapshot.rollback_count,
+        prediction_rmse_sum=snapshot.prediction_rmse_sum,
+        carry_forward_rmse_sum=snapshot.carry_forward_rmse_sum,
+        prediction_bias_sum=snapshot.prediction_bias_sum,
+        posterior_delta_rmse_sum=snapshot.posterior_delta_rmse_sum,
+        nis_mean_sum=snapshot.nis_mean_sum,
+        nis_max=snapshot.nis_max,
+        filter_wall_time_s=snapshot.filter_wall_time_s,
+    )
+
+
 __all__ = [
     "ACTIVE_KALMAN_MODE_OWNERS",
+    "ACTIVE_KALMAN_WRITEBACK_SNAPSHOT_SCHEMA_VERSION",
     "FLUID_FSI_PRESSURE_FEEDBACK_OWNER",
     "INTERFACE_MARKER_VELOCITY_OWNER",
     "SOLID_PARTICLE_VELOCITY_OWNER",
+    "ActiveKalmanOwnerMetricsSnapshot",
     "ActiveKalmanWritebackController",
     "ActiveKalmanWritebackResult",
+    "ActiveKalmanWritebackSnapshot",
 ]

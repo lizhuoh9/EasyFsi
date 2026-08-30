@@ -5834,7 +5834,7 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
         )
         self.assertEqual(
             assemble_source.count("velocity_inlet_zmax=bool(velocity_inlet_zmax),"),
-            3,
+            4,  # Predictor, both projections, and final divergence.
         )
         self.assertIn(
             "fluid.compute_divergence(\n"
@@ -6384,7 +6384,13 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
 
         boundary.assemble_pressure_neumann_matrix_rows = counted_assemble_pressure_rows
 
-        def fake_predict(dt_s=None, *, advection_scheme="euler") -> None:
+        def fake_predict(
+            dt_s=None,
+            *,
+            advection_scheme="euler",
+            pressure_outlet_zmin: bool = False,
+            velocity_inlet_zmax: bool | None = None,
+        ) -> None:
             substep = sum(1 for call in calls if call.startswith("predict"))
             self.assertEqual(
                 fluid.velocity_dirichlet_boundary_active_component_mask[2, 2, 2],
@@ -6392,6 +6398,8 @@ class HibmMpmSharpAssemblyTests(unittest.TestCase):
             )
             self.assertEqual(dt_s, 2.5e-4)
             self.assertEqual(advection_scheme, "euler")
+            self.assertIs(pressure_outlet_zmin, False)
+            self.assertIs(velocity_inlet_zmax, False)
             calls.append(f"predict{substep}")
 
         def fake_project(**kwargs):

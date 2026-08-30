@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import argparse
 import csv
 import hashlib
@@ -8,6 +9,8 @@ import json
 import math
 import os
 import sys
+import re
+import stat
 import tempfile
 import time
 import traceback
@@ -47,6 +50,26 @@ from cases.ansys_vertical_flap_fsi import (  # noqa: E402
     run_ansys_vertical_flap_benchmark,
     selected_formulation_solver_config,
     with_local_surface_force_support,
+)
+from benchmarks.official.solid_mpm_fsi_runner import (  # noqa: E402
+    _fsi_checkpoint_config_payload,
+    _fsi_checkpoint_paths,
+    _preflow_snapshot_source_payload,
+)
+from simulation_core.drivers import FsiCouplingConvergenceError  # noqa: E402
+from simulation_core.coupling.accepted_fsi_checkpoint import load_accepted_fsi_checkpoint  # noqa: E402
+from simulation_core.diagnostics.atomic_file import (  # noqa: E402
+    publish_file_create_only,
+    replace_file_atomically,
+)
+from simulation_core.diagnostics.checkpoint_store import (  # noqa: E402
+    CheckpointHead,
+    read_checkpoint_head,
+)
+from simulation_core.fluids.preflow_snapshot import canonical_source_sha256  # noqa: E402
+from simulation_core.diagnostics.run_attempt import (  # noqa: E402
+    prepare_resume_attempt,
+    require_completed_output,
 )
 from src.refactored.validation.ansys_vertical_flap_fsi.official_fluent_parity import (  # noqa: E402
     save_solver_npz_from_flow_snapshot,
@@ -165,16 +188,27 @@ def _exception_diagnostics(exc: BaseException) -> dict[str, Any]:
     return dict(_json_safe(diagnostics))
 
 
+def _fsi_coupling_diagnostics(exc: BaseException) -> dict[str, Any] | None:
+    """Return the complete report only for the concrete FSI convergence error."""
+
+    if type(exc) is not FsiCouplingConvergenceError:
+        return None
+    return dict(
+        _json_safe(
+            {
+                "context": asdict(exc.context),
+                "report": asdict(exc.report),
+            }
+        )
+    )
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(_json_safe(payload), indent=2, sort_keys=True),
         encoding="utf-8",
     )
-
-
-ATOMIC_REPLACE_ATTEMPTS = 20
-ATOMIC_REPLACE_BACKOFF_S = 0.25
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -193,16 +227,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
             handle.write(json.dumps(_json_safe(payload), indent=2, sort_keys=True))
             handle.flush()
             os.fsync(handle.fileno())
-        last_error: PermissionError | None = None
-        for attempt in range(ATOMIC_REPLACE_ATTEMPTS):
-            try:
-                temporary.replace(path)
-                return
-            except PermissionError as exc:
-                last_error = exc
-                if attempt + 1 < ATOMIC_REPLACE_ATTEMPTS:
-                    time.sleep(ATOMIC_REPLACE_BACKOFF_S)
-        raise last_error
+        replace_file_atomically(temporary, path)
     except BaseException:
         if owned_descriptor is not None:
             try:
@@ -235,6 +260,14 @@ def _record_failure_artifacts(
             "exception diagnostics failed: "
             f"{type(diagnostics_exc).__name__}: {diagnostics_exc}"
         )
+    try:
+        fsi_coupling_diagnostics = _fsi_coupling_diagnostics(exc)
+    except BaseException as diagnostics_exc:
+        fsi_coupling_diagnostics = None
+        reporting_errors.append(
+            "FSI coupling diagnostics failed: "
+            f"{type(diagnostics_exc).__name__}: {diagnostics_exc}"
+        )
     failure_payload = {
         "status": exception_status,
         "elapsed_s": float(elapsed_s),
@@ -245,6 +278,8 @@ def _record_failure_artifacts(
         "config": config_payload,
         "grid": _grid_summary(config) if config is not None else None,
     }
+    if fsi_coupling_diagnostics is not None:
+        failure_payload["fsi_coupling_diagnostics"] = fsi_coupling_diagnostics
     try:
         _write_json_atomic(
             output_dir / exception_artifact_name,
@@ -262,18 +297,25 @@ def _record_failure_artifacts(
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         progress = {"step_completed": 0, "time_s": 0.0}
     try:
+        progress_payload = {
+            **{
+                key: value
+                for key, value in progress.items()
+                if key != "fsi_coupling_diagnostics"
+            },
+            "status": exception_status,
+            "phase": exception_status,
+            "elapsed_s": float(elapsed_s),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "pressure_solve_diagnostics": exception_diagnostics,
+            "reporting_errors": reporting_errors,
+        }
+        if fsi_coupling_diagnostics is not None:
+            progress_payload["fsi_coupling_diagnostics"] = fsi_coupling_diagnostics
         _write_json_atomic(
             progress_path,
-            {
-                **progress,
-                "status": exception_status,
-                "phase": exception_status,
-                "elapsed_s": float(elapsed_s),
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-                "pressure_solve_diagnostics": exception_diagnostics,
-                "reporting_errors": reporting_errors,
-            },
+            progress_payload,
         )
     except BaseException as progress_exc:
         reporting_errors.append(
@@ -325,14 +367,211 @@ def _source_hashes() -> dict[str, str]:
     }
 
 
-def _prepare_output_dir(output_dir: Path) -> None:
-    if output_dir.exists():
-        if not output_dir.is_dir():
-            raise RuntimeError(f"output path is not a directory: {output_dir}")
+def _prepare_output_dir(
+    output_dir: Path,
+    *,
+    resume: bool,
+    canonical_output_dir: Path | None = None,
+) -> None:
+    resolved_output_dir = output_dir.resolve(strict=False)
+    if resume:
+        if canonical_output_dir is None:
+            raise ValueError("checkpoint resume requires --resume-run-dir")
+        canonical_resolved = canonical_output_dir.resolve(strict=False)
+        if resolved_output_dir == canonical_resolved:
+            raise ValueError("resume attempt output directory must be distinct from canonical root")
+        if resolved_output_dir.is_relative_to(canonical_resolved):
+            raise ValueError("resume attempt output directory must be outside canonical root")
+    output_entry = _lstat_or_none(output_dir)
+    if output_entry is not None:
+        if (
+            _is_link_or_reparse_point(output_entry)
+            or not stat.S_ISDIR(output_entry.st_mode)
+        ):
+            raise RuntimeError(f"output path is not a real directory: {output_dir}")
+        if resume:
+            if any(output_dir.iterdir()):
+                raise RuntimeError(
+                    "checkpoint resume attempt output directory must be fresh and empty"
+                )
+            return
         if any(output_dir.iterdir()):
             raise RuntimeError(f"refusing to reuse non-empty output directory: {output_dir}")
         return
     output_dir.mkdir(parents=True, exist_ok=False)
+
+
+def _checkpoint_observer_identity(
+    *,
+    output_dir: Path,
+    span_reduction: str,
+    streamwise_velocity_sign: float,
+    reverse_streamwise_axis: bool,
+    streamwise_length_m: float,
+    save_iqn_trial_vectors: bool,
+) -> str:
+    payload = {
+        "format": "ansys-vertical-flap-step-observer-v1",
+        "output_dir": str(output_dir.resolve()),
+        "span_reduction": str(span_reduction),
+        "streamwise_velocity_sign": float(streamwise_velocity_sign),
+        "reverse_streamwise_axis": bool(reverse_streamwise_axis),
+        "streamwise_length_m": float(streamwise_length_m),
+        "save_iqn_trial_vectors": bool(save_iqn_trial_vectors),
+    }
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return "ansys-vertical-flap-step-observer-v1:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _saved_checkpoint_config_payload(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"unable to read original run config: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("original run config must be a JSON object")
+    operational = {
+        "step_count",
+        "fsi_checkpoint_input_path",
+        "fsi_checkpoint_output_path",
+        "fsi_checkpoint_expected_generation",
+        "preflow_snapshot_input_path",
+        "preflow_snapshot_output_path",
+    }
+    return {key: value for key, value in payload.items() if key not in operational}
+
+
+def _resume_artifact_steps(directory: Path, suffix: str) -> set[int]:
+    root_resolved = _require_real_directory_path(
+        directory.parent,
+        role="checkpoint canonical root",
+    )
+    directory_entry = _lstat_or_none(directory)
+    if directory_entry is None:
+        return set()
+    if (
+        _is_link_or_reparse_point(directory_entry)
+        or not stat.S_ISDIR(directory_entry.st_mode)
+    ):
+        raise ValueError(
+            f"checkpoint artifact path is not a real directory: {directory}"
+        )
+    directory_resolved = directory.resolve(strict=True)
+    if not directory_resolved.is_relative_to(root_resolved):
+        raise ValueError(f"checkpoint artifact path escapes canonical root: {directory}")
+    pattern = re.compile(rf"step_(\d+){re.escape(suffix)}")
+    steps: set[int] = set()
+    for artifact in directory.iterdir():
+        if not artifact.name.startswith("step_") or not artifact.name.endswith(suffix):
+            continue
+        match = pattern.fullmatch(artifact.name)
+        if match is None:
+            raise ValueError(f"invalid checkpoint step artifact: {artifact}")
+        step = int(match.group(1))
+        entry = _lstat_or_none(artifact)
+        if (
+            artifact.name != f"step_{step:04d}{suffix}"
+            or step in steps
+            or entry is None
+            or _is_link_or_reparse_point(entry)
+            or not stat.S_ISREG(entry.st_mode)
+            or not artifact.resolve(strict=True).is_relative_to(root_resolved)
+        ):
+            raise ValueError(f"invalid checkpoint step artifact: {artifact}")
+        steps.add(step)
+    return steps
+
+
+def _validate_resume_artifact_prefix(
+    *,
+    output_dir: Path,
+    accepted_step: int,
+    require_iqn_trial_vectors: bool,
+    artifact_validator=None,
+) -> None:
+    if artifact_validator is None:
+        artifact_validator = _validate_step_artifacts
+    expected = set(range(1, accepted_step))
+    allowed = expected | {accepted_step}
+    fields = _resume_artifact_steps(output_dir / "step_fields", ".npz")
+    histories = _resume_artifact_steps(output_dir / "step_history", ".json")
+    if fields - allowed or histories - allowed:
+        raise ValueError("checkpoint output contains a forward step artifact")
+    if fields & expected != expected or histories & expected != expected:
+        raise ValueError("checkpoint output is missing an earlier accepted step artifact")
+    if accepted_step > 0:
+        try:
+            artifact_validator(
+                output_dir,
+                expected_steps=accepted_step - 1,
+                require_iqn_trial_vectors=require_iqn_trial_vectors,
+                allow_partial_terminal_step=accepted_step,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError("checkpoint output has unreadable accepted artifacts") from exc
+
+
+def _preflight_checkpoint_resume(
+    *,
+    output_dir: Path,
+    config: VerticalFlapFsiConfig,
+    checkpoint_input_path: Path,
+    step_observer: object | None,
+    checkpoint_head_reader=read_checkpoint_head,
+    checkpoint_loader=load_accepted_fsi_checkpoint,
+    artifact_validator=None,
+) -> CheckpointHead:
+    output_dir = _require_real_directory_path(
+        output_dir, role="checkpoint canonical root"
+    )
+    saved_config = _saved_checkpoint_config_payload(output_dir / "our_solver_config.json")
+    current_config = _fsi_checkpoint_config_payload(config)
+    if not _json_values_equal(saved_config, current_config):
+        raise ValueError("checkpoint resume config changes physics or algorithm settings")
+    head = checkpoint_head_reader(checkpoint_input_path)
+    if head is None or not isinstance(head.metadata, Mapping):
+        raise ValueError("complete accepted FSI checkpoint manifest is required")
+    identity = head.metadata.get("identity")
+    current_source_sha256 = canonical_source_sha256(
+        _preflow_snapshot_source_payload()
+    )
+    if (
+        not isinstance(identity, Mapping)
+        or identity.get("source_sha256") != current_source_sha256
+    ):
+        raise ValueError("checkpoint source identity does not match current source")
+    loaded = checkpoint_loader(
+        checkpoint_input_path,
+        expected_identity=identity,
+        target_step_count=int(config.step_count),
+        expected_generation=head.generation,
+    )
+    accepted_step = int(loaded.state.macro_state.accepted_step_index)
+    if head.accepted_step != accepted_step:
+        raise ValueError("checkpoint head accepted step differs from loaded state")
+    if loaded.generation != head.generation:
+        raise ValueError("checkpoint head generation differs from loaded state")
+    saved_observer_identity = loaded.state.runner_state.get("observer_identity")
+    observer_identity = (
+        None if step_observer is None else getattr(step_observer, "checkpoint_identity", None)
+    )
+    if saved_observer_identity != observer_identity:
+        raise ValueError("checkpoint observer destination differs from the original output directory")
+    if step_observer is not None:
+        _validate_resume_artifact_prefix(
+            output_dir=output_dir,
+            accepted_step=accepted_step,
+            require_iqn_trial_vectors=bool(
+                getattr(step_observer, "record_iqn_trial_vectors", False)
+            ),
+            artifact_validator=artifact_validator,
+        )
+    return head
 
 
 def _configure_taichi_offline_cache(
@@ -380,6 +619,33 @@ def _configure_taichi_offline_cache(
     }
 
 
+_PROGRESS_FAILURE_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "error",
+        "error_type",
+        "fsi_coupling_diagnostics",
+        "pressure_solve_diagnostics",
+        "reporting_errors",
+        "traceback",
+    }
+)
+
+
+def _merge_progress_event(
+    existing: dict[str, object], event: dict[str, object]
+) -> dict[str, object]:
+    base = (
+        {
+            key: value
+            for key, value in existing.items()
+            if key not in _PROGRESS_FAILURE_DIAGNOSTIC_FIELDS
+        }
+        if event.get("status") == "running"
+        else dict(existing)
+    )
+    return {**base, **event}
+
+
 def _make_run_progress_observer(
     *,
     output_dir: Path,
@@ -392,14 +658,16 @@ def _make_run_progress_observer(
             existing = {}
         _write_json_atomic(
             progress_path,
-            {
-                "status": "running",
-                "phase": "initializing",
-                "step_completed": 0,
-                "time_s": 0.0,
-                **existing,
-                **event,
-            },
+            _merge_progress_event(
+                {
+                    "status": "running",
+                    "phase": "initializing",
+                    "step_completed": 0,
+                    "time_s": 0.0,
+                    **existing,
+                },
+                event,
+            ),
         )
 
     return observe
@@ -480,6 +748,200 @@ def _append_npz_arrays(path: Path, arrays: dict[str, np.ndarray]) -> None:
             archive.writestr(f"{key}.npy", buffer.getvalue())
 
 
+def _is_link_or_reparse_point(entry: os.stat_result) -> bool:
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    return stat.S_ISLNK(entry.st_mode) or bool(
+        getattr(entry, "st_file_attributes", 0) & reparse_point
+    )
+
+
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _require_real_directory_path(path: Path, *, role: str) -> Path:
+    entry = _lstat_or_none(path)
+    if (
+        entry is None
+        or _is_link_or_reparse_point(entry)
+        or not stat.S_ISDIR(entry.st_mode)
+    ):
+        raise ValueError(f"{role} must be an existing real directory: {path}")
+    return path.resolve(strict=True)
+
+
+def _real_artifact_directory(root: Path, name: str) -> Path:
+    root_entry = _lstat_or_none(root)
+    if root_entry is None:
+        root.mkdir(parents=True, exist_ok=False)
+        root_entry = root.lstat()
+    if (
+        _is_link_or_reparse_point(root_entry)
+        or not stat.S_ISDIR(root_entry.st_mode)
+    ):
+        raise ValueError(f"accepted artifact root must be a real directory: {root}")
+    root_resolved = root.resolve(strict=True)
+    directory = root / name
+    directory_entry = _lstat_or_none(directory)
+    if directory_entry is None:
+        directory.mkdir()
+        directory_entry = directory.lstat()
+    if (
+        _is_link_or_reparse_point(directory_entry)
+        or not stat.S_ISDIR(directory_entry.st_mode)
+    ):
+        raise ValueError(f"accepted artifact directory must be a real directory: {directory}")
+    resolved = directory.resolve(strict=True)
+    if not resolved.is_relative_to(root_resolved):
+        raise ValueError(f"accepted artifact directory escapes canonical root: {directory}")
+    return resolved
+
+
+def _require_real_artifact_file(path: Path, root: Path) -> None:
+    entry = _lstat_or_none(path)
+    if entry is None:
+        return
+    if _is_link_or_reparse_point(entry) or not stat.S_ISREG(entry.st_mode):
+        raise ValueError(f"accepted artifact must be a real file: {path}")
+    if not path.resolve(strict=True).is_relative_to(root.resolve(strict=True)):
+        raise ValueError(f"accepted artifact escapes canonical root: {path}")
+
+
+def _arrays_semantically_equal(left: np.ndarray, right: np.ndarray) -> bool:
+    if left.dtype != right.dtype or left.shape != right.shape:
+        return False
+    if np.issubdtype(left.dtype, np.inexact):
+        return bool(np.array_equal(left, right, equal_nan=True))
+    return bool(np.array_equal(left, right))
+
+
+def _npz_semantically_equal(existing: Path, candidate: Path) -> bool:
+    try:
+        with np.load(existing, allow_pickle=False) as current, np.load(
+            candidate, allow_pickle=False
+        ) as proposed:
+            if (
+                len(current.files) != len(set(current.files))
+                or len(proposed.files) != len(set(proposed.files))
+            ):
+                return False
+            if set(current.files) != set(proposed.files):
+                return False
+            return all(
+                _arrays_semantically_equal(
+                    np.asarray(current[key]), np.asarray(proposed[key])
+                )
+                for key in current.files
+            )
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return False
+
+
+def _json_semantically_equal(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            _json_semantically_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_semantically_equal(item_left, item_right)
+            for item_left, item_right in zip(left, right)
+        )
+    if isinstance(left, float) and math.isnan(left):
+        return math.isnan(right)
+    return left == right
+
+
+def _load_unique_json_object(path: Path) -> dict[str, Any]:
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in payload:
+                raise ValueError(f"duplicate JSON key: {key!r}")
+            payload[key] = value
+        return payload
+
+    payload = json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=reject_duplicate_keys,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("step history must be a JSON object")
+    return payload
+
+
+def _require_existing_history_semantic_match(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    if not path.exists():
+        return
+    try:
+        matches = _json_semantically_equal(
+            _load_unique_json_object(path), _json_safe(payload)
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"existing accepted step history replay mismatch: {path}") from exc
+    if not matches:
+        raise ValueError(f"existing accepted step history replay mismatch: {path}")
+
+
+def _publish_create_or_semantic_same(
+    *,
+    temporary: Path,
+    destination: Path,
+    matches_existing,
+    artifact_name: str,
+) -> None:
+    try:
+        publish_file_create_only(temporary, destination)
+    except FileExistsError:
+        if not matches_existing(destination, temporary):
+            raise ValueError(
+                f"existing accepted {artifact_name} replay mismatch: {destination}"
+            )
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_step_history_create_or_semantic_same(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(json.dumps(_json_safe(payload), indent=2, sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        expected = _json_safe(payload)
+        _publish_create_or_semantic_same(
+            temporary=temporary,
+            destination=path,
+            matches_existing=lambda existing, _candidate: _json_semantically_equal(
+                _load_unique_json_object(existing), expected
+            ),
+            artifact_name="step history",
+        )
+    except BaseException:
+        if descriptor != -1:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def _save_step_frame_atomic(
     path: Path,
     snapshot: dict[str, Any],
@@ -537,7 +999,12 @@ def _save_step_frame_atomic(
                 },
             },
         )
-        temporary.replace(path)
+        _publish_create_or_semantic_same(
+            temporary=temporary,
+            destination=path,
+            matches_existing=_npz_semantically_equal,
+            artifact_name="step frame",
+        )
         return {**summary, "path": str(path)}
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -549,6 +1016,7 @@ def _validate_step_artifacts(
     *,
     expected_steps: int,
     require_iqn_trial_vectors: bool = False,
+    allow_partial_terminal_step: int | None = None,
 ) -> dict[str, Any]:
     expected_frame_names = [f"step_{step:04d}.npz" for step in range(1, expected_steps + 1)]
     expected_history_names = [
@@ -556,8 +1024,26 @@ def _validate_step_artifacts(
     ]
     fields_dir = output_dir / "step_fields"
     history_dir = output_dir / "step_history"
-    observed_frames = sorted(path.name for path in fields_dir.glob("step_*.npz"))
-    observed_histories = sorted(path.name for path in history_dir.glob("step_*.json"))
+    observed_frames = [
+        f"step_{step:04d}.npz"
+        for step in sorted(_resume_artifact_steps(fields_dir, ".npz"))
+    ]
+    observed_histories = [
+        f"step_{step:04d}.json"
+        for step in sorted(_resume_artifact_steps(history_dir, ".json"))
+    ]
+    if allow_partial_terminal_step is not None:
+        terminal_step = int(allow_partial_terminal_step)
+        if terminal_step <= expected_steps:
+            raise ValueError("partial terminal step must follow the validated prefix")
+        observed_frames = [
+            name for name in observed_frames
+            if name != f"step_{terminal_step:04d}.npz"
+        ]
+        observed_histories = [
+            name for name in observed_histories
+            if name != f"step_{terminal_step:04d}.json"
+        ]
     if observed_frames != expected_frame_names or observed_histories != expected_history_names:
         raise RuntimeError(
             "step artifact sequence mismatch: "
@@ -644,14 +1130,14 @@ def _validate_iqn_trial_vector_frame(frame: Any, *, expected_step: int) -> None:
 def _make_step_observer(
     *,
     output_dir: Path,
+    progress_dir: Path | None = None,
     span_reduction: str,
     streamwise_velocity_sign: float,
     reverse_streamwise_axis: bool,
     streamwise_length_m: float = 0.1,
     save_iqn_trial_vectors: bool = False,
 ):
-    fields_dir = output_dir / "step_fields"
-    progress_path = output_dir / "progress.json"
+    progress_path = (output_dir if progress_dir is None else progress_dir) / "progress.json"
 
     def observe(
         step_index: int,
@@ -659,7 +1145,18 @@ def _make_step_observer(
         history_row: dict[str, Any],
         snapshot: dict[str, Any],
     ) -> None:
-        frame_path = fields_dir / f"step_{int(step_index):04d}.npz"
+        real_fields_dir = _real_artifact_directory(output_dir, "step_fields")
+        real_history_dir = _real_artifact_directory(output_dir, "step_history")
+        frame_path = real_fields_dir / f"step_{int(step_index):04d}.npz"
+        history_path = real_history_dir / f"step_{int(step_index):04d}.json"
+        _require_real_artifact_file(frame_path, output_dir)
+        _require_real_artifact_file(history_path, output_dir)
+        history_payload = {
+            "step_index": int(step_index),
+            "time_s": float(time_s),
+            "history": history_row,
+        }
+        _require_existing_history_semantic_match(history_path, history_payload)
         frame_summary = _save_step_frame_atomic(
             frame_path,
             snapshot,
@@ -669,13 +1166,9 @@ def _make_step_observer(
             streamwise_length_m=float(streamwise_length_m),
             save_iqn_trial_vectors=bool(save_iqn_trial_vectors),
         )
-        _write_json_atomic(
-            output_dir / "step_history" / f"step_{int(step_index):04d}.json",
-            {
-                "step_index": int(step_index),
-                "time_s": float(time_s),
-                "history": history_row,
-            },
+        _write_step_history_create_or_semantic_same(
+            history_path,
+            history_payload,
         )
         progress = {
             "status": "running",
@@ -695,11 +1188,20 @@ def _make_step_observer(
             existing = json.loads(progress_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             existing = {}
-        next_progress = {**existing, **progress}
+        next_progress = _merge_progress_event(existing, progress)
         _write_json_atomic(progress_path, next_progress)
         print(json.dumps(_json_safe(next_progress), sort_keys=True), flush=True)
 
     observe.record_iqn_trial_vectors = bool(save_iqn_trial_vectors)
+    observe.checkpoint_replay_safe = True
+    observe.checkpoint_identity = _checkpoint_observer_identity(
+        output_dir=output_dir,
+        span_reduction=span_reduction,
+        streamwise_velocity_sign=streamwise_velocity_sign,
+        reverse_streamwise_axis=reverse_streamwise_axis,
+        streamwise_length_m=streamwise_length_m,
+        save_iqn_trial_vectors=save_iqn_trial_vectors,
+    )
     return observe
 
 
@@ -992,8 +1494,11 @@ def _validate_initial_guess_oracle_producer(
         raise ValueError("oracle producer source identity does not match consumer")
     if not bool(manifest.get("save_step_fields", False)):
         raise ValueError("oracle producer did not save accepted step fields")
-    if progress.get("status") != "completed" or summary.get("status") != "completed":
-        raise ValueError("oracle producer is not terminal-complete")
+    progress, summary = require_completed_output(
+        producer,
+        read_mapping=read_mapping,
+        error_message="oracle producer is not terminal-complete",
+    )
     if producer_config.get("coupling_mode") != "iqn_ils":
         raise ValueError("oracle producer must use iqn_ils")
     if producer_config.get("initial_guess_mode") != "carry_forward":
@@ -1218,6 +1723,8 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
         ),
         preflow_snapshot_input_path=getattr(args, "preflow_snapshot_in", None),
         preflow_snapshot_output_path=getattr(args, "preflow_snapshot_out", None),
+        fsi_checkpoint_input_path=getattr(args, "fsi_checkpoint_in", None),
+        fsi_checkpoint_output_path=getattr(args, "fsi_checkpoint_out", None),
         flow_hibm_sharp_search_radius_m=1.7e-3,
         flow_hibm_marker_compatibility_closure_tolerance_mps=float(
             getattr(
@@ -1330,11 +1837,15 @@ def _summary_from_report(
     elapsed_s: float,
     solver_npz_summary: dict[str, Any] | None,
     run_label: str,
+    artifact_output_dir: Path | None = None,
     solver_elapsed_s: float | None = None,
     post_solver_artifact_export_wall_time_s: float = 0.0,
     pre_summary_artifact_elapsed_s: float | None = None,
     require_runtime_identity: bool = False,
 ) -> dict[str, Any]:
+    resolved_artifact_output_dir = (
+        output_dir if artifact_output_dir is None else artifact_output_dir
+    )
     history = list(report.get("history", []))
     final_history = history[-1] if history else {}
     status = "completed" if len(history) == int(config.step_count) else "blocked"
@@ -1409,6 +1920,25 @@ def _summary_from_report(
         for field in experiment_metric_field_names
         if field in report
     }
+    material_evidence_fields = (
+        "material_transfer_configuration",
+        "material_transfer_verified",
+        "material_binding_identity",
+        "scatter_action_reaction_residual_n",
+        "force_roundoff_bound_n",
+        "torque_residual_n_m",
+        "torque_roundoff_bound_n_m",
+        "material_power_residual_w",
+        "material_power_roundoff_bound_w",
+        "mpm_direct_fixed_external_force_n",
+        "mpm_support_reaction_impulse_n_s",
+        "mpm_support_reaction_angular_impulse_n_m_s",
+        "mpm_damping_impulse_n_s",
+        "mpm_damping_angular_impulse_n_m_s",
+    )
+    material_evidence = {
+        field: report[field] for field in material_evidence_fields if field in report
+    }
     return {
         "run_label": run_label,
         "status": status,
@@ -1423,6 +1953,7 @@ def _summary_from_report(
         "profile_wall_time_enabled": profile_wall_time_enabled,
         "taichi_runtime_identity": taichi_runtime_identity,
         "output_dir": str(output_dir),
+        "artifact_root": str(resolved_artifact_output_dir),
         "step_count_requested": int(config.step_count),
         "step_count_completed": len(history),
         "final_time_s": float(config.dt_s) * len(history),
@@ -1451,6 +1982,7 @@ def _summary_from_report(
         "step_field_frame_count": len(list((output_dir / "step_fields").glob("step_*.npz"))),
         **experiment_metrics,
         **profile_totals,
+        **material_evidence,
     }
 
 
@@ -1509,6 +2041,21 @@ def main() -> int:
     preflow_snapshot_group.add_argument(
         "--preflow-snapshot-out",
         help="Atomically save the validated post-preflow state under this prefix.",
+    )
+    parser.add_argument(
+        "--fsi-checkpoint-in",
+        help="Resume from a complete accepted FSI checkpoint prefix.",
+    )
+    parser.add_argument(
+        "--fsi-checkpoint-out",
+        help="Save every accepted complete FSI state under this prefix.",
+    )
+    parser.add_argument(
+        "--resume-run-dir",
+        help=(
+            "Canonical accepted-state root to resume. It owns checkpoint and "
+            "accepted step artifacts; --output-dir becomes a fresh attempt root."
+        ),
     )
     parser.add_argument("--grid-nodes", type=int, nargs=3, default=(4, 32, 64))
     parser.add_argument(
@@ -1833,9 +2380,89 @@ def main() -> int:
         parser.error("--save-iqn-trial-vectors requires --save-step-fields")
     if args.save_iqn_trial_vectors and args.coupling_mode != "iqn_ils":
         parser.error("--save-iqn-trial-vectors requires --coupling-mode iqn_ils")
+    if args.resume_run_dir is not None:
+        if args.fsi_checkpoint_in is not None or args.fsi_checkpoint_out is not None:
+            parser.error(
+                "--fsi-checkpoint-in/--fsi-checkpoint-out cannot be combined "
+                "with --resume-run-dir"
+            )
+        canonical_output_dir = Path(args.resume_run_dir).expanduser().absolute()
+        checkpoint_prefix = canonical_output_dir / "checkpoint"
+        args.fsi_checkpoint_in = str(checkpoint_prefix)
+        args.fsi_checkpoint_out = str(checkpoint_prefix)
+    else:
+        canonical_output_dir = None
+        if args.fsi_checkpoint_in is not None:
+            parser.error(
+                "--fsi-checkpoint-in now requires --resume-run-dir so accepted "
+                "evidence is never rewritten; use --fsi-checkpoint-out alone "
+                "only for a fresh run"
+            )
 
-    output_dir = Path(args.output_dir).resolve()
-    _prepare_output_dir(output_dir)
+    output_dir = Path(args.output_dir).expanduser().absolute()
+    artifact_output_dir = (
+        output_dir if canonical_output_dir is None else canonical_output_dir
+    )
+    config = _build_config(args)
+    config_payload = asdict(config)
+    checkpoint_input_path, _ = _fsi_checkpoint_paths(config)
+    step_observer = (
+        _make_step_observer(
+            output_dir=artifact_output_dir,
+            progress_dir=output_dir,
+            span_reduction=str(args.span_reduction),
+            streamwise_velocity_sign=float(args.streamwise_velocity_sign),
+            reverse_streamwise_axis=not bool(args.no_reverse_streamwise_axis),
+            streamwise_length_m=float(config.duct_length_m),
+            save_iqn_trial_vectors=bool(args.save_iqn_trial_vectors),
+        )
+        if args.save_step_fields
+        else None
+    )
+    resume_source_sha256: dict[str, str] | None = None
+    resume_provenance: dict[str, Any] | None = None
+    if canonical_output_dir is not None:
+        if checkpoint_input_path is None:
+            raise RuntimeError("resume run directory did not configure a checkpoint")
+        checkpoint_head = _preflight_checkpoint_resume(
+            output_dir=canonical_output_dir,
+            config=config,
+            checkpoint_input_path=checkpoint_input_path,
+            step_observer=step_observer,
+        )
+        config = replace(
+            config, fsi_checkpoint_expected_generation=checkpoint_head.generation
+        )
+        config_payload = asdict(config)
+        resume_source_sha256 = _source_hashes()
+        _prepare_output_dir(
+            output_dir,
+            resume=True,
+            canonical_output_dir=canonical_output_dir,
+        )
+        attempt_id = "resume-" + hashlib.sha256(
+            f"{output_dir}:{time.time_ns()}".encode("utf-8")
+        ).hexdigest()[:24]
+        prepare_resume_attempt(
+            canonical_root=canonical_output_dir,
+            attempt_root=output_dir,
+            checkpoint_generation=checkpoint_head.generation,
+            checkpoint_identity=checkpoint_head.metadata["identity"],
+            accepted_step=checkpoint_head.accepted_step,
+            source_hashes=resume_source_sha256,
+            target_step=int(config.step_count),
+            attempt_id=attempt_id,
+            attempt_role="resume",
+        )
+        resume_provenance = {
+            "canonical_root": str(canonical_output_dir),
+            "checkpoint_generation": checkpoint_head.generation,
+            "checkpoint_identity": dict(checkpoint_head.metadata["identity"]),
+            "accepted_step": int(checkpoint_head.accepted_step),
+            "artifact_root": str(artifact_output_dir),
+        }
+    else:
+        _prepare_output_dir(output_dir, resume=False)
     start = time.perf_counter()
     progress_observer = _make_run_progress_observer(output_dir=output_dir)
     progress_observer(
@@ -1845,8 +2472,6 @@ def main() -> int:
             "elapsed_s": 0.0,
         }
     )
-    config: VerticalFlapFsiConfig | None = None
-    config_payload: dict[str, Any] = {}
     oracle_replay_identity: dict[str, Any] | None = None
     try:
         taichi_runtime = _configure_taichi_offline_cache(
@@ -1866,9 +2491,11 @@ def main() -> int:
                 "taichi_runtime": taichi_runtime,
             }
         )
-        config = _build_config(args)
-        config_payload = asdict(config)
-        source_sha256 = _source_hashes()
+        source_sha256 = (
+            _source_hashes()
+            if resume_source_sha256 is None
+            else resume_source_sha256
+        )
         if (
             (config.initial_guess_mode == "oracle_replay"
             or config.iqn_kalman_oracle_interpolation_target_step is not None)
@@ -1908,6 +2535,8 @@ def main() -> int:
             "taichi_runtime": taichi_runtime,
             "source_sha256": source_sha256,
             "initial_guess_oracle_identity": oracle_replay_identity,
+            "resume_provenance": resume_provenance,
+            "artifact_root": str(artifact_output_dir),
         }
         _write_json_atomic(output_dir / "run_manifest.json", manifest)
         _write_json_atomic(output_dir / "our_solver_config.json", config_payload)
@@ -1939,18 +2568,6 @@ def main() -> int:
             "taichi_runtime": taichi_runtime,
         }
     )
-    step_observer = (
-        _make_step_observer(
-            output_dir=output_dir,
-            span_reduction=str(args.span_reduction),
-            streamwise_velocity_sign=float(args.streamwise_velocity_sign),
-            reverse_streamwise_axis=not bool(args.no_reverse_streamwise_axis),
-            streamwise_length_m=float(config.duct_length_m),
-            save_iqn_trial_vectors=bool(args.save_iqn_trial_vectors),
-        )
-        if args.save_step_fields
-        else None
-    )
     try:
         solver_started_s = time.perf_counter()
         report = run_ansys_vertical_flap_benchmark(
@@ -1970,7 +2587,7 @@ def main() -> int:
             _write_history_csv(output_dir / "our_solver_history.csv", list(report["history"]))
             if step_observer is not None:
                 _validate_step_artifacts(
-                    output_dir,
+                    artifact_output_dir,
                     expected_steps=int(report["accepted_step_count"]),
                     require_iqn_trial_vectors=bool(args.save_iqn_trial_vectors),
                 )
@@ -1981,6 +2598,9 @@ def main() -> int:
                 output_dir / "our_solver_summary.json",
                 {
                     "status": "research_probe_terminal",
+                    "output_dir": str(output_dir),
+                    "artifact_root": str(artifact_output_dir),
+                    "resume_provenance": resume_provenance,
                     "offline_oracle": True,
                     "deployable": False,
                     "accepted_step_count": int(report["accepted_step_count"]),
@@ -2022,7 +2642,7 @@ def main() -> int:
         step_artifact_validation = None
         if step_observer is not None:
             step_artifact_validation = _validate_step_artifacts(
-                output_dir,
+                artifact_output_dir,
                 expected_steps=int(config.step_count),
                 require_iqn_trial_vectors=bool(args.save_iqn_trial_vectors),
             )
@@ -2035,6 +2655,7 @@ def main() -> int:
             report=report,
             config=config,
             output_dir=output_dir,
+            artifact_output_dir=artifact_output_dir,
             elapsed_s=elapsed_s,
             solver_npz_summary=solver_npz_summary,
             run_label=args.run_label,
@@ -2051,6 +2672,11 @@ def main() -> int:
             summary["initial_guess_oracle_identity"] = dict(
                 oracle_replay_identity
             )
+        summary["artifact_root"] = str(artifact_output_dir)
+        summary["step_field_frame_count"] = len(
+            list((artifact_output_dir / "step_fields").glob("step_*.npz"))
+        )
+        summary["resume_provenance"] = resume_provenance
         _write_json_atomic(output_dir / "our_solver_summary.json", summary)
         terminal_elapsed_s = time.perf_counter() - start
         terminal_status = (

@@ -174,6 +174,11 @@ class NeoHookeanMpmReport:
     max_radial_stretch_error: float
     primary_particle_count: int = 0
     secondary_particle_count: int = 0
+    direct_fixed_external_force_n: tuple[float, float, float] | None = None
+    support_reaction_impulse_n_s: tuple[float, float, float] | None = None
+    support_reaction_angular_impulse_n_m_s: tuple[float, float, float] | None = None
+    damping_impulse_n_s: tuple[float, float, float] | None = None
+    damping_angular_impulse_n_m_s: tuple[float, float, float] | None = None
 
 
 @ti.data_oriented
@@ -228,7 +233,7 @@ class NeoHookeanMpmState:
         )
         self.v = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
         self.C = ti.Matrix.field(3, 3, dtype=ti.f32, shape=self.particle_capacity)
-        self.F = ti.Matrix.field(3, 3, dtype=ti.f32, shape=self.particle_capacity)
+        self.F = ti.Matrix.field(3, 3, dtype=ti.f64, shape=self.particle_capacity)
         self.saved_x = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
         self.saved_position_increment_residual_m = ti.Vector.field(
             3,
@@ -237,7 +242,7 @@ class NeoHookeanMpmState:
         )
         self.saved_v = ti.Vector.field(3, dtype=ti.f32, shape=self.particle_capacity)
         self.saved_C = ti.Matrix.field(3, 3, dtype=ti.f32, shape=self.particle_capacity)
-        self.saved_F = ti.Matrix.field(3, 3, dtype=ti.f32, shape=self.particle_capacity)
+        self.saved_F = ti.Matrix.field(3, 3, dtype=ti.f64, shape=self.particle_capacity)
         self.mass_kg = ti.field(dtype=ti.f32, shape=self.particle_capacity)
         self.volume_m3 = ti.field(dtype=ti.f32, shape=self.particle_capacity)
         self.area_weight_m2 = ti.field(dtype=ti.f32, shape=self.particle_capacity)
@@ -266,6 +271,19 @@ class NeoHookeanMpmState:
         self.report_grid_momentum_kg_mps = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_transfer_grid_momentum_kg_mps = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_external_force_n = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.report_direct_fixed_external_force_n = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.report_support_reaction_impulse_n_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.report_support_reaction_angular_impulse_n_m_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.report_damping_impulse_n_s = ti.Vector.field(3, dtype=ti.f64, shape=())
+        self.report_damping_angular_impulse_n_m_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
         self.report_current_center_sum_m = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_radial_rest_center_sum_m = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_radial_center_count = ti.field(dtype=ti.i32, shape=())
@@ -296,6 +314,38 @@ class NeoHookeanMpmState:
             dtype=ti.i32,
             shape=(),
         )
+        # Physical impulse diagnostics are sticky over a deferred substep
+        # batch, unlike the current-step fields reset in _clear_report_func.
+        self.support_reaction_guard_batch_impulse_n_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.support_reaction_guard_batch_angular_impulse_n_m_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.damping_guard_batch_impulse_n_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.damping_guard_batch_angular_impulse_n_m_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.saved_support_reaction_guard_batch_impulse_n_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.saved_support_reaction_guard_batch_angular_impulse_n_m_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.saved_damping_guard_batch_impulse_n_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.saved_damping_guard_batch_angular_impulse_n_m_s = ti.Vector.field(
+            3, dtype=ti.f64, shape=()
+        )
+        self.saved_out_of_bounds_guard_batch_max_particle_count = ti.field(
+            dtype=ti.i32, shape=()
+        )
+        self.saved_deformation_clamp_guard_batch_total_count = ti.field(
+            dtype=ti.i32, shape=()
+        )
         self.report_primary_displacement_sum_m = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_primary_velocity_sum_mps = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.report_secondary_displacement_sum_m = ti.Vector.field(3, dtype=ti.f32, shape=())
@@ -304,17 +354,19 @@ class NeoHookeanMpmState:
         self.report_secondary_count = ti.field(dtype=ti.i32, shape=())
         self.report_float_snapshot = ti.Vector.field(28, dtype=ti.f32, shape=())
         self.report_count_snapshot = ti.Vector.field(6, dtype=ti.i32, shape=())
-        self.report_host_snapshot = ti.field(dtype=ti.f64, shape=34)
+        self.report_host_snapshot = ti.field(dtype=ti.f64, shape=49)
         self.primary_mass_kg = ti.field(dtype=ti.f32, shape=())
         self.secondary_mass_kg = ti.field(dtype=ti.f32, shape=())
         self.last_report_host_reads = 0
         self.last_out_of_bounds_guard_host_reads = 0
         self._out_of_bounds_guard_batch_active = False
         self._out_of_bounds_guard_batch_step_count = 0
+        self._saved_out_of_bounds_guard_batch_active = False
+        self._saved_out_of_bounds_guard_batch_step_count = 0
 
     @ti.func
     def _identity(self):
-        return ti.Matrix.identity(ti.f32, 3)
+        return ti.Matrix.identity(ti.f64, 3)
 
     @ti.kernel
     def _initialize_box_kernel(
@@ -322,12 +374,12 @@ class NeoHookeanMpmState:
         nxp: ti.i32,
         nyp: ti.i32,
         nzp: ti.i32,
-        min_x: ti.f32,
-        min_y: ti.f32,
-        min_z: ti.f32,
-        max_x: ti.f32,
-        max_y: ti.f32,
-        max_z: ti.f32,
+        min_x: ti.f64,
+        min_y: ti.f64,
+        min_z: ti.f64,
+        max_x: ti.f64,
+        max_y: ti.f64,
+        max_z: ti.f64,
         density_kgm3: ti.f32,
     ):
         particle_count = nxp * nyp * nzp
@@ -338,9 +390,12 @@ class NeoHookeanMpmState:
                 ix = p % nxp
                 iy = (p // nxp) % nyp
                 iz = p // (nxp * nyp)
-                x = min_x + (ti.cast(ix, ti.f32) + 0.5) * (max_x - min_x) / ti.cast(nxp, ti.f32)
-                y = min_y + (ti.cast(iy, ti.f32) + 0.5) * (max_y - min_y) / ti.cast(nyp, ti.f32)
-                z = min_z + (ti.cast(iz, ti.f32) + 0.5) * (max_z - min_z) / ti.cast(nzp, ti.f32)
+                # Form the Cartesian reference in f64, then round once at
+                # the f32 field store. Intermediate f32 products/divisions
+                # can otherwise make a uniform box appear nonuniform.
+                x = min_x + (ti.cast(ix, ti.f64) + 0.5) * (max_x - min_x) / ti.cast(nxp, ti.f64)
+                y = min_y + (ti.cast(iy, ti.f64) + 0.5) * (max_y - min_y) / ti.cast(nyp, ti.f64)
+                z = min_z + (ti.cast(iz, ti.f64) + 0.5) * (max_z - min_z) / ti.cast(nzp, ti.f64)
                 self.x[p] = ti.Vector([x, y, z])
                 self.rest_x[p] = ti.Vector([x, y, z])
                 self.position_increment_residual_m[p] = ti.Vector([0.0, 0.0, 0.0])
@@ -784,6 +839,11 @@ class NeoHookeanMpmState:
         self.report_grid_momentum_kg_mps[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_transfer_grid_momentum_kg_mps[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_external_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
+        self.report_direct_fixed_external_force_n[None] = ti.Vector([0.0, 0.0, 0.0])
+        self.report_support_reaction_impulse_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
+        self.report_support_reaction_angular_impulse_n_m_s[None] = ti.Vector([0.0, 0.0, 0.0])
+        self.report_damping_impulse_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
+        self.report_damping_angular_impulse_n_m_s[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_current_center_sum_m[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_radial_rest_center_sum_m[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_radial_center_count[None] = 0
@@ -803,44 +863,17 @@ class NeoHookeanMpmState:
         self.report_secondary_velocity_sum_mps[None] = ti.Vector([0.0, 0.0, 0.0])
         self.report_primary_count[None] = 0
         self.report_secondary_count[None] = 0
-        self.report_float_snapshot[None] = ti.Vector(
-            [
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-            ]
-        )
+        self.report_float_snapshot[None] = ti.Vector.zero(ti.f32, 28)
         self.report_count_snapshot[None] = ti.Vector([0, 0, 0, 0, 0, 0])
 
     @ti.kernel
     def _reset_out_of_bounds_guard_batch_kernel(self):
         self.out_of_bounds_guard_batch_max_particle_count[None] = 0
         self.deformation_clamp_guard_batch_total_count[None] = 0
+        self.support_reaction_guard_batch_impulse_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
+        self.support_reaction_guard_batch_angular_impulse_n_m_s[None] = ti.Vector([0.0, 0.0, 0.0])
+        self.damping_guard_batch_impulse_n_s[None] = ti.Vector([0.0, 0.0, 0.0])
+        self.damping_guard_batch_angular_impulse_n_m_s[None] = ti.Vector([0.0, 0.0, 0.0])
 
     @ti.func
     def _atomic_add_vector(self, field, value):
@@ -916,6 +949,10 @@ class NeoHookeanMpmState:
             self.grid_force_n[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
             self.grid_fixed_node[i, j, k] = 0
         self._clear_report_func()
+        I64 = ti.Matrix.identity(ti.f64, 3)
+        dt64 = ti.cast(dt_s, ti.f64)
+        mu64 = ti.cast(mu_pa, ti.f64)
+        lambda64 = ti.cast(lambda_pa, ti.f64)
 
         for p in range(self.particle_capacity):
             if p < particle_count:
@@ -927,78 +964,84 @@ class NeoHookeanMpmState:
                 wz = self._weights(fx.z)
                 raw_Fp = self.F[p]
                 raw_J = raw_Fp.determinant()
-                U, sig, V = ti.svd(raw_Fp)
-                clamped = 0
+                U, sig, V = ti.svd(raw_Fp, ti.f64)
+                projection_required = 0
                 for axis in ti.static(range(3)):
-                    raw_sigma = sig[axis, axis]
-                    raw_sigma_abs = ti.abs(raw_sigma)
-                    clamped_sigma = ti.min(
-                        ti.max(raw_sigma_abs, MIN_DEFORMATION_SINGULAR_VALUE),
-                        MAX_DEFORMATION_SINGULAR_VALUE,
-                    )
-                    if ti.abs(clamped_sigma - raw_sigma) > 1.0e-6:
-                        clamped = 1
-                    sig[axis, axis] = clamped_sigma
-                if (U @ V.transpose()).determinant() < 0.0:
-                    clamped = 1
-                    for row in ti.static(range(3)):
-                        U[row, 2] = -U[row, 2]
-                Fp = U @ sig @ V.transpose()
-                if Fp.determinant() <= 0.0:
-                    clamped = 1
-                    Fp[0, 2] = -Fp[0, 2]
-                    Fp[1, 2] = -Fp[1, 2]
-                    Fp[2, 2] = -Fp[2, 2]
+                    raw_sigma = ti.abs(sig[axis, axis])
+                    if (
+                        raw_sigma < ti.f64(MIN_DEFORMATION_SINGULAR_VALUE)
+                        or raw_sigma > ti.f64(MAX_DEFORMATION_SINGULAR_VALUE)
+                    ):
+                        projection_required = 1
                 if raw_J <= 0.0:
-                    clamped = 1
-                if clamped == 1:
+                    projection_required = 1
+                Fp = raw_Fp
+                if projection_required == 1:
+                    for axis in ti.static(range(3)):
+                        sig[axis, axis] = ti.min(
+                            ti.max(
+                                ti.abs(sig[axis, axis]),
+                                ti.f64(MIN_DEFORMATION_SINGULAR_VALUE),
+                            ),
+                            ti.f64(MAX_DEFORMATION_SINGULAR_VALUE),
+                        )
+                    if (U @ V.transpose()).determinant() < 0.0:
+                        for row in ti.static(range(3)):
+                            U[row, 2] = -U[row, 2]
+                    Fp = U @ sig @ V.transpose()
+                    if Fp.determinant() <= 0.0:
+                        Fp[0, 2] = -Fp[0, 2]
+                        Fp[1, 2] = -Fp[1, 2]
+                        Fp[2, 2] = -Fp[2, 2]
                     ti.atomic_add(self.report_deformation_clamp_count[None], 1)
                     self.F[p] = Fp
                 J = Fp.determinant()
-                stress_map = ti.Matrix.zero(ti.f32, 3, 3)
+                stress_map = ti.Matrix.zero(ti.f64, 3, 3)
                 if constitutive_model == CONSTITUTIVE_SAINT_VENANT_KIRCHHOFF:
                     green_lagrange = 0.5 * (
-                        Fp.transpose() @ Fp - self._identity()
+                        Fp.transpose() @ Fp - I64
                     )
                     second_piola = (
-                        lambda_pa * green_lagrange.trace() * self._identity()
-                        + 2.0 * mu_pa * green_lagrange
+                        lambda64 * green_lagrange.trace() * I64
+                        + 2.0 * mu64 * green_lagrange
                     )
                     P = Fp @ second_piola
                     stress_map = P @ Fp.transpose()
                 elif constitutive_model == CONSTITUTIVE_PLANE_STRESS_LINEAR_ELASTIC:
-                    displacement_gradient = Fp - self._identity()
+                    displacement_gradient = Fp - I64
                     strain = 0.5 * (
                         displacement_gradient + displacement_gradient.transpose()
                     )
                     in_plane_trace = strain[1, 1] + strain[2, 2]
-                    P = ti.Matrix.zero(ti.f32, 3, 3)
+                    P = ti.Matrix.zero(ti.f64, 3, 3)
                     for row, column in ti.static(ti.ndrange((1, 3), (1, 3))):
-                        P[row, column] = 2.0 * mu_pa * strain[row, column]
-                    P[1, 1] += lambda_pa * in_plane_trace
-                    P[2, 2] += lambda_pa * in_plane_trace
+                        P[row, column] = 2.0 * mu64 * strain[row, column]
+                    P[1, 1] += lambda64 * in_plane_trace
+                    P[2, 2] += lambda64 * in_plane_trace
                     stress_map = P
                 elif constitutive_model == CONSTITUTIVE_LINEAR_ELASTIC:
-                    displacement_gradient = Fp - self._identity()
+                    displacement_gradient = Fp - I64
                     strain = 0.5 * (
                         displacement_gradient + displacement_gradient.transpose()
                     )
-                    P = 2.0 * mu_pa * strain + lambda_pa * strain.trace() * self._identity()
+                    P = 2.0 * mu64 * strain + lambda64 * strain.trace() * I64
                     stress_map = P
                 else:
                     FinvT = Fp.inverse().transpose()
-                    P = mu_pa * (Fp - FinvT) + lambda_pa * ti.log(J) * FinvT
+                    P = mu64 * (Fp - FinvT) + lambda64 * ti.log(J) * FinvT
                     stress_map = P @ Fp.transpose()
-                inv_dx2 = ti.Matrix(
-                    [
-                        [4.0 / (self.dx[0] * self.dx[0]), 0.0, 0.0],
-                        [0.0, 4.0 / (self.dx[1] * self.dx[1]), 0.0],
-                        [0.0, 0.0, 4.0 / (self.dx[2] * self.dx[2])],
-                    ]
+                inv_dx2 = ti.Matrix.zero(ti.f64, 3, 3)
+                for axis in ti.static(range(3)):
+                    inv_dx2[axis, axis] = ti.cast(
+                        4.0 / (self.dx[axis] * self.dx[axis]), ti.f64
+                    )
+                stress = (
+                    -dt64
+                    * ti.cast(self.volume_m3[p], ti.f64)
+                    * (stress_map @ inv_dx2)
                 )
-                stress = -dt_s * self.volume_m3[p] * (stress_map @ inv_dx2)
                 inertial_affine = self.mass_kg[p] * self.C[p]
-                affine = stress + inertial_affine
+                affine = ti.cast(stress, ti.f32) + inertial_affine
                 particle_momentum = self.mass_kg[p] * self.v[p]
                 particle_external_force = self.external_force_n[p]
                 if self.fixed_particle[p] != 0:
@@ -1008,6 +1051,30 @@ class NeoHookeanMpmState:
                     particle_momentum = ti.Vector([0.0, 0.0, 0.0])
                     inertial_affine = ti.Matrix.zero(ti.f32, 3, 3)
                     affine = ti.Matrix.zero(ti.f32, 3, 3)
+                    direct_support_impulse = -dt_s * particle_external_force
+                    direct_support_angular_impulse = self.x[p].cross(
+                        direct_support_impulse
+                    )
+                    self._atomic_add_vector(
+                        self.report_direct_fixed_external_force_n,
+                        particle_external_force,
+                    )
+                    self._atomic_add_vector(
+                        self.report_support_reaction_impulse_n_s,
+                        direct_support_impulse,
+                    )
+                    self._atomic_add_vector(
+                        self.report_support_reaction_angular_impulse_n_m_s,
+                        direct_support_angular_impulse,
+                    )
+                    self._atomic_add_vector(
+                        self.support_reaction_guard_batch_impulse_n_s,
+                        direct_support_impulse,
+                    )
+                    self._atomic_add_vector(
+                        self.support_reaction_guard_batch_angular_impulse_n_m_s,
+                        direct_support_angular_impulse,
+                    )
                     particle_external_force = ti.Vector([0.0, 0.0, 0.0])
                 ti.atomic_add(self.report_total_mass_kg[None], self.mass_kg[p])
                 ti.atomic_add(self.report_total_volume_m3[None], self.volume_m3[p])
@@ -1086,10 +1153,83 @@ class NeoHookeanMpmState:
                     + dt_s * self.grid_force_n[i, j, k] / mass
                 )
                 transfer_velocity = velocity
-                velocity *= velocity_damping
+                velocity_after_damping = velocity * velocity_damping
+                node_position = ti.Vector(
+                    [
+                        self.bounds_min[0] + ti.cast(i, ti.f32) * self.dx[0],
+                        self.bounds_min[1] + ti.cast(j, ti.f32) * self.dx[1],
+                        self.bounds_min[2] + ti.cast(k, ti.f32) * self.dx[2],
+                    ]
+                )
+                damping_impulse = mass * (velocity_after_damping - transfer_velocity)
+                damping_angular_impulse = node_position.cross(damping_impulse)
+                self._atomic_add_vector(
+                    self.report_damping_impulse_n_s,
+                    damping_impulse,
+                )
+                self._atomic_add_vector(
+                    self.report_damping_angular_impulse_n_m_s,
+                    damping_angular_impulse,
+                )
+                self._atomic_add_vector(
+                    self.damping_guard_batch_impulse_n_s,
+                    damping_impulse,
+                )
+                self._atomic_add_vector(
+                    self.damping_guard_batch_angular_impulse_n_m_s,
+                    damping_angular_impulse,
+                )
+                velocity = velocity_after_damping
                 if self.grid_fixed_node[i, j, k] != 0:
+                    clamp_support_impulse = mass * (-velocity_after_damping)
+                    clamp_support_angular_impulse = node_position.cross(
+                        clamp_support_impulse
+                    )
+                    self._atomic_add_vector(
+                        self.report_support_reaction_impulse_n_s,
+                        clamp_support_impulse,
+                    )
+                    self._atomic_add_vector(
+                        self.report_support_reaction_angular_impulse_n_m_s,
+                        clamp_support_angular_impulse,
+                    )
+                    self._atomic_add_vector(
+                        self.support_reaction_guard_batch_impulse_n_s,
+                        clamp_support_impulse,
+                    )
+                    self._atomic_add_vector(
+                        self.support_reaction_guard_batch_angular_impulse_n_m_s,
+                        clamp_support_angular_impulse,
+                    )
                     velocity = ti.Vector([0.0, 0.0, 0.0])
                     velocity_before_update = ti.Vector([0.0, 0.0, 0.0])
+                if fixed_mass > 0.0 and self.grid_fixed_node[i, j, k] == 0:
+                    # Every fixed-particle mass share receives this final grid
+                    # velocity in G2P, then its velocity and APIC affine state
+                    # are discarded by the fixed-particle branch below.
+                    # Record the support reaction at the grid nodes so the
+                    # angular ledger includes the discarded affine momentum.
+                    # Clamped nodes are zero and already accounted above.
+                    g2p_fixed_support_impulse = -fixed_mass * velocity
+                    g2p_fixed_support_angular_impulse = node_position.cross(
+                        g2p_fixed_support_impulse
+                    )
+                    self._atomic_add_vector(
+                        self.report_support_reaction_impulse_n_s,
+                        g2p_fixed_support_impulse,
+                    )
+                    self._atomic_add_vector(
+                        self.report_support_reaction_angular_impulse_n_m_s,
+                        g2p_fixed_support_angular_impulse,
+                    )
+                    self._atomic_add_vector(
+                        self.support_reaction_guard_batch_impulse_n_s,
+                        g2p_fixed_support_impulse,
+                    )
+                    self._atomic_add_vector(
+                        self.support_reaction_guard_batch_angular_impulse_n_m_s,
+                        g2p_fixed_support_angular_impulse,
+                    )
                 self.grid_velocity_before_update_mps[i, j, k] = velocity_before_update
                 self.grid_velocity_mps[i, j, k] = velocity
                 self._atomic_add_vector(
@@ -1153,6 +1293,9 @@ class NeoHookeanMpmState:
                         )
                         self.v[p] = new_v
                         self.C[p] = new_C
+                        C64 = ti.Matrix.zero(ti.f64, 3, 3)
+                        for row, column in ti.static(ti.ndrange(3, 3)):
+                            C64[row, column] = ti.cast(new_C[row, column], ti.f64)
                         new_x = self.x[p]
                         next_position_residual = (
                             self.position_increment_residual_m[p]
@@ -1192,7 +1335,7 @@ class NeoHookeanMpmState:
                         self.position_increment_residual_m[p] = (
                             next_position_residual
                         )
-                        self.F[p] = (self._identity() + dt_s * new_C) @ self.F[p]
+                        self.F[p] = (I64 + dt64 * C64) @ self.F[p]
                 if self.fixed_particle[p] != 0:
                     # Fixed particles stay frozen: zero velocity, frozen
                     # position, rest-identity deformation, no affine state.
@@ -1307,6 +1450,21 @@ class NeoHookeanMpmState:
                 packed_counts[snapshot_index],
                 ti.f64,
             )
+        self.report_host_snapshot[34] = self.report_direct_fixed_external_force_n[None].x
+        self.report_host_snapshot[35] = self.report_direct_fixed_external_force_n[None].y
+        self.report_host_snapshot[36] = self.report_direct_fixed_external_force_n[None].z
+        self.report_host_snapshot[37] = self.support_reaction_guard_batch_impulse_n_s[None].x
+        self.report_host_snapshot[38] = self.support_reaction_guard_batch_impulse_n_s[None].y
+        self.report_host_snapshot[39] = self.support_reaction_guard_batch_impulse_n_s[None].z
+        self.report_host_snapshot[40] = self.support_reaction_guard_batch_angular_impulse_n_m_s[None].x
+        self.report_host_snapshot[41] = self.support_reaction_guard_batch_angular_impulse_n_m_s[None].y
+        self.report_host_snapshot[42] = self.support_reaction_guard_batch_angular_impulse_n_m_s[None].z
+        self.report_host_snapshot[43] = self.damping_guard_batch_impulse_n_s[None].x
+        self.report_host_snapshot[44] = self.damping_guard_batch_impulse_n_s[None].y
+        self.report_host_snapshot[45] = self.damping_guard_batch_impulse_n_s[None].z
+        self.report_host_snapshot[46] = self.damping_guard_batch_angular_impulse_n_m_s[None].x
+        self.report_host_snapshot[47] = self.damping_guard_batch_angular_impulse_n_m_s[None].y
+        self.report_host_snapshot[48] = self.damping_guard_batch_angular_impulse_n_m_s[None].z
 
     def step(
         self,
@@ -1444,6 +1602,24 @@ class NeoHookeanMpmState:
 
     @ti.kernel
     def _save_state_kernel(self, particle_count: ti.i32):
+        self.saved_out_of_bounds_guard_batch_max_particle_count[None] = (
+            self.out_of_bounds_guard_batch_max_particle_count[None]
+        )
+        self.saved_deformation_clamp_guard_batch_total_count[None] = (
+            self.deformation_clamp_guard_batch_total_count[None]
+        )
+        self.saved_support_reaction_guard_batch_impulse_n_s[None] = (
+            self.support_reaction_guard_batch_impulse_n_s[None]
+        )
+        self.saved_support_reaction_guard_batch_angular_impulse_n_m_s[None] = (
+            self.support_reaction_guard_batch_angular_impulse_n_m_s[None]
+        )
+        self.saved_damping_guard_batch_impulse_n_s[None] = (
+            self.damping_guard_batch_impulse_n_s[None]
+        )
+        self.saved_damping_guard_batch_angular_impulse_n_m_s[None] = (
+            self.damping_guard_batch_angular_impulse_n_m_s[None]
+        )
         for p in range(particle_count):
             self.saved_x[p] = self.x[p]
             self.saved_position_increment_residual_m[p] = (
@@ -1455,6 +1631,24 @@ class NeoHookeanMpmState:
 
     @ti.kernel
     def _restore_state_kernel(self, particle_count: ti.i32):
+        self.out_of_bounds_guard_batch_max_particle_count[None] = (
+            self.saved_out_of_bounds_guard_batch_max_particle_count[None]
+        )
+        self.deformation_clamp_guard_batch_total_count[None] = (
+            self.saved_deformation_clamp_guard_batch_total_count[None]
+        )
+        self.support_reaction_guard_batch_impulse_n_s[None] = (
+            self.saved_support_reaction_guard_batch_impulse_n_s[None]
+        )
+        self.support_reaction_guard_batch_angular_impulse_n_m_s[None] = (
+            self.saved_support_reaction_guard_batch_angular_impulse_n_m_s[None]
+        )
+        self.damping_guard_batch_impulse_n_s[None] = (
+            self.saved_damping_guard_batch_impulse_n_s[None]
+        )
+        self.damping_guard_batch_angular_impulse_n_m_s[None] = (
+            self.saved_damping_guard_batch_angular_impulse_n_m_s[None]
+        )
         for p in range(particle_count):
             self.x[p] = self.saved_x[p]
             self.position_increment_residual_m[p] = (
@@ -1487,16 +1681,29 @@ class NeoHookeanMpmState:
         if self.particle_count <= 0:
             raise ValueError("initialize particles before saving state")
         self._save_state_kernel(int(self.particle_count))
+        self._saved_out_of_bounds_guard_batch_active = (
+            self._out_of_bounds_guard_batch_active
+        )
+        self._saved_out_of_bounds_guard_batch_step_count = (
+            self._out_of_bounds_guard_batch_step_count
+        )
 
     def restore_state(self) -> None:
         if self.particle_count <= 0:
             raise ValueError("initialize particles before restoring state")
         self._restore_state_kernel(int(self.particle_count))
+        self._out_of_bounds_guard_batch_active = (
+            self._saved_out_of_bounds_guard_batch_active
+        )
+        self._out_of_bounds_guard_batch_step_count = (
+            self._saved_out_of_bounds_guard_batch_step_count
+        )
 
     def report(self) -> NeoHookeanMpmReport:
         snapshot = self.report_host_snapshot.to_numpy()
         values = snapshot[:28]
         counts = snapshot[28:34]
+        diagnostics = snapshot[34:49]
         self.last_report_host_reads = 1
         self.last_out_of_bounds_guard_host_reads = 1
         _raise_if_out_of_bounds_exceeds_tolerance(
@@ -1552,6 +1759,31 @@ class NeoHookeanMpmState:
             particle_momentum_kg_mps=(float(values[2]), float(values[3]), float(values[4])),
             grid_momentum_kg_mps=(float(values[5]), float(values[6]), float(values[7])),
             external_force_n=(float(values[8]), float(values[9]), float(values[10])),
+            direct_fixed_external_force_n=(
+                float(diagnostics[0]),
+                float(diagnostics[1]),
+                float(diagnostics[2]),
+            ),
+            support_reaction_impulse_n_s=(
+                float(diagnostics[3]),
+                float(diagnostics[4]),
+                float(diagnostics[5]),
+            ),
+            support_reaction_angular_impulse_n_m_s=(
+                float(diagnostics[6]),
+                float(diagnostics[7]),
+                float(diagnostics[8]),
+            ),
+            damping_impulse_n_s=(
+                float(diagnostics[9]),
+                float(diagnostics[10]),
+                float(diagnostics[11]),
+            ),
+            damping_angular_impulse_n_m_s=(
+                float(diagnostics[12]),
+                float(diagnostics[13]),
+                float(diagnostics[14]),
+            ),
             transfer_relative_error=float(values[11]),
             max_speed_mps=float(values[12]),
             max_abs_j=float(values[13]),

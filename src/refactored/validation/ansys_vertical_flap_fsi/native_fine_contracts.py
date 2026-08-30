@@ -11,6 +11,15 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from simulation_core.coupling.accepted_fsi_checkpoint import (
+    load_accepted_fsi_checkpoint,
+)
+from simulation_core.diagnostics.checkpoint_store import read_checkpoint_head
+from simulation_core.diagnostics.run_attempt import (
+    validate_dual_root_attempt_provenance,
+    validate_dual_root_history_row_semantics,
+)
+
 from .native_fine_final_contracts import (
     FINAL_PROJECTION_REQUIRED_KEYS,
     NativeFineFinalContractError,
@@ -28,6 +37,10 @@ DEFAULT_EXPECTED_STEPS = 50
 DEFAULT_DT_S = 5.0e-4
 VELOCITY_VMIN_MPS = 0.0
 VELOCITY_VMAX_MPS = 31.0
+NONLEGACY_EXACT50_STRICT_PRESSURE_PROFILES = frozenset((
+    "current_iqn_adaptive",
+    "current_iqn_adaptive_material_reference",
+))
 FRAME_RE = re.compile(r"^step_(?P<step>\d{4})\.npz$")
 STEP_HISTORY_RE = re.compile(r"^step_(?P<step>\d{4})\.json$")
 FORBIDDEN_REFERENCE_TOKENS = (
@@ -121,6 +134,22 @@ _PROJECTION_REPORT_MIRRORS = {
 class NativeFineComparisonError(RuntimeError):
     """Raised when a comparison input is incomplete or not the native run."""
 
+
+def validate_comparison_profile_entry(
+    comparison_profile: str, *, expected_steps: int, pressure_semantics_mode: str,
+) -> None:
+    """Reject bypasses before profile-local final-identity validation."""
+    if comparison_profile not in NONLEGACY_EXACT50_STRICT_PRESSURE_PROFILES:
+        return
+    label = (
+        "current IQN" if comparison_profile == "current_iqn_adaptive"
+        else "material-reference IQN"
+    )
+    if expected_steps != DEFAULT_EXPECTED_STEPS:
+        raise NativeFineComparisonError(f"{label} profile requires exactly 50 steps")
+    if pressure_semantics_mode != "strict":
+        raise NativeFineComparisonError(f"{label} profile requires strict pressure")
+
 def discover_solver_frames(
     our_run_dir: str | Path,
     *,
@@ -171,6 +200,203 @@ def discover_solver_step_histories(
             f"expected={expected}, actual={actual}"
         )
     return [path for _, path in parsed]
+
+
+def _discover_solver_artifact_prefix(
+    root: Path,
+    *,
+    relative_dir: str,
+    expression: re.Pattern[str],
+    expected_steps: int,
+    canonical_head_step: int,
+    label: str,
+) -> list[Path]:
+    directory = root / relative_dir
+    if not directory.is_dir():
+        raise NativeFineComparisonError(
+            f"canonical solver {relative_dir} directory is missing: {directory}"
+        )
+    parsed: list[tuple[int, Path]] = []
+    for path in sorted(directory.iterdir()):
+        match = expression.fullmatch(path.name)
+        if match is None:
+            raise NativeFineComparisonError(
+                f"unexpected canonical solver {label} name: {path.name}"
+            )
+        parsed.append((int(match.group("step")), path))
+    actual = [step for step, _ in parsed]
+    canonical_expected = list(range(1, canonical_head_step + 1))
+    if actual != canonical_expected:
+        raise NativeFineComparisonError(
+            f"canonical solver {label} sequence must be contiguous to its "
+            f"checkpoint head: expected={canonical_expected}, actual={actual}"
+        )
+    return [path for step, path in parsed if step <= expected_steps]
+
+
+def discover_canonical_solver_frame_prefix(
+    canonical_artifact_root: str | Path,
+    *,
+    expected_steps: int,
+    canonical_head_step: int,
+) -> list[Path]:
+    return _discover_solver_artifact_prefix(
+        Path(canonical_artifact_root),
+        relative_dir="step_fields",
+        expression=FRAME_RE,
+        expected_steps=expected_steps,
+        canonical_head_step=canonical_head_step,
+        label="frame",
+    )
+
+
+def discover_canonical_solver_step_history_prefix(
+    canonical_artifact_root: str | Path,
+    *,
+    expected_steps: int,
+    canonical_head_step: int,
+) -> list[Path]:
+    return _discover_solver_artifact_prefix(
+        Path(canonical_artifact_root),
+        relative_dir="step_history",
+        expression=STEP_HISTORY_RE,
+        expected_steps=expected_steps,
+        canonical_head_step=canonical_head_step,
+        label="step-history",
+    )
+
+
+def _validate_dual_root_history_semantics(
+    records: Sequence[Mapping[str, Any]],
+    step_history_paths: Sequence[Path],
+    aggregate_rows: Sequence[Mapping[str, Any]],
+    *,
+    expected_steps: int,
+) -> None:
+    if len(records) < expected_steps:
+        raise NativeFineComparisonError("canonical checkpoint journal is shorter than comparison prefix")
+    if len(step_history_paths) != expected_steps or len(aggregate_rows) != expected_steps:
+        raise NativeFineComparisonError("dual-root history inputs are not exactly complete")
+    for step, (record, history_path, csv_row) in enumerate(
+        zip(records[:expected_steps], step_history_paths, aggregate_rows, strict=True),
+        start=1,
+    ):
+        history_row = record.get("history_row")
+        if not isinstance(history_row, Mapping):
+            raise NativeFineComparisonError(
+                f"canonical checkpoint journal record has no history_row at step {step}"
+            )
+        wrapper = _read_json(history_path)
+        flattened = wrapper.get("history")
+        if not isinstance(flattened, Mapping):
+            raise NativeFineComparisonError(
+                f"canonical step history has no flattened payload: {history_path.name}"
+            )
+        wrapper_values = {**flattened, "time_s": wrapper.get("time_s")}
+        try:
+            validate_dual_root_history_row_semantics(
+                journal_history_row=history_row,
+                step_history_row=wrapper_values,
+                aggregate_csv_row=csv_row,
+                step=step,
+            )
+        except (TypeError, ValueError) as exc:
+            raise NativeFineComparisonError(str(exc)) from exc
+
+
+def validate_dual_root_solver_artifact_prefix(
+    *,
+    attempt_root: str | Path,
+    canonical_artifact_root: str | Path,
+    expected_steps: int,
+    aggregate_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Validate an attempt summary/CSV against a canonical artifact prefix.
+
+    The accepted-checkpoint loader validates the canonical checkpoint manifest,
+    generation NPZ, and complete immutable history chain.  The journal binds
+    journal entries to one another; it does not by itself cryptographically bind
+    separately exported step-field NPZ files.
+    """
+
+    try:
+        provenance = validate_dual_root_attempt_provenance(
+            attempt_root=attempt_root,
+            canonical_artifact_root=canonical_artifact_root,
+            expected_steps=expected_steps,
+        )
+    except (TypeError, ValueError) as exc:
+        raise NativeFineComparisonError(str(exc)) from exc
+    canonical = Path(provenance["canonical_artifact_root"])
+    metadata_identity = provenance["checkpoint_identity"]
+    assert isinstance(metadata_identity, Mapping)
+    try:
+        head_before = read_checkpoint_head(canonical / "checkpoint")
+    except (OSError, ValueError) as exc:
+        raise NativeFineComparisonError("canonical checkpoint head is invalid") from exc
+    if head_before is None:
+        raise NativeFineComparisonError("canonical checkpoint head is missing")
+    if head_before.accepted_step < expected_steps:
+        raise NativeFineComparisonError("canonical checkpoint head precedes comparison prefix")
+    if not isinstance(head_before.metadata, Mapping) or head_before.metadata.get("identity") != metadata_identity:
+        raise NativeFineComparisonError("canonical checkpoint identity does not match attempt provenance")
+    canonical_manifest = _read_json(canonical / "run_manifest.json")
+    if canonical_manifest.get("source_sha256") != provenance["source_sha256"]:
+        raise NativeFineComparisonError("canonical source SHA256 does not match attempt provenance")
+    attempt_manifest = provenance["manifest"]
+    assert isinstance(attempt_manifest, Mapping)
+    config = attempt_manifest.get("config")
+    if not isinstance(config, Mapping) or config.get("fsi_checkpoint_expected_generation") != provenance["checkpoint_generation"]:
+        raise NativeFineComparisonError("attempt checkpoint generation does not match attempt provenance")
+    try:
+        loaded = load_accepted_fsi_checkpoint(
+            canonical / "checkpoint",
+            expected_identity=metadata_identity,
+            target_step_count=head_before.accepted_step,
+        )
+    except (TypeError, ValueError) as exc:
+        raise NativeFineComparisonError("canonical accepted checkpoint/journal is invalid") from exc
+    try:
+        head_after = read_checkpoint_head(canonical / "checkpoint")
+    except (OSError, ValueError) as exc:
+        raise NativeFineComparisonError("canonical checkpoint head changed during validation") from exc
+    if head_after != head_before:
+        raise NativeFineComparisonError("canonical checkpoint head changed during validation")
+    frame_paths = discover_canonical_solver_frame_prefix(
+        canonical,
+        expected_steps=expected_steps,
+        canonical_head_step=head_before.accepted_step,
+    )
+    history_paths = discover_canonical_solver_step_history_prefix(
+        canonical,
+        expected_steps=expected_steps,
+        canonical_head_step=head_before.accepted_step,
+    )
+    _validate_dual_root_history_semantics(
+        loaded.records,
+        history_paths,
+        aggregate_rows,
+        expected_steps=expected_steps,
+    )
+    try:
+        head_final = read_checkpoint_head(canonical / "checkpoint")
+    except (OSError, ValueError) as exc:
+        raise NativeFineComparisonError("canonical checkpoint head changed during validation") from exc
+    if head_final != head_before:
+        raise NativeFineComparisonError("canonical checkpoint head changed during validation")
+    return {
+        "schema": "our_solver_dual_root_artifact_prefix_v1",
+        "status": "passed",
+        "attempt_root": provenance["attempt_root"],
+        "canonical_artifact_root": provenance["canonical_artifact_root"],
+        "comparison_prefix_steps": expected_steps,
+        "canonical_head_step": head_before.accepted_step,
+        "checkpoint_generation": provenance["checkpoint_generation"],
+        "checkpoint_identity": dict(metadata_identity),
+        "journal_validation": "accepted_fsi_checkpoint_loader_passed",
+        "step_field_frame_count": len(frame_paths),
+        "step_history_count": len(history_paths),
+    }
 
 
 def validate_solver_step_histories(
@@ -412,6 +638,25 @@ def _validate_final_projection_success(
 
 
 def _diagnostic_values_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, (list, tuple, np.ndarray)) or isinstance(
+        right, (list, tuple, np.ndarray)
+    ):
+        if not isinstance(left, (list, tuple, np.ndarray)) or not isinstance(
+            right, (list, tuple, np.ndarray)
+        ):
+            return False
+        if len(left) != len(right):
+            return False
+        return all(
+            _diagnostic_values_equal(left_value, right_value)
+            for left_value, right_value in zip(left, right, strict=True)
+        )
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+            return False
+        return set(left) == set(right) and all(
+            _diagnostic_values_equal(left[key], right[key]) for key in left
+        )
     if isinstance(left, bool) or isinstance(right, bool):
         return isinstance(left, bool) and isinstance(right, bool) and left is right
     if isinstance(left, str) or isinstance(right, str):
@@ -446,6 +691,7 @@ def _validate_run_contracts(
     fluent_summary: Mapping[str, Any],
     *,
     expected_steps: int,
+    comparison_profile: str = "legacy_final",
 ) -> float:
     config = our_manifest.get("config")
     if not isinstance(config, Mapping):
@@ -477,7 +723,7 @@ def _validate_run_contracts(
             "native-fine comparison requires the validated scalar probe and "
             "flow_hibm_sharp_interior_probe_distance_xyz_m=None"
         )
-    if expected_steps == DEFAULT_EXPECTED_STEPS:
+    if expected_steps == DEFAULT_EXPECTED_STEPS and comparison_profile == "legacy_final":
         _validate_final_run_identity(our_manifest, our_summary)
     dt_s = _finite_float(config.get("dt_s", DEFAULT_DT_S), "our run dt")
     if int(config.get("step_count", -1)) != expected_steps:

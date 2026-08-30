@@ -88,6 +88,10 @@ def _real_owners():
 class RealTaichiMacroStepRollbackTests(unittest.TestCase):
     def test_rejected_trial_restores_all_device_owners_after_nested_save(self) -> None:
         fluid, solid, markers, gradient = _real_owners()
+        f64_deformation = solid.F.to_numpy()
+        f64_deformation[0, 0, 0] = 1.0 + np.ldexp(1.0, -35)
+        f64_deformation[0, 0, 1] = np.ldexp(1.0, -35)
+        solid.F.from_numpy(f64_deformation)
 
         accepted = capture_host_macro_step_state(
             fluid=fluid,
@@ -133,6 +137,8 @@ class RealTaichiMacroStepRollbackTests(unittest.TestCase):
             np.testing.assert_array_equal(getattr(fluid, name).to_numpy(), expected)
         for name, expected in accepted.solid_fields.items():
             np.testing.assert_array_equal(getattr(solid, name).to_numpy(), expected)
+        self.assertEqual(accepted.solid_fields["F"].dtype, np.dtype(np.float64))
+        np.testing.assert_array_equal(solid.F.to_numpy(), f64_deformation)
         for name in MARKER_INTERFACE_STATE_FIELDS:
             np.testing.assert_array_equal(
                 getattr(markers, name).to_numpy()[: markers.marker_count],

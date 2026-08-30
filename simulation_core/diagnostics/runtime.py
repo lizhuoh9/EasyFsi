@@ -10,6 +10,12 @@ import taichi as ti
 
 _SUPPORTED_ARCHS = ("cuda", "gpu")
 _SUPPORTED_FPS = ("f32", "f64")
+_COMPILER_BOOLEAN_FIELDS = (
+    "cfg_optimization",
+    "advanced_optimization",
+    "fast_math",
+    "debug",
+)
 
 
 @dataclass(frozen=True)
@@ -20,6 +26,12 @@ class TaichiRuntimeConfig:
     offline_cache: bool | None = None
     offline_cache_file_path: str | None = None
     strict_arch: bool = False
+    default_ip: str | None = None
+    cfg_optimization: bool | None = None
+    opt_level: int | None = None
+    advanced_optimization: bool | None = None
+    fast_math: bool | None = None
+    debug: bool | None = None
 
 
 _INITIALIZED = False
@@ -143,6 +155,83 @@ def _actual_runtime_default_fp_name() -> str:
     )
 
 
+def _requested_compiler_configuration(
+    config: TaichiRuntimeConfig,
+) -> dict[str, object]:
+    requested: dict[str, object] = {}
+    if config.default_ip is not None:
+        if (
+            not isinstance(config.default_ip, str)
+            or config.default_ip not in {"i32", "i64"}
+        ):
+            raise ValueError("default_ip must be 'i32', 'i64', or None")
+        requested["default_ip"] = config.default_ip
+
+    if config.opt_level is not None:
+        if isinstance(config.opt_level, bool) or not isinstance(
+            config.opt_level, Integral
+        ):
+            raise ValueError("opt_level must be an integer or None")
+        requested["opt_level"] = int(config.opt_level)
+
+    for field in _COMPILER_BOOLEAN_FIELDS:
+        value = getattr(config, field)
+        if value is not None:
+            if not isinstance(value, bool):
+                raise ValueError(f"{field} must be a bool or None")
+            requested[field] = value
+    return requested
+
+
+def _actual_compiler_configuration() -> dict[str, object]:
+    actual_default_ip = ti.cfg.default_ip
+    if actual_default_ip == ti.i32:
+        default_ip = "i32"
+    elif actual_default_ip == ti.i64:
+        default_ip = "i64"
+    else:
+        raise RuntimeError(
+            "Taichi runtime reports an unrecognized actual default_ip: "
+            f"{actual_default_ip!r}"
+        )
+    return {
+        "default_ip": default_ip,
+        "cfg_optimization": bool(ti.cfg.cfg_optimization),
+        "opt_level": int(ti.cfg.opt_level),
+        "advanced_optimization": bool(ti.cfg.advanced_optimization),
+        "fast_math": bool(ti.cfg.fast_math),
+        "debug": bool(ti.cfg.debug),
+    }
+
+
+def _assert_actual_compiler_configuration(
+    requested: dict[str, object],
+) -> None:
+    if not requested:
+        return
+    actual = _actual_compiler_configuration()
+    mismatches = "; ".join(
+        f"{field}: actual={actual[field]!r}, requested={value!r}"
+        for field, value in requested.items()
+        if actual[field] != value
+    )
+    if mismatches:
+        raise RuntimeError(
+            "Taichi actual compiler configuration does not match the "
+            f"explicit request: {mismatches}"
+        )
+
+
+def _compiler_init_kwargs(
+    requested: dict[str, object],
+) -> dict[str, object]:
+    kwargs = dict(requested)
+    default_ip = kwargs.get("default_ip")
+    if default_ip is not None:
+        kwargs["default_ip"] = ti.i32 if default_ip == "i32" else ti.i64
+    return kwargs
+
+
 def taichi_runtime_identity() -> dict[str, object]:
     """Return the initialized Taichi runtime identity for persisted evidence.
 
@@ -168,6 +257,10 @@ def taichi_runtime_identity() -> dict[str, object]:
             "actual_arch": _actual_runtime_arch_name(),
             "default_fp": _actual_runtime_default_fp_name(),
             "random_seed": _INITIALIZED_RANDOM_SEED,
+            "compiler_configuration": {
+                "taichi_version": ".".join(map(str, ti.__version__)),
+                **_actual_compiler_configuration(),
+            },
             "offline_cache_identity": {
                 "enabled": _INITIALIZED_OFFLINE_CACHE,
                 "file_path": _INITIALIZED_OFFLINE_CACHE_FILE_PATH,
@@ -205,6 +298,7 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
     ):
         raise ValueError("random_seed must be an integer")
     requested_random_seed = int(cfg.random_seed)
+    requested_compiler = _requested_compiler_configuration(cfg)
 
     global _INITIALIZED, _INITIALIZED_ARCH, _INITIALIZED_FP
     global _INITIALIZED_RANDOM_SEED
@@ -257,6 +351,7 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
                     f"configuration={initialized_cache_identity!r}; cannot "
                     f"reconfigure it as {requested_cache_identity!r}"
                 )
+            _assert_actual_compiler_configuration(requested_compiler)
             return
 
         offline_cache, offline_cache_file_path = _requested_offline_cache(cfg)
@@ -264,6 +359,7 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
         default_fp = ti.f32 if requested_fp == "f32" else ti.f64
         taichi_kwargs: dict[str, object] = {
             "offline_cache": bool(offline_cache),
+            **_compiler_init_kwargs(requested_compiler),
         }
         if offline_cache_file_path:
             taichi_kwargs["offline_cache_file_path"] = offline_cache_file_path
@@ -277,6 +373,7 @@ def init_taichi(config: TaichiRuntimeConfig | None = None) -> None:
         )
         if cfg.strict_arch:
             _assert_actual_runtime_arch(requested_arch)
+        _assert_actual_compiler_configuration(requested_compiler)
         _INITIALIZED = True
         _INITIALIZED_ARCH = requested_arch
         _INITIALIZED_FP = requested_fp

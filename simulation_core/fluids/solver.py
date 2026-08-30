@@ -7871,58 +7871,37 @@ class CartesianFluidSolver:
     def _synchronize_muscl_minimum_normal_boundary_rows_kernel(
         self,
         source: ti.template(),
-        no_slip_xmin: ti.i32,
-        no_slip_ymin: ti.i32,
-        no_slip_zmin: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         """Make the colocated minimum-side MAC normals match physical faces.
 
         A compact backward-MAC row owns three different faces.  Only row0's
         component normal to a minimum domain side is colocated with that
         physical face; the two tangential components must remain untouched.
-        Exact external data has precedence over the no-slip zero target, just
-        as it does in the authoritative primal face-Q kernels below.
+        Use the same exterior contract as Q, including default closure and
+        the explicit pressure-correctable zmin row.  No maximum-side packed
+        row is modified: those rows own internal faces.
         """
 
         for i, j, k in source:
             value = source[i, j, k]
             if self.obstacle[i, j, k] == 0:
                 if i == 0:
-                    if no_slip_xmin != 0:
-                        value.x = 0.0
-                    if (
-                        self.external_velocity_boundary_x_face_active_component_mask[
-                            0, j, k
-                        ]
-                        & 1
-                    ) != 0:
-                        value.x = self.external_velocity_boundary_x_face_value_mps[
-                            0, j, k
-                        ].x
+                    value.x = self._physical_exterior_normal_velocity(
+                        source, 0, 0, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                    )
                 if j == 0:
-                    if no_slip_ymin != 0:
-                        value.y = 0.0
-                    if (
-                        self.external_velocity_boundary_y_face_active_component_mask[
-                            0, i, k
-                        ]
-                        & 2
-                    ) != 0:
-                        value.y = self.external_velocity_boundary_y_face_value_mps[
-                            0, i, k
-                        ].y
+                    value.y = self._physical_exterior_normal_velocity(
+                        source, 1, 0, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                    )
                 if k == 0:
-                    if no_slip_zmin != 0:
-                        value.z = 0.0
-                    if (
-                        self.external_velocity_boundary_z_face_active_component_mask[
-                            0, i, j
-                        ]
-                        & 4
-                    ) != 0:
-                        value.z = self.external_velocity_boundary_z_face_value_mps[
-                            0, i, j
-                        ].z
+                    value.z = self._physical_exterior_normal_velocity(
+                        source, 2, 0, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                    )
             source[i, j, k] = value
 
     @ti.kernel
@@ -7971,35 +7950,21 @@ class CartesianFluidSolver:
     def _compute_muscl_primal_normal_velocity_x_kernel(
         self,
         source: ti.template(),
-        no_slip_xmin: ti.i32,
-        no_slip_xmax: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         for face, j, k in self.muscl_normal_velocity_x:
             normal_velocity = 0.0
             if face == 0:
-                if self.obstacle[0, j, k] == 0:
-                    normal_velocity = source[0, j, k].x
-                    if no_slip_xmin != 0:
-                        normal_velocity = 0.0
-                    mask = self.external_velocity_boundary_x_face_active_component_mask[
-                        0, j, k
-                    ]
-                    if (mask & 1) != 0:
-                        normal_velocity = (
-                            self.external_velocity_boundary_x_face_value_mps[0, j, k].x
-                        )
+                normal_velocity = self._physical_exterior_normal_velocity(
+                    source, 0, 0, 0, j, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             elif face == self.nx:
-                if self.obstacle[self.nx - 1, j, k] == 0:
-                    normal_velocity = source[self.nx - 1, j, k].x
-                    if no_slip_xmax != 0:
-                        normal_velocity = 0.0
-                    mask = self.external_velocity_boundary_x_face_active_component_mask[
-                        1, j, k
-                    ]
-                    if (mask & 1) != 0:
-                        normal_velocity = (
-                            self.external_velocity_boundary_x_face_value_mps[1, j, k].x
-                        )
+                normal_velocity = self._physical_exterior_normal_velocity(
+                    source, 0, 1, self.nx - 1, j, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             else:
                 minus_fluid = self.obstacle[face - 1, j, k] == 0
                 plus_fluid = self.obstacle[face, j, k] == 0
@@ -8021,35 +7986,21 @@ class CartesianFluidSolver:
     def _compute_muscl_primal_normal_velocity_y_kernel(
         self,
         source: ti.template(),
-        no_slip_ymin: ti.i32,
-        no_slip_ymax: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         for i, face, k in self.muscl_normal_velocity_y:
             normal_velocity = 0.0
             if face == 0:
-                if self.obstacle[i, 0, k] == 0:
-                    normal_velocity = source[i, 0, k].y
-                    if no_slip_ymin != 0:
-                        normal_velocity = 0.0
-                    mask = self.external_velocity_boundary_y_face_active_component_mask[
-                        0, i, k
-                    ]
-                    if (mask & 2) != 0:
-                        normal_velocity = (
-                            self.external_velocity_boundary_y_face_value_mps[0, i, k].y
-                        )
+                normal_velocity = self._physical_exterior_normal_velocity(
+                    source, 1, 0, i, 0, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             elif face == self.ny:
-                if self.obstacle[i, self.ny - 1, k] == 0:
-                    normal_velocity = source[i, self.ny - 1, k].y
-                    if no_slip_ymax != 0:
-                        normal_velocity = 0.0
-                    mask = self.external_velocity_boundary_y_face_active_component_mask[
-                        1, i, k
-                    ]
-                    if (mask & 2) != 0:
-                        normal_velocity = (
-                            self.external_velocity_boundary_y_face_value_mps[1, i, k].y
-                        )
+                normal_velocity = self._physical_exterior_normal_velocity(
+                    source, 1, 1, i, self.ny - 1, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             else:
                 minus_fluid = self.obstacle[i, face - 1, k] == 0
                 plus_fluid = self.obstacle[i, face, k] == 0
@@ -8067,35 +8018,21 @@ class CartesianFluidSolver:
     def _compute_muscl_primal_normal_velocity_z_kernel(
         self,
         source: ti.template(),
-        no_slip_zmin: ti.i32,
-        no_slip_zmax: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         for i, j, face in self.muscl_normal_velocity_z:
             normal_velocity = 0.0
             if face == 0:
-                if self.obstacle[i, j, 0] == 0:
-                    normal_velocity = source[i, j, 0].z
-                    if no_slip_zmin != 0:
-                        normal_velocity = 0.0
-                    mask = self.external_velocity_boundary_z_face_active_component_mask[
-                        0, i, j
-                    ]
-                    if (mask & 4) != 0:
-                        normal_velocity = (
-                            self.external_velocity_boundary_z_face_value_mps[0, i, j].z
-                        )
+                normal_velocity = self._physical_exterior_normal_velocity(
+                    source, 2, 0, i, j, 0,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             elif face == self.nz:
-                if self.obstacle[i, j, self.nz - 1] == 0:
-                    normal_velocity = source[i, j, self.nz - 1].z
-                    if no_slip_zmax != 0:
-                        normal_velocity = 0.0
-                    mask = self.external_velocity_boundary_z_face_active_component_mask[
-                        1, i, j
-                    ]
-                    if (mask & 4) != 0:
-                        normal_velocity = (
-                            self.external_velocity_boundary_z_face_value_mps[1, i, j].z
-                        )
+                normal_velocity = self._physical_exterior_normal_velocity(
+                    source, 2, 1, i, j, self.nz - 1,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             else:
                 minus_fluid = self.obstacle[i, j, face - 1] == 0
                 plus_fluid = self.obstacle[i, j, face] == 0
@@ -8115,6 +8052,8 @@ class CartesianFluidSolver:
         source: ti.template(),
         no_slip_xmin: ti.i32,
         no_slip_xmax: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         for face, j, k in self.muscl_momentum_flux_x:
             left = ti.Vector([0.0, 0.0, 0.0])
@@ -8153,6 +8092,16 @@ class CartesianFluidSolver:
                     source, face, j, k, 0, -1
                 )
 
+            if face == 0:
+                left.x = self._physical_exterior_normal_velocity(
+                    source, 0, 0, 0, j, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
+            elif face == self.nx:
+                right.x = self._physical_exterior_normal_velocity(
+                    source, 0, 1, self.nx - 1, j, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             flux = ti.Vector([0.0, 0.0, 0.0])
             for component in ti.static(range(3)):
                 q_minus = 0.0
@@ -8213,6 +8162,8 @@ class CartesianFluidSolver:
         source: ti.template(),
         no_slip_ymin: ti.i32,
         no_slip_ymax: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         for i, face, k in self.muscl_momentum_flux_y:
             left = ti.Vector([0.0, 0.0, 0.0])
@@ -8251,6 +8202,16 @@ class CartesianFluidSolver:
                     source, i, face, k, 1, -1
                 )
 
+            if face == 0:
+                left.y = self._physical_exterior_normal_velocity(
+                    source, 1, 0, i, 0, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
+            elif face == self.ny:
+                right.y = self._physical_exterior_normal_velocity(
+                    source, 1, 1, i, self.ny - 1, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             flux = ti.Vector([0.0, 0.0, 0.0])
             for component in ti.static(range(3)):
                 q_minus = 0.0
@@ -8311,6 +8272,8 @@ class CartesianFluidSolver:
         source: ti.template(),
         no_slip_zmin: ti.i32,
         no_slip_zmax: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         for i, j, face in self.muscl_momentum_flux_z:
             left = ti.Vector([0.0, 0.0, 0.0])
@@ -8349,6 +8312,16 @@ class CartesianFluidSolver:
                     source, i, j, face, 2, -1
                 )
 
+            if face == 0:
+                left.z = self._physical_exterior_normal_velocity(
+                    source, 2, 0, i, j, 0,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
+            elif face == self.nz:
+                right.z = self._physical_exterior_normal_velocity(
+                    source, 2, 1, i, j, self.nz - 1,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             flux = ti.Vector([0.0, 0.0, 0.0])
             for component in ti.static(range(3)):
                 q_minus = 0.0
@@ -8407,18 +8380,20 @@ class CartesianFluidSolver:
         self,
         source: object,
         wall_flag_codes: tuple[int, int, int, int, int, int],
+        *,
+        pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool | None = None,
     ) -> None:
         """Build the authoritative scalar primal-face relative-Q ledger."""
-
-        self._compute_muscl_primal_normal_velocity_x_kernel(
-            source, wall_flag_codes[0], wall_flag_codes[1]
+        mode = self._resolve_physical_face_topology(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+            wall_flag_codes=wall_flag_codes,
         )
-        self._compute_muscl_primal_normal_velocity_y_kernel(
-            source, wall_flag_codes[2], wall_flag_codes[3]
-        )
-        self._compute_muscl_primal_normal_velocity_z_kernel(
-            source, wall_flag_codes[4], wall_flag_codes[5]
-        )
+        outlet = 1 if pressure_outlet_zmin else 0
+        self._compute_muscl_primal_normal_velocity_x_kernel(source, outlet, mode)
+        self._compute_muscl_primal_normal_velocity_y_kernel(source, outlet, mode)
+        self._compute_muscl_primal_normal_velocity_z_kernel(source, outlet, mode)
 
     def _compute_muscl_momentum_fluxes(
         self,
@@ -8426,16 +8401,21 @@ class CartesianFluidSolver:
         wall_flag_codes: tuple[int, int, int, int, int, int],
         *,
         dual_geometry_prepared: bool = False,
+        pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool | None = None,
     ) -> None:
+        # Reject an inconsistent topology before synchronizing source rows.
+        mode = self._resolve_physical_face_topology(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+            wall_flag_codes=wall_flag_codes,
+        )
         # The minimum-side normal compact rows are colocated with physical
         # boundary faces.  Synchronize them before slope/state construction so
         # stale packed values cannot enter the first RK flux.  Plus-side faces
         # have no compact owner and remain ledger-only by design.
         self._synchronize_muscl_minimum_normal_boundary_rows_kernel(
-            source,
-            wall_flag_codes[0],
-            wall_flag_codes[2],
-            wall_flag_codes[4],
+            source, int(pressure_outlet_zmin), mode,
         )
         # An immersed A/B owner is also a native MAC face state.  Restore its
         # strict target before slopes and upwind states are formed; clamping
@@ -8448,7 +8428,11 @@ class CartesianFluidSolver:
         # volume-velocity ledger.  SST scalar transport consumes these same
         # face velocities; immersed moving-wall faces are closed in relative
         # coordinates and exact external faces retain their directed target.
-        self._compute_muscl_primal_normal_velocity_ledger(source, wall_flag_codes)
+        self._compute_muscl_primal_normal_velocity_ledger(
+            source, wall_flag_codes,
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+        )
         if not dual_geometry_prepared:
             self._compute_muscl_momentum_dual_geometry_kernel()
         for axis in range(3):
@@ -8457,13 +8441,16 @@ class CartesianFluidSolver:
         # MAC dual ledgers.  Transverse faces preserve both graded half areas
         # and upwind each signed half independently before summation.
         self._compute_muscl_momentum_flux_x_kernel(
-            source, wall_flag_codes[0], wall_flag_codes[1]
+            source, wall_flag_codes[0], wall_flag_codes[1],
+            int(pressure_outlet_zmin), mode,
         )
         self._compute_muscl_momentum_flux_y_kernel(
-            source, wall_flag_codes[2], wall_flag_codes[3]
+            source, wall_flag_codes[2], wall_flag_codes[3],
+            int(pressure_outlet_zmin), mode,
         )
         self._compute_muscl_momentum_flux_z_kernel(
-            source, wall_flag_codes[4], wall_flag_codes[5]
+            source, wall_flag_codes[4], wall_flag_codes[5],
+            int(pressure_outlet_zmin), mode,
         )
 
     def _prepare_muscl_sst_reconstruction(self) -> None:
@@ -8746,9 +8733,17 @@ class CartesianFluidSolver:
         dt_s: float,
         final_stage: int,
         wall_flag_codes: tuple[int, int, int, int, int, int] = (0, 0, 0, 0, 0, 0),
+        *,
+        pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool | None = None,
     ) -> None:
         """Launch one dual-CV stage with compile-time boundary authority."""
 
+        mode = self._resolve_physical_face_topology(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+            wall_flag_codes=wall_flag_codes,
+        )
         self._muscl_momentum_ssp_stage_device_kernel(
             source,
             float(dt_s),
@@ -8759,10 +8754,7 @@ class CartesianFluidSolver:
         # copy/rate evaluation.  This complements the pre-flux synchronization:
         # either one alone leaves one stage exposed to stale packed data.
         self._synchronize_muscl_minimum_normal_boundary_rows_kernel(
-            self.velocity,
-            wall_flag_codes[0],
-            wall_flag_codes[2],
-            wall_flag_codes[4],
+            self.velocity, int(pressure_outlet_zmin), mode,
         )
         self._synchronize_muscl_exact_interface_owner_kernel(
             self.velocity,
@@ -9725,9 +9717,11 @@ class CartesianFluidSolver:
             ] = normal_masks
 
     @ti.kernel
-    def _reconstruct_sst_cell_center_velocity_from_mac_kernel(
+    def _reconstruct_sst_cell_center_velocity_from_mac_device_kernel(
         self,
         source_velocity: ti.template(),
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         """Reconstruct one compact backward-MAC field at scalar cells."""
 
@@ -9735,11 +9729,9 @@ class CartesianFluidSolver:
             reconstructed = self._sst_local_wall_velocity(i, j, k)
             normal_derivative = ti.Vector([0.0, 0.0, 0.0])
             if self.obstacle[i, j, k] == 0:
-                # Each packed component owns the cell's negative face.  The
-                # positive face is owned by the next storage row.  At an open
-                # outer boundary with no independently prescribed face, copy
-                # the available interior face: this finite zero-gradient
-                # fallback preserves constant flow without inventing data.
+                # Packed negative faces and the next row's positive faces
+                # reconstruct the cell.  Exterior normals use the same
+                # declared physical topology as projection and transport Q.
                 u_minus = source_velocity[i, j, k].x
                 if i > 0 and self.obstacle[i - 1, j, k] != 0:
                     u_minus = 0.0
@@ -9767,29 +9759,16 @@ class CartesianFluidSolver:
                             u_plus = self.velocity_dirichlet_boundary_value_mps[
                                 i + 1, j, k
                             ].x
-                elif (self.sst_no_slip_domain_wall_mask[None] & 2) != 0:
-                    u_plus = 0.0
+                else:
+                    u_plus = self._physical_exterior_normal_velocity(
+                        source_velocity, 0, 1, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                    )
                 if i == 0:
-                    if (self.sst_no_slip_domain_wall_mask[None] & 1) != 0:
-                        u_minus = 0.0
-                    if (
-                        self.external_velocity_boundary_x_face_active_component_mask[
-                            0, j, k
-                        ]
-                        & 1
-                    ) != 0:
-                        u_minus = self.external_velocity_boundary_x_face_value_mps[
-                            0, j, k
-                        ].x
-                if i == self.nx - 1 and (
-                    self.external_velocity_boundary_x_face_active_component_mask[
-                        1, j, k
-                    ]
-                    & 1
-                ) != 0:
-                    u_plus = self.external_velocity_boundary_x_face_value_mps[
-                        1, j, k
-                    ].x
+                    u_minus = self._physical_exterior_normal_velocity(
+                        source_velocity, 0, 0, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                    )
 
                 v_minus = source_velocity[i, j, k].y
                 if j > 0 and self.obstacle[i, j - 1, k] != 0:
@@ -9818,29 +9797,16 @@ class CartesianFluidSolver:
                             v_plus = self.velocity_dirichlet_boundary_value_mps[
                                 i, j + 1, k
                             ].y
-                elif (self.sst_no_slip_domain_wall_mask[None] & 8) != 0:
-                    v_plus = 0.0
+                else:
+                    v_plus = self._physical_exterior_normal_velocity(
+                        source_velocity, 1, 1, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                    )
                 if j == 0:
-                    if (self.sst_no_slip_domain_wall_mask[None] & 4) != 0:
-                        v_minus = 0.0
-                    if (
-                        self.external_velocity_boundary_y_face_active_component_mask[
-                            0, i, k
-                        ]
-                        & 2
-                    ) != 0:
-                        v_minus = self.external_velocity_boundary_y_face_value_mps[
-                            0, i, k
-                        ].y
-                if j == self.ny - 1 and (
-                    self.external_velocity_boundary_y_face_active_component_mask[
-                        1, i, k
-                    ]
-                    & 2
-                ) != 0:
-                    v_plus = self.external_velocity_boundary_y_face_value_mps[
-                        1, i, k
-                    ].y
+                    v_minus = self._physical_exterior_normal_velocity(
+                        source_velocity, 1, 0, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                    )
 
                 w_minus = source_velocity[i, j, k].z
                 if k > 0 and self.obstacle[i, j, k - 1] != 0:
@@ -9869,29 +9835,16 @@ class CartesianFluidSolver:
                             w_plus = self.velocity_dirichlet_boundary_value_mps[
                                 i, j, k + 1
                             ].z
-                elif (self.sst_no_slip_domain_wall_mask[None] & 32) != 0:
-                    w_plus = 0.0
+                else:
+                    w_plus = self._physical_exterior_normal_velocity(
+                        source_velocity, 2, 1, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                    )
                 if k == 0:
-                    if (self.sst_no_slip_domain_wall_mask[None] & 16) != 0:
-                        w_minus = 0.0
-                    if (
-                        self.external_velocity_boundary_z_face_active_component_mask[
-                            0, i, j
-                        ]
-                        & 4
-                    ) != 0:
-                        w_minus = self.external_velocity_boundary_z_face_value_mps[
-                            0, i, j
-                        ].z
-                if k == self.nz - 1 and (
-                    self.external_velocity_boundary_z_face_active_component_mask[
-                        1, i, j
-                    ]
-                    & 4
-                ) != 0:
-                    w_plus = self.external_velocity_boundary_z_face_value_mps[
-                        1, i, j
-                    ].z
+                    w_minus = self._physical_exterior_normal_velocity(
+                        source_velocity, 2, 0, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                    )
 
                 reconstructed = ti.Vector(
                     [
@@ -9912,6 +9865,18 @@ class CartesianFluidSolver:
                 i, j, k
             ] = normal_derivative
 
+    def _reconstruct_sst_cell_center_velocity_from_mac_kernel(
+        self,
+        source_velocity: object,
+        pressure_outlet_zmin: int = 0,
+        velocity_inlet_zmax_mode: int = 2,
+    ) -> None:
+        """Reconstruct a declared stage; defaults are closed plus exact faces."""
+
+        self._reconstruct_sst_cell_center_velocity_from_mac_device_kernel(
+            source_velocity, int(pressure_outlet_zmin), int(velocity_inlet_zmax_mode)
+        )
+
     @ti.func
     def _sst_cell_center_velocity_derivative_axis(
         self,
@@ -9919,6 +9884,8 @@ class CartesianFluidSolver:
         j,
         k,
         derivative_axis: ti.template(),
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         """Differentiate reconstructed velocity with side-aware wall targets."""
 
@@ -10119,6 +10086,20 @@ class CartesianFluidSolver:
 
         center = self.sst_cell_center_velocity_mps[i, j, k]
         value = ti.Vector([0.0, 0.0, 0.0])
+        normal_minus = ti.Vector([0.0, 0.0])
+        normal_plus = ti.Vector([0.0, 0.0])
+        # Only prescribed targets are consumed below, so their value is
+        # independent of the extrapolation source used for this query.
+        if at_minus_domain:
+            normal_minus = self._physical_exterior_normal_contract(
+                self.velocity, derivative_axis, 0, i, j, k,
+                pressure_outlet_zmin, velocity_inlet_zmax_mode,
+            )
+        if at_plus_domain:
+            normal_plus = self._physical_exterior_normal_contract(
+                self.velocity, derivative_axis, 1, i, j, k,
+                pressure_outlet_zmin, velocity_inlet_zmax_mode,
+            )
         for component in ti.static(range(3)):
             component_bit = 1 << component
             minus_wall = minus_obstacle_wall
@@ -10133,18 +10114,24 @@ class CartesianFluidSolver:
             ) != 0
             if at_minus_domain and (
                 minus_domain_no_slip or minus_is_external_exact
+                or (component == derivative_axis and normal_minus[0] != 0.0)
             ):
                 minus_wall = True
                 minus_target = 0.0
                 if minus_is_external_exact:
                     minus_target = external_minus_target[component]
+                if component == derivative_axis and normal_minus[0] != 0.0:
+                    minus_target = normal_minus[1]
             if at_plus_domain and (
                 plus_domain_no_slip or plus_is_external_exact
+                or (component == derivative_axis and normal_plus[0] != 0.0)
             ):
                 plus_wall = True
                 plus_target = 0.0
                 if plus_is_external_exact:
                     plus_target = external_plus_target[component]
+                if component == derivative_axis and normal_plus[0] != 0.0:
+                    plus_target = normal_plus[1]
 
             if minus_wall:
                 value[component] = (
@@ -10181,26 +10168,34 @@ class CartesianFluidSolver:
 
     @ti.func
     def _sst_cell_center_velocity_derivative_x(
-        self, i, j, k
+        self, i, j, k, pressure_outlet_zmin, velocity_inlet_zmax_mode
     ):
-        return self._sst_cell_center_velocity_derivative_axis(i, j, k, 0)
+        return self._sst_cell_center_velocity_derivative_axis(
+            i, j, k, 0, pressure_outlet_zmin, velocity_inlet_zmax_mode
+        )
 
     @ti.func
     def _sst_cell_center_velocity_derivative_y(
-        self, i, j, k
+        self, i, j, k, pressure_outlet_zmin, velocity_inlet_zmax_mode
     ):
-        return self._sst_cell_center_velocity_derivative_axis(i, j, k, 1)
+        return self._sst_cell_center_velocity_derivative_axis(
+            i, j, k, 1, pressure_outlet_zmin, velocity_inlet_zmax_mode
+        )
 
     @ti.func
     def _sst_cell_center_velocity_derivative_z(
-        self, i, j, k
+        self, i, j, k, pressure_outlet_zmin, velocity_inlet_zmax_mode
     ):
-        return self._sst_cell_center_velocity_derivative_axis(i, j, k, 2)
+        return self._sst_cell_center_velocity_derivative_axis(
+            i, j, k, 2, pressure_outlet_zmin, velocity_inlet_zmax_mode
+        )
 
     @ti.kernel
     def _update_sst_coefficients_kernel(
         self,
         molecular_nu_m2_s: ti.f32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         self.sst_reduction_max_diffusivity_m2_s[None] = molecular_nu_m2_s
         self.sst_reduction_eddy_viscosity_cap_count[None] = 0
@@ -10248,9 +10243,15 @@ class CartesianFluidSolver:
                 arg2 = ti.min(ti.max(arg2, 0.0), 10.0)
                 f1 = ti.tanh(arg1 * arg1 * arg1 * arg1)
                 f2 = ti.tanh(arg2 * arg2)
-                du_dx = self._sst_cell_center_velocity_derivative_x(i, j, k)
-                du_dy = self._sst_cell_center_velocity_derivative_y(i, j, k)
-                du_dz = self._sst_cell_center_velocity_derivative_z(i, j, k)
+                du_dx = self._sst_cell_center_velocity_derivative_x(
+                    i, j, k, pressure_outlet_zmin, velocity_inlet_zmax_mode
+                )
+                du_dy = self._sst_cell_center_velocity_derivative_y(
+                    i, j, k, pressure_outlet_zmin, velocity_inlet_zmax_mode
+                )
+                du_dz = self._sst_cell_center_velocity_derivative_z(
+                    i, j, k, pressure_outlet_zmin, velocity_inlet_zmax_mode
+                )
                 normal_derivative = (
                     self.sst_momentum_transpose_divergence_cell_mps2[i, j, k]
                 )
@@ -10304,20 +10305,32 @@ class CartesianFluidSolver:
                     ),
                 )
 
-    def _prepare_sst_coefficient_inputs(self) -> None:
+    def _prepare_sst_coefficient_inputs(
+        self,
+        pressure_outlet_zmin: int = 0,
+        velocity_inlet_zmax_mode: int = 2,
+    ) -> None:
         """Prepare velocity and boundary inputs shared by coefficient updates."""
 
         canonical_authority = self._velocity_dirichlet_boundary_authority_code()
         self._prepare_sst_obstacle_interface_wall_target_masks_kernel(
             canonical_authority
         )
-        self._reconstruct_sst_cell_center_velocity_from_mac_kernel(self.velocity)
+        self._reconstruct_sst_cell_center_velocity_from_mac_kernel(
+            self.velocity, pressure_outlet_zmin, velocity_inlet_zmax_mode
+        )
 
     def _update_sst_coefficients_from_prepared_inputs_checked(
         self,
         molecular_nu_m2_s: float,
+        pressure_outlet_zmin: int = 0,
+        velocity_inlet_zmax_mode: int = 2,
     ) -> float:
-        self._update_sst_coefficients_kernel(float(molecular_nu_m2_s))
+        self._update_sst_coefficients_kernel(
+            float(molecular_nu_m2_s),
+            pressure_outlet_zmin,
+            velocity_inlet_zmax_mode,
+        )
         cap_count = int(self.sst_reduction_eddy_viscosity_cap_count[None])
         if cap_count:
             raise FloatingPointError(
@@ -10329,10 +10342,21 @@ class CartesianFluidSolver:
         )
         return max_diffusivity
 
-    def _update_sst_coefficients_checked(self, molecular_nu_m2_s: float) -> None:
-        self._prepare_sst_coefficient_inputs()
+    def _update_sst_coefficients_checked(
+        self,
+        molecular_nu_m2_s: float,
+        *,
+        pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool | None = None,
+    ) -> None:
+        mode = self._resolve_physical_face_topology(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+            wall_flag_codes=tuple(int(flag) for flag in self._sst_no_slip_domain_walls),
+        )
+        self._prepare_sst_coefficient_inputs(int(pressure_outlet_zmin), mode)
         self._update_sst_coefficients_from_prepared_inputs_checked(
-            molecular_nu_m2_s
+            molecular_nu_m2_s, int(pressure_outlet_zmin), mode
         )
 
     def _sst_explicit_candidate_invalid_count_host(self) -> int:
@@ -12338,9 +12362,8 @@ class CartesianFluidSolver:
         j,
         k,
         component,
-        no_slip_xmin,
-        no_slip_ymin,
-        no_slip_zmin,
+        pressure_outlet_zmin,
+        velocity_inlet_zmax_mode,
     ):
         """Return ``(kind, target)`` for one packed backward-MAC row.
 
@@ -12419,47 +12442,13 @@ class CartesianFluidSolver:
             )
 
         if coordinate == 0 and plus_fluid != 0:
-            external_exact = 0
-            external_target = ti.cast(0.0, ti.f64)
-            external_no_slip = no_slip_xmin
-            if component == 0:
-                external_exact = (
-                    self.external_velocity_boundary_x_face_active_component_mask[
-                        0, j, k
-                    ]
-                    & 1
-                ) != 0
-                external_target = ti.cast(
-                    self.external_velocity_boundary_x_face_value_mps[0, j, k].x,
-                    ti.f64,
-                )
-            elif component == 1:
-                external_no_slip = no_slip_ymin
-                external_exact = (
-                    self.external_velocity_boundary_y_face_active_component_mask[
-                        0, i, k
-                    ]
-                    & 2
-                ) != 0
-                external_target = ti.cast(
-                    self.external_velocity_boundary_y_face_value_mps[0, i, k].y,
-                    ti.f64,
-                )
-            else:
-                external_no_slip = no_slip_zmin
-                external_exact = (
-                    self.external_velocity_boundary_z_face_active_component_mask[
-                        0, i, j
-                    ]
-                    & 4
-                ) != 0
-                external_target = ti.cast(
-                    self.external_velocity_boundary_z_face_value_mps[0, i, j].z,
-                    ti.f64,
-                )
-            if external_no_slip != 0 or external_exact != 0:
+            external = self._physical_exterior_normal_contract(
+                self.velocity, component, 0, i, j, k,
+                pressure_outlet_zmin, velocity_inlet_zmax_mode,
+            )
+            if external[0] != 0:
                 kind = 2
-                target = external_target if external_exact != 0 else 0.0
+                target = ti.cast(external[1], ti.f64)
 
         return ti.Vector([ti.cast(kind, ti.f64), target])
 
@@ -12611,10 +12600,11 @@ class CartesianFluidSolver:
         side,
         dt_s,
         molecular_nu_m2_s,
-        external_no_slip,
         neighbor_in_domain,
         neighbor_row_kind,
         neighbor_row_target,
+        pressure_outlet_zmin,
+        velocity_inlet_zmax_mode,
     ):
         """Return exact-identity normal-MAC boundary coefficient and RHS."""
 
@@ -12638,51 +12628,13 @@ class CartesianFluidSolver:
                     else:
                         sk -= 1
         elif side > 0:
-            side_index = 1
-            exact_mask = 0
-            exact_target = ti.cast(0.0, ti.f64)
-            if component == 0:
-                exact_mask = (
-                    self.external_velocity_boundary_x_face_active_component_mask[
-                        side_index, j, k
-                    ]
-                    & 1
-                )
-                exact_target = ti.cast(
-                    self.external_velocity_boundary_x_face_value_mps[
-                        side_index, j, k
-                    ].x,
-                    ti.f64,
-                )
-            elif component == 1:
-                exact_mask = (
-                    self.external_velocity_boundary_y_face_active_component_mask[
-                        side_index, i, k
-                    ]
-                    & 2
-                )
-                exact_target = ti.cast(
-                    self.external_velocity_boundary_y_face_value_mps[
-                        side_index, i, k
-                    ].y,
-                    ti.f64,
-                )
-            else:
-                exact_mask = (
-                    self.external_velocity_boundary_z_face_active_component_mask[
-                        side_index, i, j
-                    ]
-                    & 4
-                )
-                exact_target = ti.cast(
-                    self.external_velocity_boundary_z_face_value_mps[
-                        side_index, i, j
-                    ].z,
-                    ti.f64,
-                )
-            if exact_mask != 0 or external_no_slip != 0:
+            external = self._physical_exterior_normal_contract(
+                self.velocity, component, 1, i, j, k,
+                pressure_outlet_zmin, velocity_inlet_zmax_mode,
+            )
+            if external[0] != 0:
                 apply_boundary = 1
-                target = exact_target if exact_mask != 0 else 0.0
+                target = ti.cast(external[1], ti.f64)
 
         if apply_boundary != 0:
             nu_cell = molecular_nu_m2_s + (
@@ -12939,9 +12891,8 @@ class CartesianFluidSolver:
     def _initialize_sst_momentum_helmholtz_component_kernel(
         self,
         component: ti.template(),
-        no_slip_xmin: ti.i32,
-        no_slip_ymin: ti.i32,
-        no_slip_zmin: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         """Initialize mass/RHS rows and clear the three shared-edge ledgers."""
 
@@ -12951,9 +12902,8 @@ class CartesianFluidSolver:
                 j,
                 k,
                 component,
-                no_slip_xmin,
-                no_slip_ymin,
-                no_slip_zmin,
+                pressure_outlet_zmin,
+                velocity_inlet_zmax_mode,
             )
             row_kind = ti.cast(contract[0], ti.i32)
             self.fv_diag[i, j, k] = 0.0
@@ -12995,6 +12945,8 @@ class CartesianFluidSolver:
         molecular_nu_m2_s: ti.f32,
         no_slip_min: ti.i32,
         no_slip_max: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         """Assemble one axis of boundary rows and positive shared edges."""
 
@@ -13042,10 +12994,11 @@ class CartesianFluidSolver:
                                 side,
                                 dt_s,
                                 molecular_nu_m2_s,
-                                external_no_slip,
                                 in_domain,
                                 neighbor_kind,
                                 neighbor_target,
+                                pressure_outlet_zmin,
+                                velocity_inlet_zmax_mode,
                             )
                         )
                         diagonal += boundary_terms[0]
@@ -13260,6 +13213,8 @@ class CartesianFluidSolver:
         relative_tolerance: float = 1.0e-7,
         max_iterations: int = 1024,
         dual_geometry_prepared: bool = False,
+        pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool | None = None,
     ) -> dict[str, object]:
         """Solve the frozen, variable-viscosity MAC Helmholtz system.
 
@@ -13293,6 +13248,11 @@ class CartesianFluidSolver:
                 "SST momentum Helmholtz wall_flag_codes must contain six entries"
             )
         wall_codes = tuple(int(value) for value in wall_flag_codes)
+        mode = self._resolve_physical_face_topology(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+            wall_flag_codes=wall_codes,
+        )
 
         canonical_authority = self._velocity_dirichlet_boundary_authority_code()
         self._prepare_sst_obstacle_interface_wall_target_masks_kernel(
@@ -13301,7 +13261,9 @@ class CartesianFluidSolver:
         if self._sst_near_wall_treatment == "fluent_correlation":
             # Refresh the local fluid velocity before freezing correlation wall
             # traction coefficients for this Helmholtz solve.
-            self._reconstruct_sst_cell_center_velocity_from_mac_kernel(self.velocity)
+            self._reconstruct_sst_cell_center_velocity_from_mac_kernel(
+                self.velocity, int(pressure_outlet_zmin), mode
+            )
         if not dual_geometry_prepared:
             self._compute_muscl_momentum_dual_geometry_kernel()
 
@@ -13329,9 +13291,8 @@ class CartesianFluidSolver:
         for component in range(3):
             self._initialize_sst_momentum_helmholtz_component_kernel(
                 int(component),
-                wall_codes[0],
-                wall_codes[2],
-                wall_codes[4],
+                int(pressure_outlet_zmin),
+                mode,
             )
             for edge_field, axis_index, no_slip_min, no_slip_max in (
                 (self.cg_r_old, 0, wall_codes[0], wall_codes[1]),
@@ -13346,6 +13307,8 @@ class CartesianFluidSolver:
                     physical_nu_m2_s,
                     int(no_slip_min),
                     int(no_slip_max),
+                    int(pressure_outlet_zmin),
+                    mode,
                 )
             self._finalize_sst_momentum_helmholtz_diagonal_kernel()
             invalid_diagonal_count = int(
@@ -13538,9 +13501,8 @@ class CartesianFluidSolver:
         if all_converged:
             self._synchronize_muscl_minimum_normal_boundary_rows_kernel(
                 self.velocity,
-                wall_codes[0],
-                wall_codes[2],
-                wall_codes[4],
+                int(pressure_outlet_zmin),
+                mode,
             )
             self._synchronize_muscl_exact_interface_owner_kernel(
                 self.velocity,
@@ -13682,6 +13644,8 @@ class CartesianFluidSolver:
         kinematic_viscosity_m2_s: float | None = None,
         no_slip_domain_walls: tuple[bool, bool, bool, bool, bool, bool] | None = None,
         advection_scheme: str = "euler",
+        pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool | None = None,
         stage_observer: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
         """Advance SST transport with explicit-advection/implicit-diffusion IMEX.
@@ -13724,16 +13688,21 @@ class CartesianFluidSolver:
             if stage_observer is not None and explicit_transport_substeps == 0:
                 stage_observer(stage_name)
 
+        wall_flag_codes = tuple(1 if flag else 0 for flag in wall_flags)
+        mode = self._resolve_physical_face_topology(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+            wall_flag_codes=wall_flag_codes,
+        )
         if not self._sst_wall_distance_valid or wall_flags != self._sst_no_slip_domain_walls:
             self.prepare_sst_wall_distance(no_slip_domain_walls=wall_flags)
-        wall_flag_codes = tuple(1 if flag else 0 for flag in wall_flags)
         wall_omega_guard_count = 0
         wall_omega_target_max_s = 0.0
         # Velocity, obstacle topology, and boundary authority remain fixed
         # throughout this SST transport transaction.  Prepare them once for
         # every coefficient refresh and for the correlation guard below.
         observe_initial_transport_stage("coefficient_input_prepare_before")
-        self._prepare_sst_coefficient_inputs()
+        self._prepare_sst_coefficient_inputs(int(pressure_outlet_zmin), mode)
         observe_initial_transport_stage("coefficient_input_prepare_after")
         observe_initial_transport_stage("wall_target_guard_before")
         if self._sst_near_wall_treatment == "resolved":
@@ -13775,7 +13744,9 @@ class CartesianFluidSolver:
         # invent a different mass flux or estimate CFL from cell speed.
         observe_initial_transport_stage("primal_flux_ledger_before")
         self._compute_muscl_primal_normal_velocity_ledger(
-            self.velocity, wall_flag_codes
+            self.velocity, wall_flag_codes,
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
         )
         observe_initial_transport_stage("primal_flux_ledger_after")
 
@@ -13804,7 +13775,7 @@ class CartesianFluidSolver:
             observe_initial_transport_stage("coefficient_update_before")
             max_diffusivity = (
                 self._update_sst_coefficients_from_prepared_inputs_checked(
-                    float(nu_m2_s)
+                    float(nu_m2_s), int(pressure_outlet_zmin), mode
                 )
             )
             observe_initial_transport_stage("coefficient_update_after")
@@ -14022,7 +13993,7 @@ class CartesianFluidSolver:
         if stage_observer is not None:
             stage_observer("final_coefficient_update_before")
         self._update_sst_coefficients_from_prepared_inputs_checked(
-            float(nu_m2_s)
+            float(nu_m2_s), int(pressure_outlet_zmin), mode
         )
         if stage_observer is not None:
             stage_observer("final_coefficient_update_after")
@@ -14987,15 +14958,25 @@ class CartesianFluidSolver:
                 )
 
     @ti.kernel
-    def _build_sst_momentum_transpose_cell_gradient_kernel(self):
+    def _build_sst_momentum_transpose_cell_gradient_kernel(
+        self,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
+    ):
         """Cache G[c,a]=d_a u_c once from the frozen cell velocity."""
 
         for i, j, k in self.sst_momentum_transpose_gradient_s:
             gradient = ti.Matrix.zero(ti.f32, 3, 3)
             if self.obstacle[i, j, k] == 0:
-                derivative_x = self._sst_cell_center_velocity_derivative_x(i, j, k)
-                derivative_y = self._sst_cell_center_velocity_derivative_y(i, j, k)
-                derivative_z = self._sst_cell_center_velocity_derivative_z(i, j, k)
+                derivative_x = self._sst_cell_center_velocity_derivative_x(
+                    i, j, k, pressure_outlet_zmin, velocity_inlet_zmax_mode
+                )
+                derivative_y = self._sst_cell_center_velocity_derivative_y(
+                    i, j, k, pressure_outlet_zmin, velocity_inlet_zmax_mode
+                )
+                derivative_z = self._sst_cell_center_velocity_derivative_z(
+                    i, j, k, pressure_outlet_zmin, velocity_inlet_zmax_mode
+                )
                 gradient = ti.Matrix(
                     [
                         [derivative_x.x, derivative_y.x, derivative_z.x],
@@ -15101,6 +15082,8 @@ class CartesianFluidSolver:
         side: ti.template(),
         no_slip_domain_mask,
         canonical_authority: ti.template(),
+        pressure_outlet_zmin,
+        velocity_inlet_zmax_mode,
     ):
         """Return grad(u_normal) on one obstacle or domain boundary face."""
 
@@ -15318,10 +15301,18 @@ class CartesianFluidSolver:
                     side, i, j
                 )
 
+        normal_prescribed = False
+        if domain_wall:
+            normal = self._physical_exterior_normal_contract(
+                self.velocity_prev, normal_axis, side, i, j, k,
+                pressure_outlet_zmin, velocity_inlet_zmax_mode,
+            )
+            normal_prescribed = normal[0] != 0
+            target = normal[1]
         closed_wall = (
             obstacle_wall
             or canonical_wall
-            or (domain_wall and (external_exact or no_slip))
+            or normal_prescribed
         )
         correlation_wall = (
             obstacle_wall or canonical_wall or (domain_wall and no_slip)
@@ -15366,6 +15357,8 @@ class CartesianFluidSolver:
         molecular_nu_m2_s: ti.f32,
         no_slip_domain_mask: ti.i32,
         canonical_authority: ti.template(),
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
     ):
         """Build div(nu_eff grad(u)^T) with explicit physical-face fluxes."""
 
@@ -15475,6 +15468,8 @@ class CartesianFluidSolver:
                                 0,
                                 no_slip_domain_mask,
                                 canonical_authority,
+                                pressure_outlet_zmin,
+                                velocity_inlet_zmax_mode,
                             )
                         )
 
@@ -15511,6 +15506,8 @@ class CartesianFluidSolver:
                                 1,
                                 no_slip_domain_mask,
                                 canonical_authority,
+                                pressure_outlet_zmin,
+                                velocity_inlet_zmax_mode,
                             )
                         )
                     divergence += (forward_flux - backward_flux) / cell_width_m
@@ -15593,9 +15590,20 @@ class CartesianFluidSolver:
         no_slip_ymax: int,
         no_slip_zmin: int,
         no_slip_zmax: int,
+        *,
+        pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool | None = None,
     ) -> None:
         """Apply the MAC-aware transpose operator with physical-face closure."""
 
+        mode = self._resolve_physical_face_topology(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+            wall_flag_codes=(
+                no_slip_xmin, no_slip_xmax, no_slip_ymin,
+                no_slip_ymax, no_slip_zmin, no_slip_zmax,
+            ),
+        )
         canonical_authority = self._velocity_dirichlet_boundary_authority_code()
         no_slip_domain_mask = (
             (1 if int(no_slip_xmin) != 0 else 0)
@@ -15608,12 +15616,18 @@ class CartesianFluidSolver:
         self._prepare_sst_obstacle_interface_wall_target_masks_kernel(
             canonical_authority
         )
-        self._reconstruct_sst_cell_center_velocity_from_mac_kernel(self.velocity_prev)
-        self._build_sst_momentum_transpose_cell_gradient_kernel()
+        self._reconstruct_sst_cell_center_velocity_from_mac_kernel(
+            self.velocity_prev, int(pressure_outlet_zmin), mode
+        )
+        self._build_sst_momentum_transpose_cell_gradient_kernel(
+            int(pressure_outlet_zmin), mode
+        )
         self._build_sst_momentum_transpose_cell_divergence_kernel(
             float(molecular_nu_m2_s),
             int(no_slip_domain_mask),
             canonical_authority,
+            int(pressure_outlet_zmin),
+            mode,
         )
         self._add_sst_momentum_transpose_interior_mac_kernel(float(dt_s))
 
@@ -15677,6 +15691,8 @@ class CartesianFluidSolver:
         advection_scheme: str = "euler",
         kinematic_viscosity_m2_s: float | None = None,
         no_slip_domain_walls: tuple[bool, bool, bool, bool, bool, bool] | None = None,
+        pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool | None = None,
     ) -> None:
         step_dt_s = _finite_float(
             self.dt if dt_s is None else dt_s,
@@ -15754,6 +15770,11 @@ class CartesianFluidSolver:
                     "(xmin, xmax, ymin, ymax, zmin, zmax)"
                 )
         wall_flag_codes = tuple(1 if flag else 0 for flag in wall_flags)
+        self._resolve_physical_face_topology(
+            pressure_outlet_zmin=pressure_outlet_zmin,
+            velocity_inlet_zmax=velocity_inlet_zmax,
+            wall_flag_codes=wall_flag_codes,
+        )
         if scheme == "muscl_tvd":
             # Conservative finite-volume transport uses the same backward-MAC
             # normal mass flux as the projection operator.  SSP-RK2 supplies
@@ -15791,6 +15812,8 @@ class CartesianFluidSolver:
                             self.velocity_transport_base,
                             wall_flag_codes,
                             dual_geometry_prepared=True,
+                            pressure_outlet_zmin=pressure_outlet_zmin,
+                            velocity_inlet_zmax=velocity_inlet_zmax,
                         )
                         advection_rate_s = (
                             self._muscl_momentum_advection_rate_s()
@@ -15832,6 +15855,8 @@ class CartesianFluidSolver:
                         float(advection_dt_s),
                         0,
                         wall_flag_codes,
+                        pressure_outlet_zmin=pressure_outlet_zmin,
+                        velocity_inlet_zmax=velocity_inlet_zmax,
                     )
                     self._apply_velocity_dirichlet_boundary_rows_dispatch(
                         read_report=False,
@@ -15842,6 +15867,8 @@ class CartesianFluidSolver:
                         self.velocity_prev,
                         wall_flag_codes,
                         dual_geometry_prepared=True,
+                        pressure_outlet_zmin=pressure_outlet_zmin,
+                        velocity_inlet_zmax=velocity_inlet_zmax,
                     )
                     stage_rate_s = self._muscl_momentum_advection_rate_s()
                     stage_rate_is_valid = (
@@ -15869,6 +15896,8 @@ class CartesianFluidSolver:
                             float(advection_dt_s),
                             1,
                             wall_flag_codes,
+                            pressure_outlet_zmin=pressure_outlet_zmin,
+                            velocity_inlet_zmax=velocity_inlet_zmax,
                         )
                         self._apply_velocity_dirichlet_boundary_rows_dispatch(
                             read_report=False,
@@ -15882,6 +15911,8 @@ class CartesianFluidSolver:
                             self.velocity,
                             wall_flag_codes,
                             dual_geometry_prepared=True,
+                            pressure_outlet_zmin=pressure_outlet_zmin,
+                            velocity_inlet_zmax=velocity_inlet_zmax,
                         )
                         final_rate_s = self._muscl_momentum_advection_rate_s()
                         final_rate_is_valid = (
@@ -16120,6 +16151,8 @@ class CartesianFluidSolver:
                             float(trial_substep_dt_s),
                             float(nu_m2_s),
                             *wall_flag_codes,
+                            pressure_outlet_zmin=pressure_outlet_zmin,
+                            velocity_inlet_zmax=velocity_inlet_zmax,
                         )
                         helmholtz_report = (
                             self._solve_sst_momentum_unsplit_helmholtz(
@@ -16129,6 +16162,8 @@ class CartesianFluidSolver:
                                 relative_tolerance=1.0e-7,
                                 max_iterations=helmholtz_iteration_budget,
                                 dual_geometry_prepared=True,
+                                pressure_outlet_zmin=pressure_outlet_zmin,
+                                velocity_inlet_zmax=velocity_inlet_zmax,
                             )
                         )
                         component_iterations = sum(
@@ -20008,6 +20043,115 @@ class CartesianFluidSolver:
             )
         return 0
 
+    def _resolve_physical_face_topology(
+        self,
+        *,
+        pressure_outlet_zmin: bool,
+        velocity_inlet_zmax: bool | None,
+        wall_flag_codes: tuple[int, int, int, int, int, int],
+    ) -> int:
+        """Validate one physical-face write without retaining topology state."""
+        if pressure_outlet_zmin and wall_flag_codes[4] != 0:
+            raise ValueError(
+                "no_slip_zmin=True conflicts with pressure_outlet_zmin=True"
+            )
+        if velocity_inlet_zmax and wall_flag_codes[5] != 0:
+            raise ValueError(
+                "no_slip_zmax=True conflicts with velocity_inlet_zmax=True"
+            )
+        return self._resolve_velocity_inlet_zmax_topology_mode(
+            velocity_inlet_zmax,
+            canonical_authority=self._velocity_dirichlet_boundary_authority_code(),
+        )
+
+    @ti.func
+    def _physical_exterior_normal_contract(
+        self,
+        source: ti.template(),
+        axis: ti.i32,
+        side: ti.i32,
+        i: ti.i32,
+        j: ti.i32,
+        k: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
+    ):
+        """Return [prescribed, absolute normal] for this call's stage source.
+
+        Undeclared exterior faces are closed.  Exact normal data overrides
+        the no-slip default; the only compact-row fallbacks are the explicit
+        zmin pressure outlet and legacy whole-plane zmax inlet.  A zero-valued
+        fallback remains extrapolated, whereas an exact zero is prescribed.
+        This rule does not describe the relative Q of an interior moving wall.
+        """
+
+        prescribed = 1
+        value = 0.0
+        if self.obstacle[i, j, k] == 0:
+            if axis == 0:
+                if (
+                    self.external_velocity_boundary_x_face_active_component_mask[
+                        side, j, k
+                    ] & 1
+                ) != 0:
+                    value = self.external_velocity_boundary_x_face_value_mps[
+                        side, j, k
+                    ].x
+            elif axis == 1:
+                if (
+                    self.external_velocity_boundary_y_face_active_component_mask[
+                        side, i, k
+                    ] & 2
+                ) != 0:
+                    value = self.external_velocity_boundary_y_face_value_mps[
+                        side, i, k
+                    ].y
+            else:
+                if side == 0:
+                    if (
+                        self.external_velocity_boundary_z_face_active_component_mask[
+                            side, i, j
+                        ] & 4
+                    ) != 0:
+                        value = self.external_velocity_boundary_z_face_value_mps[
+                            side, i, j
+                        ].z
+                    elif pressure_outlet_zmin != 0:
+                        # This minimum compact row is a physical MAC face.
+                        prescribed = 0
+                        value = source[i, j, k].z
+                elif velocity_inlet_zmax_mode != 0:
+                    if (
+                        self.external_velocity_boundary_z_face_active_component_mask[
+                            side, i, j
+                        ] & 4
+                    ) != 0:
+                        value = self.external_velocity_boundary_z_face_value_mps[
+                            side, i, j
+                        ].z
+                    elif velocity_inlet_zmax_mode == 1:
+                        # Only explicit True permits this legacy extrapolation.
+                        prescribed = 0
+                        value = source[i, j, k].z
+        return ti.Vector([ti.cast(prescribed, ti.f32), value])
+
+    @ti.func
+    def _physical_exterior_normal_velocity(
+        self,
+        source: ti.template(),
+        axis: ti.template(),
+        side: ti.template(),
+        i: ti.i32,
+        j: ti.i32,
+        k: ti.i32,
+        pressure_outlet_zmin: ti.i32,
+        velocity_inlet_zmax_mode: ti.i32,
+    ):
+        return self._physical_exterior_normal_contract(
+            source, axis, side, i, j, k,
+            pressure_outlet_zmin, velocity_inlet_zmax_mode,
+        )[1]
+
     @ti.func
     def _obstacle_interface_component_is_prescribed(
         self,
@@ -20147,20 +20291,10 @@ class CartesianFluidSolver:
             else:
                 left_velocity_x = 0.0
                 right_velocity_x = 0.0
-                if (
-                    i == 0
-                    and (
-                        self.external_velocity_boundary_x_face_active_component_mask[
-                            0, j, k
-                        ]
-                        & 1
-                    )
-                    != 0
-                ):
-                    left_velocity_x = (
-                        self.external_velocity_boundary_x_face_value_mps[
-                            0, j, k
-                        ].x
+                if i == 0:
+                    left_velocity_x = self._physical_exterior_normal_velocity(
+                        self.velocity, 0, 0, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
                     )
                 elif i > 0:
                     if self.obstacle[i - 1, j, k] == 0:
@@ -20172,20 +20306,10 @@ class CartesianFluidSolver:
                         # fluid and its minus-side cell is obstacle, so the
                         # prescribed wall face is the cell's left face.
                         left_velocity_x = self.velocity[i, j, k].x
-                if (
-                    i == self.nx - 1
-                    and (
-                        self.external_velocity_boundary_x_face_active_component_mask[
-                            1, j, k
-                        ]
-                        & 1
-                    )
-                    != 0
-                ):
-                    right_velocity_x = (
-                        self.external_velocity_boundary_x_face_value_mps[
-                            1, j, k
-                        ].x
+                if i == self.nx - 1:
+                    right_velocity_x = self._physical_exterior_normal_velocity(
+                        self.velocity, 0, 1, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
                     )
                 elif i < self.nx - 1:
                     if self.obstacle[i + 1, j, k] == 0:
@@ -20199,20 +20323,10 @@ class CartesianFluidSolver:
 
                 back_velocity_y = 0.0
                 front_velocity_y = 0.0
-                if (
-                    j == 0
-                    and (
-                        self.external_velocity_boundary_y_face_active_component_mask[
-                            0, i, k
-                        ]
-                        & 2
-                    )
-                    != 0
-                ):
-                    back_velocity_y = (
-                        self.external_velocity_boundary_y_face_value_mps[
-                            0, i, k
-                        ].y
+                if j == 0:
+                    back_velocity_y = self._physical_exterior_normal_velocity(
+                        self.velocity, 1, 0, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
                     )
                 elif j > 0:
                     if self.obstacle[i, j - 1, k] == 0:
@@ -20221,20 +20335,10 @@ class CartesianFluidSolver:
                         i, j, k, 1, canonical_authority
                     ):
                         back_velocity_y = self.velocity[i, j, k].y
-                if (
-                    j == self.ny - 1
-                    and (
-                        self.external_velocity_boundary_y_face_active_component_mask[
-                            1, i, k
-                        ]
-                        & 2
-                    )
-                    != 0
-                ):
-                    front_velocity_y = (
-                        self.external_velocity_boundary_y_face_value_mps[
-                            1, i, k
-                        ].y
+                if j == self.ny - 1:
+                    front_velocity_y = self._physical_exterior_normal_velocity(
+                        self.velocity, 1, 1, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
                     )
                 elif j < self.ny - 1:
                     if self.obstacle[i, j + 1, k] == 0:
@@ -20246,26 +20350,11 @@ class CartesianFluidSolver:
 
                 bottom_velocity_z = 0.0
                 top_velocity_z = 0.0
-                if (
-                    k == 0
-                    and (
-                        self.external_velocity_boundary_z_face_active_component_mask[
-                            0, i, j
-                        ]
-                        & 4
+                if k == 0:
+                    bottom_velocity_z = self._physical_exterior_normal_velocity(
+                        self.velocity, 2, 0, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
                     )
-                    != 0
-                ):
-                    bottom_velocity_z = (
-                        self.external_velocity_boundary_z_face_value_mps[
-                            0, i, j
-                        ].z
-                    )
-                elif k == 0 and pressure_outlet_zmin == 1:
-                    # Pressure outlet uses the pressure-correctable backward
-                    # compact face; an exact external face, when present,
-                    # takes precedence above as affine boundary flux.
-                    bottom_velocity_z = self.velocity[i, j, k].z
                 elif k > 0:
                     if self.obstacle[i, j, k - 1] == 0:
                         bottom_velocity_z = self.velocity[i, j, k].z
@@ -20273,37 +20362,11 @@ class CartesianFluidSolver:
                         i, j, k, 2, canonical_authority
                     ):
                         bottom_velocity_z = self.velocity[i, j, k].z
-                if (
-                    k == self.nz - 1
-                    and (
-                        velocity_inlet_zmax_mode == 1
-                        or (
-                            velocity_inlet_zmax_mode == 2
-                            and (
-                                self.external_velocity_boundary_z_face_active_component_mask[
-                                    1, i, j
-                                ]
-                                & 4
-                            )
-                            != 0
-                        )
+                if k == self.nz - 1:
+                    top_velocity_z = self._physical_exterior_normal_velocity(
+                        self.velocity, 2, 1, i, j, k,
+                        pressure_outlet_zmin, velocity_inlet_zmax_mode,
                     )
-                ):
-                    if (
-                        self.external_velocity_boundary_z_face_active_component_mask[
-                            1, i, j
-                        ]
-                        & 4
-                    ) != 0:
-                        top_velocity_z = (
-                            self.external_velocity_boundary_z_face_value_mps[
-                                1, i, j
-                            ].z
-                        )
-                    else:
-                        # Explicit legacy whole-plane mode remains available
-                        # for callers that have not registered directed data.
-                        top_velocity_z = self.velocity[i, j, k].z
                 elif k < self.nz - 1:
                     if self.obstacle[i, j, k + 1] == 0:
                         top_velocity_z = self.velocity[i, j, k + 1].z

@@ -86,9 +86,9 @@ def _fixture():
         x=_ArrayField(np.ones((1, 3), dtype=np.float32)),
         v=_ArrayField(np.ones((1, 3), dtype=np.float32) * 2.0),
         C=_ArrayField(np.ones((1, 3, 3), dtype=np.float32) * 3.0),
-        F=_ArrayField(np.ones((1, 3, 3), dtype=np.float32) * 4.0),
+        F=_ArrayField(np.ones((1, 3, 3), dtype=np.float64) * 4.0),
         position_increment_residual_m=_ArrayField(
-            np.asarray([[0.125, -0.25, 0.5]], dtype=np.float64)
+            np.asarray([[0.125, -0.25, 0.5]], dtype=np.float32)
         ),
     )
     return simulator, solid
@@ -103,6 +103,16 @@ def _rewrite_checkpoint_metadata(path: Path, **updates: object) -> None:
     metadata = json.loads(str(payload["__metadata__"]))
     metadata.update(updates)
     payload["__metadata__"] = np.asarray(json.dumps(metadata))
+    np.savez_compressed(path, **payload)
+
+
+def _rewrite_checkpoint_array(path: Path, key: str, value: np.ndarray) -> None:
+    with np.load(path, allow_pickle=False) as checkpoint:
+        payload = {
+            name: np.asarray(checkpoint[name]).copy()
+            for name in checkpoint.files
+        }
+    payload[key] = np.asarray(value).copy()
     np.savez_compressed(path, **payload)
 
 
@@ -174,6 +184,50 @@ class SquidCheckpointAtomicityTests(unittest.TestCase):
                 )
 
             self.assertEqual(path.read_bytes(), valid_bytes)
+
+    def test_solid_dtype_and_finiteness_rejection_are_precommit_atomic(self):
+        simulator, solid = _fixture()
+        args = SimpleNamespace(solid_model="neo_hookean_mpm")
+        bad_arrays = (
+            ("solid_F", np.ones((1, 3, 3), dtype=np.float32), "dtype mismatch"),
+            ("solid_C", np.ones((1, 3, 3), dtype=np.float64), "dtype mismatch"),
+            ("solid_F", np.full((1, 3, 3), np.nan, dtype=np.float64), "must be finite"),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "restart.npz"
+            for key, bad_array, message in bad_arrays:
+                with self.subTest(key=key, dtype=bad_array.dtype, message=message):
+                    write_run_checkpoint(
+                        path,
+                        completed_step=1,
+                        step_count=2,
+                        full_pressure_waveform_steps=2,
+                        args=args,
+                        simulator=simulator,
+                        solid_mpm=solid,
+                    )
+                    _rewrite_checkpoint_array(path, key, bad_array)
+                    checkpoint_head = path.read_bytes()
+                    simulator.time_s[None] = 999.0
+                    solid.F.from_numpy(np.full((1, 3, 3), 777.0, dtype=np.float64))
+                    solid.C.from_numpy(np.full((1, 3, 3), 888.0, dtype=np.float32))
+                    owner_f = solid.F.to_numpy()
+                    owner_c = solid.C.to_numpy()
+
+                    with self.assertRaisesRegex(ValueError, message):
+                        load_run_checkpoint(
+                            path,
+                            args=args,
+                            simulator=simulator,
+                            solid_mpm=solid,
+                            step_count=2,
+                            full_pressure_waveform_steps=2,
+                        )
+
+                    self.assertEqual(simulator.time_s[None], 999.0)
+                    np.testing.assert_array_equal(solid.F.to_numpy(), owner_f)
+                    np.testing.assert_array_equal(solid.C.to_numpy(), owner_c)
+                    self.assertEqual(path.read_bytes(), checkpoint_head)
 
     def test_resume_history_requires_every_integer_step_in_order(self):
         rows = [

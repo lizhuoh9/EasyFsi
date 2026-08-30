@@ -235,7 +235,7 @@ class SSTMomentumHelmholtzContracts(unittest.TestCase):
                 solver._prepare_sst_obstacle_interface_wall_target_masks_kernel(1)
                 solver._compute_muscl_momentum_dual_geometry_kernel()
                 solver._initialize_sst_momentum_helmholtz_component_kernel(
-                    0, 0, 0, 0
+                    0, 0, 2
                 )
 
                 row_kinds = solver.bicgstab_t.to_numpy()
@@ -260,6 +260,8 @@ class SSTMomentumHelmholtzContracts(unittest.TestCase):
                     1.0,
                     0,
                     0,
+                    0,
+                    2,
                 )
 
                 # Row i=2 is the sole free x-MAC face between the two exact
@@ -326,7 +328,7 @@ class SSTMomentumHelmholtzContracts(unittest.TestCase):
         )
         solver._prepare_sst_obstacle_interface_wall_target_masks_kernel(0)
         solver._compute_muscl_momentum_dual_geometry_kernel()
-        solver._initialize_sst_momentum_helmholtz_component_kernel(0, 0, 0, 0)
+        solver._initialize_sst_momentum_helmholtz_component_kernel(0, 0, 2)
         solver._assemble_sst_momentum_helmholtz_axis_kernel(
             solver.cg_mg_residual,
             0,
@@ -335,6 +337,8 @@ class SSTMomentumHelmholtzContracts(unittest.TestCase):
             0.0,
             0,
             0,
+            0,
+            2,
         )
 
         observed = float(solver.cg_mg_residual.to_numpy()[2, 1, 1])
@@ -357,7 +361,7 @@ class SSTMomentumHelmholtzContracts(unittest.TestCase):
         )
         solver._prepare_sst_obstacle_interface_wall_target_masks_kernel(0)
         solver._compute_muscl_momentum_dual_geometry_kernel()
-        solver._initialize_sst_momentum_helmholtz_component_kernel(2, 0, 0, 0)
+        solver._initialize_sst_momentum_helmholtz_component_kernel(2, 0, 2)
         solver._assemble_sst_momentum_helmholtz_axis_kernel(
             solver.cg_r_old,
             2,
@@ -366,6 +370,8 @@ class SSTMomentumHelmholtzContracts(unittest.TestCase):
             0.0,
             0,
             0,
+            0,
+            2,
         )
 
         observed = float(solver.cg_r_old.to_numpy()[1, 1, 2])

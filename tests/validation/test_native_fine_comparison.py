@@ -4,6 +4,8 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+import shutil
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,6 +17,7 @@ from src.refactored.validation.ansys_vertical_flap_fsi.native_fine_comparison im
     evaluate_five_percent_diagnostic_gate,
     postprocess_native_fine_comparison,
 )
+from src.refactored.validation.ansys_vertical_flap_fsi import native_fine_contracts
 from src.refactored.validation.ansys_vertical_flap_fsi.native_fine_rendering import (
     _display_fluid_mask,
     _overlay_deformed_solid,
@@ -823,7 +826,9 @@ def test_postprocess_generates_native_only_diagnostic_bundle(tmp_path: Path) -> 
         path.endswith("/histories/residual_snapshot_summary.csv")
         for path in input_paths
     )
-    checksum_rows = (output_dir / "CHECKSUMS.sha256").read_text(encoding="utf-8").splitlines()
+    checksum_bytes = (output_dir / "CHECKSUMS.sha256").read_bytes()
+    assert b"\r\n" not in checksum_bytes
+    checksum_rows = checksum_bytes.decode("utf-8").splitlines()
     assert checksum_rows
     assert all("CHECKSUMS.sha256" not in row for row in checksum_rows)
 
@@ -1056,3 +1061,201 @@ def test_postprocess_refuses_nonlocked_gif_scale(tmp_path: Path) -> None:
             expected_steps=3,
             velocity_vmax_mps=31.000001,
         )
+
+
+def test_postprocess_dual_root_refuses_the_attempt_as_its_canonical_root(
+    tmp_path: Path,
+) -> None:
+    our_dir, fluent_dir = _synthetic_inputs(tmp_path)
+
+    with pytest.raises(
+        NativeFineComparisonError,
+        match="must differ from canonical artifact root",
+    ):
+        postprocess_native_fine_comparison(
+            our_dir,
+            fluent_dir,
+            tmp_path / "comparison_output",
+            expected_steps=3,
+            our_canonical_artifact_dir=our_dir,
+        )
+
+
+def test_dual_root_prefix_rejects_modified_noncore_history_field(
+    tmp_path: Path,
+) -> None:
+    step_history = {
+        "step": 1,
+        "tip_mean_displacement_m": [0.0, 1.0e-5, 0.0],
+        "max_displacement_m": 1.0e-5,
+        "local_velocity_peak_mps": 12.0,
+    }
+    history_path = tmp_path / "step_0001.json"
+    _write_json(
+        history_path,
+        {"time_s": 5.0e-4, "history": step_history},
+    )
+    journal_history = {
+        **step_history,
+        "time_s": 5.0e-4,
+        "marker_action_reaction_residual_n": 0.0,
+        "scatter_action_reaction_residual_n": 0.0,
+    }
+    aggregate_row = {
+        **step_history,
+        "time_s": 5.0e-4,
+        "local_velocity_peak_mps": 99.0,
+    }
+
+    with pytest.raises(
+        NativeFineComparisonError,
+        match="local_velocity_peak_mps.*step 1",
+    ):
+        native_fine_contracts._validate_dual_root_history_semantics(
+            ({"history_row": journal_history},),
+            (history_path,),
+            (aggregate_row,),
+            expected_steps=1,
+        )
+
+
+def test_postprocess_dual_root_uses_canonical_continuous_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempt, fluent_dir = _synthetic_inputs(tmp_path)
+    canonical = tmp_path / "canonical_artifacts"
+    shutil.copytree(attempt / "step_fields", canonical / "step_fields")
+    shutil.copytree(attempt / "step_history", canonical / "step_history")
+    shutil.copy2(
+        canonical / "step_fields" / "step_0003.npz",
+        canonical / "step_fields" / "step_0004.npz",
+    )
+    shutil.copy2(
+        canonical / "step_history" / "step_0003.json",
+        canonical / "step_history" / "step_0004.json",
+    )
+    source_hashes = {"cases/ansys_vertical_flap_fsi.py": "a" * 64}
+    identity = {
+        "config_sha256": "b" * 64,
+        "source_sha256": "c" * 64,
+        "geometry_sha256": "d" * 64,
+    }
+    generation = "e" * 32
+    provenance = {
+        "canonical_root": str(canonical.resolve()),
+        "checkpoint_generation": generation,
+        "checkpoint_identity": identity,
+        "accepted_step": 1,
+        "artifact_root": str(canonical.resolve()),
+    }
+    manifest = json.loads((attempt / "run_manifest.json").read_text("utf-8"))
+    manifest["source_sha256"] = source_hashes
+    manifest["artifact_root"] = str(canonical.resolve())
+    manifest["resume_provenance"] = provenance
+    manifest["config"]["fsi_checkpoint_expected_generation"] = generation
+    _write_json(attempt / "run_manifest.json", manifest)
+    summary = json.loads((attempt / "our_solver_summary.json").read_text("utf-8"))
+    summary.update(
+        {
+            "output_dir": str(attempt.resolve()),
+            "artifact_root": str(canonical.resolve()),
+            "resume_provenance": provenance,
+        }
+    )
+    _write_json(attempt / "our_solver_summary.json", summary)
+    _write_json(
+        attempt / "metadata.json",
+        {
+            "format": "validation-run-attempt-v2",
+            "canonical": {"resolved_path": str(canonical.resolve())},
+            "checkpoint": {
+                "generation": generation,
+                "identity": identity,
+                "accepted_step": 1,
+            },
+            "source_sha256": source_hashes,
+            "target_step": 3,
+            "attempt": {"id": "resume-1-to-3", "role": "resume"},
+        },
+    )
+    _write_json(canonical / "run_manifest.json", {"source_sha256": source_hashes})
+    (canonical / "checkpoint.json").write_text("{}", encoding="utf-8")
+    with (attempt / "our_solver_history.csv").open(
+        "r", encoding="utf-8", newline=""
+    ) as handle:
+        aggregate_rows = [
+            {
+                key: native_fine_contracts._parse_csv_value(value)
+                for key, value in row.items()
+            }
+            for row in csv.DictReader(handle)
+        ]
+    records = []
+    complete_csv_rows = []
+    for step, aggregate_row in enumerate(aggregate_rows, start=1):
+        history_path = (
+            canonical
+            / "step_history"
+            / f"step_{step:04d}.json"
+        )
+        wrapper = json.loads(
+            history_path.read_text(encoding="utf-8")
+        )
+        public_history = {
+            **wrapper["history"],
+            **aggregate_row,
+            "time_s": wrapper["time_s"],
+        }
+        wrapper["history"] = {
+            key: value
+            for key, value in public_history.items()
+            if key != "time_s"
+        }
+        _write_json(history_path, wrapper)
+        complete_csv_rows.append(
+            {
+                key: (
+                    json.dumps(value, sort_keys=True)
+                    if isinstance(value, (dict, list, tuple))
+                    else value
+                )
+                for key, value in public_history.items()
+            }
+        )
+        journal_history = {
+            **public_history,
+            "marker_action_reaction_residual_n": 0.0,
+            "scatter_action_reaction_residual_n": 0.0,
+        }
+        records.append({"history_row": journal_history})
+    _write_csv(attempt / "our_solver_history.csv", complete_csv_rows)
+    records.append(records[-1])
+    head = SimpleNamespace(
+        accepted_step=4,
+        metadata={"identity": identity, "state": {}},
+    )
+    monkeypatch.setattr(native_fine_contracts, "read_checkpoint_head", lambda _path: head)
+    monkeypatch.setattr(
+        native_fine_contracts,
+        "load_accepted_fsi_checkpoint",
+        lambda *_args, **_kwargs: SimpleNamespace(records=tuple(records)),
+    )
+
+    report = postprocess_native_fine_comparison(
+        attempt,
+        fluent_dir,
+        tmp_path / "comparison_output",
+        expected_steps=3,
+        gif_duration_ms=10,
+        our_canonical_artifact_dir=canonical,
+    )
+
+    assert report["dual_root_artifact_contract"]["canonical_head_step"] == 4
+    assert report["our_run_dir"] == str(attempt.resolve())
+    assert report["our_canonical_artifact_dir"] == str(canonical.resolve())
+    manifest_output = json.loads(
+        (tmp_path / "comparison_output" / "input_manifest.json").read_text("utf-8")
+    )
+    assert manifest_output["our_run_root"] == str(attempt.resolve())
+    assert manifest_output["our_canonical_artifact_root"] == str(canonical.resolve())

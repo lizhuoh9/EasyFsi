@@ -19,6 +19,8 @@ def _repo_root() -> Path:
 
 REPO_ROOT = _repo_root()
 SRC_ROOT = REPO_ROOT / "src"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
@@ -31,6 +33,7 @@ LOCKED_NATIVE_FLUENT_POSTPROCESS_DIR = (
 )
 
 from refactored.validation.ansys_vertical_flap_fsi.native_fine_comparison import (  # noqa: E402
+    COMPARISON_PROFILES,
     NativeFineComparisonError,
     postprocess_native_fine_comparison,
 )
@@ -46,7 +49,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--our-run-dir",
         required=True,
-        help="Completed our-solver run containing step_fields and history",
+        help="Completed our-solver attempt containing summary, progress, and CSV",
+    )
+    parser.add_argument(
+        "--our-canonical-artifact-dir",
+        help=(
+            "Distinct canonical artifact root for a resumed attempt; validates its "
+            "complete checkpoint/journal and compares only the requested prefix"
+        ),
     )
     parser.add_argument(
         "--fluent-postprocess-dir",
@@ -68,6 +78,7 @@ def _parser() -> argparse.ArgumentParser:
             "strictly from the locked postprocess input manifest run_dir"
         ),
     )
+    parser.add_argument("--comparison-profile", default="legacy_final", choices=sorted(COMPARISON_PROFILES))
     parser.add_argument("--gif-duration-ms", type=int, default=120)
     parser.add_argument("--gif-max-width", type=int, default=1600)
     return parser
@@ -86,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
             gif_max_width_px=args.gif_max_width,
             pressure_semantics_mode="strict",
             fluent_force_history_path=args.fluent_force_history,
+            comparison_profile=args.comparison_profile,
+            our_canonical_artifact_dir=args.our_canonical_artifact_dir,
         )
     except NativeFineComparisonError as exc:
         print(f"VALIDATION FAILED: {exc}", file=sys.stderr)

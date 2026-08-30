@@ -18,6 +18,7 @@ from simulation_core.fluids.preflow_snapshot import (
     PREFLOW_SNAPSHOT_FIELD_NAMES,
     PreflowSnapshot,
     PreflowSnapshotIdentity,
+    PreflowSnapshotMismatchError,
     PreflowSnapshotValidationError,
     load_preflow_snapshot,
     save_preflow_snapshot,
@@ -549,7 +550,131 @@ def test_preflow_snapshot_restore_rolls_back_partial_runtime_commit():
     assert target.velocity_dirichlet_component_ledger_generation == generation_before
 
 
-def test_preflow_identity_changes_for_any_directed_external_face_profile():
+@pytest.fixture
+def compiler_runtime_identity(monkeypatch):
+    identity = {
+        "requested_arch": "cuda", "actual_arch": "cuda", "default_fp": "f32",
+        "random_seed": 0, "strict_arch_verified": True,
+        "offline_cache_identity": {"enabled": True, "file_path": "/cache/one"},
+        "compiler_configuration": {
+            "taichi_version": "1.7.4", "default_ip": "i32",
+            "cfg_optimization": False, "opt_level": 1,
+            "advanced_optimization": True, "fast_math": True, "debug": False,
+        },
+    }
+    monkeypatch.setattr(
+        solid_mpm_fsi_runner, "taichi_runtime_identity", lambda: deepcopy(identity),
+    )
+    return identity
+
+
+def _identity_with_compiler_metadata(runtime_identity):
+    with (
+        patch.object(
+            solid_mpm_fsi_runner, "taichi_runtime_identity",
+            return_value=deepcopy(runtime_identity),
+        ),
+        patch.object(
+            solid_mpm_fsi_runner, "_preflow_snapshot_source_payload",
+            return_value={"solver.py": b"fixed-source"},
+        ),
+        patch.object(
+            solid_mpm_fsi_runner, "_preflow_snapshot_geometry_payload",
+            return_value={"coordinates": np.zeros(3, dtype=np.float64)},
+        ),
+    ):
+        return solid_mpm_fsi_runner._preflow_snapshot_identity(
+            markers=object(), fluid=object(), solid=object(),
+            config={"grid_nodes": (2, 2, 2)},
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    (("cfg_optimization", True), ("opt_level", 0),
+     ("advanced_optimization", False), ("legacy_missing_identity", None)),
+)
+def test_compiler_profile_snapshot_mismatch_rejects_before_field_mutation(
+    tmp_path, compiler_runtime_identity, field, changed_value,
+):
+    expected = _identity_with_compiler_metadata(compiler_runtime_identity)
+    if field == "legacy_missing_identity":
+        stored = PreflowSnapshotIdentity.from_inputs(
+            config={"grid_nodes": (2, 2, 2)},
+            sources={"solver.py": b"fixed-source"},
+            geometry={"coordinates": np.zeros(3, dtype=np.float64)},
+        )
+    else:
+        changed = {
+            **compiler_runtime_identity,
+            "compiler_configuration": {
+                **compiler_runtime_identity["compiler_configuration"],
+                field: changed_value,
+            },
+        }
+        stored = _identity_with_compiler_metadata(changed)
+    assert stored.source_sha256 == expected.source_sha256
+    assert stored.geometry_sha256 == expected.geometry_sha256
+    assert stored.config_sha256 != expected.config_sha256
+
+    prefix = tmp_path / "compiler_profile"
+    config = _snapshot_health_config()
+    solid_mpm_fsi_runner._write_fixed_solid_preflow_snapshot(
+        path=prefix, report=_healthy_preflow_report(), markers=object(),
+        fluid=_fake_fluid(), solid=object(), config=config, identity=stored,
+    )
+    target = _fake_fluid()
+    before = {
+        name: getattr(target, name).to_numpy()
+        for name in PREFLOW_SNAPSHOT_FIELD_NAMES
+    }
+    with pytest.raises(PreflowSnapshotMismatchError, match="config_sha256"):
+        solid_mpm_fsi_runner._restore_fixed_solid_preflow_snapshot(
+            path=prefix, markers=object(), fluid=target, solid=object(),
+            config=config, expected_identity=expected,
+        )
+    for name in PREFLOW_SNAPSHOT_FIELD_NAMES:
+        field_value = getattr(target, name)
+        assert field_value.from_numpy_calls == 0
+        np.testing.assert_array_equal(field_value.to_numpy(), before[name])
+
+
+def test_compiler_profile_ignores_cache_path_and_round_trips(
+    tmp_path, compiler_runtime_identity,
+):
+    original_metadata = deepcopy(compiler_runtime_identity)
+    stored = _identity_with_compiler_metadata(compiler_runtime_identity)
+    other_cache = {
+        **compiler_runtime_identity,
+        "offline_cache_identity": {"enabled": False, "file_path": "/cache/two"},
+        "strict_arch_verified": False,
+    }
+    expected = _identity_with_compiler_metadata(other_cache)
+    assert stored == expected
+    assert compiler_runtime_identity == original_metadata
+    prefix = tmp_path / "same_compiler"
+    source = _fake_fluid()
+    target = _fake_fluid()
+    _zero_snapshot_fields(target)
+    config = _snapshot_health_config()
+    solid_mpm_fsi_runner._write_fixed_solid_preflow_snapshot(
+        path=prefix, report=_healthy_preflow_report(), markers=object(),
+        fluid=source, solid=object(), config=config, identity=stored,
+    )
+    restored = solid_mpm_fsi_runner._restore_fixed_solid_preflow_snapshot(
+        path=prefix, markers=object(), fluid=target, solid=object(),
+        config=config, expected_identity=expected,
+    )
+    assert restored["preflow_snapshot_loaded"] is True
+    for name in PREFLOW_SNAPSHOT_FIELD_NAMES:
+        np.testing.assert_array_equal(
+            getattr(source, name).to_numpy(), getattr(target, name).to_numpy(),
+        )
+
+
+def test_preflow_identity_changes_for_any_directed_external_face_profile(
+    compiler_runtime_identity,
+):
     """A portable snapshot cannot silently replace a different live BC map."""
 
     config = {"grid_nodes": (2, 2, 2), "boundary_profile_mode": "directed"}
@@ -610,7 +735,9 @@ def test_preflow_identity_changes_for_any_directed_external_face_profile():
                 )
 
 
-def test_preflow_identity_changes_when_only_tip_cap_projection_geometry_moves():
+def test_preflow_identity_changes_when_only_tip_cap_projection_geometry_moves(
+    compiler_runtime_identity,
+):
     config = {"grid_nodes": (2, 2, 2), "boundary_profile_mode": "directed"}
     markers, solid = _fake_snapshot_identity_geometry()
     markers.projection_vertex_count = 4

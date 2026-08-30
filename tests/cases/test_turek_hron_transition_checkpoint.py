@@ -93,7 +93,7 @@ def test_transition_checkpoint_atomic_round_trip(tmp_path: Path) -> None:
     metadata = {"version": 1, "completed_step": 183}
     arrays = {
         "fluid_velocity": np.arange(12, dtype=np.float32).reshape(2, 2, 3),
-        "solid_F": np.eye(3, dtype=np.float32)[None, :, :],
+        "solid_F": np.eye(3, dtype=np.float64)[None, :, :],
         "marker_v_gamma_mps": np.zeros((2, 3), dtype=np.float32),
     }
 

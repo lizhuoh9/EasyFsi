@@ -89,6 +89,13 @@ class HibmMpmMpmForceScatterReport:
     candidate_pair_count: int = 0
     invalid_external_force_particle_count: int = -1
     max_abs_external_force_component_n: float = float("nan")
+    material_transfer_verified: bool = False
+    material_binding_identity: str | None = None
+    force_roundoff_bound_n: float | None = None
+    torque_residual_n_m: float | None = None
+    torque_roundoff_bound_n_m: float | None = None
+    material_power_residual_w: float | None = None
+    material_power_roundoff_bound_w: float | None = None
 
 
 @dataclass(frozen=True)

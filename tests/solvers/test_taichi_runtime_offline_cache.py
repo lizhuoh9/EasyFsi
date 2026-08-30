@@ -17,6 +17,36 @@ _RUNTIME_ENVIRONMENT_NAMES = (
     "TI_OFFLINE_CACHE_FILE_PATH",
 )
 
+_COMPILER_PIN_CASES = (
+    pytest.param(
+        "default_ip",
+        "i32",
+        runtime.ti.i32,
+        runtime.ti.i32,
+        runtime.ti.i64,
+        id="default-ip",
+    ),
+    pytest.param(
+        "cfg_optimization",
+        False,
+        False,
+        False,
+        True,
+        id="cfg-optimization",
+    ),
+    pytest.param("opt_level", 1, 1, 1, 2, id="opt-level"),
+    pytest.param(
+        "advanced_optimization",
+        True,
+        True,
+        True,
+        False,
+        id="advanced-optimization",
+    ),
+    pytest.param("fast_math", True, True, True, False, id="fast-math"),
+    pytest.param("debug", False, False, False, True, id="debug"),
+)
+
 
 
 @pytest.fixture(autouse=True)
@@ -44,6 +74,165 @@ def test_runtime_config_defaults_preserve_legacy_non_strict_api() -> None:
     assert config.offline_cache is None
     assert config.offline_cache_file_path is None
     assert config.strict_arch is False
+    assert config.default_ip is None
+    assert config.cfg_optimization is None
+    assert config.opt_level is None
+    assert config.advanced_optimization is None
+    assert config.fast_math is None
+    assert config.debug is None
+
+
+def test_runtime_config_preserves_legacy_six_positional_arguments() -> None:
+    config = runtime.TaichiRuntimeConfig(
+        "gpu",
+        "f64",
+        7,
+        False,
+        "legacy-cache",
+        True,
+    )
+
+    assert config.arch == "gpu"
+    assert config.default_fp == "f64"
+    assert config.random_seed == 7
+    assert config.offline_cache is False
+    assert config.offline_cache_file_path == "legacy-cache"
+    assert config.strict_arch is True
+    assert config.default_ip is None
+    assert config.cfg_optimization is None
+    assert config.opt_level is None
+    assert config.advanced_optimization is None
+    assert config.fast_math is None
+    assert config.debug is None
+
+
+@pytest.mark.parametrize(
+    (
+        "field",
+        "requested",
+        "expected_kwarg",
+        "matching_actual",
+        "drifted_actual",
+    ),
+    _COMPILER_PIN_CASES,
+)
+def test_init_taichi_forwards_explicit_compiler_pin(
+    field: str,
+    requested: object,
+    expected_kwarg: object,
+    matching_actual: object,
+    drifted_actual: object,
+) -> None:
+    del drifted_actual
+    actual_config = _actual_compiler_config(**{field: matching_actual})
+
+    with (
+        patch.object(runtime.ti, "cfg", actual_config),
+        patch.object(runtime.ti, "init") as taichi_init,
+    ):
+        runtime.init_taichi(
+            runtime.TaichiRuntimeConfig(**{field: requested})
+        )
+
+    assert taichi_init.call_args.kwargs[field] == expected_kwarg
+
+
+@pytest.mark.parametrize(
+    (
+        "field",
+        "requested",
+        "expected_kwarg",
+        "matching_actual",
+        "drifted_actual",
+    ),
+    _COMPILER_PIN_CASES,
+)
+def test_first_initialization_rejects_actual_compiler_pin_drift_without_publish(
+    field: str,
+    requested: object,
+    expected_kwarg: object,
+    matching_actual: object,
+    drifted_actual: object,
+) -> None:
+    del expected_kwarg, matching_actual
+    config = runtime.TaichiRuntimeConfig(**{field: requested})
+    actual_config = _actual_compiler_config(**{field: drifted_actual})
+
+    with (
+        patch.object(runtime.ti, "cfg", actual_config),
+        patch.object(runtime.ti, "init") as taichi_init,
+        pytest.raises(RuntimeError, match=field),
+    ):
+        runtime.init_taichi(config)
+
+    taichi_init.assert_called_once()
+    assert runtime._INITIALIZED is False
+    assert runtime._INITIALIZED_ARCH is None
+
+
+@pytest.mark.parametrize(
+    (
+        "field",
+        "requested",
+        "expected_kwarg",
+        "matching_actual",
+        "drifted_actual",
+    ),
+    _COMPILER_PIN_CASES,
+)
+def test_initialized_runtime_rejects_actual_compiler_pin_drift(
+    field: str,
+    requested: object,
+    expected_kwarg: object,
+    matching_actual: object,
+    drifted_actual: object,
+) -> None:
+    del expected_kwarg
+    config = runtime.TaichiRuntimeConfig(**{field: requested})
+    matching_config = _actual_compiler_config(**{field: matching_actual})
+    drifted_config = _actual_compiler_config(**{field: drifted_actual})
+
+    with (
+        patch.object(runtime.ti, "cfg", matching_config),
+        patch.object(runtime.ti, "init") as first_init,
+    ):
+        runtime.init_taichi(config)
+
+    first_init.assert_called_once()
+    with (
+        patch.object(runtime.ti, "cfg", drifted_config),
+        patch.object(runtime.ti, "init") as second_init,
+        pytest.raises(RuntimeError, match=field),
+    ):
+        runtime.init_taichi(config)
+
+    second_init.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("default_ip", 32),
+        ("cfg_optimization", 0),
+        ("opt_level", True),
+        ("advanced_optimization", 1),
+        ("fast_math", "true"),
+        ("debug", 0),
+    ),
+)
+def test_explicit_compiler_pin_rejects_invalid_type_before_taichi_init(
+    field: str,
+    invalid_value: object,
+) -> None:
+    with (
+        patch.object(runtime.ti, "init") as taichi_init,
+        pytest.raises(ValueError, match=field),
+    ):
+        runtime.init_taichi(
+            runtime.TaichiRuntimeConfig(**{field: invalid_value})
+        )
+
+    taichi_init.assert_not_called()
 
 
 def test_runtime_identity_fails_closed_before_taichi_initialization() -> None:
@@ -52,10 +241,7 @@ def test_runtime_identity_fails_closed_before_taichi_initialization() -> None:
 
 
 def test_runtime_identity_records_actual_strict_cuda_configuration() -> None:
-    actual_config = SimpleNamespace(
-        arch=runtime.ti.cuda,
-        default_fp=runtime.ti.f32,
-    )
+    actual_config = _actual_compiler_config(cfg_optimization=True)
 
     with (
         patch.object(runtime.ti, "cfg", actual_config),
@@ -71,6 +257,12 @@ def test_runtime_identity_records_actual_strict_cuda_configuration() -> None:
         "actual_arch": "cuda",
         "default_fp": "f32",
         "random_seed": 0,
+        "compiler_configuration": {
+            "taichi_version": ".".join(map(str, runtime.ti.__version__)),
+            "default_ip": "i32", "cfg_optimization": True,
+            "opt_level": 1, "advanced_optimization": True,
+            "fast_math": True, "debug": False,
+        },
         "offline_cache_identity": {
             "enabled": True,
             "file_path": None,
@@ -80,10 +272,10 @@ def test_runtime_identity_records_actual_strict_cuda_configuration() -> None:
 
 
 def test_runtime_identity_reads_actual_arch_instead_of_requested_arch() -> None:
-    actual_config = SimpleNamespace(
-        arch=runtime.ti.cpu,
-        default_fp=runtime.ti.f32,
-    )
+    actual_config = SimpleNamespace(**{
+        **vars(_actual_compiler_config()),
+        "arch": runtime.ti.cpu,
+    })
 
     with (
         patch.object(runtime.ti, "cfg", actual_config),
@@ -95,6 +287,66 @@ def test_runtime_identity_reads_actual_arch_instead_of_requested_arch() -> None:
     assert identity["requested_arch"] == "cuda"
     assert identity["actual_arch"] == "cpu"
     assert identity["strict_arch_verified"] is False
+
+
+def _actual_compiler_config(**overrides: object) -> SimpleNamespace:
+    values = {
+        "arch": runtime.ti.cuda,
+        "default_fp": runtime.ti.f32,
+        "default_ip": runtime.ti.i32,
+        "cfg_optimization": False,
+        "opt_level": 1,
+        "advanced_optimization": True,
+        "fast_math": True,
+        "debug": False,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.parametrize("cfg_optimization", (False, True))
+def test_runtime_compiler_identity_reads_actual_values_not_environment(
+    monkeypatch, cfg_optimization: bool,
+) -> None:
+    monkeypatch.setenv("TI_CFG_OPTIMIZATION", str(int(not cfg_optimization)))
+    actual = _actual_compiler_config(cfg_optimization=cfg_optimization)
+    with (
+        patch.object(runtime.ti, "cfg", actual),
+        patch.object(runtime.ti, "init") as taichi_init,
+    ):
+        runtime.init_taichi(runtime.TaichiRuntimeConfig(strict_arch=True))
+        identity = runtime.taichi_runtime_identity()
+
+    assert identity["compiler_configuration"] == {
+        "taichi_version": ".".join(map(str, runtime.ti.__version__)),
+        "default_ip": "i32", "cfg_optimization": cfg_optimization,
+        "opt_level": 1, "advanced_optimization": True,
+        "fast_math": True, "debug": False,
+    }
+    assert "cfg_optimization" not in taichi_init.call_args.kwargs
+    assert "opt_level" not in taichi_init.call_args.kwargs
+    assert "advanced_optimization" not in taichi_init.call_args.kwargs
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ("default_ip", "cfg_optimization", "opt_level", "advanced_optimization",
+     "fast_math", "debug"),
+)
+def test_runtime_compiler_identity_rejects_missing_actual_field(
+    missing_field: str,
+) -> None:
+    actual = SimpleNamespace(**{
+        name: value for name, value in vars(_actual_compiler_config()).items()
+        if name != missing_field
+    })
+    with (
+        patch.object(runtime.ti, "cfg", actual),
+        patch.object(runtime.ti, "init"),
+    ):
+        runtime.init_taichi(runtime.TaichiRuntimeConfig(strict_arch=True))
+        with pytest.raises(AttributeError, match=missing_field):
+            runtime.taichi_runtime_identity()
 
 
 def _publish_preinitialized_cpu_runtime(monkeypatch) -> None:

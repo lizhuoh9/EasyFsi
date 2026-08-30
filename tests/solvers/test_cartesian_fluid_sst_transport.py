@@ -847,6 +847,18 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
         rhs_scale = 1.0 + directional_y + directional_z
         rhs = np.zeros((*grid_nodes, 3), dtype=np.float32)
         rhs[..., 0] = rhs_scale * exact_mode[None, :, :]
+        # The Neumann eigenmode is transverse (y/z).  Its nonzero x-normal
+        # values require declared physical x faces; an undeclared x face is
+        # impermeable, not an extra homogeneous-Neumann direction.
+        for side_index in (0, 1):
+            solver.refresh_external_velocity_boundary_face_uniform(
+                axis_index=0, side_index=side_index,
+                target_velocity_mps=(0.0, 0.0, 0.0),
+                active_component_mask=1,
+            )
+        x_face_targets = solver.external_velocity_boundary_x_face_value_mps.to_numpy()
+        x_face_targets[..., 0] = exact_mode[None, :, :]
+        solver.external_velocity_boundary_x_face_value_mps.from_numpy(x_face_targets)
         solver.velocity.from_numpy(rhs)
 
         report = solver._solve_sst_momentum_unsplit_helmholtz(
@@ -1186,7 +1198,15 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
             no_slip_domain_walls=_OPEN_WALLS,
         )
 
-        solver.set_uniform_velocity((1.25, -0.75, 0.5))
+        uniform_velocity = (1.25, -0.75, 0.5)
+        solver.set_uniform_velocity(uniform_velocity)
+        for axis_index in range(3):
+            for side_index in (0, 1):
+                solver.refresh_external_velocity_boundary_face_uniform(
+                    axis_index=axis_index, side_index=side_index,
+                    target_velocity_mps=uniform_velocity,
+                    active_component_mask=1 << axis_index,
+                )
         solver._update_sst_coefficients_checked(1.0e-5)
         self.assertLess(
             float(np.max(np.abs(solver.sst_strain_rate_magnitude_s.to_numpy()))),
@@ -1199,6 +1219,18 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
         # v lives on y-normal faces; because this shear varies only with x,
         # its true face x coordinate is the scalar-cell x center.
         velocity[..., 1] = shear_rate_s * centers_x[:, None, None]
+        # Replace the previous uniform face data before testing a different
+        # field.  Only the y-normal faces need nonzero prescribed values.
+        for axis_index in range(3):
+            for side_index in (0, 1):
+                solver.refresh_external_velocity_boundary_face_uniform(
+                    axis_index=axis_index, side_index=side_index,
+                    target_velocity_mps=(0.0, 0.0, 0.0),
+                    active_component_mask=2 if axis_index == 1 else 0,
+                )
+        y_face_targets = solver.external_velocity_boundary_y_face_value_mps.to_numpy()
+        y_face_targets[..., 1] = shear_rate_s * centers_x[None, :, None]
+        solver.external_velocity_boundary_y_face_value_mps.from_numpy(y_face_targets)
         solver.velocity.from_numpy(velocity)
         solver._update_sst_coefficients_checked(1.0e-5)
         self.assertAlmostEqual(
@@ -2518,7 +2550,11 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
         solver.sst_turbulent_kinetic_energy.fill(1.0)
         solver.sst_specific_dissipation_rate.fill(1.0)
 
-        solver.advance_sst_transport(dt_s=1.0e-2)
+        solver.advance_sst_transport(
+            dt_s=1.0e-2,
+            pressure_outlet_zmin=True,
+            velocity_inlet_zmax=True,
+        )
 
         k_after = solver.sst_turbulent_kinetic_energy.to_numpy()
         self.assertLess(float(np.mean(k_after[:, :, -1])), float(np.mean(k_after[:, :, -2])))
@@ -2989,7 +3025,7 @@ class CartesianFluidSSTTransportContracts(unittest.TestCase):
                     "_update_sst_coefficients_from_prepared_inputs_checked",
                     # Keep prescribed coefficients frozen while preserving
                     # the former separate max-diffusivity reduction result.
-                    new=lambda _solver, molecular_nu: float(molecular_nu),
+                    new=lambda _solver, molecular_nu, _outlet, _mode: float(molecular_nu),
                 ):
                     solver.advance_sst_transport(
                         dt_s=1.0e-2,

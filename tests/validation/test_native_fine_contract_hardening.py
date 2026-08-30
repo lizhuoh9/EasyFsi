@@ -5,6 +5,8 @@ import json
 import math
 from pathlib import Path
 import runpy
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -16,6 +18,7 @@ from src.refactored.validation.ansys_vertical_flap_fsi.native_fine_comparison im
 )
 from src.refactored.validation.ansys_vertical_flap_fsi.native_fine_contracts import (
     CANONICAL_NATIVE_FLUENT_PATH_MARKERS,
+    _diagnostic_values_equal,
     _validate_native_fluent_bundle,
     _validate_run_contracts,
     _validate_final_projection_success,
@@ -35,6 +38,12 @@ from .test_native_fine_comparison import (
     _write_csv,
     _write_json,
 )
+
+
+def test_dual_root_history_semantics_accepts_equivalent_tuple_and_json_list() -> None:
+    assert _diagnostic_values_equal(
+        (0.0, 1.0e-5, -2.0e-5), [0.0, 1.0e-5, -2.0e-5]
+    )
 
 
 def _set_projection_status(
@@ -338,6 +347,31 @@ def test_postprocess_cli_default_tracks_latest_fresh50_bundle() -> None:
     )
 
 
+def test_postprocess_cli_starts_without_repo_root_already_on_python_path(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    script_path = (
+        repo_root
+        / "validation_runs"
+        / "ansys_vertical_flap_fsi"
+        / "our_solver_vs_native_fluent_fine_2026-07-10"
+        / "scripts"
+        / "postprocess_our_solver_vs_native_fluent.py"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(script_path), "--help"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--our-canonical-artifact-dir" in completed.stdout
+
+
 def test_postprocess_cli_returns_nonzero_when_five_percent_gate_fails(
     tmp_path: Path,
 ) -> None:
@@ -413,6 +447,50 @@ def test_postprocess_cli_forwards_explicit_fluent_force_history(tmp_path: Path) 
 
     assert exit_code == 0
     assert captured["fluent_force_history_path"] == str(force_history)
+
+
+def test_postprocess_cli_forwards_explicit_canonical_artifact_root(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    script_path = (
+        repo_root
+        / "validation_runs"
+        / "ansys_vertical_flap_fsi"
+        / "our_solver_vs_native_fluent_fine_2026-07-10"
+        / "scripts"
+        / "postprocess_our_solver_vs_native_fluent.py"
+    )
+    namespace = runpy.run_path(str(script_path))
+    main = namespace["main"]
+    captured: dict[str, object] = {}
+
+    def _postprocess(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "five_percent_diagnostic_gate": {
+                "status": "passed",
+                "all_metrics_within_tolerance": True,
+            }
+        }
+
+    main.__globals__["postprocess_native_fine_comparison"] = _postprocess
+    canonical = tmp_path / "canonical"
+    exit_code = main(
+        [
+            "--our-run-dir",
+            str(tmp_path / "attempt"),
+            "--our-canonical-artifact-dir",
+            str(canonical),
+            "--fluent-postprocess-dir",
+            str(tmp_path / "fluent"),
+            "--output-dir",
+            str(tmp_path / "comparison"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["our_canonical_artifact_dir"] == str(canonical)
 
 
 @pytest.mark.parametrize(

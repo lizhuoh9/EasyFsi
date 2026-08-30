@@ -17,6 +17,46 @@ implementation belongs in the functional packages below.
 | `simulation_core/diagnostics/` | Validation helpers, CFL/time-step controllers, field checks, and Taichi runtime bootstrap. | Changing validation/report helpers, CFL substep rules, or shared runtime initialization. |
 | `simulation_core/drivers/` | Shared runtime-adapter contracts and the case-agnostic FSI trial engine used by adapter-based cases. | Changing shared physical-step ownership, generic coupling convergence, runtime-adapter contracts, or driver result envelopes. |
 
+## Physical Exterior Normal Flux
+
+`fluids/solver.py` owns one `_physical_exterior_normal_contract` returning
+`[prescribed, absolute normal velocity]`. Its velocity wrapper is shared by
+projection divergence, primal-Q, MUSCL normal states, and SST reconstruction;
+SST strain/transpose and normal Helmholtz rows also consume the prescribed flag.
+Unregistered exterior normals are closed; a maximum-side
+exterior face must not borrow the last internal backward-MAC velocity. Exact
+normal targets remain authoritative, including zero targets and partial masks.
+Interior HIBM transport Q remains wall-relative, not the absolute wall velocity
+used by projection.
+
+`predict` and `advance_sst_transport` receive `pressure_outlet_zmin=False` and
+`velocity_inlet_zmax=None` explicitly. The pressure outlet alone may use its
+colocated minimum compact row. The zmax modes retain their projection meaning:
+None derives per-face ownership, True permits the legacy whole-plane fallback,
+and False rejects any exact zmax normal on a fluid-adjacent face. Conflicting
+no-slip/open declarations are rejected before physical writes. Topology is
+resolved per call and passed through all SSP sources/retries; no active-mode
+cache is added to persistent state.
+
+An extrapolated zero at an explicit z port is still free, unlike an exact or
+default closed zero. Minimum normal compact rows are synchronized before fluxes
+and after SSP/implicit stages. Maximum exterior normals have no compact owner:
+their ghost state and matrix boundary term must not overwrite the last internal
+MAC row. Normal closure alone does not activate tangential no-slip or SST wall
+correlation friction. All three SST reconstruction paths receive the same
+per-call topology and their own current/previous stage source.
+
+The official runner shares one config parser across SST, prediction and
+projection. The generic `hibm_mpm/core.py` sharp-load assembly also passes its
+existing outlet/inlet settings to both predictor and projection. Standalone
+throughflow callers must explicitly declare the openings they require.
+
+Generic sharp-HIBM band and air sweeps invalidate their canonical ledger even
+when the returned cell increment is zero. Rebuild/prepare/seal before testing an
+early exit or invoking a reachability reader. Positive overflow/tiny cleanup
+also reseals before its next reader, and nested helpers publish the report from
+that same generation. No reader performs lazy repair or relaxes the sealed guard.
+
 ## Removed Legacy Entry Points
 
 The old root-level compatibility modules have been removed. Import from the
@@ -120,3 +160,108 @@ FSI1/FSI8/FSI50 validation; host architecture tests alone are insufficient.
 
 Legacy module names are not installed. New project code and external migration
 guides should use the functional package path.
+
+## Registered Segment Geometry and Accepted-Step Restart
+
+The non-interpolated registered 2-D/extruded route is decomposed inside
+`coupling/hibm_mpm/`: `component_face_segment_geometry.py` owns finite F64
+projection and integer topology validation; `component_face_segment_assembly.py`
+owns full raw-route scratch and independent global-nearest-owner selection;
+`component_face_segment_audit.py` certifies every raw source and connected path.
+Raw sources retain the original strict support. Geometric connectors use the
+strict face-global Euclidean disk circumscribing the active-plane source box
+(scalar support retains its original disk). Owner, corner and every actual
+connector share this bounded domain; a unique qualified registered subarc is
+still required. This supersedes the projection hull that rejected a legal
+curved connector at r36 step 49; it does not widen raw-source permission.
+`core.py` dispatches these passes and writes the canonical ledger only after
+all certificates pass. Legacy 3-D/interpolated routes are not this contract.
+
+`component_face_candidate_geometry.py` checks global-nearest-owner permission
+for each possible MAC destination before source-progress ranking. This is a
+candidate prepass only: it neither creates/drops raw authors nor replaces the
+final route audit. Failure still prevents the sole public-ledger commit.
+
+## Fixed Material Surface and Adjoint Loads
+
+- `coupling/hibm_mpm/material_surface_binding.py` constructs immutable Cartesian
+  reference W, its source identity, and finite conditioning/mass-gain diagnostics.
+  It checks unity/affine reproduction and bounded signed half-cell extrapolation
+  with particle and marker input-quantization accounting.
+- `coupling/hibm_mpm/material_surface_transfer.py` owns device Wx/Wv geometry,
+  edge-oriented normals, pressure probes and deterministic CSR W.T loads. Actual
+  rounded f32 particle-force increments are staged, audited and then committed.
+- `hibm_mpm/core.py` binds that map, guards immutable topology, and composes cap
+  motion/load derivatives. `interface_state.py` includes binding identity while
+  keeping an IQN trial velocity independent of accepted-material Wv.
+- `solids/neo_hookean_mpm.py` reports direct fixed force (N, final substep), support
+  and damping impulse (N s, accepted batch), and their angular impulses (N m s).
+  The `pure_fixed_mass` policy includes the discarded fixed PIC/APIC share at
+  unclamped grid nodes without double-counting the grid clamp. Persistent `F` and
+  `saved_F` are f64; `C`, `v`, grid velocity and the existing P2G/APIC layout remain
+  f32. The step uses explicit f64 deformation recurrence/constitutive locals and
+  preserves an in-range raw `F` without SVD reconstruction; SVD projection is only
+  for an actual singular-value bound violation or reversed determinant. These
+  diagnostics have rollback state; they are not a global PIC/FLIP momentum or
+  whole-FSI energy proof.
+- The ANSYS case and official runner select `cartesian_reference_adjoint_v1`.
+  Physical markers have zero face offset; pressure probes carry the separate
+  offset. Fixed reference surface/cap areas remain the current convention.
+
+The new `src/refactored/validation/ansys_vertical_flap_fsi/material_reference_fine_contracts.py`
+adds material/reaction evidence to the existing strict IQN fine50 contract.
+The validation CLI must preserve these fields through its canonical JSON `_N`
+force-key serialization. Historical Fluent profiles remain separate.
+
+## Complete Accepted-Step Persistence
+
+Persistent restart is separate from an in-memory trial rollback:
+
+- `coupling/accepted_fsi_checkpoint.py` validates complete accepted macro state,
+  controller/IQN state, physical time, binding identity, and incremental
+  report/outbox records. Bound material geometry is checked before runtime writes;
+  unbound legacy marker metadata remains a separate supported schema. Its solid
+  deformation checkpoint field accepts only f64 `F`; a legacy f32 deformation is
+  rejected before owner writes rather than implicitly cast, so accepted save/restore
+  retains f64 low bits while other declared f32 fields remain f32.
+- `diagnostics/checkpoint_codec.py` is the non-pickle JSON/numeric-array codec.
+- `diagnostics/checkpoint_store.py` publishes immutable NPZ generations and
+  checksummed journals with a manifest-last single-writer transaction.
+- `diagnostics/atomic_file.py` bounds retries of one already-prepared Windows
+  publication when sharing conflicts temporarily deny rename. Mutable metadata
+  uses atomic replacement; immutable accepted artifacts use create-only rename
+  and still never overwrite an existing destination. Neither path regenerates
+  payloads, retries solver work or advances physical time.
+- `diagnostics/run_attempt.py` preserves old `failure.json` / `interruption.json`
+  under a unique checksummed `attempts/` ledger after successful resume preflight.
+  It rejects non-regular terminal entries, including Linux symlinks exposed as
+  Windows/WSL reparse points. Completion requires both completed records and no
+  active failure/interruption. Its single-writer rename contract preserves bytes
+  across ordinary process errors; it does not certify power-loss durability.
+  `validate_dual_root_attempt_provenance` also binds a completed attempt-v2 root
+  to a distinct canonical artifact root, exact target step, checkpoint
+  generation/identity, source hashes and matching manifest/summary provenance.
+  This is a control-plane contract only. The comparison consumer separately
+  validates the canonical checkpoint journal and exact field/history prefix,
+  then uses `validate_dual_root_history_row_semantics` to bind every public
+  journal field to the per-step JSON and aggregate CSV. CSV boolean spelling and
+  empty values are normalized only at that serialization boundary; unexpected
+  aliases, JSON type drift, nonfinite values and non-core field mismatches fail
+  closed.
+  Therefore a canonical head at K200 may supply a locked K1--K50 artifact prefix
+  to a completed K50 attempt without treating the canonical historical summary
+  as the current accepted-state pointer or silently merging the two roots.
+- The official runner restores validated state, rebuilds derived caches, then
+  continues from accepted step K. The validation CLI owns output-prefix/outbox
+  checks. It checks the current production source identity before archiving or
+  publishing a new running state, and reuses the same verified checkpoint head
+  after checking the loaded generation and accepted step. Reduced
+  `step_fields/*.npz` files are never restart checkpoints. For the exact
+  `FsiCouplingConvergenceError` only, its failure artifact also preserves the
+  complete context/report and raw IQN guess/candidate/residual histories; legacy
+  pressure diagnostics retain their existing meaning. Failure reporting preserves
+  the already accepted progress index/time, does not label non-FSI errors as FSI,
+  and a new `running` event clears stale FSI failure diagnostics.
+
+See the [continuous-execution design and measured validation boundary](refactoring/ANSYS_VERTICAL_FLAP_CONTINUOUS_EXECUTION_DESIGN_2026-08-28.md)
+before changing these contracts or starting a long numerical run.

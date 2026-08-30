@@ -53,7 +53,7 @@ class _RestorableOwner(SimpleNamespace):
                 "hibm_dynamic_solid_volume_obstacle",
                 "hibm_dynamic_solid_volume_external_carve",
                 "hibm_fresh_fluid_cell",
-            } else np.float32
+            } else (np.float64 if name == "F" else np.float32)
             setattr(
                 self,
                 name,

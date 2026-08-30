@@ -1469,6 +1469,8 @@ class _FakePredictorFluid:
         advection_scheme: str,
         kinematic_viscosity_m2_s: float | None = None,
         no_slip_domain_walls: tuple[bool, bool, bool, bool, bool, bool] | None = None,
+        pressure_outlet_zmin: bool = False,
+        velocity_inlet_zmax: bool | None = None,
     ) -> None:
         self.calls.append(f"predict:{dt_s}:{advection_scheme}")
         accepted_dt_s = float(dt_s) * float(self.momentum_accepted_fraction)

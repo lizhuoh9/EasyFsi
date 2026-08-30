@@ -8,6 +8,9 @@ import numpy as np
 import taichi as ti
 
 from simulation_core import CartesianFluidSolver, FluidDomainSpec, TaichiRuntimeConfig
+from simulation_core.diagnostics.time_stepping import (
+    physical_time_roundoff_tolerance_s,
+)
 from simulation_core.fluids import CartesianGrid
 
 
@@ -61,8 +64,45 @@ def _cuda_solver(
 class CartesianFluidMusclTransportContracts(unittest.TestCase):
     """Accuracy contracts for the production finite-volume transport path."""
 
-    @staticmethod
+    def _assert_full_advection_step(
+        self,
+        solver: CartesianFluidSolver,
+        requested_dt_s: float,
+        completed_pair_dts_s: list[float],
+    ) -> None:
+        self.assertTrue(completed_pair_dts_s)
+        for dt_s in completed_pair_dts_s:
+            self.assertTrue(math.isfinite(dt_s))
+            self.assertGreater(dt_s, 0.0)
+        accepted_dt_s = math.fsum(completed_pair_dts_s)
+        self.assertEqual(
+            solver._last_momentum_advection_substeps,
+            len(completed_pair_dts_s),
+        )
+        self.assertEqual(solver._last_momentum_advection_rejected_trial_count, 0)
+        self.assertEqual(
+            solver._last_momentum_advection_requested_time_s,
+            requested_dt_s,
+        )
+        self.assertEqual(
+            solver._last_momentum_advection_accepted_time_s,
+            accepted_dt_s,
+        )
+        self.assertEqual(
+            solver._last_momentum_advection_remaining_unadvanced_time_s,
+            0.0,
+        )
+        self.assertLessEqual(
+            abs(requested_dt_s - accepted_dt_s),
+            physical_time_roundoff_tolerance_s(
+                requested_time_s=requested_dt_s,
+                accepted_time_s=accepted_dt_s,
+                accepted_substep_count=len(completed_pair_dts_s),
+            ),
+        )
+
     def _smooth_transverse_shear_result(
+        self,
         cells_z: int,
     ) -> tuple[float, float]:
         cfl = 0.25
@@ -81,12 +121,115 @@ class CartesianFluidMusclTransportContracts(unittest.TestCase):
         velocity[..., 2] = -1.0
         solver.velocity.from_numpy(velocity)
 
-        for _ in range(step_count):
-            solver.predict(
-                dt_s=dt_s,
-                advection_scheme="muscl_tvd",
-                kinematic_viscosity_m2_s=0.0,
+        def phi(position_z: float, time_s: float) -> float:
+            return 0.1 * math.sin(4.0 * math.pi * (position_z + time_s))
+
+        def set_time_dependent_boundary_fixture(time_s: float) -> None:
+            # This is test-fixture state only: public registration declares
+            # ownership, while the direct face-value write supplies the
+            # nonuniform x-normal trace.  It is not a production callback.
+            for side_index in (0, 1):
+                solver.refresh_external_velocity_boundary_face_uniform(
+                    axis_index=0,
+                    side_index=side_index,
+                    target_velocity_mps=(0.0, 0.0, 0.0),
+                    active_component_mask=1,
+                )
+            x_values = np.zeros((2, 4, cells_z, 3), dtype=np.float32)
+            x_values[..., 0] = np.asarray(
+                [phi(float(position_z), time_s) for position_z in z],
+                dtype=np.float32,
+            )[None, None, :]
+            solver.external_velocity_boundary_x_face_value_mps.from_numpy(x_values)
+            solver.refresh_external_velocity_boundary_face_uniform(
+                axis_index=2,
+                side_index=1,
+                target_velocity_mps=(phi(1.0, time_s), 0.0, 0.0),
+                active_component_mask=1,
             )
+
+        original_stage = CartesianFluidSolver._muscl_momentum_ssp_stage_kernel
+        current_time_s = 0.0
+        completed_pair_dts_s: list[float] = []
+        stage_sequence: list[tuple[float, int]] = []
+        active_pair_dt_s: float | None = None
+
+        def record_real_ssp_stage(
+            active_solver: CartesianFluidSolver,
+            source: object,
+            stage_dt_s: float,
+            final_stage: int,
+            wall_flag_codes: tuple[int, int, int, int, int, int] = (0, 0, 0, 0, 0, 0),
+            *,
+            pressure_outlet_zmin: bool = False,
+            velocity_inlet_zmax: bool | None = None,
+        ) -> None:
+            nonlocal active_pair_dt_s
+            self.assertIs(active_solver, solver)
+            self.assertIs(
+                source, solver.velocity_transport_base if final_stage == 0 else solver.velocity_prev,
+            )
+            if final_stage == 0:
+                self.assertIsNone(active_pair_dt_s)
+                stage_dt_s = float(stage_dt_s)
+                self.assertTrue(math.isfinite(stage_dt_s))
+                self.assertGreater(stage_dt_s, 0.0)
+                # Flux 0 already belongs to outer_t.  This fixture-only write
+                # gives the tail synchronization and stage 1 its next-pair
+                # boundary time without introducing a production callback.
+                set_time_dependent_boundary_fixture(
+                    current_time_s + math.fsum(completed_pair_dts_s + [stage_dt_s])
+                )
+                active_pair_dt_s = stage_dt_s
+                stage_sequence.append((stage_dt_s, 0))
+            else:
+                self.assertEqual(final_stage, 1)
+                self.assertIsNotNone(active_pair_dt_s)
+                self.assertEqual(float(stage_dt_s), active_pair_dt_s)
+            original_stage(
+                active_solver,
+                source,
+                stage_dt_s,
+                final_stage,
+                wall_flag_codes,
+                pressure_outlet_zmin=pressure_outlet_zmin,
+                velocity_inlet_zmax=velocity_inlet_zmax,
+            )
+            if final_stage == 1:
+                completed_pair_dts_s.append(float(stage_dt_s))
+                stage_sequence.append((float(stage_dt_s), 1))
+                active_pair_dt_s = None
+
+        with mock.patch.object(
+            CartesianFluidSolver,
+            "_muscl_momentum_ssp_stage_kernel",
+            new=record_real_ssp_stage,
+        ):
+            for _ in range(step_count):
+                set_time_dependent_boundary_fixture(current_time_s)
+                completed_pair_dts_s.clear()
+                stage_sequence.clear()
+                active_pair_dt_s = None
+                solver.predict(
+                    dt_s=dt_s,
+                    advection_scheme="muscl_tvd",
+                    kinematic_viscosity_m2_s=0.0,
+                    pressure_outlet_zmin=True,
+                    velocity_inlet_zmax=True,
+                )
+                self.assertIsNone(active_pair_dt_s)
+                self._assert_full_advection_step(
+                    solver,
+                    dt_s,
+                    completed_pair_dts_s,
+                )
+                self.assertEqual(len(stage_sequence), 2 * len(completed_pair_dts_s))
+                for pair_index, pair_dt_s in enumerate(completed_pair_dts_s):
+                    self.assertEqual(
+                        stage_sequence[2 * pair_index : 2 * pair_index + 2],
+                        [(pair_dt_s, 0), (pair_dt_s, 1)],
+                    )
+                current_time_s += solver._last_momentum_advection_accepted_time_s
 
         transported = solver.velocity.to_numpy()[1, 1, :, 0]
         exact = 0.1 * np.sin(4.0 * np.pi * (z + transport_time_s))
@@ -303,6 +446,13 @@ class CartesianFluidMusclTransportContracts(unittest.TestCase):
         velocity[1, 2, :, 1] = 4.0
         solver.velocity.from_numpy(velocity)
         solver.velocity_transport_base.from_numpy(velocity)
+        for side_index in (0, 1):
+            solver.refresh_external_velocity_boundary_face_uniform(
+                axis_index=0,
+                side_index=side_index,
+                target_velocity_mps=(5.0, 0.0, 0.0),
+                active_component_mask=1,
+            )
         solver._compute_muscl_momentum_fluxes(
             solver.velocity_transport_base,
             (0, 0, 0, 0, 0, 0),
@@ -521,6 +671,8 @@ class CartesianFluidMusclTransportContracts(unittest.TestCase):
                 kinematic_viscosity_m2_s=1.0e-8,
                 no_slip_domain_walls=_OPEN_WALLS,
                 advection_scheme="muscl_tvd",
+                pressure_outlet_zmin=True,
+                velocity_inlet_zmax=True,
             )
 
         transported = np.mean(
@@ -586,7 +738,9 @@ class CartesianFluidMusclTransportContracts(unittest.TestCase):
             "_update_sst_coefficients_from_prepared_inputs_checked",
             # Preserve the former separate max-diffusivity reduction while
             # keeping this test's prescribed coefficient fields frozen.
-            new=lambda _solver, molecular_nu: float(molecular_nu),
+            new=lambda _solver, molecular_nu, pressure_outlet_zmin, mode: float(
+                molecular_nu
+            ),
         ):
             solver.advance_sst_transport(
                 dt_s=dt_s,
@@ -642,27 +796,184 @@ class CartesianFluidMusclTransportContracts(unittest.TestCase):
             atol=1.0e-7,
         )
 
-        # A discontinuous transverse pulse exercises the non-smooth MC branch:
-        # conservative transport may sharpen it but must neither create new
-        # extrema nor lose volume before the pulse reaches an open boundary.
+        # A discontinuous transverse pulse exercises the non-smooth MC branch.
+        # Every free dual cell must obey the advective-form momentum budget,
+        # including both boundary flux and the matching continuity correction.
         velocity.fill(0.0)
         velocity[..., 2] = -1.0
         velocity[:, :, 9:12, 0] = 1.0
+        velocity[0, :, :, 0] = 0.0
         solver.velocity.from_numpy(velocity)
-        initial_integral = float(np.sum(velocity[..., 0]))
-        for _ in range(4):
-            solver.predict(
-                dt_s=0.25 / cells_z,
-                advection_scheme="muscl_tvd",
-                kinematic_viscosity_m2_s=0.0,
+        density_kgm3 = 1.0
+        cell_volume_m3 = 1.0 / (4.0 * 4.0 * cells_z)
+        observed_stages: list[tuple[float, int, float, float, float]] = []
+        original_stage = CartesianFluidSolver._muscl_momentum_ssp_stage_kernel
+
+        def free_x_momentum_stage_rhs(
+            active_solver: CartesianFluidSolver,
+            source_velocity: np.ndarray,
+        ) -> float:
+            flux_x = active_solver.muscl_momentum_flux_x.to_numpy()[..., 0].astype(np.float64)
+            flux_y = active_solver.muscl_momentum_flux_y.to_numpy()[..., 0].astype(np.float64)
+            flux_z = active_solver.muscl_momentum_flux_z.to_numpy()[..., 0].astype(np.float64)
+            q_x = np.sum(
+                active_solver.muscl_momentum_volume_flux_x_half_m3_s.to_numpy()[
+                    ..., 0, :
+                ],
+                axis=-1,
+                dtype=np.float64,
             )
+            q_y = np.sum(
+                active_solver.muscl_momentum_volume_flux_y_half_m3_s.to_numpy()[
+                    ..., 0, :
+                ],
+                axis=-1,
+                dtype=np.float64,
+            )
+            q_z = np.sum(
+                active_solver.muscl_momentum_volume_flux_z_half_m3_s.to_numpy()[
+                    ..., 0, :
+                ],
+                axis=-1,
+                dtype=np.float64,
+            )
+            # Sum the six outer surfaces directly, independently of the
+            # device's per-cell flux divergence.  x face 1 is the fixed/free
+            # dual-CV interface; omitting it would break this budget.
+            outward_momentum_flux = (
+                np.sum(flux_x[-1]) - np.sum(flux_x[1])
+                + np.sum(flux_y[1:, -1, :]) - np.sum(flux_y[1:, 0, :])
+                + np.sum(flux_z[1:, :, -1]) - np.sum(flux_z[1:, :, 0])
+            )
+            volume_divergence = (
+                q_x[2:, :, :] - q_x[1:-1, :, :]
+                + q_y[1:, 1:, :] - q_y[1:, :-1, :]
+                + q_z[1:, :, 1:] - q_z[1:, :, :-1]
+            )
+            source_x = source_velocity[1:, :, :, 0].astype(np.float64)
+            return float(
+                -outward_momentum_flux
+                + np.sum(source_x * volume_divergence)
+            )
+
+        def free_x_momentum_kg_m_s(velocity_values: np.ndarray) -> float:
+            return momentum_scale * float(
+                np.sum(velocity_values[1:, :, :, 0], dtype=np.float64)
+            )
+
+        def record_real_ssp_stage(
+            active_solver: CartesianFluidSolver,
+            source: object,
+            stage_dt_s: float,
+            final_stage: int,
+            wall_flag_codes: tuple[int, int, int, int, int, int] = (0, 0, 0, 0, 0, 0),
+            *,
+            pressure_outlet_zmin: bool = False,
+            velocity_inlet_zmax: bool | None = None,
+        ) -> None:
+            self.assertIs(active_solver, solver)
+            self.assertIn(final_stage, (0, 1))
+            self.assertIs(
+                source, solver.velocity_transport_base if final_stage == 0 else solver.velocity_prev,
+            )
+            source_velocity = source.to_numpy()
+            source_momentum_kg_m_s = free_x_momentum_kg_m_s(source_velocity)
+            stage_rhs = free_x_momentum_stage_rhs(active_solver, source_velocity)
+            original_stage(
+                active_solver,
+                source,
+                stage_dt_s,
+                final_stage,
+                wall_flag_codes,
+                pressure_outlet_zmin=pressure_outlet_zmin,
+                velocity_inlet_zmax=velocity_inlet_zmax,
+            )
+            observed_stages.append(
+                (
+                    float(stage_dt_s),
+                    int(final_stage),
+                    stage_rhs,
+                    source_momentum_kg_m_s,
+                    free_x_momentum_kg_m_s(active_solver.velocity.to_numpy()),
+                )
+            )
+
+        initial_integral = float(np.sum(velocity[1:, :, :, 0], dtype=np.float64))
+        momentum_scale = density_kgm3 * cell_volume_m3
+        momentum_tolerance_kg_m_s = momentum_scale * max(1.0e-5, 2.0e-6 * initial_integral)
+        initial_momentum_kg_m_s = momentum_scale * initial_integral
+        previous_momentum_kg_m_s = initial_momentum_kg_m_s
+        expected_momentum_delta_kg_m_s = 0.0
+        with mock.patch.object(
+            CartesianFluidSolver,
+            "_muscl_momentum_ssp_stage_kernel",
+            new=record_real_ssp_stage,
+        ):
+            for _ in range(4):
+                first_stage = len(observed_stages)
+                solver.predict(
+                    dt_s=0.25 / cells_z,
+                    advection_scheme="muscl_tvd",
+                    kinematic_viscosity_m2_s=0.0,
+                    pressure_outlet_zmin=True,
+                    velocity_inlet_zmax=True,
+                )
+                stages = observed_stages[first_stage:]
+                # A rollback makes every observed pair provisional.  Reject
+                # before treating any one of them as accepted physical time.
+                self.assertEqual(
+                    solver._last_momentum_advection_rejected_trial_count,
+                    0,
+                )
+                self.assertTrue(stages)
+                self.assertEqual(len(stages) % 2, 0)
+                completed_pair_dts_s: list[float] = []
+                for stage_index in range(0, len(stages), 2):
+                    stage_zero, stage_one = stages[stage_index : stage_index + 2]
+                    self.assertEqual(stage_zero[1], 0)
+                    self.assertEqual(stage_one[1], 1)
+                    self.assertEqual(stage_zero[0], stage_one[0])
+                    completed_pair_dts_s.append(stage_zero[0])
+                self._assert_full_advection_step(
+                    solver,
+                    0.25 / cells_z,
+                    completed_pair_dts_s,
+                )
+                for stage_index in range(0, len(stages), 2):
+                    stage_zero, stage_one = stages[stage_index : stage_index + 2]
+                    expected_delta = density_kgm3 * 0.5 * stage_zero[0] * (
+                        stage_zero[2] + stage_one[2]
+                    )
+                    self.assertEqual(stage_one[3], stage_zero[4])
+                    self.assertEqual(stage_zero[3], previous_momentum_kg_m_s)
+                    self.assertAlmostEqual(
+                        stage_one[4] - stage_zero[3],
+                        expected_delta,
+                        delta=momentum_tolerance_kg_m_s,
+                    )
+                    expected_momentum_delta_kg_m_s += expected_delta
+                    previous_momentum_kg_m_s = stage_one[4]
+                self.assertEqual(
+                    previous_momentum_kg_m_s,
+                    free_x_momentum_kg_m_s(solver.velocity.to_numpy()),
+                )
         transported = solver.velocity.to_numpy()[..., 0]
         self.assertGreaterEqual(float(np.min(transported)), -2.0e-6)
         self.assertLessEqual(float(np.max(transported)), 1.0 + 2.0e-6)
+        production_dual_volume_m3 = solver.muscl_momentum_dual_volume_m3.to_numpy()[
+            1:, :, :, 0
+        ]
+        np.testing.assert_allclose(
+            production_dual_volume_m3,
+            cell_volume_m3,
+            rtol=0.0,
+            atol=0.0,
+        )
+        final_momentum_kg_m_s = free_x_momentum_kg_m_s(solver.velocity.to_numpy())
         self.assertAlmostEqual(
-            float(np.sum(transported)),
-            initial_integral,
-            delta=max(1.0e-5, 2.0e-6 * initial_integral),
+            final_momentum_kg_m_s - initial_momentum_kg_m_s,
+            expected_momentum_delta_kg_m_s,
+            delta=momentum_tolerance_kg_m_s,
         )
 
     def test_muscl_momentum_reuses_committed_final_flux_for_next_substep(
@@ -838,6 +1149,13 @@ class CartesianFluidMusclTransportContracts(unittest.TestCase):
             np.arange(cells_z, dtype=np.float32)[None, None, :] + 1.0
         )
         solver.velocity.from_numpy(velocity)
+        for side_index in (0, 1):
+            solver.refresh_external_velocity_boundary_face_uniform(
+                axis_index=0,
+                side_index=side_index,
+                target_velocity_mps=(2.0, 0.0, 0.0),
+                active_component_mask=1,
+            )
 
         solver.predict(
             dt_s=dt_s,

@@ -127,7 +127,7 @@ class SstTransportStageObserverContracts(unittest.TestCase):
         advance_source = ast.unparse(_solver_function("advance_sst_transport"))
 
         self.assertEqual(
-            advance_source.count("self._prepare_sst_coefficient_inputs()"),
+            advance_source.count("self._prepare_sst_coefficient_inputs(int(pressure_outlet_zmin), mode)"),
             1,
         )
         self.assertEqual(
@@ -141,14 +141,14 @@ class SstTransportStageObserverContracts(unittest.TestCase):
             advance_source,
         )
         self.assertLess(
-            advance_source.index("self._prepare_sst_coefficient_inputs()"),
+            advance_source.index("self._prepare_sst_coefficient_inputs(int(pressure_outlet_zmin), mode)"),
             advance_source.index("while remaining_dt_s"),
         )
         prepare_stage_before = advance_source.index(
             "'coefficient_input_prepare_before'"
         )
         prepare_call = advance_source.index(
-            "self._prepare_sst_coefficient_inputs()"
+            "self._prepare_sst_coefficient_inputs(int(pressure_outlet_zmin), mode)"
         )
         prepare_stage_after = advance_source.index(
             "'coefficient_input_prepare_after'"
@@ -159,7 +159,7 @@ class SstTransportStageObserverContracts(unittest.TestCase):
         wrapper_source = ast.unparse(
             _solver_function("_update_sst_coefficients_checked")
         )
-        self.assertIn("self._prepare_sst_coefficient_inputs()", wrapper_source)
+        self.assertIn("self._prepare_sst_coefficient_inputs(int(pressure_outlet_zmin), mode)", wrapper_source)
         self.assertIn(
             "self._update_sst_coefficients_from_prepared_inputs_checked(",
             wrapper_source,

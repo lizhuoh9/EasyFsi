@@ -21,6 +21,9 @@
    - [`validation/ANSYS_VERTICAL_FLAP_IQN_KALMAN_ACCELERATION_PROTOCOL_2026-08-26.md`](validation/ANSYS_VERTICAL_FLAP_IQN_KALMAN_ACCELERATION_PROTOCOL_2026-08-26.md)：Kalman 只作下一物理步首猜、IQN-ILS 强耦合的结果前锁定协议；与 modified-physics 写回实验分离。
    - [`validation/ANSYS_VERTICAL_FLAP_IQN_KALMAN_R20_WORKLOG_2026-08-27.md`](validation/ANSYS_VERTICAL_FLAP_IQN_KALMAN_R20_WORKLOG_2026-08-27.md)：r20 的 source-matched 17 ms prefix、H1/H3 work ledger、fail-closed seam 证据和未闭合验证边界。
    - [`validation/ANSYS_VERTICAL_FLAP_MARKER_CLOSURE_R28_WORKLOG_2026-08-27.md`](validation/ANSYS_VERTICAL_FLAP_MARKER_CLOSURE_R28_WORKLOG_2026-08-27.md)：r23--r28 closure 预算修复、真实分钟级 profile、exact 36-step PASS 与 41/50 新 target-conflict 边界。
+   - [`validation/ANSYS_VERTICAL_FLAP_SEGMENT_AGGREGATION_R29_WORKLOG_2026-08-28.md`](validation/ANSYS_VERTICAL_FLAP_SEGMENT_AGGREGATION_R29_WORKLOG_2026-08-28.md)：从r29 segment aggregation、材料参考/伴随载荷、物理外边界和完整accepted checkpoint重构，记录到r47 source-matched K200。r47以exit 0完成200/200步和0.1 s物理时间；journal与固定资源审计通过，但最坏pressure residual接近1e-6门槛，K5000仍未证明。
+   - [`refactoring/ANSYS_VERTICAL_FLAP_CONTINUOUS_EXECUTION_DESIGN_2026-08-28.md`](refactoring/ANSYS_VERTICAL_FLAP_CONTINUOUS_EXECUTION_DESIGN_2026-08-28.md)：材料W/W.T、几何候选、IQN/accepted恢复、attempt/canonical dual-root及同条件Fluent诊断顺序。包含r47 K200、速度云图哈希和exact50比较边界；dual-root前50步还逐步绑定全部460个公共history字段，不宣称Fluent真值、10%通过或5000步保证。
+     - r47 exact50 dual-root诊断中，v速度`4.27%`和out-of-plane leakage `0.0`通过5%单项检查；speed `13.33%`、pressure `19.07%`、位移`20.92%/23.23%`及力`37.52%/57.25%`均未满足10%高一致性目标。3D/2D差异不自动豁免这些偏差，内部求解器门槛未放宽。
 2. [`refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md`](refactoring/ANSYS_VERTICAL_FLAP_GENERIC_SOLVER_THREAD_HANDOFF_2026-07-23.md)
 3. [`VALIDATION.md`](VALIDATION.md) 中对应的运行与证据说明
 4. [`../validation_runs/README.md`](../validation_runs/README.md) 中的验证产物索引
