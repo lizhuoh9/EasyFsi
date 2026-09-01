@@ -593,9 +593,12 @@ path-free raw SHA256 values:
 - omega 1.00: `7b3db40d75d4f8e077e96e5570194ea5a10a07dd85d1e830c61ed016c1d77270`.
 
 Projection and attestation files remain strict JSON and reject every
-non-finite value. These seal-contract files are outside the frozen 139-file
-numerical source map, so this correction does not invalidate the regenerated
-CUDA campaign.
+non-finite value. The credential-key exception applies only to the exact
+validated `source_sha256` mapping and entries with SHA-256 digest values; the
+same credential-like filename token anywhere else remains rejected. The
+focused WSL and Windows publication suites pass all 34 tests. These
+seal-contract files are outside the frozen 139-file numerical source map, so
+this correction does not invalidate the regenerated CUDA campaign.
 
 These ignored numerical roots remain local. The final schema-3 projection and
 terminal attestation may be generated only after the non-source-mapped

@@ -184,27 +184,61 @@ def _unsafe_portable_string(value: str) -> bool:
     )
 
 
-def assert_portable(value: Any) -> None:
+def assert_portable(
+    value: Any,
+    *,
+    validated_source_map: Mapping[str, str] | None = None,
+) -> None:
     """Reject paths and credential-like keys from published JSON."""
 
-    if isinstance(value, Mapping):
-        for key, nested in value.items():
-            if not isinstance(key, str) or _unsafe_portable_string(key):
-                raise R24CPostPublicationError(
-                    "published output contains an unsafe key"
-                )
-            if _CREDENTIAL_KEY_RE.search(key):
-                raise R24CPostPublicationError(
-                    "published output contains credential-like key"
-                )
-            assert_portable(nested)
-    elif isinstance(value, (list, tuple)):
-        for nested in value:
-            assert_portable(nested)
-    elif isinstance(value, str) and _unsafe_portable_string(value):
-        raise R24CPostPublicationError("published output contains a path")
-    elif isinstance(value, float) and not math.isfinite(value):
-        raise R24CPostPublicationError("published output contains non-finite data")
+    validated_path: tuple[str, ...] | None = None
+    if validated_source_map is not None and isinstance(value, Mapping):
+        if "attestation_core" in value:
+            core = value.get("attestation_core")
+            source_identity = (
+                core.get("source_map") if isinstance(core, Mapping) else None
+            )
+            candidate_path = ("attestation_core", "source_map", "source_sha256")
+        else:
+            source_identity = value.get("source_map")
+            candidate_path = ("source_map", "source_sha256")
+        if (
+            isinstance(source_identity, Mapping)
+            and source_identity.get("source_sha256") is validated_source_map
+        ):
+            validated_path = candidate_path
+
+    def visit(candidate: Any, path: tuple[str, ...]) -> None:
+        if isinstance(candidate, Mapping):
+            for key, nested in candidate.items():
+                if not isinstance(key, str) or _unsafe_portable_string(key):
+                    raise R24CPostPublicationError(
+                        "published output contains an unsafe key"
+                    )
+                if (
+                    _CREDENTIAL_KEY_RE.search(key)
+                    and not (
+                        candidate is validated_source_map
+                        and path == validated_path
+                        and isinstance(nested, str)
+                        and SHA256_RE.fullmatch(nested)
+                    )
+                ):
+                    raise R24CPostPublicationError(
+                        "published output contains credential-like key"
+                    )
+                visit(nested, (*path, key))
+        elif isinstance(candidate, (list, tuple)):
+            for index, nested in enumerate(candidate):
+                visit(nested, (*path, f"[{index}]"))
+        elif isinstance(candidate, str) and _unsafe_portable_string(candidate):
+            raise R24CPostPublicationError("published output contains a path")
+        elif isinstance(candidate, float) and not math.isfinite(candidate):
+            raise R24CPostPublicationError(
+                "published output contains non-finite data"
+            )
+
+    visit(value, ())
     try:
         json.dumps(value, ensure_ascii=True, allow_nan=False)
     except (TypeError, ValueError) as exc:
@@ -598,10 +632,15 @@ def _fsync_directory(directory: Path) -> None:
                 pass
 
 
-def _atomic_json(path: Path, payload: Mapping[str, Any]) -> str:
+def _atomic_json(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    validated_source_map: Mapping[str, str] | None = None,
+) -> str:
     if _path_exists(path):
         raise R24CPostPublicationError(f"destination exists: {path}")
-    assert_portable(payload)
+    assert_portable(payload, validated_source_map=validated_source_map)
     descriptor: int | None = None
     temporary: Path | None = None
     try:
@@ -653,6 +692,8 @@ def write_pair(
     attestation_path: Path | str,
     projection: Mapping[str, Any],
     attestation: Mapping[str, Any],
+    *,
+    validated_source_map: Mapping[str, str],
 ) -> dict[str, str]:
     projection_target = path_from(projection_path, "projection destination")
     attestation_target = path_from(attestation_path, "attestation destination")
@@ -663,11 +704,30 @@ def write_pair(
     if _path_exists(projection_target) or _path_exists(attestation_target):
         raise R24CPostPublicationError("publication destination already exists")
     assert_portable(projection)
-    assert_portable(attestation)
+    core = attestation.get("attestation_core")
+    source_identity = core.get("source_map") if isinstance(core, Mapping) else None
+    source_map = (
+        source_identity.get("source_sha256")
+        if isinstance(source_identity, Mapping)
+        else None
+    )
+    if (
+        not isinstance(validated_source_map, Mapping)
+        or source_map is not validated_source_map
+    ):
+        raise R24CPostPublicationError("validated source map identity mismatch")
+    assert_portable(
+        attestation,
+        validated_source_map=validated_source_map,
+    )
     projection_sha = _atomic_json(projection_target, projection)
-    final_attestation = copy.deepcopy(dict(attestation))
+    final_attestation = dict(attestation)
     final_attestation["publication_projection_sha256"] = projection_sha
-    attestation_sha = _atomic_json(attestation_target, final_attestation)
+    attestation_sha = _atomic_json(
+        attestation_target,
+        final_attestation,
+        validated_source_map=validated_source_map,
+    )
     return {
         "projection_sha256": projection_sha,
         "attestation_sha256": attestation_sha,

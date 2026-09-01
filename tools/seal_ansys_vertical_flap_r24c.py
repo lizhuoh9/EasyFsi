@@ -292,6 +292,9 @@ def _seal(args: argparse.Namespace, seal: Any) -> int:
         attestation_path,
         projection,
         attestation,
+        validated_source_map=attestation["attestation_core"]["source_map"][
+            "source_sha256"
+        ],
     )
     verified = seal.verify_pair(projection_path, attestation_path)
     print(

@@ -166,12 +166,17 @@ raw-byte bindings are:
 The attestation runtime schema requires exactly these three distinct hashes.
 Projection and attestation loading and writing remain strict JSON and still
 reject every non-finite value.
+The credential-key exception is limited to the exact validated
+`source_sha256` mapping and entries whose values are SHA-256 digests; the
+same credential-like filename token anywhere else remains rejected.
 
 The initial boundary test run recorded 11 failures and 18 passes. After the
 implementation and the added missing/non-object and duplicate-evidence cases,
-the focused WSL suite passed all 34 tests. A production consensus read of the
-three regenerated roots returned strict CUDA, f32, seed 0, Taichi 1.7.4 and
-the exact three hashes above.
+the focused WSL suite passed all 34 tests. The same suite now covers the
+source-map filename regression and its negative boundary; both WSL and Windows
+pass all 34 tests. A production consensus read of the three regenerated roots
+returned strict CUDA, f32, seed 0, Taichi 1.7.4 and the exact three hashes
+above.
 
 ## CLI and remote acceptance
 

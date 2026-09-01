@@ -571,7 +571,7 @@ def build_pair(
         "release": False,
         "release_recommendation": False,
     }
-    assert_portable(core)
+    assert_portable(core, validated_source_map=full_source_map)
     core_sha = attestation_core_sha256(core)
     projection = copy.deepcopy(dict(legacy_projection))
     projection.update(
@@ -600,7 +600,7 @@ def build_pair(
         "attestation_core": core,
         "attestation_core_sha256": core_sha,
     }
-    assert_portable(attestation)
+    assert_portable(attestation, validated_source_map=full_source_map)
     return projection, attestation
 
 
@@ -682,7 +682,6 @@ def verify_pair(
     projection = load_json_object(projection_target)
     attestation = load_json_object(attestation_target)
     assert_portable(projection)
-    assert_portable(attestation)
     if (
         projection.get("schema_version") != 3
         or attestation.get("schema_version") != 1
@@ -691,6 +690,11 @@ def verify_pair(
     core = attestation.get("attestation_core")
     if not isinstance(core, dict):
         raise R24CPostPublicationError("attestation core missing")
+    source_map = _validate_core_source_map(core.get("source_map"))
+    assert_portable(
+        attestation,
+        validated_source_map=core["source_map"]["source_sha256"],
+    )
     if core.get("schema_version") != 1:
         raise R24CPostPublicationError("attestation core schema mismatch")
     core_sha = _require_sha(
@@ -719,7 +723,6 @@ def verify_pair(
         )
     ):
         raise R24CPostPublicationError("attestation release flags mismatch")
-    source_map = _validate_core_source_map(core.get("source_map"))
     _validate_core_producer(core.get("producer_identity"), source_map)
     preflow = core.get("preflow_hashes")
     if (

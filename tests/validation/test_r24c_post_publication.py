@@ -20,15 +20,9 @@ def test_production_source_map_contract_constants_are_exact_literals() -> None:
         "a14a313568d86f6773c8fcbb2d5b1611e833389eb7455272554ae2e78d566b00"
     )
     assert subject.EXPECTED_Q0_COMPACT_REPORT_SHA256 == {
-        "omega_0_50": (
-            "a1e8cc0dcd2dee73b33ded7d9e808ce09f0eb4b8ee51d769166e9da65b93c69e"
-        ),
-        "omega_0_75": (
-            "feee24643817a0c0d3ee5e6fc9283534a5b31f404f565adb7c4c5693a952fd81"
-        ),
-        "omega_1_00": (
-            "7b3db40d75d4f8e077e96e5570194ea5a10a07dd85d1e830c61ed016c1d77270"
-        ),
+        "omega_0_50": "a1e8cc0dcd2dee73b33ded7d9e808ce09f0eb4b8ee51d769166e9da65b93c69e",
+        "omega_0_75": "feee24643817a0c0d3ee5e6fc9283534a5b31f404f565adb7c4c5693a952fd81",
+        "omega_1_00": "7b3db40d75d4f8e077e96e5570194ea5a10a07dd85d1e830c61ed016c1d77270",
     }
 
 
@@ -50,7 +44,7 @@ def _run(conclusion: str = "success", head: str = HEAD) -> dict[str, object]:
 
 
 def _contract(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    source_map = {"src.py": "f" * 64}
+    source_map = {"src/oracle_threshold_prefix_decisions.py": "f" * 64}
     source_sha = subject.source_map_sha256(source_map)
     monkeypatch.setattr(subject, "EXPECTED_SOURCE_COUNT", 1)
     monkeypatch.setattr(subject, "EXPECTED_SOURCE_MAP_SHA256", source_sha)
@@ -132,7 +126,8 @@ def _pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, 
     projection, attestation = subject.build_pair(**_contract(monkeypatch))
     projection_path = tmp_path / "projection.json"
     attestation_path = tmp_path / "attestation.json"
-    subject.write_pair(projection_path, attestation_path, projection, attestation)
+    source_map = attestation["attestation_core"]["source_map"]["source_sha256"]
+    subject.write_pair(projection_path, attestation_path, projection, attestation, validated_source_map=source_map)
     return projection_path, attestation_path, projection, attestation
 
 
@@ -147,6 +142,8 @@ def test_rejects_duplicate_and_nonfinite_json(tmp_path: Path) -> None:
         subject.load_json_object(nan_value)
     with pytest.raises(subject.R24CPostPublicationError, match="non-finite"):
         subject.assert_portable({"x": float("nan")})
+    with pytest.raises(subject.R24CPostPublicationError, match="credential"):
+        subject.assert_portable({"oracle_threshold_prefix_decisions.py": "f" * 64})
 
 
 @pytest.mark.parametrize("value", ["/tmp/x", r"\server\share", "file:///tmp/x", "../x", "a/../../x"])
@@ -516,12 +513,20 @@ def test_build_pair_rejects_empty_attestation_host(
 
 def test_write_pair_preflights_distinct_and_existing_destinations(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     projection, attestation = subject.build_pair(**_contract(monkeypatch))
+    source_map = attestation["attestation_core"]["source_map"]["source_sha256"]
+    with pytest.raises(subject.R24CPostPublicationError, match="identity"):
+        subject.write_pair(tmp_path / "wrong-p.json", tmp_path / "wrong-a.json", projection, attestation, validated_source_map=dict(source_map))
+    alias_paths = (tmp_path / "alias-p.json", tmp_path / "alias-a.json")
+    aliased = {**attestation, "unexpected": source_map}
+    with pytest.raises(subject.R24CPostPublicationError, match="credential"):
+        subject.write_pair(alias_paths[0], alias_paths[1], projection, aliased, validated_source_map=source_map)
+    assert not any(path.exists() for path in alias_paths)
     same = tmp_path / "same.json"
     with pytest.raises(subject.R24CPostPublicationError, match="differ"):
-        subject.write_pair(same, same, projection, attestation)
-    subject.write_pair(same, tmp_path / "attestation.json", projection, attestation)
+        subject.write_pair(same, same, projection, attestation, validated_source_map=source_map)
+    subject.write_pair(same, tmp_path / "attestation.json", projection, attestation, validated_source_map=source_map)
     with pytest.raises(subject.R24CPostPublicationError, match="already exists"):
-        subject.write_pair(same, tmp_path / "second.json", projection, attestation)
+        subject.write_pair(same, tmp_path / "second.json", projection, attestation, validated_source_map=source_map)
 
 
 def test_seal_host_identity_uses_exact_gpu_query(monkeypatch: pytest.MonkeyPatch) -> None:
