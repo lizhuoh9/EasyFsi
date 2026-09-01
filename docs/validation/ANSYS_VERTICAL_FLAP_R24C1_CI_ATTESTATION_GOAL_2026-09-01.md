@@ -2,8 +2,10 @@
 
 Date: 2026-09-01
 
-Status: ACTIVE — the traction-default repair and source-matched CUDA evidence
-regeneration are complete; the final clean-HEAD CI seal remains pending.
+Status: EVIDENCE COMPLETE — the traction-default repair and source-matched
+CUDA regeneration are complete. Terminal closure is accepted only when the
+generated pair verifies against a matching successful clean-final-HEAD CI run;
+the pair, rather than this prose status, is authoritative.
 
 ## Baseline, authority, and authorization
 
@@ -147,6 +149,30 @@ identity: Python and Taichi versions, CUDA support/driver identity, and GPU
 name/UUID/device identity. The numerical producer fields remain explicitly
 recorded=false when absent and must never be filled from host data.
 
+The three Q0 compact producer reports contain legacy non-standard JSON
+constants only in unrelated undefined zmin diagnostics. Seal-time runtime
+extraction therefore reads each raw report once, hashes those exact bytes,
+rejects duplicate keys, recursively rejects NaN or infinity anywhere in the
+runtime/producer subtree, and copies only the finite runtime whitelist. It
+accepts only the known legacy NaN token outside that subtree;
+Infinity/-Infinity are rejected before field selection in every location. It
+never publishes the absolute offline-cache path. The required path-free
+raw-byte bindings are:
+
+- omega 0.50: `a1e8cc0dcd2dee73b33ded7d9e808ce09f0eb4b8ee51d769166e9da65b93c69e`;
+- omega 0.75: `feee24643817a0c0d3ee5e6fc9283534a5b31f404f565adb7c4c5693a952fd81`;
+- omega 1.00: `7b3db40d75d4f8e077e96e5570194ea5a10a07dd85d1e830c61ed016c1d77270`.
+
+The attestation runtime schema requires exactly these three distinct hashes.
+Projection and attestation loading and writing remain strict JSON and still
+reject every non-finite value.
+
+The initial boundary test run recorded 11 failures and 18 passes. After the
+implementation and the added missing/non-object and duplicate-evidence cases,
+the focused WSL suite passed all 34 tests. A production consensus read of the
+three regenerated roots returned strict CUDA, f32, seed 0, Taichi 1.7.4 and
+the exact three hashes above.
+
 ## CLI and remote acceptance
 
 Seal mode requires absolute, resolvable displacement, threshold directory,
@@ -165,9 +191,12 @@ local strict-CUDA regeneration.
 Remote acceptance is green only when both Ubuntu and Windows jobs pass on the
 clean final documentation/seal-contract commit, with a verified schema-3 pair
 and all source, artifact, runtime, host, and GitHub bindings. Run 33500763817
-proves the source-fix commit green; a later final-HEAD run is still required
-after the non-source-mapped seal constant and documentation are committed. The
-schema-3 pair must not be generated against any earlier or dirty HEAD.
+proves the source-fix commit green, and run 33518531919 proves the first
+seal-constant/documentation closure green. Neither historical run substitutes
+for the pair's exact-final-HEAD binding after any later seal-contract edit.
+The exact terminal run is intentionally recorded in the generated pair rather
+than frozen into this document. The schema-3 pair must not be generated
+against any earlier or dirty HEAD.
 
 ## Rollback and explicit exclusions
 
@@ -230,6 +259,8 @@ The six seal inputs have SHA256:
 - new legacy projection: `3e010664011acd5fd5695d76c6671aa2746bb5a05c8f06e2abdd47791650e742`.
 
 The ignored numerical roots remain local and are not committed. The terminal
-schema-3 projection and attestation are deliberately deferred until this
+schema-3 projection and attestation may be written only after the
 non-source-mapped goal/tool/test/documentation closure is committed, pushed,
-and matched by a successful final-HEAD GitHub run.
+and matched by a successful exact-final-HEAD GitHub run. Their embedded HEAD,
+run ID, hashes, and successful verify result are the authoritative closure
+record.

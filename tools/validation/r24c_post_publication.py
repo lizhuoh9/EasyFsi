@@ -19,6 +19,7 @@ from src.refactored.validation.ansys_vertical_flap_fsi.oracle_threshold_lineage 
     validate_complete_source_map,
 )
 from tools.validation.r24c_post_publication_contracts import (
+    EXPECTED_Q0_COMPACT_REPORT_SHA256,
     R24CPostPublicationError,
     assert_portable,
     attestation_core_sha256,
@@ -35,6 +36,7 @@ from tools.validation.r24c_post_publication_contracts import (
     verify_preflow,
     verify_preflow_snapshot,
     validate_host_identity as _validate_host_identity,
+    validate_q0_report_hashes as _q0_report_hash_map,
     write_pair,
 )
 
@@ -80,6 +82,7 @@ _RUNTIME_KEYS = (
     "producer_python",
     "cuda_driver",
     "gpu",
+    "q0_compact_report_sha256",
 )
 _PRODUCER_MODE = "source_map_bound_working_tree"
 
@@ -468,7 +471,7 @@ def _producer_map(
 
 
 def _runtime_map(value: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or any(key not in value for key in _RUNTIME_KEYS):
+    if not isinstance(value, Mapping) or set(value) != set(_RUNTIME_KEYS):
         raise R24CPostPublicationError("numerical runtime identity is incomplete")
     expected = {
         "requested_arch": "cuda",
@@ -494,6 +497,9 @@ def _runtime_map(value: Mapping[str, Any]) -> dict[str, Any]:
             bool,
         ):
             raise R24CPostPublicationError(f"{name} identity recording flag invalid")
+    result["q0_compact_report_sha256"] = _q0_report_hash_map(
+        result["q0_compact_report_sha256"]
+    )
     return result
 
 
@@ -768,6 +774,7 @@ def verify_pair(
 
 
 __all__ = (
+    "EXPECTED_Q0_COMPACT_REPORT_SHA256",
     "EXPECTED_SOURCE_COUNT",
     "EXPECTED_SOURCE_MAP_SHA256",
     "R24CPostPublicationError",

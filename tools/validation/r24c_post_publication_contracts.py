@@ -16,6 +16,17 @@ from typing import Any, Mapping, Sequence
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+EXPECTED_Q0_COMPACT_REPORT_SHA256 = {
+    "omega_0_50": (
+        "a1e8cc0dcd2dee73b33ded7d9e808ce09f0eb4b8ee51d769166e9da65b93c69e"
+    ),
+    "omega_0_75": (
+        "feee24643817a0c0d3ee5e6fc9283534a5b31f404f565adb7c4c5693a952fd81"
+    ),
+    "omega_1_00": (
+        "7b3db40d75d4f8e077e96e5570194ea5a10a07dd85d1e830c61ed016c1d77270"
+    ),
+}
 _CREDENTIAL_KEY_RE = re.compile(
     r"(?i)(?:token|password|secret|credential|private[_-]?key|api[_-]?key|"
     r"authorization|(?:^|_)(?:path|root|file|directory|prefix|uri|url)(?:$|_))"
@@ -37,6 +48,12 @@ def _duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _reject_constant(value: str) -> None:
     raise R24CPostPublicationError(f"non-finite JSON value: {value}")
+
+
+def _parse_legacy_q0_constant(value: str) -> float:
+    if value != "NaN":
+        _reject_constant(value)
+    return math.nan
 
 
 def _require_finite(value: Any) -> None:
@@ -112,6 +129,25 @@ def require_commit(value: object, label: str) -> str:
     if not isinstance(value, str) or COMMIT_RE.fullmatch(value) is None:
         raise R24CPostPublicationError(f"{label} must be a Git commit")
     return value
+
+
+def validate_q0_report_hashes(value: object) -> dict[str, str]:
+    expected_keys = set(EXPECTED_Q0_COMPACT_REPORT_SHA256)
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        raise R24CPostPublicationError(
+            "Q0 compact report SHA map must contain exactly three omega labels"
+        )
+    result = {
+        label: require_sha(value[label], f"Q0 compact report SHA {label}")
+        for label in EXPECTED_Q0_COMPACT_REPORT_SHA256
+    }
+    if len(set(result.values())) != 3:
+        raise R24CPostPublicationError(
+            "Q0 compact report SHA values must be distinct"
+        )
+    if result != EXPECTED_Q0_COMPACT_REPORT_SHA256:
+        raise R24CPostPublicationError("Q0 compact report SHA mismatch")
+    return result
 
 
 def safe_relative_path(value: object, label: str = "path") -> str:
@@ -381,6 +417,49 @@ def _report_path(root: object) -> Path:
     return path
 
 
+def _load_q0_runtime_report(path: Path) -> tuple[dict[str, Any], str]:
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise R24CPostPublicationError(
+            f"cannot read Q0 compact report: {path}"
+        ) from exc
+    try:
+        report = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_duplicates,
+            parse_constant=_parse_legacy_q0_constant,
+        )
+    except R24CPostPublicationError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise R24CPostPublicationError(
+            f"invalid Q0 compact report: {path}"
+        ) from exc
+    if not isinstance(report, dict):
+        raise R24CPostPublicationError("Q0 compact report must be an object")
+    runtime = report.get("taichi_runtime_identity")
+    if not isinstance(runtime, Mapping):
+        raise R24CPostPublicationError(
+            "Q0 compact report runtime identity missing"
+        )
+    _require_finite(runtime)
+    selected = {"taichi_runtime_identity": runtime}
+    for key in (
+        "producer_python",
+        "python",
+        "cuda_driver",
+        "producer_cuda_driver",
+        "driver",
+        "gpu",
+        "producer_gpu",
+    ):
+        if key in report:
+            selected[key] = report[key]
+    _require_finite(selected)
+    return selected, hashlib.sha256(payload).hexdigest()
+
+
 def _producer_identity(report: Mapping[str, Any], name: str) -> dict[str, Any]:
     aliases = {
         "producer_python": ("producer_python", "python"),
@@ -405,16 +484,29 @@ def _producer_identity(report: Mapping[str, Any], name: str) -> dict[str, Any]:
 def numerical_runtime_consensus(
     q0_roots: Mapping[object, Path | str] | Sequence[Path | str],
 ) -> dict[str, Any]:
-    values = (
-        list(q0_roots.values())
-        if isinstance(q0_roots, Mapping)
-        else list(q0_roots)
-    )
+    root_labels = ("0.5", "0.75", "1.0")
+    binding_labels = ("omega_0_50", "omega_0_75", "omega_1_00")
+    if isinstance(q0_roots, Mapping):
+        if set(q0_roots) != set(root_labels):
+            raise R24CPostPublicationError(
+                "formal Q0 roots must contain omega 0.5, 0.75, and 1.0"
+            )
+        values = [q0_roots[label] for label in root_labels]
+    else:
+        values = list(q0_roots)
     if len(values) != 3:
         raise R24CPostPublicationError(
             "formal Q0 roots must contain exactly three reports"
         )
-    reports = [load_json_object(_report_path(value)) for value in values]
+    report_paths = [_report_path(value) for value in values]
+    if len(set(report_paths)) != 3:
+        raise R24CPostPublicationError("formal Q0 report paths must be distinct")
+    loaded = [_load_q0_runtime_report(path) for path in report_paths]
+    reports = [report for report, _ in loaded]
+    digests = [digest for _, digest in loaded]
+    if len(set(digests)) != 3:
+        raise R24CPostPublicationError("formal Q0 report bytes must be distinct")
+    report_sha256 = dict(zip(binding_labels, digests))
     observed: list[dict[str, Any]] = []
     for report in reports:
         runtime = report.get("taichi_runtime_identity")
@@ -445,6 +537,7 @@ def numerical_runtime_consensus(
             "cuda_driver": _producer_identity(report, "cuda_driver"),
             "gpu": _producer_identity(report, "gpu"),
         }
+        _require_finite(candidate)
         if (
             candidate["requested_arch"],
             candidate["actual_arch"],
@@ -467,7 +560,9 @@ def numerical_runtime_consensus(
         observed.append(candidate)
     if any(candidate != observed[0] for candidate in observed[1:]):
         raise R24CPostPublicationError("Q0 runtime identities disagree")
-    return observed[0]
+    result = copy.deepcopy(observed[0])
+    result["q0_compact_report_sha256"] = report_sha256
+    return result
 
 
 def verify_numerical_runtime(
@@ -581,6 +676,7 @@ def write_pair(
 
 __all__ = (
     "COMMIT_RE",
+    "EXPECTED_Q0_COMPACT_REPORT_SHA256",
     "R24CPostPublicationError",
     "SHA256_RE",
     "assert_portable",
@@ -595,4 +691,5 @@ __all__ = (
     "sha256_file",
     "snapshot",
     "validate_host_identity",
+    "validate_q0_report_hashes",
 )

@@ -579,9 +579,28 @@ The source-matched seal-input hashes are:
 - IQN reuse: `11bb1bb309e64cfa01f1ad3569c082ca839db55ccfc06942a643402e62373b59`;
 - new legacy projection: `3e010664011acd5fd5695d76c6671aa2746bb5a05c8f06e2abdd47791650e742`.
 
+The Q0 compact reports retain legacy non-standard NaN constants only in
+unrelated undefined zmin diagnostics. They were not previously transitively
+bound by the threshold source manifest. The terminal runtime contract therefore
+reads and hashes each raw report in one operation, rejects duplicate JSON keys,
+requires the complete runtime/producer subtree to be finite, publishes only
+the runtime whitelist, tolerates only the known legacy NaN token outside that
+subtree, rejects Infinity/-Infinity everywhere, and binds these exact
+path-free raw SHA256 values:
+
+- omega 0.50: `a1e8cc0dcd2dee73b33ded7d9e808ce09f0eb4b8ee51d769166e9da65b93c69e`;
+- omega 0.75: `feee24643817a0c0d3ee5e6fc9283534a5b31f404f565adb7c4c5693a952fd81`;
+- omega 1.00: `7b3db40d75d4f8e077e96e5570194ea5a10a07dd85d1e830c61ed016c1d77270`.
+
+Projection and attestation files remain strict JSON and reject every
+non-finite value. These seal-contract files are outside the frozen 139-file
+numerical source map, so this correction does not invalidate the regenerated
+CUDA campaign.
+
 These ignored numerical roots remain local. The final schema-3 projection and
-terminal attestation are generated only after the non-source-mapped
-seal-constant/test/documentation closure is committed, pushed, and has a
-matching successful clean-HEAD GitHub run. This record does not claim Fluent
+terminal attestation may be generated only after the non-source-mapped
+seal-contract/test/documentation closure is committed, pushed, and matched by
+a successful exact-final-HEAD GitHub run. The generated pair records the
+authoritative terminal HEAD and run ID. This report does not claim Fluent
 parity, exact50, a long run, deployable acceleration, or production predictor
 authorization.

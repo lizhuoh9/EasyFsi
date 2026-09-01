@@ -19,6 +19,17 @@ def test_production_source_map_contract_constants_are_exact_literals() -> None:
     assert subject.EXPECTED_SOURCE_MAP_SHA256 == (
         "a14a313568d86f6773c8fcbb2d5b1611e833389eb7455272554ae2e78d566b00"
     )
+    assert subject.EXPECTED_Q0_COMPACT_REPORT_SHA256 == {
+        "omega_0_50": (
+            "a1e8cc0dcd2dee73b33ded7d9e808ce09f0eb4b8ee51d769166e9da65b93c69e"
+        ),
+        "omega_0_75": (
+            "feee24643817a0c0d3ee5e6fc9283534a5b31f404f565adb7c4c5693a952fd81"
+        ),
+        "omega_1_00": (
+            "7b3db40d75d4f8e077e96e5570194ea5a10a07dd85d1e830c61ed016c1d77270"
+        ),
+    }
 
 
 def _json(path: Path, payload: object) -> None:
@@ -84,6 +95,9 @@ def _contract(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
         "producer_python": {"recorded": False},
         "cuda_driver": {"recorded": False},
         "gpu": {"recorded": False},
+        "q0_compact_report_sha256": copy.deepcopy(
+            subject.EXPECTED_Q0_COMPACT_REPORT_SHA256
+        ),
     }
     return {
         "legacy_projection": legacy,
@@ -412,7 +426,10 @@ def test_numerical_runtime_consensus_records_absent_producers(tmp_path: Path) ->
     roots = []
     for index in range(3):
         path = tmp_path / f"q0-{index}.json"
-        _json(path, {"taichi_runtime_identity": runtime})
+        _json(
+            path,
+            {"taichi_runtime_identity": runtime, "run_index": index},
+        )
         roots.append(path)
     consensus = subject.numerical_runtime_consensus(roots)
     assert consensus["producer_python"] == {"recorded": False}
@@ -570,3 +587,208 @@ def test_cli_verify_does_not_probe_gpu_or_github(
     ]) == 0
     assert calls == [str(projection.resolve()), str(attestation.resolve())]
     assert json.loads(capsys.readouterr().out)["status"] == "verified"
+
+
+def _q0_runtime() -> dict[str, object]:
+    return {
+        "requested_arch": "cuda",
+        "actual_arch": "cuda",
+        "strict_arch_verified": True,
+        "default_fp": "f32",
+        "random_seed": 0,
+        "compiler_configuration": {"taichi_version": "1.7.4"},
+    }
+
+
+def test_numerical_runtime_consensus_binds_q0_raw_sha_and_ignores_diagnostic_nan(
+    tmp_path: Path,
+) -> None:
+    roots: dict[str, Path] = {}
+    expected: dict[str, str] = {}
+    labels = {
+        "0.5": "omega_0_50",
+        "0.75": "omega_0_75",
+        "1.0": "omega_1_00",
+    }
+    for index, (root_label, binding_label) in enumerate(labels.items()):
+        path = tmp_path / f"q0-{index}.json"
+        _json(
+            path,
+            {
+                "taichi_runtime_identity": _q0_runtime(),
+                "diagnostic": float("nan"),
+                "run_index": index,
+            },
+        )
+        roots[root_label] = path
+        expected[binding_label] = subject.sha256_file(path)
+    consensus = subject.numerical_runtime_consensus(roots)
+    assert consensus["q0_compact_report_sha256"] == expected
+
+
+@pytest.mark.parametrize("nonfinite", [float("inf"), float("-inf")])
+def test_numerical_runtime_consensus_rejects_infinity_outside_runtime(
+    tmp_path: Path,
+    nonfinite: float,
+) -> None:
+    roots: dict[str, Path] = {}
+    for index, root_label in enumerate(("0.5", "0.75", "1.0")):
+        path = tmp_path / f"q0-{index}.json"
+        _json(
+            path,
+            {
+                "taichi_runtime_identity": _q0_runtime(),
+                "diagnostic": nonfinite if root_label == "0.75" else index,
+                "run_index": index,
+            },
+        )
+        roots[root_label] = path
+    with pytest.raises(subject.R24CPostPublicationError, match="non-finite"):
+        subject.numerical_runtime_consensus(roots)
+
+
+@pytest.mark.parametrize(
+    "nonfinite",
+    [float("nan"), float("inf"), float("-inf")],
+)
+def test_numerical_runtime_consensus_rejects_nonfinite_runtime_subtree(
+    tmp_path: Path,
+    nonfinite: float,
+) -> None:
+    roots: dict[str, Path] = {}
+    for index, root_label in enumerate(("0.5", "0.75", "1.0")):
+        runtime = _q0_runtime()
+        if root_label == "0.75":
+            runtime["compiler_configuration"] = {
+                "taichi_version": "1.7.4",
+                "nested_diagnostic": nonfinite,
+            }
+        path = tmp_path / f"q0-{index}.json"
+        _json(path, {"taichi_runtime_identity": runtime})
+        roots[root_label] = path
+    with pytest.raises(subject.R24CPostPublicationError, match="non-finite"):
+        subject.numerical_runtime_consensus(roots)
+
+
+def test_numerical_runtime_consensus_rejects_duplicate_runtime_key(
+    tmp_path: Path,
+) -> None:
+    roots: dict[str, Path] = {}
+    encoded_runtime = json.dumps(_q0_runtime(), sort_keys=True)
+    for index, root_label in enumerate(("0.5", "0.75", "1.0")):
+        path = tmp_path / f"q0-{index}.json"
+        if root_label == "0.75":
+            path.write_text(
+                (
+                    '{"taichi_runtime_identity": '
+                    + encoded_runtime
+                    + ', "taichi_runtime_identity": '
+                    + encoded_runtime
+                    + "}"
+                ),
+                encoding="utf-8",
+            )
+        else:
+            _json(path, {"taichi_runtime_identity": _q0_runtime()})
+        roots[root_label] = path
+    with pytest.raises(subject.R24CPostPublicationError, match="duplicate"):
+        subject.numerical_runtime_consensus(roots)
+
+
+@pytest.mark.parametrize("invalid_runtime", [None, []])
+def test_numerical_runtime_consensus_rejects_missing_or_nonobject_runtime(
+    tmp_path: Path,
+    invalid_runtime: object,
+) -> None:
+    roots: dict[str, Path] = {}
+    for index, root_label in enumerate(("0.5", "0.75", "1.0")):
+        path = tmp_path / f"q0-{index}.json"
+        runtime = invalid_runtime if root_label == "0.75" else _q0_runtime()
+        _json(
+            path,
+            {"taichi_runtime_identity": runtime, "run_index": index},
+        )
+        roots[root_label] = path
+    with pytest.raises(
+        subject.R24CPostPublicationError,
+        match="runtime identity missing",
+    ):
+        subject.numerical_runtime_consensus(roots)
+
+
+def test_numerical_runtime_consensus_rejects_duplicate_path_or_bytes(
+    tmp_path: Path,
+) -> None:
+    roots: dict[str, Path] = {}
+    for index, root_label in enumerate(("0.5", "0.75", "1.0")):
+        path = tmp_path / f"q0-{index}.json"
+        _json(path, {"taichi_runtime_identity": _q0_runtime()})
+        roots[root_label] = path
+    with pytest.raises(subject.R24CPostPublicationError, match="bytes"):
+        subject.numerical_runtime_consensus(roots)
+
+    roots["1.0"] = roots["0.75"]
+    with pytest.raises(subject.R24CPostPublicationError, match="paths"):
+        subject.numerical_runtime_consensus(roots)
+
+
+def test_pair_requires_exact_q0_compact_report_hash_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid_bindings = [
+        {
+            "omega_0_50": "a" * 64,
+            "omega_0_75": "b" * 64,
+        },
+        {
+            "omega_0_50": "a" * 64,
+            "omega_0_75": "a" * 64,
+            "omega_1_00": "c" * 64,
+        },
+        {
+            **subject.EXPECTED_Q0_COMPACT_REPORT_SHA256,
+            "omega_0_50": "0" * 64,
+        },
+    ]
+    for binding in invalid_bindings:
+        args = _contract(monkeypatch)
+        args["numerical_runtime"]["q0_compact_report_sha256"] = binding
+        with pytest.raises(
+            subject.R24CPostPublicationError,
+            match="Q0 compact report SHA",
+        ):
+            subject.build_pair(**args)
+
+    args = _contract(monkeypatch)
+    args["numerical_runtime"]["unexpected"] = True
+    with pytest.raises(
+        subject.R24CPostPublicationError,
+        match="runtime identity",
+    ):
+        subject.build_pair(**args)
+
+
+def test_pair_rejects_rehashed_q0_report_binding_tamper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    projection_path, attestation_path, _, _ = _pair(tmp_path, monkeypatch)
+    projection = json.loads(projection_path.read_text(encoding="utf-8"))
+    attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+    core = attestation["attestation_core"]
+    core["numerical_runtime"]["q0_compact_report_sha256"]["omega_0_50"] = (
+        "0" * 64
+    )
+    core_sha = subject.attestation_core_sha256(core)
+    attestation["attestation_core_sha256"] = core_sha
+    projection["post_publication"]["attestation_core_sha256"] = core_sha
+    _json(projection_path, projection)
+    attestation["publication_projection_sha256"] = subject.sha256_file(
+        projection_path
+    )
+    _json(attestation_path, attestation)
+    with pytest.raises(
+        subject.R24CPostPublicationError,
+        match="Q0 compact report SHA",
+    ):
+        subject.verify_pair(projection_path, attestation_path)
