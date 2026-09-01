@@ -74,6 +74,12 @@ from simulation_core.diagnostics.run_attempt import (  # noqa: E402
 from src.refactored.validation.ansys_vertical_flap_fsi.official_fluent_parity import (  # noqa: E402
     save_solver_npz_from_flow_snapshot,
 )
+from src.refactored.validation.ansys_vertical_flap_fsi.kalman_oracle_headroom_contracts import (  # noqa: E402
+    _load_run as _load_oracle_headroom_run,
+)
+from src.refactored.validation.ansys_vertical_flap_fsi.oracle_threshold_lineage import (  # noqa: E402
+    q0_probe_identity as _q0_probe_identity,
+)
 
 
 PHYSICAL_SOLID_BOUNDS = {
@@ -355,6 +361,7 @@ def _source_hashes() -> dict[str, str]:
     )
     paths = {
         Path(__file__).resolve(),
+        REPO_ROOT / "tools" / "audit_ansys_vertical_flap_oracle_threshold.py",
         REPO_ROOT / "tools" / "validation" / "compare_solid_substep_ab.py",
     }
     for root in roots:
@@ -1462,6 +1469,7 @@ def _validate_initial_guess_oracle_producer(
     consumer_output: str | Path,
     consumer_config_payload: dict[str, Any],
     current_source_sha256: dict[str, str],
+    require_full_lineage: bool = False,
 ) -> dict[str, Any]:
     """Validate and seal a completed Q0 trajectory before Q3 starts."""
 
@@ -1541,25 +1549,45 @@ def _validate_initial_guess_oracle_producer(
         )
 
     fields_dir = producer / "step_fields"
+    histories_dir = producer / "step_history"
     expected_names = [
         f"step_{step:04d}.npz" for step in range(1, expected_steps + 1)
     ]
+    expected_history_names = [
+        f"step_{step:04d}.json" for step in range(1, expected_steps + 1)
+    ]
     observed_names = sorted(path.name for path in fields_dir.glob("step_*.npz"))
+    observed_history_names = sorted(
+        path.name for path in histories_dir.glob("step_*.json")
+    )
     if observed_names != expected_names:
         raise ValueError(
             "oracle producer step-field sequence mismatch: "
             f"observed={observed_names}, expected={expected_names}"
         )
+    if observed_history_names != expected_history_names:
+        raise ValueError(
+            "oracle producer step-history sequence mismatch: "
+            f"observed={observed_history_names}, expected={expected_history_names}"
+        )
     trajectory_hasher = hashlib.sha256()
+    history_trajectory_hasher = hashlib.sha256()
     frame_hashes: dict[str, str] = {}
+    history_hashes: dict[str, str] = {}
     for frame_name in expected_names:
         payload = (fields_dir / frame_name).read_bytes()
         frame_digest = hashlib.sha256(payload).hexdigest()
         frame_hashes[frame_name] = frame_digest
         trajectory_hasher.update(frame_name.encode("utf-8"))
         trajectory_hasher.update(bytes.fromhex(frame_digest))
+    for history_name in expected_history_names:
+        payload = (histories_dir / history_name).read_bytes()
+        history_digest = hashlib.sha256(payload).hexdigest()
+        history_hashes[history_name] = history_digest
+        history_trajectory_hasher.update(history_name.encode("utf-8"))
+        history_trajectory_hasher.update(bytes.fromhex(history_digest))
 
-    return {
+    base_identity = {
         "offline_oracle": True,
         "deployable": False,
         "producer_output": str(producer),
@@ -1567,8 +1595,27 @@ def _validate_initial_guess_oracle_producer(
         "source_sha256": dict(producer_sources),
         "frame_sha256": frame_hashes,
         "trajectory_sha256": trajectory_hasher.hexdigest(),
+        "history_sha256": history_hashes,
+        "history_trajectory_sha256": history_trajectory_hasher.hexdigest(),
         "step_count": expected_steps,
     }
+    if not require_full_lineage:
+        return base_identity
+
+    try:
+        q0_run = _load_oracle_headroom_run(
+            producer,
+            expected_mode="carry_forward",
+        )
+        full_identity = _q0_probe_identity(q0_run)
+    except Exception as exc:
+        raise ValueError(
+            f"oracle producer full lineage validation failed: {exc}"
+        ) from exc
+    for field, expected in base_identity.items():
+        if not _json_values_equal(full_identity.get(field), expected):
+            raise ValueError(f"oracle producer {field} identity mismatch")
+    return dict(full_identity)
 
 
 def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
@@ -1674,7 +1721,19 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
             else None
         ),
         iqn_kalman_oracle_interpolation_oracle_path=(
-            str(getattr(args, "research_iqn_kalman_oracle_interpolation_oracle_path", None))
+            str(
+                Path(
+                    str(
+                        getattr(
+                            args,
+                            "research_iqn_kalman_oracle_interpolation_oracle_path",
+                            None,
+                        )
+                    )
+                )
+                .expanduser()
+                .resolve()
+            )
             if getattr(args, "research_iqn_kalman_oracle_interpolation_oracle_path", None) is not None
             else None
         ),
@@ -1971,6 +2030,11 @@ def _summary_from_report(
             report.get("kalman_modified_physics", False)
         ),
         "kalman_summary": report.get("kalman_summary", {}),
+        "preflow_snapshot_loaded": report.get("preflow_snapshot_loaded"),
+        "preflow_snapshot_identity": report.get("preflow_snapshot_identity"),
+        "preflow_snapshot_artifact_identity": report.get(
+            "preflow_snapshot_artifact_identity"
+        ),
         "max_displacement_m": report.get("max_displacement_m"),
         "max_displacement_relative_error": report.get(
             "max_displacement_relative_error"
@@ -2473,6 +2537,20 @@ def main() -> int:
         }
     )
     oracle_replay_identity: dict[str, Any] | None = None
+    research_probe_requested = (
+        config.iqn_kalman_oracle_interpolation_target_step is not None
+    )
+    oracle_requested = bool(
+        config.initial_guess_mode == "oracle_replay"
+        or research_probe_requested
+    )
+    validate_oracle_identity = bool(
+        research_probe_requested
+        or (
+            config.initial_guess_mode == "oracle_replay"
+            and not bool(args.dry_run)
+        )
+    )
     try:
         taichi_runtime = _configure_taichi_offline_cache(
             enabled=not bool(args.disable_taichi_offline_cache),
@@ -2496,11 +2574,7 @@ def main() -> int:
             if resume_source_sha256 is None
             else resume_source_sha256
         )
-        if (
-            (config.initial_guess_mode == "oracle_replay"
-            or config.iqn_kalman_oracle_interpolation_target_step is not None)
-            and not bool(args.dry_run)
-        ):
+        if validate_oracle_identity:
             oracle_replay_identity = _validate_initial_guess_oracle_producer(
                 producer_output=str(
                     config.initial_guess_oracle_path
@@ -2510,8 +2584,13 @@ def main() -> int:
                 consumer_output=output_dir,
                 consumer_config_payload=config_payload,
                 current_source_sha256=source_sha256,
+                require_full_lineage=research_probe_requested,
             )
         manifest = {
+            "offline_oracle": oracle_requested,
+            "deployable": bool(
+                not oracle_requested and not bool(args.dry_run)
+            ),
             "run_label": args.run_label,
             "repo_root": str(REPO_ROOT),
             "script": str(Path(__file__).resolve()),
@@ -2607,6 +2686,37 @@ def main() -> int:
                     "accepted_time_s": float(report["accepted_time_s"]),
                     "research_probe_wall_time_s": float(report["research_probe_wall_time_s"]),
                     "raw_elapsed_s_including_probe": research_probe_elapsed_s,
+                    "profile_wall_time_enabled": report.get(
+                        "profile_wall_time_enabled"
+                    ),
+                    "taichi_runtime_identity": report.get(
+                        "taichi_runtime_identity"
+                    ),
+                    "grid": _grid_summary(config),
+                    "hibm_coupling_scheme": (
+                        "iterative_marker_velocity_iqn_ils"
+                    ),
+                    "kalman_modified_physics": bool(
+                        report.get("kalman_modified_physics", False)
+                    ),
+                    "kalman_writeback_mode": str(config.kalman_writeback_mode),
+                    "marker_count": int(config.marker_count),
+                    "solid_particle_counts": list(config.solid_particle_counts),
+                    "solid_substeps": config.solid_substeps,
+                    "solid_substeps_mode": (
+                        "adaptive"
+                        if config.solid_substeps is None
+                        else "fixed_override"
+                    ),
+                    "preflow_snapshot_loaded": report.get(
+                        "preflow_snapshot_loaded"
+                    ),
+                    "preflow_snapshot_identity": report.get(
+                        "preflow_snapshot_identity"
+                    ),
+                    "preflow_snapshot_artifact_identity": report.get(
+                        "preflow_snapshot_artifact_identity"
+                    ),
                     "initial_guess_oracle_identity": report.get("initial_guess_oracle_identity"),
                 },
             )

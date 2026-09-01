@@ -489,9 +489,14 @@ def _iqn_kalman_oracle_interpolation_config(
     target_step = int(target)
     if target_step <= 0 or target_step > int(config.step_count):
         raise ValueError("Kalman-Oracle interpolation target step is out of range")
-    if str(config.coupling_mode) != "iqn_ils" or str(config.initial_guess_mode) != "kalman":
+    baseline_mode = str(config.initial_guess_mode)
+    if (
+        str(config.coupling_mode) != "iqn_ils"
+        or baseline_mode not in {"carry_forward", "kalman"}
+    ):
         raise ValueError(
-            "Kalman-Oracle interpolation requires iqn_ils with a Kalman first guess"
+            "Kalman-Oracle interpolation requires iqn_ils with a "
+            "carry-forward or Kalman first guess"
         )
     if str(getattr(config, "kalman_writeback_mode", "off")) != "off":
         raise ValueError("Kalman-Oracle interpolation requires kalman_writeback_mode=''off''")
@@ -513,8 +518,162 @@ def _iqn_kalman_oracle_interpolation_config(
         "target_step": target_step,
         "oracle_path": oracle_path,
         "alphas": converted,
+        "baseline_mode": baseline_mode,
         "offline_oracle": True,
         "deployable": False,
+    }
+
+
+_HOST_MACRO_STEP_SCALAR_FIELDS = (
+    "accepted_step_index",
+    "accepted_time_s",
+    "feedback_available_for_projection",
+    "solid_particle_count",
+    "marker_count",
+    "marker_projection_vertex_count",
+)
+_HOST_MACRO_STEP_MAPPING_FIELDS = (
+    "fluid_fields",
+    "fluid_host_metadata",
+    "solid_fields",
+    "marker_state",
+)
+
+
+def _state_value_mismatch_fields(
+    expected: object,
+    observed: object,
+    *,
+    path: str,
+) -> list[str]:
+    if isinstance(expected, np.ndarray) or isinstance(observed, np.ndarray):
+        if not isinstance(expected, np.ndarray) or not isinstance(observed, np.ndarray):
+            return [path]
+        if (
+            expected.shape != observed.shape
+            or expected.dtype != observed.dtype
+            or not np.array_equal(expected, observed)
+        ):
+            return [path]
+        return []
+    if isinstance(expected, Mapping) or isinstance(observed, Mapping):
+        if not isinstance(expected, Mapping) or not isinstance(observed, Mapping):
+            return [path]
+        expected_keys = set(expected)
+        observed_keys = set(observed)
+        mismatches = [
+            f"{path}.{key}"
+            for key in sorted(expected_keys.symmetric_difference(observed_keys), key=str)
+        ]
+        for key in sorted(expected_keys.intersection(observed_keys), key=str):
+            mismatches.extend(
+                _state_value_mismatch_fields(
+                    expected[key],
+                    observed[key],
+                    path=f"{path}.{key}",
+                )
+            )
+        return mismatches
+    if isinstance(expected, (tuple, list)) or isinstance(observed, (tuple, list)):
+        if type(expected) is not type(observed) or len(expected) != len(observed):
+            return [path]
+        mismatches: list[str] = []
+        for index, (expected_item, observed_item) in enumerate(
+            zip(expected, observed)
+        ):
+            mismatches.extend(
+                _state_value_mismatch_fields(
+                    expected_item,
+                    observed_item,
+                    path=f"{path}[{index}]",
+                )
+            )
+        return mismatches
+    if type(expected) is not type(observed) or expected != observed:
+        return [path]
+    return []
+
+
+def _host_macro_step_state_mismatch_fields(
+    expected: object,
+    observed: object,
+) -> tuple[str, ...]:
+    """Return exact captured-state mismatch paths after a research rollback."""
+
+    mismatches: list[str] = []
+    for field in _HOST_MACRO_STEP_SCALAR_FIELDS:
+        mismatches.extend(
+            _state_value_mismatch_fields(
+                getattr(expected, field),
+                getattr(observed, field),
+                path=field,
+            )
+        )
+    for field in _HOST_MACRO_STEP_MAPPING_FIELDS:
+        mismatches.extend(
+            _state_value_mismatch_fields(
+                getattr(expected, field),
+                getattr(observed, field),
+                path=field,
+            )
+        )
+    mismatches.extend(
+        _state_value_mismatch_fields(
+            getattr(expected, "marker_pressure_neumann_gradient"),
+            getattr(observed, "marker_pressure_neumann_gradient"),
+            path="marker_pressure_neumann_gradient",
+        )
+    )
+    return tuple(mismatches)
+
+
+def _research_probe_coupling_fields(
+    coupling: FsiCouplingReport,
+) -> dict[str, object]:
+    absolute = list(coupling.absolute_residual_history_mps)
+    relative = list(coupling.relative_residual_history)
+    return {
+        "converged": bool(coupling.converged),
+        "iterations": int(coupling.iterations),
+        "first_absolute_residual_mps": (
+            None if not absolute else float(absolute[0])
+        ),
+        "second_absolute_residual_mps": (
+            None if len(absolute) < 2 else float(absolute[1])
+        ),
+        "first_relative_residual": (
+            None if not relative else float(relative[0])
+        ),
+        "second_relative_residual": (
+            None if len(relative) < 2 else float(relative[1])
+        ),
+        "relative_residual_history": relative,
+        "absolute_residual_history_mps": absolute,
+        "candidate_velocity_rms_history_mps": list(
+            coupling.candidate_velocity_rms_history_mps
+        ),
+        "max_marker_residual_history_mps": list(
+            coupling.max_marker_residual_history_mps
+        ),
+        "relative_tolerance_equivalent_history_mps": list(
+            coupling.relative_tolerance_equivalent_history_mps
+        ),
+        "effective_tolerance_history_mps": list(
+            coupling.effective_tolerance_history_mps
+        ),
+        "residual_to_effective_tolerance_history": list(
+            coupling.residual_to_effective_tolerance_history
+        ),
+        "update_mode_history": list(coupling.update_modes),
+        "iqn_rank_history": list(coupling.iqn_rank_history),
+        "iqn_condition_number_history": list(
+            coupling.iqn_condition_number_history
+        ),
+        "iqn_fallback_reasons": list(coupling.iqn_fallback_reasons),
+        "iqn_fallback_count": int(coupling.iqn_fallback_count),
+        "iqn_update_limited_history": list(
+            coupling.iqn_update_limited_history
+        ),
     }
 
 
@@ -2509,7 +2668,9 @@ def run_hibm_mpm_fsi(
                 "hibm_fsi_coupling_update_mode_history": [],
                 "hibm_fsi_coupling_iqn_rank_history": [],
                 "hibm_fsi_coupling_iqn_condition_number_history": [],
+                "hibm_fsi_coupling_iqn_fallback_reasons": [],
                 "hibm_fsi_coupling_iqn_fallback_count": 0,
+                "hibm_fsi_coupling_iqn_update_limited_history": [],
                 "hibm_fsi_coupling_base_assembly_count": 0,
             }
         else:
@@ -2667,13 +2828,20 @@ def run_hibm_mpm_fsi(
                     reference_positions_m=np.asarray(marker_reference_positions_m, dtype=np.float32),
                     namespace=f"{case_id}:marker_velocity",
                 )
-                preview_controller = deepcopy(initial_guess_controller)
-                kalman_guess = preview_controller.begin_step(
-                    marker_base["v_gamma_mps"],
-                    dt_s=float(config.dt_s),
-                    layout_id=layout_id,
-                )
-                preview_controller.discard_step()
+                baseline_mode = str(research_probe_config["baseline_mode"])
+                if baseline_mode == "carry_forward":
+                    baseline_guess = np.asarray(
+                        marker_base["v_gamma_mps"],
+                        dtype=np.float64,
+                    ).copy()
+                else:
+                    preview_controller = deepcopy(initial_guess_controller)
+                    baseline_guess = preview_controller.begin_step(
+                        marker_base["v_gamma_mps"],
+                        dt_s=float(config.dt_s),
+                        layout_id=layout_id,
+                    )
+                    preview_controller.discard_step()
                 oracle_velocity = research_probe_oracle[step_index]
                 probe_rows: list[dict[str, object]] = []
                 probe_anchor_refresh_before = pressure_pair_anchor_runtime_refresh_count
@@ -2684,7 +2852,7 @@ def run_hibm_mpm_fsi(
                         probe_work_start = len(research_probe_trial_work_reports)
                         probe_solid_start = len(research_probe_solid_trial_reports)
                         mixed_guess = _mixed_iqn_kalman_oracle_guess(
-                            kalman_guess, oracle_velocity, float(alpha)
+                            baseline_guess, oracle_velocity, float(alpha)
                         )
                         probe_runtime = deepcopy(iqn_runtime)
                         probe_runtime._begin_initial_guess_step = (
@@ -2695,6 +2863,10 @@ def run_hibm_mpm_fsi(
                         )
                         probe_runtime._discard_initial_guess_step = lambda: None
                         research_probe_active = True
+                        probe_row: dict[str, object] = {
+                            "alpha": float(alpha),
+                            "baseline_mode": baseline_mode,
+                        }
                         try:
                             _trial, coupling = solve_fsi_step(
                                 probe_runtime,
@@ -2708,20 +2880,71 @@ def run_hibm_mpm_fsi(
                                     iqn_svd_relative_cutoff=float(config.iqn_svd_relative_cutoff),
                                 ),
                             )
-                            probe_rows.append({"alpha": float(alpha), "converged": bool(coupling.converged), "iterations": int(coupling.iterations), "relative_residual_history": list(coupling.relative_residual_history), "absolute_residual_history_mps": list(coupling.absolute_residual_history_mps), "candidate_velocity_rms_history_mps": list(coupling.candidate_velocity_rms_history_mps), "max_marker_residual_history_mps": list(coupling.max_marker_residual_history_mps), "effective_tolerance_history_mps": list(coupling.effective_tolerance_history_mps), "residual_to_effective_tolerance_history": list(coupling.residual_to_effective_tolerance_history), "update_mode_history": list(coupling.update_modes), "iqn_rank_history": list(coupling.iqn_rank_history), "iqn_condition_number_history": list(coupling.iqn_condition_number_history), "iqn_fallback_reasons": list(coupling.iqn_fallback_reasons), "iqn_fallback_count": int(coupling.iqn_fallback_count), "iqn_update_limited_history": list(coupling.iqn_update_limited_history), "trial_work": _fsi_trial_work_summary(research_probe_trial_work_reports[probe_work_start:]), "solid_trial_reports": research_probe_solid_trial_reports[probe_solid_start:]})
+                            probe_row.update(
+                                _research_probe_coupling_fields(coupling)
+                            )
                         except FsiCouplingConvergenceError as error:
-                            probe_rows.append({"alpha": float(alpha), "converged": False, "iterations": len(research_probe_trial_work_reports[probe_work_start:]), "error": repr(error), "trial_work": _fsi_trial_work_summary(research_probe_trial_work_reports[probe_work_start:]), "solid_trial_reports": research_probe_solid_trial_reports[probe_solid_start:]})
+                            probe_row.update(
+                                _research_probe_coupling_fields(error.report)
+                            )
+                            probe_row["converged"] = False
+                            probe_row["error"] = repr(error)
                         finally:
                             research_probe_active = False
                             probe_runtime.rollback_step(context)
-                    restore_iqn_step_state(accepted_base, context)
+                        restored_probe_state = capture_iqn_step_state()
+                        rollback_mismatches = (
+                            _host_macro_step_state_mismatch_fields(
+                                accepted_base,
+                                restored_probe_state,
+                            )
+                        )
+                        probe_row.update(
+                            {
+                                "trial_work": _fsi_trial_work_summary(
+                                    research_probe_trial_work_reports[
+                                        probe_work_start:
+                                    ]
+                                ),
+                                "solid_trial_reports": (
+                                    research_probe_solid_trial_reports[
+                                        probe_solid_start:
+                                    ]
+                                ),
+                                "rollback_host_macro_step_state_equal": (
+                                    not rollback_mismatches
+                                ),
+                                "rollback_host_macro_step_state_mismatch_fields": list(
+                                    rollback_mismatches
+                                ),
+                            }
+                        )
+                        probe_rows.append(probe_row)
+                        if rollback_mismatches:
+                            raise RuntimeError(
+                                "research probe rollback changed accepted HostMacroStepState: "
+                                + ", ".join(rollback_mismatches)
+                            )
                 finally:
                     restore_iqn_step_state(accepted_base, context)
+                sweep_restored_state = capture_iqn_step_state()
+                sweep_mismatches = _host_macro_step_state_mismatch_fields(
+                    accepted_base,
+                    sweep_restored_state,
+                )
+                if sweep_mismatches:
+                    raise RuntimeError(
+                        "research probe sweep changed accepted HostMacroStepState: "
+                        + ", ".join(sweep_mismatches)
+                    )
                 return {
+                    **preflow_report,
                     "case": case_id,
                     "status": "research_probe_terminal",
                     "config": asdict(config),
                     "history": history,
+                    "taichi_runtime_identity": dict(runtime_identity),
+                    "profile_wall_time_enabled": bool(profile_wall_time),
                     "research_probe_terminal": True,
                     "offline_oracle": True,
                     "deployable": False,
@@ -2730,10 +2953,22 @@ def run_hibm_mpm_fsi(
                     "research_probe_wall_time_s": time.perf_counter() - probe_started_s,
                     "research_probe_rows": probe_rows,
                     "research_probe_trial_work": research_probe_trial_work_reports,
+                    "research_probe_all_rollbacks_equal": all(
+                        bool(
+                            row[
+                                "rollback_host_macro_step_state_equal"
+                            ]
+                        )
+                        for row in probe_rows
+                    ),
+                    "research_probe_sweep_state_equal": not sweep_mismatches,
+                    "research_probe_sweep_state_mismatch_fields": list(
+                        sweep_mismatches
+                    ),
                     "computed_result_sources": {
                         "research_probe_rows": (
                             "same accepted HostMacroStepState; uncommitted "
-                            "solve_fsi_step Kalman-Oracle alpha sweep"
+                            "solve_fsi_step baseline-Oracle alpha sweep"
                         ),
                     },
                     "research_probe_anchor_refresh_delta": (
@@ -2884,8 +3119,14 @@ def run_hibm_mpm_fsi(
                 "hibm_fsi_coupling_iqn_condition_number_history": list(
                     generic_row["fsi_iqn_condition_number_history"]
                 ),
+                "hibm_fsi_coupling_iqn_fallback_reasons": list(
+                    generic_row["fsi_iqn_fallback_reasons"]
+                ),
                 "hibm_fsi_coupling_iqn_fallback_count": int(
                     generic_row["fsi_iqn_fallback_count"]
+                ),
+                "hibm_fsi_coupling_iqn_update_limited_history": list(
+                    generic_row["fsi_iqn_update_limited_history"]
                 ),
                 "hibm_fsi_coupling_first_relative_residual": float(
                     generic_row["fsi_coupling_first_relative_residual"]
@@ -13180,6 +13421,11 @@ def _restore_fixed_solid_preflow_snapshot(
         "source_sha256": expected_identity.source_sha256,
         "geometry_sha256": expected_identity.geometry_sha256,
     }
+    if snapshot.artifact_identity is None:
+        raise ValueError("loaded preflow snapshot is missing artifact identity")
+    report["preflow_snapshot_artifact_identity"] = dict(
+        snapshot.artifact_identity
+    )
     return report
 
 

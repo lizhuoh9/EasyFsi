@@ -61,6 +61,66 @@ class ValidationCiWorkflowTests(unittest.TestCase):
             with self.subTest(test_name=test_name):
                 self.assertIn(test_name, fast_gate)
 
+    def test_fast_gate_has_cpu_only_r24_r24b_r24c_evidence_contracts(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("fetch-depth: 0", workflow)
+        gate = workflow.split(
+            "- name: Run CPU-only R24 through R24C evidence gates",
+            1,
+        )[1].split("- name: Run fast platform-independent contracts", 1)[0]
+
+        for path in (
+            "kalman_oracle_headroom_analysis.py",
+            "kalman_oracle_headroom_artifacts.py",
+            "kalman_oracle_headroom_verification.py",
+            "oracle_threshold_common.py",
+            "oracle_threshold_probe_contracts.py",
+            "oracle_threshold_iqn_first_update.py",
+            "oracle_threshold_displacement_evidence.py",
+            "oracle_threshold_lineage.py",
+            "oracle_threshold_prefix_decisions.py",
+            "oracle_threshold_publication.py",
+            "oracle_threshold_reuse_evidence.py",
+            "oracle_threshold_evidence.py",
+            "audit_ansys_vertical_flap_oracle_threshold.py",
+            "test_oracle_threshold_iqn_first_update.py",
+            "test_oracle_threshold_lineage.py",
+            "test_oracle_threshold_publication.py",
+            "test_oracle_threshold_reuse_evidence.py",
+            "test_our_solver_vertical_flap_runner.py",
+            "test_ansys_vertical_flap_runner_loop_contract.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, gate)
+        for test_path in (
+            "tests/validation/test_kalman_oracle_headroom.py",
+            "tests/validation/test_kalman_oracle_headroom_fail_closed.py",
+            "tests/validation/test_kalman_statistical_calibration.py",
+            "tests/validation/test_oracle_threshold_iqn_first_update.py",
+            "tests/validation/test_oracle_threshold_lineage.py",
+            "tests/validation/test_oracle_threshold_publication.py",
+            "tests/validation/test_oracle_threshold_reuse_evidence.py",
+            "tests/validation/test_our_solver_vertical_flap_runner.py",
+        ):
+            with self.subTest(test_path=test_path):
+                self.assertIn(test_path, gate)
+        for node in (
+            "test_iqn_runner_maps_generic_threshold_audit_histories",
+            "test_research_probe_recaptures_and_compares_after_each_rollback",
+            "test_research_probe_rejects_iqn_history_reuse",
+            "test_research_probe_terminal_satisfies_official_report_contract",
+        ):
+            with self.subTest(node=node):
+                self.assertIn(node, gate)
+        for cli in (
+            "tools/audit_ansys_vertical_flap_kalman.py --help",
+            "tools/audit_ansys_vertical_flap_oracle_headroom.py --help",
+            "tools/audit_ansys_vertical_flap_oracle_threshold.py --help",
+        ):
+            with self.subTest(cli=cli):
+                self.assertIn(cli, gate)
+        self.assertIn('git diff --check "$base...HEAD"', gate)
+
     def test_ci_tools_and_direct_render_dependency_are_locked(self) -> None:
         requirements = REQUIREMENTS.read_text(encoding="utf-8").lower()
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 import hashlib
 import inspect
@@ -58,16 +59,17 @@ def _load_runner_module():
 def test_source_hashes_include_solid_substep_ab_comparator() -> None:
     runner = _load_runner_module()
     comparator = REPO_ROOT / "tools" / "validation" / "compare_solid_substep_ab.py"
+    audit_cli = REPO_ROOT / "tools" / "audit_ansys_vertical_flap_oracle_threshold.py"
 
     source_hashes = runner._source_hashes()
-    comparator_key = comparator.relative_to(REPO_ROOT).as_posix()
-
-    assert comparator_key in source_hashes
-    comparator_digest = source_hashes[comparator_key]
-    assert len(comparator_digest) == 64
-    assert comparator_digest == comparator_digest.lower()
-    assert all(character in "0123456789abcdef" for character in comparator_digest)
-    assert comparator_digest == hashlib.sha256(comparator.read_bytes()).hexdigest()
+    for path in (comparator, audit_cli):
+        key = path.relative_to(REPO_ROOT).as_posix()
+        assert key in source_hashes
+        digest = source_hashes[key]
+        assert len(digest) == 64
+        assert digest == digest.lower()
+        assert all(character in "0123456789abcdef" for character in digest)
+        assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def test_grid_summary_reports_the_actual_modeled_half_domain_resolution() -> None:
@@ -468,18 +470,247 @@ def test_research_probe_default_alphas_are_explicit() -> None:
     )
 
 
+def test_research_probe_accepts_carry_forward_baseline() -> None:
+    config = replace(
+        VerticalFlapFsiConfig(),
+        step_count=8,
+        coupling_mode="iqn_ils",
+        initial_guess_mode="carry_forward",
+        iqn_kalman_oracle_interpolation_target_step=8,
+        iqn_kalman_oracle_interpolation_oracle_path="q0",
+        iqn_kalman_oracle_interpolation_alphas=(0.9, 1.0),
+    )
+
+    result = solid_mpm_fsi_runner._iqn_kalman_oracle_interpolation_config(
+        config
+    )
+
+    assert result is not None
+    assert result["baseline_mode"] == "carry_forward"
+
+
+def test_research_probe_rejects_unsupported_baseline_mode() -> None:
+    config = replace(
+        VerticalFlapFsiConfig(),
+        step_count=8,
+        coupling_mode="iqn_ils",
+        initial_guess_mode="linear_extrapolation",
+        iqn_kalman_oracle_interpolation_target_step=8,
+        iqn_kalman_oracle_interpolation_oracle_path="q0",
+        iqn_kalman_oracle_interpolation_alphas=(0.9, 1.0),
+    )
+
+    with pytest.raises(ValueError, match="carry-forward or Kalman"):
+        solid_mpm_fsi_runner._iqn_kalman_oracle_interpolation_config(config)
+
+
+def test_host_macro_step_state_comparator_reports_exact_mismatch_path() -> None:
+    expected = SimpleNamespace(
+        accepted_step_index=4,
+        accepted_time_s=2.0e-3,
+        feedback_available_for_projection=True,
+        fluid_fields={"velocity": np.zeros((2, 3), dtype=np.float32)},
+        fluid_host_metadata={"wall_flags": (True, False)},
+        solid_fields={"x": np.ones((2, 3), dtype=np.float32)},
+        solid_particle_count=2,
+        marker_state={"x_gamma_m": np.zeros((4, 3), dtype=np.float32)},
+        marker_count=4,
+        marker_projection_vertex_count=6,
+        marker_pressure_neumann_gradient=np.zeros(6, dtype=np.float32),
+    )
+    observed = deepcopy(expected)
+
+    assert (
+        solid_mpm_fsi_runner._host_macro_step_state_mismatch_fields(
+            expected,
+            observed,
+        )
+        == ()
+    )
+    observed.fluid_fields["velocity"][0, 1] = 1.0
+    assert (
+        solid_mpm_fsi_runner._host_macro_step_state_mismatch_fields(
+            expected,
+            observed,
+        )
+        == ("fluid_fields.velocity",)
+    )
+
+
 def test_research_probe_dry_run_persists_controls(tmp_path: Path) -> None:
     runner = _load_runner_module()
     output_dir = tmp_path / "probe_dry_run"
+    oracle_identity = {
+        "offline_oracle": True,
+        "deployable": False,
+        "preflow_snapshot_identity": {"source_sha256": "a" * 64},
+        "layout_sha256": "b" * 64,
+    }
     with (
         patch.object(runner, "_source_hashes", return_value={}),
         patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+        patch.object(
+            runner,
+            "_validate_initial_guess_oracle_producer",
+            return_value=oracle_identity,
+        ) as validate_producer,
         patch.object(runner.sys, "argv", [str(RUNNER_PATH), "--output-dir", str(output_dir), "--dry-run", "--coupling-mode", "iqn_ils", "--initial-guess-mode", "kalman", "--initial-guess-kalman-q", "1e-3", "--initial-guess-kalman-r", "1e-5", "--research-iqn-kalman-oracle-interpolation-target-step", "8", "--research-iqn-kalman-oracle-interpolation-oracle-path", "q0", "--research-iqn-kalman-oracle-interpolation-alphas", "0", "0.5", "1"]),
     ):
         assert runner.main() == 0
+    validate_producer.assert_called_once()
     manifest = runner.json.loads((output_dir / "run_manifest.json").read_text())
     assert manifest["dry_run"] is True
+    assert manifest["offline_oracle"] is True
+    assert manifest["deployable"] is False
+    assert manifest["initial_guess_oracle_identity"] == oracle_identity
     assert manifest["config"]["iqn_kalman_oracle_interpolation_alphas"] == [0.0, 0.5, 1.0]
+    assert manifest["config"][
+        "iqn_kalman_oracle_interpolation_oracle_path"
+    ] == str(Path("q0").expanduser().resolve())
+
+
+def test_research_probe_dry_run_validates_oracle_identity_and_boundary(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / 'probe_dry_run_identity'
+    producer = tmp_path / 'q0-producer'
+    identity = {
+        'offline_oracle': True,
+        'deployable': False,
+        'producer_output': str(producer),
+        'preflow_snapshot_identity': {'source_sha256': 'a' * 64},
+        'layout_sha256': 'b' * 64,
+        'frame_sha256': {'step_0001.npz': 'c' * 64},
+        'history_sha256': {'step_0001.json': 'd' * 64},
+    }
+
+    with (
+        patch.object(runner, '_source_hashes', return_value={}),
+        patch.object(runner, '_configure_taichi_offline_cache', return_value={}),
+        patch.object(
+            runner,
+            '_validate_initial_guess_oracle_producer',
+            return_value=identity,
+        ) as validate_producer,
+        patch.object(
+            runner.sys,
+            'argv',
+            [
+                str(RUNNER_PATH),
+                '--output-dir',
+                str(output_dir),
+                '--dry-run',
+                '--steps',
+                '8',
+                '--coupling-mode',
+                'iqn_ils',
+                '--research-iqn-kalman-oracle-interpolation-target-step',
+                '8',
+                '--research-iqn-kalman-oracle-interpolation-oracle-path',
+                str(producer),
+                '--research-iqn-kalman-oracle-interpolation-alphas',
+                '0.9',
+                '1.0',
+            ],
+        ),
+    ):
+        assert runner.main() == 0
+
+    validate_producer.assert_called_once()
+    manifest = runner.json.loads(
+        (output_dir / 'run_manifest.json').read_text(encoding='utf-8')
+    )
+    assert manifest['offline_oracle'] is True
+    assert manifest['deployable'] is False
+    assert manifest['initial_guess_oracle_identity'] == identity
+
+
+def test_research_probe_terminal_summary_preserves_actual_runtime_and_profile(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner_module()
+    output_dir = tmp_path / "probe_terminal_runtime"
+    runtime_identity = {
+        "actual_arch": "cuda",
+        "default_fp": "f32",
+        "random_seed": 0,
+        "requested_arch": "cuda",
+        "strict_arch_verified": True,
+        "compiler_configuration": {"taichi_version": "1.7.4"},
+    }
+    preflow_identity = {
+        "config_sha256": "a" * 64,
+        "source_sha256": "b" * 64,
+        "geometry_sha256": "c" * 64,
+    }
+    preflow_artifact_identity = {
+        "metadata_file_sha256": "d" * 64,
+        "manifest_sha256": "e" * 64,
+        "npz_file": "state.0123456789abcdef0123456789abcdef.npz",
+        "npz_sha256": "f" * 64,
+    }
+    report = {
+        "status": "research_probe_terminal",
+        "history": [],
+        "accepted_step_count": 0,
+        "accepted_time_s": 0.0,
+        "research_probe_wall_time_s": 0.25,
+        "taichi_runtime_identity": runtime_identity,
+        "profile_wall_time_enabled": True,
+        "preflow_snapshot_loaded": True,
+        "preflow_snapshot_identity": preflow_identity,
+        "preflow_snapshot_artifact_identity": preflow_artifact_identity,
+    }
+
+    with (
+        patch.object(runner, "_source_hashes", return_value={}),
+        patch.object(runner, "_configure_taichi_offline_cache", return_value={}),
+        patch.object(
+            runner,
+            "run_ansys_vertical_flap_benchmark",
+            return_value=report,
+        ),
+        patch.object(
+            runner.sys,
+            "argv",
+            [
+                str(RUNNER_PATH),
+                "--output-dir",
+                str(output_dir),
+                "--steps",
+                "0",
+                "--marker-count",
+                "64",
+                "--solid-particle-counts",
+                "1",
+                "256",
+                "20",
+                "--profile-wall-time",
+            ],
+        ),
+    ):
+        assert runner.main() == 0
+
+    summary = runner.json.loads(
+        (output_dir / "our_solver_summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["taichi_runtime_identity"] == runtime_identity
+    assert summary["profile_wall_time_enabled"] is True
+    assert summary["grid"]["grid_nodes"] == [4, 32, 64]
+    assert summary["hibm_coupling_scheme"] == "iterative_marker_velocity_iqn_ils"
+    assert summary["kalman_modified_physics"] is False
+    assert summary["kalman_writeback_mode"] == "off"
+    assert summary["marker_count"] == 64
+    assert summary["solid_particle_counts"] == [1, 256, 20]
+    assert summary["solid_substeps"] is None
+    assert summary["solid_substeps_mode"] == "adaptive"
+    assert summary["preflow_snapshot_loaded"] is True
+    assert summary["preflow_snapshot_identity"] == preflow_identity
+    assert (
+        summary["preflow_snapshot_artifact_identity"]
+        == preflow_artifact_identity
+    )
 
 
 def test_research_probe_uses_transactional_fresh_runtime_contract() -> None:
@@ -488,6 +719,15 @@ def test_research_probe_uses_transactional_fresh_runtime_contract() -> None:
     assert "probe_runtime = deepcopy(iqn_runtime)" in source
     assert "solve_fsi_step(" in source
     assert "probe_runtime.rollback_step(context)" in source
+    assert "restored_probe_state = capture_iqn_step_state()" in source
+    assert "_host_macro_step_state_mismatch_fields(" in source
+    assert '"rollback_host_macro_step_state_equal"' in source
+    assert '"rollback_host_macro_step_state_mismatch_fields"' in source
+    assert "research probe rollback changed accepted HostMacroStepState" in source
+    assert "sweep_restored_state = capture_iqn_step_state()" in source
+    assert '"research_probe_sweep_state_equal"' in source
+    assert '"research_probe_sweep_state_mismatch_fields"' in source
+    assert "research probe sweep changed accepted HostMacroStepState" in source
     assert "step_observer is not None and not research_probe_active" in source
     assert "not research_probe_active and export_final_flow_snapshot" in source
     assert "restore_iqn_step_state(accepted_base, context)" in source
@@ -795,7 +1035,9 @@ def test_oracle_producer_preflight_requires_completed_source_matched_q0(
     producer = tmp_path / "producer"
     consumer = tmp_path / "consumer"
     fields = producer / "step_fields"
+    histories = producer / "step_history"
     fields.mkdir(parents=True)
+    histories.mkdir(parents=True)
     source_hashes = {"simulation_core/example.py": "abc123"}
     producer_config = replace(
         VerticalFlapFsiConfig(),
@@ -834,6 +1076,10 @@ def test_oracle_producer_preflight_requires_completed_source_matched_q0(
             fields / f"step_{step:04d}.npz",
             marker_velocity_mps=np.full((4, 3), float(step), dtype=np.float32),
         )
+        (histories / f"step_{step:04d}.json").write_text(
+            runner.json.dumps({"step_index": step}),
+            encoding="utf-8",
+        )
 
     identity = runner._validate_initial_guess_oracle_producer(
         producer_output=producer,
@@ -847,6 +1093,26 @@ def test_oracle_producer_preflight_requires_completed_source_matched_q0(
     assert identity["producer_run_label"] == "q0-producer"
     assert len(identity["trajectory_sha256"]) == 64
     assert len(identity["frame_sha256"]) == 2
+    assert len(identity["history_trajectory_sha256"]) == 64
+    assert len(identity["history_sha256"]) == 2
+
+    full_identity = {
+        **identity,
+        "preflow_snapshot_identity": {"source_sha256": "a" * 64},
+        "layout_sha256": "b" * 64,
+    }
+    with (
+        patch.object(runner, "_load_oracle_headroom_run", return_value=object()),
+        patch.object(runner, "_q0_probe_identity", return_value=full_identity),
+    ):
+        observed_full_identity = runner._validate_initial_guess_oracle_producer(
+            producer_output=producer,
+            consumer_output=consumer,
+            consumer_config_payload=runner.asdict(consumer_config),
+            current_source_sha256=source_hashes,
+            require_full_lineage=True,
+        )
+    assert observed_full_identity == full_identity
 
     with pytest.raises(ValueError, match="source"):
         runner._validate_initial_guess_oracle_producer(
@@ -1725,6 +1991,17 @@ def test_main_treats_empty_final_snapshot_as_absent_after_loaded_preflow(
         "preflow_steps_completed": 40,
         "preflow_snapshot_loaded": True,
         "preflow_snapshot_input_path": str(snapshot_prefix),
+        "preflow_snapshot_identity": {
+            "config_sha256": "a" * 64,
+            "source_sha256": "b" * 64,
+            "geometry_sha256": "c" * 64,
+        },
+        "preflow_snapshot_artifact_identity": {
+            "metadata_file_sha256": "d" * 64,
+            "manifest_sha256": "e" * 64,
+            "npz_file": "state.0123456789abcdef0123456789abcdef.npz",
+            "npz_sha256": "f" * 64,
+        },
         "preflow_status": "snapshot_loaded",
         "preflow_stop_reason": "snapshot_loaded",
         "final_flow_field_snapshot": {},
@@ -1770,6 +2047,13 @@ def test_main_treats_empty_final_snapshot_as_absent_after_loaded_preflow(
     assert summary["step_count_requested"] == 0
     assert summary["step_count_completed"] == 0
     assert summary["solver_npz_summary"] == {}
+    assert summary["preflow_snapshot_loaded"] is True
+    assert summary["preflow_snapshot_identity"] == report[
+        "preflow_snapshot_identity"
+    ]
+    assert summary["preflow_snapshot_artifact_identity"] == report[
+        "preflow_snapshot_artifact_identity"
+    ]
     assert not (output_dir / "failure.json").exists()
     assert not (output_dir / "final_flow_snapshot_meta.json").exists()
     assert not (output_dir / "our_solver_final_fields.npz").exists()

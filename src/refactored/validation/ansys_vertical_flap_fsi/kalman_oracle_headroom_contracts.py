@@ -7,7 +7,6 @@ it never changes the production predictor, solver, or accepted state.
 
 from __future__ import annotations
 
-from functools import lru_cache
 import hashlib
 import json
 import math
@@ -16,6 +15,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
+
+from simulation_core.fluids.preflow_snapshot import inspect_preflow_snapshot
 
 from .kalman_oracle_headroom_integrity import (
     production_preflow_source_sha256,
@@ -283,43 +284,11 @@ def _normalised_rmse(reference: np.ndarray, candidate: np.ndarray) -> float:
     return rmse / scale
 
 
-@lru_cache(maxsize=8)
 def _preflow_snapshot_identity(prefix_text: str) -> dict[str, Any]:
-    prefix = Path(prefix_text).expanduser().resolve()
-    manifest_path = Path(f"{prefix}.json")
-    manifest = _read_json(manifest_path)
-    identity = manifest.get("identity")
-    _require(
-        isinstance(identity, dict),
-        f"preflow snapshot identity missing: {manifest_path}",
-    )
-    for key in ("config_sha256", "geometry_sha256", "source_sha256"):
-        digest = identity.get(key)
-        _require(
-            isinstance(digest, str) and len(digest) == 64,
-            f"preflow snapshot {key} invalid: {manifest_path}",
-        )
-    npz_name = manifest.get("npz_file")
-    _require(
-        isinstance(npz_name, str) and npz_name,
-        f"preflow snapshot payload missing: {manifest_path}",
-    )
-    npz_path = (manifest_path.parent / npz_name).resolve()
-    _require(npz_path.is_file(), f"preflow snapshot NPZ missing: {npz_path}")
-    npz_sha256 = _sha256_file(npz_path)
-    declared_npz_sha256 = manifest.get("npz_sha256")
-    if declared_npz_sha256 is not None:
-        _require(
-            declared_npz_sha256 == npz_sha256,
-            f"preflow snapshot NPZ SHA mismatch: {npz_path}",
-        )
-    return {
-        "prefix": str(prefix),
-        "manifest_sha256": _sha256_file(manifest_path),
-        "npz_file": npz_path.name,
-        "npz_sha256": npz_sha256,
-        "identity": {str(key): str(value) for key, value in sorted(identity.items())},
-    }
+    try:
+        return inspect_preflow_snapshot(prefix_text)
+    except (OSError, ValueError) as exc:
+        raise OracleHeadroomContractError(str(exc)) from exc
 
 
 def _scalar_text(value: np.ndarray, *, label: str) -> str:

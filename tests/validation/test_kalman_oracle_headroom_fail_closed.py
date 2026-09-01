@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from simulation_core.fluids.preflow_snapshot import canonical_config_sha256
 from src.refactored.validation.ansys_vertical_flap_fsi import (
     kalman_oracle_headroom as subject,
 )
@@ -32,6 +33,13 @@ def test_preflow_source_identity_must_match_current_executable_surface(
     snapshot = Path(manifest["config"]["preflow_snapshot_input_path"] + ".json")
     payload = json.loads(snapshot.read_text(encoding="utf-8"))
     payload["identity"]["source_sha256"] = "6" * 64
+    payload["manifest_sha256"] = canonical_config_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "manifest_sha256"
+        }
+    )
     _write_json(snapshot, payload)
 
     with pytest.raises(subject.OracleHeadroomContractError, match="preflow source"):

@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -41,6 +43,76 @@ jobs:
         run: |
           python -m ruff check . --select F601,F821
           python -m compileall -q simulation_core cases tools
+
+      - name: Run CPU-only R24 through R24C evidence gates
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          python -m py_compile \
+            benchmarks/official/solid_mpm_fsi_runner.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/kalman_statistical_calibration.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/kalman_oracle_headroom.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/kalman_oracle_headroom_analysis.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/kalman_oracle_headroom_artifacts.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/kalman_oracle_headroom_contracts.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/kalman_oracle_headroom_integrity.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/kalman_oracle_headroom_verification.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/oracle_threshold_common.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/oracle_threshold_probe_contracts.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/oracle_threshold_iqn_first_update.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/oracle_threshold_displacement_evidence.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/oracle_threshold_evidence.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/oracle_threshold_lineage.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/oracle_threshold_prefix_decisions.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/oracle_threshold_publication.py \
+            src/refactored/validation/ansys_vertical_flap_fsi/oracle_threshold_reuse_evidence.py \
+            validation_runs/ansys_vertical_flap_fsi/our_solver_fine_vs_fluent_2026-07-02/scripts/run_our_solver_vertical_flap.py \
+            tools/audit_ansys_vertical_flap_kalman.py \
+            tools/audit_ansys_vertical_flap_oracle_headroom.py \
+            tools/audit_ansys_vertical_flap_oracle_threshold.py \
+            tests/validation/test_kalman_statistical_calibration.py \
+            tests/validation/test_kalman_oracle_headroom.py \
+            tests/validation/test_kalman_oracle_headroom_fail_closed.py \
+            tests/validation/test_oracle_threshold_iqn_first_update.py \
+            tests/validation/test_oracle_threshold_lineage.py \
+            tests/validation/test_oracle_threshold_publication.py \
+            tests/validation/test_oracle_threshold_reuse_evidence.py \
+            tests/validation/test_our_solver_vertical_flap_runner.py \
+            tests/integration/test_ansys_vertical_flap_runner_loop_contract.py
+
+          python -m pytest -q \
+            tests/validation/test_kalman_statistical_calibration.py \
+            tests/validation/test_kalman_oracle_headroom.py \
+            tests/validation/test_kalman_oracle_headroom_fail_closed.py \
+            tests/validation/test_kalman_iqn_reuse_fine_contracts.py \
+            tests/validation/test_oracle_threshold_iqn_first_update.py \
+            tests/validation/test_oracle_threshold_lineage.py \
+            tests/validation/test_oracle_threshold_publication.py \
+            tests/validation/test_oracle_threshold_reuse_evidence.py \
+            tests/validation/test_our_solver_vertical_flap_runner.py \
+            tests/integration/test_ansys_vertical_flap_runner_loop_contract.py::AnsysVerticalFlapRunnerLoopContractTests::test_iqn_runner_maps_generic_threshold_audit_histories \
+            tests/integration/test_ansys_vertical_flap_runner_loop_contract.py::AnsysVerticalFlapRunnerLoopContractTests::test_research_probe_recaptures_and_compares_after_each_rollback \
+            tests/integration/test_ansys_vertical_flap_runner_loop_contract.py::AnsysVerticalFlapRunnerLoopContractTests::test_research_probe_rejects_iqn_history_reuse \
+            tests/integration/test_ansys_vertical_flap_runner_loop_contract.py::AnsysVerticalFlapRunnerLoopContractTests::test_research_probe_terminal_satisfies_official_report_contract \
+            tests/tools/test_calibrate_iqn_kalman_qr.py \
+            tests/coupling/test_interface_kalman_predictor.py \
+            tests/coupling/test_active_kalman_writeback.py \
+            tests/benchmarks/test_modified_physics_kalman_contract.py
+
+          python tools/audit_ansys_vertical_flap_kalman.py --help
+          python tools/audit_ansys_vertical_flap_oracle_headroom.py --help
+          python tools/audit_ansys_vertical_flap_oracle_threshold.py --help
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE_SHA"
+          elif [ "$EVENT_NAME" = "push" ] && [ -n "$PUSH_BEFORE_SHA" ] && [ "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            base="$PUSH_BEFORE_SHA"
+          else
+            base="$(git rev-parse HEAD^)"
+          fi
+          git diff --check "$base...HEAD"
 
       - name: Run fast platform-independent contracts
         run: |

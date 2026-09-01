@@ -18,6 +18,7 @@ from src.refactored.validation.ansys_vertical_flap_fsi.material_reference_fine_c
 )
 from src.refactored.validation.ansys_vertical_flap_fsi.kalman_iqn_reuse_fine_contracts import (
     MATERIAL_PROFILE_CONTRACT_SHA256,
+    _replay_iqn_updates,
     _requires_growth_reset,
 )
 
@@ -123,6 +124,39 @@ def _producer_trace(
         "iqn_trial_dt_s": np.asarray(_DT_S, dtype=np.float64),
     }
     return trace, updates
+
+
+def test_raw_replay_uses_explicit_initial_picard_relaxation() -> None:
+    residual = np.full(_MARKER_SHAPE, 1.0e-2, dtype=np.float64)
+    first_guess = np.zeros(_MARKER_SHAPE, dtype=np.float64)
+    second_guess = first_guess + 0.75 * residual
+    trace = {
+        "T": 2,
+        "_trial_guess": np.stack((first_guess, second_guess)),
+        "_trial_candidate": np.stack(
+            (first_guess + residual, second_guess.copy())
+        ),
+        "_trial_residual": np.stack(
+            (residual, np.zeros_like(residual))
+        ),
+    }
+    history = {
+        "hibm_fsi_coupling_update_mode_history": ["picard"],
+        "hibm_fsi_coupling_iqn_rank_history": [0],
+        "hibm_fsi_coupling_iqn_condition_number_history": [None],
+        "hibm_fsi_coupling_iqn_fallback_count": 0,
+    }
+
+    replay = _replay_iqn_updates(
+        history,
+        trace,
+        step=1,
+        retained=None,
+        growth_reset=False,
+        initial_picard_relaxation=0.75,
+    )
+
+    assert replay["pair_count_history"] == [0]
 
 def _initial_guess_report(step: int) -> dict[str, object]:
     prediction_used = step >= KALMAN_CONFIG["warmup_accepted_states"]

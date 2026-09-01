@@ -327,6 +327,7 @@ def _replay_iqn_updates(
     step: int,
     retained: tuple[np.ndarray, np.ndarray] | None,
     growth_reset: bool,
+    initial_picard_relaxation: float = IQN_INITIAL_PICARD_RELAXATION,
 ) -> dict[str, Any]:
     guesses = np.asarray(
         trace["_trial_guess"], dtype=np.float64,
@@ -367,7 +368,7 @@ def _replay_iqn_updates(
         condition: float | None = None
         fallback_reason: str | None = None
         limited = False
-        next_guess = guess + IQN_INITIAL_PICARD_RELAXATION * residual
+        next_guess = guess + initial_picard_relaxation * residual
 
         if pair_count:
             try:
@@ -533,6 +534,7 @@ def _requires_growth_reset(
 def _validate_reuse_report(
     history: Mapping[str, Any], trace: Mapping[str, Any], step: int, *,
     prior_reports: Sequence[Mapping[str, Any]],
+    initial_picard_relaxation: float = IQN_INITIAL_PICARD_RELAXATION,
 ) -> dict[str, Any]:
     reuse = _history_common(
         history,
@@ -609,8 +611,12 @@ def _validate_reuse_report(
         prior_residual=prior_residual,
     )
     replay = _replay_iqn_updates(
-        history, trace, step=step,
-        retained=previous_secants, growth_reset=growth_reset,
+        history,
+        trace,
+        step=step,
+        retained=previous_secants,
+        growth_reset=growth_reset,
+        initial_picard_relaxation=initial_picard_relaxation,
     )
     _require(
         reset_reason == replay["expected_reset_reason"],

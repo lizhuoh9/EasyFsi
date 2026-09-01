@@ -135,6 +135,14 @@ _IDENTITY_FIELD_NAMES = (
     "source_sha256",
     "geometry_sha256",
 )
+_ARTIFACT_IDENTITY_FIELD_NAMES = frozenset(
+    {
+        "metadata_file_sha256",
+        "manifest_sha256",
+        "npz_file",
+        "npz_sha256",
+    }
+)
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _GENERATION_NPZ_PATTERN = re.compile(r".+\.[0-9a-f]{32}\.npz\Z")
 _MANIFEST_FIELD_NAMES = frozenset(
@@ -915,6 +923,34 @@ def _freeze_json_value(value: Any) -> Any:
     return value
 
 
+def _validated_artifact_identity(
+    value: Mapping[str, str] | None,
+    *,
+    error_type: type[PreflowSnapshotError],
+) -> Mapping[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != _ARTIFACT_IDENTITY_FIELD_NAMES:
+        raise error_type(
+            "snapshot artifact identity must contain exactly metadata_file_sha256, "
+            "manifest_sha256, npz_file, and npz_sha256"
+        )
+    normalized = {name: value[name] for name in _ARTIFACT_IDENTITY_FIELD_NAMES}
+    try:
+        for name in ("metadata_file_sha256", "manifest_sha256", "npz_sha256"):
+            _require_sha256(normalized[name], field_name=name)
+    except (TypeError, ValueError) as exc:
+        raise error_type(f"snapshot artifact identity is invalid: {exc}") from exc
+    npz_file = normalized["npz_file"]
+    if (
+        not isinstance(npz_file, str)
+        or Path(npz_file).name != npz_file
+        or _GENERATION_NPZ_PATTERN.fullmatch(npz_file) is None
+    ):
+        raise error_type("snapshot artifact identity npz_file is invalid")
+    return MappingProxyType(dict(sorted(normalized.items())))
+
+
 @dataclass(frozen=True)
 class PreflowSnapshot:
     """Validated immutable host representation of a reusable preflow state."""
@@ -924,6 +960,7 @@ class PreflowSnapshot:
     history: Any = None
     velocity_dirichlet_boundary_authority: str = "legacy"
     velocity_dirichlet_component_ledger_generation: int = 0
+    artifact_identity: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, PreflowSnapshotIdentity):
@@ -936,6 +973,10 @@ class PreflowSnapshot:
         )
         generation = _validated_velocity_dirichlet_component_ledger_generation(
             self.velocity_dirichlet_component_ledger_generation,
+            error_type=PreflowSnapshotValidationError,
+        )
+        artifact_identity = _validated_artifact_identity(
+            self.artifact_identity,
             error_type=PreflowSnapshotValidationError,
         )
         validated = _validated_field_copies(
@@ -958,6 +999,7 @@ class PreflowSnapshot:
             "velocity_dirichlet_component_ledger_generation",
             generation,
         )
+        object.__setattr__(self, "artifact_identity", artifact_identity)
 
 
 @dataclass(frozen=True)
@@ -1114,10 +1156,11 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return parsed
 
 
-def _load_manifest(path: Path) -> dict[str, Any]:
+def _load_manifest(path: Path) -> tuple[dict[str, Any], str]:
     try:
+        metadata_bytes = path.read_bytes()
         parsed = json.loads(
-            path.read_text(encoding="utf-8"),
+            metadata_bytes.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_json_keys,
         )
     except FileNotFoundError as exc:
@@ -1167,7 +1210,7 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         raise PreflowSnapshotIntegrityError(
             "snapshot schema version must be an integer"
         )
-    return parsed
+    return parsed, hashlib.sha256(metadata_bytes).hexdigest()
 
 
 def _manifest_identity(manifest: Mapping[str, Any]) -> PreflowSnapshotIdentity:
@@ -1328,7 +1371,7 @@ def load_preflow_snapshot(
         error_type=PreflowSnapshotValidationError,
     )
     files = _snapshot_files(path)
-    manifest = _load_manifest(files.metadata_path)
+    manifest, metadata_file_sha256 = _load_manifest(files.metadata_path)
     if manifest.get("format") != PREFLOW_SNAPSHOT_FORMAT:
         raise PreflowSnapshotIntegrityError(
             f"unsupported snapshot format: {manifest.get('format')!r}"
@@ -1443,11 +1486,51 @@ def load_preflow_snapshot(
             history=manifest.get("history"),
             velocity_dirichlet_boundary_authority=stored_authority,
             velocity_dirichlet_component_ledger_generation=stored_generation,
+            artifact_identity={
+                "metadata_file_sha256": metadata_file_sha256,
+                "manifest_sha256": manifest["manifest_sha256"],
+                "npz_file": generation_npz_path.name,
+                "npz_sha256": manifest["npz_sha256"],
+            },
         )
     except PreflowSnapshotValidationError as exc:
         raise PreflowSnapshotIntegrityError(
             f"snapshot payload failed schema validation: {exc}"
         ) from exc
+
+
+def inspect_preflow_snapshot(
+    path: str | os.PathLike[str],
+) -> dict[str, Any]:
+    """Validate a snapshot through the production loader and return its byte identity."""
+
+    files = _snapshot_files(path)
+    manifest, _metadata_file_sha256 = _load_manifest(files.metadata_path)
+    stored_identity = _manifest_identity(manifest)
+    schema_version = manifest.get("schema_version")
+    stored_authority = (
+        "legacy"
+        if schema_version == _LEGACY_PREFLOW_SNAPSHOT_SCHEMA_VERSION
+        else manifest.get("velocity_dirichlet_boundary_authority")
+    )
+    snapshot = load_preflow_snapshot(
+        files,
+        expected_identity=stored_identity,
+        expected_velocity_dirichlet_boundary_authority=stored_authority,
+    )
+    if snapshot.artifact_identity is None:  # pragma: no cover - loader invariant
+        raise PreflowSnapshotIntegrityError(
+            "loaded snapshot is missing its artifact identity"
+        )
+    artifact_identity = dict(snapshot.artifact_identity)
+    return {
+        "prefix": str(Path(files.snapshot_path).expanduser().resolve()),
+        "manifest_sha256": artifact_identity["metadata_file_sha256"],
+        "npz_file": artifact_identity["npz_file"],
+        "npz_sha256": artifact_identity["npz_sha256"],
+        "identity": _identity_payload(snapshot.identity),
+        "artifact_identity": artifact_identity,
+    }
 
 
 __all__ = [
@@ -1464,6 +1547,7 @@ __all__ = [
     "canonical_config_sha256",
     "canonical_geometry_sha256",
     "canonical_source_sha256",
+    "inspect_preflow_snapshot",
     "load_preflow_snapshot",
     "save_preflow_snapshot",
 ]

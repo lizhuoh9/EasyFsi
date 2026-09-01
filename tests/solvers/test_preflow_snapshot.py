@@ -24,6 +24,7 @@ from simulation_core.fluids.preflow_snapshot import (
     canonical_config_sha256,
     canonical_geometry_sha256,
     canonical_source_sha256,
+    inspect_preflow_snapshot,
     load_preflow_snapshot,
     save_preflow_snapshot,
 )
@@ -459,6 +460,31 @@ class PreflowSnapshotTests(unittest.TestCase):
                     self.assertNotIn(transient_name, archive.files)
 
             loaded = load_preflow_snapshot(files, expected_identity=snapshot.identity)
+            expected_artifact_identity = {
+                "metadata_file_sha256": hashlib.sha256(
+                    files.metadata_path.read_bytes()
+                ).hexdigest(),
+                "manifest_sha256": manifest["manifest_sha256"],
+                "npz_file": files.npz_path.name,
+                "npz_sha256": manifest["npz_sha256"],
+            }
+            self.assertEqual(
+                dict(loaded.artifact_identity),
+                expected_artifact_identity,
+            )
+            inspected = inspect_preflow_snapshot(prefix)
+            self.assertEqual(
+                inspected["artifact_identity"],
+                expected_artifact_identity,
+            )
+            self.assertEqual(
+                inspected["identity"],
+                {
+                    "config_sha256": snapshot.identity.config_sha256,
+                    "source_sha256": snapshot.identity.source_sha256,
+                    "geometry_sha256": snapshot.identity.geometry_sha256,
+                },
+            )
             with self.assertRaisesRegex(ValueError, "generation NPZ"):
                 load_preflow_snapshot(
                     files.npz_path,

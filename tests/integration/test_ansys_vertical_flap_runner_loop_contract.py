@@ -81,6 +81,14 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
                 "fsi_coupling_residual_to_effective_tolerance_history",
                 "hibm_fsi_coupling_residual_to_effective_tolerance_history",
             ),
+            (
+                "fsi_iqn_fallback_reasons",
+                "hibm_fsi_coupling_iqn_fallback_reasons",
+            ),
+            (
+                "fsi_iqn_update_limited_history",
+                "hibm_fsi_coupling_iqn_update_limited_history",
+            ),
         )
         for generic_field, runner_field in expected_history_fields:
             self.assertIn(generic_field, mapping_body)
@@ -219,6 +227,56 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
 
         self.assertEqual(len(terminal_returns), 1)
         self.assertIn("computed_result_sources", terminal_returns[0])
+        self.assertIn("taichi_runtime_identity", terminal_returns[0])
+        self.assertIn("profile_wall_time_enabled", terminal_returns[0])
+        terminal_return = next(
+            node
+            for node in ast.walk(run_function)
+            if isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Dict)
+            and any(
+                isinstance(key, ast.Constant)
+                and key.value == "research_probe_terminal"
+                for key in node.value.keys
+            )
+        )
+        self.assertTrue(
+            any(
+                key is None
+                and isinstance(value, ast.Name)
+                and value.id == "preflow_report"
+                for key, value in zip(
+                    terminal_return.value.keys,
+                    terminal_return.value.values,
+                )
+            )
+        )
+
+    def test_research_probe_recaptures_and_compares_after_each_rollback(self) -> None:
+        source = _runner_source()
+        probe_start = source.index(
+            "if (\n                research_probe_config is not None"
+        )
+        probe_end = source.index("\n            generic_run = solve_fsi_runtime(", probe_start)
+        probe = source[probe_start:probe_end]
+
+        rollback = probe.index("probe_runtime.rollback_step(context)")
+        recapture = probe.index(
+            "restored_probe_state = capture_iqn_step_state()",
+            rollback,
+        )
+        compare = probe.index(
+            "_host_macro_step_state_mismatch_fields(",
+            recapture,
+        )
+        append = probe.index("probe_rows.append(", compare)
+        self.assertLess(rollback, recapture)
+        self.assertLess(recapture, compare)
+        self.assertLess(compare, append)
+        self.assertIn(
+            "research probe rollback changed accepted HostMacroStepState",
+            probe,
+        )
 
     def test_iqn_trial_reseals_pressure_pair_anchors_without_accepting_feedback(self) -> None:
         source = _runner_source()

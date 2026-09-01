@@ -11,6 +11,14 @@ import sys
 import numpy as np
 import pytest
 
+from simulation_core.fluids.preflow_snapshot import (
+    PREFLOW_SNAPSHOT_FIELD_NAMES,
+    PreflowSnapshot,
+    PreflowSnapshotIdentity,
+    _FIELD_DTYPES,
+    _expected_shape,
+    save_preflow_snapshot,
+)
 from src.refactored.validation.ansys_vertical_flap_fsi import (
     kalman_oracle_headroom as subject,
 )
@@ -68,20 +76,30 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
 def _base_config(root: Path, *, mode: str, oracle_path: Path | None) -> dict[str, object]:
     snapshot_root = root.parent / "preflow"
     snapshot_root.mkdir(exist_ok=True)
-    snapshot_payload = snapshot_root / "state.synthetic.npz"
     snapshot_manifest = snapshot_root / "state.json"
-    if not snapshot_payload.exists():
-        np.savez(snapshot_payload, state=np.asarray([1.0], dtype=np.float64))
-        _write_json(
-            snapshot_manifest,
-            {
-                "identity": {
-                    "config_sha256": "4" * 64,
-                    "geometry_sha256": "5" * 64,
-                    "source_sha256": _preflow_source_sha256(root.parent),
-                },
-                "npz_file": snapshot_payload.name,
-            },
+    if not snapshot_manifest.exists():
+        grid_shape = (2, 2, 2)
+        fields = {
+            name: np.zeros(
+                _expected_shape(name, grid_shape),
+                dtype=_FIELD_DTYPES[name],
+            )
+            for name in PREFLOW_SNAPSHOT_FIELD_NAMES
+        }
+        fields["sst_specific_dissipation_rate"].fill(1.0)
+        fields["sst_wall_distance_m"].fill(1.0)
+        fields["velocity_dirichlet_boundary_marker_region_id"].fill(-1)
+        save_preflow_snapshot(
+            snapshot_root / "state",
+            PreflowSnapshot(
+                fields=fields,
+                identity=PreflowSnapshotIdentity(
+                    config_sha256="4" * 64,
+                    geometry_sha256="5" * 64,
+                    source_sha256=_preflow_source_sha256(root.parent),
+                ),
+                history={},
+            ),
         )
     return {
         "step_count": 8,

@@ -666,6 +666,12 @@ def test_compiler_profile_ignores_cache_path_and_round_trips(
         config=config, expected_identity=expected,
     )
     assert restored["preflow_snapshot_loaded"] is True
+    assert set(restored["preflow_snapshot_artifact_identity"]) == {
+        "metadata_file_sha256",
+        "manifest_sha256",
+        "npz_file",
+        "npz_sha256",
+    }
     for name in PREFLOW_SNAPSHOT_FIELD_NAMES:
         np.testing.assert_array_equal(
             getattr(source, name).to_numpy(), getattr(target, name).to_numpy(),
