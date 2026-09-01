@@ -44,7 +44,7 @@ verify_reuse_evidence = _reuse_module.verify_reuse_evidence
 
 EXPECTED_SOURCE_COUNT = 139
 EXPECTED_SOURCE_MAP_SHA256 = (
-    "84afaa15c7c4cc07ebceadbc141cb087c53a00efb71f6ca2e81b787649f350d8"
+    "a14a313568d86f6773c8fcbb2d5b1611e833389eb7455272554ae2e78d566b00"
 )
 WORKFLOW_NAME = "ANSYS vertical flap validation contracts"
 _LEGACY_ARTIFACT_KEYS = frozenset(

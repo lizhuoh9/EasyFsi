@@ -520,3 +520,68 @@ that identity and require source-matched preflow and numerical regeneration.
 No runner change, numerical rerun, schema-3 projection, or terminal attestation
 is claimed here. R24D, R24E, adaptive Kalman, GRU, CUDA/numerical reruns,
 Fluent parity, exact50, and long-run claims remain explicitly excluded.
+
+## 13. R24C.1 traction-fix source-matched supersession (2026-09-01)
+
+This section supersedes only the pending/blocked state recorded in Section 12;
+the older R24C and failed-CI records remain historical evidence. Under the
+user's expanded authorization, commit
+`4475da464ad098e26991f0c8bcf5eba836900186` corrected the executable default
+traction predicate to marker offset 0.0, `physical_face_offset` probe origin,
+and probe offset 0.51 cells. The runner SHA256 is
+`56f005af2a3d8b03a50dadb61ea630dc0eb00673df84276d4112e5aa4a922ce8`.
+
+The exact focused gate moved from 4 failures/15 passes to 20 passes. The full
+Windows runner group passed 23 tests, and the broader relevant CPU suite passed
+352 tests with one pre-existing NumPy warning. A fresh Sol Ultra review
+returned ship with no findings. The source-fix commit was pushed non-force to
+`origin/codex/r24c1-ci-attestation`, and GitHub Actions run 33500763817
+concluded success.
+
+The regenerated execution source contains exactly 139 mapped files. Its
+canonical source-map SHA256 is
+`a14a313568d86f6773c8fcbb2d5b1611e833389eb7455272554ae2e78d566b00`.
+Only `benchmarks/official/solid_mpm_fsi_runner.py` changed in that map.
+
+The new stationary preflow root
+`ansys_vf__preflow__material_fine__20260901__r24c1_tractionfix` converged
+naturally at step 79; its load-check consumer completed separately. Its
+config/source/geometry hashes are `16298a97...4783f`,
+`ce0bd548...5fad8`, and `eb28d561...8bbb`. The state JSON, internal
+manifest, and NPZ hashes are `875acc70...1b14`, `09523cd9...f85e`, and
+`d2e562cf...3616`.
+
+All regenerated numerical runs used strict CUDA, f32, seed 0, and Taichi
+1.7.4. The omega 0.50, 0.75, and 1.00 exact8 Q0 arms completed with
+`(trials, rejected, CG) = (24,16,5728), (24,16,5728), (19,11,4528)`.
+Every arm has 8 frames, 8 histories, final time 0.004 s, and full fluid and
+solid `dt_s=0.0005` consumption per accepted step within roundoff.
+
+All nine omega-by-target probes ended `research_probe_terminal`. Each
+evaluated 10 alphas, preserved exactly 1/4/7 accepted-prefix frames and
+histories for target step 2/5/8, and passed convergence, rollback equality,
+sweep-state equality, and no-mismatch checks. Bottom-up verification returned
+`PASS_ORACLE_THRESHOLD_MATRIX`, selected safe `omega=0.75`, and retained
+`academic_offline_feasibility_only` with `deployable=false`.
+
+At omega 0.75, carry reuse off/on completed at `(24,16,5728)` and
+`(19,11,4528)`; offline-oracle reuse off/on both completed at
+`(8,0,1920)`. The oracle arms are non-causal and non-deployable. Bottom-up
+reuse verification returned `PASS_IQN_REUSE_FACTOR_MATRIX` and
+`reuse_matrix_authorized`.
+
+The source-matched seal-input hashes are:
+
+- immutable displacement: `84ee846dc09ec30607eedd21e2f2ecbd0206e594cf17d79d28451b78d219f98f`;
+- threshold response: `7a0bd9dee1c6b16e966c981e518b1c8044eba0816c0803034c4ef559b158b2d6`;
+- threshold source manifest: `bded530116914dd795d74c20628fd6690760dfcf87c9264fc9beffab58f75e9f`;
+- threshold summary: `92a77a62cc4d9e9b48756ae58779cc31a8fffe80c6d484ee83e4fdca4b2487ba`;
+- IQN reuse: `11bb1bb309e64cfa01f1ad3569c082ca839db55ccfc06942a643402e62373b59`;
+- new legacy projection: `3e010664011acd5fd5695d76c6671aa2746bb5a05c8f06e2abdd47791650e742`.
+
+These ignored numerical roots remain local. The final schema-3 projection and
+terminal attestation are generated only after the non-source-mapped
+seal-constant/test/documentation closure is committed, pushed, and has a
+matching successful clean-HEAD GitHub run. This record does not claim Fluent
+parity, exact50, a long run, deployable acceleration, or production predictor
+authorization.

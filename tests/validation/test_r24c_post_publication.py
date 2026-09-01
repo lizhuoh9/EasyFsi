@@ -14,6 +14,13 @@ from tools.validation import r24c_post_publication as subject
 HEAD = "a" * 40
 
 
+def test_production_source_map_contract_constants_are_exact_literals() -> None:
+    assert subject.EXPECTED_SOURCE_COUNT == 139
+    assert subject.EXPECTED_SOURCE_MAP_SHA256 == (
+        "a14a313568d86f6773c8fcbb2d5b1611e833389eb7455272554ae2e78d566b00"
+    )
+
+
 def _json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
