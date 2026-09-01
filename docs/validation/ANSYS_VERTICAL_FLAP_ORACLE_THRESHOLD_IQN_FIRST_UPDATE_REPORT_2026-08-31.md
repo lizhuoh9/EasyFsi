@@ -446,3 +446,55 @@ destination is a non-force push to
 roots remain local and are not part of the Git commit. This report does not
 treat the push itself as numerical validation or remote CI evidence; the final
 handoff must verify the remote commit before claiming publication success.
+
+## 12. R24C.1 CI attestation closure (2026-09-01)
+
+R24C.1 reviewed baseline aef06288d098ac5e674cdec381a5a41df13eff8b in the
+authoritative WSL checkout
+
+    /home/zhuohengli/worktrees/HIBM-MPM-r21-validation
+
+on branch codex/r24c1-ci-attestation. Historical GitHub run 33465020431 had
+conclusion=failure. Its four exact local CI root-cause categories were stale
+particle-bin consumer/generation assertions, missing preflow runtime
+generation/support-radius capture, a solid-substep test targeting the retired
+batched helper instead of the selected macro-step report, and an incomplete
+removed-backend test namespace that failed before the intended full-config
+validation.
+
+The local TDD sequence began RED with 3 failures and 1 error. The corrected
+five-node semantic surface is now OK: the two original particle-bin generation
+tests, the preflow runtime-capture test, the solid-substeps runtime test, and
+the removed-backend full-config test all passed. The original focused sealer
+gate passed 19 tests; the focused suite is now expanded and passes 21 tests.
+The core, contracts helper, CLI, and focused test all pass py_compile. The
+current WSL environment has no ruff module, so no local ruff result is claimed.
+
+The real read-only CPU bottom-up helper returned:
+
+- displacement: PASS_ACCEPTED_DISPLACEMENT_AUDIT;
+- threshold: PASS_ORACLE_THRESHOLD_MATRIX;
+- reuse: PASS_IQN_REUSE_FACTOR_MATRIX with status reuse_matrix_authorized.
+
+The six verified artifact hashes are:
+
+- displacement: 84ee846dc09ec30607eedd21e2f2ecbd0206e594cf17d79d28451b78d219f98f;
+- threshold response: f61224f5a110dcf93de5fd71e99e7bc3adb947a63c0f7abcfa77464d6e8af6d5;
+- threshold source manifest: 3f2b05f4918a84052480e85ebc9495274ed042e38c516dc63619a8cac6d859c0;
+- threshold summary: 92a77a62cc4d9e9b48756ae58779cc31a8fffe80c6d484ee83e4fdca4b2487ba;
+- IQN reuse: 43ec674f82c8e7e09463b31fb91204b449f9ea26a5e2751ff4f59efa26e6772d;
+- legacy projection: 940f3e42cc6eeb2e3c4ae88c48b1108dc7f137714a8775920471b7a1b1fbfffd.
+
+The formal source map remains exactly 139 entries with canonical SHA256
+84afaa15c7c4cc07ebceadbc141cb087c53a00efb71f6ca2e81b787649f350d8, and every
+current-checkout byte was checked. The schema-2 legacy projection was read
+only and never overwritten. The future schema-3 projection keeps
+deployable=false and bottom_up_reverification=false; its terminal attestation
+has not been generated.
+
+The remote Ubuntu/Windows green result and clean-final-commit acceptance are
+pending. Once authorized on a clean checkout, the seal must produce and
+immediately verify the schema-3 projection plus terminal attestation. No
+attestation is claimed in this report. R24D, R24E, adaptive Kalman, GRU,
+CUDA/numerical reruns, Fluent parity, exact50, and long-run claims remain
+explicitly excluded.

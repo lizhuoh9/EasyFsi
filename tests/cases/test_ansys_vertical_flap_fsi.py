@@ -279,7 +279,12 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "flow_solid_boundary_mode"):
             solid_mpm_fsi_runner._validate_rectangular_solid_config(
-                SimpleNamespace(flow_solid_boundary_mode="cell_obstacle_layers")
+                SimpleNamespace(
+                    **{
+                        **vars(VerticalFlapFsiConfig()),
+                        "flow_solid_boundary_mode": "cell_obstacle_layers",
+                    }
+                )
             )
 
     def test_ymin_no_slip_rows_constrain_only_fluid_wall_cells(self):
@@ -3287,17 +3292,50 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         self.assertNotAlmostEqual(config.mpm_support_radius_m, 0.006)
 
     def test_full_domain_runner_persists_solid_substeps_in_process_updates(self):
-        runner_source = inspect.getsource(
-            solid_mpm_fsi_runner.run_hibm_mpm_fsi
-        )
+        captured: dict[str, object] = {}
+        observer = object()
 
-        self.assertIn("_select_and_advance_solid_macro_step(", runner_source)
-        self.assertNotIn("_advance_solid_substeps_batched(", runner_source)
-        self.assertGreaterEqual(
-            runner_source.count("support_radius_m=config.mpm_support_radius_m"),
-            2,
-        )
-        self.assertIn("particle_position_write_observer=record_particle_position_write", runner_source)
+        class Solid:
+            def accepted_particle_max_speed(self) -> float:
+                return 2.0
+
+        def advance(*_args: object, **kwargs: object) -> dict[str, object]:
+            captured.update(kwargs)
+            return {
+                "solid_substeps_selected": 4,
+                "solid_accepted_substep_count": 4,
+                "solid_substeps_executed_total": 4,
+                "solid_rejected_trial_count": 0,
+            }
+
+        with patch.object(
+            solid_mpm_fsi_runner,
+            "solid_substep_cfl_report",
+            lambda *_args, **_kwargs: {
+                "solid_substeps_selected": 4,
+                "solid_elastic_wave_speed_mps": 3.0,
+                "solid_max_particle_speed_mps": 2.0,
+                "solid_min_grid_spacing_m": 0.01,
+            },
+        ), patch.object(
+            solid_mpm_fsi_runner,
+            "_advance_solid_macro_step_with_retries",
+            advance,
+        ):
+            result = solid_mpm_fsi_runner._select_and_advance_solid_macro_step(
+                Solid(),
+                SimpleNamespace(dt_s=0.08, solid_max_automatic_substeps=16),
+                mu_pa=2.0,
+                lambda_pa=3.0,
+                retry_prepare=lambda: None,
+                particle_position_write_observer=observer,
+            )
+
+        self.assertEqual(captured["selected_substeps"], 4)
+        self.assertEqual(captured["particle_position_write_observer"], observer)
+        self.assertEqual(result["solid_substeps_selected"], 4)
+        self.assertAlmostEqual(result["solid_substep_dt_s"], 0.02)
+        self.assertEqual(result["solid_accepted_substep_count"], 4)
 
     def test_full_domain_runner_has_official_style_stationary_preflow_option(self):
         parser_source = inspect.getsource(vertical_flap_case._build_parser)

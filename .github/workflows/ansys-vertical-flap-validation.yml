@@ -72,6 +72,9 @@ jobs:
             tools/audit_ansys_vertical_flap_kalman.py \
             tools/audit_ansys_vertical_flap_oracle_headroom.py \
             tools/audit_ansys_vertical_flap_oracle_threshold.py \
+            tools/validation/r24c_post_publication.py \
+            tools/validation/r24c_post_publication_contracts.py \
+            tools/seal_ansys_vertical_flap_r24c.py \
             tests/validation/test_kalman_statistical_calibration.py \
             tests/validation/test_kalman_oracle_headroom.py \
             tests/validation/test_kalman_oracle_headroom_fail_closed.py \
@@ -79,6 +82,7 @@ jobs:
             tests/validation/test_oracle_threshold_lineage.py \
             tests/validation/test_oracle_threshold_publication.py \
             tests/validation/test_oracle_threshold_reuse_evidence.py \
+            tests/validation/test_r24c_post_publication.py \
             tests/validation/test_our_solver_vertical_flap_runner.py \
             tests/integration/test_ansys_vertical_flap_runner_loop_contract.py
 
@@ -91,6 +95,7 @@ jobs:
             tests/validation/test_oracle_threshold_lineage.py \
             tests/validation/test_oracle_threshold_publication.py \
             tests/validation/test_oracle_threshold_reuse_evidence.py \
+            tests/validation/test_r24c_post_publication.py \
             tests/validation/test_our_solver_vertical_flap_runner.py \
             tests/integration/test_ansys_vertical_flap_runner_loop_contract.py::AnsysVerticalFlapRunnerLoopContractTests::test_iqn_runner_maps_generic_threshold_audit_histories \
             tests/integration/test_ansys_vertical_flap_runner_loop_contract.py::AnsysVerticalFlapRunnerLoopContractTests::test_research_probe_recaptures_and_compares_after_each_rollback \
@@ -104,6 +109,7 @@ jobs:
           python tools/audit_ansys_vertical_flap_kalman.py --help
           python tools/audit_ansys_vertical_flap_oracle_headroom.py --help
           python tools/audit_ansys_vertical_flap_oracle_threshold.py --help
+          python tools/seal_ansys_vertical_flap_r24c.py --help
 
           if [ "$EVENT_NAME" = "pull_request" ]; then
             base="$PR_BASE_SHA"
@@ -203,6 +209,9 @@ jobs:
             validation_runs\ansys_vertical_flap_fsi\scripts\run_fluent_reference_collection_validation.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_traction_selected_formulation_fluent_parity.py `
             validation_runs\ansys_vertical_flap_fsi\scripts\run_preflow_release_step20_matrix.py `
+            tools\validation\r24c_post_publication.py `
+            tools\validation\r24c_post_publication_contracts.py `
+            tools\seal_ansys_vertical_flap_r24c.py `
             scripts\check_validation_artifact_hygiene.py
 
           python -m py_compile `
@@ -224,7 +233,19 @@ jobs:
             tests\integration\test_ansys_vertical_flap_real_solver_validation_status.py `
             tests\integration\test_ansys_vertical_flap_traction_selected_formulation_fluent_parity_comparison_logic.py `
             tests\tools\test_validation_artifact_hygiene.py `
-            tests\solvers\test_pressure_sample_pair_provider_contract.py
+            tests\solvers\test_pressure_sample_pair_provider_contract.py `
+            tests\validation\test_r24c_post_publication.py
+
+      - name: Run R24C.1 CPU publication and semantic contracts
+        shell: pwsh
+        run: |
+          python -m pytest -q tests\validation\test_r24c_post_publication.py
+          python -m unittest -v `
+            tests.benchmarks.test_main_audit_particle_bin_generation_wiring.ParticleBinGenerationWiringTests.test_main_runner_owns_initial_generation_and_preflow_propagates_it `
+            tests.benchmarks.test_main_audit_particle_bin_generation_wiring.ParticleBinGenerationWiringTests.test_every_runner_particle_bin_consumer_receives_the_owned_generation `
+            tests.benchmarks.test_main_audit_particle_bin_generation_wiring.ParticleBinGenerationWiringTests.test_preflow_scatter_receives_current_generation_and_support_radius `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_full_domain_runner_persists_solid_substeps_in_process_updates `
+            tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_public_ansys_entrypoints_reject_removed_cell_obstacle_backend
 
       - name: Run shared-driver and canonical ANSYS contracts
         shell: pwsh

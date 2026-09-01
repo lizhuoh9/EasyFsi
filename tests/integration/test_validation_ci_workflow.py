@@ -83,10 +83,14 @@ class ValidationCiWorkflowTests(unittest.TestCase):
             "oracle_threshold_reuse_evidence.py",
             "oracle_threshold_evidence.py",
             "audit_ansys_vertical_flap_oracle_threshold.py",
+            "r24c_post_publication.py",
+            "r24c_post_publication_contracts.py",
+            "seal_ansys_vertical_flap_r24c.py",
             "test_oracle_threshold_iqn_first_update.py",
             "test_oracle_threshold_lineage.py",
             "test_oracle_threshold_publication.py",
             "test_oracle_threshold_reuse_evidence.py",
+            "test_r24c_post_publication.py",
             "test_our_solver_vertical_flap_runner.py",
             "test_ansys_vertical_flap_runner_loop_contract.py",
         ):
@@ -116,10 +120,44 @@ class ValidationCiWorkflowTests(unittest.TestCase):
             "tools/audit_ansys_vertical_flap_kalman.py --help",
             "tools/audit_ansys_vertical_flap_oracle_headroom.py --help",
             "tools/audit_ansys_vertical_flap_oracle_threshold.py --help",
+            "tools/seal_ansys_vertical_flap_r24c.py --help",
         ):
             with self.subTest(cli=cli):
                 self.assertIn(cli, gate)
+        pytest_gate = gate.split("python -m pytest -q", 1)[1]
+        self.assertIn(
+            "tests/validation/test_r24c_post_publication.py",
+            pytest_gate,
+        )
         self.assertIn('git diff --check "$base...HEAD"', gate)
+
+    def test_windows_gate_compiles_and_runs_r24c_cpu_contracts(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        windows_gate = workflow.split("  contracts:", 1)[1].split(
+            "  scheduled-cuda-step50:",
+            1,
+        )[0]
+        for path in (
+            "tools\\validation\\r24c_post_publication.py",
+            "tools\\validation\\r24c_post_publication_contracts.py",
+            "tools\\seal_ansys_vertical_flap_r24c.py",
+            "tests\\validation\\test_r24c_post_publication.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, windows_gate)
+        for node in (
+            "tests.benchmarks.test_main_audit_particle_bin_generation_wiring.ParticleBinGenerationWiringTests.test_main_runner_owns_initial_generation_and_preflow_propagates_it",
+            "tests.benchmarks.test_main_audit_particle_bin_generation_wiring.ParticleBinGenerationWiringTests.test_every_runner_particle_bin_consumer_receives_the_owned_generation",
+            "tests.benchmarks.test_main_audit_particle_bin_generation_wiring.ParticleBinGenerationWiringTests.test_preflow_scatter_receives_current_generation_and_support_radius",
+            "tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_full_domain_runner_persists_solid_substeps_in_process_updates",
+            "tests.cases.test_ansys_vertical_flap_fsi.AnsysVerticalFlapFsiSmokeTests.test_public_ansys_entrypoints_reject_removed_cell_obstacle_backend",
+        ):
+            with self.subTest(node=node):
+                self.assertIn(node, windows_gate)
+        self.assertIn(
+            "python -m pytest -q tests\\validation\\test_r24c_post_publication.py",
+            windows_gate,
+        )
 
     def test_ci_tools_and_direct_render_dependency_are_locked(self) -> None:
         requirements = REQUIREMENTS.read_text(encoding="utf-8").lower()
