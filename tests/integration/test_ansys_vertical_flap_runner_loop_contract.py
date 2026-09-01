@@ -140,20 +140,7 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
 
     def test_one_partitioned_trial_is_extracted_with_acceptance_outside(self) -> None:
         source = _runner_source()
-        tree = ast.parse(source)
-        run_function = next(
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "run_hibm_mpm_fsi"
-        )
-        step_loop = next(
-            node
-            for node in ast.walk(run_function)
-            if isinstance(node, ast.For)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == "step_index"
-        )
+        step_loop = _fsi_step_loop(source)
         trial_functions = [
             node
             for node in step_loop.body
@@ -168,7 +155,7 @@ class AnsysVerticalFlapRunnerLoopContractTests(unittest.TestCase):
             "_sample_stress_to_marker_forces(",
             "scatter_marker_forces_to_mpm_particles(",
             "_select_and_advance_solid_macro_step(",
-            "update_surface_feedback_from_mpm_surface_particles(",
+            "update_material_surface_from_mpm_particles(",
             "_apply_hibm_sharp_marker_boundary_to_fluid(",
         )
         indices = [trial_body.index(token) for token in ordered_tokens]
@@ -353,17 +340,45 @@ def _runner_source() -> str:
     return RUNNER_SOURCE.read_text(encoding="utf-8")
 
 
+def _fsi_step_loop(source: str) -> ast.For:
+    tree = ast.parse(source)
+    run_function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "run_hibm_mpm_fsi"
+    )
+    return next(
+        node
+        for node in run_function.body
+        if isinstance(node, ast.For)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "step_index"
+    )
+
+
 def _fsi_loop_body(source: str) -> str:
-    loop_start = source.index("for step_index in range(config.step_count):")
-    loop_end = source.index("    if (\n        latest_stress_report is None", loop_start)
-    return source[loop_start:loop_end]
+    loop_body = ast.get_source_segment(source, _fsi_step_loop(source))
+    if loop_body is None:
+        raise AssertionError("could not recover the FSI step loop source")
+    return loop_body
 
 
 def _history_append_body(source: str) -> str:
-    loop_body = _fsi_loop_body(source)
-    append_start = loop_body.index("history.append(")
-    append_end = loop_body.index("\n        )", append_start) + len("\n        )")
-    return loop_body[append_start:append_end]
+    append_statement = next(
+        node
+        for node in ast.walk(_fsi_step_loop(source))
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "append"
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "history"
+    )
+    append_body = ast.get_source_segment(source, append_statement)
+    if append_body is None:
+        raise AssertionError("could not recover the history.append source")
+    return append_body
 
 
 def _flow_advance_body(source: str) -> str:

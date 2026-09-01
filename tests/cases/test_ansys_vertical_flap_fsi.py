@@ -1234,14 +1234,26 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                math.isclose(position[2], solid_max[2] + 0.51 * dz)
+                math.isclose(position[2], solid_max[2])
                 for position in markers.positions_m[:3]
             )
         )
         self.assertTrue(
             all(
-                math.isclose(position[2], solid_min[2] - 0.51 * dz)
+                math.isclose(position[2], solid_min[2])
                 for position in markers.positions_m[3:]
+            )
+        )
+        self.assertTrue(
+            all(
+                math.isclose(origin[2], solid_max[2] + 0.51 * dz)
+                for origin in markers.pressure_probe_origins_m[:3]
+            )
+        )
+        self.assertTrue(
+            all(
+                math.isclose(origin[2], solid_min[2] - 0.51 * dz)
+                for origin in markers.pressure_probe_origins_m[3:]
             )
         )
 
@@ -1900,7 +1912,15 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             "two_sided_pressure_jump",
         )
         self.assertFalse(config.traction_include_viscous)
-        self.assertAlmostEqual(config.traction_marker_face_offset_cells, 0.51)
+        self.assertAlmostEqual(config.traction_marker_face_offset_cells, 0.0)
+        self.assertEqual(
+            config.traction_pressure_probe_origin_mode,
+            "physical_face_offset",
+        )
+        self.assertAlmostEqual(
+            config.traction_pressure_probe_origin_offset_cells,
+            0.51,
+        )
         self.assertAlmostEqual(config.traction_viscosity_pa_s, 0.0)
 
         run_source = inspect.getsource(
@@ -2134,8 +2154,9 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
             )
         )
         explicit_probe_origin = VerticalFlapFsiConfig(
-            traction_pressure_probe_origin_mode="physical_face_offset",
-            traction_pressure_probe_origin_offset_cells=0.51,
+            traction_marker_face_offset_cells=0.0,
+            traction_pressure_probe_origin_mode="marker_position",
+            traction_pressure_probe_origin_offset_cells=None,
         )
         self.assertFalse(
             solid_mpm_fsi_runner._is_default_traction_formulation(
@@ -2144,20 +2165,10 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "fixed-solid diagnostics only"):
             solid_mpm_fsi_runner._validate_rectangular_solid_config(
-                VerticalFlapFsiConfig(
-                    step_count=1,
-                    preflow_steps=0,
-                    traction_pressure_probe_origin_mode="physical_face_offset",
-                    traction_pressure_probe_origin_offset_cells=0.51,
-                )
+                replace(explicit_probe_origin, step_count=1, preflow_steps=0)
             )
         solid_mpm_fsi_runner._validate_rectangular_solid_config(
-            VerticalFlapFsiConfig(
-                step_count=0,
-                preflow_steps=1,
-                traction_pressure_probe_origin_mode="physical_face_offset",
-                traction_pressure_probe_origin_offset_cells=0.51,
-            )
+            replace(explicit_probe_origin, step_count=0, preflow_steps=1)
         )
 
         source = inspect.getsource(solid_mpm_fsi_runner._sample_stress_to_marker_forces)

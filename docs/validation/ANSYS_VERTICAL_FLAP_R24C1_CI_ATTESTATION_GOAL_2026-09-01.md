@@ -2,8 +2,8 @@
 
 Date: 2026-09-01
 
-Status: ACTIVE — remote green acceptance and the actual attestation remain
-pending.
+Status: ACTIVE — fail-closed at a production traction-default regression;
+remote green acceptance and the actual attestation remain pending.
 
 ## Baseline, authority, and authorization
 
@@ -17,10 +17,12 @@ the project entry point and is not an implementation source. All source reads,
 edits, tests, and validation commands use the WSL checkout explicitly.
 
 The current authorization is limited to the R24C.1 core/contracts/focused tests,
-seal CLI, CI workflow and the documentation files named by this goal. It does
-not authorize a commit, push, pull request, remote publication, CUDA run,
-Fluent run, or changes outside that set. A dirty checkout, stale source map,
-artifact drift, verifier mismatch, or failed CI gate is a stop condition.
+seal CLI, CI workflow and the documentation files named by this goal. On
+2026-09-01 the user explicitly authorized commit and push for the R24C.1
+branch. This does not authorize a pull request, publication attestation, CUDA
+run, Fluent run, numerical rerun, or changes outside that set. A dirty
+checkout, stale source map, artifact drift, verifier mismatch, or failed CI
+gate is a stop condition.
 
 ## Objective and scope
 
@@ -71,6 +73,37 @@ semantic nodes are now CPU-only and must remain in the Windows contracts job:
 the two original generation tests, the preflow runtime-capture test, the solid
 substeps runtime test, and the removed-backend full-config test.
 
+## Remote run 33492835609 and fail-closed production finding
+
+Clean commit ea3884b4d78cfa380ab2954467cbb6d4961910ab was pushed to the
+R24C.1 branch and triggered GitHub Actions run 33492835609. The Ubuntu
+quality-and-fast-contracts job passed, the scheduled CUDA job was correctly
+skipped, and every new R24C.1 compile, publication, and five-node semantic
+step in the Windows contracts job passed. Windows failed later in the existing
+source-level runner contract group.
+
+The six failing nodes reproduced identically in WSL, so this was additional
+test coverage rather than a Windows or CRLF defect. Five failures were stale
+test contracts after the deef2f3 continuous-execution refactor: material
+markers versus pressure-probe origins, checkpoint-aware step-loop discovery,
+history append discovery, and the material-surface update API name. The
+test-only corrections reduce the complete source-level group from two failures
+and four errors to 22 passes and one unresolved valid failure.
+
+The remaining failure is a production validation regression. The current
+VerticalFlapFsiConfig defaults place material markers on the physical face and
+offset only pressure probes, but _is_default_traction_formulation still
+recognizes the retired marker-offset formulation. Consequently
+_validate_rectangular_solid_config rejects an otherwise default coupled config
+as a non-default fixed-solid diagnostic. Changing the assertion would hide a
+real error and is forbidden.
+
+Correcting that predicate would modify the frozen executable runner, invalidate
+the 139-file source map, and make every retained R24C numerical root old-source
+evidence. Because this goal excludes CUDA and numerical reruns, the runner is
+unchanged and the workflow remains intentionally fail-closed until a separately
+authorized source-matched regeneration path is chosen.
+
 ## Publication schema and transaction invariants
 
 The core has schema_version 1 and bottom_up_reverification=true. Its
@@ -114,9 +147,10 @@ by these R24C.1 checks.
 
 Remote acceptance is green only when both Ubuntu and Windows jobs pass on a
 clean final commit, with a verified schema-3 projection and all source,
-artifact, runtime, host, and GitHub bindings. Current status is remote green
-pending. The actual schema-3 attestation pair is also pending and must not be
-claimed until the authorized seal runs on a clean checkout.
+artifact, runtime, host, and GitHub bindings. Run 33492835609 is red because
+the existing Windows source-level group correctly exposes the production
+traction-default regression described above. The schema-3 attestation pair is
+therefore pending and must not be generated or claimed from this red branch.
 
 ## Rollback and explicit exclusions
 

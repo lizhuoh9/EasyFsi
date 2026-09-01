@@ -470,6 +470,27 @@ gate passed 19 tests; the focused suite is now expanded and passes 21 tests.
 The core, contracts helper, CLI, and focused test all pass py_compile. The
 current WSL environment has no ruff module, so no local ruff result is claimed.
 
+Commit ea3884b4d78cfa380ab2954467cbb6d4961910ab was pushed and triggered
+GitHub Actions run 33492835609. Ubuntu quality-and-fast-contracts passed, the
+scheduled CUDA job was skipped, and every new R24C.1 compile, focused
+publication, and five-node Windows semantic step passed. The Windows contracts
+job failed only later in its existing source-level runner group. All six nodes
+reproduced in WSL, ruling out a Windows or CRLF-specific cause.
+
+Five failures were stale test contracts after deef2f3: material markers are on
+the physical faces while pressure-probe origins retain the 0.51-cell offset;
+the accepted-step loop is checkpoint-aware; and material-surface feedback uses
+update_material_surface_from_mpm_particles. The minimal test-only corrections
+leave the complete source-level group at 22 passes and one failure.
+
+The last failure is not weakened. VerticalFlapFsiConfig now defaults to marker
+offset 0.0 with physical_face_offset probes at 0.51 cells, while the executable
+_is_default_traction_formulation predicate still recognizes the retired marker
+offset 0.51 and marker_position probe formulation. A non-numerical runtime
+probe confirms _validate_rectangular_solid_config rejects the current default
+coupled config as a non-default fixed-solid diagnostic. This is a production
+validation regression, not a stale expectation.
+
 The real read-only CPU bottom-up helper returned:
 
 - displacement: PASS_ACCEPTED_DISPLACEMENT_AUDIT;
@@ -492,9 +513,10 @@ only and never overwritten. The future schema-3 projection keeps
 deployable=false and bottom_up_reverification=false; its terminal attestation
 has not been generated.
 
-The remote Ubuntu/Windows green result and clean-final-commit acceptance are
-pending. Once authorized on a clean checkout, the seal must produce and
-immediately verify the schema-3 projection plus terminal attestation. No
-attestation is claimed in this report. R24D, R24E, adaptive Kalman, GRU,
-CUDA/numerical reruns, Fluent parity, exact50, and long-run claims remain
-explicitly excluded.
+Remote Ubuntu/Windows green acceptance is blocked by that production finding.
+The reviewed evidence policy permits the retained numerical roots only while
+the 139 executable source bytes remain unchanged; a runner fix would invalidate
+that identity and require source-matched preflow and numerical regeneration.
+No runner change, numerical rerun, schema-3 projection, or terminal attestation
+is claimed here. R24D, R24E, adaptive Kalman, GRU, CUDA/numerical reruns,
+Fluent parity, exact50, and long-run claims remain explicitly excluded.
