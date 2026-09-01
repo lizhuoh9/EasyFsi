@@ -22,6 +22,12 @@ def test_material_default_uses_physical_markers_and_separate_pressure_probes():
     assert config.traction_pressure_probe_origin_offset_cells == 0.51
 
 
+def test_bare_default_config_passes_both_preallocation_validators():
+    config = VerticalFlapFsiConfig()
+    runner._validate_rectangular_solid_config(config)
+    runner._validate_material_surface_transfer_config(config)
+
+
 @pytest.mark.parametrize("change", (
     {"traction_marker_face_offset_cells": 0.51},
     {"traction_marker_face_offset_cells": float("nan")},

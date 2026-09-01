@@ -4886,11 +4886,14 @@ def _is_default_traction_formulation(config: Any) -> bool:
     return (
         _traction_marker_layout(config) == TRACTION_MARKER_LAYOUT_DUAL_PHYSICAL_FACES
         and _traction_pressure_sampling_mode(config) == TRACTION_PRESSURE_TWO_SIDED
-        and math.isclose(_traction_marker_face_offset_cells(config), 0.51)
+        and math.isclose(_traction_marker_face_offset_cells(config), 0.0)
         and not _traction_include_viscous(config)
         and _traction_pressure_probe_origin_mode(config)
-        == TRACTION_PRESSURE_PROBE_ORIGIN_MARKER_POSITION
-        and _traction_pressure_probe_origin_offset_cells(config) is None
+        == TRACTION_PRESSURE_PROBE_ORIGIN_PHYSICAL_FACE_OFFSET
+        and math.isclose(
+            float(_traction_pressure_probe_origin_offset_cells(config) or -1.0),
+            0.51,
+        )
         and _traction_pressure_probe_start_offset_cells(config) is None
         and _traction_pressure_probe_ladder_mode(config)
         == TRACTION_PRESSURE_PROBE_LADDER_CURRENT_NORMAL_CELL
