@@ -258,10 +258,13 @@ def _no_target_trial_worsening(
 
 
 def _standalone_seed_pass(
-    totals: Mapping[str, Mapping[str, Any]], seed: int
+    totals: Mapping[str, Mapping[str, Any]],
+    seed: int,
+    *,
+    family: str = "GDelta-M",
 ) -> bool:
     reference = totals["C0"]
-    candidate = totals[f"GDelta-M-seed{seed}"]
+    candidate = totals[f"{family}-seed{seed}"]
     if not candidate["converged"] or not reference["converged"]:
         return False
     if int(candidate["trials"]) <= int(reference["trials"]) - 1:
@@ -314,6 +317,11 @@ def analyze_live_probe_reports(
         }
         for seed in (0, 1, 2)
     }
+    g0_m_passes = [
+        seed
+        for seed in (0, 1, 2)
+        if _standalone_seed_pass(totals, seed, family="G0-M")
+    ]
     standalone_passes = [
         seed for seed in (0, 1, 2) if _standalone_seed_pass(totals, seed)
     ]
@@ -336,7 +344,11 @@ def analyze_live_probe_reports(
     ar_classification = (
         "PASS_POD_AR_LIVE_VALUE" if ar_pass else "FAIL_POD_AR_LIVE_VALUE"
     )
-    neural_pass = len(standalone_passes) >= 2 or len(gk_passes) >= 2
+    neural_pass = (
+        len(g0_m_passes) >= 2
+        or len(standalone_passes) >= 2
+        or len(gk_passes) >= 2
+    )
     if neural_pass:
         overall = "PASS_NEURAL_LIVE_SIGNAL"
     elif ar_pass:
@@ -348,6 +360,7 @@ def analyze_live_probe_reports(
         "work_totals": totals,
         "effects": effects,
         "passing_seeds": {
+            "g0_m": g0_m_passes,
             "standalone_gru": standalone_passes,
             "gk1_incremental": gk_passes,
         },

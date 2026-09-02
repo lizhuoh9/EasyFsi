@@ -364,6 +364,31 @@ def test_live_analysis_computes_matched_effects_and_frozen_gates() -> None:
     assert result["classifications"]["pod_ar"] == "PASS_POD_AR_LIVE_VALUE"
 
 
+def test_live_analysis_continues_for_g0_m_only_signal() -> None:
+    reports = {7: _probe_report(7), 8: _probe_report(8)}
+    for target_step, report in reports.items():
+        iterations = {arm_id: 3 for arm_id in EXPECTED_ARM_IDS}
+        iterations["Q"] = 1
+        if target_step == 7:
+            iterations["G0-M-seed0"] = 2
+            iterations["G0-M-seed1"] = 2
+        report["research_probe_rows"] = [
+            _probe_row(arm_id, iterations[arm_id])
+            for arm_id in EXPECTED_ARM_IDS
+        ]
+        report["research_probe_anchor_refresh_delta"] = sum(iterations.values())
+
+    result = analyze_live_probe_reports(reports)
+
+    assert result["passing_seeds"]["g0_m"] == [0, 1]
+    assert result["passing_seeds"]["standalone_gru"] == []
+    assert result["passing_seeds"]["gk1_incremental"] == []
+    assert result["classifications"]["standalone_gru"] == (
+        "FAIL_G0_MATCHED_LIVE_VALUE"
+    )
+    assert result["classifications"]["overall"] == "PASS_NEURAL_LIVE_SIGNAL"
+
+
 def test_live_analysis_rejects_rollback_and_first_guess_mismatch() -> None:
     report = _probe_report(7)
     report["research_probe_rows"][0]["rollback_host_macro_step_state_equal"] = False
