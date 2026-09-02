@@ -330,6 +330,158 @@ Point A extrapolation, case presets, marker-area accounting, and plane-strain
 wiring already have focused tests. R26A adds only missing arithmetic, runtime,
 and constituent-construction checks.
 
+### 5.4 Frozen executable component protocol
+
+The component campaign is fixed before any component result is observed. Its
+common FSI1 controls are:
+
+- L0 grid `(4,48,288)`, `dt_s = 0.005`, automatic side/tip marker counts,
+  `flow_predictor_substeps = 1`, `flow_projection_iterations = 4000`, and
+  `flow_cg_tolerance = 1e-6`;
+- `ib_anisotropic_envelope = True`,
+  `classify_far_internal_nodes = True`, and
+  `flow_cg_preconditioner = "fv_multigrid"`;
+- `flow_reprojection_iterations = 1200`,
+  `flow_reprojection_cg_tolerance = 1e-4`,
+  `marker_reseed_interval_steps = None`, and
+  `velocity_damping = 1.0` (no artificial damping).
+
+Automatic markers resolve to side/tip counts `(54,4)` on L0, `(108,7)` on
+L1, and `(162,10)` on L2; changing only nx from 4 to 8 must not change them.
+
+These choices follow the pre-reference geometry/topology contract, not a fit to
+Featflow output. A time-zero initialization audit must still prove connected
+cylinder/beam geometry, complete beam-interior obstacle coverage, no sealed
+fluid pocket, finite zero-load fields, and the expected automatic marker layout.
+Failure stops the campaign; it does not authorize switching a flag after seeing
+reference error.
+
+The solid-only matrix contains three fresh runs:
+
+| run | grid | solid substeps | macro steps | prescribed load |
+| --- | --- | ---: | ---: | --- |
+| S100-nx4 | (4,48,288) | 100 | 40 | \(a_y=0.01\ {\rm m/s^2}\) |
+| S200-nx4 | (4,48,288) | 200 | 40 | \(a_y=0.01\ {\rm m/s^2}\) |
+| S200-nx8 | (8,48,288) | 200 | 40 | \(a_y=0.01\ {\rm m/s^2}\) |
+
+At the beginning of each run, every particle receives
+
+\[
+\mathbf F_p=m_p(0,0.01,0),
+\]
+
+not a particle-count-dependent uniform force. The force is then held fixed for
+all \(40\times0.005=0.2\) s. Every macro step must complete its declared solid
+substeps and full physical time. Each accepted row records Point A, the full
+particle displacement and velocity norms by axis, fixed-root drift, out-of-bounds
+count, deformation-clamp count, and applied-force sums. The root tolerance is
+\(10^{-8}\) m. S100-nx4 versus S200-nx4 and S200-nx4 versus S200-nx8 must each
+satisfy the relative Point-A vector criterion below at 0.2 s.
+
+The fixed-fluid matrix contains fresh nx4 and nx8 runs. Each uses a fixed
+cylinder and a fixed, zero-velocity beam for 500 macro steps (2.5 s); no solid
+advance is allowed. The frozen marker position, velocity, normal, area, region,
+and ordering must remain identical after every step. The boundary for physical
+step \(n\) is imposed at \(t_n=n\Delta t\). Only completed steps 401--500
+(2.005--2.5 s), after the 2 s inlet ramp, enter inlet, flux, no-slip, force,
+and quasi-2D aggregate checks.
+
+After both constituent matrices pass, launch one fresh one-step coupled preflight
+and one separate fresh two-step coupled preflight through the production generic
+FSI path. The two-step run starts at \(t=0\); it must not resume or copy the
+one-step state. These runs check launch, transaction, accepted-time, and artifact
+contracts only.
+
+### 5.5 Frozen formulas, tolerances, and evidence labels
+
+For nonzero finer/reference vector \(\mathbf b\), define
+
+\[
+\delta(\mathbf a,\mathbf b)=
+\frac{\lVert\mathbf a-\mathbf b\rVert_2}{\lVert\mathbf b\rVert_2}.
+\]
+
+A zero or nonfinite denominator fails closed. The two compared observable vectors
+are Point A \((-\Delta z,\Delta y)\) and force per span \((D,L)\). Both the
+100/200-solid-substep Point-A comparison and each nx4/nx8 constituent comparison
+must satisfy \(\delta<0.02\). The solid comparison owns the Point-A check; the
+fixed-fluid comparison owns the force-per-span check.
+
+For a vector field or time series \(\mathbf a=(a_x,a_y,a_z)\), define spanwise
+leakage
+
+\[
+R_x(\mathbf a)=
+\frac{\lVert a_x\rVert_2}
+{\sqrt{\lVert a_y\rVert_2^2+\lVert a_z\rVert_2^2}}.
+\]
+
+The denominator must be nonzero and finite. Concatenate the declared completed
+window before taking each norm. Apply this formula separately to all solid
+particles' displacement and velocity, all active fluid cells' velocity, and raw
+reported force; each must satisfy \(R_x\le10^{-3}\).
+
+For each fully ramped fixed-fluid row, let
+
+\[
+U_{\rm in}=\frac{|Q_{\rm in}|}{H s},\qquad
+e_U=\frac{|U_{\rm in}-\bar U|}{|\bar U|}.
+\]
+
+Require \(\max e_U<0.005\), positive-magnitude inlet and outlet flux in the
+documented -z flow direction, and the time-integrated mass imbalance
+
+\[
+E_Q=
+\frac{\sum_n |Q_{{\rm out},n}-Q_{{\rm in},n}|\Delta t_n}
+{\sum_n \max(|Q_{{\rm in},n}|,|Q_{{\rm out},n}|)\Delta t_n}<0.01.
+\]
+
+Let \(\tau_{32}=32\epsilon_{32}\max(1,|\bar U|)\) m/s. The canonical external
+wall-face constrained-row residual \(\max|\mathbf u_{\rm row}-\mathbf
+u_{\rm target}|\), the base-cylinder obstacle-cell velocity, and normal velocity
+on every base-cylinder obstacle/fluid crossing face must each be at most
+\(\tau_{32}\). Fixed-beam marker no-slip uses the production marker sampler,
+requires exactly the expected valid markers and zero invalid markers, and must
+have finite RMS at most \(10^{-4}\) m/s and finite maximum residual at most
+\(0.01|\bar U|=0.002\) m/s for FSI1.
+
+The outlet check proves that the pressure operator used
+`pressure_outlet_zmin = True`; finite pressure, valid outlet graph/topology,
+converged component labels, zero CG breakdown, and converged pressure solves are
+required. On nonzero-RHS evaluation rows, requested and effective preconditioner
+must both be `fv_multigrid` with zero fallback. The check must not assert that a
+cell-centred `pressure[:,:,0]` slice is identically zero.
+
+Raw solver-axis beam, cylinder-pressure, and cylinder-viscous force vectors are
+persisted before conversion. Drag maps from solver \(-z\), lift from solver
+\(+y\), and span normalization occurs exactly once. Force closure requires
+
+\[
+\mathbf F_{\rm sum}=\mathbf F_{\rm beam}+\mathbf F_{\rm cyl,p}
++\mathbf F_{\rm cyl,v},\qquad
+\frac{\lVert\mathbf F_{\rm total}-\mathbf F_{\rm sum}\rVert_2}
+{\lVert\mathbf F_{\rm sum}\rVert_2}\le32\epsilon_{64}.
+\]
+
+If the total-force norm is zero, exact zero closure is required instead. Every
+component must be finite. A physical-time comparison uses
+`max(1e-15, 1e-12*dt_s)` as its absolute tolerance and also requires exact
+declared/observed substep counts.
+
+Every command claims a new run directory with create-if-absent semantics. Its
+manifest records commit and dirty state, complete configuration, executable
+source paths and per-source hashes, a combined source hash, configuration hash,
+marker-layout hash when applicable, artifact byte hashes, and per-array hashes.
+The canonical array hash is SHA256 over the dtype string, canonical shape, and
+contiguous C-order bytes. Histories contain only completed component steps or
+accepted coupled steps; a failed or rejected state is never appended as accepted.
+
+Successful constituent and comparison commands are
+**PASS_COMPONENT_ONLY**. Successful coupled preflights are
+**PASS_SMOKE_ONLY**. Neither label is a numerical FSI1 pass, and constituent
+nx4/nx8 agreement cannot substitute for a coupled discretization study.
+
 ## 6. FSI1 steady validation
 
 ### 6.1 Frozen grids
@@ -341,9 +493,10 @@ and constituent-construction checks.
 | L2 | (4,144,864) | 7.0 | convergence confirmation |
 
 Refinement preserves \(dy\approx dz\). Marker counts are automatic and
-geometry-derived. The choices for **ib_anisotropic_envelope** and
-**classify_far_internal_nodes** are frozen after geometry, zero-load, and
-internal-pocket checks, before a reference comparison.
+geometry-derived. R26A freezes **ib_anisotropic_envelope = True**,
+**classify_far_internal_nodes = True**, and
+**flow_cg_preconditioner = "fv_multigrid"** before any reference comparison.
+The Section 5.4 initialization audit must pass without changing those controls.
 
 ### 6.2 Run matrix
 
@@ -547,6 +700,7 @@ the old executable identity; old artifacts are never re-signed.
 Allowed classifications include:
 
 - **PASS_CONTRACT_ONLY**
+- **PASS_COMPONENT_ONLY**
 - **PASS_SMOKE_ONLY**
 - **PASS_EXPLORATORY**
 - **PASS_BENCHMARK_QUALITY**
