@@ -56,6 +56,7 @@ def frozen_component_config(
         "markers_per_side": "auto",
         "markers_per_tip": "auto",
         "flow_predictor_substeps": 1,
+        "fluid_advection_scheme": "rk2",
         "flow_projection_iterations": 4000,
         "flow_cg_tolerance": 1.0e-6,
         "flow_cg_preconditioner": "fv_multigrid",

@@ -32,11 +32,13 @@ class TurekCanonicalBoundaryRuntimeTests(unittest.TestCase):
         y_masks = (
             fluid.external_velocity_boundary_y_face_active_component_mask.to_numpy()
         )
+        y_values = fluid.external_velocity_boundary_y_face_value_mps.to_numpy()
         z_masks = (
             fluid.external_velocity_boundary_z_face_active_component_mask.to_numpy()
         )
         z_values = fluid.external_velocity_boundary_z_face_value_mps.to_numpy()
         np.testing.assert_array_equal(y_masks, np.full_like(y_masks, 7))
+        np.testing.assert_array_equal(y_values, np.zeros_like(y_values))
         np.testing.assert_array_equal(z_masks[0], np.zeros_like(z_masks[0]))
         np.testing.assert_array_equal(z_masks[1], np.full_like(z_masks[1], 7))
         np.testing.assert_array_equal(z_values[1, :, 0], 0.0)

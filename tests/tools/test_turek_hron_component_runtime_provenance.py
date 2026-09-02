@@ -100,6 +100,23 @@ def test_solid_runtime_uses_production_particle_mass_field():
     )
 
 
+def test_external_y_face_residual_reads_production_ledger():
+    mask = np.full((2, 3, 4), 7, dtype=np.int32)
+    ledger = np.zeros((2, 3, 4, 3), dtype=np.float32)
+    expected = np.zeros((2, 3, 4, 3), dtype=np.float64)
+    residual = runtimes.FixedFluidRuntime._external_y_face_ledger_residual
+
+    assert residual(mask, ledger, expected) == 0.0
+    ledger[1, 2, 2, 0] = 1.0e-3
+    assert residual(mask, ledger, expected) == pytest.approx(1.0e-3)
+    ledger[1, 2, 2, 0] = np.nan
+    assert np.isinf(residual(mask, ledger, expected))
+    ledger[1, 2, 2, 0] = 0.0
+    assert np.isinf(residual(mask, ledger, expected[..., :2]))
+    mask[0, 0, 0] = 3
+    assert np.isinf(residual(mask, ledger, expected))
+
+
 def test_runtime_identity_is_hashed_in_summary_manifest_and_read_back(tmp_path: Path):
     run_dir = runner._claim_output_dir(tmp_path, "identity")
     result = runner._write_artifacts(

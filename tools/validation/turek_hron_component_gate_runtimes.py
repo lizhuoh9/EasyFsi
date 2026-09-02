@@ -335,15 +335,30 @@ class _FixedFluidRuntime:
         raise TypeError(f"unsupported marker geometry metadata: {type(value).__name__}")
 
     @staticmethod
-    def _external_y_face_ledger_residual(mask: np.ndarray, target: np.ndarray) -> float:
-        """Verify canonical directed y-face data rather than cell-centred rows."""
+    def _external_y_face_ledger_residual(
+        mask: np.ndarray, ledger: np.ndarray, expected: np.ndarray
+    ) -> float:
+        """Compare the production device ledger with the independent case target."""
 
+        face_mask = np.asarray(mask, dtype=np.int32)
+        actual = np.asarray(ledger, dtype=np.float64)
+        required = np.asarray(expected, dtype=np.float64)
         expected_mask = (1 << 3) - 1
-        if np.asarray(mask).shape != np.asarray(target).shape[:-1]:
+        if (
+            actual.ndim != 4
+            or actual.shape[0] != 2
+            or actual.shape[-1] != 3
+            or required.shape != actual.shape
+            or face_mask.shape != actual.shape[:-1]
+        ):
             return math.inf
-        if not np.all(np.asarray(mask, dtype=np.int32) == expected_mask):
+        if (
+            not np.all(face_mask == expected_mask)
+            or not np.all(np.isfinite(actual))
+            or not np.all(np.isfinite(required))
+        ):
             return math.inf
-        return float(np.max(np.abs(np.asarray(target, dtype=np.float64)), initial=0.0))
+        return float(np.max(np.abs(actual - required), initial=0.0))
 
     @staticmethod
     def _base_crossing_normal_speed(
@@ -532,7 +547,11 @@ class _FixedFluidRuntime:
             raise RuntimeError("FAIL_FLUID_ACTIVE_FIELD_EMPTY")
         no_slip = report.no_slip_residual
         mask = self.fluid.external_velocity_boundary_y_face_active_component_mask.to_numpy()
-        target = self.fluid.external_velocity_boundary_y_face_value_mps.to_numpy()
+        ledger = self.fluid.external_velocity_boundary_y_face_value_mps.to_numpy()
+        expected_wall_faces = np.zeros(
+            (2, int(self.fluid.nx), int(self.fluid.nz), 3),
+            dtype=np.float64,
+        )
         inlet, outlet = self._boundary_fluxes(self.fluid, self._config)
         topology = self._topology_valid(report)
         return {
@@ -547,7 +566,9 @@ class _FixedFluidRuntime:
             "inlet_flux_m3ps": float(inlet),
             "outlet_flux_m3ps": float(outlet),
             "marker_layout_sha256": self.marker_layout_hash,
-            "external_wall_face_max_residual_mps": self._external_y_face_ledger_residual(mask, target),
+            "external_wall_face_max_residual_mps": self._external_y_face_ledger_residual(
+                mask, ledger, expected_wall_faces
+            ),
             "external_wall_face_full_component_mask_valid": bool(
                 np.all(np.asarray(mask, dtype=np.int32) == 7)
             ),

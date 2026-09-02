@@ -124,6 +124,7 @@ def test_frozen_component_config_uses_real_turek_fields_and_values():
     assert config["step_count"] == 40
     assert config["markers_per_side"] == config["markers_per_tip"] == "auto"
     assert config["flow_predictor_substeps"] == 1
+    assert config["fluid_advection_scheme"] == "rk2"
     assert config["flow_projection_iterations"] == 4000
     assert config["flow_cg_tolerance"] == pytest.approx(1.0e-6)
     assert config["ib_anisotropic_envelope"] is True

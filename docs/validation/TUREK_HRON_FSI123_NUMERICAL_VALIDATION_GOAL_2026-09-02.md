@@ -336,8 +336,8 @@ The component campaign is fixed before any component result is observed. Its
 common FSI1 controls are:
 
 - L0 grid `(4,48,288)`, `dt_s = 0.005`, automatic side/tip marker counts,
-  `flow_predictor_substeps = 1`, `flow_projection_iterations = 4000`, and
-  `flow_cg_tolerance = 1e-6`;
+  `flow_predictor_substeps = 1`, `fluid_advection_scheme = "rk2"`,
+  `flow_projection_iterations = 4000`, and `flow_cg_tolerance = 1e-6`;
 - `ib_anisotropic_envelope = True`,
   `classify_far_internal_nodes = True`, and
   `flow_cg_preconditioner = "fv_multigrid"`;
@@ -437,14 +437,18 @@ E_Q=
 {\sum_n \max(|Q_{{\rm in},n}|,|Q_{{\rm out},n}|)\Delta t_n}<0.01.
 \]
 
-Let \(\tau_{32}=32\epsilon_{32}\max(1,|\bar U|)\) m/s. The canonical external
-wall-face constrained-row residual \(\max|\mathbf u_{\rm row}-\mathbf
-u_{\rm target}|\), the base-cylinder obstacle-cell velocity, and normal velocity
-on every base-cylinder obstacle/fluid crossing face must each be at most
-\(\tau_{32}\). Fixed-beam marker no-slip uses the production marker sampler,
-requires exactly the expected valid markers and zero invalid markers, and must
-have finite RMS at most \(10^{-4}\) m/s and finite maximum residual at most
-\(0.01|\bar U|=0.002\) m/s for FSI1.
+Let \(\tau_{32}=32\epsilon_{32}\max(1,|\bar U|)\) m/s. Both external y-wall
+device-ledger planes must have full-component mask 7. Against the independently
+frozen zero-wall value, their boundary-ledger residual
+\(\max|\mathbf u_{\rm face,ledger}-\mathbf u_{\rm face,expected}|\), the
+base-cylinder obstacle-cell velocity, and normal velocity on every base-cylinder
+obstacle/fluid crossing face must each be at most \(\tau_{32}\). This first
+quantity proves exact boundary registration, not a persistent RK2 face-state;
+focused RK2 backtrace tests separately prove that all three registered
+components are consumed. Fixed-beam marker no-slip uses the production marker
+sampler, requires exactly the expected valid markers and zero invalid markers,
+and must have finite RMS at most \(10^{-4}\) m/s and finite maximum residual at
+most \(0.01|\bar U|=0.002\) m/s for FSI1.
 
 The outlet check proves that the pressure operator used
 `pressure_outlet_zmin = True`; finite pressure, valid outlet graph/topology,
