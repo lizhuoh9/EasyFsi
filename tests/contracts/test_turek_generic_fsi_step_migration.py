@@ -107,6 +107,31 @@ class TurekGenericFsiStepArchitectureTests(unittest.TestCase):
 
 
 class TurekGenericFsiStepRuntimeTests(unittest.TestCase):
+    def test_completed_solid_macro_time_fields_are_explicit_and_fail_closed(self) -> None:
+        fields = turek._completed_solid_macro_step_time_fields(
+            dt_s=0.005,
+            solid_substeps=100,
+        )
+
+        self.assertEqual(fields["solid_macro_requested_time_s"], 0.005)
+        self.assertEqual(fields["solid_macro_accepted_time_s"], 0.005)
+        self.assertEqual(fields["solid_macro_remaining_unadvanced_time_s"], 0.0)
+        self.assertEqual(fields["solid_substeps"], 100)
+        for bad_dt in (0.0, -0.005, float("nan")):
+            with self.subTest(dt_s=bad_dt), self.assertRaises(ValueError):
+                turek._completed_solid_macro_step_time_fields(
+                    dt_s=bad_dt,
+                    solid_substeps=100,
+                )
+        for bad_substeps in (0, -1):
+            with self.subTest(solid_substeps=bad_substeps), self.assertRaises(
+                ValueError
+            ):
+                turek._completed_solid_macro_step_time_fields(
+                    dt_s=0.005,
+                    solid_substeps=bad_substeps,
+                )
+
     def test_fluid_macro_time_gate_observes_every_accepted_substep(self) -> None:
         class FakeFluid:
             def __init__(self, ledgers: list[tuple[float, float, float]]) -> None:
@@ -168,6 +193,26 @@ class TurekGenericFsiStepRuntimeTests(unittest.TestCase):
                 fluid_substeps=4,
             )
 
+    def test_production_history_persists_accepted_time_and_mpm_health(self) -> None:
+        required = {
+            "fluid_macro_requested_time_s",
+            "fluid_macro_accepted_time_s",
+            "fluid_macro_remaining_unadvanced_time_s",
+            "fluid_predictor_substeps",
+            "solid_macro_requested_time_s",
+            "solid_macro_accepted_time_s",
+            "solid_macro_remaining_unadvanced_time_s",
+            "solid_substeps",
+            "mpm_grid_out_of_bounds_particle_count",
+            "mpm_deformation_clamp_count",
+        }
+
+        self.assertTrue(required.issubset(turek.HISTORY_FIELDS))
+        run_source = inspect.getsource(turek.run_turek_hron_fsi)
+        self.assertIn("**accepted_physical_time_fields", run_source)
+        self.assertIn("latest_report.mpm.grid_out_of_bounds_particle_count", run_source)
+        self.assertIn("latest_report.mpm.deformation_clamp_count", run_source)
+
     def test_every_trial_restores_one_fluid_solid_marker_base(self) -> None:
         fluid = _FakeRestorable(10.0)
         solid = _FakeRestorable(20.0)
@@ -212,6 +257,7 @@ class TurekGenericFsiStepRuntimeTests(unittest.TestCase):
         prepared_gradient = gradient_base + 10.0
         trial_inputs: list[dict[str, object]] = []
         reports = [object(), object()]
+        committed_payloads: list[dict[str, object]] = []
 
         def prepare_step(_context: FsiStepContext) -> None:
             for name, value in prepared_marker.items():
@@ -242,7 +288,12 @@ class TurekGenericFsiStepRuntimeTests(unittest.TestCase):
             boundary.marker_pressure_neumann_gradient_field.from_numpy(
                 np.full_like(gradient_base, 9.0)
             )
-            return reports[len(trial_inputs) - 1]
+            completed_trial_index = len(trial_inputs) - 1
+            return reports[completed_trial_index], {
+                "accepted_physical_time_fields": {
+                    "trial_index": completed_trial_index,
+                }
+            }
 
         boundary_refreshes: list[int] = []
         runtime = turek._TurekHronFsiRuntime(
@@ -253,7 +304,9 @@ class TurekGenericFsiStepRuntimeTests(unittest.TestCase):
             advance_trial=advance_trial,
             prepare_step=prepare_step,
             restore_case_boundaries=lambda _context: boundary_refreshes.append(1),
-            commit_case_step=lambda _context, _trial, _coupling: {},
+            commit_case_step=lambda _context, trial, _coupling: (
+                committed_payloads.append(dict(trial.payload)) or {}
+            ),
             finalize_case_run=lambda: {},
         )
         context = FsiStepContext(step=1, step_index=0, time_s=0.25, dt_s=0.25)
@@ -299,6 +352,14 @@ class TurekGenericFsiStepRuntimeTests(unittest.TestCase):
         np.testing.assert_allclose(second.marker_velocity_mps, 0.25 * second_guess + 0.75)
         self.assertIs(first.payload["latest_report"], reports[0])
         self.assertIs(second.payload["latest_report"], reports[1])
+        self.assertEqual(
+            first.payload["accepted_physical_time_fields"],
+            {"trial_index": 0},
+        )
+        self.assertEqual(
+            second.payload["accepted_physical_time_fields"],
+            {"trial_index": 1},
+        )
 
         runtime.rollback_step(context)
         self.assertEqual(fluid.value, 10.0)
@@ -312,6 +373,11 @@ class TurekGenericFsiStepRuntimeTests(unittest.TestCase):
         np.testing.assert_allclose(
             boundary.marker_pressure_neumann_gradient_field.to_numpy(),
             gradient_base,
+        )
+        runtime.commit_step(context, first, object())
+        self.assertEqual(
+            committed_payloads[0]["accepted_physical_time_fields"],
+            {"trial_index": 0},
         )
 
     def test_prepare_failure_restores_pre_step_turek_state(self) -> None:
@@ -358,7 +424,7 @@ class TurekGenericFsiStepRuntimeTests(unittest.TestCase):
             solid=solid,
             markers=markers,
             boundary=boundary,
-            advance_trial=lambda _context, _trial_index: None,
+            advance_trial=lambda _context, _trial_index: (None, {}),
             prepare_step=fail_prepare,
             restore_case_boundaries=lambda _context: None,
             commit_case_step=lambda _context, _trial, _coupling: {},

@@ -1296,7 +1296,7 @@ class TurekHronObservabilityExportTests(unittest.TestCase):
             expected_marker_count=136,
         )
 
-        self.assertEqual(row["history_schema_version"], 3)
+        self.assertEqual(row["history_schema_version"], 4)
         self.assertEqual(row["stress_expected_marker_count"], 136)
         self.assertEqual(row["projection_cg_converged_all"], True)
         self.assertAlmostEqual(row["post_solid_projection_l2"], 0.0125)
@@ -1392,6 +1392,16 @@ class TurekHronObservabilityExportTests(unittest.TestCase):
             "mpm_scatter_active_pair_count",
             "mpm_scatter_action_reaction_residual_n",
             "fsi_coupling_max_marker_residual_mps",
+            "fluid_macro_requested_time_s",
+            "fluid_macro_accepted_time_s",
+            "fluid_macro_remaining_unadvanced_time_s",
+            "fluid_predictor_substeps",
+            "solid_macro_requested_time_s",
+            "solid_macro_accepted_time_s",
+            "solid_macro_remaining_unadvanced_time_s",
+            "solid_substeps",
+            "mpm_grid_out_of_bounds_particle_count",
+            "mpm_deformation_clamp_count",
         )
         self.assertEqual(HISTORY_FIELDS[-len(expected_suffix) :], expected_suffix)
 

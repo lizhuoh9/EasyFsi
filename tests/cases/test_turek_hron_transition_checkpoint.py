@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +54,72 @@ def test_transition_checkpoint_metadata_accepts_a_longer_run() -> None:
 
     assert completed_step == 183
     assert metadata["version"] == turek.TUREK_HRON_TRANSITION_CHECKPOINT_VERSION
+    assert metadata["history_schema_version"] == turek.TUREK_HRON_HISTORY_SCHEMA_VERSION
+
+
+def _complete_history_row(*, step: int, schema_version: int) -> dict[str, Any]:
+    row = {field: 0 for field in turek.HISTORY_FIELDS}
+    row["step"] = step
+    row["history_schema_version"] = schema_version
+    return row
+
+
+def test_transition_checkpoint_history_rejects_old_or_incomplete_rows() -> None:
+    old_row = _complete_history_row(step=1, schema_version=3)
+    with pytest.raises(ValueError, match="history schema"):
+        turek._validated_turek_hron_transition_checkpoint_history(
+            [old_row],
+            completed_step=1,
+        )
+
+    incomplete_row = _complete_history_row(
+        step=1,
+        schema_version=turek.TUREK_HRON_HISTORY_SCHEMA_VERSION,
+    )
+    incomplete_row.pop("solid_macro_accepted_time_s")
+    with pytest.raises(ValueError, match="missing required fields"):
+        turek._validated_turek_hron_transition_checkpoint_history(
+            [incomplete_row],
+            completed_step=1,
+        )
+
+
+def test_transition_checkpoint_history_and_csv_round_trip_schema_v4(
+    tmp_path: Path,
+) -> None:
+    row = _complete_history_row(
+        step=1,
+        schema_version=turek.TUREK_HRON_HISTORY_SCHEMA_VERSION,
+    )
+    row["mpm_grid_out_of_bounds_particle_count"] = 7
+    row["mpm_deformation_clamp_count"] = 11
+    checkpoint_path = tmp_path / "step_000001_transition_checkpoint.npz"
+    turek._write_turek_hron_transition_checkpoint(
+        checkpoint_path,
+        metadata={
+            "version": turek.TUREK_HRON_TRANSITION_CHECKPOINT_VERSION,
+            "history_schema_version": turek.TUREK_HRON_HISTORY_SCHEMA_VERSION,
+            "history": [row],
+        },
+        arrays={"state": np.asarray([1.0], dtype=np.float32)},
+    )
+
+    loaded_metadata, _ = turek._load_turek_hron_transition_checkpoint(
+        checkpoint_path
+    )
+    restored = turek._validated_turek_hron_transition_checkpoint_history(
+        loaded_metadata["history"],
+        completed_step=1,
+    )
+    csv_path = tmp_path / "history.csv"
+    assert turek._flush_history_csv(csv_path, restored, header_written=False)
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        csv_rows = list(csv.DictReader(handle))
+
+    assert len(csv_rows) == 1
+    assert csv_rows[0]["history_schema_version"] == "4"
+    assert csv_rows[0]["mpm_grid_out_of_bounds_particle_count"] == "7"
+    assert csv_rows[0]["mpm_deformation_clamp_count"] == "11"
 
 
 @pytest.mark.parametrize(

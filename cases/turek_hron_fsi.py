@@ -68,7 +68,8 @@ TUREK_HRON_HISTORY_FLUSH_INTERVAL_STEPS = 25
 # case-local: it captures the exact FSI transition state needed to replay a
 # narrow failure window without pretending to be a general production restart
 # format.
-TUREK_HRON_TRANSITION_CHECKPOINT_VERSION = 1
+TUREK_HRON_HISTORY_SCHEMA_VERSION = 4
+TUREK_HRON_TRANSITION_CHECKPOINT_VERSION = 2
 
 # Channel walls (solver y=0 and y=channel_height_m) are physical no-slip walls.
 # They are exact external component-face constraints. The parabolic inlet lives
@@ -1144,6 +1145,27 @@ def _verified_fluid_macro_step_time_fields(
     }
 
 
+def _completed_solid_macro_step_time_fields(
+    *,
+    dt_s: float,
+    solid_substeps: int,
+) -> dict[str, float | int]:
+    """Describe one solid macro step only after every substep returned."""
+
+    macro_dt_s = float(dt_s)
+    substeps = int(solid_substeps)
+    if not math.isfinite(macro_dt_s) or macro_dt_s <= 0.0:
+        raise ValueError("dt_s must be finite and positive")
+    if substeps <= 0:
+        raise ValueError("solid_substeps must be positive")
+    return {
+        "solid_macro_requested_time_s": macro_dt_s,
+        "solid_macro_accepted_time_s": macro_dt_s,
+        "solid_macro_remaining_unadvanced_time_s": 0.0,
+        "solid_substeps": substeps,
+    }
+
+
 def _advance_turek_hron_solid_macro_step(
     *,
     solid: Any,
@@ -1253,7 +1275,10 @@ class _TurekHronFsiRuntime:
         solid: Any,
         markers: Any,
         boundary: Any,
-        advance_trial: Callable[[FsiStepContext, int], Any],
+        advance_trial: Callable[
+            [FsiStepContext, int],
+            tuple[Any, dict[str, Any]],
+        ],
         prepare_step: Callable[[FsiStepContext], None],
         restore_case_boundaries: Callable[[FsiStepContext], None],
         commit_case_step: Callable[
@@ -1361,10 +1386,15 @@ class _TurekHronFsiRuntime:
             else self.before_trial(context, trial_index)
         )
         try:
-            latest_report = self.advance_trial(context, trial_index)
+            latest_report, advance_payload = self.advance_trial(
+                context,
+                trial_index,
+            )
         finally:
             if self.clear_trial is not None:
                 self.clear_trial()
+        if not isinstance(advance_payload, dict):
+            raise TypeError("Turek FSI trial payload must be a dictionary")
         if self._marker_step_base is None:
             raise RuntimeError("Turek FSI marker base disappeared during a trial")
         marker_candidate = _fsi_coupling_marker_candidate_from_step_base(
@@ -1387,13 +1417,20 @@ class _TurekHronFsiRuntime:
                 latest_report,
             )
         self._trial_index += 1
+        base_payload = {
+            "latest_report": latest_report,
+            "marker_state": marker_candidate,
+            "physical_context": context,
+        }
+        reserved = sorted(set(base_payload).intersection(advance_payload))
+        if reserved:
+            raise ValueError(
+                "Turek FSI trial payload overrides reserved fields: "
+                + ", ".join(reserved)
+            )
         return FsiTrialResult(
             marker_velocity_mps=candidate_velocity,
-            payload={
-                "latest_report": latest_report,
-                "marker_state": marker_candidate,
-                "physical_context": context,
-            },
+            payload={**base_payload, **dict(advance_payload)},
         )
 
     def commit_step(
@@ -1863,7 +1900,7 @@ def _committed_step_observability_row(
     scatter = load.mpm_force_scatter
     marker_forces = load.marker_forces
     return {
-        "history_schema_version": 3,
+        "history_schema_version": TUREK_HRON_HISTORY_SCHEMA_VERSION,
         "stress_expected_marker_count": int(expected_marker_count),
         "projection_cg_converged_all": _optional_report_value(
             main_projection, "cg_converged_all", bool
@@ -2028,6 +2065,17 @@ HISTORY_FIELDS = (
     "mpm_scatter_active_pair_count",
     "mpm_scatter_action_reaction_residual_n",
     "fsi_coupling_max_marker_residual_mps",
+    # Schema v4: accepted physical-time and solid-integrity evidence.
+    "fluid_macro_requested_time_s",
+    "fluid_macro_accepted_time_s",
+    "fluid_macro_remaining_unadvanced_time_s",
+    "fluid_predictor_substeps",
+    "solid_macro_requested_time_s",
+    "solid_macro_accepted_time_s",
+    "solid_macro_remaining_unadvanced_time_s",
+    "solid_substeps",
+    "mpm_grid_out_of_bounds_particle_count",
+    "mpm_deformation_clamp_count",
 )
 
 
@@ -2236,6 +2284,7 @@ def _turek_hron_transition_checkpoint_metadata(
         raise ValueError("marker_count must be positive")
     return {
         "version": TUREK_HRON_TRANSITION_CHECKPOINT_VERSION,
+        "history_schema_version": TUREK_HRON_HISTORY_SCHEMA_VERSION,
         "case_id": TUREK_HRON_CASE_ID,
         "preset": str(preset),
         "completed_step": int(completed_step),
@@ -2259,6 +2308,10 @@ def _validate_turek_hron_transition_checkpoint_metadata(
     expected_version = TUREK_HRON_TRANSITION_CHECKPOINT_VERSION
     if int(metadata.get("version", -1)) != expected_version:
         raise ValueError("transition checkpoint version mismatch")
+    if int(metadata.get("history_schema_version", -1)) != (
+        TUREK_HRON_HISTORY_SCHEMA_VERSION
+    ):
+        raise ValueError("transition checkpoint history schema mismatch")
     if str(metadata.get("case_id", "")) != TUREK_HRON_CASE_ID:
         raise ValueError("transition checkpoint case_id mismatch")
     if str(metadata.get("preset", "")) != str(preset):
@@ -2280,6 +2333,36 @@ def _validate_turek_hron_transition_checkpoint_metadata(
     if str(metadata.get("config_fingerprint", "")) != expected_fingerprint:
         raise ValueError("transition checkpoint configuration fingerprint mismatch")
     return completed_step
+
+
+def _validated_turek_hron_transition_checkpoint_history(
+    history: Any,
+    *,
+    completed_step: int,
+) -> list[dict[str, Any]]:
+    """Validate every committed row before restoring checkpoint state."""
+
+    if not isinstance(history, list) or len(history) != int(completed_step):
+        raise ValueError(
+            "transition checkpoint history must contain every committed row"
+        )
+    required_fields = set(HISTORY_FIELDS)
+    validated: list[dict[str, Any]] = []
+    for expected_step, row in enumerate(history, start=1):
+        if not isinstance(row, dict) or int(row.get("step", -1)) != expected_step:
+            raise ValueError("transition checkpoint history step sequence is invalid")
+        if int(row.get("history_schema_version", -1)) != (
+            TUREK_HRON_HISTORY_SCHEMA_VERSION
+        ):
+            raise ValueError("transition checkpoint history schema mismatch")
+        missing = sorted(required_fields.difference(row))
+        if missing:
+            raise ValueError(
+                "transition checkpoint history row is missing required fields: "
+                + ", ".join(missing)
+            )
+        validated.append(dict(row))
+    return validated
 
 
 def _validated_checkpoint_array(name: str, value: Any) -> np.ndarray:
@@ -3054,8 +3137,11 @@ def run_turek_hron_fsi(
     )
     solid_substep_count = int(config.solid_substeps)
     active_transition_diagnostic_arrays: dict[str, np.ndarray] | None = None
+    completed_solid_time_fields: dict[str, float | int] | None = None
 
     def solid_step() -> Any:
+        nonlocal completed_solid_time_fields
+        completed_solid_time_fields = None
         if active_transition_diagnostic_arrays is not None:
             active_transition_diagnostic_arrays.update(
                 _turek_hron_transition_diagnostic_stage_arrays(
@@ -3077,6 +3163,10 @@ def run_turek_hron_fsi(
             constitutive_model=str(config.solid_constitutive_model),
             enforce_plane_strain_x=bool(config.enforce_plane_strain_x),
             particle_position_write_observer=record_particle_position_write,
+        )
+        completed_solid_time_fields = _completed_solid_macro_step_time_fields(
+            dt_s=float(config.dt_s),
+            solid_substeps=solid_substep_count,
         )
         if active_transition_diagnostic_arrays is not None:
             active_transition_diagnostic_arrays.update(
@@ -3109,22 +3199,10 @@ def run_turek_hron_fsi(
             raise ValueError(
                 "transition checkpoint must precede the requested final step"
             )
-        checkpoint_history = resume_metadata.get("history")
-        if not isinstance(checkpoint_history, list) or len(
-            checkpoint_history
-        ) != int(completed_step_offset):
-            raise ValueError(
-                "transition checkpoint history must contain every committed row"
-            )
-        for expected_step, checkpoint_row in enumerate(
-            checkpoint_history, start=1
-        ):
-            if not isinstance(checkpoint_row, dict) or int(
-                checkpoint_row.get("step", -1)
-            ) != expected_step:
-                raise ValueError(
-                    "transition checkpoint history step sequence is invalid"
-                )
+        checkpoint_history = _validated_turek_hron_transition_checkpoint_history(
+            resume_metadata.get("history"),
+            completed_step=completed_step_offset,
+        )
         _restore_turek_hron_transition_checkpoint_arrays(
             fluid=fluid,
             solid=solid,
@@ -3133,7 +3211,7 @@ def run_turek_hron_fsi(
             payload=resume_arrays,
             particle_position_write_observer=record_particle_position_write,
         )
-        history = [dict(row) for row in checkpoint_history]
+        history = checkpoint_history
         committed_transition_reference_arrays = {
             name: np.asarray(value).copy()
             for name, value in resume_arrays.items()
@@ -3187,7 +3265,9 @@ def run_turek_hron_fsi(
     def advance_trial(
         _context: FsiStepContext,
         _trial_index: int,
-    ) -> Any:
+    ) -> tuple[Any, dict[str, Any]]:
+        nonlocal completed_solid_time_fields
+        completed_solid_time_fields = None
         (
             report,
             predictor_time_observations,
@@ -3263,7 +3343,7 @@ def run_turek_hron_fsi(
             search_radius_xyz_m=search_radius_xyz_m,
             interior_probe_distance_xyz_m=interior_probe_distance_xyz_m,
         )
-        _verified_fluid_macro_step_time_fields(
+        fluid_time_fields = _verified_fluid_macro_step_time_fields(
             predictor_time_observations=predictor_time_observations,
             fluid_projection=report.fluid_to_mpm_loads.fluid_projection,
             fluid_predictor_applied=(
@@ -3272,7 +3352,16 @@ def run_turek_hron_fsi(
             dt_s=float(config.dt_s),
             fluid_substeps=int(config.flow_predictor_substeps),
         )
-        return report
+        if completed_solid_time_fields is None:
+            raise RuntimeError(
+                "Turek-Hron accepted trial omitted its solid macro-step time report"
+            )
+        return report, {
+            "accepted_physical_time_fields": {
+                **fluid_time_fields,
+                **completed_solid_time_fields,
+            }
+        }
 
     def before_trial(
         context: FsiStepContext,
@@ -3417,6 +3506,13 @@ def run_turek_hron_fsi(
         latest_report = trial.payload.get("latest_report")
         if latest_report is None:
             raise RuntimeError("generic Turek FSI trial omitted its sharp-step report")
+        accepted_physical_time_fields = trial.payload.get(
+            "accepted_physical_time_fields"
+        )
+        if not isinstance(accepted_physical_time_fields, dict):
+            raise RuntimeError(
+                "generic Turek FSI trial omitted accepted physical-time fields"
+            )
         write_pending_transition_diagnostic(coupling)
         coupling_fields = _turek_hron_coupling_report_fields(
             coupling,
@@ -3492,6 +3588,13 @@ def run_turek_hron_fsi(
             ),
             "stress_invalid_marker_count": int(
                 load.fluid_stress.invalid_marker_count
+            ),
+            **accepted_physical_time_fields,
+            "mpm_grid_out_of_bounds_particle_count": int(
+                latest_report.mpm.grid_out_of_bounds_particle_count
+            ),
+            "mpm_deformation_clamp_count": int(
+                latest_report.mpm.deformation_clamp_count
             ),
             "history_schema_version": int(
                 committed_observability["history_schema_version"]
