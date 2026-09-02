@@ -8,7 +8,7 @@ import math
 import tempfile
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -936,6 +936,254 @@ def _build_solid(
         "rest": rest,
     }
     return solid, masks
+
+
+def _force_reporting_per_span_fields(
+    *,
+    beam_force_n: tuple[float, float, float],
+    cylinder_pressure_force_n: tuple[float, float, float],
+    cylinder_viscous_force_n: tuple[float, float, float],
+    span_m: float,
+) -> dict[str, float]:
+    """Map solver-axis component forces to Turek-Hron force observables."""
+
+    span = float(span_m)
+    if not math.isfinite(span) or span <= 0.0:
+        raise ValueError("span_m must be finite and positive")
+
+    def finite_components(
+        name: str, values: tuple[float, float, float]
+    ) -> tuple[float, float, float]:
+        components = tuple(float(value) for value in values)
+        if len(components) != 3 or not all(
+            math.isfinite(value) for value in components
+        ):
+            raise ValueError(f"{name} must contain three finite components")
+        return components[0], components[1], components[2]
+
+    beam = finite_components("beam_force_n", beam_force_n)
+    cylinder_pressure = finite_components(
+        "cylinder_pressure_force_n", cylinder_pressure_force_n
+    )
+    cylinder_viscous = finite_components(
+        "cylinder_viscous_force_n", cylinder_viscous_force_n
+    )
+    cylinder = tuple(
+        pressure + viscous
+        for pressure, viscous in zip(
+            cylinder_pressure, cylinder_viscous, strict=True
+        )
+    )
+    beam_drag = -beam[2] / span
+    beam_lift = beam[1] / span
+    cylinder_drag = -cylinder[2] / span
+    cylinder_lift = cylinder[1] / span
+    return {
+        "beam_drag_per_span_n_per_m": beam_drag,
+        "beam_lift_per_span_n_per_m": beam_lift,
+        "cylinder_form_drag_per_span_n_per_m": -cylinder_pressure[2] / span,
+        "cylinder_friction_drag_per_span_n_per_m": -cylinder_viscous[2] / span,
+        "cylinder_drag_per_span_n_per_m": cylinder_drag,
+        "cylinder_lift_per_span_n_per_m": cylinder_lift,
+        "total_drag_per_span_n_per_m": beam_drag + cylinder_drag,
+        "total_lift_per_span_n_per_m": beam_lift + cylinder_lift,
+    }
+
+
+def _capture_fluid_predictor_time_observations(
+    operation: Callable[..., Any],
+    *,
+    fluid_to_observe: Any,
+    **operation_kwargs: Any,
+) -> tuple[Any, tuple[dict[str, float], ...]]:
+    """Run one sharp step while recording every fluid predictor time ledger."""
+
+    original_predict = fluid_to_observe.predict
+    observations: list[dict[str, float]] = []
+
+    def observed_predict(*args: Any, **kwargs: Any) -> Any:
+        result = original_predict(*args, **kwargs)
+        observations.append(
+            {
+                "requested_time_s": float(
+                    getattr(
+                        fluid_to_observe,
+                        "_last_momentum_advection_requested_time_s",
+                        math.nan,
+                    )
+                ),
+                "accepted_time_s": float(
+                    getattr(
+                        fluid_to_observe,
+                        "_last_momentum_advection_accepted_time_s",
+                        math.nan,
+                    )
+                ),
+                "remaining_unadvanced_time_s": float(
+                    getattr(
+                        fluid_to_observe,
+                        "_last_momentum_advection_remaining_unadvanced_time_s",
+                        math.nan,
+                    )
+                ),
+            }
+        )
+        return result
+
+    fluid_to_observe.predict = observed_predict
+    try:
+        result = operation(**operation_kwargs)
+    finally:
+        fluid_to_observe.predict = original_predict
+    return result, tuple(observations)
+
+
+def _verified_fluid_macro_step_time_fields(
+    *,
+    predictor_time_observations: Sequence[Mapping[str, float]],
+    fluid_projection: Mapping[str, Any],
+    fluid_predictor_applied: bool,
+    dt_s: float,
+    fluid_substeps: int,
+) -> dict[str, float | int]:
+    """Fail closed unless every predictor call consumes its physical time."""
+
+    macro_dt_s = float(dt_s)
+    expected_substeps = int(fluid_substeps)
+    if not math.isfinite(macro_dt_s) or macro_dt_s <= 0.0:
+        raise ValueError("dt_s must be finite and positive")
+    if expected_substeps <= 0:
+        raise ValueError("fluid_substeps must be positive")
+    if not bool(fluid_predictor_applied):
+        raise RuntimeError("Turek-Hron fluid predictor was not applied")
+
+    observations = tuple(predictor_time_observations)
+    observed_substeps = int(fluid_projection.get("fluid_substeps", -1))
+    if (
+        observed_substeps != expected_substeps
+        or len(observations) != expected_substeps
+    ):
+        raise RuntimeError("Turek-Hron fluid macro-step time report is incomplete")
+
+    requested_times_s: list[float] = []
+    accepted_times_s: list[float] = []
+    remaining_times_s: list[float] = []
+    expected_substep_dt_s = macro_dt_s / float(expected_substeps)
+    substep_tolerance_s = max(1.0e-15, 1.0e-12 * expected_substep_dt_s)
+    for index, observation in enumerate(observations):
+        requested = float(observation.get("requested_time_s", math.nan))
+        accepted = float(observation.get("accepted_time_s", math.nan))
+        remaining = float(
+            observation.get("remaining_unadvanced_time_s", math.nan)
+        )
+        if not all(
+            math.isfinite(value) for value in (requested, accepted, remaining)
+        ):
+            raise RuntimeError(
+                f"Turek-Hron fluid predictor substep {index} has non-finite time"
+            )
+        if not (
+            math.isclose(
+                requested,
+                expected_substep_dt_s,
+                rel_tol=1.0e-12,
+                abs_tol=substep_tolerance_s,
+            )
+            and math.isclose(
+                accepted,
+                requested,
+                rel_tol=1.0e-12,
+                abs_tol=substep_tolerance_s,
+            )
+            and abs(remaining) <= substep_tolerance_s
+        ):
+            raise RuntimeError(
+                "Turek-Hron fluid predictor did not consume the full macro step: "
+                f"substep={index}, requested_time_s={requested:.16g}, "
+                f"accepted_time_s={accepted:.16g}, "
+                f"remaining_time_s={remaining:.16g}"
+            )
+        requested_times_s.append(requested)
+        accepted_times_s.append(accepted)
+        remaining_times_s.append(remaining)
+
+    requested_time_s = math.fsum(requested_times_s)
+    accepted_time_s = math.fsum(accepted_times_s)
+    remaining_time_s = math.fsum(remaining_times_s)
+    tolerance_s = max(1.0e-15, 1.0e-12 * macro_dt_s)
+    complete = (
+        math.isclose(
+            requested_time_s,
+            macro_dt_s,
+            rel_tol=1.0e-12,
+            abs_tol=tolerance_s,
+        )
+        and math.isclose(
+            accepted_time_s,
+            macro_dt_s,
+            rel_tol=1.0e-12,
+            abs_tol=tolerance_s,
+        )
+        and abs(remaining_time_s) <= tolerance_s
+    )
+    if not complete:
+        raise RuntimeError(
+            "Turek-Hron fluid predictor did not consume the full macro step: "
+            f"expected_dt_s={macro_dt_s:.16g}, "
+            f"expected_substeps={expected_substeps}, "
+            f"observed_substeps={observed_substeps}, "
+            f"requested_time_s={requested_time_s:.16g}, "
+            f"accepted_time_s={accepted_time_s:.16g}, "
+            f"remaining_time_s={remaining_time_s:.16g}"
+        )
+    return {
+        "fluid_macro_requested_time_s": requested_time_s,
+        "fluid_macro_accepted_time_s": accepted_time_s,
+        "fluid_macro_remaining_unadvanced_time_s": remaining_time_s,
+        "fluid_predictor_substeps": observed_substeps,
+    }
+
+
+def _advance_turek_hron_solid_macro_step(
+    *,
+    solid: Any,
+    dt_s: float,
+    solid_substeps: int,
+    mu_pa: float,
+    lambda_pa: float,
+    velocity_damping: float,
+    constitutive_model: str,
+    enforce_plane_strain_x: bool,
+    particle_position_write_observer: Callable[[], None],
+) -> Any:
+    """Advance one accepted solid macro step and close its guard batch."""
+
+    substeps = int(solid_substeps)
+    if substeps <= 0:
+        raise ValueError("solid_substeps must be positive")
+    substep_dt_s = float(dt_s) / float(substeps)
+    substep_damping = float(velocity_damping) ** (1.0 / float(substeps))
+    solid.begin_out_of_bounds_guard_batch()
+    try:
+        for _solid_substep_index in range(substeps):
+            solid.step(
+                dt_s=substep_dt_s,
+                mu_pa=float(mu_pa),
+                lambda_pa=float(lambda_pa),
+                primary_region_id=PRIMARY_REGION_ID,
+                secondary_region_id=SECONDARY_UNUSED_REGION_ID,
+                velocity_damping=substep_damping,
+                constitutive_model=str(constitutive_model),
+                read_report=False,
+            )
+            particle_position_write_observer()
+            if enforce_plane_strain_x:
+                solid.enforce_rest_x_plane()
+                particle_position_write_observer()
+        return solid.end_out_of_bounds_guard_batch()
+    except BaseException:
+        solid.abort_out_of_bounds_guard_batch()
+        raise
 
 
 def _build_markers(
@@ -2790,10 +3038,6 @@ def run_turek_hron_fsi(
         runtime=taichi_runtime,
     )
     mu_pa, lambda_pa = _lame_parameters(config)
-    solid_substep_dt_s = float(config.dt_s) / float(config.solid_substeps)
-    solid_damping = float(config.velocity_damping) ** (
-        1.0 / float(config.solid_substeps)
-    )
     plane_dx_m, plane_dy_m, plane_dz_m = fluid_cell_spacing_m(config)
     plane_spacing_m = max(plane_dy_m, plane_dz_m)
     search_radius_m = 1.5 * plane_spacing_m
@@ -2823,39 +3067,29 @@ def run_turek_hron_fsi(
                     boundary=boundary,
                 )
             )
-        solid.begin_out_of_bounds_guard_batch()
-        try:
-            for _solid_substep_index in range(solid_substep_count):
-                solid.step(
-                    dt_s=solid_substep_dt_s,
-                    mu_pa=mu_pa,
-                    lambda_pa=lambda_pa,
-                    primary_region_id=PRIMARY_REGION_ID,
-                    secondary_region_id=SECONDARY_UNUSED_REGION_ID,
-                    velocity_damping=solid_damping,
-                    constitutive_model=str(config.solid_constitutive_model),
-                    read_report=False,
+        report = _advance_turek_hron_solid_macro_step(
+            solid=solid,
+            dt_s=float(config.dt_s),
+            solid_substeps=solid_substep_count,
+            mu_pa=mu_pa,
+            lambda_pa=lambda_pa,
+            velocity_damping=float(config.velocity_damping),
+            constitutive_model=str(config.solid_constitutive_model),
+            enforce_plane_strain_x=bool(config.enforce_plane_strain_x),
+            particle_position_write_observer=record_particle_position_write,
+        )
+        if active_transition_diagnostic_arrays is not None:
+            active_transition_diagnostic_arrays.update(
+                _turek_hron_transition_diagnostic_stage_arrays(
+                    stage="post_solid",
+                    fluid=fluid,
+                    solid=solid,
+                    markers=markers,
+                    search=search,
+                    boundary=boundary,
                 )
-                record_particle_position_write()
-                if config.enforce_plane_strain_x:
-                    solid.enforce_rest_x_plane()
-                    record_particle_position_write()
-            report = solid.end_out_of_bounds_guard_batch()
-            if active_transition_diagnostic_arrays is not None:
-                active_transition_diagnostic_arrays.update(
-                    _turek_hron_transition_diagnostic_stage_arrays(
-                        stage="post_solid",
-                        fluid=fluid,
-                        solid=solid,
-                        markers=markers,
-                        search=search,
-                        boundary=boundary,
-                    )
-                )
-            return report
-        except BaseException:
-            solid.abort_out_of_bounds_guard_batch()
-            raise
+            )
+        return report
 
     history: list[dict[str, Any]] = []
     completed_step_offset = 0
@@ -2954,7 +3188,12 @@ def run_turek_hron_fsi(
         _context: FsiStepContext,
         _trial_index: int,
     ) -> Any:
-        return advance_hibm_mpm_sharp_mpm_step(
+        (
+            report,
+            predictor_time_observations,
+        ) = _capture_fluid_predictor_time_observations(
+            advance_hibm_mpm_sharp_mpm_step,
+            fluid_to_observe=fluid,
             fluid=fluid,
             markers=markers,
             ib_search=search,
@@ -3024,6 +3263,16 @@ def run_turek_hron_fsi(
             search_radius_xyz_m=search_radius_xyz_m,
             interior_probe_distance_xyz_m=interior_probe_distance_xyz_m,
         )
+        _verified_fluid_macro_step_time_fields(
+            predictor_time_observations=predictor_time_observations,
+            fluid_projection=report.fluid_to_mpm_loads.fluid_projection,
+            fluid_predictor_applied=(
+                report.fluid_to_mpm_loads.fluid_predictor_applied
+            ),
+            dt_s=float(config.dt_s),
+            fluid_substeps=int(config.flow_predictor_substeps),
+        )
+        return report
 
     def before_trial(
         context: FsiStepContext,
@@ -3189,15 +3438,13 @@ def run_turek_hron_fsi(
         cylinder_viscous_force_n = (
             fluid.compute_obstacle_surface_viscous_force_n()
         )
-        cylinder_force_n = tuple(
-            pressure + viscous
-            for pressure, viscous in zip(
-                cylinder_pressure_force_n,
-                cylinder_viscous_force_n,
-                strict=True,
-            )
-        )
         span_m = float(config.span_m)
+        force_reporting = _force_reporting_per_span_fields(
+            beam_force_n=force_n,
+            cylinder_pressure_force_n=cylinder_pressure_force_n,
+            cylinder_viscous_force_n=cylinder_viscous_force_n,
+            span_m=span_m,
+        )
         ramp = inlet_ramp_factor(context.time_s, config)
         inlet_flux_actual_m3ps, outlet_flux_m3ps = _boundary_fluxes_m3ps(
             fluid,
@@ -3229,26 +3476,7 @@ def run_turek_hron_fsi(
             "marker_force_x_n": force_n[0],
             "marker_force_y_n": force_n[1],
             "marker_force_z_n": force_n[2],
-            "beam_drag_per_span_n_per_m": -force_n[2] / span_m,
-            "beam_lift_per_span_n_per_m": force_n[1] / span_m,
-            "cylinder_form_drag_per_span_n_per_m": (
-                -cylinder_pressure_force_n[2] / span_m
-            ),
-            "cylinder_friction_drag_per_span_n_per_m": (
-                -cylinder_viscous_force_n[2] / span_m
-            ),
-            "cylinder_drag_per_span_n_per_m": (
-                -cylinder_force_n[2] / span_m
-            ),
-            "cylinder_lift_per_span_n_per_m": (
-                cylinder_force_n[1] / span_m
-            ),
-            "total_drag_per_span_n_per_m": (
-                -(force_n[2] + cylinder_force_n[2]) / span_m
-            ),
-            "total_lift_per_span_n_per_m": (
-                (force_n[1] + cylinder_force_n[1]) / span_m
-            ),
+            **force_reporting,
             "fluid_speed_max_mps": speed_max_mps,
             "outlet_flux_m3ps": outlet_flux_m3ps,
             "inlet_flux_target_m3ps": (

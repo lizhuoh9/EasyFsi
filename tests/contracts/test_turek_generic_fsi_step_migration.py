@@ -107,6 +107,67 @@ class TurekGenericFsiStepArchitectureTests(unittest.TestCase):
 
 
 class TurekGenericFsiStepRuntimeTests(unittest.TestCase):
+    def test_fluid_macro_time_gate_observes_every_accepted_substep(self) -> None:
+        class FakeFluid:
+            def __init__(self, ledgers: list[tuple[float, float, float]]) -> None:
+                self.ledgers = list(ledgers)
+
+            def predict(self) -> None:
+                requested, accepted, remaining = self.ledgers.pop(0)
+                self._last_momentum_advection_requested_time_s = requested
+                self._last_momentum_advection_accepted_time_s = accepted
+                self._last_momentum_advection_remaining_unadvanced_time_s = (
+                    remaining
+                )
+
+        def run_predictors(*, fluid: FakeFluid) -> str:
+            for _ in range(4):
+                fluid.predict()
+            return "report"
+
+        complete = [(0.00125, 0.00125, 0.0)] * 4
+        fluid = FakeFluid(complete)
+        report, observations = turek._capture_fluid_predictor_time_observations(
+            run_predictors,
+            fluid_to_observe=fluid,
+            fluid=fluid,
+        )
+
+        self.assertEqual(report, "report")
+        self.assertEqual(len(observations), 4)
+        fields = turek._verified_fluid_macro_step_time_fields(
+            predictor_time_observations=observations,
+            fluid_projection={"fluid_substeps": 4},
+            fluid_predictor_applied=True,
+            dt_s=0.005,
+            fluid_substeps=4,
+        )
+        self.assertEqual(fields["fluid_macro_requested_time_s"], 0.005)
+        self.assertEqual(fields["fluid_macro_accepted_time_s"], 0.005)
+        self.assertEqual(fields["fluid_macro_remaining_unadvanced_time_s"], 0.0)
+        self.assertEqual(fields["fluid_predictor_substeps"], 4)
+
+        deficient = [
+            (0.00125, 0.001, 0.00025),
+            (0.00125, 0.00125, 0.0),
+            (0.00125, 0.00125, 0.0),
+            (0.00125, 0.00125, 0.0),
+        ]
+        fluid = FakeFluid(deficient)
+        _, observations = turek._capture_fluid_predictor_time_observations(
+            run_predictors,
+            fluid_to_observe=fluid,
+            fluid=fluid,
+        )
+        with self.assertRaisesRegex(RuntimeError, "full macro step"):
+            turek._verified_fluid_macro_step_time_fields(
+                predictor_time_observations=observations,
+                fluid_projection={"fluid_substeps": 4},
+                fluid_predictor_applied=True,
+                dt_s=0.005,
+                fluid_substeps=4,
+            )
+
     def test_every_trial_restores_one_fluid_solid_marker_base(self) -> None:
         fluid = _FakeRestorable(10.0)
         solid = _FakeRestorable(20.0)

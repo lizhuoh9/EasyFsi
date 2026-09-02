@@ -647,7 +647,7 @@ class TurekHronSolverContractTests(unittest.TestCase):
         self.assertIn("search_inactive_axis", parameters)
 
         source = inspect.getsource(run_turek_hron_fsi)
-        call_start = source.index("return advance_hibm_mpm_sharp_mpm_step(")
+        call_start = source.index("_capture_fluid_predictor_time_observations(")
         call_end = source.index("fluid_dt_s=float(config.dt_s)", call_start)
         advance_call = source[call_start:call_end]
         self.assertIn("search_inactive_axis=(", advance_call)
@@ -701,37 +701,33 @@ class TurekHronSolverContractTests(unittest.TestCase):
             source,
         )
 
-    def test_solid_substeps_use_one_fail_closed_oob_guard_batch(self):
-        source = inspect.getsource(run_turek_hron_fsi)
-        solid_step_source = source[
-            source.index("def solid_step()") : source.index(
-                "history: list[dict[str, Any]]"
-            )
-        ]
+    def test_solid_macro_helper_uses_one_fail_closed_oob_guard_batch(self):
+        source = inspect.getsource(
+            turek_hron_case._advance_turek_hron_solid_macro_step
+        )
 
-        begin_index = solid_step_source.index(
+        begin_index = source.index(
             "solid.begin_out_of_bounds_guard_batch()"
         )
-        loop_index = solid_step_source.index(
-            "for _solid_substep_index in range(solid_substep_count):"
+        loop_index = source.index(
+            "for _solid_substep_index in range(substeps):"
         )
-        end_index = solid_step_source.index(
-            "report = solid.end_out_of_bounds_guard_batch()"
+        end_index = source.index(
+            "return solid.end_out_of_bounds_guard_batch()"
         )
-        return_index = solid_step_source.index("return report", end_index)
+        abort_index = source.index("solid.abort_out_of_bounds_guard_batch()")
 
         self.assertLess(begin_index, loop_index)
         self.assertLess(loop_index, end_index)
-        self.assertLess(end_index, return_index)
-        self.assertEqual(solid_step_source.count("read_report=False"), 1)
-        self.assertNotIn("read_report=True", solid_step_source)
+        self.assertLess(end_index, abort_index)
+        self.assertEqual(source.count("read_report=False"), 1)
+        self.assertNotIn("read_report=True", source)
         self.assertNotIn(
             "read_report=(_solid_substep_index == solid_substep_count - 1)",
-            solid_step_source,
+            source,
         )
-        self.assertIn("except BaseException:", solid_step_source)
-        self.assertIn("solid.abort_out_of_bounds_guard_batch()", solid_step_source)
-        self.assertIn("\n            raise", solid_step_source)
+        self.assertIn("except BaseException:", source)
+        self.assertIn("\n        raise", source)
 
 
 def _generic_coupling_fields(
