@@ -134,7 +134,7 @@ class _SolidOnlyRuntime:
 
     def _apply_mass_proportional_force(self) -> None:
         count = int(self.solid.particle_count)
-        masses = self.solid.mass.to_numpy()[:count]
+        masses = self.solid.mass_kg.to_numpy()[:count]
         force = np.asarray(
             masses[:, None] * self._acceleration.astype(np.float32)[None, :],
             dtype=np.float32,

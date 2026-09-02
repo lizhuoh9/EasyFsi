@@ -71,6 +71,35 @@ def test_runtime_constructor_rejects_callable_returning_prebuilt_instance():
         runtimes.construct_component_runtime(lambda _: prebuilt, effective)
 
 
+def test_solid_runtime_uses_production_particle_mass_field():
+    class Field:
+        def __init__(self, value):
+            self.value = np.asarray(value, dtype=np.float32)
+
+        def to_numpy(self):
+            return self.value.copy()
+
+        def from_numpy(self, value):
+            self.value = np.asarray(value, dtype=np.float32).copy()
+
+    class Solid:
+        particle_count = 2
+        mass_kg = Field([2.0, 3.0, 99.0])
+        external_force_n = Field(np.zeros((2, 3), dtype=np.float32))
+
+    runtime = object.__new__(runtimes.SolidOnlyRuntime)
+    runtime.solid = Solid()
+    runtime._acceleration = np.asarray([0.0, 0.01, 0.0], dtype=np.float64)
+    runtime._apply_mass_proportional_force()
+
+    np.testing.assert_allclose(
+        runtime.solid.external_force_n.to_numpy(),
+        [[0.0, 0.02, 0.0], [0.0, 0.03, 0.0]],
+        rtol=1.0e-6,
+        atol=0.0,
+    )
+
+
 def test_runtime_identity_is_hashed_in_summary_manifest_and_read_back(tmp_path: Path):
     run_dir = runner._claim_output_dir(tmp_path, "identity")
     result = runner._write_artifacts(
