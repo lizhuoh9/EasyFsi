@@ -25,21 +25,32 @@ obstacle cells outside the analytic beam-cell-intersection or the canonical
 cylinder. This update invalidates older component artifacts by source identity
 and does not itself establish new FSI1/2/3 numerical evidence.
 
-R26A fixed-fluid endpoint-arbitration update (2026-09-03): the first
+R26A fixed-fluid same-point-arbitration update (2026-09-03): the first
 source-matched nx4 fixed-fluid attempt after that correction passed its
 time-zero audit, then stopped during the first physical step with six canonical
 component-face target conflicts. It produced no accepted physical row. The
 conflicting authors were a direct fluid row and its relocation shadow at the
 same physical free-tip endpoint: their serialized targets were exactly equal,
 but their independently reconstructed effective targets differed only by
-floating-point roundoff. The repair discards the shadow only after the existing
-redundant-shadow proof succeeds and additionally requires the inactive axis,
-the same unique registered segment and marker, identical one-hot endpoint
-weights, identical boundary point, an exactly equal serialized target, finite
+floating-point roundoff. The first repair covered exact one-hot endpoints.
+
+After regenerating the source-matched solid-only chain, nx4 fixed-fluid attempt
+`r03` again passed its time-zero audit and stopped during the first physical
+step, before any accepted row, with two target conflicts. Its first witness was
+not an endpoint: the direct row and its relocation shadow projected to the same
+exact interior point of registered segment `(109,110)`, with the same nearest
+marker, projection weights, boundary point, region, and serialized zero target.
+Their effective targets differed by about `2.07e-19 m/s`.
+
+The generalized repair still discards the shadow only after the existing full
+redundant-shadow proof succeeds. It additionally requires the inactive axis,
+an exactly equal serialized component target, the exact same nearest marker,
+all three projection weights, and all three boundary-point coordinates, finite
 effective targets, and an effective-target difference no greater than
-`1e-6 m/s`. It preserves the direct target without averaging or rewriting it.
-Two focused endpoint tests and six neighboring strict-CUDA contract tests pass;
-the complete component-face geometry module exceeded its 1200 s bound and has
+`1e-6 m/s`. It preserves the direct target bits without averaging or rewriting
+them. Three focused tests and twelve neighboring strict-CUDA contract tests
+pass; Python compilation, diff checks, and Ruff also pass. The complete
+component-face geometry module was not rerun; its preceding 1200 s attempt has
 no module-level verdict. All component artifacts predating this source change
 are source-stale and must be regenerated. This update authorizes another
 component-gate attempt; it is not fixed-fluid or FSI1 numerical evidence.

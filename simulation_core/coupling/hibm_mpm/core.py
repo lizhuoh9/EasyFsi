@@ -20485,7 +20485,7 @@ class HibmMpmIbBoundaryConditions:
                                                     direct_reference_slot
                                                 ]
                                             )
-                                            endpoint_roundoff_same_slot_shadow_target = (
+                                            same_projected_point_roundoff_same_slot_shadow_target = (
                                                 axis
                                                 == surface_projection_inactive_axis
                                                 and current_serialized_target[axis]
@@ -20502,24 +20502,6 @@ class HibmMpmIbBoundaryConditions:
                                                 == direct_slot_projection_weights.y
                                                 and current_projection_weights.z
                                                 == direct_slot_projection_weights.z
-                                                and (
-                                                    (
-                                                        direct_slot_projection_weights.x
-                                                        == 1.0
-                                                        and direct_slot_projection_weights.y
-                                                        == 0.0
-                                                        and direct_slot_projection_weights.z
-                                                        == 0.0
-                                                    )
-                                                    or (
-                                                        direct_slot_projection_weights.x
-                                                        == 0.0
-                                                        and direct_slot_projection_weights.y
-                                                        == 1.0
-                                                        and direct_slot_projection_weights.z
-                                                        == 0.0
-                                                    )
-                                                )
                                                 and boundary_point.x
                                                 == node_boundary_point_m[source].x
                                                 and boundary_point.y
@@ -20551,7 +20533,7 @@ class HibmMpmIbBoundaryConditions:
                                                 )
                                                 and (
                                                     exact_same_slot_shadow_target
-                                                    or endpoint_roundoff_same_slot_shadow_target
+                                                    or same_projected_point_roundoff_same_slot_shadow_target
                                                     or cached_transverse_adjacent_direct_pair_available
                                                     or transverse_interpolated_same_slot_shadow
                                                 )

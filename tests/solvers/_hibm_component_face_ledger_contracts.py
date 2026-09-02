@@ -13791,15 +13791,16 @@ class CanonicalComponentFaceLedgerContractMixin:
         finally:
             boundary.__dict__.pop(closure_name, None)
 
-    def _run_inactive_axis_endpoint_shadow_prepare(
+    def _run_inactive_axis_same_projected_point_shadow_prepare(
         self,
         *,
-        endpoint_marker: int,
+        endpoint_marker: int | None,
         shadow_serialized_x: float,
         shadow_sample_x: float,
         stop_after_prepare: bool,
+        identity_drift: str | None = None,
     ) -> tuple[dict[str, object], tuple[tuple[str, bytes], ...], BaseException | None]:
-        """Exercise one endpoint shadow through claim preparation only."""
+        """Exercise one same-projected-point shadow through claim preparation."""
 
         class _StopAfterClaimPrepare(Exception):
             pass
@@ -13824,6 +13825,23 @@ class CanonicalComponentFaceLedgerContractMixin:
         search.node_projection_marker_weights[shadow] = tuple(
             float(value) for value in search.node_projection_marker_weights[direct]
         )
+        if identity_drift == "projection_weights":
+            weights = np.asarray(
+                search.node_projection_marker_weights[shadow], dtype=np.float32
+            )
+            weights[0] = np.nextafter(weights[0], np.float32(np.inf))
+            weights[1] = np.nextafter(weights[1], np.float32(-np.inf))
+            search.node_projection_marker_weights[shadow] = tuple(weights)
+        elif identity_drift == "boundary_z":
+            boundary_point = list(search.node_boundary_point_m[shadow])
+            boundary_point[2] = float(
+                np.nextafter(np.float32(boundary_point[2]), np.float32(np.inf))
+            )
+            search.node_boundary_point_m[shadow] = tuple(boundary_point)
+        elif identity_drift == "nearest_marker":
+            search.nearest_marker[shadow] = 1
+        elif identity_drift is not None:
+            raise ValueError(f"unknown identity drift: {identity_drift!r}")
         boundary.velocity_dirichlet_mps_field[shadow] = (
             shadow_serialized_x,
             3.0,
@@ -13851,6 +13869,16 @@ class CanonicalComponentFaceLedgerContractMixin:
                     for value in boundary.velocity_dirichlet_relocation_shadow_storage_base_row[
                         direct
                     ]
+                )
+                observed["direct_nearest_marker"] = int(search.nearest_marker[direct])
+                observed["shadow_nearest_marker"] = int(search.nearest_marker[shadow])
+                observed["direct_projection_weights"] = tuple(
+                    float(value)
+                    for value in search.node_projection_marker_weights[direct]
+                )
+                observed["shadow_projection_weights"] = tuple(
+                    float(value)
+                    for value in search.node_projection_marker_weights[shadow]
                 )
                 observed["shadow_boundary_point_m"] = tuple(
                     float(value) for value in search.node_boundary_point_m[shadow]
@@ -13892,6 +13920,11 @@ class CanonicalComponentFaceLedgerContractMixin:
                 )
                 observed["target_conflicts"] = int(
                     boundary.report_velocity_dirichlet_component_face_target_conflict_count[
+                        None
+                    ]
+                )
+                observed["relocation_blocked_count"] = int(
+                    boundary.report_velocity_dirichlet_component_face_relocation_blocked_count[
                         None
                     ]
                 )
@@ -13955,10 +13988,10 @@ class CanonicalComponentFaceLedgerContractMixin:
         )
         return observed, ledger_before, failure
 
-    def test_inactive_axis_endpoint_shadow_roundoff_keeps_direct_authority(
+    def test_inactive_axis_same_projected_point_shadow_roundoff_keeps_direct_authority(
         self,
     ) -> None:
-        """A sub-tolerance endpoint shadow preserves direct f32 authority."""
+        """A sub-tolerance same-point shadow preserves direct f32 authority."""
 
         shadow_sample = float(np.nextafter(np.float32(2.0), np.float32(np.inf)))
         direct_bits = int(np.float32(2.0).view(np.uint32))
@@ -13967,10 +14000,10 @@ class CanonicalComponentFaceLedgerContractMixin:
         self.assertEqual(shadow_bits - direct_bits, 1)
         self.assertGreater(shadow_delta, 0.0)
         self.assertLessEqual(shadow_delta, 1.0e-6)
-        for endpoint_marker in (0, 1):
+        for endpoint_marker in (None, 0, 1):
             with self.subTest(endpoint_marker=endpoint_marker):
                 observed, _, failure = (
-                    self._run_inactive_axis_endpoint_shadow_prepare(
+                    self._run_inactive_axis_same_projected_point_shadow_prepare(
                         endpoint_marker=endpoint_marker,
                         shadow_serialized_x=2.0,
                         shadow_sample_x=shadow_sample,
@@ -13998,15 +14031,15 @@ class CanonicalComponentFaceLedgerContractMixin:
                 )
                 self.assertEqual((observed["first_key"], observed["second_key"]), (-1, -1))
 
-    def test_inactive_axis_endpoint_shadow_rejects_nonidentical_contracts(
+    def test_inactive_axis_same_projected_point_shadow_rejects_nonidentical_contracts(
         self,
     ) -> None:
-        """Endpoint serialized and effective differences remain fail-closed."""
+        """Same-point serialized and effective differences remain fail-closed."""
 
         nextafter_two = float(np.nextafter(np.float32(2.0), np.float32(np.inf)))
         baseline, _, baseline_failure = (
-            self._run_inactive_axis_endpoint_shadow_prepare(
-                endpoint_marker=0,
+            self._run_inactive_axis_same_projected_point_shadow_prepare(
+                endpoint_marker=None,
                 shadow_serialized_x=2.0,
                 shadow_sample_x=nextafter_two,
                 stop_after_prepare=True,
@@ -14019,8 +14052,8 @@ class CanonicalComponentFaceLedgerContractMixin:
         ):
             with self.subTest(name=name):
                 observed, ledger_before, failure = (
-                    self._run_inactive_axis_endpoint_shadow_prepare(
-                        endpoint_marker=0,
+                    self._run_inactive_axis_same_projected_point_shadow_prepare(
+                        endpoint_marker=None,
                         shadow_serialized_x=serialized,
                         shadow_sample_x=sample,
                         stop_after_prepare=False,
@@ -14055,6 +14088,90 @@ class CanonicalComponentFaceLedgerContractMixin:
                         float(observed["shadow_effective_delta_mps"]),
                         1.0e-6,
                     )
+
+    def test_inactive_axis_same_projected_point_shadow_rejects_identity_drift(
+        self,
+    ) -> None:
+        """One-ULP identity drift must not enter the same-point exception."""
+
+        shadow_sample = float(np.nextafter(np.float32(2.0), np.float32(np.inf)))
+        baseline, _, baseline_failure = (
+            self._run_inactive_axis_same_projected_point_shadow_prepare(
+                endpoint_marker=None,
+                shadow_serialized_x=2.0,
+                shadow_sample_x=shadow_sample,
+                stop_after_prepare=True,
+            )
+        )
+        self.assertIsNone(baseline_failure)
+        for identity_drift in (
+            "projection_weights",
+            "boundary_z",
+            "nearest_marker",
+        ):
+            with self.subTest(identity_drift=identity_drift):
+                observed, ledger_before, failure = (
+                    self._run_inactive_axis_same_projected_point_shadow_prepare(
+                        endpoint_marker=None,
+                        shadow_serialized_x=2.0,
+                        shadow_sample_x=shadow_sample,
+                        stop_after_prepare=False,
+                        identity_drift=identity_drift,
+                    )
+                )
+                self.assertIsNotNone(failure)
+                self.assertRegex(
+                    str(failure),
+                    r"conflicting canonical component-face claims \(target\)",
+                )
+                self.assertEqual(observed["shadow_valid"], 1)
+                self.assertEqual(observed["shadow_source"], (0, 1, 2))
+                self.assertEqual(observed["shadow_storage"], (0, 2, 2))
+                self.assertEqual(observed["relocation_blocked_count"], 0)
+                self.assertEqual(observed["claim_count"], 2)
+                self.assertLess(observed["first_key"], -1)
+                self.assertLess(observed["second_key"], -1)
+                self.assertEqual(
+                    observed["target_conflicts"],
+                    baseline["target_conflicts"] + 1,
+                )
+                self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+                if identity_drift == "projection_weights":
+                    self.assertEqual(
+                        np.float32(sum(observed["shadow_projection_weights"])),
+                        np.float32(1.0),
+                    )
+                    self.assertLessEqual(
+                        max(
+                            abs(
+                                float(shadow_weight - direct_weight)
+                            )
+                            for direct_weight, shadow_weight in zip(
+                                observed["direct_projection_weights"],
+                                observed["shadow_projection_weights"],
+                                strict=True,
+                            )
+                        ),
+                        1.0e-6,
+                    )
+                elif identity_drift == "boundary_z":
+                    self.assertGreater(
+                        abs(
+                            float(observed["shadow_boundary_point_m"][2])
+                            - 0.625
+                        ),
+                        0.0,
+                    )
+                    self.assertLessEqual(
+                        abs(
+                            float(observed["shadow_boundary_point_m"][2])
+                            - 0.625
+                        ),
+                        1.0e-6,
+                    )
+                else:
+                    self.assertEqual(observed["direct_nearest_marker"], 0)
+                    self.assertEqual(observed["shadow_nearest_marker"], 1)
 
     def test_shifted_inactive_axis_double_relocation_reconstructs_one_face_ray(
         self,

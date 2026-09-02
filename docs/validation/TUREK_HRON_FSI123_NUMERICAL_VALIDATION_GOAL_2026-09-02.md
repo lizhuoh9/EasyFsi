@@ -398,15 +398,39 @@ segment, nearest marker, one-hot endpoint weights, boundary point, region, and
 exact serialized zero target; their distinct interior rays nevertheless
 produced non-bit-identical effective targets at roundoff scale.
 
-The endpoint repair remains fail-closed. It consumes the relocation shadow only
-when the existing redundant-shadow proof succeeds and all of the endpoint
-identity fields above match exactly, both effective targets are finite, and
-their difference is at most `1e-6 m/s`. The direct claim remains authoritative;
-the implementation neither averages claims nor relaxes the global conflict
-rule. Focused strict-CUDA evidence is two endpoint tests plus six neighboring
-component-face contract tests passing. The full component-face geometry module
-timed out at 1200 s and therefore has no verdict. This source change makes the
-previous solid-only artifacts source-stale again: the entire frozen component
+That endpoint repair remained fail-closed. It consumed the relocation shadow
+only when the existing redundant-shadow proof succeeded and all endpoint
+identity fields matched exactly, both effective targets were finite, and their
+difference was at most `1e-6 m/s`. The direct claim remained authoritative;
+the implementation neither averaged claims nor relaxed the global conflict
+rule. Its focused strict-CUDA evidence was two endpoint tests plus six
+neighboring component-face contract tests passing. The full component-face
+geometry module timed out at 1200 s and therefore had no verdict.
+
+After the solid-only chain was regenerated against that source, nx4 fixed-fluid
+attempt `r03` passed the time-zero audit and then failed during its first
+physical step, before any accepted row or usable artifact, with two canonical
+target conflicts. The first direct/shadow pair projected to the same exact
+interior point of segment `(109,110)`: nearest marker `110`, weights
+`(0.3541681767,0.6458318233,0)`, full boundary point, region, normal, and
+serialized zero target all agreed. Both outer redundant-shadow proofs were
+valid, while independently reconstructed effective targets differed by only
+about `2.07e-19 m/s`. The old one-hot-only predicate was therefore the sole
+rejected condition.
+
+The narrow repair now applies to a same exact projected wall point, whether an
+endpoint or segment interior. It still requires the complete outer
+redundant-shadow proof, the inactive axis, exact serialized component target,
+exact nearest marker, exact three-component projection weights, exact
+three-coordinate boundary point, finite effective targets, and an effective
+difference no greater than `1e-6 m/s`. Only the shadow is consumed; the direct
+f32 target bits remain authoritative and no averaging or global tolerance
+change is allowed. Focused strict-CUDA evidence is three tests covering the
+interior and both endpoints plus serialized/effective/identity-drift negative
+cases, followed by twelve neighboring component-face contract tests passing.
+Python compilation, `git diff --check`, and Ruff pass. The full module was not
+rerun, so there is still no module-level verdict. This source change makes all
+preceding solid-only artifacts source-stale again: the entire frozen component
 order must be regenerated before nx4 fixed-fluid is retried, and none of this
 is yet FSI1 numerical evidence.
 
