@@ -12,3 +12,6 @@ validation_runs/ansys_vertical_flap_fsi/fluent_reference/source_exports/public_t
 # This legacy validation bundle hashes canonical LF bytes.  Pin the checkout
 # form so Git archives, Linux clones, and Windows clones materialize identically.
 validation/ansys-fluent-official-half-domain-hibm-mpm-2026-06-25/** text=auto eol=lf
+
+# These Featflow files are immutable upstream bytes bound by SHA256 manifests.
+docs/validation/turek_hron_featflow/*.point binary

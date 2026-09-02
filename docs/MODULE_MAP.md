@@ -123,6 +123,23 @@ root wrapper files:
 - Case-agnostic FSI orchestration goes in `simulation_core/drivers/`.
 - Fluent benchmark/parity runners should use these package paths and must not introduce case-specific solver logic under `simulation_core/`.
 
+## Turek-Hron Offline Validation Ownership
+
+`src/refactored/validation/turek_hron_fsi/` owns the solver-free Turek-Hron
+reference and assessment layer. `references.py` is the single immutable,
+source-first catalog for canonical Featflow definitions, published table rows,
+raw-series identities, and separately labelled LS-DYNA cross-checks.
+`featflow.py` accepts only manifest fields and raw bytes that exactly match that
+catalog. `limit_cycle.py` owns the preregistered rising-crossing, extrema,
+stability, and FFT calculations without importing Taichi or solver code.
+
+The upstream FSI2/FSI3 bytes and their exact manifests live under
+`docs/validation/turek_hron_featflow/`; `.gitattributes` marks the `.point`
+files non-text so line-ending conversion cannot invalidate their SHA256
+identities. `cases/turek_hron_fsi.py` may expose a read-only compatibility
+projection and a fresh JSON reporting copy, but must not own another mutable
+reference table or silently fall back between sources.
+
 ## FSI Execution Ownership
 
 `simulation_core.drivers.generic_fsi_solver` is the single shared trial engine

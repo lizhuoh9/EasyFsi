@@ -49,6 +49,9 @@ from simulation_core.solids.neo_hookean_mpm import (
     CONSTITUTIVE_MODELS,
     NeoHookeanMpmState,
 )
+from src.refactored.validation.turek_hron_fsi.references import (
+    legacy_case_reference_projection,
+)
 from cases.turek_hron_kernels import (
     boundary_zflux_sums_kernel,
     outlet_zflux_sum_kernel,
@@ -102,33 +105,15 @@ TUREK_HRON_PRESET_PARAMETERS: dict[str, dict[str, float]] = {
     },
 }
 
-# Reference values are per unit span (2D benchmark); compare force / span_m.
-TUREK_HRON_REFERENCE_RESULTS: dict[str, dict[str, Any]] = {
-    "fsi1": {
-        "source": "Turek & Hron (2006) canonical steady benchmark",
-        "ux_a_m": 2.27e-5,
-        "uy_a_m": 8.209e-4,
-        "drag_n_per_m": 14.295,
-        "lift_n_per_m": 0.7638,
-        "regime": "steady",
-    },
-    "fsi2": {
-        "source": "Turek & Hron (2006) canonical benchmark",
-        "regime": "periodic-large-amplitude",
-    },
-    "fsi3": {
-        "source": "LS-DYNA ICFD aerofsi1 report (mean +/- amplitude)",
-        "ux_a_mean_m": -2.35e-3,
-        "ux_a_amplitude_m": 2.45e-3,
-        "uy_a_mean_m": 1.5e-3,
-        "uy_a_amplitude_m": 33.5e-3,
-        "drag_mean_n_per_m": 452.0,
-        "drag_amplitude_n_per_m": 31.0,
-        "lift_mean_n_per_m": 3.3,
-        "lift_amplitude_n_per_m": 83.1,
-        "regime": "periodic",
-    },
-}
+# Backward-compatible, read-only projection of the validation-owned source truth.
+TUREK_HRON_REFERENCE_RESULTS = legacy_case_reference_projection()
+
+
+def _summary_reference_results(preset: str) -> dict[str, object]:
+    """Return a fresh JSON-safe selected reference projection for reporting."""
+
+    return dict(TUREK_HRON_REFERENCE_RESULTS.get(str(preset), {}))
+
 
 TUREK_HRON_CASE_METADATA: dict[str, Any] = {
     "source": {
@@ -3621,10 +3606,7 @@ def run_turek_hron_fsi(
         "coupling_accelerator": "iqn_ils",
         "generic_runtime_completed_steps": len(generic_run.history),
         "wall_boundary_model": TUREK_HRON_WALL_BOUNDARY_MODEL,
-        "reference_results": TUREK_HRON_REFERENCE_RESULTS.get(
-            str(preset),
-            {},
-        ),
+        "reference_results": _summary_reference_results(str(preset)),
         "completed_steps": len(history),
         "history": history,
         "final": history[-1],

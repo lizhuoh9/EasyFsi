@@ -1,0 +1,32 @@
+{
+  "schema_version": "featflow_raw_series_manifest_v1",
+  "source_id": "featflow_raw_fsi2_dt_0p0005",
+  "case_id": "fsi2",
+  "url": "https://wwwold.mathematik.tu-dortmund.de/~featflow/media/fsi/data/fsi2/0p0005/ref_fsi2.point",
+  "filename": "ref_fsi2.point",
+  "byte_count": 1783320,
+  "row_count": 9240,
+  "column_count": 12,
+  "time_start_s": 10.0,
+  "time_end_s": 14.6195,
+  "time_step_s": 0.0005,
+  "sha256": "d4e192f5ae6aa493d36c472b68d8d734d54194aca6e9f0a70014816b6835dd75",
+  "documented_columns": {
+    "1": "time",
+    "5": "beam_drag",
+    "6": "beam_lift",
+    "7": "cylinder_drag",
+    "8": "cylinder_lift",
+    "11": "point_a_ux",
+    "12": "point_a_uy"
+  },
+  "opaque_columns": [2, 3, 4, 9, 10],
+  "units": {
+    "time": "s",
+    "force": "N",
+    "point_a_displacement": "m"
+  },
+  "force_scope": "whole_body",
+  "coordinate_convention": "turek_hron_2d_v1:x_left_inflow_to_right_outflow;y_bottom_to_top;point_a_ux_uy_on_xy_axes;whole_body_drag_plus_x;whole_body_lift_plus_y",
+  "extraction_policy": "last_complete_rising_crossing_bounded_cycle"
+}

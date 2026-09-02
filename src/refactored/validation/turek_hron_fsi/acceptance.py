@@ -15,6 +15,12 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from .references import (
+    canonical_fsi1_metric_values,
+    lsdyna_fsi1_metric_values,
+    lsdyna_fsi1_uncertainty_values,
+)
+
 
 class TurekHronAcceptanceError(ValueError):
     """Raised when a history cannot serve as acceptance evidence."""
@@ -85,23 +91,9 @@ METRIC_FIELDS = (
 
 HISTORY_SCHEMA_VERSION = 3
 
-CANONICAL_FSI1_REFERENCE: Mapping[str, float] = {
-    "tip_ux_turek_hron_m": 2.27e-5,
-    "tip_uy_turek_hron_m": 8.209e-4,
-    "total_drag_per_span_n_per_m": 14.295,
-    "total_lift_per_span_n_per_m": 0.7638,
-}
-
-LOCAL_LS_DYNA_REFERENCE: Mapping[str, float] = {
-    "tip_ux_turek_hron_m": 1.7e-5,
-    "tip_uy_turek_hron_m": 8.6e-4,
-    "total_drag_per_span_n_per_m": 14.26,
-    "total_lift_per_span_n_per_m": 0.73,
-}
-
-LOCAL_LS_DYNA_UNCERTAINTY: Mapping[str, float] = {
-    "total_lift_per_span_n_per_m": 0.30,
-}
+CANONICAL_FSI1_REFERENCE = canonical_fsi1_metric_values()
+LOCAL_LS_DYNA_REFERENCE = lsdyna_fsi1_metric_values()
+LOCAL_LS_DYNA_UNCERTAINTY = lsdyna_fsi1_uncertainty_values()
 
 _INTEGER_FIELDS = (
     "step",

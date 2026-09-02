@@ -49,6 +49,10 @@ from cases.turek_hron_fsi import (
     _reseed_turek_hron_markers,
     _resample_marker_group_arrays,
 )
+from src.refactored.validation.turek_hron_fsi.references import (
+    FEATFLOW_WEB_SOURCE_ID,
+    canonical_fsi1_metric_values,
+)
 from benchmarks.official.solid_mpm_fsi_runner import (
     SOLID_CONSTITUTIVE_MODELS,
 )
@@ -57,6 +61,21 @@ from simulation_core.coupling.hibm_mpm import (
     assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
 )
 from simulation_core.drivers.generic_fsi_solver import FsiCouplingReport
+
+
+class TurekHronSummarySerializationTests(unittest.TestCase):
+    def test_reference_results_use_a_json_safe_fresh_reporting_copy(self):
+        reporting_reference = turek_hron_case._summary_reference_results("fsi1")
+
+        self.assertIsInstance(reporting_reference, dict)
+        self.assertEqual(reporting_reference, TUREK_HRON_REFERENCE_RESULTS["fsi1"])
+        json.dumps({"reference_results": reporting_reference}, allow_nan=False)
+
+        reporting_reference["source"] = "report-only mutation"
+        self.assertEqual(
+            TUREK_HRON_REFERENCE_RESULTS["fsi1"]["source"],
+            "Featflow TU Dortmund published level 7+0",
+        )
 
 
 class TurekHronCliTests(unittest.TestCase):
@@ -207,10 +226,16 @@ class TurekHronConfigPresetTests(unittest.TestCase):
 
     def test_reference_results_pin_canonical_fsi1_values(self):
         reference = TUREK_HRON_REFERENCE_RESULTS["fsi1"]
-        self.assertAlmostEqual(reference["ux_a_m"], 2.27e-5)
-        self.assertAlmostEqual(reference["uy_a_m"], 8.209e-4)
-        self.assertAlmostEqual(reference["drag_n_per_m"], 14.295)
-        self.assertAlmostEqual(reference["lift_n_per_m"], 0.7638)
+        canonical = canonical_fsi1_metric_values()
+        self.assertAlmostEqual(reference["ux_a_m"], canonical["tip_ux_turek_hron_m"])
+        self.assertAlmostEqual(reference["uy_a_m"], canonical["tip_uy_turek_hron_m"])
+        self.assertAlmostEqual(
+            reference["drag_n_per_m"], canonical["total_drag_per_span_n_per_m"]
+        )
+        self.assertAlmostEqual(
+            reference["lift_n_per_m"], canonical["total_lift_per_span_n_per_m"]
+        )
+        self.assertEqual(reference["source_id"], FEATFLOW_WEB_SOURCE_ID)
         self.assertEqual(reference["regime"], "steady")
 
     def test_reference_results_pin_ls_dyna_fsi3_ranges(self):

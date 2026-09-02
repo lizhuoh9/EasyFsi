@@ -12,6 +12,9 @@ from src.refactored.validation.turek_hron_fsi.acceptance import (
     TurekHronAcceptanceError,
     assess_fsi1_history_csv,
 )
+from src.refactored.validation.turek_hron_fsi.references import (
+    canonical_fsi1_metric_values,
+)
 
 
 CANONICAL = {
@@ -132,7 +135,9 @@ def test_stable_post_ramp_history_passes_and_keeps_reference_ledgers_separate(
 
     canonical = report["reference_ledgers"]["canonical"]
     local = report["reference_ledgers"]["local_ls_dyna"]
-    assert canonical["tip_ux_turek_hron_m"]["reference"] == pytest.approx(2.27e-5)
+    assert canonical["tip_ux_turek_hron_m"]["reference"] == pytest.approx(
+        canonical_fsi1_metric_values()["tip_ux_turek_hron_m"]
+    )
     assert local["tip_ux_turek_hron_m"]["reference"] == pytest.approx(1.7e-5)
     assert canonical["total_drag_per_span_n_per_m"]["relative_error_percent"] < 1.0
     assert local["total_lift_per_span_n_per_m"]["uncertainty"] == pytest.approx(0.30)
