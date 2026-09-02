@@ -62,7 +62,18 @@ def _validated_row(row: Mapping[str, Any]) -> dict[str, Any]:
         or row.get("actual_first_guess_equals_requested") is not True
     ):
         raise LiveAnalysisError(f"{arm_id}: actual first guess differs from requested")
+    converged_value = row.get("converged")
+    if not isinstance(converged_value, (bool, np.bool_)):
+        raise LiveAnalysisError(f"{arm_id}: converged must be Boolean")
+    converged = bool(converged_value)
     iterations = _integer(row.get("iterations"), label=f"{arm_id} iterations", minimum=1)
+    rejected_trials = _integer(
+        row.get("coupling_rejected_trial_count"),
+        label=f"{arm_id} rejected trials",
+        minimum=0,
+    )
+    if rejected_trials != iterations - int(converged):
+        raise LiveAnalysisError(f"{arm_id}: rejected trial count is inconsistent")
     work = row.get("trial_work")
     if not isinstance(work, Mapping):
         raise LiveAnalysisError(f"{arm_id}: trial_work is missing")
@@ -76,6 +87,15 @@ def _validated_row(row: Mapping[str, Any]) -> dict[str, Any]:
         label=f"{arm_id} pressure CG",
         minimum=0,
     )
+    pressure_matvec = _integer(
+        work.get("pressure_matvec_count_total"),
+        label=f"{arm_id} pressure matvec",
+        minimum=1,
+    )
+    if pressure_matvec < cg_iterations:
+        raise LiveAnalysisError(
+            f"{arm_id}: pressure matvec count is below CG iterations"
+        )
     for field in (
         "first_absolute_residual_mps",
         "second_absolute_residual_mps",
@@ -88,12 +108,14 @@ def _validated_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         **dict(row),
         "arm_id": str(arm_id),
-        "converged": bool(row.get("converged", False)),
+        "converged": converged,
         "iterations": iterations,
+        "coupling_rejected_trial_count": rejected_trials,
         "trial_work": {
             **dict(work),
             "trial_count": trial_count,
             "cg_iterations_total": cg_iterations,
+            "pressure_matvec_count_total": pressure_matvec,
         },
     }
 
@@ -137,12 +159,25 @@ def validate_live_probe_report(report: Mapping[str, Any]) -> dict[str, Any]:
     validated_rows = tuple(_validated_row(row) for row in rows)
     if tuple(row["arm_id"] for row in validated_rows) != EXPECTED_ARM_IDS:
         raise LiveAnalysisError("live-probe rows do not match the exact 13-arm order")
+    anchor_refresh_delta = _integer(
+        report.get("research_probe_anchor_refresh_delta"),
+        label="research probe anchor refresh delta",
+        minimum=0,
+    )
+    expected_anchor_refresh_delta = sum(
+        int(row["trial_work"]["trial_count"]) for row in validated_rows
+    )
+    if anchor_refresh_delta != expected_anchor_refresh_delta:
+        raise LiveAnalysisError(
+            "research probe anchor refresh delta differs from trial work"
+        )
     return {
         **dict(report),
         "target_step": target,
         "accepted_step_count": accepted_step,
         "accepted_time_s": float(accepted_time),
         "research_probe_rows": validated_rows,
+        "research_probe_anchor_refresh_delta": anchor_refresh_delta,
     }
 
 
@@ -161,8 +196,15 @@ def _work_totals(
         ]
         result[arm_id] = {
             "trials": sum(int(row["iterations"]) for row in rows),
+            "rejected_trials": sum(
+                int(row["coupling_rejected_trial_count"]) for row in rows
+            ),
             "pressure_cg": sum(
                 int(row["trial_work"]["cg_iterations_total"]) for row in rows
+            ),
+            "pressure_matvec": sum(
+                int(row["trial_work"]["pressure_matvec_count_total"])
+                for row in rows
             ),
             "converged": all(bool(row["converged"]) for row in rows),
             "trials_by_target": {
@@ -171,6 +213,14 @@ def _work_totals(
             },
             "pressure_cg_by_target": {
                 str(target): int(row["trial_work"]["cg_iterations_total"])
+                for target, row in zip(EXPECTED_TARGET_STEPS, rows, strict=True)
+            },
+            "rejected_trials_by_target": {
+                str(target): int(row["coupling_rejected_trial_count"])
+                for target, row in zip(EXPECTED_TARGET_STEPS, rows, strict=True)
+            },
+            "pressure_matvec_by_target": {
+                str(target): int(row["trial_work"]["pressure_matvec_count_total"])
                 for target, row in zip(EXPECTED_TARGET_STEPS, rows, strict=True)
             },
         }

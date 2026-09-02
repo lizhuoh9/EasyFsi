@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-CANDIDATE_BUNDLE_SCHEMA_VERSION = 1
+CANDIDATE_BUNDLE_SCHEMA_VERSION = 2
 CANDIDATE_ARRAY_FILENAME = "candidate_predictions.npz"
 CANDIDATE_MANIFEST_FILENAME = "candidate_manifest.json"
 EXPECTED_MARKER_COUNT = 128
@@ -153,12 +153,78 @@ def _validated_reference_positions(values: Any) -> np.ndarray:
     return np.ascontiguousarray(raw, dtype=np.float64)
 
 
-def _validated_source_identity(values: Mapping[str, Any]) -> dict[str, Any]:
+def _validated_causal_input_ood_diagnostics(
+    values: object,
+    *,
+    target_step: int,
+) -> dict[str, object]:
+    if not isinstance(values, Mapping):
+        raise CandidateBundleError("causal input OOD diagnostics are missing")
+    expected_keys = {
+        "d0_fit_steps",
+        "history_source_steps",
+        "innovation_source_steps",
+        "max_abs_normalized_pod_coefficient",
+        "normalized_pod_coefficient_outside_d0_fit_range_fraction",
+        "max_abs_normalized_k1_innovation",
+    }
+    if set(values) != expected_keys:
+        raise CandidateBundleError("causal input OOD diagnostic fields changed")
+    if values.get("d0_fit_steps") != [1, 100]:
+        raise CandidateBundleError("causal input OOD D0 range must be steps 1-100")
+    expected_sources = list(range(target_step - 4, target_step))
+    for field in ("history_source_steps", "innovation_source_steps"):
+        if values.get(field) != expected_sources:
+            raise CandidateBundleError(
+                "causal input OOD sources must be the latest four accepted steps"
+            )
+    result: dict[str, object] = {
+        "d0_fit_steps": [1, 100],
+        "history_source_steps": expected_sources,
+        "innovation_source_steps": expected_sources,
+    }
+    for field in (
+        "max_abs_normalized_pod_coefficient",
+        "normalized_pod_coefficient_outside_d0_fit_range_fraction",
+        "max_abs_normalized_k1_innovation",
+    ):
+        value = values.get(field)
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value, (int, float, np.integer, np.floating)
+        ):
+            raise CandidateBundleError(
+                f"causal input OOD {field} must be finite numeric data"
+            )
+        number = float(value)
+        if not np.isfinite(number) or number < 0.0:
+            raise CandidateBundleError(
+                f"causal input OOD {field} must be finite and non-negative"
+            )
+        result[field] = number
+    fraction = float(
+        result["normalized_pod_coefficient_outside_d0_fit_range_fraction"]
+    )
+    if fraction > 1.0:
+        raise CandidateBundleError("causal input OOD outside fraction exceeds one")
+    return result
+
+
+def _validated_source_identity(
+    values: Mapping[str, Any],
+    *,
+    target_step: int,
+) -> dict[str, Any]:
     if not isinstance(values, Mapping) or not values:
         raise CandidateBundleError("source_identity must be a non-empty mapping")
     result = {str(key): value for key, value in values.items()}
     if any(not key for key in result):
         raise CandidateBundleError("source_identity keys must be non-empty")
+    result["causal_input_ood_diagnostics"] = (
+        _validated_causal_input_ood_diagnostics(
+            result.get("causal_input_ood_diagnostics"),
+            target_step=target_step,
+        )
+    )
     try:
         json.dumps(result, allow_nan=False, sort_keys=True)
     except (TypeError, ValueError) as exc:
@@ -204,7 +270,7 @@ def write_candidate_bundle(
     matrix = np.ascontiguousarray(np.stack(ordered), dtype=np.float64)
     regions = _validated_region_ids(marker_region_ids)
     references = _validated_reference_positions(marker_reference_positions_m)
-    identity = _validated_source_identity(source_identity)
+    identity = _validated_source_identity(source_identity, target_step=target)
     diagnostic_rows = {} if diagnostics is None else dict(diagnostics)
     if diagnostic_rows and set(diagnostic_rows) != set(EXPECTED_ARM_IDS):
         raise CandidateBundleError("diagnostics must cover the exact 13-arm matrix")
@@ -415,7 +481,10 @@ def load_candidate_bundle(
             validated_candidates[index]
         ):
             raise CandidateBundleError(f"{arm_id}: candidate SHA256 mismatch")
-    _validated_source_identity(manifest.get("source_identity", {}))
+    _validated_source_identity(
+        manifest.get("source_identity", {}),
+        target_step=target,
+    )
     validated_candidates.flags.writeable = False
     validated_regions.flags.writeable = False
     validated_references.flags.writeable = False

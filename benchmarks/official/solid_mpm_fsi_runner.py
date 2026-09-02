@@ -377,6 +377,64 @@ def _fsi_trial_work_summary(
     }
 
 
+def _research_candidate_pressure_matvec_count(
+    projection_report: Mapping[str, object],
+) -> int:
+    """Return exact fine-grid matvec work for the frozen R25B projection path."""
+
+    for field in (
+        "pressure_marker_nullspace_enabled_all",
+        "pressure_marker_nullspace_all_velocity_paths_projected_all",
+    ):
+        if projection_report.get(field) is not True:
+            raise RuntimeError(
+                f"R25B pressure matvec counter is invalid because {field} is not true"
+            )
+    value = projection_report.get(
+        "pressure_marker_nullspace_operator_apply_count"
+    )
+    if isinstance(value, (bool, np.bool_)):
+        raise RuntimeError("R25B pressure matvec count must be a positive integer")
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(
+            "R25B pressure matvec count must be a positive integer"
+        ) from exc
+    if count <= 0 or count != value:
+        raise RuntimeError("R25B pressure matvec count must be a positive integer")
+    return count
+
+
+def _research_candidate_trial_work_summary(
+    reports: list[Mapping[str, object]],
+) -> dict[str, float | int]:
+    summary = _fsi_trial_work_summary(reports)
+    pressure_matvec_count_total = 0
+    for trial_index, report in enumerate(reports, start=1):
+        value = report.get("pressure_matvec_count")
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError(
+                f"R25B trial {trial_index} pressure matvec count is invalid"
+            )
+        try:
+            count = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"R25B trial {trial_index} pressure matvec count is invalid"
+            ) from exc
+        cg_iterations = int(report["cg_iterations_total"])
+        if count <= 0 or count != value or count < cg_iterations:
+            raise ValueError(
+                f"R25B trial {trial_index} pressure matvec count is invalid"
+            )
+        pressure_matvec_count_total += count
+    return {
+        **summary,
+        "pressure_matvec_count_total": pressure_matvec_count_total,
+    }
+
+
 def _fsi_coupling_iteration_summary(
     iterations: list[int],
 ) -> dict[str, float | int]:
@@ -720,6 +778,9 @@ def _research_probe_coupling_fields(
     return {
         "converged": bool(coupling.converged),
         "iterations": int(coupling.iterations),
+        "coupling_rejected_trial_count": (
+            int(coupling.iterations) - int(bool(coupling.converged))
+        ),
         "first_absolute_residual_mps": (
             None if not absolute else float(absolute[0])
         ),
@@ -2715,12 +2776,7 @@ def run_hibm_mpm_fsi(
                     latest_flow_report,
                     latest_observer_topology_report,
                 )
-                (
-                    research_probe_trial_work_reports
-                    if research_probe_active
-                    else coupling_trial_work_reports
-                ).append(
-                    {
+                trial_work_report = {
                         "flow_wall_time_s": float(flow_wall_time_s),
                         "hibm_wall_time_s": float(
                             trial_hibm_wall_times["hibm_wall_time_s"]
@@ -2750,7 +2806,20 @@ def run_hibm_mpm_fsi(
                             ]
                         ),
                     }
-                )
+                if (
+                    research_probe_active
+                    and research_candidate_config is not None
+                ):
+                    trial_work_report["pressure_matvec_count"] = (
+                        _research_candidate_pressure_matvec_count(
+                            projection_report
+                        )
+                    )
+                (
+                    research_probe_trial_work_reports
+                    if research_probe_active
+                    else coupling_trial_work_reports
+                ).append(trial_work_report)
             except Exception:
                 _discard_modified_physics_kalman_step(
                     kalman_controller,
@@ -3099,10 +3168,18 @@ def run_hibm_mpm_fsi(
                         )
                         probe_row.update(
                             {
-                                "trial_work": _fsi_trial_work_summary(
-                                    research_probe_trial_work_reports[
-                                        probe_work_start:
-                                    ]
+                                "trial_work": (
+                                    _research_candidate_trial_work_summary(
+                                        research_probe_trial_work_reports[
+                                            probe_work_start:
+                                        ]
+                                    )
+                                    if candidate_probe
+                                    else _fsi_trial_work_summary(
+                                        research_probe_trial_work_reports[
+                                            probe_work_start:
+                                        ]
+                                    )
                                 ),
                                 "solid_trial_reports": (
                                     research_probe_solid_trial_reports[

@@ -543,6 +543,72 @@ class VerticalFlapStageThreeObservabilityContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cg_iterations_total"):
             runner._fsi_trial_work_summary([invalid])
 
+    def test_research_candidate_work_records_exact_matvec_and_rejections(
+        self,
+    ) -> None:
+        from simulation_core.drivers.generic_fsi_solver import FsiCouplingReport
+
+        projection = {
+            "pressure_marker_nullspace_enabled_all": True,
+            "pressure_marker_nullspace_all_velocity_paths_projected_all": True,
+            "pressure_marker_nullspace_operator_apply_count": 22,
+        }
+        self.assertEqual(
+            runner._research_candidate_pressure_matvec_count(projection),
+            22,
+        )
+        invalid_projection = dict(projection)
+        invalid_projection[
+            "pressure_marker_nullspace_all_velocity_paths_projected_all"
+        ] = False
+        with self.assertRaisesRegex(RuntimeError, "matvec"):
+            runner._research_candidate_pressure_matvec_count(
+                invalid_projection
+            )
+
+        reports = [
+            {
+                "flow_wall_time_s": 1.0,
+                "hibm_wall_time_s": 2.0,
+                "solid_wall_time_s": 3.0,
+                "cg_iterations_total": 4,
+                "pressure_matvec_count": 6,
+                "flow_momentum_advection_substeps_total": 7,
+                "flow_sst_transport_substeps_total": 8,
+                "solid_substeps_executed_total": 9,
+                "feedback_consumed": False,
+            },
+            {
+                "flow_wall_time_s": 10.0,
+                "hibm_wall_time_s": 20.0,
+                "solid_wall_time_s": 30.0,
+                "cg_iterations_total": 40,
+                "pressure_matvec_count": 60,
+                "flow_momentum_advection_substeps_total": 70,
+                "flow_sst_transport_substeps_total": 80,
+                "solid_substeps_executed_total": 90,
+                "feedback_consumed": True,
+            },
+        ]
+        summary = runner._research_candidate_trial_work_summary(reports)
+        self.assertEqual(summary["pressure_matvec_count_total"], 66)
+
+        coupling = FsiCouplingReport(
+            iterations=3,
+            converged=True,
+            relative_residual=0.1,
+            absolute_residual_mps=0.1,
+            max_marker_residual_mps=0.1,
+            relative_residual_history=(1.0, 0.5, 0.1),
+            absolute_residual_history_mps=(1.0, 0.5, 0.1),
+            update_modes=("picard", "iqn"),
+        )
+        fields = runner._research_probe_coupling_fields(coupling)
+        self.assertEqual(fields["coupling_rejected_trial_count"], 2)
+        nonconverged = replace(coupling, converged=False)
+        fields = runner._research_probe_coupling_fields(nonconverged)
+        self.assertEqual(fields["coupling_rejected_trial_count"], 3)
+
     def test_fsi_coupling_iteration_summary_reports_distribution(self) -> None:
         summary = runner._fsi_coupling_iteration_summary([2, 3, 7, 8])
 

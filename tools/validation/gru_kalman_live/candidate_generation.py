@@ -365,6 +365,84 @@ def _causal_k1_state(
     )
 
 
+def _causal_input_ood_diagnostics(
+    *,
+    d0_fit_values: Any,
+    accepted_prefix: Any,
+    innovation_history: Any,
+    pod: PODBasis,
+    normalization: ModalNormalization,
+    target_step: int,
+) -> dict[str, object]:
+    """Measure OOD only on the frozen four-step causal model inputs."""
+
+    if isinstance(target_step, (bool, np.bool_)) or int(target_step) not in (7, 8):
+        raise CandidateGenerationError("OOD target step must be 7 or 8")
+    target = int(target_step)
+    window = R25A_SELECTED_ARCHITECTURE.window
+    expected_fit_steps = tuple(range(1, 101))
+    if (
+        pod.rank != R25A_SELECTED_ARCHITECTURE.rank
+        or normalization.rank != R25A_SELECTED_ARCHITECTURE.rank
+        or pod.fit_steps != expected_fit_steps
+        or normalization.fit_steps != expected_fit_steps
+    ):
+        raise CandidateGenerationError(
+            "OOD diagnostics require the frozen D0 steps 1-100 rank-8 basis"
+        )
+    d0 = np.asarray(d0_fit_values, dtype=np.float64)
+    prefix = np.asarray(accepted_prefix, dtype=np.float64)
+    innovations = np.asarray(innovation_history, dtype=np.float64)
+    field_shape = (pod.marker_count, 3)
+    if d0.shape != (100, *field_shape):
+        raise CandidateGenerationError("OOD D0 fit fields must be steps 1-100")
+    if prefix.shape != (target - 1, *field_shape):
+        raise CandidateGenerationError("OOD accepted prefix does not match target")
+    if innovations.shape != (window, *field_shape):
+        raise CandidateGenerationError(
+            "OOD innovation history must be the latest four accepted steps"
+        )
+
+    d0_coefficients = normalization.normalize(pod.encode(d0))
+    live_coefficients = normalization.normalize(
+        pod.encode(prefix[-window:])
+    )
+    normalized_innovations = (
+        pod.encode_residual(innovations) / normalization.scale
+    )
+    d0_minimum = np.min(d0_coefficients, axis=0)
+    d0_maximum = np.max(d0_coefficients, axis=0)
+    outside = np.logical_or(
+        live_coefficients < d0_minimum,
+        live_coefficients > d0_maximum,
+    )
+    source_steps = list(range(target - window, target))
+    result = {
+        "d0_fit_steps": [1, 100],
+        "history_source_steps": source_steps,
+        "innovation_source_steps": source_steps,
+        "max_abs_normalized_pod_coefficient": float(
+            np.max(np.abs(live_coefficients))
+        ),
+        "normalized_pod_coefficient_outside_d0_fit_range_fraction": float(
+            np.mean(outside)
+        ),
+        "max_abs_normalized_k1_innovation": float(
+            np.max(np.abs(normalized_innovations))
+        ),
+    }
+    if any(
+        not np.isfinite(float(result[field]))
+        for field in (
+            "max_abs_normalized_pod_coefficient",
+            "normalized_pod_coefficient_outside_d0_fit_range_fraction",
+            "max_abs_normalized_k1_innovation",
+        )
+    ):
+        raise CandidateGenerationError("OOD diagnostics are non-finite")
+    return result
+
+
 def _predict_gk1(
     accepted_prefix: np.ndarray,
     *,
@@ -474,6 +552,14 @@ def generate_candidate_bundles(
             dt_s=float(exact8_trace.dt_s),
             layout_id=str(exact8_trace.layout_id),
         )
+        causal_input_ood_diagnostics = _causal_input_ood_diagnostics(
+            d0_fit_values=d0_trace.values[:100],
+            accepted_prefix=accepted_prefix,
+            innovation_history=innovation_history,
+            pod=selection.pod,
+            normalization=selection.normalization,
+            target_step=target_step,
+        )
         inference_time["K1"] = time.perf_counter() - k1_state_started
         candidates["K1"] = k1_prediction
         for seed in MATCHED_SEEDS:
@@ -555,6 +641,7 @@ def generate_candidate_bundles(
             "selection_fingerprint": selection.selection_fingerprint,
             "selection_artifact_sha256": dict(selection.artifact_sha256),
             "generator_source_sha256": _generator_source_sha256(),
+            "causal_input_ood_diagnostics": causal_input_ood_diagnostics,
         }
         bundle_paths.append(
             write_candidate_bundle(

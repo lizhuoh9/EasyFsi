@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,8 @@ from tools.validation.gru_kalman_live.candidate_bundle import (
 )
 from tools.validation.gru_kalman_live.candidate_generation import (
     CandidateGenerationError,
+    _causal_input_ood_diagnostics,
+    _causal_k1_state,
     load_source_matched_marker_identity,
 )
 from tools.validation.gru_kalman_live.controls import (
@@ -62,6 +65,67 @@ def _pod_contract(trace: AcceptedTrace):
         fit_steps=fit_steps,
     )
     return pod, normalization
+
+
+def test_causal_ood_diagnostics_match_frozen_modal_formulas() -> None:
+    trace = _trace(markers=128)
+    pod, normalization = _pod_contract(trace)
+    accepted_prefix = np.ascontiguousarray(trace.values[:6], dtype=np.float64)
+    _, innovation_history = _causal_k1_state(
+        accepted_prefix,
+        dt_s=trace.dt_s,
+        layout_id=trace.layout_id,
+    )
+
+    diagnostics = _causal_input_ood_diagnostics(
+        d0_fit_values=trace.values[:100],
+        accepted_prefix=accepted_prefix,
+        innovation_history=innovation_history,
+        pod=pod,
+        normalization=normalization,
+        target_step=7,
+    )
+
+    d0_coefficients = normalization.normalize(pod.encode(trace.values[:100]))
+    live_coefficients = normalization.normalize(
+        pod.encode(accepted_prefix[-4:])
+    )
+    outside = np.logical_or(
+        live_coefficients < np.min(d0_coefficients, axis=0),
+        live_coefficients > np.max(d0_coefficients, axis=0),
+    )
+    normalized_innovations = (
+        pod.encode_residual(innovation_history) / normalization.scale
+    )
+    assert diagnostics["d0_fit_steps"] == [1, 100]
+    assert diagnostics["history_source_steps"] == [3, 4, 5, 6]
+    assert diagnostics["innovation_source_steps"] == [3, 4, 5, 6]
+    assert diagnostics["max_abs_normalized_pod_coefficient"] == pytest.approx(
+        np.max(np.abs(live_coefficients))
+    )
+    assert diagnostics[
+        "normalized_pod_coefficient_outside_d0_fit_range_fraction"
+    ] == pytest.approx(np.mean(outside))
+    assert diagnostics["max_abs_normalized_k1_innovation"] == pytest.approx(
+        np.max(np.abs(normalized_innovations))
+    )
+
+    step8_prefix = np.ascontiguousarray(trace.values[:7], dtype=np.float64)
+    _, step8_innovations = _causal_k1_state(
+        step8_prefix,
+        dt_s=trace.dt_s,
+        layout_id=trace.layout_id,
+    )
+    step8_diagnostics = _causal_input_ood_diagnostics(
+        d0_fit_values=trace.values[:100],
+        accepted_prefix=step8_prefix,
+        innovation_history=step8_innovations,
+        pod=pod,
+        normalization=normalization,
+        target_step=8,
+    )
+    assert step8_diagnostics["history_source_steps"] == [4, 5, 6, 7]
+    assert step8_diagnostics["innovation_source_steps"] == [4, 5, 6, 7]
 
 
 def test_matched_control_constants_are_frozen() -> None:
@@ -142,7 +206,19 @@ def _write_bundle(tmp_path: Path, *, target_step: int = 7) -> Path:
         candidates=_candidate_arrays(),
         marker_region_ids=regions,
         marker_reference_positions_m=reference,
-        source_identity={"accepted_prefix_sha256": "a" * 64},
+        source_identity={
+            "accepted_prefix_sha256": "a" * 64,
+            "causal_input_ood_diagnostics": {
+                "d0_fit_steps": [1, 100],
+                "history_source_steps": list(range(target_step - 4, target_step)),
+                "innovation_source_steps": list(
+                    range(target_step - 4, target_step)
+                ),
+                "max_abs_normalized_pod_coefficient": 1.25,
+                "normalized_pod_coefficient_outside_d0_fit_range_fraction": 0.125,
+                "max_abs_normalized_k1_innovation": 0.75,
+            },
+        },
         diagnostics={arm_id: {"inference_time_s": 0.0} for arm_id in EXPECTED_ARM_IDS},
     )
 
@@ -171,6 +247,28 @@ def test_candidate_bundle_round_trip_binds_exact_matrix_and_provenance(
         ).hexdigest()
         assert arms[arm_id]["candidate_sha256"] == expected_sha
 
+    ood = bundle.manifest["source_identity"][
+        "causal_input_ood_diagnostics"
+    ]
+    assert ood["history_source_steps"] == [3, 4, 5, 6]
+    assert all(
+        "causal_input_ood_diagnostics" not in row["diagnostics"]
+        for row in arms.values()
+    )
+
+def test_candidate_bundle_rejects_missing_causal_ood_diagnostics(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_bundle(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del payload["source_identity"]["causal_input_ood_diagnostics"]
+    manifest_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CandidateBundleError, match="causal input OOD"):
+        load_candidate_bundle(manifest_path, expected_target_step=7)
+
 
 def test_candidate_bundle_rejects_layout_region_and_hash_drift(tmp_path: Path) -> None:
     manifest_path = _write_bundle(tmp_path)
@@ -198,11 +296,13 @@ def _probe_row(arm_id: str, iterations: int) -> dict[str, object]:
         "arm_id": arm_id,
         "converged": True,
         "iterations": iterations,
+        "coupling_rejected_trial_count": iterations - 1,
         "first_absolute_residual_mps": float(iterations),
         "second_absolute_residual_mps": float(iterations) / 2.0,
         "trial_work": {
             "trial_count": iterations,
             "cg_iterations_total": 100 * iterations,
+            "pressure_matvec_count_total": 101 * iterations,
         },
         "rollback_host_macro_step_state_equal": True,
         "rollback_host_macro_step_state_mismatch_fields": [],
@@ -240,12 +340,14 @@ def _probe_report(target_step: int) -> dict[str, object]:
         "research_probe_rows": [
             _probe_row(arm_id, iterations[arm_id]) for arm_id in EXPECTED_ARM_IDS
         ],
+        "research_probe_anchor_refresh_delta": sum(iterations.values()),
     }
 
 
 def test_live_analysis_computes_matched_effects_and_frozen_gates() -> None:
     result = analyze_live_probe_reports({7: _probe_report(7), 8: _probe_report(8)})
     assert result["work_totals"]["C0"]["trials"] == 6
+    assert result["work_totals"]["C0"]["pressure_matvec"] == 606
     assert result["effects"]["seed0"]["trials"] == {
         "delta_g": 2,
         "delta_k": 0,
@@ -273,6 +375,27 @@ def test_live_analysis_rejects_rollback_and_first_guess_mismatch() -> None:
     report = _probe_report(7)
     report["research_probe_rows"][0]["actual_first_guess_equals_requested"] = False
     with pytest.raises(LiveAnalysisError, match="first guess"):
+        validate_live_probe_report(report)
+
+
+def test_live_analysis_requires_matvec_rejections_and_anchor_accounting() -> None:
+    report = _probe_report(7)
+    del report["research_probe_rows"][0]["trial_work"][
+        "pressure_matvec_count_total"
+    ]
+    with pytest.raises(LiveAnalysisError, match="matvec"):
+        validate_live_probe_report(report)
+
+    report = _probe_report(7)
+    report["research_probe_rows"][0]["coupling_rejected_trial_count"] = 0
+    with pytest.raises(LiveAnalysisError, match="rejected"):
+        validate_live_probe_report(report)
+
+    report = _probe_report(7)
+    report["research_probe_anchor_refresh_delta"] = int(
+        report["research_probe_anchor_refresh_delta"]
+    ) - 1
+    with pytest.raises(LiveAnalysisError, match="anchor"):
         validate_live_probe_report(report)
 
 
@@ -398,6 +521,67 @@ def _runner_modules():
     from cases.ansys_vertical_flap_fsi import VerticalFlapFsiConfig
 
     return solid_mpm_fsi_runner, VerticalFlapFsiConfig
+
+
+def test_runner_trial_work_records_pressure_matvecs_and_rejected_trials() -> None:
+    solid_mpm_fsi_runner, _ = _runner_modules()
+    from simulation_core.drivers.generic_fsi_solver import FsiCouplingReport
+
+    projection = {
+        "pressure_marker_nullspace_enabled_all": True,
+        "pressure_marker_nullspace_all_velocity_paths_projected_all": True,
+        "pressure_marker_nullspace_operator_apply_count": 22,
+    }
+    assert solid_mpm_fsi_runner._research_candidate_pressure_matvec_count(
+        projection
+    ) == 22
+    invalid_projection = dict(projection)
+    invalid_projection[
+        "pressure_marker_nullspace_all_velocity_paths_projected_all"
+    ] = False
+    with pytest.raises(RuntimeError, match="matvec"):
+        solid_mpm_fsi_runner._research_candidate_pressure_matvec_count(
+            invalid_projection
+        )
+
+    reports = [
+        {
+            "flow_wall_time_s": 1.0,
+            "hibm_wall_time_s": 2.0,
+            "solid_wall_time_s": 3.0,
+            "cg_iterations_total": 4,
+            "pressure_matvec_count": 6,
+            "flow_momentum_advection_substeps_total": 7,
+            "flow_sst_transport_substeps_total": 8,
+            "solid_substeps_executed_total": 9,
+            "feedback_consumed": False,
+        },
+        {
+            "flow_wall_time_s": 10.0,
+            "hibm_wall_time_s": 20.0,
+            "solid_wall_time_s": 30.0,
+            "cg_iterations_total": 40,
+            "pressure_matvec_count": 60,
+            "flow_momentum_advection_substeps_total": 70,
+            "flow_sst_transport_substeps_total": 80,
+            "solid_substeps_executed_total": 90,
+            "feedback_consumed": True,
+        },
+    ]
+    summary = solid_mpm_fsi_runner._research_candidate_trial_work_summary(reports)
+    assert summary["pressure_matvec_count_total"] == 66
+    coupling = FsiCouplingReport(
+        iterations=3,
+        converged=True,
+        relative_residual=0.1,
+        absolute_residual_mps=0.1,
+        max_marker_residual_mps=0.1,
+        relative_residual_history=(1.0, 0.5, 0.1),
+        absolute_residual_history_mps=(1.0, 0.5, 0.1),
+        update_modes=("picard", "iqn"),
+    )
+    fields = solid_mpm_fsi_runner._research_probe_coupling_fields(coupling)
+    assert fields["coupling_rejected_trial_count"] == 2
 
 
 def test_runner_candidate_config_is_research_only_and_mutually_exclusive(
