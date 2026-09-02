@@ -197,6 +197,9 @@ class VerticalFlapFsiConfig:
         0.99,
         1.0,
     )
+    # R25B offline candidate matrix. The manifest owns target-step identity;
+    # the live runner validates and evaluates every arm without committing it.
+    research_initial_guess_candidate_matrix_path: str | None = None
     # Explicitly modified-physics experiment.  ``off`` preserves the legacy
     # solver path and constructs no predictor; active modes write posterior
     # values only to their uniquely owned feedback/state field.

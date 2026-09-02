@@ -1742,6 +1742,22 @@ def _build_config(args: argparse.Namespace) -> VerticalFlapFsiConfig:
             if getattr(args, "research_iqn_kalman_oracle_interpolation_alphas", None) is not None
             else VerticalFlapFsiConfig.iqn_kalman_oracle_interpolation_alphas
         ),
+        research_initial_guess_candidate_matrix_path=(
+            str(
+                Path(
+                    str(
+                        getattr(
+                            args,
+                            "research_initial_guess_candidate_matrix_path",
+                            None,
+                        )
+                    )
+                ).expanduser().resolve()
+            )
+            if getattr(args, "research_initial_guess_candidate_matrix_path", None)
+            is not None
+            else None
+        ),
         kalman_writeback_mode=kalman_mode,
         kalman_interface_config=kalman_interface_config,
         kalman_fluid_config=kalman_fluid_config,
@@ -2257,6 +2273,12 @@ def main() -> int:
         help="Strictly increasing alpha values in [0, 1] for the offline sweep.",
     )
     parser.add_argument(
+        "--research-initial-guess-candidate-matrix-path",
+        type=str,
+        default=None,
+        help="Frozen R25B candidate manifest for a no-commit target-step sweep.",
+    )
+    parser.add_argument(
         "--fsi-max-iterations",
         type=int,
         default=VerticalFlapFsiConfig.fsi_coupling_max_iterations,
@@ -2540,6 +2562,9 @@ def main() -> int:
     research_probe_requested = (
         config.iqn_kalman_oracle_interpolation_target_step is not None
     )
+    candidate_probe_requested = (
+        config.research_initial_guess_candidate_matrix_path is not None
+    )
     oracle_requested = bool(
         config.initial_guess_mode == "oracle_replay"
         or research_probe_requested
@@ -2588,8 +2613,11 @@ def main() -> int:
             )
         manifest = {
             "offline_oracle": oracle_requested,
+            "offline_candidates": candidate_probe_requested,
             "deployable": bool(
-                not oracle_requested and not bool(args.dry_run)
+                not oracle_requested
+                and not candidate_probe_requested
+                and not bool(args.dry_run)
             ),
             "run_label": args.run_label,
             "repo_root": str(REPO_ROOT),
@@ -2658,7 +2686,11 @@ def main() -> int:
         solver_elapsed_s = time.perf_counter() - solver_started_s
         elapsed_s = time.perf_counter() - start
         report = dict(report)
-        if report.get("status") == "research_probe_terminal":
+        terminal_status = str(report.get("status", ""))
+        if terminal_status in {
+            "research_probe_terminal",
+            "research_candidate_probe_terminal",
+        }:
             if oracle_replay_identity is not None:
                 report["initial_guess_oracle_identity"] = dict(
                     oracle_replay_identity
@@ -2671,16 +2703,27 @@ def main() -> int:
                     require_iqn_trial_vectors=bool(args.save_iqn_trial_vectors),
                 )
             research_probe_elapsed_s = time.perf_counter() - start
-            progress_observer({"status": "research_probe_terminal", "phase": "research_probe_terminal", "elapsed_s": research_probe_elapsed_s})
+            progress_observer(
+                {
+                    "status": terminal_status,
+                    "phase": terminal_status,
+                    "elapsed_s": research_probe_elapsed_s,
+                }
+            )
             _write_json(output_dir / "our_solver_report_compact.json", report)
             _write_json(
                 output_dir / "our_solver_summary.json",
                 {
-                    "status": "research_probe_terminal",
+                    "status": terminal_status,
                     "output_dir": str(output_dir),
                     "artifact_root": str(artifact_output_dir),
                     "resume_provenance": resume_provenance,
-                    "offline_oracle": True,
+                    "offline_oracle": bool(
+                        report.get("offline_oracle", False)
+                    ),
+                    "offline_candidates": bool(
+                        report.get("offline_candidates", False)
+                    ),
                     "deployable": False,
                     "accepted_step_count": int(report["accepted_step_count"]),
                     "accepted_time_s": float(report["accepted_time_s"]),

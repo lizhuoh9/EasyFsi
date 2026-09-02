@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
@@ -11,6 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from tools.validation.gru_kalman_live.candidate_bundle import (
+    EXPECTED_ARM_IDS as R25B_EXPECTED_ARM_IDS,
+    load_candidate_bundle,
+)
 
 from simulation_core.coupling.accepted_fsi_checkpoint import (
     AcceptedFsiState,
@@ -522,6 +528,85 @@ def _iqn_kalman_oracle_interpolation_config(
         "offline_oracle": True,
         "deployable": False,
     }
+
+
+def _research_initial_guess_candidate_config(
+    config: Any,
+) -> dict[str, object] | None:
+    """Validate and preload the explicitly offline R25B candidate matrix."""
+
+    candidate_path = getattr(
+        config, "research_initial_guess_candidate_matrix_path", None
+    )
+    if candidate_path is None:
+        return None
+    if not isinstance(candidate_path, str) or not candidate_path.strip():
+        raise ValueError(
+            "research_initial_guess_candidate_matrix_path must be a non-empty path"
+        )
+    if (
+        getattr(config, "iqn_kalman_oracle_interpolation_target_step", None)
+        is not None
+        or getattr(
+            config, "iqn_kalman_oracle_interpolation_oracle_path", None
+        )
+        is not None
+    ):
+        raise ValueError(
+            "R25B candidate matrix and Kalman-Oracle interpolation are mutually exclusive"
+        )
+    if str(config.coupling_mode) != "iqn_ils":
+        raise ValueError("R25B candidate matrix requires coupling_mode='iqn_ils'")
+    if str(config.initial_guess_mode) != "carry_forward":
+        raise ValueError(
+            "R25B candidate matrix requires a carry-forward accepted prefix"
+        )
+    if str(getattr(config, "kalman_writeback_mode", "off")) != "off":
+        raise ValueError("R25B candidate matrix requires kalman_writeback_mode='off'")
+    if bool(getattr(config, "iqn_reuse_previous_step_history", False)):
+        raise ValueError(
+            "R25B candidate matrix requires iqn_reuse_previous_step_history=False"
+        )
+    frozen_scalars = (
+        ("dt_s", float(config.dt_s), 5.0e-4),
+        ("fsi_coupling_relative_tolerance", float(config.fsi_coupling_relative_tolerance), 1.0e-3),
+        ("fsi_coupling_absolute_tolerance_mps", float(config.fsi_coupling_absolute_tolerance_mps), 0.0),
+        ("iqn_initial_picard_relaxation", float(config.iqn_initial_picard_relaxation), 0.75),
+    )
+    for name, actual, expected in frozen_scalars:
+        if not math.isfinite(actual) or not math.isclose(
+            actual, expected, rel_tol=0.0, abs_tol=1.0e-15
+        ):
+            raise ValueError(f"R25B candidate matrix requires {name}={expected}")
+    if int(config.fsi_coupling_max_iterations) != 16:
+        raise ValueError(
+            "R25B candidate matrix requires fsi_coupling_max_iterations=16"
+        )
+    bundle = load_candidate_bundle(candidate_path)
+    target_step = int(bundle.manifest["target_step"])
+    if target_step > int(config.step_count):
+        raise ValueError("R25B candidate target step exceeds configured step_count")
+    return {
+        "target_step": target_step,
+        "manifest_path": str(bundle.manifest_path),
+        "arm_ids": bundle.arm_ids,
+        "bundle": bundle,
+        "offline_candidates": True,
+        "deployable": False,
+    }
+
+
+def _research_candidate_sha256(values: Any) -> str:
+    candidate = np.asarray(values)
+    if (
+        candidate.dtype != np.float64
+        or candidate.shape != (128, 3)
+        or not np.all(np.isfinite(candidate))
+    ):
+        raise RuntimeError("R25B candidate first guess must be finite float64 (128, 3)")
+    return hashlib.sha256(
+        np.ascontiguousarray(candidate).tobytes(order="C")
+    ).hexdigest()
 
 
 _HOST_MACRO_STEP_SCALAR_FIELDS = (
@@ -1976,6 +2061,7 @@ def run_hibm_mpm_fsi(
         raise ValueError("IQN trial-vector export requires coupling_mode='iqn_ils'")
     initial_guess_controller: InterfaceInitialGuessController | None = None
     prior_iqn_secant_history = None
+    research_candidate_config = _research_initial_guess_candidate_config(config)
     research_probe_config = _iqn_kalman_oracle_interpolation_config(config)
     research_probe_oracle = (
         _load_initial_guess_oracle_replay(
@@ -1985,6 +2071,7 @@ def run_hibm_mpm_fsi(
         if research_probe_config is not None
         else None
     )
+    research_candidate_bundle = None
     marker_reference_positions_m = None
     if coupling_mode == "iqn_ils":
         marker_reference_positions_m = np.asarray(
@@ -2009,6 +2096,29 @@ def run_hibm_mpm_fsi(
             ),
             oracle_replay=oracle_replay,
         )
+        if research_candidate_config is not None:
+            physical_marker_count = int(markers.marker_count)
+            physical_region_ids = np.asarray(
+                markers.region_id.to_numpy()[:physical_marker_count],
+                dtype=np.int64,
+            )
+            live_layout_id = marker_layout_identity(
+                markers,
+                reference_positions_m=marker_reference_positions_m,
+                namespace=f"{case_id}:marker_velocity",
+            )
+            research_candidate_bundle = load_candidate_bundle(
+                str(research_candidate_config["manifest_path"]),
+                expected_target_step=int(
+                    research_candidate_config["target_step"]
+                ),
+                expected_layout_sha256=live_layout_id,
+                expected_marker_region_ids=physical_region_ids,
+                expected_marker_reference_positions_m=np.asarray(
+                    marker_reference_positions_m,
+                    dtype=np.float64,
+                ),
+            )
 
     def current_marker_pressure_neumann_gradient_field() -> Any | None:
         cache_entry = sharp_boundary_cache.get("hibm_sharp_marker_boundary")
@@ -2812,8 +2922,10 @@ def run_hibm_mpm_fsi(
             if (
                 research_probe_config is not None
                 and int(research_probe_config["target_step"]) == step_index + 1
+            ) or (
+                research_candidate_config is not None
+                and int(research_candidate_config["target_step"]) == step_index + 1
             ):
-                assert research_probe_oracle is not None
                 assert initial_guess_controller is not None
                 context = FsiStepContext(
                     step=step_index + 1,
@@ -2828,45 +2940,81 @@ def run_hibm_mpm_fsi(
                     reference_positions_m=np.asarray(marker_reference_positions_m, dtype=np.float32),
                     namespace=f"{case_id}:marker_velocity",
                 )
-                baseline_mode = str(research_probe_config["baseline_mode"])
-                if baseline_mode == "carry_forward":
-                    baseline_guess = np.asarray(
-                        marker_base["v_gamma_mps"],
-                        dtype=np.float64,
-                    ).copy()
-                else:
-                    preview_controller = deepcopy(initial_guess_controller)
-                    baseline_guess = preview_controller.begin_step(
-                        marker_base["v_gamma_mps"],
-                        dt_s=float(config.dt_s),
-                        layout_id=layout_id,
+                candidate_probe = research_candidate_config is not None
+                if candidate_probe:
+                    assert research_candidate_bundle is not None
+                    arm_metadata = {
+                        str(row["arm_id"]): dict(row)
+                        for row in research_candidate_bundle.manifest["arms"]
+                    }
+                    probe_inputs = tuple(
+                        (
+                            {
+                                "arm_id": arm_id,
+                                "requested_candidate_sha256": arm_metadata[
+                                    arm_id
+                                ]["candidate_sha256"],
+                                "candidate_metadata": arm_metadata[arm_id],
+                            },
+                            research_candidate_bundle.candidate(arm_id),
+                        )
+                        for arm_id in R25B_EXPECTED_ARM_IDS
                     )
-                    preview_controller.discard_step()
-                oracle_velocity = research_probe_oracle[step_index]
+                else:
+                    assert research_probe_config is not None
+                    assert research_probe_oracle is not None
+                    baseline_mode = str(research_probe_config["baseline_mode"])
+                    if baseline_mode == "carry_forward":
+                        baseline_guess = np.asarray(
+                            marker_base["v_gamma_mps"],
+                            dtype=np.float64,
+                        ).copy()
+                    else:
+                        preview_controller = deepcopy(initial_guess_controller)
+                        baseline_guess = preview_controller.begin_step(
+                            marker_base["v_gamma_mps"],
+                            dt_s=float(config.dt_s),
+                            layout_id=layout_id,
+                        )
+                        preview_controller.discard_step()
+                    oracle_velocity = research_probe_oracle[step_index]
+                    probe_inputs = tuple(
+                        (
+                            {
+                                "alpha": float(alpha),
+                                "baseline_mode": baseline_mode,
+                            },
+                            _mixed_iqn_kalman_oracle_guess(
+                                baseline_guess,
+                                oracle_velocity,
+                                float(alpha),
+                            ),
+                        )
+                        for alpha in research_probe_config["alphas"]
+                    )
                 probe_rows: list[dict[str, object]] = []
                 probe_anchor_refresh_before = pressure_pair_anchor_runtime_refresh_count
                 probe_started_s = time.perf_counter()
                 try:
-                    for alpha in research_probe_config["alphas"]:
+                    for probe_metadata, requested_guess in probe_inputs:
                         restore_iqn_step_state(accepted_base, context)
                         probe_work_start = len(research_probe_trial_work_reports)
                         probe_solid_start = len(research_probe_solid_trial_reports)
-                        mixed_guess = _mixed_iqn_kalman_oracle_guess(
-                            baseline_guess, oracle_velocity, float(alpha)
+                        requested_guess = np.ascontiguousarray(
+                            requested_guess,
+                            dtype=np.float64,
                         )
                         probe_runtime = deepcopy(iqn_runtime)
                         probe_runtime._begin_initial_guess_step = (
-                            lambda _context, _carry, _layout, guess=mixed_guess: guess.copy()
+                            lambda _context, _carry, _layout, guess=requested_guess: guess.copy()
                         )
                         probe_runtime._accept_initial_guess_step = (
                             lambda _context, _accepted, _layout: None
                         )
                         probe_runtime._discard_initial_guess_step = lambda: None
                         research_probe_active = True
-                        probe_row: dict[str, object] = {
-                            "alpha": float(alpha),
-                            "baseline_mode": baseline_mode,
-                        }
+                        probe_row: dict[str, object] = dict(probe_metadata)
+                        coupling_report: FsiCouplingReport | None = None
                         try:
                             _trial, coupling = solve_fsi_step(
                                 probe_runtime,
@@ -2878,12 +3026,15 @@ def run_hibm_mpm_fsi(
                                     initial_relaxation=float(config.iqn_initial_picard_relaxation),
                                     history_limit=int(config.iqn_history_limit),
                                     iqn_svd_relative_cutoff=float(config.iqn_svd_relative_cutoff),
+                                    record_trial_vectors=True,
                                 ),
                             )
+                            coupling_report = coupling
                             probe_row.update(
                                 _research_probe_coupling_fields(coupling)
                             )
                         except FsiCouplingConvergenceError as error:
+                            coupling_report = error.report
                             probe_row.update(
                                 _research_probe_coupling_fields(error.report)
                             )
@@ -2892,6 +3043,53 @@ def run_hibm_mpm_fsi(
                         finally:
                             research_probe_active = False
                             probe_runtime.rollback_step(context)
+                        if candidate_probe:
+                            if (
+                                coupling_report is None
+                                or coupling_report.trial_guess_history_mps is None
+                                or coupling_report.trial_guess_history_mps.shape[0] < 1
+                            ):
+                                raise RuntimeError(
+                                    "R25B candidate probe did not record its first guess"
+                                )
+                            actual_first_guess = np.ascontiguousarray(
+                                coupling_report.trial_guess_history_mps[0],
+                                dtype=np.float64,
+                            )
+                            requested_sha256 = _research_candidate_sha256(
+                                requested_guess
+                            )
+                            actual_sha256 = _research_candidate_sha256(
+                                actual_first_guess
+                            )
+                            first_guess_equal = bool(
+                                np.array_equal(
+                                    actual_first_guess,
+                                    requested_guess,
+                                )
+                            )
+                            probe_row.update(
+                                {
+                                    "requested_candidate_sha256": requested_sha256,
+                                    "actual_first_guess_sha256": actual_sha256,
+                                    "actual_first_guess_equals_requested": (
+                                        first_guess_equal
+                                    ),
+                                }
+                            )
+                            if (
+                                requested_sha256
+                                != str(
+                                    probe_metadata[
+                                        "requested_candidate_sha256"
+                                    ]
+                                )
+                                or actual_sha256 != requested_sha256
+                                or not first_guess_equal
+                            ):
+                                raise RuntimeError(
+                                    "R25B candidate probe first guess differs from requested matrix"
+                                )
                         restored_probe_state = capture_iqn_step_state()
                         rollback_mismatches = (
                             _host_macro_step_state_mismatch_fields(
@@ -2937,16 +3135,25 @@ def run_hibm_mpm_fsi(
                         "research probe sweep changed accepted HostMacroStepState: "
                         + ", ".join(sweep_mismatches)
                     )
+                terminal_status = (
+                    "research_candidate_probe_terminal"
+                    if candidate_probe
+                    else "research_probe_terminal"
+                )
+                target_step = step_index + 1
                 return {
                     **preflow_report,
                     "case": case_id,
-                    "status": "research_probe_terminal",
+                    "status": terminal_status,
                     "config": asdict(config),
                     "history": history,
                     "taichi_runtime_identity": dict(runtime_identity),
                     "profile_wall_time_enabled": bool(profile_wall_time),
                     "research_probe_terminal": True,
-                    "offline_oracle": True,
+                    "research_candidate_probe_terminal": candidate_probe,
+                    "target_step": target_step,
+                    "offline_oracle": not candidate_probe,
+                    "offline_candidates": candidate_probe,
                     "deployable": False,
                     "accepted_step_count": step_index,
                     "accepted_time_s": float(step_index) * float(config.dt_s),
@@ -2967,8 +3174,15 @@ def run_hibm_mpm_fsi(
                     ),
                     "computed_result_sources": {
                         "research_probe_rows": (
-                            "same accepted HostMacroStepState; uncommitted "
-                            "solve_fsi_step baseline-Oracle alpha sweep"
+                            (
+                                "same accepted HostMacroStepState; uncommitted "
+                                "solve_fsi_step frozen candidate-matrix sweep"
+                            )
+                            if candidate_probe
+                            else (
+                                "same accepted HostMacroStepState; uncommitted "
+                                "solve_fsi_step baseline-Oracle alpha sweep"
+                            )
                         ),
                     },
                     "research_probe_anchor_refresh_delta": (
@@ -3855,7 +4069,14 @@ def run_hibm_mpm_fsi(
             if record_iqn_trial_vectors:
                 if accepted_iqn_trial_vectors is None:
                     raise RuntimeError("accepted IQN step did not produce a trial-vector trace")
-                step_observer_snapshot = {**step_observer_snapshot, **accepted_iqn_trial_vectors}
+                step_observer_snapshot = {
+                    **step_observer_snapshot,
+                    **accepted_iqn_trial_vectors,
+                    "iqn_trial_marker_reference_positions_m": np.asarray(
+                        marker_reference_positions_m,
+                        dtype=np.float32,
+                    ).copy(),
+                }
             snapshot_capture_wall_time_s = float(math.fsum((
                 snapshot_capture_wall_time_s, direct_snapshot_wall_time_s,
             )))
@@ -5237,6 +5458,11 @@ def _fsi_checkpoint_paths(config: Any) -> tuple[Path | None, Path | None]:
         raise ValueError("FSI checkpointing requires a positive total step count")
     if getattr(config, "iqn_kalman_oracle_interpolation_target_step", None) is not None:
         raise ValueError("FSI checkpointing does not support offline no-commit research probes")
+    if (
+        getattr(config, "research_initial_guess_candidate_matrix_path", None)
+        is not None
+    ):
+        raise ValueError("FSI checkpointing does not support R25B candidate probes")
     if input_path is not None:
         if any(getattr(config, name, None) is not None for name in (
             "preflow_snapshot_input_path", "preflow_snapshot_output_path",
@@ -5403,6 +5629,7 @@ def _validate_rectangular_solid_config(config: Any) -> None:
             "initial_guess_oracle_path is only valid for oracle_replay mode"
         )
     _iqn_kalman_oracle_interpolation_config(config)
+    _research_initial_guess_candidate_config(config)
     _modified_physics_kalman_configs(config)
     boundary_mode = str(
         getattr(
@@ -12231,6 +12458,7 @@ _PREFLOW_SNAPSHOT_FSI_ONLY_CONFIG_FIELDS = frozenset(
         "iqn_kalman_oracle_interpolation_target_step",
         "iqn_kalman_oracle_interpolation_oracle_path",
         "iqn_kalman_oracle_interpolation_alphas",
+        "research_initial_guess_candidate_matrix_path",
         "detailed_preflow_stage_progress",
         "velocity_damping",
         "fixed_node_lock_policy",
