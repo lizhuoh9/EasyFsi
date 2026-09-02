@@ -2038,6 +2038,7 @@ class CartesianFluidSolver:
         self.last_cg_breakdown_dAd = 0.0
         self.last_cg_preconditioner_requested = "auto"
         self.last_cg_preconditioner_effective = "not_run"
+        self.last_cg_rhs_nonzero = False
         self.last_cg_multigrid_apply_count = 0
         self.last_cg_multigrid_to_jacobi_fallback_count = 0
         self.last_cg_exact_residual_confirmation_count = 0
@@ -2127,6 +2128,14 @@ class CartesianFluidSolver:
         self.last_project_cg_restart_policy = ""
         self.last_project_cg_preconditioner_requested = "auto"
         self.last_project_cg_preconditioner_effective = "not_run"
+        self.last_project_cg_nonzero_rhs_project_calls = 0
+        self.last_project_cg_nonzero_rhs_preconditioner_requested = (
+            "not_applicable"
+        )
+        self.last_project_cg_nonzero_rhs_preconditioner_effective = (
+            "not_applicable"
+        )
+        self.last_project_cg_nonzero_rhs_multigrid_to_jacobi_fallback_count = 0
         self.last_project_cg_multigrid_apply_count = 0
         self.last_project_cg_multigrid_to_jacobi_fallback_count = 0
         self.last_project_cg_exact_residual_confirmation_count = 0
@@ -26546,6 +26555,7 @@ class CartesianFluidSolver:
         self.last_cg_breakdown_dAd = 0.0
         self.last_cg_preconditioner_requested = preconditioner_name
         self.last_cg_preconditioner_effective = "not_applied"
+        self.last_cg_rhs_nonzero = False
         self.last_cg_multigrid_apply_count = 0
         self.last_cg_multigrid_to_jacobi_fallback_count = 0
         self.last_cg_exact_residual_confirmation_count = 0
@@ -26716,6 +26726,7 @@ class CartesianFluidSolver:
             )
         self._copy_scalar_field_kernel(self.cg_rhs, self.cg_z)
         b_norm = sqrt(max(float(self._weighted_dot_kernel(self.cg_z, self.cg_z)), 0.0))
+        self.last_cg_rhs_nonzero = b_norm > 1.0e-30
         if b_norm <= 1.0e-30:
             self._copy_scalar_field_kernel(self.cg_r, self.cg_z)
             self._clear_pressure_kernel()
@@ -27889,6 +27900,14 @@ class CartesianFluidSolver:
             cg_preconditioner_requested_name
         )
         self.last_project_cg_preconditioner_effective = "not_run"
+        self.last_project_cg_nonzero_rhs_project_calls = 0
+        self.last_project_cg_nonzero_rhs_preconditioner_requested = (
+            "not_applicable"
+        )
+        self.last_project_cg_nonzero_rhs_preconditioner_effective = (
+            "not_applicable"
+        )
+        self.last_project_cg_nonzero_rhs_multigrid_to_jacobi_fallback_count = 0
         self.last_project_cg_multigrid_apply_count = 0
         self.last_project_cg_multigrid_to_jacobi_fallback_count = 0
         self.last_project_cg_exact_residual_confirmation_count = 0
@@ -27935,6 +27954,33 @@ class CartesianFluidSolver:
             self.last_project_cg_multigrid_to_jacobi_fallback_count += int(
                 self.last_cg_multigrid_to_jacobi_fallback_count
             )
+            if bool(self.last_cg_rhs_nonzero):
+                self.last_project_cg_nonzero_rhs_project_calls += 1
+                if self.last_project_cg_nonzero_rhs_project_calls == 1:
+                    self.last_project_cg_nonzero_rhs_preconditioner_requested = str(
+                        self.last_cg_preconditioner_requested
+                    )
+                    self.last_project_cg_nonzero_rhs_preconditioner_effective = str(
+                        self.last_cg_preconditioner_effective
+                    )
+                else:
+                    if (
+                        self.last_project_cg_nonzero_rhs_preconditioner_requested
+                        != str(self.last_cg_preconditioner_requested)
+                    ):
+                        self.last_project_cg_nonzero_rhs_preconditioner_requested = (
+                            "mixed"
+                        )
+                    if (
+                        self.last_project_cg_nonzero_rhs_preconditioner_effective
+                        != str(self.last_cg_preconditioner_effective)
+                    ):
+                        self.last_project_cg_nonzero_rhs_preconditioner_effective = (
+                            "mixed"
+                        )
+                (
+                    self.last_project_cg_nonzero_rhs_multigrid_to_jacobi_fallback_count
+                ) += int(self.last_cg_multigrid_to_jacobi_fallback_count)
             self.last_project_cg_exact_residual_confirmation_count += int(
                 self.last_cg_exact_residual_confirmation_count
             )
@@ -29288,6 +29334,18 @@ class CartesianFluidSolver:
             ),
             "cg_preconditioner_effective": str(
                 self.last_project_cg_preconditioner_effective
+            ),
+            "cg_nonzero_rhs_project_calls": int(
+                self.last_project_cg_nonzero_rhs_project_calls
+            ),
+            "cg_nonzero_rhs_preconditioner_requested": str(
+                self.last_project_cg_nonzero_rhs_preconditioner_requested
+            ),
+            "cg_nonzero_rhs_preconditioner_effective": str(
+                self.last_project_cg_nonzero_rhs_preconditioner_effective
+            ),
+            "cg_nonzero_rhs_multigrid_to_jacobi_fallback_count": int(
+                self.last_project_cg_nonzero_rhs_multigrid_to_jacobi_fallback_count
             ),
             "cg_multigrid_apply_count": int(
                 self.last_project_cg_multigrid_apply_count

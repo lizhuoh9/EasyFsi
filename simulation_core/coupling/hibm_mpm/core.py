@@ -248,6 +248,7 @@ def _combine_projection_reports(
         "cg_mean_projection_count",
         "cg_componentwise_mean_projection_count",
         "cg_breakdown_count",
+        "cg_multigrid_to_jacobi_fallback_count",
         "hibm_post_dirichlet_consistency_projection_count",
         "hibm_projection_overflow_singleton_cleanup_cell_count",
         "hibm_projection_overflow_singleton_cleanup_component_count",
@@ -300,6 +301,48 @@ def _combine_projection_reports(
         combined["cg_converged_all"] = all(
             bool(report.get("cg_converged_all", True))
             for report in projection_reports
+        )
+    for key in (
+        "cg_preconditioner_requested",
+        "cg_preconditioner_effective",
+    ):
+        values = [str(report[key]) for report in projection_reports if key in report]
+        if values:
+            combined[key] = values[0] if len(set(values)) == 1 else "mixed"
+    nonzero_rhs_reports = [
+        report
+        for report in projection_reports
+        if int(report.get("cg_nonzero_rhs_project_calls", 0)) > 0
+    ]
+    combined["projection_rhs_nonzero"] = bool(nonzero_rhs_reports)
+    combined["cg_nonzero_rhs_project_calls"] = sum(
+        int(report.get("cg_nonzero_rhs_project_calls", 0))
+        for report in nonzero_rhs_reports
+    )
+    combined["cg_nonzero_rhs_multigrid_to_jacobi_fallback_count"] = sum(
+        int(
+            report.get(
+                "cg_nonzero_rhs_multigrid_to_jacobi_fallback_count",
+                0,
+            )
+        )
+        for report in nonzero_rhs_reports
+    )
+    for key in (
+        "cg_nonzero_rhs_preconditioner_requested",
+        "cg_nonzero_rhs_preconditioner_effective",
+    ):
+        values = [
+            str(report[key])
+            for report in nonzero_rhs_reports
+            if key in report
+        ]
+        combined[key] = (
+            "not_applicable"
+            if not values
+            else values[0]
+            if len(set(values)) == 1
+            else "mixed"
         )
     if any("pressure_solve_failed" in report for report in projection_reports):
         failed = any(

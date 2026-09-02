@@ -140,6 +140,16 @@ identities. `cases/turek_hron_fsi.py` may expose a read-only compatibility
 projection and a fresh JSON reporting copy, but must not own another mutable
 reference table or silently fall back between sources.
 
+The executable constituent gate is split by responsibility under
+`tools/validation/`: `turek_hron_component_gate_contracts.py` owns the frozen
+matrix, formulas, raw-evidence schemas, and runtime-identity validation;
+`turek_hron_component_gate_runtimes.py` owns lazy construction of the three real
+Taichi runtimes; and `run_turek_hron_component_gates.py` owns exclusive output
+claims, artifact provenance, comparisons, and CLI exit status. Runtime instances
+must be constructed only after the output claim. Comparison artifacts record
+`not-applicable` for their own Taichi identity because comparison is solver-free;
+their constituent parents retain complete measured CUDA identities.
+
 ## FSI Execution Ownership
 
 `simulation_core.drivers.generic_fsi_solver` is the single shared trial engine

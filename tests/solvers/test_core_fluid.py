@@ -4921,6 +4921,21 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
 
         self.assertTrue(solver.last_cg_converged, solver.last_cg_breakdown)
         self.assertEqual(project_report["cg_project_calls"], 1)
+        self.assertEqual(project_report["cg_nonzero_rhs_project_calls"], 1)
+        self.assertEqual(
+            project_report["cg_nonzero_rhs_preconditioner_requested"],
+            "jacobi",
+        )
+        self.assertEqual(
+            project_report["cg_nonzero_rhs_preconditioner_effective"],
+            "jacobi_explicit",
+        )
+        self.assertEqual(
+            project_report[
+                "cg_nonzero_rhs_multigrid_to_jacobi_fallback_count"
+            ],
+            0,
+        )
         self.assertLess(solver.last_cg_relative_residual, 1.0e-6)
         self.assertAlmostEqual(
             report["zmin_velocity_outlet_to_source_ratio"],
@@ -4931,6 +4946,37 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
             residual_volume_flux_m3s,
             0.0,
             delta=source_total_m3s * 0.01,
+        )
+
+    def test_fv_cg_zero_rhs_is_excluded_from_nonzero_rhs_health(self) -> None:
+        solver = CartesianFluidSolver(
+            FluidDomainSpec.unit_box(grid_nodes=(4, 4, 4), dt_s=1.0e-3),
+            runtime=TaichiRuntimeConfig(arch="cuda"),
+        )
+
+        report = solver.project(
+            iterations=8,
+            pressure_outlet_zmin=True,
+            reset_pressure=True,
+            pressure_solver="fv_cg",
+            cg_preconditioner="fv_multigrid",
+        )
+
+        self.assertEqual(report["cg_project_calls"], 1)
+        self.assertEqual(report["cg_nonzero_rhs_project_calls"], 0)
+        self.assertEqual(
+            report["cg_nonzero_rhs_preconditioner_requested"],
+            "not_applicable",
+        )
+        self.assertEqual(
+            report["cg_nonzero_rhs_preconditioner_effective"],
+            "not_applicable",
+        )
+        self.assertEqual(
+            report[
+                "cg_nonzero_rhs_multigrid_to_jacobi_fallback_count"
+            ],
+            0,
         )
 
     def test_fv_cg_light_multigrid_preconditioner_keeps_graded_outlet_balance(self) -> None:

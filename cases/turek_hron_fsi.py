@@ -24,6 +24,7 @@ from simulation_core.coupling.hibm_mpm import (
     MARKER_INTERFACE_STATE_FIELDS,
     advance_hibm_mpm_sharp_mpm_step,
     capture_marker_interface_state,
+    marker_layout_identity,
     marker_trial_state,
     marker_velocity_state,
     restore_marker_interface_state,
@@ -3106,6 +3107,14 @@ def run_turek_hron_fsi(
 
     record_particle_position_write()
     markers = _build_markers(config, taichi_runtime)
+    marker_reference_positions_m = np.asarray(
+        capture_marker_interface_state(markers)["x_gamma_m"],
+        dtype=np.float64,
+    ).copy()
+    marker_layout_sha256 = marker_layout_identity(
+        markers,
+        reference_positions_m=marker_reference_positions_m,
+    )
     expected_marker_count = int(markers.marker_count)
     bounds_min, bounds_max = _full_bounds(config)
     search = HibmMpmIbNodeSearch(
@@ -3926,10 +3935,17 @@ def run_turek_hron_fsi(
     latest_report = latest_report_box["value"]
     if latest_report is None:
         raise RuntimeError("turek-hron FSI run did not advance")
+    if marker_layout_identity(
+        markers,
+        reference_positions_m=marker_reference_positions_m,
+    ) != marker_layout_sha256:
+        raise RuntimeError("Turek-Hron marker layout identity changed")
     summary: dict[str, Any] = {
         "case": TUREK_HRON_CASE_ID,
         "preset": str(preset),
         "config": asdict(config),
+        "marker_layout_sha256": marker_layout_sha256,
+        "marker_layout_identity_verified": True,
         "solver_path": (
             "simulation_core.drivers.generic_fsi_solver.solve_fsi_runtime"
         ),

@@ -473,6 +473,61 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
         self.assertEqual(int(combined["fluid_substeps"]), 2)
         self.assertEqual(combined["fluid_advection_scheme"], "euler")
 
+    def test_combine_projection_reports_aggregates_preconditioner_health(self) -> None:
+        from simulation_core.coupling.hibm_mpm.core import (
+            _combine_projection_reports,
+        )
+
+        combined = _combine_projection_reports(
+            [
+                {
+                    "cg_preconditioner_requested": "fv_multigrid",
+                    "cg_preconditioner_effective": "jacobi_fallback",
+                    "cg_project_calls": 1,
+                    "cg_multigrid_to_jacobi_fallback_count": 1,
+                    "cg_nonzero_rhs_project_calls": 1,
+                    "cg_nonzero_rhs_preconditioner_requested": "fv_multigrid",
+                    "cg_nonzero_rhs_preconditioner_effective": "jacobi_fallback",
+                    "cg_nonzero_rhs_multigrid_to_jacobi_fallback_count": 1,
+                    "pre_projection_raw_l2": 2.5,
+                },
+                {
+                    "cg_preconditioner_requested": "fv_multigrid",
+                    "cg_preconditioner_effective": "fv_multigrid",
+                    "cg_project_calls": 1,
+                    "cg_multigrid_to_jacobi_fallback_count": 0,
+                    "cg_nonzero_rhs_project_calls": 0,
+                    "cg_nonzero_rhs_preconditioner_requested": "not_applicable",
+                    "cg_nonzero_rhs_preconditioner_effective": "not_applicable",
+                    "cg_nonzero_rhs_multigrid_to_jacobi_fallback_count": 0,
+                    "pre_projection_raw_l2": 9.0,
+                },
+            ],
+            fluid_substeps=1,
+            fluid_advection_scheme="rk2",
+        )
+
+        self.assertEqual(
+            combined["cg_multigrid_to_jacobi_fallback_count"],
+            1,
+        )
+        self.assertEqual(combined["cg_preconditioner_requested"], "fv_multigrid")
+        self.assertEqual(combined["cg_preconditioner_effective"], "mixed")
+        self.assertTrue(combined["projection_rhs_nonzero"])
+        self.assertEqual(combined["cg_nonzero_rhs_project_calls"], 1)
+        self.assertEqual(
+            combined["cg_nonzero_rhs_preconditioner_requested"],
+            "fv_multigrid",
+        )
+        self.assertEqual(
+            combined["cg_nonzero_rhs_preconditioner_effective"],
+            "jacobi_fallback",
+        )
+        self.assertEqual(
+            combined["cg_nonzero_rhs_multigrid_to_jacobi_fallback_count"],
+            1,
+        )
+
     def test_reprojection_pressure_accumulation_is_safe_by_default(self) -> None:
         signature = inspect.signature(assemble_hibm_mpm_sharp_fluid_to_mpm_loads)
 

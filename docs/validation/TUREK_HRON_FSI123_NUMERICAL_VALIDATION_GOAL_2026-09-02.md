@@ -469,13 +469,23 @@ component must be finite. A physical-time comparison uses
 `max(1e-15, 1e-12*dt_s)` as its absolute tolerance and also requires exact
 declared/observed substep counts.
 
-Every command claims a new run directory with create-if-absent semantics. Its
-manifest records commit and dirty state, complete configuration, executable
-source paths and per-source hashes, a combined source hash, configuration hash,
-marker-layout hash when applicable, artifact byte hashes, and per-array hashes.
-The canonical array hash is SHA256 over the dtype string, canonical shape, and
-contiguous C-order bytes. Histories contain only completed component steps or
-accepted coupled steps; a failed or rejected state is never appended as accepted.
+Every command claims a new run directory with create-if-absent semantics before
+constructing its runtime. The runner accepts a runtime class, not an instance or
+callable factory, and the manifest records commit and dirty state, the complete
+normalized effective case configuration, executable source paths and per-source
+hashes, a combined source hash, configuration hash, marker-layout hash when
+applicable, artifact byte hashes, and per-array hashes. Constituent and coupled
+artifacts also duplicate one measured Taichi identity in the summary and
+manifest: requested and actual architecture, default floating-point and integer
+types, random seed, strict-architecture verification, compiler controls, Taichi
+version, and offline-cache identity. Offline-cache location/state remains
+auditable but is excluded from numerical-equivalence comparison; all numerical
+runtime fields must match exactly. A comparison command does not initialize
+Taichi, so its two identity fields are strictly `not-applicable` and still
+hash-checked. The canonical array hash is SHA256 over the dtype string,
+canonical shape, and contiguous C-order bytes. Histories contain only completed
+component steps or accepted coupled steps; a failed or rejected state is never
+appended as accepted.
 
 Successful constituent and comparison commands are
 **PASS_COMPONENT_ONLY**. Successful coupled preflights are
