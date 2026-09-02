@@ -39,7 +39,7 @@ from tools.validation.gru_kalman.pod import (
     PODARModel,
     PODBasis,
 )
-from tools.validation.gru_kalman_live.candidate_bundle import (
+from benchmarks.official.gru_kalman_live_candidate_bundle import (
     EXPECTED_ARM_IDS,
     write_candidate_bundle,
 )
@@ -495,7 +495,7 @@ def _generator_source_sha256() -> dict[str, str]:
     root = Path(__file__).resolve().parents[3]
     names = (
         "tools/validation/gru_kalman_live/candidate_generation.py",
-        "tools/validation/gru_kalman_live/candidate_bundle.py",
+        "benchmarks/official/gru_kalman_live_candidate_bundle.py",
         "tools/validation/gru_kalman_live/controls.py",
         "tools/validation/gru_kalman_live/prediction_metrics.py",
     )

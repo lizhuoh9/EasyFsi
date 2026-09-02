@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from tools.validation.gru_kalman_live.candidate_bundle import (
+from benchmarks.official.gru_kalman_live_candidate_bundle import (
     EXPECTED_ARM_IDS as R25B_EXPECTED_ARM_IDS,
     load_candidate_bundle,
 )

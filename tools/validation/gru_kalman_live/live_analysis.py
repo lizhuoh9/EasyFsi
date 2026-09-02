@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .candidate_bundle import EXPECTED_ARM_IDS
+from benchmarks.official.gru_kalman_live_candidate_bundle import EXPECTED_ARM_IDS
 
 EXPECTED_TARGET_STEPS = (7, 8)
 EXPECTED_DT_S = 5.0e-4

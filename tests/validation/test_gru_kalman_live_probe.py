@@ -13,7 +13,7 @@ import pytest
 from tools.validation.gru_kalman.baselines import evaluate_baseline
 from tools.validation.gru_kalman.dataset import AcceptedTrace, EXPECTED_LAYOUT_ID
 from tools.validation.gru_kalman.pod import fit_normalization, fit_pod
-from tools.validation.gru_kalman_live.candidate_bundle import (
+from benchmarks.official.gru_kalman_live_candidate_bundle import (
     EXPECTED_ARM_IDS,
     CandidateBundleError,
     ModelLayoutMismatchError,
