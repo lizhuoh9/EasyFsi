@@ -516,7 +516,7 @@ def test_metric_rows_include_global_and_per_step_evidence() -> None:
     assert summary["model"] == "Q"
 
 
-def test_runtime_identity_binds_dirty_harness_sources() -> None:
+def test_runtime_identity_binds_current_harness_sources() -> None:
     identity = campaign_module.runtime_identity(Path(".").resolve())
     assert identity["python_version"]
     assert identity["numpy_version"]
@@ -524,10 +524,52 @@ def test_runtime_identity_binds_dirty_harness_sources() -> None:
     assert identity["cuda_available"] is False
     assert identity["cuda_version"] is None
     assert identity["cpu_only"] is True
-    assert identity["base_commit"] == "fbf4b729a68fab4c69316568cadcf46f234202d9"
-    assert identity["working_tree_dirty"] is True
-    assert identity["dirty_state"] == "implementation_files_uncommitted"
-    assert "tools/validation/gru_kalman/campaign.py" in identity["harness_source_sha256"]
+    assert len(identity["base_commit"]) == 40
+    assert all(character in "0123456789abcdef" for character in identity["base_commit"])
+    assert isinstance(identity["working_tree_dirty"], bool)
+    expected_dirty_state = (
+        "implementation_files_uncommitted"
+        if identity["working_tree_dirty"]
+        else "clean"
+    )
+    assert identity["dirty_state"] == expected_dirty_state
+    assert (
+        identity["base_commit_is_not_implementation_identity"]
+        is identity["working_tree_dirty"]
+    )
+    assert set(identity["harness_source_sha256"]) == set(
+        campaign_module.R25A_HARNESS_SOURCE_FILES
+    )
+    assert all(
+        len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest)
+        for digest in identity["harness_source_sha256"].values()
+    )
+
+
+def test_report_binds_historical_runtime_identity_to_r25a_commit() -> None:
+    report = Path(
+        "docs/validation/"
+        "ANSYS_VERTICAL_FLAP_GRU_KALMAN_FEASIBILITY_REPORT_2026-09-02.md"
+    ).read_text(encoding="utf-8")
+    encoded = report.split("RUNTIME_IDENTITY_JSON:\n", 1)[1].split(
+        "\nEND_RUNTIME_IDENTITY_JSON", 1
+    )[0]
+    historical = json.loads(encoded)
+    assert historical["base_commit"] == "fbf4b729a68fab4c69316568cadcf46f234202d9"
+    assert historical["working_tree_dirty"] is True
+    assert historical["dirty_state"] == "implementation_files_uncommitted"
+    r25a_commit = "adb2a0470085ecca1f772bae14d292df76c963d9"
+    committed_hashes = {}
+    for relative in campaign_module.R25A_HARNESS_SOURCE_FILES:
+        blob = subprocess.run(
+            ["git", "show", f"{r25a_commit}:{relative}"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        committed_hashes[relative] = hashlib.sha256(blob).hexdigest()
+    assert len(committed_hashes) == 11
+    assert historical["harness_source_sha256"] == committed_hashes
 
 
 def test_nonempty_report_is_refused_before_training(tmp_path: Path, monkeypatch) -> None:
