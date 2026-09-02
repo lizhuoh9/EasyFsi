@@ -1,7 +1,11 @@
 # ANSYS Vertical Flap R25B GRU/Kalman Live No-Commit Probe Goal
 
-Status: active. This goal is frozen before the R25B live-probe implementation and
-numerical runs. It starts from R25A commit
+Status: complete. The design below was frozen before implementation. The r2 sweep
+reached `FAIL_NO_LIVE_SOLVER_WORK_REDUCTION`, but a post-run audit found missing
+OOD, explicit rejected-trial, pressure-matvec, and anchor-counter evidence fields.
+The frozen gates were not changed; the fresh source-matched r3 chain is complete,
+and the required fresh read-only Sol review returned `SHIP`. The implementation
+started from R25A commit
 `adb2a0470085ecca1f772bae14d292df76c963d9` on branch
 `codex/gru-kalman-live-probe-r25b`.
 
@@ -101,7 +105,7 @@ imports PyTorch or loads neural model weights.
 
 The manifest and loader fail closed unless all of the following match:
 
-- schema version and R25B generator-source hashes;
+- schema version;
 - target step 7 or 8 and `max_source_step = target_step - 1`;
 - marker velocity shape `(128, 3)` for every arm;
 - `dt_s = 0.0005`;
@@ -112,7 +116,17 @@ The manifest and loader fail closed unless all of the following match:
 - identical marker region IDs, reference positions, ordering, and their hashes;
 - finite C-contiguous float64 candidate values;
 - unique arm IDs and the exact frozen arm matrix;
-- whole-NPZ SHA256 and per-candidate SHA256.
+- whole-NPZ SHA256 and per-candidate SHA256;
+- schema-2 causal-input OOD provenance, using D0 fit steps 1--100 and the latest
+  four accepted source steps for normalized POD coefficients and K1 innovations;
+- finite nonnegative OOD values with fractions constrained to `[0, 1]` and all
+  source steps bounded by `target_step - 1`.
+
+The manifest also records generator-source SHA256 provenance. Those hashes are
+separately audited against the generator files; because they are authored by the
+same generator, the loader does not treat them as an external trust root. Loader
+acceptance is enforced by the schema, source bounds, layout/marker identities,
+whole-NPZ hash, per-candidate hashes, and OOD contract above.
 
 Any layout, ordering, region, shape, dtype, identity, or hash mismatch is classified
 `BLOCKED_MODEL_LAYOUT_MISMATCH`. R25B does not implement marker remapping.
@@ -226,8 +240,11 @@ Each arm records at least:
 - convergence, coupling trials, and rejected trials;
 - first/second absolute and relative residuals, maximum-marker residual, and complete
   residual histories;
-- pressure CG iterations and matvec work;
+- pressure CG iterations and candidate-only pressure-operator matvec work;
 - fluid solves, momentum/SST substeps, solid macro solves, and MPM substeps;
+- the exact invariant
+  `coupling_rejected_trial_count = iterations - int(converged)`;
+- a target-level anchor-refresh delta equal to the sum of all 13 row trial counts;
 - IQN update modes, rank, condition number, fallback, and update limiting;
 - per-arm and final rollback equality plus mismatch fields;
 - accepted step/time before and after the probe;
@@ -317,10 +334,12 @@ remapping, full-suite cleanup, or release/deployable marker is part of R25B.
 Implementation order is fixed:
 
 1. RED tests for candidate schema, hashes, layout/order/region mismatch, causal source
-   bounds, exact arm matrix, analysis formulas, and stop gates;
+   bounds, schema-2 OOD provenance, exact arm matrix, analysis formulas, and stop
+   gates;
 2. RED runner contracts for mutual exclusion, forced trial-vector recording,
    requested/actual first-guess identity, per-arm rollback, final sweep equality, and
-   terminal accepted step/time;
+   terminal accepted step/time, plus rejected-trial, pressure-matvec, and anchor
+   conservation invariants;
 3. minimal GREEN implementation;
 4. focused R25A regression, new R25B tests, existing official-runner probe tests,
    `py_compile`, `git diff --check`, source-map review, and actual-diff review;
@@ -332,3 +351,49 @@ all requested-vs-actual and rollback invariants pass, the final accepted prefix 
 unchanged, and a fresh read-only reviewer returns `ship`. Focused tests or CPU-only
 training are never reported as solver acceleration, full-suite validation, Fluent
 parity, or production readiness.
+
+## 15. r3 completion evidence
+
+Implementation commit `f833439bf5fc15c6f04923410c8f804e5a394fe8` completed
+the schema-2 OOD, explicit rejected-trial, candidate-only pressure-matvec, and anchor
+contracts without changing the frozen work gates or production/oracle checkpoint
+schemas. The authoritative r3 chain contains six equal 141-entry formal source maps;
+their canonical sorted compact-JSON digest is
+`e0b643d2f8ec8d36935148b44c8139125cb9499798bbb9109ccb6e1bb6f4e28b`.
+The fresh preflow reached stationary step 79 and produced the shared strict snapshot
+`state.4237fbac9c384f6fb0fb3427c7ce2f84.npz`, SHA256
+`7c4cb847bbc8b09a10049f73c5fd6c9589ddf9413e59a6634e043ed2ef2dccc3`.
+Exact8 accepted 8/8 steps; its no-op resume restored accepted step 8 and executed no
+new physical step.
+
+Review-fix commit `4349f63` adds the previously missing G0-M-only continuation
+branch to the bottom-up classifier. `live_analysis.py` is outside the six formal CUDA
+source maps, so the raw r3 runs remain source matched; reanalysis leaves every G0-M
+passing-seed set empty and the frozen scientific classification unchanged.
+
+Both target bundles are immutable schema-2 `(13, 128, 3)` float64 arrays. Their OOD
+source windows are steps 3--6 and 4--7, respectively; those diagnostics do not enter
+the work gates. Probe 7 and probe 8 each preserve the accepted prefix, have 13/13
+exact requested/actual first guesses, 13/13 equal per-arm rollbacks, equal final
+sweep state, no target artifact, and anchor delta 37 equal to the target's summed
+trial count.
+
+Every causal arm totals 6 trials, 4 rejected trials, 1,440 pressure-CG iterations,
+and 1,452 pressure matvecs across the two targets. Noncausal Q totals 2 trials, 0
+rejected trials, 480 CG iterations, and 484 matvecs. The full 26-row matrix sums to
+74 trials, 48 rejected trials, 17,760 CG iterations, and 17,908 matvecs. The frozen
+classifications are:
+
+- `FAIL_G0_MATCHED_LIVE_VALUE`;
+- `FAIL_GK1_INCREMENTAL_LIVE_VALUE`;
+- `FAIL_POD_AR_LIVE_VALUE`;
+- `FAIL_NO_LIVE_SOLVER_WORK_REDUCTION`.
+
+The focused R25B suite passed 14 tests with 3 skipped; the six-file formal
+CLI/checkpoint/resume regression passed 141 tests. Selected independent runner and
+pressure-nullspace contracts passed. The adjacent full SST runner suite still has
+one pre-existing, out-of-scope AST-kwargs expectation failure, so no full-suite-green
+claim is made. No exact9/12 expansion, step10/11 fill, R25C, exact12/20/50, Fluent,
+production controller, online training, deployment, push, or PR was authorized.
+The dated report contains the exact evidence. The required fresh read-only Sol
+reviewer returned `SHIP`; this Goal is complete on its bounded evidence and stop tree.
