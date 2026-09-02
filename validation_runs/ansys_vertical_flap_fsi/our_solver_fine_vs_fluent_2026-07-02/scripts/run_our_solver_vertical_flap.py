@@ -132,6 +132,7 @@ IQN_TRIAL_VECTOR_STEP_KEYS = (
     "iqn_trial_step",
     "iqn_trial_time_s",
     "iqn_trial_dt_s",
+    "iqn_trial_marker_reference_positions_m",
 )
 
 _JSON_CANONICAL_KEY_ALIASES = {

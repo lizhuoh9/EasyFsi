@@ -1597,6 +1597,9 @@ def test_step_observer_writes_a_frame_and_atomic_progress(tmp_path: Path) -> Non
         "iqn_trial_step": np.asarray(1, dtype=np.int64),
         "iqn_trial_time_s": np.asarray(5.0e-4, dtype=np.float64),
         "iqn_trial_dt_s": np.asarray(5.0e-4, dtype=np.float64),
+        "iqn_trial_marker_reference_positions_m": np.asarray(
+            [[0.001, 0.003, 0.046]], dtype=np.float32
+        ),
     }
     snapshot.update(trial_vectors)
 

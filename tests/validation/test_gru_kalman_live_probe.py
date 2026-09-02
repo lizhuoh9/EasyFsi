@@ -386,6 +386,7 @@ def test_runner_exports_reference_identity_and_validation_cli_wires_probe() -> N
     assert '"--research-initial-guess-candidate-matrix-path"' in cli_source
     assert "research_initial_guess_candidate_matrix_path=" in cli_source
     assert '"research_candidate_probe_terminal"' in cli_source
+    assert '"iqn_trial_marker_reference_positions_m"' in cli_source
     assert cli_source.count('/ "gru_kalman_live"') >= 2
     assert '/ "__init__.py"' in cli_source
     assert '/ "candidate_bundle.py"' in cli_source
