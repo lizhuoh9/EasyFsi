@@ -1725,6 +1725,9 @@ class CartesianFluidSolver:
         self.reduction_sum = ti.field(dtype=ti.f64, shape=())
         self.reduction_max = ti.field(dtype=ti.f64, shape=())
         self.reduction_count = ti.field(dtype=ti.i32, shape=())
+        self.cfl_max_abs_velocity_x_mps = ti.field(dtype=ti.f64, shape=())
+        self.cfl_max_abs_velocity_y_mps = ti.field(dtype=ti.f64, shape=())
+        self.cfl_max_abs_velocity_z_mps = ti.field(dtype=ti.f64, shape=())
         self.report_flow_state_obstacle_cells = ti.field(dtype=ti.i32, shape=())
         self.report_flow_state_fluid_cells = ti.field(dtype=ti.i32, shape=())
         self.report_flow_state_velocity_peak_mps = ti.field(dtype=ti.f64, shape=())
@@ -8079,6 +8082,10 @@ class CartesianFluidSolver:
                 for component in ti.static(range(3)):
                     if (mask & (1 << component)) != 0:
                         left[component] = target[component]
+                left.x = self._physical_exterior_normal_velocity(
+                    source, 0, 0, 0, j, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             elif face == self.nx:
                 left = self._muscl_vector_face_state(
                     source, self.nx - 1, j, k, 0, 1
@@ -8093,6 +8100,10 @@ class CartesianFluidSolver:
                 for component in ti.static(range(3)):
                     if (mask & (1 << component)) != 0:
                         right[component] = target[component]
+                right.x = self._physical_exterior_normal_velocity(
+                    source, 0, 1, self.nx - 1, j, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             else:
                 left = self._muscl_vector_face_state(
                     source, face - 1, j, k, 0, 1
@@ -8101,16 +8112,6 @@ class CartesianFluidSolver:
                     source, face, j, k, 0, -1
                 )
 
-            if face == 0:
-                left.x = self._physical_exterior_normal_velocity(
-                    source, 0, 0, 0, j, k,
-                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
-                )
-            elif face == self.nx:
-                right.x = self._physical_exterior_normal_velocity(
-                    source, 0, 1, self.nx - 1, j, k,
-                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
-                )
             flux = ti.Vector([0.0, 0.0, 0.0])
             for component in ti.static(range(3)):
                 q_minus = 0.0
@@ -8189,6 +8190,10 @@ class CartesianFluidSolver:
                 for component in ti.static(range(3)):
                     if (mask & (1 << component)) != 0:
                         left[component] = target[component]
+                left.y = self._physical_exterior_normal_velocity(
+                    source, 1, 0, i, 0, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             elif face == self.ny:
                 left = self._muscl_vector_face_state(
                     source, i, self.ny - 1, k, 1, 1
@@ -8203,6 +8208,10 @@ class CartesianFluidSolver:
                 for component in ti.static(range(3)):
                     if (mask & (1 << component)) != 0:
                         right[component] = target[component]
+                right.y = self._physical_exterior_normal_velocity(
+                    source, 1, 1, i, self.ny - 1, k,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             else:
                 left = self._muscl_vector_face_state(
                     source, i, face - 1, k, 1, 1
@@ -8211,16 +8220,6 @@ class CartesianFluidSolver:
                     source, i, face, k, 1, -1
                 )
 
-            if face == 0:
-                left.y = self._physical_exterior_normal_velocity(
-                    source, 1, 0, i, 0, k,
-                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
-                )
-            elif face == self.ny:
-                right.y = self._physical_exterior_normal_velocity(
-                    source, 1, 1, i, self.ny - 1, k,
-                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
-                )
             flux = ti.Vector([0.0, 0.0, 0.0])
             for component in ti.static(range(3)):
                 q_minus = 0.0
@@ -8299,6 +8298,10 @@ class CartesianFluidSolver:
                 for component in ti.static(range(3)):
                     if (mask & (1 << component)) != 0:
                         left[component] = target[component]
+                left.z = self._physical_exterior_normal_velocity(
+                    source, 2, 0, i, j, 0,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             elif face == self.nz:
                 left = self._muscl_vector_face_state(
                     source, i, j, self.nz - 1, 2, 1
@@ -8313,6 +8316,10 @@ class CartesianFluidSolver:
                 for component in ti.static(range(3)):
                     if (mask & (1 << component)) != 0:
                         right[component] = target[component]
+                right.z = self._physical_exterior_normal_velocity(
+                    source, 2, 1, i, j, self.nz - 1,
+                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
+                )
             else:
                 left = self._muscl_vector_face_state(
                     source, i, j, face - 1, 2, 1
@@ -8321,16 +8328,6 @@ class CartesianFluidSolver:
                     source, i, j, face, 2, -1
                 )
 
-            if face == 0:
-                left.z = self._physical_exterior_normal_velocity(
-                    source, 2, 0, i, j, 0,
-                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
-                )
-            elif face == self.nz:
-                right.z = self._physical_exterior_normal_velocity(
-                    source, 2, 1, i, j, self.nz - 1,
-                    pressure_outlet_zmin, velocity_inlet_zmax_mode,
-                )
             flux = ti.Vector([0.0, 0.0, 0.0])
             for component in ti.static(range(3)):
                 q_minus = 0.0
@@ -15642,56 +15639,93 @@ class CartesianFluidSolver:
 
     @ti.kernel
     def _max_fluid_speed_kernel(self) -> ti.f64:
-        self.reduction_max[None] = 0.0
+        self.cfl_max_abs_velocity_x_mps[None] = 0.0
+        self.cfl_max_abs_velocity_y_mps[None] = 0.0
+        self.cfl_max_abs_velocity_z_mps[None] = 0.0
         for i, j, k in self.velocity:
             if self.obstacle[i, j, k] == 0:
                 ti.atomic_max(
-                    self.reduction_max[None],
-                    ti.cast(self.velocity[i, j, k].norm(), ti.f64),
+                    self.cfl_max_abs_velocity_x_mps[None],
+                    ti.cast(ti.abs(self.velocity[i, j, k].x), ti.f64),
+                )
+                ti.atomic_max(
+                    self.cfl_max_abs_velocity_y_mps[None],
+                    ti.cast(ti.abs(self.velocity[i, j, k].y), ti.f64),
+                )
+                ti.atomic_max(
+                    self.cfl_max_abs_velocity_z_mps[None],
+                    ti.cast(ti.abs(self.velocity[i, j, k].z), ti.f64),
                 )
         # Canonical velocity inlets are exact external-face data, not hard
         # clamped cell-centre rows.  They must participate in every advective
         # CFL guard used by the momentum and SST scalar predictors.
         for side, j, k in self.external_velocity_boundary_x_face_active_component_mask:
-            if self.external_velocity_boundary_x_face_active_component_mask[
+            mask = self.external_velocity_boundary_x_face_active_component_mask[
                 side, j, k
-            ] != 0:
-                ti.atomic_max(
-                    self.reduction_max[None],
-                    ti.cast(
-                        self.external_velocity_boundary_x_face_value_mps[
-                            side, j, k
-                        ].norm(),
-                        ti.f64,
-                    ),
-                )
+            ]
+            if mask != 0:
+                target = self.external_velocity_boundary_x_face_value_mps[side, j, k]
+                if (mask & 1) != 0:
+                    ti.atomic_max(
+                        self.cfl_max_abs_velocity_x_mps[None],
+                        ti.cast(ti.abs(target.x), ti.f64),
+                    )
+                if (mask & 2) != 0:
+                    ti.atomic_max(
+                        self.cfl_max_abs_velocity_y_mps[None],
+                        ti.cast(ti.abs(target.y), ti.f64),
+                    )
+                if (mask & 4) != 0:
+                    ti.atomic_max(
+                        self.cfl_max_abs_velocity_z_mps[None],
+                        ti.cast(ti.abs(target.z), ti.f64),
+                    )
         for side, i, k in self.external_velocity_boundary_y_face_active_component_mask:
-            if self.external_velocity_boundary_y_face_active_component_mask[
+            mask = self.external_velocity_boundary_y_face_active_component_mask[
                 side, i, k
-            ] != 0:
-                ti.atomic_max(
-                    self.reduction_max[None],
-                    ti.cast(
-                        self.external_velocity_boundary_y_face_value_mps[
-                            side, i, k
-                        ].norm(),
-                        ti.f64,
-                    ),
-                )
+            ]
+            if mask != 0:
+                target = self.external_velocity_boundary_y_face_value_mps[side, i, k]
+                if (mask & 1) != 0:
+                    ti.atomic_max(
+                        self.cfl_max_abs_velocity_x_mps[None],
+                        ti.cast(ti.abs(target.x), ti.f64),
+                    )
+                if (mask & 2) != 0:
+                    ti.atomic_max(
+                        self.cfl_max_abs_velocity_y_mps[None],
+                        ti.cast(ti.abs(target.y), ti.f64),
+                    )
+                if (mask & 4) != 0:
+                    ti.atomic_max(
+                        self.cfl_max_abs_velocity_z_mps[None],
+                        ti.cast(ti.abs(target.z), ti.f64),
+                    )
         for side, i, j in self.external_velocity_boundary_z_face_active_component_mask:
-            if self.external_velocity_boundary_z_face_active_component_mask[
+            mask = self.external_velocity_boundary_z_face_active_component_mask[
                 side, i, j
-            ] != 0:
-                ti.atomic_max(
-                    self.reduction_max[None],
-                    ti.cast(
-                        self.external_velocity_boundary_z_face_value_mps[
-                            side, i, j
-                        ].norm(),
-                        ti.f64,
-                    ),
-                )
-        return self.reduction_max[None]
+            ]
+            if mask != 0:
+                target = self.external_velocity_boundary_z_face_value_mps[side, i, j]
+                if (mask & 1) != 0:
+                    ti.atomic_max(
+                        self.cfl_max_abs_velocity_x_mps[None],
+                        ti.cast(ti.abs(target.x), ti.f64),
+                    )
+                if (mask & 2) != 0:
+                    ti.atomic_max(
+                        self.cfl_max_abs_velocity_y_mps[None],
+                        ti.cast(ti.abs(target.y), ti.f64),
+                    )
+                if (mask & 4) != 0:
+                    ti.atomic_max(
+                        self.cfl_max_abs_velocity_z_mps[None],
+                        ti.cast(ti.abs(target.z), ti.f64),
+                    )
+        max_x = self.cfl_max_abs_velocity_x_mps[None]
+        max_y = self.cfl_max_abs_velocity_y_mps[None]
+        max_z = self.cfl_max_abs_velocity_z_mps[None]
+        return ti.sqrt(max_x * max_x + max_y * max_y + max_z * max_z)
 
     def predict(
         self,

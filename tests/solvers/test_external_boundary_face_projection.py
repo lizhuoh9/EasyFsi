@@ -311,6 +311,7 @@ class ExternalBoundaryFaceProjectionContracts(unittest.TestCase):
             target_velocity_mps=tuple(float(value) for value in target),
             active_component_mask=0b111,
         )
+        self._seal_current_canonical_ledger(solver)
         solver.velocity.fill(0.0)
 
         dt_s = 1.0e-4
@@ -335,6 +336,37 @@ class ExternalBoundaryFaceProjectionContracts(unittest.TestCase):
             ),
         )
 
+    def test_rk2_ymin_viscous_ghost_consumes_full_vector_face_target(self) -> None:
+        grid_nodes = (4, 4, 4)
+        solver = self._solver(grid_nodes)
+        target = np.asarray((1.0, -2.0, 3.0), dtype=np.float64)
+        solver.refresh_external_velocity_boundary_face_uniform(
+            axis_index=1,
+            side_index=0,
+            target_velocity_mps=tuple(float(value) for value in target),
+            active_component_mask=0b111,
+        )
+        self._seal_current_canonical_ledger(solver)
+        solver.velocity.fill(0.0)
+
+        dt_s = 1.0e-4
+        nu_m2_s = 1.0e-2
+        solver.predict(
+            dt_s=dt_s,
+            advection_scheme="rk2",
+            kinematic_viscosity_m2_s=nu_m2_s,
+            no_slip_domain_walls=(False, False, False, False, False, False),
+        )
+
+        dy = float(solver.cell_width_y_m[0])
+        expected = dt_s * nu_m2_s * target / (0.5 * dy * dy)
+        np.testing.assert_allclose(
+            np.asarray(solver.velocity[1, 0, 1], dtype=np.float64),
+            expected,
+            rtol=2.0e-5,
+            atol=2.0e-7,
+        )
+
     def test_predictor_zmax_viscous_ghost_inactive_tangent_is_zero_gradient(
         self,
     ) -> None:
@@ -349,6 +381,7 @@ class ExternalBoundaryFaceProjectionContracts(unittest.TestCase):
             target_velocity_mps=(0.0, 99.0, 0.0),
             active_component_mask=0b101,
         )
+        self._seal_current_canonical_ledger(solver)
 
         solver.predict(
             dt_s=1.0e-4,
@@ -428,6 +461,7 @@ class ExternalBoundaryFaceProjectionContracts(unittest.TestCase):
                             ),
                             active_component_mask=1 << axis_index,
                         )
+                        self._seal_current_canonical_ledger(solver)
 
                         sample_cell = [1, 1, 2]
                         sample_cell[axis_index] = (
@@ -465,6 +499,79 @@ class ExternalBoundaryFaceProjectionContracts(unittest.TestCase):
                             ),
                         )
 
+    def test_cfl_speed_combines_active_face_target_with_inactive_one_sided_state(
+        self,
+    ) -> None:
+        grid_nodes = (4, 4, 4)
+        solver = self._solver(grid_nodes)
+        velocity = np.zeros((*grid_nodes, 3), dtype=np.float32)
+        velocity[0, 0, 1, 1] = 8.0
+        solver.velocity.from_numpy(velocity)
+        solver.refresh_external_velocity_boundary_face_uniform(
+            axis_index=0,
+            side_index=0,
+            target_velocity_mps=(0.0, 99.0, -99.0),
+            active_component_mask=0b001,
+        )
+        face_values = solver.external_velocity_boundary_x_face_value_mps.to_numpy()
+        face_values[0, 1, 1, 0] = 8.0
+        solver.external_velocity_boundary_x_face_value_mps.from_numpy(face_values)
+
+        self.assertAlmostEqual(
+            float(solver._max_fluid_speed_kernel()),
+            float(np.sqrt(8.0**2 + 8.0**2)),
+            places=6,
+        )
+
+    def test_rk2_y_wall_backtrace_consumes_full_vector_face_target(self) -> None:
+        grid_nodes = (4, 4, 4)
+        solver = self._solver(grid_nodes)
+        dt_s = 0.1
+
+        for side_index in range(2):
+            with self.subTest(side=side_index):
+                solver.external_velocity_boundary_y_face_active_component_mask.fill(0)
+                solver.external_velocity_boundary_y_face_value_mps.fill(0.0)
+                normal_sign = 1.0 if side_index == 0 else -1.0
+                interior_velocity = np.asarray(
+                    (0.20, 2.0 * normal_sign, 0.40), dtype=np.float32
+                )
+                solver.velocity.from_numpy(
+                    np.broadcast_to(interior_velocity, (*grid_nodes, 3)).copy()
+                )
+                target = np.asarray(
+                    (0.75, 0.625 * normal_sign, -0.50), dtype=np.float32
+                )
+                solver.refresh_external_velocity_boundary_face_uniform(
+                    axis_index=1,
+                    side_index=side_index,
+                    target_velocity_mps=tuple(float(value) for value in target),
+                    active_component_mask=0b111,
+                )
+                self._seal_current_canonical_ledger(solver)
+                sample_cell = (1, 0 if side_index == 0 else 3, 2)
+
+                solver.predict(
+                    dt_s=dt_s,
+                    advection_scheme="rk2",
+                    kinematic_viscosity_m2_s=0.0,
+                    no_slip_domain_walls=(
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                    ),
+                )
+
+                np.testing.assert_allclose(
+                    np.asarray(solver.velocity[sample_cell], dtype=np.float64),
+                    target.astype(np.float64),
+                    rtol=2.0e-6,
+                    atol=2.0e-6,
+                )
+
     def test_predictor_advection_corner_backtrace_uses_earliest_face(
         self,
     ) -> None:
@@ -476,8 +583,8 @@ class ExternalBoundaryFaceProjectionContracts(unittest.TestCase):
         solver.velocity.from_numpy(
             np.broadcast_to(interior_velocity, (*grid_nodes, 3)).copy()
         )
-        xmin_target = (11.0, 12.0, 13.0)
-        ymin_target = (21.0, 22.0, 23.0)
+        xmin_target = (0.11, 0.12, 0.13)
+        ymin_target = (0.21, 0.22, 0.23)
         solver.refresh_external_velocity_boundary_face_uniform(
             axis_index=0,
             side_index=0,
@@ -490,6 +597,7 @@ class ExternalBoundaryFaceProjectionContracts(unittest.TestCase):
             target_velocity_mps=ymin_target,
             active_component_mask=0b111,
         )
+        self._seal_current_canonical_ledger(solver)
 
         dt_s = 0.2
         x_hit_time_s = (
