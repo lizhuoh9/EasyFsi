@@ -672,7 +672,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
             refresh_window,
         )
 
-    def test_post_solid_step_reuses_ib_classification_when_marker_geometry_static(
+    def test_post_solid_step_refreshes_live_dynamic_volume_or_reuses_static_ib_search(
         self,
     ) -> None:
         source = inspect.getsource(advance_hibm_mpm_sharp_mpm_step)
@@ -684,9 +684,42 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
             source.index("marker_geometry_changed = (") :
             source.index("next_pressure_neumann_gradient_report = None")
         ]
-        self.assertIn("if marker_geometry_changed:", second_search)
+        self.assertIn("post_solid_dynamic_volume_enabled = (", second_search)
+        self.assertIn(
+            "if marker_geometry_changed or post_solid_dynamic_volume_enabled:",
+            second_search,
+        )
+        self.assertIn("post_solid_far_internal_node_mask = (", second_search)
+        self.assertIn(
+            "fluid.hibm_dynamic_solid_volume_obstacle",
+            second_search,
+        )
+        self.assertIn(
+            "far_internal_node_mask=post_solid_far_internal_node_mask",
+            second_search,
+        )
+        self.assertIn(
+            "ib_search.assert_internal_nodes_subset_of_supplied_mask(",
+            second_search,
+        )
+        self.assertIn("int(markers.projection_segment_count) > 0", second_search)
         self.assertIn("ib_search.search_and_classify_grid_fields", second_search)
         self.assertIn("next_ib_report = load_report.ib_node_search", second_search)
+
+    def test_sharp_assembly_passes_dynamic_solid_volume_as_far_internal_mask(
+        self,
+    ) -> None:
+        source = inspect.getsource(assemble_hibm_mpm_sharp_fluid_to_mpm_loads)
+
+        self.assertIn("far_internal_node_mask = (", source)
+        self.assertIn("fluid.hibm_dynamic_solid_volume_obstacle", source)
+        self.assertIn("hibm_dynamic_solid_volume_enabled", source)
+        self.assertIn("int(markers.projection_segment_count) > 0", source)
+        self.assertIn("far_internal_node_mask=far_internal_node_mask", source)
+        self.assertIn(
+            "ib_search.assert_internal_nodes_subset_of_supplied_mask(",
+            source,
+        )
 
     def test_two_sided_stress_nearest_cell_uses_centered_rounding(self) -> None:
         source = HIBM_MPM_CORE_SOURCE.read_text(encoding="utf-8")
@@ -2357,6 +2390,230 @@ class HibmMpmIbNodeSearchTests(unittest.TestCase):
                 interior_probe_distance_m=0.02,
                 classify_far_internal_nodes=True,
             )
+
+    def test_far_internal_mask_requires_enabled_far_classification(self) -> None:
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.5, 0.5, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(1, 1, 1),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=1,
+        )
+        far_internal_node_mask = ti.field(dtype=ti.i32, shape=(1, 1, 1))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "far_internal_node_mask requires classify_far_internal_nodes=True",
+        ):
+            search.search_and_classify(
+                markers,
+                search_radius_m=0.05,
+                interior_probe_distance_m=0.02,
+                far_internal_node_mask=far_internal_node_mask,
+            )
+
+    def test_far_internal_mask_requires_grid_shape(self) -> None:
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.5, 0.5, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(1, 1, 1),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=1,
+        )
+        far_internal_node_mask = ti.field(dtype=ti.i32, shape=(1, 1, 2))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "far_internal_node_mask shape does not match grid_nodes",
+        ):
+            search.search_and_classify(
+                markers,
+                search_radius_m=0.05,
+                interior_probe_distance_m=0.02,
+                classify_far_internal_nodes=True,
+                far_internal_node_mask=far_internal_node_mask,
+            )
+
+    def test_far_internal_mask_requires_scalar_taichi_i32_field(self) -> None:
+        markers = HibmMpmSurfaceMarkers(marker_capacity=1)
+        markers.load_markers(
+            positions_m=((0.5, 0.5, 0.5),),
+            velocities_mps=((0.0, 0.0, 0.0),),
+            normals=((0.0, 0.0, 1.0),),
+            areas_m2=(1.0,),
+            region_ids=(7,),
+        )
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(1, 1, 1),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=1,
+        )
+        invalid_masks = {
+            "numpy": np.zeros((1, 1, 1), dtype=np.int32),
+            "float": ti.field(dtype=ti.f32, shape=(1, 1, 1)),
+            "vector": ti.Vector.field(3, dtype=ti.i32, shape=(1, 1, 1)),
+        }
+
+        for kind, far_internal_node_mask in invalid_masks.items():
+            with self.subTest(kind=kind), self.assertRaisesRegex(
+                ValueError,
+                "far_internal_node_mask must be a scalar Taichi i32 field",
+            ):
+                search.search_and_classify(
+                    markers,
+                    search_radius_m=0.05,
+                    interior_probe_distance_m=0.02,
+                    classify_far_internal_nodes=True,
+                    far_internal_node_mask=far_internal_node_mask,
+                )
+
+    def test_supplied_mask_internal_subset_assertion_fails_closed(self) -> None:
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(1, 1, 1),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=1,
+        )
+        far_internal_node_mask = ti.field(dtype=ti.i32, shape=(1, 1, 1))
+        far_internal_node_mask.fill(0)
+        search.node_kind_code[0, 0, 0] = HibmMpmIbNodeSearch._NODE_INTERNAL
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "internal nodes outside supplied far-internal mask",
+        ):
+            search.assert_internal_nodes_subset_of_supplied_mask(
+                far_internal_node_mask,
+            )
+
+    def test_segment_far_internal_mask_preserves_local_ownership(self) -> None:
+        markers = HibmMpmSurfaceMarkers(
+            marker_capacity=2,
+            projection_triangle_capacity=1,
+        )
+        markers.load_markers(
+            positions_m=((0.5, 0.25, 0.5), (0.5, 0.75, 0.5)),
+            velocities_mps=((0.0, 0.0, 0.0),) * 2,
+            normals=((0.0, 0.0, 1.0),) * 2,
+            areas_m2=(0.5, 0.5),
+            region_ids=(7, 7),
+        )
+        markers.set_projection_segments(((0, 1),))
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(1, 1, 6),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=2,
+        )
+        far_internal_node_mask = ti.field(dtype=ti.i32, shape=(1, 1, 6))
+        far_internal_node_mask.fill(0)
+        far_internal_node_mask[0, 0, 1] = 1
+        far_internal_node_mask[0, 0, 3] = 1
+
+        report = search.search_and_classify(
+            markers,
+            search_radius_m=0.1,
+            interior_probe_distance_m=0.05,
+            classify_far_internal_nodes=True,
+            far_internal_node_mask=far_internal_node_mask,
+            search_inactive_axis=0,
+        )
+
+        # The far, negative-side witness is not part of the physical solid;
+        # a raw open-segment signed-distance fallback must not classify it.
+        self.assertEqual(search.node_kind((0, 0, 0)), "none")
+        # A masked deep-solid cell becomes internal without fabricated
+        # projection metadata.
+        self.assertEqual(search.node_kind((0, 0, 1)), "internal")
+        self.assertEqual(search.nearest_marker_index((0, 0, 1)), -1)
+        # In supplied-mask mode, a locally negative-side node remains absent
+        # unless the authoritative solid-volume mask includes it.
+        self.assertEqual(search.node_kind((0, 0, 2)), "none")
+        self.assertEqual(search.nearest_marker_index((0, 0, 2)), -1)
+        self.assertEqual(search.node_pressure_owner_marker[0, 0, 2], -1)
+        self.assertEqual(
+            tuple(search.node_projection_marker_indices[0, 0, 2]),
+            (-1, -1, -1),
+        )
+        # A local positive-side projection overrides the solid mask and keeps
+        # the true segment owner for the boundary-condition path.
+        self.assertEqual(search.node_kind((0, 0, 3)), "external_ib")
+        self.assertGreaterEqual(search.nearest_marker_index((0, 0, 3)), 0)
+        self.assertEqual(report.external_ib_node_count, 1)
+
+    def test_segment_grid_field_far_internal_mask_preserves_local_ownership(
+        self,
+    ) -> None:
+        markers = HibmMpmSurfaceMarkers(
+            marker_capacity=2,
+            projection_triangle_capacity=1,
+        )
+        markers.load_markers(
+            positions_m=((0.5, 0.25, 0.5), (0.5, 0.75, 0.5)),
+            velocities_mps=((0.0, 0.0, 0.0),) * 2,
+            normals=((0.0, 0.0, 1.0),) * 2,
+            areas_m2=(0.5, 0.5),
+            region_ids=(7, 7),
+        )
+        markers.set_projection_segments(((0, 1),))
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=(1, 1, 6),
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=2,
+        )
+        cell_center_x_m = ti.field(dtype=ti.f32, shape=1)
+        cell_center_y_m = ti.field(dtype=ti.f32, shape=1)
+        cell_center_z_m = ti.field(dtype=ti.f32, shape=6)
+        cell_center_x_m[0] = 0.5
+        cell_center_y_m[0] = 0.5
+        for index in range(6):
+            cell_center_z_m[index] = (float(index) + 0.5) / 6.0
+        far_internal_node_mask = ti.field(dtype=ti.i32, shape=(1, 1, 6))
+        far_internal_node_mask.fill(0)
+        far_internal_node_mask[0, 0, 1] = 1
+        far_internal_node_mask[0, 0, 3] = 1
+
+        report = search.search_and_classify_grid_fields(
+            markers,
+            cell_center_x_m=cell_center_x_m,
+            cell_center_y_m=cell_center_y_m,
+            cell_center_z_m=cell_center_z_m,
+            search_radius_m=0.1,
+            interior_probe_distance_m=0.05,
+            classify_far_internal_nodes=True,
+            far_internal_node_mask=far_internal_node_mask,
+            search_inactive_axis=0,
+        )
+
+        self.assertEqual(search.node_kind((0, 0, 0)), "none")
+        self.assertEqual(search.node_kind((0, 0, 1)), "internal")
+        self.assertEqual(search.nearest_marker_index((0, 0, 1)), -1)
+        self.assertEqual(search.node_kind((0, 0, 2)), "none")
+        self.assertEqual(search.nearest_marker_index((0, 0, 2)), -1)
+        self.assertEqual(search.node_pressure_owner_marker[0, 0, 2], -1)
+        self.assertEqual(
+            tuple(search.node_projection_marker_indices[0, 0, 2]),
+            (-1, -1, -1),
+        )
+        self.assertEqual(search.node_kind((0, 0, 3)), "external_ib")
+        self.assertGreaterEqual(search.nearest_marker_index((0, 0, 3)), 0)
+        self.assertEqual(report.external_ib_node_count, 1)
 
     def test_plane_search_classifies_external_and_internal_nodes_on_taichi_fields(self) -> None:
         markers = HibmMpmSurfaceMarkers(marker_capacity=1)

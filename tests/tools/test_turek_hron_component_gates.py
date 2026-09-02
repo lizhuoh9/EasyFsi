@@ -251,6 +251,27 @@ def test_window_leakage_concatenates_axis_norms_before_dividing():
     )
 
 
+def test_initialization_audit_rejects_obstacles_outside_physical_volume():
+    module = _module()
+    config = module.frozen_component_config("fixed-fluid")
+    audit = {
+        "cylinder_connected": True,
+        "beam_connected": True,
+        "no_sealed_fluid_pocket": True,
+        "zero_load_fields_finite": True,
+        "hibm_base_obstacle_established": True,
+        "hibm_topology_valid": True,
+        "base_cylinder_mask_exact": True,
+        "beam_interior_mask_complete": True,
+        "obstacle_union_single_component": True,
+        "unexpected_obstacle_outside_beam_or_cylinder_cell_count": 1,
+        "marker_counts": (54, 4),
+    }
+
+    with pytest.raises(ValueError, match="FAIL_INIT_AUDIT"):
+        module.evaluate_initialization_audit(audit, config)
+
+
 def test_fixed_fluid_runner_uses_step_dt_and_exact_post_ramp_window(tmp_path: Path):
     module = _module()
     events: list[tuple[str, float | None]] = []
@@ -275,6 +296,7 @@ def test_fixed_fluid_runner_uses_step_dt_and_exact_post_ramp_window(tmp_path: Pa
                 "base_cylinder_mask_exact": True,
                 "beam_interior_mask_complete": True,
                 "obstacle_union_single_component": True,
+                "unexpected_obstacle_outside_beam_or_cylinder_cell_count": 0,
                 "marker_counts": (54, 4),
             }
 

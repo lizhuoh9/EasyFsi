@@ -28,10 +28,13 @@ from cases.turek_hron_fsi import (
     beam_fixed_particle_mask,
     beam_root_x_m,
     beam_surface_force_support_radius_m,
+    build_marker_projection_segments,
     build_cylinder_obstacle_mask,
     build_marker_layout,
     build_turek_hron_final_fields_snapshot,
     _build_parser,
+    _build_markers,
+    _update_turek_hron_dynamic_solid_volume,
     _flush_history_csv,
     _write_final_fields_contour_png,
     cylinder_center_solver_m,
@@ -673,6 +676,72 @@ class TurekHronSolverContractTests(unittest.TestCase):
             solid_step_source,
             r"constitutive_model\s*=\s*(?:str\()?config\.solid_constitutive_model",
         )
+
+    def test_dynamic_solid_volume_refresh_uses_live_particle_geometry(self):
+        config = replace(
+            TurekHronFsiConfig(),
+            solid_particle_counts=(1, 2, 4),
+        )
+        positions = object()
+        deformation_gradients = object()
+        solid = SimpleNamespace(
+            x=positions,
+            F=deformation_gradients,
+            particle_count=8,
+        )
+        expected_report = {"fluid_dynamic_obstacle_cell_count": 17}
+        update = mock.Mock(return_value=expected_report)
+        fluid = SimpleNamespace(
+            update_dynamic_solid_obstacle_from_particles=update,
+        )
+        box_min, box_max = beam_box_solver_m(config)
+        expected_support = tuple(
+            (float(box_max[axis]) - float(box_min[axis]))
+            / float(config.solid_particle_counts[axis])
+            for axis in range(3)
+        )
+
+        report = _update_turek_hron_dynamic_solid_volume(
+            fluid,
+            solid,
+            config,
+        )
+
+        self.assertIs(report, expected_report)
+        update.assert_called_once_with(
+            positions,
+            particle_count=8,
+            particle_support_size_m=expected_support,
+            particle_deformation_gradient=deformation_gradients,
+            store_as_hibm_dynamic_solid_volume=True,
+        )
+
+    def test_run_refreshes_dynamic_solid_volume_at_t0_and_after_solid_step(self):
+        source = inspect.getsource(run_turek_hron_fsi)
+        self.assertEqual(
+            source.count("_update_turek_hron_dynamic_solid_volume("),
+            2,
+        )
+        initial_refresh = source.index(
+            "_update_turek_hron_dynamic_solid_volume(",
+        )
+        marker_build = source.index("markers = _build_markers(")
+        self.assertLess(initial_refresh, marker_build)
+
+        solid_step_start = source.index("def solid_step()")
+        solid_step_end = source.index("history: list[dict[str, Any]]")
+        solid_step_source = source[solid_step_start:solid_step_end]
+        advance = solid_step_source.index(
+            "report = _advance_turek_hron_solid_macro_step("
+        )
+        accepted_time = solid_step_source.index(
+            "completed_solid_time_fields = _completed_solid_macro_step_time_fields("
+        )
+        refresh = solid_step_source.index(
+            "_update_turek_hron_dynamic_solid_volume("
+        )
+        self.assertLess(advance, refresh)
+        self.assertLess(refresh, accepted_time)
 
     def test_startup_validation_rejects_bad_solid_model_and_one_z_section(self):
         validator = turek_hron_case._validate_fsi_coupling_controls
@@ -1600,6 +1669,40 @@ class TurekHronMarkerGroupOrderTests(unittest.TestCase):
         self.assertIn(
             "slice(2 * side_count, 2 * side_count + tip_count)", source
         )
+
+    def test_projection_segments_are_three_disconnected_open_polylines(self):
+        config = replace(
+            TurekHronFsiConfig(), markers_per_side=3, markers_per_tip=2
+        )
+        expected_segments = ((0, 1), (1, 2), (3, 4), (4, 5), (6, 7))
+
+        self.assertEqual(build_marker_projection_segments(config), expected_segments)
+
+        class RecordingMarkers:
+            instance = None
+
+            def __init__(self, marker_capacity, runtime):
+                self.marker_capacity = marker_capacity
+                self.runtime = runtime
+                self.loaded = None
+                self.projection_segments = None
+                type(self).instance = self
+
+            def load_markers(self, **kwargs):
+                self.loaded = kwargs
+
+            def set_projection_segments(self, segment_indices):
+                self.projection_segments = tuple(segment_indices)
+
+        runtime = SimpleNamespace()
+        with mock.patch.object(
+            turek_hron_case, "HibmMpmSurfaceMarkers", RecordingMarkers
+        ):
+            markers = _build_markers(config, runtime)
+
+        self.assertIs(markers, RecordingMarkers.instance)
+        self.assertEqual(markers.marker_capacity, 8)
+        self.assertEqual(markers.projection_segments, expected_segments)
 
 
 if __name__ == "__main__":

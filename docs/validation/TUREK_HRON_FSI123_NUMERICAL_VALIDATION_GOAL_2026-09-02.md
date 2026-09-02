@@ -356,6 +356,39 @@ fluid pocket, finite zero-load fields, and the expected automatic marker layout.
 Failure stops the campaign; it does not authorize switching a flag after seeing
 reference error.
 
+#### 5.4.1 Pre-campaign segment and far-interior correction (2026-09-03)
+
+The first fixed-fluid time-zero attempt failed before any physical step with 12
+conflicting canonical alpha claims at the physical free tip. A bounded device
+diagnostic traced every conflict to adjacent point-marker authors. Registering
+the three existing physical marker groups as three disconnected open polylines
+(lower face, upper face, and free tip; 109 segments on L0) reduced alpha,
+target, region, and aggregate claim conflicts to zero.
+
+Those open polylines are valid local projection geometry, but they are not a
+closed-volume certificate. An intentionally bypassed diagnostic produced 348
+globally signed far-internal nodes and exposed an upstream fluid witness that
+the free-tip normal would misclassify. Therefore the frozen
+`classify_far_internal_nodes = True` setting has the following stricter
+meaning before the first canonical campaign:
+
+- finite segments own only local boundary classification and interpolation;
+- far-interior membership comes only from the current deformed MPM particle
+  volume (`solid.x` plus `solid.F`), installed at time zero and refreshed after
+  every solid macro step before the post-solid search;
+- segment-plus-far search without that scalar `i32` grid mask fails closed;
+- each initial and post-solid search fails closed unless every `INTERNAL` node
+  is a member of that current live particle-volume mask;
+- the dynamic volume and carve fields remain part of fluid save/restore, so a
+  rejected coupling trial cannot leak geometry into an accepted state; and
+- the time-zero component audit requires both complete beam-interior coverage
+  and exactly zero obstacle cells outside the analytic beam-cell-intersection
+  or canonical cylinder volume.
+
+This is a pre-reference topology correction, not parameter fitting. It changes
+the source identity, so all earlier component artifacts are source-stale and
+must be regenerated before any fixed-fluid or coupled result is canonical.
+
 The solid-only matrix contains three fresh runs:
 
 | run | grid | solid substeps | macro steps | prescribed load |

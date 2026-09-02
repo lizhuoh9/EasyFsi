@@ -12,6 +12,19 @@ physics adapter and component-local fluid/solid substeps. Numerical results in
 this report predate that migration and must be rerun before they are treated as
 evidence for the unified core.
 
+R26A pre-campaign correctness update (2026-09-03): the beam's lower face,
+upper face, and physical free tip are registered as three disconnected open
+segment chains for local HIBM projection. Open chains are never used as a
+global inside/outside certificate. When `classify_far_internal_nodes=True`,
+the far-interior authority is the live deformed MPM particle volume, installed
+before the first search and refreshed after each solid macro step; the search
+fails closed if that volume mask is absent. Before internal classifications are
+converted to obstacles, a device-side invariant also requires every `INTERNAL`
+node to belong to the live mask. The fixed-fluid time-zero audit requires zero
+obstacle cells outside the analytic beam-cell-intersection or the canonical
+cylinder. This update invalidates older component artifacts by source identity
+and does not itself establish new FSI1/2/3 numerical evidence.
+
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It
 deliberately separates confirmed results from confounded comparisons. Every
@@ -119,7 +132,9 @@ Key config knobs:
 and the flow/solid substep controls. Turek-Hron now uses the canonical
 component-face ledger: y-min/y-max no-slip walls and the z-max parabolic inlet are
 directed external component faces, and the ledger is prepared and sealed before
-each solve.
+each solve. Beam surface rows use the three physical finite-segment chains;
+deep beam cells use the current MPM particle-volume mask rather than a global
+signed-distance extrapolation from those open chains.
 
 ## 6. Open frontiers (if FSI3 flutter is pursued later)
 

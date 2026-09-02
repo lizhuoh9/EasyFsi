@@ -307,8 +307,16 @@ def evaluate_initialization_audit(
         "beam_interior_mask_complete",
         "obstacle_union_single_component",
     )
-    _required(audit, *required_true, "marker_counts")
+    unexpected_key = "unexpected_obstacle_outside_beam_or_cylinder_cell_count"
+    _required(audit, *required_true, unexpected_key, "marker_counts")
     failed = [key for key in required_true if audit[key] is not True]
+    unexpected_count = audit[unexpected_key]
+    if (
+        isinstance(unexpected_count, (bool, np.bool_))
+        or not isinstance(unexpected_count, (int, np.integer))
+        or int(unexpected_count) != 0
+    ):
+        failed.append(unexpected_key)
     if failed:
         raise ValueError(f"FAIL_INIT_AUDIT: {', '.join(failed)}")
     marker_counts = tuple(int(value) for value in audit["marker_counts"])
@@ -317,7 +325,11 @@ def evaluate_initialization_audit(
         raise ValueError(
             f"FAIL_MARKER_LAYOUT: expected side/tip {expected}, got {marker_counts}"
         )
-    return {"marker_counts": marker_counts, "status": "PASS_COMPONENT_ONLY"}
+    return {
+        "marker_counts": marker_counts,
+        unexpected_key: 0,
+        "status": "PASS_COMPONENT_ONLY",
+    }
 
 
 def evaluate_solid_row(

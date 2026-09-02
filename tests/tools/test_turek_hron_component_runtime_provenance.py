@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -98,6 +100,58 @@ def test_solid_runtime_uses_production_particle_mass_field():
         rtol=1.0e-6,
         atol=0.0,
     )
+
+
+def test_fixed_fluid_runtime_installs_t0_dynamic_particle_volume():
+    source = inspect.getsource(runtimes._FixedFluidRuntime.__init__)
+    solid_build = source.index("self.solid, self._masks = _build_solid(")
+    volume_refresh = source.index("_update_turek_hron_dynamic_solid_volume(")
+    marker_build = source.index("self.markers = _build_markers(")
+
+    assert solid_build < volume_refresh < marker_build
+    assert "if bool(self._config.classify_far_internal_nodes):" in source
+
+
+def test_fixed_fluid_initialization_audit_rejects_obstacle_outside_beam_volume():
+    class Field:
+        def __init__(self, value):
+            self.value = np.asarray(value)
+
+        def to_numpy(self):
+            return self.value.copy()
+
+    shape = (1, 4, 6)
+    base = np.zeros(shape, dtype=np.int32)
+    obstacle = np.zeros(shape, dtype=np.int32)
+    obstacle[0, 1, 2:4] = 1
+    obstacle[0, 1, 5] = 1
+    runtime = object.__new__(runtimes.FixedFluidRuntime)
+    runtime._initialization_report = SimpleNamespace(
+        internal_obstacle_cell_count=3,
+    )
+    runtime._last_report = None
+    runtime._canonical_cylinder_mask = base.copy()
+    runtime._beam_box_min = (0.0, 0.12, 0.22)
+    runtime._beam_box_max = (0.1, 0.18, 0.38)
+    runtime._spacing_xyz_m = (0.1, 0.1, 0.1)
+    runtime._config = SimpleNamespace(grid_nodes=shape)
+    runtime._marker_counts = (2, 2)
+    runtime._topology_valid = lambda report: True
+    runtime.fluid = SimpleNamespace(
+        hibm_base_obstacle=Field(base),
+        obstacle=Field(obstacle),
+        velocity=Field(np.zeros((*shape, 3), dtype=np.float32)),
+        pressure=Field(np.zeros(shape, dtype=np.float32)),
+        _hibm_base_obstacle_initialized=True,
+    )
+    runtime.solid = SimpleNamespace(
+        external_force_n=Field(np.zeros((1, 3), dtype=np.float32)),
+    )
+
+    audit = runtime.initialization_audit()
+
+    assert audit["unexpected_obstacle_outside_beam_or_cylinder_cell_count"] == 1
+    assert audit["beam_interior_mask_complete"] is False
 
 
 def test_external_y_face_residual_reads_production_ledger():

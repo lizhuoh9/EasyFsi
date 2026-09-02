@@ -255,18 +255,14 @@ class TurekHronFsiConfig:
     # spurious lift at rest on grid_nodes=(4, 96, 288) with the isotropic
     # envelope.
     ib_anisotropic_envelope: bool = False
-    # Global signed-distance interior classification (2026-07-09). The band
-    # classification only reaches search_radius from each face; on refined
-    # grids the beam interior extends beyond both faces' bands, leaving
-    # beam-center cells UNCLASSIFIED: sealed "fluid" pockets between the
-    # Dirichlet bands whose pressure blocks are near-singular (measured on
-    # (4,96,288)+aniso: only 36% of beam-interior cells obstacle-flagged and
-    # one CG solve per advance burning its full budget; with this flag the
-    # interior is 100% covered). False preserves the legacy base-grid
-    # behavior byte-for-byte (there the 2.3-cell interior is fully inside the
-    # bands, so far classification never fires). Geometrically sound for this
-    # case: the marker surface's only opening (beam root) is embedded in the
-    # cylinder obstacle mask.
+    # Far-interior classification (2026-07-09, hardened 2026-09). The local
+    # marker band alone does not reach beam-centre cells on refined grids.
+    # When enabled, the case therefore publishes the current MPM particle
+    # volume as the authoritative far-interior mask before the first search
+    # and after every solid macro step. Physical marker segments remain the
+    # sole local boundary/projection geometry; their disconnected open curves
+    # are never extrapolated globally to decide volume membership. False
+    # preserves the legacy base-grid path without a dynamic volume layer.
     classify_far_internal_nodes: bool = False
     # Tier-2 marker re-seeding (2026-07-09). build_marker_layout() builds the
     # beam surface markers ONCE at rest and every step thereafter they just
@@ -580,6 +576,25 @@ def build_marker_layout(
         normals.append((0.0, 0.0, -1.0))
         areas.append(tip_area_m2)
     return positions, normals, areas
+
+
+def build_marker_projection_segments(
+    config: TurekHronFsiConfig,
+) -> tuple[tuple[int, int], ...]:
+    """Return the three physical marker groups as disconnected open polylines."""
+
+    side_count, tip_count = resolved_marker_counts(config)
+    return (
+        tuple((index, index + 1) for index in range(side_count - 1))
+        + tuple(
+            (side_count + index, side_count + index + 1)
+            for index in range(side_count - 1)
+        )
+        + tuple(
+            (2 * side_count + index, 2 * side_count + index + 1)
+            for index in range(tip_count - 1)
+        )
+    )
 
 
 def thin_beam_pressure_probe_max_multiplier(config: TurekHronFsiConfig) -> float:
@@ -940,6 +955,29 @@ def _build_solid(
     return solid, masks
 
 
+def _update_turek_hron_dynamic_solid_volume(
+    fluid: CartesianFluidSolver,
+    solid: NeoHookeanMpmState,
+    config: TurekHronFsiConfig,
+) -> dict[str, object]:
+    """Publish the current deformed MPM beam volume for far classification."""
+
+    box_min, box_max = beam_box_solver_m(config)
+    particle_counts = tuple(int(value) for value in config.solid_particle_counts)
+    particle_support_size_m = tuple(
+        (float(box_max[axis]) - float(box_min[axis]))
+        / float(particle_counts[axis])
+        for axis in range(3)
+    )
+    return fluid.update_dynamic_solid_obstacle_from_particles(
+        solid.x,
+        particle_count=int(solid.particle_count),
+        particle_support_size_m=particle_support_size_m,
+        particle_deformation_gradient=solid.F,
+        store_as_hibm_dynamic_solid_volume=True,
+    )
+
+
 def _force_reporting_per_span_fields(
     *,
     beam_force_n: tuple[float, float, float],
@@ -1221,6 +1259,7 @@ def _build_markers(
         areas_m2=areas,
         region_ids=[PRIMARY_REGION_ID] * len(positions),
     )
+    markers.set_projection_segments(build_marker_projection_segments(config))
     return markers
 
 
@@ -3097,6 +3136,8 @@ def run_turek_hron_fsi(
     taichi_runtime = TaichiRuntimeConfig(arch="cuda")
     fluid = _build_fluid(config, taichi_runtime)
     solid, masks = _build_solid(config, taichi_runtime)
+    if bool(config.classify_far_internal_nodes):
+        _update_turek_hron_dynamic_solid_volume(fluid, solid, config)
     particle_position_generation = 0
 
     def record_particle_position_write() -> None:
@@ -3173,6 +3214,8 @@ def run_turek_hron_fsi(
             enforce_plane_strain_x=bool(config.enforce_plane_strain_x),
             particle_position_write_observer=record_particle_position_write,
         )
+        if bool(config.classify_far_internal_nodes):
+            _update_turek_hron_dynamic_solid_volume(fluid, solid, config)
         completed_solid_time_fields = _completed_solid_macro_step_time_fields(
             dt_s=float(config.dt_s),
             solid_substeps=solid_substep_count,

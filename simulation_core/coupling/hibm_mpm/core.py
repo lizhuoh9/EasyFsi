@@ -10554,6 +10554,13 @@ class HibmMpmIbNodeSearch:
         self._uniform_cell_width_z_m.from_numpy(
             np.full((nodes[2],), self.spacing_m[2], dtype=np.float32)
         )
+        # Private all-zero fallback for the public optional far-solid mask.
+        # It is never exposed or mutated; callers that need far classification
+        # must provide their own current physical-solid volume field.
+        self._default_far_internal_node_mask = ti.field(
+            dtype=ti.i32,
+            shape=nodes,
+        )
 
         self.node_kind_code = ti.field(dtype=ti.i32, shape=nodes)
         self.nearest_marker = ti.field(dtype=ti.i32, shape=nodes)
@@ -10593,6 +10600,10 @@ class HibmMpmIbNodeSearch:
         self.report_external_ib_node_count = ti.field(dtype=ti.i32, shape=())
         self.report_internal_node_count = ti.field(dtype=ti.i32, shape=())
         self.report_invalid_projection_count = ti.field(dtype=ti.i32, shape=())
+        self._internal_nodes_outside_supplied_mask_count = ti.field(
+            dtype=ti.i32,
+            shape=(),
+        )
         # C2e: device-resident marker AABB, refreshed once per
         # search_and_classify_grid_fields call and used as a per-node
         # early-continue in the main classify kernel (inflated by the
@@ -11042,6 +11053,8 @@ class HibmMpmIbNodeSearch:
         interior_probe_distance_m: ti.f32,
         sign_tolerance_m: ti.f32,
         classify_far_internal_nodes: ti.i32,
+        far_internal_node_mask: ti.template(),
+        use_far_internal_node_mask: ti.i32,
         bounds_min_x_m: ti.f32,
         bounds_min_y_m: ti.f32,
         bounds_min_z_m: ti.f32,
@@ -11146,7 +11159,10 @@ class HibmMpmIbNodeSearch:
                             ib,
                             ic,
                         )
-                        if classify_far_internal_nodes != 0:
+                        if (
+                            classify_far_internal_nodes != 0
+                            and use_far_internal_node_mask == 0
+                        ):
                             if distance < nearest_global_distance:
                                 nearest_global_distance = distance
                                 nearest_global = marker
@@ -11227,7 +11243,10 @@ class HibmMpmIbNodeSearch:
                         marker = ia
                         if segment_fraction > 0.5:
                             marker = ib
-                        if classify_far_internal_nodes != 0:
+                        if (
+                            classify_far_internal_nodes != 0
+                            and use_far_internal_node_mask == 0
+                        ):
                             if distance < nearest_global_distance:
                                 nearest_global_distance = distance
                                 nearest_global = marker
@@ -11267,7 +11286,10 @@ class HibmMpmIbNodeSearch:
                     )
                     distance = offset.norm()
                     signed_distance = offset.dot(normal)
-                    if classify_far_internal_nodes != 0:
+                    if (
+                        classify_far_internal_nodes != 0
+                        and use_far_internal_node_mask == 0
+                    ):
                         if distance < nearest_global_distance:
                             nearest_global_distance = distance
                             nearest_global = marker
@@ -11329,32 +11351,57 @@ class HibmMpmIbNodeSearch:
                     self.node_kind_code[node] = self._NODE_EXTERNAL_IB
                     self.report_external_ib_node_count[None] += 1
                 else:
+                    if (
+                        use_far_internal_node_mask != 0
+                        and far_internal_node_mask[node] == 0
+                    ):
+                        self.nearest_marker[node] = -1
+                        self.node_pressure_owner_marker[node] = -1
+                        self.node_signed_distance_m[node] = 0.0
+                        self.node_boundary_point_m[node] = ti.Vector([0.0, 0.0, 0.0])
+                        self.node_interior_fluid_point_m[node] = ti.Vector(
+                            [0.0, 0.0, 0.0]
+                        )
+                        self.node_projection_marker_indices[node] = ti.Vector(
+                            [-1, -1, -1]
+                        )
+                        self.node_projection_marker_weights[node] = ti.Vector(
+                            [0.0, 0.0, 0.0]
+                        )
+                    else:
+                        self.node_kind_code[node] = self._NODE_INTERNAL
+                        self.report_internal_node_count[None] += 1
+            elif classify_far_internal_nodes != 0:
+                if use_far_internal_node_mask != 0:
+                    # Deep physical-solid cells intentionally retain unset
+                    # projection metadata: only local geometry may own a
+                    # boundary condition or pressure anchor.
+                    if far_internal_node_mask[node] != 0:
+                        self.node_kind_code[node] = self._NODE_INTERNAL
+                        self.report_internal_node_count[None] += 1
+                elif (
+                    nearest_global >= 0
+                    and nearest_global_signed_distance <= sign_tolerance_m
+                ):
                     self.node_kind_code[node] = self._NODE_INTERNAL
+                    self.nearest_marker[node] = nearest_global
+                    self.node_pressure_owner_marker[node] = (
+                        projection_vertex_pressure_owner_index[nearest_global]
+                    )
+                    self.node_signed_distance_m[node] = nearest_global_signed_distance
+                    boundary_point = nearest_global_boundary_point
+                    normal = nearest_global_normal
+                    self.node_boundary_point_m[node] = boundary_point
+                    self.node_projection_marker_indices[node] = (
+                        nearest_global_projection_indices
+                    )
+                    self.node_projection_marker_weights[node] = (
+                        nearest_global_projection_weights
+                    )
+                    self.node_interior_fluid_point_m[node] = (
+                        boundary_point + normal * interior_probe_distance_m
+                    )
                     self.report_internal_node_count[None] += 1
-            elif (
-                classify_far_internal_nodes != 0
-                and nearest_global >= 0
-                and nearest_global_signed_distance <= sign_tolerance_m
-            ):
-                self.node_kind_code[node] = self._NODE_INTERNAL
-                self.nearest_marker[node] = nearest_global
-                self.node_pressure_owner_marker[node] = (
-                    projection_vertex_pressure_owner_index[nearest_global]
-                )
-                self.node_signed_distance_m[node] = nearest_global_signed_distance
-                boundary_point = nearest_global_boundary_point
-                normal = nearest_global_normal
-                self.node_boundary_point_m[node] = boundary_point
-                self.node_projection_marker_indices[node] = (
-                    nearest_global_projection_indices
-                )
-                self.node_projection_marker_weights[node] = (
-                    nearest_global_projection_weights
-                )
-                self.node_interior_fluid_point_m[node] = (
-                    boundary_point + normal * interior_probe_distance_m
-                )
-                self.report_internal_node_count[None] += 1
 
     @ti.kernel
     def _update_marker_bounds_kernel(
@@ -11392,6 +11439,8 @@ class HibmMpmIbNodeSearch:
         interior_probe_distance_m: ti.f32,
         sign_tolerance_m: ti.f32,
         classify_far_internal_nodes: ti.i32,
+        far_internal_node_mask: ti.template(),
+        use_far_internal_node_mask: ti.i32,
         cell_center_x_m: ti.template(),
         cell_center_y_m: ti.template(),
         cell_center_z_m: ti.template(),
@@ -11449,7 +11498,10 @@ class HibmMpmIbNodeSearch:
             self.node_projection_marker_indices[node] = ti.Vector([-1, -1, -1])
             self.node_projection_marker_weights[node] = ti.Vector([0.0, 0.0, 0.0])
 
-            if classify_far_internal_nodes == 0 and (
+            if (
+                classify_far_internal_nodes == 0
+                or use_far_internal_node_mask != 0
+            ) and (
                 (
                     search_inactive_axis != 0
                     and (position.x < aabb_min_x or position.x > aabb_max_x)
@@ -11463,6 +11515,16 @@ class HibmMpmIbNodeSearch:
                     and (position.z < aabb_min_z or position.z > aabb_max_z)
                 )
             ):
+                if (
+                    classify_far_internal_nodes != 0
+                    and use_far_internal_node_mask != 0
+                    and far_internal_node_mask[node] != 0
+                ):
+                    # This node is outside every local-search envelope.  The
+                    # authoritative volume field may still mark it as deep
+                    # solid, but it must not receive fake boundary metadata.
+                    self.node_kind_code[node] = self._NODE_INTERNAL
+                    self.report_internal_node_count[None] += 1
                 continue
 
             nearest = -1
@@ -11535,7 +11597,10 @@ class HibmMpmIbNodeSearch:
                         marker = ia
                         if segment_fraction > 0.5:
                             marker = ib
-                        if classify_far_internal_nodes != 0:
+                        if (
+                            classify_far_internal_nodes != 0
+                            and use_far_internal_node_mask == 0
+                        ):
                             if distance < nearest_global_distance:
                                 nearest_global_distance = distance
                                 nearest_global = marker
@@ -11606,7 +11671,10 @@ class HibmMpmIbNodeSearch:
                             ib,
                             ic,
                         )
-                        if classify_far_internal_nodes != 0:
+                        if (
+                            classify_far_internal_nodes != 0
+                            and use_far_internal_node_mask == 0
+                        ):
                             if distance < nearest_global_distance:
                                 nearest_global_distance = distance
                                 nearest_global = marker
@@ -11646,7 +11714,10 @@ class HibmMpmIbNodeSearch:
                     )
                     distance = offset.norm()
                     signed_distance = offset.dot(normal)
-                    if classify_far_internal_nodes != 0:
+                    if (
+                        classify_far_internal_nodes != 0
+                        and use_far_internal_node_mask == 0
+                    ):
                         if distance < nearest_global_distance:
                             nearest_global_distance = distance
                             nearest_global = marker
@@ -11708,32 +11779,57 @@ class HibmMpmIbNodeSearch:
                     self.node_kind_code[node] = self._NODE_EXTERNAL_IB
                     self.report_external_ib_node_count[None] += 1
                 else:
+                    if (
+                        use_far_internal_node_mask != 0
+                        and far_internal_node_mask[node] == 0
+                    ):
+                        self.nearest_marker[node] = -1
+                        self.node_pressure_owner_marker[node] = -1
+                        self.node_signed_distance_m[node] = 0.0
+                        self.node_boundary_point_m[node] = ti.Vector([0.0, 0.0, 0.0])
+                        self.node_interior_fluid_point_m[node] = ti.Vector(
+                            [0.0, 0.0, 0.0]
+                        )
+                        self.node_projection_marker_indices[node] = ti.Vector(
+                            [-1, -1, -1]
+                        )
+                        self.node_projection_marker_weights[node] = ti.Vector(
+                            [0.0, 0.0, 0.0]
+                        )
+                    else:
+                        self.node_kind_code[node] = self._NODE_INTERNAL
+                        self.report_internal_node_count[None] += 1
+            elif classify_far_internal_nodes != 0:
+                if use_far_internal_node_mask != 0:
+                    # The volume mask classifies deep solid only.  Near
+                    # segment/triangle/point geometry above retains exclusive
+                    # ownership of boundary and pressure-projection metadata.
+                    if far_internal_node_mask[node] != 0:
+                        self.node_kind_code[node] = self._NODE_INTERNAL
+                        self.report_internal_node_count[None] += 1
+                elif (
+                    nearest_global >= 0
+                    and nearest_global_signed_distance <= sign_tolerance_m
+                ):
                     self.node_kind_code[node] = self._NODE_INTERNAL
+                    self.nearest_marker[node] = nearest_global
+                    self.node_pressure_owner_marker[node] = (
+                        projection_vertex_pressure_owner_index[nearest_global]
+                    )
+                    self.node_signed_distance_m[node] = nearest_global_signed_distance
+                    boundary_point = nearest_global_boundary_point
+                    normal = nearest_global_normal
+                    self.node_boundary_point_m[node] = boundary_point
+                    self.node_projection_marker_indices[node] = (
+                        nearest_global_projection_indices
+                    )
+                    self.node_projection_marker_weights[node] = (
+                        nearest_global_projection_weights
+                    )
+                    self.node_interior_fluid_point_m[node] = (
+                        boundary_point + normal * interior_probe_distance_m
+                    )
                     self.report_internal_node_count[None] += 1
-            elif (
-                classify_far_internal_nodes != 0
-                and nearest_global >= 0
-                and nearest_global_signed_distance <= sign_tolerance_m
-            ):
-                self.node_kind_code[node] = self._NODE_INTERNAL
-                self.nearest_marker[node] = nearest_global
-                self.node_pressure_owner_marker[node] = (
-                    projection_vertex_pressure_owner_index[nearest_global]
-                )
-                self.node_signed_distance_m[node] = nearest_global_signed_distance
-                boundary_point = nearest_global_boundary_point
-                normal = nearest_global_normal
-                self.node_boundary_point_m[node] = boundary_point
-                self.node_projection_marker_indices[node] = (
-                    nearest_global_projection_indices
-                )
-                self.node_projection_marker_weights[node] = (
-                    nearest_global_projection_weights
-                )
-                self.node_interior_fluid_point_m[node] = (
-                    boundary_point + normal * interior_probe_distance_m
-                )
-                self.report_internal_node_count[None] += 1
 
     def _validate_search_inputs(
         self,
@@ -11817,6 +11913,65 @@ class HibmMpmIbNodeSearch:
             resolved_search_inactive_axis,
         )
 
+    def _resolve_far_internal_node_mask(
+        self,
+        *,
+        far_internal_node_mask,
+        classify_far_internal_nodes: bool,
+    ) -> tuple[Any, bool]:
+        if far_internal_node_mask is None:
+            return self._default_far_internal_node_mask, False
+        if not bool(classify_far_internal_nodes):
+            raise ValueError(
+                "far_internal_node_mask requires classify_far_internal_nodes=True"
+            )
+        if not isinstance(far_internal_node_mask, ti.ScalarField) or (
+            far_internal_node_mask.dtype != ti.i32
+        ):
+            raise ValueError(
+                "far_internal_node_mask must be a scalar Taichi i32 field"
+            )
+        try:
+            shape = tuple(far_internal_node_mask.shape)
+        except (AttributeError, TypeError) as exc:
+            raise ValueError(
+                "far_internal_node_mask must be a grid field with grid_nodes shape"
+            ) from exc
+        if shape != self.grid_nodes:
+            raise ValueError("far_internal_node_mask shape does not match grid_nodes")
+        return far_internal_node_mask, True
+
+    @ti.kernel
+    def _count_internal_nodes_outside_supplied_mask_kernel(
+        self,
+        far_internal_node_mask: ti.template(),
+    ):
+        self._internal_nodes_outside_supplied_mask_count[None] = 0
+        for node in ti.grouped(self.node_kind_code):
+            if (
+                self.node_kind_code[node] == self._NODE_INTERNAL
+                and far_internal_node_mask[node] == 0
+            ):
+                ti.atomic_add(self._internal_nodes_outside_supplied_mask_count[None], 1)
+
+    def assert_internal_nodes_subset_of_supplied_mask(
+        self,
+        far_internal_node_mask,
+    ) -> None:
+        """Fail closed when a supplied solid-volume mask misses an internal node."""
+        mask, supplied = self._resolve_far_internal_node_mask(
+            far_internal_node_mask=far_internal_node_mask,
+            classify_far_internal_nodes=True,
+        )
+        if not supplied:
+            raise ValueError("far_internal_node_mask must be supplied")
+        self._count_internal_nodes_outside_supplied_mask_kernel(mask)
+        violations = int(self._internal_nodes_outside_supplied_mask_count[None])
+        if violations != 0:
+            raise RuntimeError(
+                f"{violations} internal nodes outside supplied far-internal mask"
+            )
+
     def search_and_classify(
         self,
         markers: HibmMpmSurfaceMarkers,
@@ -11825,6 +11980,7 @@ class HibmMpmIbNodeSearch:
         interior_probe_distance_m: float,
         sign_tolerance_m: float | None = None,
         classify_far_internal_nodes: bool = False,
+        far_internal_node_mask=None,
         search_radius_xyz_m: tuple[float, float, float] | None = None,
         search_inactive_axis: int | None = None,
     ) -> HibmMpmIbNodeSearchReport:
@@ -11852,9 +12008,14 @@ class HibmMpmIbNodeSearch:
             search_radius,
             search_radius,
         )
+        far_internal_mask, use_far_internal_mask = self._resolve_far_internal_node_mask(
+            far_internal_node_mask=far_internal_node_mask,
+            classify_far_internal_nodes=bool(classify_far_internal_nodes),
+        )
         if (
             int(markers.projection_segment_count) > 0
             and bool(classify_far_internal_nodes)
+            and not use_far_internal_mask
         ):
             raise ValueError(
                 "projection segments do not support far-internal classification"
@@ -11876,6 +12037,8 @@ class HibmMpmIbNodeSearch:
             probe_distance,
             sign_tolerance,
             1 if bool(classify_far_internal_nodes) else 0,
+            far_internal_mask,
+            1 if use_far_internal_mask else 0,
             float(self.bounds_min_m[0]),
             float(self.bounds_min_m[1]),
             float(self.bounds_min_m[2]),
@@ -11916,6 +12079,7 @@ class HibmMpmIbNodeSearch:
         interior_probe_distance_m: float,
         sign_tolerance_m: float | None = None,
         classify_far_internal_nodes: bool = False,
+        far_internal_node_mask=None,
         search_radius_xyz_m: tuple[float, float, float] | None = None,
         search_inactive_axis: int | None = None,
     ) -> HibmMpmIbNodeSearchReport:
@@ -11943,9 +12107,14 @@ class HibmMpmIbNodeSearch:
             search_radius,
             search_radius,
         )
+        far_internal_mask, use_far_internal_mask = self._resolve_far_internal_node_mask(
+            far_internal_node_mask=far_internal_node_mask,
+            classify_far_internal_nodes=bool(classify_far_internal_nodes),
+        )
         if (
             int(markers.projection_segment_count) > 0
             and bool(classify_far_internal_nodes)
+            and not use_far_internal_mask
         ):
             raise ValueError(
                 "projection segments do not support far-internal classification"
@@ -11995,6 +12164,8 @@ class HibmMpmIbNodeSearch:
             probe_distance,
             sign_tolerance,
             1 if bool(classify_far_internal_nodes) else 0,
+            far_internal_mask,
+            1 if use_far_internal_mask else 0,
             cell_center_x_m,
             cell_center_y_m,
             cell_center_z_m,
@@ -31796,6 +31967,15 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         )
 
     _debug_stage_progress("search_and_classify_grid_fields:start")
+    far_internal_node_mask = (
+        fluid.hibm_dynamic_solid_volume_obstacle
+        if (
+            bool(classify_far_internal_nodes)
+            and bool(getattr(fluid, "hibm_dynamic_solid_volume_enabled", False))
+            and int(markers.projection_segment_count) > 0
+        )
+        else None
+    )
     ib_report = ib_search.search_and_classify_grid_fields(
         markers,
         cell_center_x_m=fluid.cell_center_x_m,
@@ -31804,9 +31984,14 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         search_radius_m=float(search_radius_m),
         interior_probe_distance_m=float(interior_probe_distance_m),
         classify_far_internal_nodes=bool(classify_far_internal_nodes),
+        far_internal_node_mask=far_internal_node_mask,
         search_radius_xyz_m=search_radius_xyz_m,
         search_inactive_axis=search_inactive_axis,
     )
+    if far_internal_node_mask is not None:
+        ib_search.assert_internal_nodes_subset_of_supplied_mask(
+            far_internal_node_mask,
+        )
     _debug_stage_progress("search_and_classify_grid_fields:done")
     _debug_stage_progress("apply_hibm_internal_obstacles:start")
     internal_obstacle_cell_count = fluid.apply_hibm_internal_obstacles(
@@ -33331,7 +33516,17 @@ def advance_hibm_mpm_sharp_mpm_step(
         float(feedback_report.max_marker_displacement_m) > 0.0
         or float(feedback_report.max_marker_normal_change) > 0.0
     )
-    if marker_geometry_changed:
+    post_solid_dynamic_volume_enabled = (
+        bool(classify_far_internal_nodes)
+        and bool(getattr(fluid, "hibm_dynamic_solid_volume_enabled", False))
+        and int(markers.projection_segment_count) > 0
+    )
+    if marker_geometry_changed or post_solid_dynamic_volume_enabled:
+        post_solid_far_internal_node_mask = (
+            fluid.hibm_dynamic_solid_volume_obstacle
+            if post_solid_dynamic_volume_enabled
+            else None
+        )
         next_ib_report = ib_search.search_and_classify_grid_fields(
             markers,
             cell_center_x_m=fluid.cell_center_x_m,
@@ -33340,9 +33535,14 @@ def advance_hibm_mpm_sharp_mpm_step(
             search_radius_m=float(search_radius_m),
             interior_probe_distance_m=float(interior_probe_distance_m),
             classify_far_internal_nodes=bool(classify_far_internal_nodes),
+            far_internal_node_mask=post_solid_far_internal_node_mask,
             search_radius_xyz_m=search_radius_xyz_m,
             search_inactive_axis=search_inactive_axis,
         )
+        if post_solid_far_internal_node_mask is not None:
+            ib_search.assert_internal_nodes_subset_of_supplied_mask(
+                post_solid_far_internal_node_mask,
+            )
     else:
         next_ib_report = load_report.ib_node_search
     next_internal_obstacle_cell_count = fluid.apply_hibm_internal_obstacles(

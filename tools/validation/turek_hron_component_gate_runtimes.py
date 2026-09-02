@@ -216,6 +216,7 @@ class _FixedFluidRuntime:
             _build_fluid,
             _build_markers,
             _build_solid,
+            _update_turek_hron_dynamic_solid_volume,
             _capture_fluid_predictor_time_observations,
             _full_bounds,
             _force_reporting_per_span_fields,
@@ -251,6 +252,12 @@ class _FixedFluidRuntime:
         runtime = _strict_cuda_runtime()
         self.fluid = _build_fluid(self._config, runtime)
         self.solid, self._masks = _build_solid(self._config, runtime)
+        if bool(self._config.classify_far_internal_nodes):
+            _update_turek_hron_dynamic_solid_volume(
+                self.fluid,
+                self.solid,
+                self._config,
+            )
         self.markers = _build_markers(self._config, runtime)
         self.taichi_runtime_identity = _measured_taichi_runtime_identity()
         bounds_min, bounds_max = _full_bounds(self._config)
@@ -662,8 +669,17 @@ class _FixedFluidRuntime:
             & (z[None, None, :] >= z_min)
             & (z[None, None, :] <= z_max)
         )
+        beam_cell_intersection = (
+            ((x + 0.5 * dx)[:, None, None] >= x_min)
+            & ((x - 0.5 * dx)[:, None, None] <= x_max)
+            & ((y + 0.5 * dy)[None, :, None] >= y_min)
+            & ((y - 0.5 * dy)[None, :, None] <= y_max)
+            & ((z + 0.5 * dz)[None, None, :] >= z_min)
+            & ((z - 0.5 * dz)[None, None, :] <= z_max)
+        )
         expected_beam_only = expected_beam & (base == 0)
         dynamic_only = (dynamic != 0) & (base == 0)
+        unexpected_obstacle = dynamic_only & ~beam_cell_intersection
         expected_beam_complete = bool(np.all(dynamic[expected_beam_only] != 0))
         union_connected = self._connected_yz(np.any(dynamic != 0, axis=0))
         topology = self._topology_valid(report)
@@ -671,6 +687,7 @@ class _FixedFluidRuntime:
             expected_beam_complete
             and np.count_nonzero(dynamic_only) > 0
             and report.internal_obstacle_cell_count > 0
+            and np.count_nonzero(unexpected_obstacle) == 0
         )
         return {
             "cylinder_connected": base_exact and bool(np.any(base != 0)),
@@ -693,6 +710,9 @@ class _FixedFluidRuntime:
             "internal_obstacle_cell_count": int(report.internal_obstacle_cell_count),
             "expected_beam_only_cell_count": int(np.count_nonzero(expected_beam_only)),
             "expected_beam_only_complete": expected_beam_complete,
+            "unexpected_obstacle_outside_beam_or_cylinder_cell_count": int(
+                np.count_nonzero(unexpected_obstacle)
+            ),
         }
 
     def assert_fixed_markers(self) -> None:
