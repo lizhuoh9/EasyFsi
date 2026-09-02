@@ -20485,6 +20485,55 @@ class HibmMpmIbBoundaryConditions:
                                                     direct_reference_slot
                                                 ]
                                             )
+                                            endpoint_roundoff_same_slot_shadow_target = (
+                                                axis
+                                                == surface_projection_inactive_axis
+                                                and current_serialized_target[axis]
+                                                == direct_source_slot_serialized_target[
+                                                    direct_reference_slot
+                                                ]
+                                                and current_marker
+                                                == direct_source_slot_marker[
+                                                    direct_reference_slot
+                                                ]
+                                                and current_projection_weights.x
+                                                == direct_slot_projection_weights.x
+                                                and current_projection_weights.y
+                                                == direct_slot_projection_weights.y
+                                                and current_projection_weights.z
+                                                == direct_slot_projection_weights.z
+                                                and (
+                                                    (
+                                                        direct_slot_projection_weights.x
+                                                        == 1.0
+                                                        and direct_slot_projection_weights.y
+                                                        == 0.0
+                                                        and direct_slot_projection_weights.z
+                                                        == 0.0
+                                                    )
+                                                    or (
+                                                        direct_slot_projection_weights.x
+                                                        == 0.0
+                                                        and direct_slot_projection_weights.y
+                                                        == 1.0
+                                                        and direct_slot_projection_weights.z
+                                                        == 0.0
+                                                    )
+                                                )
+                                                and boundary_point.x
+                                                == node_boundary_point_m[source].x
+                                                and boundary_point.y
+                                                == node_boundary_point_m[source].y
+                                                and boundary_point.z
+                                                == node_boundary_point_m[source].z
+                                                and ti.abs(
+                                                    current_target
+                                                    - direct_source_slot_target[
+                                                        direct_reference_slot
+                                                    ]
+                                                )
+                                                <= 1.0e-6
+                                            )
                                             if (
                                                 redundant_shadow_proven
                                                 and not cached_transverse_direct_relocation_shadow
@@ -20502,6 +20551,7 @@ class HibmMpmIbBoundaryConditions:
                                                 )
                                                 and (
                                                     exact_same_slot_shadow_target
+                                                    or endpoint_roundoff_same_slot_shadow_target
                                                     or cached_transverse_adjacent_direct_pair_available
                                                     or transverse_interpolated_same_slot_shadow
                                                 )

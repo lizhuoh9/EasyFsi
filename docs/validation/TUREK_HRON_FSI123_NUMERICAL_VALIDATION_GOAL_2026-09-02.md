@@ -389,6 +389,27 @@ This is a pre-reference topology correction, not parameter fitting. It changes
 the source identity, so all earlier component artifacts are source-stale and
 must be regenerated before any fixed-fluid or coupled result is canonical.
 
+A subsequent source-matched nx4 fixed-fluid attempt (`r02`) passed the time-zero
+audit but failed during the first physical step, before any accepted row, with
+six canonical component-face target conflicts. The first witness was the
+inactive-axis face at the physical free tip. A direct fluid row and its
+relocation shadow had the same source/storage identity, unique registered
+segment, nearest marker, one-hot endpoint weights, boundary point, region, and
+exact serialized zero target; their distinct interior rays nevertheless
+produced non-bit-identical effective targets at roundoff scale.
+
+The endpoint repair remains fail-closed. It consumes the relocation shadow only
+when the existing redundant-shadow proof succeeds and all of the endpoint
+identity fields above match exactly, both effective targets are finite, and
+their difference is at most `1e-6 m/s`. The direct claim remains authoritative;
+the implementation neither averages claims nor relaxes the global conflict
+rule. Focused strict-CUDA evidence is two endpoint tests plus six neighboring
+component-face contract tests passing. The full component-face geometry module
+timed out at 1200 s and therefore has no verdict. This source change makes the
+previous solid-only artifacts source-stale again: the entire frozen component
+order must be regenerated before nx4 fixed-fluid is retried, and none of this
+is yet FSI1 numerical evidence.
+
 The solid-only matrix contains three fresh runs:
 
 | run | grid | solid substeps | macro steps | prescribed load |

@@ -25,6 +25,25 @@ obstacle cells outside the analytic beam-cell-intersection or the canonical
 cylinder. This update invalidates older component artifacts by source identity
 and does not itself establish new FSI1/2/3 numerical evidence.
 
+R26A fixed-fluid endpoint-arbitration update (2026-09-03): the first
+source-matched nx4 fixed-fluid attempt after that correction passed its
+time-zero audit, then stopped during the first physical step with six canonical
+component-face target conflicts. It produced no accepted physical row. The
+conflicting authors were a direct fluid row and its relocation shadow at the
+same physical free-tip endpoint: their serialized targets were exactly equal,
+but their independently reconstructed effective targets differed only by
+floating-point roundoff. The repair discards the shadow only after the existing
+redundant-shadow proof succeeds and additionally requires the inactive axis,
+the same unique registered segment and marker, identical one-hot endpoint
+weights, identical boundary point, an exactly equal serialized target, finite
+effective targets, and an effective-target difference no greater than
+`1e-6 m/s`. It preserves the direct target without averaging or rewriting it.
+Two focused endpoint tests and six neighboring strict-CUDA contract tests pass;
+the complete component-face geometry module exceeded its 1200 s bound and has
+no module-level verdict. All component artifacts predating this source change
+are source-stale and must be regenerated. This update authorizes another
+component-gate attempt; it is not fixed-fluid or FSI1 numerical evidence.
+
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It
 deliberately separates confirmed results from confounded comparisons. Every

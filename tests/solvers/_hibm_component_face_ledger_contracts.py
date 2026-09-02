@@ -13791,6 +13791,271 @@ class CanonicalComponentFaceLedgerContractMixin:
         finally:
             boundary.__dict__.pop(closure_name, None)
 
+    def _run_inactive_axis_endpoint_shadow_prepare(
+        self,
+        *,
+        endpoint_marker: int,
+        shadow_serialized_x: float,
+        shadow_sample_x: float,
+        stop_after_prepare: bool,
+    ) -> tuple[dict[str, object], tuple[tuple[str, bytes], ...], BaseException | None]:
+        """Exercise one endpoint shadow through claim preparation only."""
+
+        class _StopAfterClaimPrepare(Exception):
+            pass
+
+        fixture = self._load_inactive_axis_extrusion_cohort_fixture(
+            direct_slots=(0,),
+            shadow_slots=(0,),
+            terminal_endpoint_marker=endpoint_marker,
+        )
+        boundary = self.segment_component_face_boundary
+        search = self.segment_component_face_search
+        target = fixture["target"]
+        direct = fixture["direct_rows"][0]
+        shadow = fixture["shadow_rows"][0]
+        search.node_boundary_point_m[shadow] = tuple(
+            float(value) for value in search.node_boundary_point_m[direct]
+        )
+        search.nearest_marker[shadow] = int(search.nearest_marker[direct])
+        search.node_projection_marker_indices[shadow] = tuple(
+            int(value) for value in search.node_projection_marker_indices[direct]
+        )
+        search.node_projection_marker_weights[shadow] = tuple(
+            float(value) for value in search.node_projection_marker_weights[direct]
+        )
+        boundary.velocity_dirichlet_mps_field[shadow] = (
+            shadow_serialized_x,
+            3.0,
+            0.0,
+        )
+        velocity = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
+        velocity[..., 1] = 3.0
+        self.fluid.velocity.from_numpy(velocity)
+        observed: dict[str, object] = {}
+        ledger_before = self._canonical_ledger_bytes()
+
+        def capture_stages(stage: str) -> None:
+            if stage == "hibm_velocity_row_relocation_materialize_after":
+                observed["shadow_valid"] = int(
+                    boundary.velocity_dirichlet_relocation_shadow_claim_valid[direct]
+                )
+                observed["shadow_source"] = tuple(
+                    int(value)
+                    for value in boundary.velocity_dirichlet_relocation_shadow_source_row[
+                        direct
+                    ]
+                )
+                observed["shadow_storage"] = tuple(
+                    int(value)
+                    for value in boundary.velocity_dirichlet_relocation_shadow_storage_base_row[
+                        direct
+                    ]
+                )
+                observed["shadow_boundary_point_m"] = tuple(
+                    float(value) for value in search.node_boundary_point_m[shadow]
+                )
+                observed["shadow_sample_point_m"] = tuple(
+                    float(value)
+                    for value in boundary.velocity_dirichlet_relocation_shadow_sample_point_m[
+                        direct
+                    ]
+                )
+                boundary.velocity_dirichlet_relocation_shadow_sample_velocity_mps[
+                    direct
+                ] = (shadow_sample_x, 3.0, 0.0)
+            elif stage == "hibm_velocity_row_direct_presample_after":
+                boundary.velocity_dirichlet_component_face_actual_sample_velocity_mps[
+                    direct
+                ] = (2.0, 3.0, 0.0)
+            elif stage == "hibm_velocity_row_claim_prepare_after":
+                pair = (*target, 0)
+                observed["claim_count"] = int(
+                    boundary.velocity_dirichlet_component_face_claim_count[target][0]
+                )
+                observed["claim_target_bits"] = int(
+                    np.float32(
+                        boundary.velocity_dirichlet_component_face_claim_target_mps[
+                            target
+                        ][0]
+                    ).view(np.uint32)
+                )
+                observed["first_key"] = int(
+                    boundary.velocity_dirichlet_component_face_segment_first_author_linear_key[
+                        pair
+                    ]
+                )
+                observed["second_key"] = int(
+                    boundary.velocity_dirichlet_component_face_segment_second_author_linear_key[
+                        pair
+                    ]
+                )
+                observed["target_conflicts"] = int(
+                    boundary.report_velocity_dirichlet_component_face_target_conflict_count[
+                        None
+                    ]
+                )
+                if stop_after_prepare:
+                    raise _StopAfterClaimPrepare
+
+        failure: BaseException | None = None
+        try:
+            self._assemble_component_face_ledger(
+                interpolate_interior_velocity=True,
+                use_marker_geometry=True,
+                use_segment_fixture=True,
+                provide_marker_topology=True,
+                surface_projection_inactive_axis=0,
+                stage_observer=capture_stages,
+            )
+        except _StopAfterClaimPrepare:
+            if not stop_after_prepare:
+                raise
+        except RuntimeError as exc:
+            failure = exc
+        shadow_boundary = np.asarray(
+            observed["shadow_boundary_point_m"], dtype=np.float32
+        )
+        shadow_sample = np.asarray(
+            observed["shadow_sample_point_m"], dtype=np.float32
+        )
+        face_center = np.asarray(
+            (
+                self.fluid.cell_face_x_m[target[0]],
+                self.fluid.cell_center_y_m[target[1]],
+                self.fluid.cell_center_z_m[target[2]],
+            ),
+            dtype=np.float32,
+        )
+        segment = np.float32(shadow_sample - shadow_boundary)
+        face_offset = np.float32(face_center - shadow_boundary)
+        numerator = np.float32(
+            np.float32(face_offset[0] * segment[0])
+            + np.float32(face_offset[1] * segment[1])
+            + np.float32(face_offset[2] * segment[2])
+        )
+        denominator = np.float32(
+            np.float32(segment[0] * segment[0])
+            + np.float32(segment[1] * segment[1])
+            + np.float32(segment[2] * segment[2])
+        )
+        alpha = np.float32(
+            min(1.0, max(0.0, float(np.float32(numerator / denominator))))
+        )
+        shadow_effective = np.float32(
+            np.float32(shadow_serialized_x)
+            + np.float32(np.float32(shadow_sample_x) - shadow_serialized_x) * alpha
+        )
+        observed["shadow_effective_bits"] = int(shadow_effective.view(np.uint32))
+        observed["shadow_effective_delta_mps"] = float(
+            abs(np.float32(shadow_effective - np.float32(2.0)))
+        )
+        self._assert_component_face_relocation_transient_neutral(
+            use_segment_fixture=True
+        )
+        return observed, ledger_before, failure
+
+    def test_inactive_axis_endpoint_shadow_roundoff_keeps_direct_authority(
+        self,
+    ) -> None:
+        """A sub-tolerance endpoint shadow preserves direct f32 authority."""
+
+        shadow_sample = float(np.nextafter(np.float32(2.0), np.float32(np.inf)))
+        direct_bits = int(np.float32(2.0).view(np.uint32))
+        shadow_bits = int(np.float32(shadow_sample).view(np.uint32))
+        shadow_delta = float(np.float32(shadow_sample) - np.float32(2.0))
+        self.assertEqual(shadow_bits - direct_bits, 1)
+        self.assertGreater(shadow_delta, 0.0)
+        self.assertLessEqual(shadow_delta, 1.0e-6)
+        for endpoint_marker in (0, 1):
+            with self.subTest(endpoint_marker=endpoint_marker):
+                observed, _, failure = (
+                    self._run_inactive_axis_endpoint_shadow_prepare(
+                        endpoint_marker=endpoint_marker,
+                        shadow_serialized_x=2.0,
+                        shadow_sample_x=shadow_sample,
+                        stop_after_prepare=True,
+                    )
+                )
+                self.assertIsNone(failure)
+                self.assertEqual(observed["shadow_valid"], 1)
+                self.assertEqual(observed["shadow_source"], (0, 1, 2))
+                self.assertEqual(observed["shadow_storage"], (0, 2, 2))
+                self.assertEqual(observed["claim_count"], 1)
+                self.assertEqual(observed["claim_target_bits"], direct_bits)
+                self.assertNotEqual(observed["claim_target_bits"], shadow_bits)
+                self.assertNotEqual(
+                    observed["shadow_effective_bits"],
+                    direct_bits,
+                )
+                self.assertGreater(
+                    float(observed["shadow_effective_delta_mps"]),
+                    0.0,
+                )
+                self.assertLessEqual(
+                    float(observed["shadow_effective_delta_mps"]),
+                    1.0e-6,
+                )
+                self.assertEqual((observed["first_key"], observed["second_key"]), (-1, -1))
+
+    def test_inactive_axis_endpoint_shadow_rejects_nonidentical_contracts(
+        self,
+    ) -> None:
+        """Endpoint serialized and effective differences remain fail-closed."""
+
+        nextafter_two = float(np.nextafter(np.float32(2.0), np.float32(np.inf)))
+        baseline, _, baseline_failure = (
+            self._run_inactive_axis_endpoint_shadow_prepare(
+                endpoint_marker=0,
+                shadow_serialized_x=2.0,
+                shadow_sample_x=nextafter_two,
+                stop_after_prepare=True,
+            )
+        )
+        self.assertIsNone(baseline_failure)
+        for name, serialized, sample in (
+            ("serialized_ulp", nextafter_two, nextafter_two),
+            ("effective_delta", 2.0, float(np.float32(2.0 + 4.0e-6))),
+        ):
+            with self.subTest(name=name):
+                observed, ledger_before, failure = (
+                    self._run_inactive_axis_endpoint_shadow_prepare(
+                        endpoint_marker=0,
+                        shadow_serialized_x=serialized,
+                        shadow_sample_x=sample,
+                        stop_after_prepare=False,
+                    )
+                )
+                self.assertIsNotNone(failure)
+                self.assertRegex(
+                    str(failure),
+                    r"conflicting canonical component-face claims \(target\)",
+                )
+                self.assertEqual(observed["claim_count"], 2)
+                self.assertLess(observed["first_key"], -1)
+                self.assertLess(observed["second_key"], -1)
+                self.assertEqual(
+                    observed["target_conflicts"],
+                    baseline["target_conflicts"] + 1,
+                )
+                self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+                if name == "serialized_ulp":
+                    self.assertEqual(
+                        int(np.float32(serialized).view(np.uint32))
+                        - int(np.float32(2.0).view(np.uint32)),
+                        1,
+                    )
+                    self.assertGreater(float(np.float32(serialized) - 2.0), 0.0)
+                    self.assertLessEqual(
+                        float(np.float32(serialized) - 2.0),
+                        1.0e-6,
+                    )
+                else:
+                    self.assertGreater(
+                        float(observed["shadow_effective_delta_mps"]),
+                        1.0e-6,
+                    )
+
     def test_shifted_inactive_axis_double_relocation_reconstructs_one_face_ray(
         self,
     ) -> None:
