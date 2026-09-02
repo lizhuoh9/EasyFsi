@@ -363,6 +363,20 @@ def _source_hashes() -> dict[str, str]:
         Path(__file__).resolve(),
         REPO_ROOT / "tools" / "audit_ansys_vertical_flap_oracle_threshold.py",
         REPO_ROOT / "tools" / "validation" / "compare_solid_substep_ab.py",
+        (
+            REPO_ROOT
+            / "tools"
+            / "validation"
+            / "gru_kalman_live"
+            / "__init__.py"
+        ),
+        (
+            REPO_ROOT
+            / "tools"
+            / "validation"
+            / "gru_kalman_live"
+            / "candidate_bundle.py"
+        ),
     }
     for root in roots:
         if root.is_dir():
