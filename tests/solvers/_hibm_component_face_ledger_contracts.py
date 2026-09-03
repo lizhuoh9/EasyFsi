@@ -13001,6 +13001,96 @@ class CanonicalComponentFaceLedgerContractMixin:
             msg="canonical shared-face state depends on author assignment",
         )
 
+    def test_segment_reconstruct_scopes_pair_storage_route_to_registered_bridge(
+        self,
+    ) -> None:
+        method = (
+            type(self.component_face_boundary)
+            ._reconstruct_velocity_dirichlet_component_face_segment_claims_kernel
+        )
+        function = ast.parse(
+            inspect.cleandoc(inspect.getsource(method))
+        ).body[0]
+        selector_assignments = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr
+            == "_select_canonical_component_face_storage_device"
+        ]
+        self.assertEqual(len(selector_assignments), 1)
+        selector = selector_assignments[0]
+        unpack = selector.targets[0]
+        self.assertIsInstance(unpack, ast.Tuple)
+        self.assertTrue(
+            all(isinstance(element, ast.Name) for element in unpack.elts)
+        )
+        outputs = tuple(element.id for element in unpack.elts)
+        generic_outputs = outputs[0:3]
+        pair_outputs = outputs[4:7]
+
+        route_ifs = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "cached_registered_single_bridge_direct_pair"
+        ]
+        self.assertEqual(len(route_ifs), 1)
+        route_if = route_ifs[0]
+        self.assertEqual(route_if.orelse, [])
+
+        overrides = {}
+        for statement in route_if.body:
+            self.assertIsInstance(statement, ast.Assign)
+            self.assertEqual(len(statement.targets), 1)
+            self.assertIsInstance(statement.targets[0], ast.Name)
+            self.assertIsInstance(statement.value, ast.Name)
+            overrides[statement.value.id] = statement.targets[0].id
+        self.assertEqual(set(overrides), set(pair_outputs))
+        selected_outputs = tuple(overrides[name] for name in pair_outputs)
+
+        defaults = {
+            (node.targets[0].id, node.value.id)
+            for node in ast.walk(function)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Name)
+            and selector.end_lineno < node.lineno < route_if.lineno
+        }
+        for selected, generic in zip(
+            selected_outputs,
+            generic_outputs,
+            strict=True,
+        ):
+            self.assertIn((selected, generic), defaults)
+
+        parents = {
+            child: parent
+            for parent in ast.walk(function)
+            for child in ast.iter_child_nodes(parent)
+        }
+
+        def is_inside(node: ast.AST, ancestor: ast.AST) -> bool:
+            while node in parents:
+                node = parents[node]
+                if node is ancestor:
+                    return True
+            return False
+
+        pair_loads = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in pair_outputs
+        ]
+        self.assertEqual(len(pair_loads), 3)
+        self.assertTrue(all(is_inside(node, route_if) for node in pair_loads))
+
     def test_interpolation_reconstructs_distinct_same_segment_face_projection(
         self,
     ) -> None:

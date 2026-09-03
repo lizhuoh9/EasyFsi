@@ -23108,6 +23108,7 @@ class HibmMpmIbBoundaryConditions:
                 minus_face_author = ti.Vector([target.x, target.y, target.z])
                 minus_face_author[component_axis] -= 1
                 reconstruction_valid = 1
+                cached_registered_single_bridge_direct_pair = 0
                 if (
                     second_linear_key < 0
                     or self.velocity_dirichlet_component_face_claim_count[target][
@@ -24013,25 +24014,32 @@ class HibmMpmIbBoundaryConditions:
                                     ny,
                                     nz,
                                 )
+                                selected_storage_valid = _canonical_storage_valid
+                                selected_storage = _canonical_storage
+                                selected_alpha = _canonical_alpha
+                                if cached_registered_single_bridge_direct_pair:
+                                    selected_storage_valid = canonical_pair_valid
+                                    selected_storage = canonical_pair_storage
+                                    selected_alpha = canonical_pair_alpha
                                 reconstructed_target_candidate = (
                                     canonical_boundary_target
                                     + (
                                         canonical_sample_velocity[component_axis]
                                         - canonical_boundary_target
                                     )
-                                    * canonical_pair_alpha
+                                    * selected_alpha
                                 )
-                                # Exact face-first pairs are identified by the
-                                # storage face nearest the shared ray, not by
-                                # the generic ray's earliest progress.
+                                # Only the proven registered connector route
+                                # uses nearest-face ranking; legacy face-first
+                                # cohorts retain generic ray progress.
                                 if (
-                                    canonical_pair_valid == 0
-                                    or canonical_pair_storage.x != target.x
-                                    or canonical_pair_storage.y != target.y
-                                    or canonical_pair_storage.z != target.z
-                                    or canonical_pair_alpha <= 1.0e-6
-                                    or ti.math.isnan(canonical_pair_alpha)
-                                    or ti.math.isinf(canonical_pair_alpha)
+                                    selected_storage_valid == 0
+                                    or selected_storage.x != target.x
+                                    or selected_storage.y != target.y
+                                    or selected_storage.z != target.z
+                                    or selected_alpha <= 1.0e-6
+                                    or ti.math.isnan(selected_alpha)
+                                    or ti.math.isinf(selected_alpha)
                                     or ti.math.isnan(reconstructed_target_candidate)
                                     or ti.math.isinf(reconstructed_target_candidate)
                                 ):
@@ -24040,7 +24048,7 @@ class HibmMpmIbBoundaryConditions:
                                     reconstructed_target = (
                                         reconstructed_target_candidate
                                     )
-                                    reconstructed_alpha = canonical_pair_alpha
+                                    reconstructed_alpha = selected_alpha
                                     accepted_endpoint_clamped = (
                                         distinct_pair_endpoint_clamped
                                     )
