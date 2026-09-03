@@ -334,6 +334,7 @@ def _combine_projection_reports(
     sum_keys = (
         "cg_project_calls",
         "cg_iterations_total",
+        "cg_operator_apply_count",
         "cg_host_residual_checks",
         "cg_mean_host_reads",
         "cg_mean_projection_count",

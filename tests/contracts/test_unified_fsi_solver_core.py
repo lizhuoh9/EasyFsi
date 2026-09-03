@@ -824,6 +824,67 @@ class UnifiedFsiSolverCoreTests(unittest.TestCase):
         self.assertEqual(runtime.committed_rows[0]["step"], 1)
         self.assertTrue(runtime.committed_rows[0]["fsi_coupling_converged"])
 
+    def test_two_coupling_trials_publish_exactly_one_accepted_row(self) -> None:
+        from simulation_core.drivers.generic_fsi_solver import (
+            FsiCouplingConfig,
+            FsiSolverConfig,
+            FsiTrialResult,
+            solve_fsi_runtime,
+        )
+
+        class TwoTrialRuntime:
+            def __init__(self) -> None:
+                self.trials = 0
+                self.commits = 0
+                self.publications = 0
+
+            def begin_step(self, context):
+                return np.zeros((1, 3), dtype=np.float64)
+
+            def evaluate_trial(self, context, marker_velocity_guess_mps):
+                self.trials += 1
+                value = 1.0 if self.trials == 1 else 0.6
+                return FsiTrialResult(
+                    marker_velocity_mps=np.asarray(
+                        [[value, 0.0, 0.0]], dtype=np.float64
+                    )
+                )
+
+            def commit_step(self, context, trial, coupling):
+                self.commits += 1
+                return {"trial_work_count": self.trials}
+
+            def publish_step(self, context, row):
+                self.publications += 1
+                self.asserted_row = dict(row)
+
+            def rollback_step(self, context):
+                raise AssertionError("the two-trial step must converge")
+
+            def finalize_run(self):
+                return {}
+
+        runtime = TwoTrialRuntime()
+        result = solve_fsi_runtime(
+            runtime,
+            FsiSolverConfig(
+                step_count=1,
+                time_step_s=0.1,
+                coupling=FsiCouplingConfig(
+                    max_iterations=2,
+                    relative_tolerance=0.1,
+                    absolute_tolerance_mps=0.5,
+                    initial_relaxation=0.5,
+                ),
+            ),
+        )
+
+        self.assertEqual(runtime.trials, 2)
+        self.assertEqual(runtime.commits, 1)
+        self.assertEqual(runtime.publications, 1)
+        self.assertEqual(result.history[0]["trial_work_count"], 2)
+        self.assertEqual(runtime.asserted_row["fsi_coupling_iterations"], 2)
+
     def test_executor_only_transition_api_is_deleted(self) -> None:
         from simulation_core.drivers import generic_fsi_solver
 

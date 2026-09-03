@@ -2052,6 +2052,7 @@ class CartesianFluidSolver:
         self.last_cg_multigrid_pre_smooth_iterations = 0
         self.last_cg_multigrid_coarse_smooth_iterations = 0
         self.last_cg_multigrid_post_smooth_iterations = 0
+        self.last_cg_operator_apply_count = 0
         self.last_hibm_pressure_unreached_cell_count = 0
         self.last_hibm_pressure_unreached_raw_cell_count = 0
         self.last_hibm_pressure_reachability_converged = True
@@ -2121,6 +2122,7 @@ class CartesianFluidSolver:
         }
         self.last_project_cg_project_calls = 0
         self.last_project_cg_iterations_total = 0
+        self.last_project_cg_operator_apply_count = 0
         self.last_project_cg_iterations_max = 0
         self.last_project_cg_host_residual_checks = 0
         self.last_project_cg_mean_projection_count = 0
@@ -22299,6 +22301,7 @@ class CartesianFluidSolver:
     ) -> None:
         """Apply the exact fine FV operator, optionally preserving marker Q."""
 
+        self.last_cg_operator_apply_count += 1
         self._fv_laplacian_apply_kernel(
             pressure,
             output,
@@ -26600,6 +26603,7 @@ class CartesianFluidSolver:
         self.last_cg_multigrid_pre_smooth_iterations = 0
         self.last_cg_multigrid_coarse_smooth_iterations = 0
         self.last_cg_multigrid_post_smooth_iterations = 0
+        self.last_cg_operator_apply_count = 0
         self.cg_breakdown_code[None] = 0
         self.cg_breakdown_dAd[None] = 0.0
         physical_outlet_component_count = (
@@ -27911,6 +27915,8 @@ class CartesianFluidSolver:
         pressure_nullspace_component_rhs_integral_max_abs = 0.0
         self.last_project_cg_project_calls = 0
         self.last_project_cg_iterations_total = 0
+        self.last_project_cg_operator_apply_count = 0
+        self.last_cg_operator_apply_count = 0
         self.last_project_cg_iterations_max = 0
         self.last_project_cg_host_residual_checks = 0
         self.last_project_cg_mean_projection_count = 0
@@ -28026,6 +28032,9 @@ class CartesianFluidSolver:
             else:
                 self.last_project_cg_exact_relative_residual_max = math.inf
             self.last_project_cg_iterations_total += int(self.last_cg_iterations)
+            self.last_project_cg_operator_apply_count += int(
+                self.last_cg_operator_apply_count
+            )
             self.last_project_cg_iterations_max = max(
                 int(self.last_project_cg_iterations_max),
                 int(self.last_cg_iterations),
@@ -29363,6 +29372,9 @@ class CartesianFluidSolver:
                 reachability_prepared
             ),
             "cg_project_calls": int(self.last_project_cg_project_calls),
+            "cg_operator_apply_count": int(
+                self.last_project_cg_operator_apply_count
+            ),
             "cg_preconditioner_requested": str(
                 self.last_project_cg_preconditioner_requested
             ),

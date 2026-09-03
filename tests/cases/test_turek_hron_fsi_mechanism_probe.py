@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import inspect
+import json
 import math
+from pathlib import Path
+import tempfile
 import unittest
 
 from cases import turek_hron_fsi as turek
@@ -272,31 +275,127 @@ class TurekHronMechanismProbeFlushOrderingTests(unittest.TestCase):
             )
         )
 
-    def test_trigger_row_is_appended_and_flushed_before_raise(self) -> None:
+    def test_trigger_candidate_is_published_only_after_generic_rollback(self) -> None:
         source = inspect.getsource(turek.run_turek_hron_fsi)
         evaluate_index = source.index(
             "_evaluate_turek_hron_mechanism_probe("
         )
-        append_index = source.index("history.append(row)", evaluate_index)
-        decision_index = source.index(
-            "_history_flush_required(",
-            append_index,
+        candidate_index = source.index(
+            '"candidate_row": _strict_json_diagnostic_value(row)',
+            evaluate_index,
         )
-        flush_index = source.index("_flush_history_csv(", decision_index)
         raise_index = source.index(
             "raise TurekHronMechanismProbeTriggered",
-            flush_index,
+            candidate_index,
         )
-        snapshot_index = source.index(
-            "build_turek_hron_final_fields_snapshot(",
+        append_index = source.index(
+            "history.append(row)",
             raise_index,
         )
+        solve_index = source.index("generic_run = solve_fsi_runtime(")
+        catch_index = source.index(
+            "except TurekHronMechanismProbeTriggered as error:",
+            solve_index,
+        )
+        persist_index = source.index(
+            "_persist_fsi_coupling_failure_evidence(",
+            catch_index,
+        )
 
-        self.assertLess(evaluate_index, append_index)
-        self.assertLess(append_index, decision_index)
-        self.assertLess(decision_index, flush_index)
-        self.assertLess(flush_index, raise_index)
-        self.assertLess(raise_index, snapshot_index)
+        self.assertLess(evaluate_index, candidate_index)
+        self.assertLess(candidate_index, raise_index)
+        self.assertLess(raise_index, append_index)
+        self.assertLess(solve_index, catch_index)
+        self.assertLess(catch_index, persist_index)
+        self.assertNotIn(
+            '"physical_state_restored": True',
+            source[candidate_index:raise_index],
+        )
+
+    def test_nonfinite_candidate_persists_strict_json_after_rollback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            decision = turek._evaluate_turek_hron_mechanism_probe(
+                turek.TurekHronMechanismProbe(),
+                {
+                    "max_displacement_m": float("nan"),
+                    "fixed_root_max_displacement_m": 0.0,
+                    "projection_l2": float("inf"),
+                    "projection_max_abs": float("-inf"),
+                    "fluid_speed_max_mps": 0.0,
+                },
+            )
+            self.assertTrue(decision.triggered)
+            error = turek.TurekHronMechanismProbeTriggered("probe")
+            payload = {
+                "failure_kind": "mechanism_probe",
+                "reason": decision.reason,
+                "candidate_row": turek._strict_json_diagnostic_value(
+                    {
+                        "max_displacement_m": float("nan"),
+                        "projection_l2": float("inf"),
+                        "projection_max_abs": float("-inf"),
+                    }
+                ),
+                **turek._post_rollback_evidence(error),
+            }
+
+            _, _, persistence_errors = (
+                turek._persist_fsi_coupling_failure_evidence(
+                    incremental_history_path=None,
+                    history=[],
+                    last_flushed_index=0,
+                    incremental_header_written=False,
+                    output_dir=output_dir,
+                    failure_payload=payload,
+                )
+            )
+
+            self.assertEqual(persistence_errors, ())
+            artifact = output_dir / "turek_hron_fsi_coupling_failure.json"
+            loaded = json.loads(artifact.read_text(encoding="utf-8"))
+            self.assertTrue(loaded["physical_state_restored"])
+            self.assertIsNone(loaded["rollback_failure"])
+            self.assertEqual(
+                loaded["candidate_row"],
+                {
+                    "max_displacement_m": {"nonfinite_float": "nan"},
+                    "projection_l2": {
+                        "nonfinite_float": "positive_infinity"
+                    },
+                    "projection_max_abs": {
+                        "nonfinite_float": "negative_infinity"
+                    },
+                },
+            )
+            self.assertFalse(list(output_dir.glob("*.tmp")))
+
+    def test_post_rollback_evidence_reports_success_and_failure_truthfully(self) -> None:
+        success = turek._post_rollback_evidence(
+            turek.TurekHronMechanismProbeTriggered("probe")
+        )
+        self.assertEqual(
+            success,
+            {"physical_state_restored": True, "rollback_failure": None},
+        )
+
+        try:
+            try:
+                raise RuntimeError("restore failed")
+            except RuntimeError as rollback_failure:
+                raise turek.TurekHronMechanismProbeTriggered(
+                    "probe"
+                ) from rollback_failure
+        except turek.TurekHronMechanismProbeTriggered as error:
+            failed = turek._post_rollback_evidence(error)
+
+        self.assertFalse(failed["physical_state_restored"])
+        self.assertEqual(
+            failed["rollback_failure"],
+            "RuntimeError:restore failed",
+        )
 
 
 if __name__ == "__main__":

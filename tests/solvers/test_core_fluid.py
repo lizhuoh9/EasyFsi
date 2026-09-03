@@ -2422,13 +2422,18 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         source[source_cells] = source_total_m3s / (8.0 * spec.cell_volume_m3)
         solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
         solver.volume_source_s.from_numpy(source)
+        solver.last_cg_operator_apply_count = 999
+        solver.last_project_cg_operator_apply_count = 999
 
-        solver.project(
+        report = solver.project(
             iterations=960,
             pressure_outlet_zmin=True,
             reset_pressure=True,
             pressure_solver="jacobi",
         )
+        self.assertEqual(solver.last_cg_operator_apply_count, 0)
+        self.assertEqual(solver.last_project_cg_operator_apply_count, 0)
+        self.assertEqual(report["cg_operator_apply_count"], 0)
         report = solver.pressure_outlet_fv_flux_report()
 
         self.assertAlmostEqual(
@@ -5543,6 +5548,8 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         source[negative_cells] = -source_total_m3s / float(np.sum(cell_volume_m3[negative_cells]))
         solver = CartesianFluidSolver(spec, runtime=TaichiRuntimeConfig(arch="cuda"))
         solver.volume_source_s.from_numpy(source)
+        solver.last_cg_operator_apply_count = 999
+        solver.last_project_cg_operator_apply_count = 999
 
         report = solver.project(
             iterations=96,
@@ -5559,6 +5566,19 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         self.assertLess(solver.last_cg_relative_residual, 1.0e-6)
         self.assertEqual(report["cg_project_calls"], 1)
         self.assertEqual(report["cg_iterations_total"], solver.last_cg_iterations)
+        self.assertEqual(
+            report["cg_operator_apply_count"],
+            solver.last_project_cg_operator_apply_count,
+        )
+        self.assertEqual(
+            solver.last_project_cg_operator_apply_count,
+            solver.last_cg_operator_apply_count,
+        )
+        self.assertEqual(solver.last_cg_restart_count, 0)
+        self.assertEqual(
+            report["cg_operator_apply_count"],
+            report["cg_iterations_total"] + 2,
+        )
         self.assertLess(report["cg_iterations_total"], 96)
         self.assertTrue(report["cg_converged_all"])
         self.assertLess(report["cg_relative_residual_max"], 1.0e-6)
@@ -5798,6 +5818,8 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         stale_pressure[:, :, :] = np.linspace(0.0, 1.0, 6, dtype=np.float32)[None, None, :]
         solver.pressure.from_numpy(stale_pressure)
         velocity_before = solver.velocity.to_numpy()
+        solver.last_cg_operator_apply_count = 999
+        solver.last_project_cg_operator_apply_count = 999
 
         report = solver.project(
             iterations=8,
@@ -5811,6 +5833,11 @@ class CoreCartesianFluidSolverTests(unittest.TestCase):
         np.testing.assert_allclose(solver.pressure.to_numpy(), np.zeros_like(stale_pressure), atol=1.0e-12)
         self.assertTrue(report["cg_converged_all"])
         self.assertAlmostEqual(report["cg_initial_relative_residual_max"], 0.0)
+        self.assertEqual(report["cg_iterations_total"], 0)
+        self.assertEqual(report["cg_operator_apply_count"], 1)
+        self.assertEqual(solver.last_cg_operator_apply_count, 1)
+        self.assertEqual(solver.last_project_cg_operator_apply_count, 1)
+        self.assertEqual(solver.last_cg_exact_residual_confirmation_count, 1)
 
     def test_fv_multigrid_outlet_balance_converges_faster_than_fv_jacobi(self) -> None:
         grid_nodes = (16, 16, 16)

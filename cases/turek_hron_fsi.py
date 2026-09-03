@@ -37,7 +37,10 @@ from simulation_core.coupling.hibm_mpm import (
 from simulation_core.coupling.marker_seeding import (
     resample_polyline_markers_by_arc_length,
 )
-from simulation_core.diagnostics.runtime import TaichiRuntimeConfig
+from simulation_core.diagnostics.runtime import (
+    TaichiRuntimeConfig,
+    taichi_runtime_identity,
+)
 from simulation_core.drivers.generic_fsi_solver import (
     FsiCouplingConfig,
     FsiCouplingConvergenceError,
@@ -311,7 +314,7 @@ class TurekHronMechanismProbeDecision:
 
 
 class TurekHronMechanismProbeTriggered(RuntimeError):
-    """Raised after the triggering completed row has been persisted."""
+    """Raised after the rejected candidate row has been persisted as failure evidence."""
 
 
 def _evaluate_turek_hron_mechanism_probe(
@@ -1868,6 +1871,21 @@ def _point_a_displacement_from_tip_sections(
     return np.asarray(point_a, dtype=np.float64)
 
 
+def _point_a_velocity_from_tip_sections(
+    rest_positions_m: np.ndarray,
+    velocity_mps: np.ndarray,
+    *,
+    physical_tip_solver_z_m: float,
+) -> np.ndarray:
+    """Apply the Point-A displacement extrapolation weights to velocity."""
+
+    return _point_a_displacement_from_tip_sections(
+        rest_positions_m,
+        velocity_mps,
+        physical_tip_solver_z_m=physical_tip_solver_z_m,
+    )
+
+
 def _tip_displacement_row(
     solid: NeoHookeanMpmState, masks: dict[str, np.ndarray | float]
 ) -> dict[str, float]:
@@ -2024,6 +2042,174 @@ def _committed_step_observability_row(
             else float(fsi_coupling_max_marker_residual_mps)
         ),
     }
+
+
+def _turek_hron_trial_work_row(
+    latest_report: Any,
+    *,
+    solid_substeps: int,
+) -> dict[str, int]:
+    """Return exact solver work performed by one coupling trial."""
+
+    main_projection = latest_report.fluid_to_mpm_loads.fluid_projection
+    post_projection = latest_report.post_solid_fluid_projection
+
+    def projection_count(
+        projection: Mapping[str, Any] | None,
+        key: str,
+        *,
+        stage: str,
+    ) -> int:
+        if projection is None:
+            return 0
+        if not isinstance(projection, Mapping) or key not in projection:
+            raise RuntimeError(
+                f"formal Turek work ledger omitted {stage}.{key}"
+            )
+        raw_value = projection[key]
+        if isinstance(raw_value, (bool, np.bool_)):
+            raise RuntimeError(
+                f"formal Turek work ledger {stage}.{key} must be an integer"
+            )
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeError(
+                f"formal Turek work ledger {stage}.{key} must be an integer"
+            ) from exc
+        if value < 0 or float(raw_value) != float(value):
+            raise RuntimeError(
+                f"formal Turek work ledger {stage}.{key} must be nonnegative"
+            )
+        return value
+
+    return {
+        "pressure_cg_iterations_total": projection_count(
+            main_projection,
+            "cg_iterations_total",
+            stage="main_projection",
+        )
+        + projection_count(
+            post_projection,
+            "cg_iterations_total",
+            stage="post_solid_projection",
+        ),
+        "pressure_matvec_count_total": projection_count(
+            main_projection,
+            "cg_operator_apply_count",
+            stage="main_projection",
+        )
+        + projection_count(
+            post_projection,
+            "cg_operator_apply_count",
+            stage="post_solid_projection",
+        ),
+        "fluid_solve_count": 1,
+        "solid_macro_solve_count": 1,
+        "mpm_substeps_executed_total": int(solid_substeps),
+    }
+
+
+def _aggregate_turek_hron_trial_work_rows(
+    rows: Sequence[Mapping[str, int]],
+    *,
+    coupling_iterations: int,
+) -> dict[str, int]:
+    source = tuple(rows)
+    trials = int(coupling_iterations)
+    if trials <= 0 or len(source) != trials:
+        raise RuntimeError(
+            "formal Turek trial work count does not match coupling iterations"
+        )
+    keys = (
+        "pressure_cg_iterations_total",
+        "pressure_matvec_count_total",
+        "fluid_solve_count",
+        "solid_macro_solve_count",
+        "mpm_substeps_executed_total",
+    )
+    totals = {
+        key: sum(int(item[key]) for item in source)
+        for key in keys
+    }
+    return {
+        **totals,
+        "coupling_trial_count": trials,
+        "coupling_rejected_trial_count": trials - 1,
+    }
+
+
+def _fixed_width_history_array(
+    values: Sequence[Any],
+    *,
+    width: int,
+    dtype: Any,
+    fill_value: Any,
+    name: str,
+) -> np.ndarray:
+    """Encode a ragged per-step history without object arrays or pickles."""
+
+    source = tuple(values)
+    if len(source) > int(width):
+        raise RuntimeError(f"{name} exceeds the configured coupling width")
+    result = np.full(int(width), fill_value, dtype=dtype)
+    if source:
+        result[: len(source)] = np.asarray(source, dtype=dtype)
+    return result
+
+
+def _force_vector_closes(
+    observed: Sequence[float],
+    expected: Sequence[float],
+    *,
+    relative_tolerance: float,
+) -> bool:
+    observed_array = np.asarray(observed, dtype=np.float64)
+    expected_array = np.asarray(expected, dtype=np.float64)
+    if observed_array.shape != (3,) or expected_array.shape != (3,):
+        return False
+    if not np.all(np.isfinite(observed_array)) or not np.all(
+        np.isfinite(expected_array)
+    ):
+        return False
+    error = float(np.linalg.norm(observed_array - expected_array))
+    scale = float(np.linalg.norm(expected_array))
+    return error == 0.0 if scale == 0.0 else error / scale <= relative_tolerance
+
+
+def _capture_turek_hron_pre_solid_force_state(
+    fluid: Any,
+    markers: Any,
+    *,
+    marker_count: int,
+) -> dict[str, np.ndarray]:
+    """Snapshot every force constituent at the accepted trial's load stage."""
+
+    state = {
+        "marker_force_pre_solid_n": np.asarray(
+            markers.F_gamma_n.to_numpy()[:marker_count],
+            dtype=np.float64,
+        ).copy(),
+        "cylinder_pressure_force_solver_xyz_n": np.asarray(
+            fluid.compute_obstacle_surface_pressure_force_n(),
+            dtype=np.float64,
+        ).copy(),
+        "cylinder_viscous_force_solver_xyz_n": np.asarray(
+            fluid.compute_obstacle_surface_viscous_force_n(),
+            dtype=np.float64,
+        ).copy(),
+    }
+    if state["marker_force_pre_solid_n"].shape != (marker_count, 3):
+        raise RuntimeError("pre-solid marker force payload has invalid shape")
+    for name in (
+        "cylinder_pressure_force_solver_xyz_n",
+        "cylinder_viscous_force_solver_xyz_n",
+    ):
+        if state[name].shape != (3,) or not np.all(np.isfinite(state[name])):
+            raise RuntimeError(f"pre-solid {name} must be a finite force vector")
+    if not np.all(np.isfinite(state["marker_force_pre_solid_n"])):
+        raise RuntimeError("pre-solid marker forces must be finite")
+    return state
 
 
 HISTORY_FIELDS = (
@@ -2291,6 +2477,33 @@ def _write_fsi_coupling_failure_artifact(
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
     return artifact_path
+
+
+def _strict_json_diagnostic_value(value: Any) -> Any:
+    """Return a fresh JSON-safe diagnostic value without hiding non-finites."""
+
+    if isinstance(value, np.ndarray):
+        return _strict_json_diagnostic_value(value.tolist())
+    if isinstance(value, np.generic):
+        return _strict_json_diagnostic_value(value.item())
+    if isinstance(value, Mapping):
+        return {
+            str(key): _strict_json_diagnostic_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return [_strict_json_diagnostic_value(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            category = "nan"
+        elif value > 0.0:
+            category = "positive_infinity"
+        else:
+            category = "negative_infinity"
+        return {"nonfinite_float": category}
+    return value
 
 
 def _turek_hron_checkpoint_config_fingerprint(
@@ -3107,6 +3320,18 @@ def _persist_fsi_coupling_failure_evidence(
     )
 
 
+def _post_rollback_evidence(error: BaseException) -> dict[str, Any]:
+    rollback_failure = error.__cause__
+    return {
+        "physical_state_restored": rollback_failure is None,
+        "rollback_failure": (
+            None
+            if rollback_failure is None
+            else f"{type(rollback_failure).__name__}:{rollback_failure}"
+        ),
+    }
+
+
 def run_turek_hron_fsi(
     config: TurekHronFsiConfig,
     *,
@@ -3118,12 +3343,25 @@ def run_turek_hron_fsi(
     transition_checkpoint_step: int | None = None,
     transition_diagnostic_step: int | None = None,
     resume_transition_checkpoint: Path | str | None = None,
+    accepted_step_observer: Callable[[dict[str, np.ndarray]], None] | None = None,
+    taichi_runtime_config: TaichiRuntimeConfig | None = None,
 ) -> dict[str, Any]:
     """Run every Turek-Hron preset through the sole generic FSI runtime."""
 
     _validate_marker_grid_consistency(config)
     _validate_fsi_coupling_controls(config)
     config = with_beam_surface_force_support(config)
+    if accepted_step_observer is not None:
+        if not callable(accepted_step_observer):
+            raise TypeError("accepted_step_observer must be callable")
+        if resume_transition_checkpoint is not None:
+            raise ValueError(
+                "formal accepted-interface capture does not support resume"
+            )
+        if config.marker_reseed_interval_steps is not None:
+            raise ValueError(
+                "formal accepted-interface capture requires marker reseeding disabled"
+            )
     for control_name, configured_step in (
         ("transition_checkpoint_step", transition_checkpoint_step),
         ("transition_diagnostic_step", transition_diagnostic_step),
@@ -3139,7 +3377,7 @@ def run_turek_hron_fsi(
         if output_dir is None:
             raise ValueError(f"{control_name} requires output_dir")
 
-    taichi_runtime = TaichiRuntimeConfig(arch="cuda")
+    taichi_runtime = taichi_runtime_config or TaichiRuntimeConfig(arch="cuda")
     fluid = _build_fluid(config, taichi_runtime)
     solid, masks = _build_solid(config, taichi_runtime)
     if bool(config.classify_far_internal_nodes):
@@ -3162,6 +3400,7 @@ def run_turek_hron_fsi(
         markers,
         reference_positions_m=marker_reference_positions_m,
     )
+    measured_taichi_runtime_identity = taichi_runtime_identity()
     expected_marker_count = int(markers.marker_count)
     bounds_min, bounds_max = _full_bounds(config)
     search = HibmMpmIbNodeSearch(
@@ -3208,10 +3447,22 @@ def run_turek_hron_fsi(
     solid_substep_count = int(config.solid_substeps)
     active_transition_diagnostic_arrays: dict[str, np.ndarray] | None = None
     completed_solid_time_fields: dict[str, float | int] | None = None
+    active_pre_solid_force_state: dict[str, np.ndarray] | None = None
 
     def solid_step() -> Any:
-        nonlocal completed_solid_time_fields
+        nonlocal completed_solid_time_fields, active_pre_solid_force_state
         completed_solid_time_fields = None
+        if active_pre_solid_force_state is not None:
+            raise RuntimeError(
+                "Turek-Hron trial invoked the solid load stage more than once"
+            )
+        active_pre_solid_force_state = (
+            _capture_turek_hron_pre_solid_force_state(
+                fluid,
+                markers,
+                marker_count=expected_marker_count,
+            )
+        )
         if active_transition_diagnostic_arrays is not None:
             active_transition_diagnostic_arrays.update(
                 _turek_hron_transition_diagnostic_stage_arrays(
@@ -3316,9 +3567,13 @@ def run_turek_hron_fsi(
         flow_snapshots_dir.mkdir(parents=True, exist_ok=True)
 
     latest_report_box: dict[str, Any] = {"value": None}
+    accepted_force_box: dict[str, Any] = {}
+    trial_work_rows: list[dict[str, int]] = []
+    pending_mechanism_failure_payload: dict[str, Any] | None = None
     pending_transition_diagnostic: dict[str, Any] | None = None
 
     def prepare_step(context: FsiStepContext) -> None:
+        trial_work_rows.clear()
         if (
             config.marker_reseed_interval_steps is not None
             and context.step_index > 0
@@ -3338,8 +3593,9 @@ def run_turek_hron_fsi(
         _context: FsiStepContext,
         _trial_index: int,
     ) -> tuple[Any, dict[str, Any]]:
-        nonlocal completed_solid_time_fields
+        nonlocal completed_solid_time_fields, active_pre_solid_force_state
         completed_solid_time_fields = None
+        active_pre_solid_force_state = None
         (
             report,
             predictor_time_observations,
@@ -3429,11 +3685,19 @@ def run_turek_hron_fsi(
             raise RuntimeError(
                 "Turek-Hron accepted trial omitted its solid macro-step time report"
             )
+        if active_pre_solid_force_state is None:
+            raise RuntimeError(
+                "Turek-Hron trial omitted its pre-solid force snapshot"
+            )
         return report, {
             "accepted_physical_time_fields": {
                 **fluid_time_fields,
                 **completed_solid_time_fields,
-            }
+            },
+            "pre_solid_force_state": {
+                name: value.copy()
+                for name, value in active_pre_solid_force_state.items()
+            },
         }
 
     def before_trial(
@@ -3477,6 +3741,13 @@ def run_turek_hron_fsi(
         _latest_report: Any,
     ) -> None:
         nonlocal pending_transition_diagnostic
+        if accepted_step_observer is not None:
+            trial_work_rows.append(
+                _turek_hron_trial_work_row(
+                    _latest_report,
+                    solid_substeps=solid_substep_count,
+                )
+            )
         if trial_token is None:
             return
         arrays = dict(trial_token)
@@ -3574,7 +3845,7 @@ def run_turek_hron_fsi(
         trial: FsiTrialResult,
         coupling: FsiCouplingReport,
     ) -> dict[str, Any]:
-        nonlocal mechanism_probe_streaks
+        nonlocal mechanism_probe_streaks, pending_mechanism_failure_payload
 
         latest_report = trial.payload.get("latest_report")
         if latest_report is None:
@@ -3601,12 +3872,63 @@ def run_turek_hron_fsi(
         )
         projection = load.fluid_projection
         speed_max_mps = float(fluid._max_fluid_speed_kernel())
-        cylinder_pressure_force_n = (
-            fluid.compute_obstacle_surface_pressure_force_n()
+        pre_solid_force_state = trial.payload.get("pre_solid_force_state")
+        if not isinstance(pre_solid_force_state, Mapping):
+            raise RuntimeError(
+                "generic Turek FSI trial omitted its pre-solid force snapshot"
+            )
+        marker_force_pre_solid_n = np.asarray(
+            pre_solid_force_state["marker_force_pre_solid_n"],
+            dtype=np.float64,
+        ).copy()
+        cylinder_pressure_solver_xyz_n = np.asarray(
+            pre_solid_force_state["cylinder_pressure_force_solver_xyz_n"],
+            dtype=np.float64,
+        ).copy()
+        cylinder_viscous_solver_xyz_n = np.asarray(
+            pre_solid_force_state["cylinder_viscous_force_solver_xyz_n"],
+            dtype=np.float64,
+        ).copy()
+        beam_force_solver_xyz_n = np.asarray(force_n, dtype=np.float64)
+        if not _force_vector_closes(
+            marker_force_pre_solid_n.sum(axis=0),
+            beam_force_solver_xyz_n,
+            relative_tolerance=32.0 * np.finfo(np.float32).eps,
+        ):
+            raise RuntimeError(
+                "Turek pre-solid marker-force sum does not match trial report"
+            )
+        cylinder_pressure_force_n = tuple(
+            float(value) for value in cylinder_pressure_solver_xyz_n
         )
-        cylinder_viscous_force_n = (
-            fluid.compute_obstacle_surface_viscous_force_n()
+        cylinder_viscous_force_n = tuple(
+            float(value) for value in cylinder_viscous_solver_xyz_n
         )
+        formal_work_fields: dict[str, int] = {}
+        if accepted_step_observer is not None:
+            formal_work_fields = _aggregate_turek_hron_trial_work_rows(
+                trial_work_rows,
+                coupling_iterations=int(coupling.iterations),
+            )
+            accepted_force_box.clear()
+            accepted_force_box.update(
+                {
+                    "step": int(context.step),
+                    "marker_force_pre_solid_n": marker_force_pre_solid_n,
+                    "beam_force_solver_xyz_n": beam_force_solver_xyz_n,
+                    "cylinder_pressure_force_solver_xyz_n": (
+                        cylinder_pressure_solver_xyz_n
+                    ),
+                    "cylinder_viscous_force_solver_xyz_n": (
+                        cylinder_viscous_solver_xyz_n
+                    ),
+                    "total_force_solver_xyz_n": (
+                        beam_force_solver_xyz_n
+                        + cylinder_pressure_solver_xyz_n
+                        + cylinder_viscous_solver_xyz_n
+                    ),
+                }
+            )
         span_m = float(config.span_m)
         force_reporting = _force_reporting_per_span_fields(
             beam_force_n=force_n,
@@ -3706,6 +4028,7 @@ def run_turek_hron_fsi(
             "hibm_stress_two_sided_extended_marker_count": int(
                 load.fluid_stress.two_sided_extended_marker_count
             ),
+            **formal_work_fields,
         }
         mechanism_probe_decision = _evaluate_turek_hron_mechanism_probe(
             fail_fast_probe,
@@ -3725,25 +4048,17 @@ def run_turek_hron_fsi(
             }
         )
         if mechanism_probe_decision.triggered:
-            _persist_fsi_coupling_failure_evidence(
-                incremental_history_path=incremental_history_path,
-                history=history,
-                last_flushed_index=last_flushed_index,
-                incremental_header_written=incremental_header_written,
-                output_dir=output_dir,
-                failure_payload={
-                    "schema_version": 1,
-                    "case": TUREK_HRON_CASE_ID,
-                    "preset": str(preset),
-                    "failed_step": int(context.step),
-                    "failed_time_s": float(context.time_s),
-                    "completed_steps": len(history),
-                    "failure_kind": "mechanism_probe",
-                    "reason": mechanism_probe_decision.reason,
-                    "candidate_row": row,
-                    "physical_state_restored": True,
-                },
-            )
+            pending_mechanism_failure_payload = {
+                "schema_version": 1,
+                "case": TUREK_HRON_CASE_ID,
+                "preset": str(preset),
+                "failed_step": int(context.step),
+                "failed_time_s": float(context.time_s),
+                "completed_steps": len(history),
+                "failure_kind": "mechanism_probe",
+                "reason": mechanism_probe_decision.reason,
+                "candidate_row": _strict_json_diagnostic_value(row),
+            }
             raise TurekHronMechanismProbeTriggered(
                 "Turek-Hron mechanism probe triggered at candidate step "
                 f"{context.step}: {mechanism_probe_decision.reason}"
@@ -3752,6 +4067,226 @@ def run_turek_hron_fsi(
         history.append(row)
         latest_report_box["value"] = latest_report
         return row
+
+    def publish_accepted_interface(
+        context: FsiStepContext,
+        committed_row: Mapping[str, Any],
+    ) -> None:
+        if accepted_step_observer is None:
+            return
+        if int(accepted_force_box.get("step", -1)) != int(context.step):
+            raise RuntimeError("formal Turek accepted force payload is stale")
+
+        marker_state = capture_marker_interface_state(markers)
+        marker_count = int(markers.marker_count)
+        current_position_m = np.asarray(
+            marker_state["x_gamma_m"],
+            dtype=np.float64,
+        ).copy()
+        marker_velocity_mps = np.asarray(
+            marker_state["v_gamma_mps"],
+            dtype=np.float64,
+        ).copy()
+        marker_normal = np.asarray(
+            marker_state["n_gamma"],
+            dtype=np.float64,
+        ).copy()
+        marker_area_m2 = np.asarray(
+            marker_state["A_gamma_m2"],
+            dtype=np.float64,
+        ).copy()
+        if any(
+            value.shape != expected_shape
+            for value, expected_shape in (
+                (current_position_m, (marker_count, 3)),
+                (marker_velocity_mps, (marker_count, 3)),
+                (marker_normal, (marker_count, 3)),
+                (marker_area_m2, (marker_count,)),
+            )
+        ):
+            raise RuntimeError("formal Turek marker payload shape changed")
+        if marker_layout_identity(
+            markers,
+            reference_positions_m=marker_reference_positions_m,
+        ) != marker_layout_sha256:
+            raise RuntimeError("formal Turek marker layout identity changed")
+
+        solid_count = int(solid.particle_count)
+        solid_current_m = np.asarray(
+            solid.x.to_numpy()[:solid_count],
+            dtype=np.float64,
+        )
+        solid_velocity_mps = np.asarray(
+            solid.v.to_numpy()[:solid_count],
+            dtype=np.float64,
+        )
+        solid_rest_m = np.asarray(masks["rest"], dtype=np.float64)
+        point_a_displacement = _point_a_displacement_from_tip_sections(
+            solid_rest_m,
+            solid_current_m - solid_rest_m,
+            physical_tip_solver_z_m=float(masks["physical_tip_solver_z_m"]),
+        )
+        point_a_velocity = _point_a_velocity_from_tip_sections(
+            solid_rest_m,
+            solid_velocity_mps,
+            physical_tip_solver_z_m=float(masks["physical_tip_solver_z_m"]),
+        )
+
+        width = int(config.fsi_coupling_iterations)
+        condition_history = tuple(
+            np.nan if value is None else float(value)
+            for value in committed_row["fsi_iqn_condition_number_history"]
+        )
+        update_mode_history = tuple(
+            str(value)
+            for value in committed_row["fsi_coupling_update_modes"]
+        )
+        fallback_reason_history = tuple(
+            "none" if value is None else str(value)
+            for value in committed_row["fsi_iqn_fallback_reasons"]
+        )
+        record = {
+            "accepted_step": np.asarray(context.step, dtype=np.int64),
+            "accepted_time_s": np.asarray(context.time_s, dtype=np.float64),
+            "marker_reference_position_m": np.asarray(
+                marker_reference_positions_m,
+                dtype=np.float64,
+            ).copy(),
+            "marker_current_position_m": current_position_m,
+            "marker_material_displacement_m": (
+                current_position_m
+                - np.asarray(marker_reference_positions_m, dtype=np.float64)
+            ),
+            "marker_velocity_mps": marker_velocity_mps,
+            "marker_normal": marker_normal,
+            "marker_fixed_area_m2": marker_area_m2,
+            "marker_region_id": np.asarray(
+                markers.region_id.to_numpy()[:marker_count],
+                dtype=np.int32,
+            ).copy(),
+            "marker_order": np.arange(marker_count, dtype=np.int64),
+            "marker_force_pre_solid_n": np.asarray(
+                accepted_force_box["marker_force_pre_solid_n"],
+                dtype=np.float64,
+            ).copy(),
+            "point_a_displacement_turek_xy_m": np.asarray(
+                (-point_a_displacement[2], point_a_displacement[1]),
+                dtype=np.float64,
+            ),
+            "point_a_velocity_turek_xy_mps": np.asarray(
+                (-point_a_velocity[2], point_a_velocity[1]),
+                dtype=np.float64,
+            ),
+            "beam_force_solver_xyz_n": np.asarray(
+                accepted_force_box["beam_force_solver_xyz_n"],
+                dtype=np.float64,
+            ).copy(),
+            "cylinder_pressure_force_solver_xyz_n": np.asarray(
+                accepted_force_box["cylinder_pressure_force_solver_xyz_n"],
+                dtype=np.float64,
+            ).copy(),
+            "cylinder_viscous_force_solver_xyz_n": np.asarray(
+                accepted_force_box["cylinder_viscous_force_solver_xyz_n"],
+                dtype=np.float64,
+            ).copy(),
+            "total_force_solver_xyz_n": np.asarray(
+                accepted_force_box["total_force_solver_xyz_n"],
+                dtype=np.float64,
+            ).copy(),
+            "coupling_trial_count": np.asarray(
+                committed_row["coupling_trial_count"],
+                dtype=np.int64,
+            ),
+            "coupling_rejected_trial_count": np.asarray(
+                committed_row["coupling_rejected_trial_count"],
+                dtype=np.int64,
+            ),
+            "pressure_cg_iterations_total": np.asarray(
+                committed_row["pressure_cg_iterations_total"],
+                dtype=np.int64,
+            ),
+            "pressure_matvec_count_total": np.asarray(
+                committed_row["pressure_matvec_count_total"],
+                dtype=np.int64,
+            ),
+            "fluid_solve_count": np.asarray(
+                committed_row["fluid_solve_count"],
+                dtype=np.int64,
+            ),
+            "solid_macro_solve_count": np.asarray(
+                committed_row["solid_macro_solve_count"],
+                dtype=np.int64,
+            ),
+            "mpm_substeps_executed_total": np.asarray(
+                committed_row["mpm_substeps_executed_total"],
+                dtype=np.int64,
+            ),
+            "iqn_fallback_count": np.asarray(
+                committed_row["fsi_iqn_fallback_count"],
+                dtype=np.int64,
+            ),
+            "coupling_relative_residual_history": _fixed_width_history_array(
+                committed_row["fsi_coupling_relative_residual_history"],
+                width=width,
+                dtype=np.float64,
+                fill_value=np.nan,
+                name="coupling relative residual history",
+            ),
+            "coupling_absolute_residual_history_mps": (
+                _fixed_width_history_array(
+                    committed_row["fsi_coupling_absolute_residual_history_mps"],
+                    width=width,
+                    dtype=np.float64,
+                    fill_value=np.nan,
+                    name="coupling absolute residual history",
+                )
+            ),
+            "coupling_update_mode_history": _fixed_width_history_array(
+                update_mode_history,
+                width=width,
+                dtype="<U64",
+                fill_value="",
+                name="coupling update-mode history",
+            ),
+            "iqn_rank_history": _fixed_width_history_array(
+                committed_row["fsi_iqn_rank_history"],
+                width=width,
+                dtype=np.int64,
+                fill_value=-1,
+                name="IQN rank history",
+            ),
+            "iqn_condition_number_history": _fixed_width_history_array(
+                condition_history,
+                width=width,
+                dtype=np.float64,
+                fill_value=np.nan,
+                name="IQN condition-number history",
+            ),
+            "iqn_fallback_reason_history": _fixed_width_history_array(
+                fallback_reason_history,
+                width=width,
+                dtype="<U64",
+                fill_value="",
+                name="IQN fallback-reason history",
+            ),
+            "iqn_update_limited_history": _fixed_width_history_array(
+                committed_row["fsi_iqn_update_limited_history"],
+                width=width,
+                dtype=np.bool_,
+                fill_value=False,
+                name="IQN update-limited history",
+            ),
+            "marker_layout_sha256": np.asarray(marker_layout_sha256),
+            "taichi_runtime_identity_json": np.asarray(
+                json.dumps(
+                    measured_taichi_runtime_identity,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            ),
+        }
+        accepted_step_observer(record)
 
     def publish_case_step(
         context: FsiStepContext,
@@ -3764,6 +4299,7 @@ def run_turek_hron_fsi(
         if not history or int(history[-1]["step"]) != int(context.step):
             raise RuntimeError("Turek committed history is out of sequence")
         history[-1] = dict(committed_row)
+        publish_accepted_interface(context, committed_row)
         prospective_history = history
         if _committed_transition_checkpoint_requested(
             configured_step=transition_checkpoint_step,
@@ -3915,6 +4451,27 @@ def run_turek_hron_fsi(
 
     try:
         generic_run = solve_fsi_runtime(case_runtime, solver_config)
+    except TurekHronMechanismProbeTriggered as error:
+        if pending_mechanism_failure_payload is None:
+            raise RuntimeError(
+                "mechanism probe failed without a pending evidence payload"
+            ) from error
+        (
+            incremental_header_written,
+            last_flushed_index,
+            _persistence_errors,
+        ) = _persist_fsi_coupling_failure_evidence(
+            incremental_history_path=incremental_history_path,
+            history=history,
+            last_flushed_index=last_flushed_index,
+            incremental_header_written=incremental_header_written,
+            output_dir=output_dir,
+            failure_payload={
+                **pending_mechanism_failure_payload,
+                **_post_rollback_evidence(error),
+            },
+        )
+        raise
     except FsiCouplingConvergenceError as error:
         transition_persistence_error: str | None = None
         try:
@@ -3977,7 +4534,7 @@ def run_turek_hron_fsi(
             "fsi_coupling_max_marker_residual_mps": float(
                 error.report.max_marker_residual_mps
             ),
-            "physical_state_restored": True,
+            **_post_rollback_evidence(error),
             "transition_diagnostic_persistence_error": (
                 transition_persistence_error
             ),
@@ -4010,6 +4567,7 @@ def run_turek_hron_fsi(
         "config": asdict(config),
         "marker_layout_sha256": marker_layout_sha256,
         "marker_layout_identity_verified": True,
+        "taichi_runtime_identity": measured_taichi_runtime_identity,
         "solver_path": (
             "simulation_core.drivers.generic_fsi_solver.solve_fsi_runtime"
         ),

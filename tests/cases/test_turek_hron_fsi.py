@@ -555,6 +555,19 @@ class TurekHronPointADisplacementTests(unittest.TestCase):
 
         np.testing.assert_allclose(point_a, expected, rtol=0.0, atol=1.0e-14)
 
+    def test_point_a_velocity_uses_the_same_two_section_weights(self):
+        rest, velocity, physical_tip_z_m, expected = (
+            self._linear_tip_section_fixture()
+        )
+
+        point_a = turek_hron_case._point_a_velocity_from_tip_sections(
+            rest,
+            velocity,
+            physical_tip_solver_z_m=physical_tip_z_m,
+        )
+
+        np.testing.assert_allclose(point_a, expected, rtol=0.0, atol=1.0e-14)
+
     def test_point_a_helper_supports_symmetric_max_side_extrapolation(self):
         physical_tip_z_m = 2.0
         section_z_m = (1.9975, 1.99875)
@@ -1473,6 +1486,127 @@ class TurekHronObservabilityExportTests(unittest.TestCase):
             "mpm_deformation_clamp_count",
         )
         self.assertEqual(HISTORY_FIELDS[-len(expected_suffix) :], expected_suffix)
+
+    def test_formal_trial_work_uses_exact_main_and_post_projection_counts(self):
+        report = SimpleNamespace(
+            fluid_to_mpm_loads=SimpleNamespace(
+                fluid_projection={
+                    "cg_iterations_total": 11,
+                    "cg_operator_apply_count": 17,
+                }
+            ),
+            post_solid_fluid_projection={
+                "cg_iterations_total": 3,
+                "cg_operator_apply_count": 5,
+            },
+        )
+
+        work = turek_hron_case._turek_hron_trial_work_row(
+            report,
+            solid_substeps=100,
+        )
+
+        self.assertEqual(work["pressure_cg_iterations_total"], 14)
+        self.assertEqual(work["pressure_matvec_count_total"], 22)
+        self.assertEqual(work["fluid_solve_count"], 1)
+        self.assertEqual(work["solid_macro_solve_count"], 1)
+        self.assertEqual(work["mpm_substeps_executed_total"], 100)
+
+    def test_formal_work_ledger_accumulates_rejected_and_accepted_trials(self):
+        first = {
+            "pressure_cg_iterations_total": 14,
+            "pressure_matvec_count_total": 18,
+            "fluid_solve_count": 1,
+            "solid_macro_solve_count": 1,
+            "mpm_substeps_executed_total": 100,
+        }
+        second = {
+            "pressure_cg_iterations_total": 9,
+            "pressure_matvec_count_total": 13,
+            "fluid_solve_count": 1,
+            "solid_macro_solve_count": 1,
+            "mpm_substeps_executed_total": 100,
+        }
+
+        work = turek_hron_case._aggregate_turek_hron_trial_work_rows(
+            (first, second),
+            coupling_iterations=2,
+        )
+
+        self.assertEqual(work["coupling_trial_count"], 2)
+        self.assertEqual(work["coupling_rejected_trial_count"], 1)
+        self.assertEqual(work["pressure_cg_iterations_total"], 23)
+        self.assertEqual(work["pressure_matvec_count_total"], 31)
+        self.assertEqual(work["fluid_solve_count"], 2)
+        self.assertEqual(work["solid_macro_solve_count"], 2)
+        self.assertEqual(work["mpm_substeps_executed_total"], 200)
+        with self.assertRaisesRegex(RuntimeError, "coupling iterations"):
+            turek_hron_case._aggregate_turek_hron_trial_work_rows(
+                (first,),
+                coupling_iterations=2,
+            )
+
+    def test_pre_solid_force_snapshot_is_copied_before_solid_and_post_projection(self):
+        marker_values = np.asarray(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            dtype=np.float32,
+        )
+        pressure_values = np.asarray([7.0, 8.0, 9.0], dtype=np.float64)
+        viscous_values = np.asarray([10.0, 11.0, 12.0], dtype=np.float64)
+
+        class Field:
+            def to_numpy(self):
+                return marker_values
+
+        fluid = SimpleNamespace(
+            compute_obstacle_surface_pressure_force_n=lambda: pressure_values,
+            compute_obstacle_surface_viscous_force_n=lambda: viscous_values,
+        )
+        markers = SimpleNamespace(F_gamma_n=Field())
+
+        snapshot = turek_hron_case._capture_turek_hron_pre_solid_force_state(
+            fluid,
+            markers,
+            marker_count=2,
+        )
+        marker_values[:] = -1.0
+        pressure_values[:] = -2.0
+        viscous_values[:] = -3.0
+
+        np.testing.assert_array_equal(
+            snapshot["marker_force_pre_solid_n"],
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        )
+        np.testing.assert_array_equal(
+            snapshot["cylinder_pressure_force_solver_xyz_n"],
+            [7.0, 8.0, 9.0],
+        )
+        np.testing.assert_array_equal(
+            snapshot["cylinder_viscous_force_solver_xyz_n"],
+            [10.0, 11.0, 12.0],
+        )
+        source = inspect.getsource(turek_hron_case.run_turek_hron_fsi)
+        capture_index = source.index(
+            "_capture_turek_hron_pre_solid_force_state("
+        )
+        solid_index = source.index(
+            "_advance_turek_hron_solid_macro_step(", capture_index
+        )
+        self.assertLess(capture_index, solid_index)
+
+    def test_formal_ragged_histories_are_fixed_width_without_objects(self):
+        encoded = turek_hron_case._fixed_width_history_array(
+            (0.5, 0.1),
+            width=4,
+            dtype=np.float64,
+            fill_value=np.nan,
+            name="test history",
+        )
+
+        self.assertEqual(encoded.shape, (4,))
+        self.assertNotEqual(encoded.dtype, np.dtype(object))
+        np.testing.assert_allclose(encoded[:2], (0.5, 0.1))
+        self.assertTrue(np.isnan(encoded[2:]).all())
 
     def test_flush_helper_appends_and_writes_header_once(self):
         source = inspect.getsource(_flush_history_csv)

@@ -51,7 +51,7 @@ def _history_row(step: int, *, dt_s: float = 0.005) -> dict[str, object]:
         "fsi_coupling_residual_measured": True,
         "fsi_coupling_converged": True,
         "fsi_coupling_absolute_residual_mps": 2.0e-5,
-        "history_schema_version": 3,
+        "history_schema_version": 4,
         "stress_viscous_gradient_invalid_marker_count": 0,
         "stress_one_sided_pressure_marker_count": marker_count,
         "stress_expected_marker_count": marker_count,
@@ -83,6 +83,16 @@ def _history_row(step: int, *, dt_s: float = 0.005) -> dict[str, object]:
         "mpm_scatter_active_pair_count": marker_count * 4,
         "mpm_scatter_action_reaction_residual_n": 2.5e-9,
         "fsi_coupling_max_marker_residual_mps": 4.0e-4,
+        "fluid_macro_requested_time_s": dt_s,
+        "fluid_macro_accepted_time_s": dt_s,
+        "fluid_macro_remaining_unadvanced_time_s": 0.0,
+        "fluid_predictor_substeps": 1,
+        "solid_macro_requested_time_s": dt_s,
+        "solid_macro_accepted_time_s": dt_s,
+        "solid_macro_remaining_unadvanced_time_s": 0.0,
+        "solid_substeps": 100,
+        "mpm_grid_out_of_bounds_particle_count": 0,
+        "mpm_deformation_clamp_count": 0,
     }
 
 
@@ -93,8 +103,12 @@ def _write_history(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
-def _stable_history(steps: int) -> list[dict[str, object]]:
-    return [_history_row(step) for step in range(1, steps + 1)]
+def _stable_history(
+    steps: int,
+    *,
+    dt_s: float = 0.005,
+) -> list[dict[str, object]]:
+    return [_history_row(step, dt_s=dt_s) for step in range(1, steps + 1)]
 
 
 def test_stable_post_ramp_history_passes_and_keeps_reference_ledgers_separate(
@@ -229,7 +243,7 @@ def test_acceptance_config_rejects_string_numeric_values() -> None:
         ("flux_imbalance_rel", 0.2, "flux imbalance"),
     ],
 )
-def test_schema3_numerical_and_physical_gates_fail_closed(
+def test_schema4_numerical_and_physical_gates_fail_closed(
     tmp_path: Path,
     field: str,
     bad_value: object,
@@ -270,9 +284,9 @@ def test_schema3_numerical_and_physical_gates_fail_closed(
         ),
         (
             lambda rows: rows.__setitem__(
-                10, {**rows[10], "history_schema_version": 2}
+                10, {**rows[10], "history_schema_version": 3}
             ),
-            "schema version 3",
+            "schema version 4",
         ),
     ],
 )
@@ -336,6 +350,108 @@ def test_ls_dyna_agreement_cannot_mask_canonical_reference_failure(
         entry["relative_error_percent"] == pytest.approx(0.0)
         for entry in report["reference_ledgers"]["local_ls_dyna"].values()
     )
+
+
+def test_review_frozen_fsi1_steady_thresholds_are_half_percent() -> None:
+    config = Fsi1AcceptanceConfig(expected_steps=1600)
+
+    assert config.steady_window_mean_drift_rel_max == pytest.approx(0.005)
+    assert config.steady_p05_p95_span_rel_max == pytest.approx(0.005)
+    assert config.steady_slope_change_rel_max == pytest.approx(0.005)
+
+
+def test_existing_positional_ramp_duration_api_is_preserved() -> None:
+    config = Fsi1AcceptanceConfig(1600, 3.0)
+
+    assert config.ramp_duration_s == pytest.approx(3.0)
+    assert config.expected_dt_s == pytest.approx(0.005)
+
+
+def test_uniform_history_with_wrong_frozen_dt_is_rejected(tmp_path: Path) -> None:
+    history_path = tmp_path / "history.csv"
+    _write_history(history_path, _stable_history(1600, dt_s=0.006))
+
+    with pytest.raises(TurekHronAcceptanceError, match="expected dt_s"):
+        assess_fsi1_history_csv(
+            history_path,
+            Fsi1AcceptanceConfig(expected_steps=1600),
+        )
+
+
+def test_history_time_rejects_drift_beyond_absolute_only_tolerance(
+    tmp_path: Path,
+) -> None:
+    dt_s = 0.005
+    tolerance = max(1.0e-15, 1.0e-12 * dt_s)
+    rows = _stable_history(1600, dt_s=dt_s)
+    rows[999] = {
+        **rows[999],
+        "time_s": float(rows[999]["time_s"]) + 2.0 * tolerance,
+    }
+    history_path = tmp_path / "history.csv"
+    _write_history(history_path, rows)
+
+    with pytest.raises(TurekHronAcceptanceError, match="absolute-only"):
+        assess_fsi1_history_csv(
+            history_path,
+            Fsi1AcceptanceConfig(expected_steps=1600),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value", "expected_violation"),
+    [
+        ("fluid_macro_accepted_time_s", 0.004, "fluid physical time"),
+        ("fluid_macro_remaining_unadvanced_time_s", 0.001, "fluid physical time"),
+        ("fluid_predictor_substeps", 2, "fluid physical time"),
+        ("solid_macro_accepted_time_s", 0.004, "solid physical time"),
+        ("solid_macro_remaining_unadvanced_time_s", 0.001, "solid physical time"),
+        ("solid_substeps", 200, "solid physical time"),
+        ("mpm_grid_out_of_bounds_particle_count", 1, "MPM integrity"),
+        ("mpm_deformation_clamp_count", 1, "MPM integrity"),
+    ],
+)
+def test_schema4_full_macro_time_and_mpm_health_fail_closed(
+    tmp_path: Path,
+    field: str,
+    bad_value: object,
+    expected_violation: str,
+) -> None:
+    rows = _stable_history(1600)
+    rows[37] = {**rows[37], field: bad_value}
+    history_path = tmp_path / "history.csv"
+    _write_history(history_path, rows)
+
+    report = assess_fsi1_history_csv(
+        history_path,
+        Fsi1AcceptanceConfig(expected_steps=1600),
+    )
+
+    assert report["status"] == "numerical_contract_failed"
+    assert any(expected_violation in value for value in report["violations"])
+
+
+def test_macro_time_tolerance_cannot_stack_across_requested_and_accepted(
+    tmp_path: Path,
+) -> None:
+    dt_s = 0.005
+    tolerance = max(1.0e-15, 1.0e-12 * dt_s)
+    rows = _stable_history(1600)
+    rows[0] = {
+        **rows[0],
+        "fluid_macro_requested_time_s": dt_s + 0.75 * tolerance,
+        "fluid_macro_accepted_time_s": dt_s + 1.5 * tolerance,
+    }
+    history_path = tmp_path / "history.csv"
+    _write_history(history_path, rows)
+
+    report = assess_fsi1_history_csv(
+        history_path,
+        Fsi1AcceptanceConfig(expected_steps=1600),
+    )
+
+    assert report["status"] == "numerical_contract_failed"
+    assert any("fluid physical time" in value for value in report["violations"])
 
 
 @pytest.mark.parametrize(

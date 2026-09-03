@@ -484,6 +484,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
                     "cg_preconditioner_requested": "fv_multigrid",
                     "cg_preconditioner_effective": "jacobi_fallback",
                     "cg_project_calls": 1,
+                    "cg_operator_apply_count": 11,
                     "cg_multigrid_to_jacobi_fallback_count": 1,
                     "cg_nonzero_rhs_project_calls": 1,
                     "cg_nonzero_rhs_preconditioner_requested": "fv_multigrid",
@@ -495,6 +496,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
                     "cg_preconditioner_requested": "fv_multigrid",
                     "cg_preconditioner_effective": "fv_multigrid",
                     "cg_project_calls": 1,
+                    "cg_operator_apply_count": 7,
                     "cg_multigrid_to_jacobi_fallback_count": 0,
                     "cg_nonzero_rhs_project_calls": 0,
                     "cg_nonzero_rhs_preconditioner_requested": "not_applicable",
@@ -507,6 +509,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
             fluid_advection_scheme="rk2",
         )
 
+        self.assertEqual(combined["cg_operator_apply_count"], 18)
         self.assertEqual(
             combined["cg_multigrid_to_jacobi_fallback_count"],
             1,

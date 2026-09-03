@@ -43,10 +43,15 @@ class Fsi1AcceptanceConfig:
     coupling_absolute_residual_mps_max: float = 1.0e-4
     coupling_max_marker_residual_mps_max: float = 1.0e-3
     scatter_action_reaction_residual_n_max: float = 1.0e-6
-    steady_window_mean_drift_rel_max: float = 1.0e-2
-    steady_p05_p95_span_rel_max: float = 5.0e-2
-    steady_slope_change_rel_max: float = 1.0e-2
+    steady_window_mean_drift_rel_max: float = 5.0e-3
+    steady_p05_p95_span_rel_max: float = 5.0e-3
+    steady_slope_change_rel_max: float = 5.0e-3
     canonical_relative_error_max: float = 5.0e-2
+    # Appended for positional compatibility with the schema-3 public API.
+    expected_dt_s: float = 0.005
+    expected_fluid_predictor_substeps: int = 1
+    expected_solid_substeps: int = 100
+    expected_marker_count: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -55,7 +60,25 @@ class Fsi1AcceptanceConfig:
             or int(self.expected_steps) <= 0
         ):
             raise ValueError("expected_steps must be a positive integer")
+        for name in (
+            "expected_fluid_predictor_substeps",
+            "expected_solid_substeps",
+        ):
+            raw_value = getattr(self, name)
+            if (
+                isinstance(raw_value, bool)
+                or not isinstance(raw_value, Integral)
+                or int(raw_value) <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer")
+        if self.expected_marker_count is not None and (
+            isinstance(self.expected_marker_count, bool)
+            or not isinstance(self.expected_marker_count, Integral)
+            or int(self.expected_marker_count) <= 0
+        ):
+            raise ValueError("expected_marker_count must be None or a positive integer")
         positive = (
+            "expected_dt_s",
             "ramp_duration_s",
             "settling_duration_s",
             "steady_window_duration_s",
@@ -89,7 +112,7 @@ METRIC_FIELDS = (
     "total_lift_per_span_n_per_m",
 )
 
-HISTORY_SCHEMA_VERSION = 3
+HISTORY_SCHEMA_VERSION = 4
 
 CANONICAL_FSI1_REFERENCE = canonical_fsi1_metric_values()
 LOCAL_LS_DYNA_REFERENCE = lsdyna_fsi1_metric_values()
@@ -112,6 +135,10 @@ _INTEGER_FIELDS = (
     "mpm_scatter_active_marker_count",
     "mpm_scatter_invalid_marker_count",
     "mpm_scatter_active_pair_count",
+    "fluid_predictor_substeps",
+    "solid_substeps",
+    "mpm_grid_out_of_bounds_particle_count",
+    "mpm_deformation_clamp_count",
 )
 
 _FLOAT_FIELDS = (
@@ -129,6 +156,12 @@ _FLOAT_FIELDS = (
     "post_solid_no_slip_l2_mps",
     "mpm_scatter_action_reaction_residual_n",
     "fsi_coupling_max_marker_residual_mps",
+    "fluid_macro_requested_time_s",
+    "fluid_macro_accepted_time_s",
+    "fluid_macro_remaining_unadvanced_time_s",
+    "solid_macro_requested_time_s",
+    "solid_macro_accepted_time_s",
+    "solid_macro_remaining_unadvanced_time_s",
 )
 
 _BOOLEAN_FIELDS = (
@@ -255,18 +288,20 @@ def _validate_history_identity(
     ]
     if schema_steps:
         raise TurekHronAcceptanceError(
-            f"FSI1 acceptance requires history schema version 3 on every row; "
+            f"FSI1 acceptance requires history schema version "
+            f"{HISTORY_SCHEMA_VERSION} on every row; "
             f"mismatch at steps {_step_preview(schema_steps)}"
         )
     times = np.asarray([float(row["time_s"]) for row in rows], dtype=np.float64)
     if np.any(np.diff(times) <= 0.0):
         raise TurekHronAcceptanceError("history time_s must be strictly increasing")
-    dt_s = float(times[0])
+    dt_s = float(config.expected_dt_s)
     expected_times = np.arange(1, len(rows) + 1, dtype=np.float64) * dt_s
-    tolerance = max(1.0e-12, abs(dt_s) * 1.0e-8)
-    if dt_s <= 0.0 or not np.allclose(times, expected_times, rtol=1.0e-9, atol=tolerance):
+    tolerance = max(1.0e-15, abs(dt_s) * 1.0e-12)
+    if not np.all(np.abs(times - expected_times) <= tolerance):
         raise TurekHronAcceptanceError(
-            "history time_s must be uniform and consistent with one-based steps"
+            "history time_s must match expected dt_s and one-based steps "
+            "within the absolute-only physical-time tolerance"
         )
     return dt_s
 
@@ -284,9 +319,25 @@ def _failed_steps(
 
 
 def _numerical_contract_violations(
-    rows: Sequence[Mapping[str, Any]], config: Fsi1AcceptanceConfig
+    rows: Sequence[Mapping[str, Any]],
+    config: Fsi1AcceptanceConfig,
+    *,
+    dt_s: float,
 ) -> tuple[str, ...]:
     expected_marker_count = int(rows[0]["stress_expected_marker_count"])
+    time_tolerance = max(1.0e-15, 1.0e-12 * abs(float(dt_s)))
+
+    def full_macro_time(row: Mapping[str, Any], prefix: str) -> bool:
+        requested = float(row[f"{prefix}_macro_requested_time_s"])
+        accepted = float(row[f"{prefix}_macro_accepted_time_s"])
+        remaining = float(row[f"{prefix}_macro_remaining_unadvanced_time_s"])
+        return (
+            abs(requested - float(dt_s)) <= time_tolerance
+            and abs(accepted - float(dt_s)) <= time_tolerance
+            and abs(accepted - requested) <= time_tolerance
+            and abs(remaining) <= time_tolerance
+        )
+
     checks = (
         (
             "mechanism probe",
@@ -377,6 +428,22 @@ def _numerical_contract_violations(
             > config.scatter_action_reaction_residual_n_max,
         ),
         (
+            "fluid physical time",
+            lambda row: not full_macro_time(row, "fluid")
+            or row["fluid_predictor_substeps"]
+            != int(config.expected_fluid_predictor_substeps),
+        ),
+        (
+            "solid physical time",
+            lambda row: not full_macro_time(row, "solid")
+            or row["solid_substeps"] != int(config.expected_solid_substeps),
+        ),
+        (
+            "MPM integrity",
+            lambda row: row["mpm_grid_out_of_bounds_particle_count"] != 0
+            or row["mpm_deformation_clamp_count"] != 0,
+        ),
+        (
             "flux imbalance",
             lambda row: row["ramp_factor"] >= 1.0 - 1.0e-9
             and abs(row["flux_imbalance_rel"])
@@ -384,6 +451,14 @@ def _numerical_contract_violations(
         ),
     )
     violations: list[str] = []
+    if (
+        config.expected_marker_count is not None
+        and expected_marker_count != int(config.expected_marker_count)
+    ):
+        violations.append(
+            "marker identity gate failed: history marker count "
+            f"{expected_marker_count} != expected {int(config.expected_marker_count)}"
+        )
     for label, predicate in checks:
         steps = _failed_steps(rows, predicate)
         if steps:
@@ -456,11 +531,11 @@ def _metric_report(
             f"finite input values produced non-finite derived metrics for {field}"
         )
     stability_violations: list[str] = []
-    if drift_rel > config.steady_window_mean_drift_rel_max:
+    if drift_rel >= config.steady_window_mean_drift_rel_max:
         stability_violations.append("adjacent-window mean drift")
-    if span_rel > config.steady_p05_p95_span_rel_max:
+    if span_rel >= config.steady_p05_p95_span_rel_max:
         stability_violations.append("late-window p05-p95 span")
-    if slope_change_rel > config.steady_slope_change_rel_max:
+    if slope_change_rel >= config.steady_slope_change_rel_max:
         stability_violations.append("late-window slope")
     return {
         **late,
@@ -520,7 +595,11 @@ def assess_fsi1_history_csv(
     rows = _typed_history_rows(path)
     dt_s = _validate_history_identity(rows, config)
     observed_end_time_s = float(rows[-1]["time_s"])
-    numerical_violations = _numerical_contract_violations(rows, config)
+    numerical_violations = _numerical_contract_violations(
+        rows,
+        config,
+        dt_s=dt_s,
+    )
     base: dict[str, Any] = {
         "history_csv": str(path),
         "completed_steps": len(rows),
@@ -565,6 +644,7 @@ def assess_fsi1_history_csv(
             **base,
             "status": "numerical_contract_failed",
             "acceptance_passed": False,
+            "steady_state_passed": False,
             "violations": numerical_violations,
         }
 
@@ -578,6 +658,7 @@ def assess_fsi1_history_csv(
             **base,
             "status": "insufficient_steady_history",
             "acceptance_passed": False,
+            "steady_state_passed": False,
             "violations": (
                 "history ends before two adjacent post-ramp, post-settling windows are available",
             ),
@@ -648,6 +729,7 @@ def assess_fsi1_history_csv(
         **base,
         "status": status,
         "acceptance_passed": status == "passed",
+        "steady_state_passed": not stability_violations,
         "violations": violations,
         "steady_windows": {
             "previous": {
