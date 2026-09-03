@@ -31756,6 +31756,18 @@ class HibmMpmSharpCouplingState:
         )
 
 
+def _prepare_legacy_no_slip_sampling_fields(
+    fluid: Any,
+) -> tuple[Any, Any, Any]:
+    """Preserve the legacy residual/viscous obstacle split and rebuild order."""
+
+    viscous_sampling_obstacle = fluid.build_hibm_no_slip_sampling_obstacle()
+    component_face_valid_mask = (
+        fluid.build_hibm_no_slip_component_face_valid_mask()
+    )
+    return fluid.obstacle, viscous_sampling_obstacle, component_face_valid_mask
+
+
 def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     *,
     fluid: Any,
@@ -31848,6 +31860,9 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     classify_far_internal_nodes: bool = False,
     convert_internal_nodes_to_obstacles: bool = True,
     post_dirichlet_consistency_projection_iterations: int = 3,
+    # Optional Q/P adapter. None preserves the existing generic/ANSYS
+    # projection and terminal sampling behavior exactly.
+    marker_mac_constraint_projector: Any | None = None,
     diagnostic_disable_pressure_neumann_matrix_rows: bool = False,
     diagnostic_capture_pressure_neumann_invalid_rows: bool = False,
     interpolate_velocity_dirichlet_with_interior: bool = True,
@@ -31880,6 +31895,57 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     iterations = int(projection_iterations)
     if iterations <= 0:
         raise ValueError("projection_iterations must be positive")
+    if (
+        marker_mac_constraint_projector is not None
+        and getattr(marker_mac_constraint_projector, "markers_owner", None)
+        is not markers
+    ):
+        raise RuntimeError("marker-MAC projector marker owner changed")
+    marker_mac_projection_enabled = (
+        marker_mac_constraint_projector is not None and bool(run_fluid_predictor)
+    )
+    marker_mac_projector_kwargs: dict[str, object] = {}
+    if marker_mac_projection_enabled:
+        marker_mac_projector_kwargs = {
+            "pre_projection_velocity_projector": (
+                marker_mac_constraint_projector
+            ),
+            "pressure_velocity_nullspace_projector": (
+                marker_mac_constraint_projector
+            ),
+        }
+
+    def require_marker_mac_qp_health(
+        project_report: Mapping[str, object],
+        *,
+        stage: str,
+    ) -> None:
+        if not marker_mac_projection_enabled:
+            return
+        required_true = (
+            "pre_projection_velocity_projector_prepared",
+            "pre_projection_velocity_projector_converged",
+            "pre_projection_velocity_projector_committed",
+            "pressure_marker_nullspace_enabled",
+            "pressure_marker_nullspace_prepared",
+            "pressure_marker_nullspace_all_velocity_paths_projected",
+        )
+        failed = [
+            key for key in required_true if not bool(project_report.get(key, False))
+        ]
+        invalid = {
+            key: int(project_report.get(key, 0))
+            for key in (
+                "pressure_marker_nullspace_actuation_invalid_count",
+                "pressure_marker_nullspace_correction_invalid_count",
+            )
+            if int(project_report.get(key, 0)) != 0
+        }
+        if failed or invalid:
+            raise RuntimeError(
+                "marker-MAC Q/P projection health failed: "
+                f"stage={stage}, failed={failed}, invalid={invalid}"
+            )
     # Re-projection budget/tolerance resolve to the main values when the
     # caller leaves the override kwargs at their None default, so every
     # existing case (which never sets them) is byte-for-byte identical to
@@ -32452,6 +32518,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 hibm_tiny_unreached_cleanup_component_cells=0,
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
+                **marker_mac_projector_kwargs,
                 read_report=True,
                 warm_start_slot=substep_warm_start_slot,
             )
@@ -32460,6 +32527,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             getattr(fluid, "last_cg_iterations", -1)
         )
         project_report["wall_time_s"] = time.perf_counter() - _main_project_start_s
+        require_marker_mac_qp_health(project_report, stage="main")
         project_report["hibm_projection_overflow_singleton_cleanup_cell_count"] = (
             int(project_report.get("hibm_projection_overflow_singleton_cleanup_cell_count", 0))
             + int(overflow_singleton_cleanup_cell_count)
@@ -32591,6 +32659,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
                 hibm_tiny_unreached_cleanup_component_cells=0,
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
+                **marker_mac_projector_kwargs,
                 read_report=True,
                 warm_start_slot=consistency_warm_start_slot,
             )
@@ -32600,6 +32669,13 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         )
         consistency_project_report["wall_time_s"] = (
             time.perf_counter() - _consistency_project_start_s
+        )
+        require_marker_mac_qp_health(
+            consistency_project_report,
+            stage=(
+                "post_dirichlet_consistency_"
+                f"{int(consistency_projection_index)}"
+            ),
         )
         consistency_project_report[
             "hibm_projection_overflow_singleton_cleanup_cell_count"
@@ -32781,13 +32857,33 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
     # while the viscous-gradient sampler still consumes a scalar obstacle
     # view.  Rebuild both derived views from the same sealed/current boundary
     # ledger rather than retaining the removed legacy local implicitly.
-    no_slip_sampling_obstacle = fluid.build_hibm_no_slip_sampling_obstacle()
-    no_slip_component_face_valid_mask = (
-        fluid.build_hibm_no_slip_component_face_valid_mask()
-    )
+    if marker_mac_projection_enabled:
+        (
+            prepared_no_slip_sampling_identity,
+            no_slip_component_face_valid_mask,
+            no_slip_sampling_obstacle,
+            no_slip_topology_generation,
+            no_slip_component_face_valid_mask_generation,
+        ) = marker_mac_constraint_projector.terminal_no_slip_sampling_inputs(
+            fluid=fluid
+        )
+        viscous_sampling_obstacle = no_slip_sampling_obstacle
+    else:
+        # Time-zero and all None paths retain the legacy reprepare behavior;
+        # an unprepared Q transaction must never gate initialization.
+        (
+            no_slip_sampling_obstacle,
+            viscous_sampling_obstacle,
+            no_slip_component_face_valid_mask,
+        ) = _prepare_legacy_no_slip_sampling_fields(
+            fluid
+        )
+        prepared_no_slip_sampling_identity = None
+        no_slip_topology_generation = None
+        no_slip_component_face_valid_mask_generation = None
     no_slip_report = markers.sample_no_slip_residual(
         fluid.velocity,
-        fluid.obstacle,
+        no_slip_sampling_obstacle,
         no_slip_component_face_valid_mask,
         fluid.cell_face_x_m,
         fluid.cell_face_y_m,
@@ -32798,7 +32894,25 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         fluid.grid.grid_nodes,
         primary_region_id=int(primary_region_id),
         secondary_region_id=int(secondary_region_id),
+        prepared_sampling_identity=prepared_no_slip_sampling_identity,
+        topology_generation=no_slip_topology_generation,
+        component_face_valid_mask_generation=(
+            no_slip_component_face_valid_mask_generation
+        ),
     )
+    if marker_mac_projection_enabled:
+        residual = float(no_slip_report.max_no_slip_residual_mps)
+        tolerance = float(marker_mac_constraint_projector.absolute_tolerance_mps)
+        if (
+            int(no_slip_report.invalid_marker_count) != 0
+            or not math.isfinite(residual)
+            or residual > tolerance
+        ):
+            raise RuntimeError(
+                "marker-MAC terminal no-slip health failed: "
+                f"invalid={int(no_slip_report.invalid_marker_count)}, "
+                f"max_residual_mps={residual:.9g}, tolerance_mps={tolerance:.9g}"
+            )
     _debug_stage_progress("sample_no_slip_residual:done")
     # S2-A8'' sampling preparation, strictly after the LAST fluid.project(...)
     # (including the post-Dirichlet consistency projection) and strictly before
@@ -32922,7 +33036,7 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
         # projection obstacle intentionally hides those cells, so use the
         # already-built diagnostic view only for the velocity gradient; the
         # per-face pressure probe continues to read the projection view.
-        viscous_sampling_obstacle_field=no_slip_sampling_obstacle,
+        viscous_sampling_obstacle_field=viscous_sampling_obstacle,
         viscous_inactive_axis=viscous_inactive_axis,
     )
     _debug_stage_progress("sample_fluid_stress_to_marker_tractions:done")
@@ -33357,6 +33471,7 @@ def advance_hibm_mpm_sharp_mpm_step(
     classify_far_internal_nodes: bool = False,
     convert_internal_nodes_to_obstacles: bool = True,
     post_dirichlet_consistency_projection_iterations: int = 3,
+    marker_mac_constraint_projector: Any | None = None,
     diagnostic_disable_pressure_neumann_matrix_rows: bool = False,
     diagnostic_capture_pressure_neumann_invalid_rows: bool = False,
     update_surface_geometry_from_mpm: bool = True,
@@ -33373,6 +33488,25 @@ def advance_hibm_mpm_sharp_mpm_step(
 ) -> HibmMpmSharpMpmStepReport:
     if not callable(solid_step):
         raise ValueError("solid_step must be callable")
+    if (
+        marker_mac_constraint_projector is not None
+        and getattr(marker_mac_constraint_projector, "markers_owner", None)
+        is not markers
+    ):
+        raise RuntimeError("marker-MAC projector marker owner changed")
+    marker_mac_projection_enabled = (
+        marker_mac_constraint_projector is not None and bool(run_fluid_predictor)
+    )
+    marker_mac_projector_kwargs: dict[str, object] = {}
+    if marker_mac_projection_enabled:
+        marker_mac_projector_kwargs = {
+            "pre_projection_velocity_projector": (
+                marker_mac_constraint_projector
+            ),
+            "pressure_velocity_nullspace_projector": (
+                marker_mac_constraint_projector
+            ),
+        }
 
     def current_particle_position_generation() -> int | None:
         if callable(mpm_particle_position_generation):
@@ -33501,6 +33635,11 @@ def advance_hibm_mpm_sharp_mpm_step(
         convert_internal_nodes_to_obstacles=bool(convert_internal_nodes_to_obstacles),
         post_dirichlet_consistency_projection_iterations=int(
             post_dirichlet_consistency_projection_iterations
+        ),
+        marker_mac_constraint_projector=(
+            marker_mac_constraint_projector
+            if marker_mac_projection_enabled
+            else None
         ),
         diagnostic_disable_pressure_neumann_matrix_rows=bool(
             diagnostic_disable_pressure_neumann_matrix_rows
@@ -34029,6 +34168,7 @@ def advance_hibm_mpm_sharp_mpm_step(
                 hibm_tiny_unreached_cleanup_component_cells=0,
                 divergence_cleanup_iterations=int(divergence_cleanup_iterations),
                 divergence_cleanup_relaxation=float(divergence_cleanup_relaxation),
+                **marker_mac_projector_kwargs,
                 read_report=True,
                 warm_start_slot=post_solid_warm_start_slot,
             )
@@ -34039,6 +34179,33 @@ def advance_hibm_mpm_sharp_mpm_step(
         post_solid_project_report["wall_time_s"] = (
             time.perf_counter() - _post_solid_project_start_s
         )
+        if marker_mac_projection_enabled:
+            required_true = (
+                "pre_projection_velocity_projector_prepared",
+                "pre_projection_velocity_projector_converged",
+                "pre_projection_velocity_projector_committed",
+                "pressure_marker_nullspace_enabled",
+                "pressure_marker_nullspace_prepared",
+                "pressure_marker_nullspace_all_velocity_paths_projected",
+            )
+            failed = [
+                key
+                for key in required_true
+                if not bool(post_solid_project_report.get(key, False))
+            ]
+            invalid = {
+                key: int(post_solid_project_report.get(key, 0))
+                for key in (
+                    "pressure_marker_nullspace_actuation_invalid_count",
+                    "pressure_marker_nullspace_correction_invalid_count",
+                )
+                if int(post_solid_project_report.get(key, 0)) != 0
+            }
+            if failed or invalid:
+                raise RuntimeError(
+                    "marker-MAC Q/P projection health failed: "
+                    f"stage=post_solid, failed={failed}, invalid={invalid}"
+                )
         post_solid_project_report[
             "hibm_projection_overflow_singleton_cleanup_cell_count"
         ] = (
@@ -34102,12 +34269,27 @@ def advance_hibm_mpm_sharp_mpm_step(
             }
         )
         post_solid_projection_applied = True
-        post_solid_no_slip_component_face_valid_mask = (
-            fluid.build_hibm_no_slip_component_face_valid_mask()
-        )
+        if marker_mac_projection_enabled:
+            (
+                post_solid_prepared_sampling_identity,
+                post_solid_no_slip_component_face_valid_mask,
+                post_solid_no_slip_sampling_obstacle,
+                post_solid_topology_generation,
+                post_solid_component_face_valid_mask_generation,
+            ) = marker_mac_constraint_projector.terminal_no_slip_sampling_inputs(
+                fluid=fluid
+            )
+        else:
+            post_solid_no_slip_sampling_obstacle = fluid.obstacle
+            post_solid_no_slip_component_face_valid_mask = (
+                fluid.build_hibm_no_slip_component_face_valid_mask()
+            )
+            post_solid_prepared_sampling_identity = None
+            post_solid_topology_generation = None
+            post_solid_component_face_valid_mask_generation = None
         post_solid_no_slip_report = markers.sample_no_slip_residual(
             fluid.velocity,
-            fluid.obstacle,
+            post_solid_no_slip_sampling_obstacle,
             post_solid_no_slip_component_face_valid_mask,
             fluid.cell_face_x_m,
             fluid.cell_face_y_m,
@@ -34118,7 +34300,27 @@ def advance_hibm_mpm_sharp_mpm_step(
             fluid.grid.grid_nodes,
             primary_region_id=int(primary_region_id),
             secondary_region_id=int(secondary_region_id),
+            prepared_sampling_identity=post_solid_prepared_sampling_identity,
+            topology_generation=post_solid_topology_generation,
+            component_face_valid_mask_generation=(
+                post_solid_component_face_valid_mask_generation
+            ),
         )
+        if marker_mac_projection_enabled:
+            residual = float(post_solid_no_slip_report.max_no_slip_residual_mps)
+            tolerance = float(marker_mac_constraint_projector.absolute_tolerance_mps)
+            if (
+                int(post_solid_no_slip_report.invalid_marker_count) != 0
+                or not math.isfinite(residual)
+                or residual > tolerance
+            ):
+                raise RuntimeError(
+                    "marker-MAC terminal no-slip health failed: "
+                    f"stage=post_solid, "
+                    f"invalid={int(post_solid_no_slip_report.invalid_marker_count)}, "
+                    f"max_residual_mps={residual:.9g}, "
+                    f"tolerance_mps={tolerance:.9g}"
+                )
     if bool(far_pressure_air_backed) and int(next_air_backed_cell_count) > 0:
         # The post-solid seed/convert pass can create a new air-cell set, and
         # the optional kinematic-consistency project above may overwrite its

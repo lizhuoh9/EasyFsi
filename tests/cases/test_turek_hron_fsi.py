@@ -1126,7 +1126,7 @@ class TurekHronOneSidedPressureSamplingTests(unittest.TestCase):
             assemble_hibm_mpm_sharp_fluid_to_mpm_loads
         )
         self.assertIn(
-            "viscous_sampling_obstacle_field=no_slip_sampling_obstacle",
+            "viscous_sampling_obstacle_field=viscous_sampling_obstacle",
             assembly_source,
         )
 

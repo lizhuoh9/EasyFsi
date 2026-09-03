@@ -232,6 +232,8 @@ class _FixedFluidRuntime:
         from simulation_core.coupling.hibm_mpm import (
             HibmMpmIbBoundaryConditions,
             HibmMpmIbNodeSearch,
+            HibmMpmMarkerMacConstraintOperator,
+            HibmMpmMarkerMacConstraintProjector,
             assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
             capture_marker_interface_state,
             marker_layout_identity,
@@ -272,6 +274,23 @@ class _FixedFluidRuntime:
             grid_nodes=self._config.grid_nodes,
             marker_capacity=self.markers.marker_count,
             runtime=runtime,
+        )
+        self._marker_mac_constraint_projector = (
+            HibmMpmMarkerMacConstraintProjector(
+                markers=self.markers,
+                operator=HibmMpmMarkerMacConstraintOperator(
+                    grid_nodes=self._config.grid_nodes,
+                    marker_capacity=self.markers.marker_count,
+                ),
+                max_iterations=int(
+                    self._config.flow_hibm_marker_mac_constraint_iterations
+                ),
+                absolute_tolerance_mps=float(
+                    self._config.flow_hibm_marker_mac_constraint_absolute_tolerance_mps
+                ),
+                primary_region_id=PRIMARY_REGION_ID,
+                secondary_region_id=SECONDARY_UNUSED_REGION_ID,
+            )
         )
         self._assemble_loads = assemble_hibm_mpm_sharp_fluid_to_mpm_loads
         self._capture_predictor_time = _capture_fluid_predictor_time_observations
@@ -503,6 +522,9 @@ class _FixedFluidRuntime:
                 reprojection_projection_iterations=int(self._config.flow_reprojection_iterations),
                 reprojection_cg_tolerance=float(self._config.flow_reprojection_cg_tolerance),
                 post_dirichlet_consistency_projection_iterations=1,
+                marker_mac_constraint_projector=(
+                    self._marker_mac_constraint_projector
+                ),
                 interpolate_velocity_dirichlet_with_interior=bool(
                     self._config.interpolate_velocity_dirichlet_with_interior
                 ),

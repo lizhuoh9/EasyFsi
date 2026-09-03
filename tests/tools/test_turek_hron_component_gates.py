@@ -127,6 +127,10 @@ def test_frozen_component_config_uses_real_turek_fields_and_values():
     assert config["fluid_advection_scheme"] == "rk2"
     assert config["flow_projection_iterations"] == 4000
     assert config["flow_cg_tolerance"] == pytest.approx(1.0e-6)
+    assert config["flow_hibm_marker_mac_constraint_iterations"] == 64
+    assert config[
+        "flow_hibm_marker_mac_constraint_absolute_tolerance_mps"
+    ] == pytest.approx(1.0e-4)
     assert config["ib_anisotropic_envelope"] is True
     assert config["classify_far_internal_nodes"] is True
     assert config["flow_cg_preconditioner"] == "fv_multigrid"

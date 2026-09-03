@@ -434,6 +434,65 @@ preceding solid-only artifacts source-stale again: the entire frozen component
 order must be regenerated before nx4 fixed-fluid is retried, and none of this
 is yet FSI1 numerical evidence.
 
+#### 5.4.2 Source-matched solid pass and fixed-fluid stop (2026-09-03)
+
+At clean commit `f16737e`, the complete frozen solid-only chain passed as
+`PASS_COMPONENT_ONLY` under strict CUDA:
+
+- `turek_hron__component__solid_s100_nx4__20260903__r07`;
+- `turek_hron__component__solid_s200_nx4__20260903__r05`;
+- `turek_hron__component__solid_s100_s200_nx4__20260903__r05`, with Point-A
+  relative-vector delta `0.0003264915974131584` (0.032649%);
+- `turek_hron__component__solid_s200_nx8__20260903__r05`;
+- `turek_hron__component__solid_s200_nx4_nx8__20260903__r05`, with Point-A
+  relative-vector delta `0.0`.
+
+Every solid run completed all 40 rows with zero root displacement and zero
+displacement/velocity spanwise leakage. The next canonical nx4 fixed-fluid
+attempt, `turek_hron__component__fixed_fluid_nx4__20260903__r04`, reached the
+first frozen evaluation row at physical step 401 (`t=2.005 s`) and failed
+closed with `FAIL_BEAM_MARKER_NO_SLIP`: RMS residual
+`0.0012601176039343787 m/s` and maximum residual
+`0.005936640314757824 m/s`, against `1e-4` and `0.002 m/s`. Sampler coverage
+was complete: 112 valid and zero invalid markers.
+
+Noncanonical in-memory diagnostics first crossed the RMS limit at step 33.
+Overall RMS/max was `0.00010018624307816692/0.0004438578907866031 m/s`; the
+108 direct samples contributed
+`8.716031220311704e-05/0.0002774639579001814`, while four free-tip
+`normal_walk` samples contributed
+`0.0002755487092652955/0.0004438578907866031`. At step 100 the corresponding
+overall, direct, and `normal_walk` RMS/max pairs were
+`0.000522078997451709/0.002698277123272419`,
+`0.0004219407204557312/0.0013645613798871636`, and
+`0.0016807570266407306/0.002698277123272419 m/s`. The failed canonical `r04`
+directory and explicitly diagnostic `r01`/`r02` directories are empty; these
+diagnostic values exist only in console/in-memory traces.
+
+The execution-path defect was localized: time-zero marker closure directly
+constrained 308 of 336 marker-axis equations, while 28 q-free directions
+depended on marker-Q. The generic HIBM-MPM core called `fluid.project(...)`
+without the existing marker-Q/pressure-nullspace adapter. All pressure
+marker-nullspace enable/prepare/apply diagnostics were false or zero, while
+terminal `normal_walk` positions were bitwise identical to the closure
+positions. The repair now shares one persistent Q/P adapter across Turek main,
+consistency, and post-solid projections and preserves the legacy/default ANSYS
+path. A first review caught a default-path residual/viscous obstacle regression;
+that issue was fixed under a focused behavior test before any CUDA rerun.
+
+The repaired dirty source passed `142` focused tests plus `15` subtests,
+compilation, Ruff, diff checks, and a fresh read-only final review. One
+**noncanonical, in-memory** strict-CUDA nx4 step then passed with exact
+requested/accepted time `0.005/0.005 s`, zero unadvanced time, Q
+prepared/converged/committed, pressure-nullspace projection on all velocity
+paths, zero invalid actuation/correction entries, 112/112 valid markers, and
+terminal no-slip RMS/max
+`2.98977615920801e-07/9.697889709059382e-07 m/s`. This probe wrote no artifact
+and is not a component PASS. The source change invalidates every `f16737e`
+solid artifact by source identity, so the complete frozen component chain must
+be regenerated before nx4/nx8 fixed-fluid and coupled-preflight gates. No
+fixed-fluid PASS or FSI1 evidence exists.
+
 The solid-only matrix contains three fresh runs:
 
 | run | grid | solid substeps | macro steps | prescribed load |
@@ -877,7 +936,9 @@ diagnostic; the final claim remains no-commit live coupling/CG/matvec work.
 4. Implement and test canonical multi-source references.
 5. Import and manifest the two official raw series.
 6. Implement and test the deterministic limit-cycle analyzer.
-7. Complete the missing component gates.
+7. Close the generic-core marker-Q/pressure-nullspace wiring defect, then
+   regenerate the entire frozen component chain and complete the remaining
+   component gates — active; no fixed-fluid PASS or FSI1 evidence exists.
 8. Run FSI1-S0, then M0/M1, then conditional F0.
 9. If and only if FSI1 passes, run FSI2.
 10. If and only if FSI2 passes, run FSI3.

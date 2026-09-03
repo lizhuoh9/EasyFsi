@@ -59,6 +59,8 @@ def frozen_component_config(
         "fluid_advection_scheme": "rk2",
         "flow_projection_iterations": 4000,
         "flow_cg_tolerance": 1.0e-6,
+        "flow_hibm_marker_mac_constraint_iterations": 64,
+        "flow_hibm_marker_mac_constraint_absolute_tolerance_mps": 1.0e-4,
         "flow_cg_preconditioner": "fv_multigrid",
         "flow_reprojection_iterations": 1200,
         "flow_reprojection_cg_tolerance": 1.0e-4,

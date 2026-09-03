@@ -35,6 +35,7 @@ from .marker_mac_constraint import (
     HibmMpmMarkerMacConstraintOperator,
     HibmMpmMarkerMacConstraintReport,
 )
+from .marker_mac_projector import HibmMpmMarkerMacConstraintProjector
 from .interface_state import (
     MARKER_INTERFACE_STATE_FIELDS,
     capture_marker_interface_state,
@@ -99,6 +100,7 @@ __all__ = [
     "HibmMpmMpmForceScatterReport",
     "HibmMpmMarkerMacConstraintOperator",
     "HibmMpmMarkerMacConstraintReport",
+    "HibmMpmMarkerMacConstraintProjector",
     "HibmMpmNoSlipResidualReport",
     "HibmMpmPreparedNoSlipSamplingIdentity",
     "HibmMpmPaperRequirement",

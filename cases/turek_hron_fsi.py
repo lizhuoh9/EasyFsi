@@ -20,6 +20,8 @@ from benchmarks.official.solid_mpm_fsi_runner import (
 from simulation_core.coupling.hibm_mpm import (
     HibmMpmIbBoundaryConditions,
     HibmMpmIbNodeSearch,
+    HibmMpmMarkerMacConstraintOperator,
+    HibmMpmMarkerMacConstraintProjector,
     HibmMpmSurfaceMarkers,
     MARKER_INTERFACE_STATE_FIELDS,
     advance_hibm_mpm_sharp_mpm_step,
@@ -188,6 +190,10 @@ class TurekHronFsiConfig:
     flow_projection_iterations: int = 4000
     flow_pressure_solver: str = "fv_cg"
     flow_cg_tolerance: float = 1.0e-6
+    # Marker-MAC Q/P transaction controls. These are frozen into component
+    # evidence so terminal no-slip health is reproducible source-to-run.
+    flow_hibm_marker_mac_constraint_iterations: int = 64
+    flow_hibm_marker_mac_constraint_absolute_tolerance_mps: float = 1.0e-4
     # CG preconditioner. Default "auto" -> Jacobi on a uniform grid. Set
     # "fv_multigrid" to force the multigrid preconditioner (converges the
     # near-obstacle deficient-stencil modes the plain CG leaves under-resolved).
@@ -3170,6 +3176,19 @@ def run_turek_hron_fsi(
         marker_capacity=markers.marker_count,
         runtime=taichi_runtime,
     )
+    marker_mac_constraint_projector = HibmMpmMarkerMacConstraintProjector(
+        markers=markers,
+        operator=HibmMpmMarkerMacConstraintOperator(
+            grid_nodes=config.grid_nodes,
+            marker_capacity=markers.marker_count,
+        ),
+        max_iterations=int(config.flow_hibm_marker_mac_constraint_iterations),
+        absolute_tolerance_mps=float(
+            config.flow_hibm_marker_mac_constraint_absolute_tolerance_mps
+        ),
+        primary_region_id=PRIMARY_REGION_ID,
+        secondary_region_id=SECONDARY_UNUSED_REGION_ID,
+    )
     mu_pa, lambda_pa = _lame_parameters(config)
     plane_dx_m, plane_dy_m, plane_dz_m = fluid_cell_spacing_m(config)
     plane_spacing_m = max(plane_dy_m, plane_dz_m)
@@ -3387,6 +3406,7 @@ def run_turek_hron_fsi(
             ),
             fluid_advection_scheme=str(config.fluid_advection_scheme),
             post_dirichlet_consistency_projection_iterations=1,
+            marker_mac_constraint_projector=marker_mac_constraint_projector,
             update_surface_geometry_from_mpm=False,
             interpolate_velocity_dirichlet_with_interior=(
                 bool(config.interpolate_velocity_dirichlet_with_interior)

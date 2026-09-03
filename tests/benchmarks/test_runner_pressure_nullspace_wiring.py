@@ -120,6 +120,8 @@ def _prepared_wrapper() -> tuple[
         operator=operator,
         max_iterations=32,
         absolute_tolerance_mps=1.0e-4,
+        primary_region_id=0,
+        secondary_region_id=0,
     )
     fluid = _FluidOwner()
     component_face_valid_mask = object()

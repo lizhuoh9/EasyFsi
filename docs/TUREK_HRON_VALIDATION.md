@@ -55,6 +55,57 @@ no module-level verdict. All component artifacts predating this source change
 are source-stale and must be regenerated. This update authorizes another
 component-gate attempt; it is not fixed-fluid or FSI1 numerical evidence.
 
+**R26A source-matched component execution update (2026-09-03).** At clean
+commit `f16737e`, the complete frozen solid-only chain passed as
+`PASS_COMPONENT_ONLY` under strict CUDA. Runs
+`turek_hron__component__solid_s100_nx4__20260903__r07`,
+`turek_hron__component__solid_s200_nx4__20260903__r05`, and
+`turek_hron__component__solid_s200_nx8__20260903__r05` each completed all 40
+rows with zero root displacement and zero displacement/velocity spanwise
+leakage. The source-matched S100/S200 Point-A relative-vector delta was
+`0.0003264915974131584` (0.032649%), and the nx4/nx8 delta was `0.0`.
+
+The next canonical nx4 fixed-fluid attempt,
+`turek_hron__component__fixed_fluid_nx4__20260903__r04`, reached physical step
+401 (`t=2.005 s`) and failed closed with `FAIL_BEAM_MARKER_NO_SLIP`: RMS
+residual `0.0012601176039343787 m/s` and maximum residual
+`0.005936640314757824 m/s`, against limits `1e-4` and `0.002 m/s`. Its 112
+markers were all valid. Noncanonical in-memory traces first crossed the RMS
+limit at step 33: overall RMS/max
+`0.00010018624307816692/0.0004438578907866031 m/s`; the 108 direct samples
+contributed `8.716031220311704e-05/0.0002774639579001814`, while the four
+free-tip `normal_walk` samples contributed
+`0.0002755487092652955/0.0004438578907866031`. At step 100 the corresponding
+overall, direct, and `normal_walk` pairs were
+`0.000522078997451709/0.002698277123272419`,
+`0.0004219407204557312/0.0013645613798871636`, and
+`0.0016807570266407306/0.002698277123272419 m/s`.
+
+The defect was localized to projection wiring, not an alternate tip sampler:
+time-zero closure directly constrained 308 of 336 marker-axis equations, while
+28 q-free directions required marker-Q. The generic HIBM-MPM core did not pass
+the existing marker-Q adapter into either the pre-projection or pressure
+velocity-nullspace hook, and every pressure marker-nullspace diagnostic was
+therefore false or zero. The terminal `normal_walk` and closure positions were
+bitwise identical. The repair exposes the proven runner adapter publicly and
+uses one persistent Q/P owner for Turek main, consistency, and post-solid
+projections. Its default `None` path retains the prior ANSYS behavior; a review
+found and blocked a transient residual/viscous obstacle mix-up before CUDA, and
+a focused behavior regression now preserves their distinct legacy fields.
+
+After `142 passed, 15 subtests passed`, compilation, Ruff, diff checks, and a
+fresh read-only review, one **noncanonical, in-memory** strict-CUDA nx4 step
+passed: requested/accepted time was exactly `0.005/0.005 s` with zero
+unadvanced time; Q was prepared, converged, and committed; pressure-nullspace
+projection covered all velocity paths with zero invalid actuation/correction
+entries; 112/112 markers were valid; and terminal no-slip RMS/max was
+`2.98977615920801e-07/9.697889709059382e-07 m/s`. This probe created no
+component artifact and is not a canonical gate result. The failed canonical
+`r04` directory and diagnostic `r01`/`r02` directories are empty. Because the
+source has changed, all `f16737e` solid artifacts are source-stale and the
+entire frozen component chain must be regenerated. No nx8 fixed-fluid, coupled
+preflight, or FSI1 run is yet authorized.
+
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It
 deliberately separates confirmed results from confounded comparisons. Every
