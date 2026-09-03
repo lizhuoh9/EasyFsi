@@ -15144,6 +15144,7 @@ class HibmMpmIbBoundaryConditions:
         allow_inactive_axis_extrusion_direct_pair: ti.i32,
         allow_inactive_axis_double_relocation_face_transport: ti.i32,
         direct_face_owner_geometry_slot: ti.i32,
+        allow_registered_single_bridge_direct_pair: ti.i32,
         marker_position_m: ti.template(),
         marker_velocity_mps: ti.template(),
         marker_region_id: ti.template(),
@@ -15246,7 +15247,11 @@ class HibmMpmIbBoundaryConditions:
                 surface_projection_inactive_axis == component_axis
                 and allow_inactive_axis_extrusion_direct_pair == 0
             )
-            or (not same_segment and not adjacent_segments)
+            or (
+                not same_segment
+                and not adjacent_segments
+                and allow_registered_single_bridge_direct_pair == 0
+            )
             or self._canonical_component_face_vector_is_finite(face_center) == 0
             or self._canonical_component_face_vector_is_finite(
                 first_source_center
@@ -15386,6 +15391,158 @@ class HibmMpmIbBoundaryConditions:
             cell_face_z_m,
         )
         if first_segment_valid == 0 or second_segment_valid == 0:
+            valid = 0
+
+        registered_first_source_count = 0
+        registered_second_source_count = 0
+        registered_bridge_count = 0
+        first_x_degree = 0
+        first_y_degree = 0
+        second_x_degree = 0
+        second_y_degree = 0
+        bridge_indices = ti.Vector([-1, -1, -1])
+        bridge_first_join = -1
+        bridge_second_join = -1
+        if (
+            allow_registered_single_bridge_direct_pair != 0
+            and projection_segment_topology_available != 0
+            and projection_segment_count > 0
+        ):
+            for segment_index in range(projection_segment_count):
+                registered_segment = projection_segment_indices[segment_index]
+                if (
+                    registered_segment.x == first_projection_indices.x
+                    and registered_segment.y == first_projection_indices.y
+                ):
+                    registered_first_source_count += 1
+                if (
+                    registered_segment.x == second_projection_indices.x
+                    and registered_segment.y == second_projection_indices.y
+                ):
+                    registered_second_source_count += 1
+                if (
+                    registered_segment.x == first_projection_indices.x
+                    or registered_segment.y == first_projection_indices.x
+                ):
+                    first_x_degree += 1
+                if (
+                    registered_segment.x == first_projection_indices.y
+                    or registered_segment.y == first_projection_indices.y
+                ):
+                    first_y_degree += 1
+                if (
+                    registered_segment.x == second_projection_indices.x
+                    or registered_segment.y == second_projection_indices.x
+                ):
+                    second_x_degree += 1
+                if (
+                    registered_segment.x == second_projection_indices.y
+                    or registered_segment.y == second_projection_indices.y
+                ):
+                    second_y_degree += 1
+                segment_x_on_first = (
+                    registered_segment.x == first_projection_indices.x
+                    or registered_segment.x == first_projection_indices.y
+                )
+                segment_y_on_first = (
+                    registered_segment.y == first_projection_indices.x
+                    or registered_segment.y == first_projection_indices.y
+                )
+                segment_x_on_second = (
+                    registered_segment.x == second_projection_indices.x
+                    or registered_segment.x == second_projection_indices.y
+                )
+                segment_y_on_second = (
+                    registered_segment.y == second_projection_indices.x
+                    or registered_segment.y == second_projection_indices.y
+                )
+                if (
+                    (segment_x_on_first and segment_y_on_second)
+                    or (segment_y_on_first and segment_x_on_second)
+                ):
+                    registered_bridge_count += 1
+                    bridge_indices = registered_segment
+                    if segment_x_on_first:
+                        bridge_first_join = registered_segment.x
+                        bridge_second_join = registered_segment.y
+                    else:
+                        bridge_first_join = registered_segment.y
+                        bridge_second_join = registered_segment.x
+
+        bridge_first_join_degree = 0
+        bridge_second_join_degree = 0
+        if bridge_first_join == first_projection_indices.x:
+            bridge_first_join_degree = first_x_degree
+        elif bridge_first_join == first_projection_indices.y:
+            bridge_first_join_degree = first_y_degree
+        if bridge_second_join == second_projection_indices.x:
+            bridge_second_join_degree = second_x_degree
+        elif bridge_second_join == second_projection_indices.y:
+            bridge_second_join_degree = second_y_degree
+        registered_single_bridge_topology_valid = (
+            allow_registered_single_bridge_direct_pair != 0
+            and first_projection_indices.x < first_projection_indices.y
+            and second_projection_indices.x < second_projection_indices.y
+            and registered_first_source_count == 1
+            and registered_second_source_count == 1
+            and registered_bridge_count == 1
+            and bridge_indices.x >= 0
+            and bridge_indices.x < bridge_indices.y
+            and bridge_indices.z == -1
+            and bridge_first_join == first_nearest_marker_index
+            and bridge_second_join == second_nearest_marker_index
+            and bridge_first_join_degree == 2
+            and bridge_second_join_degree == 2
+        )
+        bridge_segment_valid = 0
+        bridge_segment_target = 0.0
+        bridge_segment_distance_squared = ti.cast(1.0e30, ti.f64)
+        bridge_segment_closest_point = ti.Vector(
+            [
+                ti.cast(0.0, ti.f64),
+                ti.cast(0.0, ti.f64),
+                ti.cast(0.0, ti.f64),
+            ]
+        )
+        bridge_segment_endpoint_clamped = 0
+        bridge_segment_clamp_support_ratio = 0.0
+        if registered_single_bridge_topology_valid:
+            (
+                bridge_segment_valid,
+                bridge_segment_target,
+                bridge_segment_distance_squared,
+                bridge_segment_closest_point,
+                bridge_segment_endpoint_clamped,
+                bridge_segment_clamp_support_ratio,
+            ) = self._canonical_component_face_segment_projection_target(
+                target,
+                component_axis,
+                face_center,
+                bridge_indices.x,
+                bridge_indices.y,
+                claim_region,
+                surface_projection_inactive_axis,
+                0,
+                marker_position_m,
+                marker_velocity_mps,
+                marker_region_id,
+                cell_face_x_m,
+                cell_face_y_m,
+                cell_face_z_m,
+            )
+        registered_single_bridge_is_strict_owner = (
+            registered_single_bridge_topology_valid
+            and first_segment_valid != 0
+            and second_segment_valid != 0
+            and bridge_segment_valid != 0
+            and bridge_segment_endpoint_clamped == 0
+            and bridge_segment_distance_squared < first_segment_distance_squared
+            and bridge_segment_distance_squared < second_segment_distance_squared
+        )
+        if (
+            allow_registered_single_bridge_direct_pair != 0
+            and registered_single_bridge_is_strict_owner == 0
+        ):
             valid = 0
 
         local_width = ti.Vector(
@@ -15591,6 +15748,12 @@ class HibmMpmIbBoundaryConditions:
             owner_target = second_segment_target
             owner_endpoint_clamped = second_segment_endpoint_clamped
             owner_clamp_support_ratio = second_segment_clamp_support_ratio
+        if registered_single_bridge_is_strict_owner:
+            owner_indices = bridge_indices
+            owner_closest_point = bridge_segment_closest_point
+            owner_target = bridge_segment_target
+            owner_endpoint_clamped = bridge_segment_endpoint_clamped
+            owner_clamp_support_ratio = bridge_segment_clamp_support_ratio
 
         stored_face = face_center
         stored_owner_a = marker_position_m[owner_indices.x]
@@ -18762,6 +18925,24 @@ class HibmMpmIbBoundaryConditions:
                         or inactive_axis_double_relocation_pair_provenance_valid,
                         inactive_axis_double_relocation_pair_provenance_valid,
                         direct_face_owner_geometry_slot,
+                        direct_pair_routes_to_target
+                        and first_author_kind == 0
+                        and second_author_kind == 0
+                        and surface_projection_inactive_axis >= 0
+                        and surface_projection_inactive_axis != component_axis
+                        and direct_pair_first_indices.x >= 0
+                        and direct_pair_first_indices.y >= 0
+                        and direct_pair_first_indices.z == -1
+                        and direct_pair_second_indices.x >= 0
+                        and direct_pair_second_indices.y >= 0
+                        and direct_pair_second_indices.z == -1
+                        and direct_pair_shared_endpoint_count == 0
+                        and first_author.x == first_geometry_author.x
+                        and first_author.y == first_geometry_author.y
+                        and first_author.z == first_geometry_author.z
+                        and second_author.x == second_geometry_author.x
+                        and second_author.y == second_geometry_author.y
+                        and second_author.z == second_geometry_author.z,
                         marker_position_m,
                         marker_velocity_mps,
                         marker_region_id,
@@ -21393,6 +21574,45 @@ class HibmMpmIbBoundaryConditions:
                                                     )
                                                     == 3
                                                 )
+                                                cached_registered_single_bridge_direct_pair = (
+                                                    precomputed_pair_keys_match_forward
+                                                    and precomputed_pair_kinds_match_forward
+                                                    and direct_direct_component_axis_pair
+                                                    and surface_projection_inactive_axis
+                                                    >= 0
+                                                    and surface_projection_inactive_axis
+                                                    != axis
+                                                    and not same_projection_segment
+                                                    and shared_endpoint_count == 0
+                                                    and self.velocity_dirichlet_component_face_segment_pair_first_author_kind[
+                                                        target.x,
+                                                        target.y,
+                                                        target.z,
+                                                        axis,
+                                                    ]
+                                                    == 0
+                                                    and self.velocity_dirichlet_component_face_segment_pair_second_author_kind[
+                                                        target.x,
+                                                        target.y,
+                                                        target.z,
+                                                        axis,
+                                                    ]
+                                                    == 0
+                                                    and self.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                                                        target.x,
+                                                        target.y,
+                                                        target.z,
+                                                        axis,
+                                                    ]
+                                                    != 0
+                                                    and self.velocity_dirichlet_component_face_segment_pair_full_valid[
+                                                        target.x,
+                                                        target.y,
+                                                        target.z,
+                                                        axis,
+                                                    ]
+                                                    != 0
+                                                )
                                                 interpolated_surface_segment_pair_topology = (
                                                     marker_geometry_available != 0
                                                     and interpolate_interior_velocity != 0
@@ -21409,6 +21629,7 @@ class HibmMpmIbBoundaryConditions:
                                                     and (
                                                         same_projection_segment
                                                         or adjacent_projection_segments
+                                                        or cached_registered_single_bridge_direct_pair
                                                     )
                                                     and (
                                                         direct_direct_component_axis_pair
@@ -23022,6 +23243,7 @@ class HibmMpmIbBoundaryConditions:
                 second_weights = ti.Vector([0.0, 0.0, 0.0])
                 first_target = 0.0
                 second_target = 0.0
+                inactive_axis_double_relocation_targets_match = 0
                 first_segment_region = claim_region
                 second_segment_region = claim_region
                 identical_projection_provenance = 0
@@ -23042,6 +23264,9 @@ class HibmMpmIbBoundaryConditions:
                     second_target = self.velocity_dirichlet_mps_field[second_author][
                         component_axis
                     ]
+                    inactive_axis_double_relocation_targets_match = (
+                        first_target == second_target
+                    )
                     if projection_only_region_seam:
                         first_segment_region = -1
                         second_segment_region = -1
@@ -23197,6 +23422,46 @@ class HibmMpmIbBoundaryConditions:
                     if first_indices.y == second_indices.y:
                         shared_endpoint_count += 1
                         shared_endpoint_marker = first_indices.y
+                    cached_registered_single_bridge_direct_pair = (
+                        segment_reconstruction_mode
+                        == HIBM_COMPONENT_FACE_SEGMENT_MODE_FACE_FIRST_FINITE_SEGMENT_PAIR
+                        and authors_are_component_axis_pair
+                        and surface_projection_inactive_axis >= 0
+                        and surface_projection_inactive_axis != component_axis
+                        and not same_segment
+                        and shared_endpoint_count == 0
+                        and self.velocity_dirichlet_component_face_claim_count[target][
+                            component_axis
+                        ]
+                        == 2
+                        and claim_region >= 0
+                        and first_segment_region == claim_region
+                        and second_segment_region == claim_region
+                        and self.velocity_dirichlet_component_face_segment_pair_first_author_linear_key[
+                            i, j, k, component_axis
+                        ]
+                        == first_linear_key
+                        and self.velocity_dirichlet_component_face_segment_pair_second_author_linear_key[
+                            i, j, k, component_axis
+                        ]
+                        == second_linear_key
+                        and self.velocity_dirichlet_component_face_segment_pair_first_author_kind[
+                            i, j, k, component_axis
+                        ]
+                        == 0
+                        and self.velocity_dirichlet_component_face_segment_pair_second_author_kind[
+                            i, j, k, component_axis
+                        ]
+                        == 0
+                        and self.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                            i, j, k, component_axis
+                        ]
+                        != 0
+                        and self.velocity_dirichlet_component_face_segment_pair_full_valid[
+                            i, j, k, component_axis
+                        ]
+                        != 0
+                    )
                     if (
                         first_author_valid == 0
                         or second_author_valid == 0
@@ -23204,6 +23469,7 @@ class HibmMpmIbBoundaryConditions:
                             not same_segment
                             and shared_endpoint_count != 1
                             and not projection_only_region_seam
+                            and not cached_registered_single_bridge_direct_pair
                         )
                     ):
                         reconstruction_valid = 0
@@ -23287,6 +23553,7 @@ class HibmMpmIbBoundaryConditions:
                             or (
                                 not same_segment
                                 and shared_endpoint_count != 1
+                                and not cached_registered_single_bridge_direct_pair
                             )
                             or (
                                 component_axis_direct_face_relocation_shadow
@@ -23576,7 +23843,7 @@ class HibmMpmIbBoundaryConditions:
                                 or first_weights.x != second_weights.x
                                 or first_weights.y != second_weights.y
                                 or first_weights.z != second_weights.z
-                                or first_target != second_target
+                                or inactive_axis_double_relocation_targets_match == 0
                             ):
                                 reconstruction_valid = 0
                         canonical_boundary_point = distinct_pair_boundary_point

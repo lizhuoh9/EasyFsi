@@ -2657,6 +2657,79 @@ class CanonicalComponentFaceLedgerContractMixin:
             search.node_projection_marker_weights[source_row] = payload[3]
 
     @classmethod
+    def _load_interpolated_registered_connector_direct_authors(
+        cls,
+        *,
+        include_connector: bool,
+    ) -> tuple[tuple[float, float], float]:
+        """Load two moving direct authors separated by one registry edge."""
+
+        cls._load_interpolated_continuous_segment_pair_fixture(
+            adjacent_segments=True,
+        )
+        source_rows = ((0, 0, 1), (0, 1, 1))
+        marker_positions = (
+            (0.125, 0.165, 0.50),
+            (0.125, 0.240, 0.50),
+            (0.125, 0.270, 0.50),
+            (0.125, 0.420, 0.50),
+        )
+        marker_velocity_y_mps = (5.1e-5, 5.0e-5, 4.9e-5, 4.8e-5)
+        author_weights = ((0.2, 0.8, 0.0), (0.8, 0.2, 0.0))
+        author_targets = (
+            author_weights[0][0] * marker_velocity_y_mps[0]
+            + author_weights[0][1] * marker_velocity_y_mps[1],
+            author_weights[1][0] * marker_velocity_y_mps[2]
+            + author_weights[1][1] * marker_velocity_y_mps[3],
+        )
+        connector_parameter = (0.25 - 0.24) / (0.27 - 0.24)
+        expected_target = marker_velocity_y_mps[1] + connector_parameter * (
+            marker_velocity_y_mps[2] - marker_velocity_y_mps[1]
+        )
+
+        markers = cls.segment_component_face_markers
+        search = cls.segment_component_face_search
+        boundary = cls.segment_component_face_boundary
+        markers.load_markers(
+            positions_m=marker_positions,
+            velocities_mps=tuple(
+                (0.0, velocity_y_mps, 0.0)
+                for velocity_y_mps in marker_velocity_y_mps
+            ),
+            normals=((0.0, 0.0, -1.0),) * 4,
+            areas_m2=(0.25,) * 4,
+            region_ids=(202,) * 4,
+        )
+        segments = ((0, 1), (2, 3))
+        if include_connector:
+            segments = ((0, 1), (1, 2), (2, 3))
+        markers.set_projection_segments(segments)
+        search._last_search_support_radius_xyz_m = (0.5, 0.5, 0.5)
+        search._last_search_support_anisotropic = False
+        search._last_search_inactive_axis = 0
+        for source_row, indices, weights, nearest, target in zip(
+            source_rows,
+            ((0, 1, -1), (2, 3, -1)),
+            author_weights,
+            (1, 2),
+            author_targets,
+            strict=True,
+        ):
+            search.node_projection_marker_indices[source_row] = indices
+            search.node_projection_marker_weights[source_row] = weights
+            search.nearest_marker[source_row] = nearest
+            boundary.velocity_dirichlet_mps_field[source_row] = (0.0, target, 0.0)
+            # x is the inactive-axis cell centre; z=0.125 places both probes
+            # 0.375 m inward from the z=0.5 marker surface along the -z normal.
+            search.node_interior_fluid_point_m[source_row] = (
+                0.125,
+                float(search.node_boundary_point_m[source_row][1]),
+                0.125,
+            )
+        cls.fluid.velocity.fill((0.0, expected_target, 0.0))
+        return author_targets, expected_target
+
+    @classmethod
     def _load_coincident_boundary_same_segment_probe_pair_fixture(
         cls,
         *,
@@ -10635,34 +10708,92 @@ class CanonicalComponentFaceLedgerContractMixin:
                     reverse_authors=reverse_authors,
                     adjacent_segments=True,
                 )
-                velocity = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
-                z_centers_m = self.fluid.cell_center_z_m.to_numpy()
-                # The two normal rays sample z=0.125 and z=0.25 with alpha
-                # 1/3 and 1/2.  This affine field therefore gives effective
-                # row targets 0.75 and 1.50 m/s without relying on the
-                # staggered sampler's transverse y support selection.
-                velocity[..., 1] = 1.5 + 6.0 * z_centers_m[
-                    : self._GRID_NODES[2]
-                ][
-                    np.newaxis,
-                    np.newaxis,
-                    :,
-                ]
-                self.fluid.velocity.from_numpy(velocity)
+                boundary = self.segment_component_face_boundary
+                markers = self.segment_component_face_markers
+                search = self.segment_component_face_search
+                marker_velocity_y_mps = (0.0, 1.0, 4.0)
+                for marker_index, velocity_y_mps in enumerate(
+                    marker_velocity_y_mps
+                ):
+                    markers.v_gamma_mps[marker_index] = (
+                        0.0,
+                        velocity_y_mps,
+                        0.0,
+                    )
+                author_targets = []
+                for source_row in ((0, 0, 1), (0, 1, 1)):
+                    indices = tuple(
+                        int(value)
+                        for value in search.node_projection_marker_indices[
+                            source_row
+                        ]
+                    )
+                    weights = tuple(
+                        float(value)
+                        for value in search.node_projection_marker_weights[
+                            source_row
+                        ]
+                    )
+                    target_mps = sum(
+                        weights[slot] * marker_velocity_y_mps[indices[slot]]
+                        for slot in range(2)
+                    )
+                    author_targets.append(target_mps)
+                    boundary.velocity_dirichlet_mps_field[source_row] = (
+                        0.0,
+                        target_mps,
+                        0.0,
+                    )
+                    boundary_point = search.node_boundary_point_m[source_row]
+                    search.node_interior_fluid_point_m[source_row] = (
+                        float(boundary_point[0]),
+                        float(boundary_point[1]),
+                        0.125,
+                    )
+                markers.set_projection_segments(((0, 1), (1, 2)))
+                search._last_search_support_radius_xyz_m = (0.5, 0.5, 0.5)
+                search._last_search_support_anisotropic = False
+                search._last_search_inactive_axis = 0
+                self.fluid.velocity.fill((0.0, 1.0, 0.0))
+
+                target_pair = (0, 1, 1, 1)
+                observed = {}
+
+                def capture_precompute(stage: str) -> None:
+                    if stage == "hibm_velocity_row_segment_pair_precompute_after":
+                        observed["pair"] = (
+                            int(
+                                boundary.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                                    target_pair
+                                ]
+                            ),
+                            int(
+                                boundary.velocity_dirichlet_component_face_segment_pair_full_valid[
+                                    target_pair
+                                ]
+                            ),
+                            float(
+                                boundary.velocity_dirichlet_component_face_segment_pair_boundary_target_mps[
+                                    target_pair
+                                ]
+                            ),
+                        )
 
                 report = self._assemble_component_face_ledger(
                     interpolate_interior_velocity=True,
                     use_marker_geometry=True,
                     use_segment_fixture=True,
+                    provide_marker_topology=True,
                     surface_projection_inactive_axis=0,
+                    stage_observer=capture_precompute,
                 )["canonical_velocity_dirichlet_report"]
                 shared_face_state = self._canonical_component_state(
                     (0, 1, 1),
                     1,
                 )
 
-                # Row targets are 0.75 and 1.50 m/s.  The face y=0.25 is
-                # one third of the way from boundary y=0.225 to y=0.30.
+                self.assertEqual(observed.get("pair", ())[:2], (1, 1))
+                self.assertAlmostEqual(observed["pair"][2], 1.0, places=6)
                 self.assertAlmostEqual(
                     float(shared_face_state["value_mps"]),
                     1.0,
@@ -10670,7 +10801,7 @@ class CanonicalComponentFaceLedgerContractMixin:
                 )
                 self.assertNotAlmostEqual(
                     float(shared_face_state["value_mps"]),
-                    1.125,
+                    0.5 * sum(author_targets),
                     places=6,
                 )
                 self.assertEqual(shared_face_state["region_id"], 202)
@@ -10705,6 +10836,163 @@ class CanonicalComponentFaceLedgerContractMixin:
                 observations[1],
                 msg="adjacent interpolated C0 reconstruction depends on author order",
             )
+
+    def test_interpolation_reconstructs_registered_connector_between_direct_authors(
+        self,
+    ) -> None:
+        """A unique registered connector owns a moving face between authors."""
+
+        author_targets, expected_target = (
+            self._load_interpolated_registered_connector_direct_authors(
+                include_connector=True,
+            )
+        )
+        boundary = self.segment_component_face_boundary
+        target_pair = (0, 1, 1, 1)
+        observed = {}
+
+        def capture_precompute(stage: str) -> None:
+            if stage == "hibm_velocity_row_segment_pair_precompute_after":
+                observed["pair"] = (
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                            target_pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_full_valid[
+                            target_pair
+                        ]
+                    ),
+                    float(
+                        boundary.velocity_dirichlet_component_face_segment_pair_boundary_target_mps[
+                            target_pair
+                        ]
+                    ),
+                )
+        report = self._assemble_component_face_ledger(
+            interpolate_interior_velocity=True,
+            use_marker_geometry=True,
+            use_segment_fixture=True,
+            provide_marker_topology=True,
+            surface_projection_inactive_axis=0,
+            stage_observer=capture_precompute,
+        )["canonical_velocity_dirichlet_report"]
+        state = self._canonical_component_state((0, 1, 1), 1)
+
+        self.assertIn("pair", observed)
+        self.assertEqual(observed["pair"][:2], (1, 1))
+        self.assertAlmostEqual(observed["pair"][2], expected_target, places=9)
+        self.assertTrue(state["active"])
+        self.assertTrue(state["owned"])
+        self.assertEqual(state["region_id"], 202)
+        self.assertAlmostEqual(float(state["value_mps"]), expected_target, places=9)
+        self.assertGreater(abs(author_targets[0] - author_targets[1]), 1.0e-6)
+        self.assertNotAlmostEqual(
+            expected_target,
+            0.5 * (author_targets[0] + author_targets[1]),
+            places=8,
+        )
+        self.assertEqual(int(report["target_conflict_count"]), 0)
+        self.assertEqual(int(report["region_conflict_count"]), 0)
+        self.assertEqual(int(report["alpha_conflict_count"]), 0)
+        self.assertEqual(
+            int(
+                boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                    None
+                ]
+            ),
+            1,
+        )
+
+    def _assert_interpolation_rejects_registered_connector_topology_atomically(
+        self,
+        projection_segments: tuple[tuple[int, int], ...],
+    ) -> None:
+        self._load_interpolated_registered_connector_direct_authors(
+            include_connector=False,
+        )
+        self.segment_component_face_markers.set_projection_segments(
+            projection_segments
+        )
+        target = (0, 1, 1)
+        target_pair = (*target, 1)
+        boundary = self.segment_component_face_boundary
+        observed = {}
+
+        def capture_precompute(stage: str) -> None:
+            if stage == "hibm_velocity_row_segment_pair_precompute_after":
+                observed["pair"] = (
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                            target_pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_full_valid[
+                            target_pair
+                        ]
+                    ),
+                )
+
+        ledger_before = self._canonical_ledger_bytes()
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"conflicting canonical component-face claims \(target\)",
+        ) as raised:
+            self._assemble_component_face_ledger(
+                interpolate_interior_velocity=True,
+                use_marker_geometry=True,
+                use_segment_fixture=True,
+                provide_marker_topology=True,
+                surface_projection_inactive_axis=0,
+                stage_observer=capture_precompute,
+            )
+
+        failure = str(raised.exception)
+        self.assertIn("pair", observed)
+        self.assertEqual(observed["pair"], (0, 0))
+        self.assertIn(f"'component_face': {target}", failure)
+        self.assertIn("'conflict_source': 'prepare_pair_arbitration'", failure)
+        self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+        self.assertEqual(
+            int(
+                boundary.report_velocity_dirichlet_component_face_conflict_count[
+                    None
+                ]
+            ),
+            1,
+        )
+        self._assert_component_face_relocation_transient_neutral(
+            use_segment_fixture=True
+        )
+
+    def test_interpolation_rejects_disconnected_direct_author_segments_atomically(
+        self,
+    ) -> None:
+        """Two registered author segments need a connecting path."""
+
+        self._assert_interpolation_rejects_registered_connector_topology_atomically(
+            ((0, 1), (2, 3))
+        )
+
+    def test_interpolation_rejects_ambiguous_registered_connectors_atomically(
+        self,
+    ) -> None:
+        """Two valid connector paths cannot choose an order-dependent owner."""
+
+        self._assert_interpolation_rejects_registered_connector_topology_atomically(
+            ((0, 1), (0, 2), (1, 3), (2, 3))
+        )
+
+    def test_interpolation_rejects_outer_chord_as_registered_connector_atomically(
+        self,
+    ) -> None:
+        """A long outer chord cannot impersonate the authors' local connector."""
+
+        self._assert_interpolation_rejects_registered_connector_topology_atomically(
+            ((0, 1), (0, 3), (2, 3))
+        )
 
     def test_adjacent_direct_pair_discards_redundant_same_slot_shadow_without_cached_pair(
         self,

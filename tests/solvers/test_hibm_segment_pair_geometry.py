@@ -86,13 +86,13 @@ def _captured_finite_segment_union_admission_probe(
     claim_region: ti.i32,
     allow_inactive_axis_extrusion_direct_pair: ti.i32,
     allow_inactive_axis_double_relocation_face_transport: ti.i32,
+    allow_registered_single_bridge_direct_pair: ti.i32,
     result_i32: ti.template(),
     result_f64: ti.template(),
 ):
-    # The topology arguments deliberately accompany the direct contract even
-    # before the production helper consumes them.  This makes the current
-    # terminal false-positive an assertion RED, while preserving the exact
-    # topology input that the production fix must wire into admission.
+    # The topology arguments mirror the production direct-pair contract so this
+    # probe covers both legacy disjoint segments and the registered local
+    # connector admission path.
     target = ti.Vector([0, 1, 2])
     face_center = face_center_m[None]
     first_projection_indices = ti.Vector(
@@ -216,6 +216,7 @@ def _captured_finite_segment_union_admission_probe(
         allow_inactive_axis_extrusion_direct_pair,
         allow_inactive_axis_double_relocation_face_transport,
         -1,
+        allow_registered_single_bridge_direct_pair,
         marker_position_m,
         marker_velocity_mps,
         marker_region_id,
@@ -487,6 +488,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             4,
             4,
             4,
+            0,
         )
 
         self.assertEqual(
@@ -707,6 +709,7 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                         0,
                     )
                 ),
+                int(case.get("allow_registered_single_bridge_direct_pair", 0)),
                 result_i32,
                 result_f64,
             )
@@ -720,6 +723,145 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
             tuple(float(result_f64[index]) for index in range(16)),
             installed_segments,
         )
+
+    @staticmethod
+    def _registered_bridge_direct_pair_case(
+        *,
+        face_y_m: float = 0.25,
+    ) -> dict[str, object]:
+        """Return two direct authors separated by one registered local edge."""
+
+        return {
+            "component_axis": 1,
+            "face": (0.125, face_y_m, 0.375),
+            "region": 202,
+            "positions": (
+                (0.125, 0.165, 0.5),
+                (0.125, 0.240, 0.5),
+                (0.125, 0.270, 0.5),
+                (0.125, 0.420, 0.5),
+            ),
+            "velocities": (
+                (0.0, 8.0e-5, 0.0),
+                (0.0, 6.0e-5, 0.0),
+                (0.0, 3.0e-5, 0.0),
+                (0.0, 1.0e-5, 0.0),
+            ),
+            "projection_segments": ((0, 1), (1, 2), (2, 3)),
+            "source_centers": (
+                (0.125, face_y_m - 0.125, 0.375),
+                (0.125, face_y_m + 0.125, 0.375),
+            ),
+            "boundaries": (
+                (0.125, 0.225, 0.5),
+                (0.125, 0.300, 0.5),
+            ),
+            "probes": (
+                (0.125, 0.225, 0.125),
+                (0.125, 0.300, 0.125),
+            ),
+            "normals": ((0.0, 0.0, -1.0),) * 2,
+            "indices": ((0, 1, -1), (2, 3, -1)),
+            "nearest_markers": (1, 2),
+            "weights": ((0.2, 0.8, 0.0), (0.8, 0.2, 0.0)),
+            "configured_source_support_xyz_m": (0.5, 0.5, 0.5),
+            "configured_source_support_anisotropic": 0,
+            "cell_face_x_m": (0.0, 0.25, 0.5, 0.75, 1.0),
+            "cell_face_y_m": tuple(
+                face_y_m + offset * 0.25 for offset in (-1, 0, 1, 2, 3)
+            ),
+            "cell_face_z_m": (-0.25, 0.0, 0.25, 0.5, 0.75),
+            "allow_registered_single_bridge_direct_pair": 1,
+        }
+
+    def test_registered_bridge_is_unique_direct_pair_owner(self) -> None:
+        """The local connector, not either clamped author segment, owns the face."""
+
+        case = self._registered_bridge_direct_pair_case()
+        integer_result, floating_result, installed_segments = (
+            self._run_direct_finite_segment_union_case(case)
+        )
+
+        self.assertEqual(integer_result, (1, 1, 1, 1, 1, 1, 0))
+        self.assertEqual(installed_segments, ((0, 1), (1, 2), (2, 3)))
+        self.assertAlmostEqual(floating_result[6], 5.0e-5, delta=1.0e-9)
+
+        swapped = {
+            **case,
+            **{
+                key: tuple(reversed(case[key]))
+                for key in (
+                    "source_centers",
+                    "boundaries",
+                    "probes",
+                    "normals",
+                    "indices",
+                    "nearest_markers",
+                    "weights",
+                )
+            },
+        }
+        swapped_integer, swapped_floating, swapped_segments = (
+            self._run_direct_finite_segment_union_case(swapped)
+        )
+        self.assertEqual(swapped_integer[4:], integer_result[4:])
+        self.assertAlmostEqual(swapped_floating[6], floating_result[6], places=12)
+        self.assertEqual(swapped_segments, installed_segments)
+
+    def test_registered_bridge_endpoint_clamp_fails_closed(self) -> None:
+        """A connector reached only beyond its endpoint is not a strict owner."""
+
+        case = self._registered_bridge_direct_pair_case(face_y_m=0.239)
+        positions = np.asarray(case["positions"], dtype=np.float32).astype(np.float64)
+        face = np.asarray(case["face"], dtype=np.float32).astype(np.float64)
+        bridge = positions[2, 1:] - positions[1, 1:]
+        bridge_parameter = float(
+            np.dot(face[1:] - positions[1, 1:], bridge) / np.dot(bridge, bridge)
+        )
+        self.assertLess(bridge_parameter, 0.0)
+
+        integer_result, _, _ = self._run_direct_finite_segment_union_case(case)
+
+        self.assertEqual(integer_result[0:4], (1, 1, 0, 1))
+        self.assertEqual(integer_result[4:6], (0, 0))
+
+    def test_registered_bridge_endpoint_tie_fails_closed(self) -> None:
+        """An exact bridge/source endpoint tie has no unique primitive owner."""
+
+        case = self._registered_bridge_direct_pair_case(face_y_m=0.240)
+        positions = np.asarray(case["positions"], dtype=np.float32).astype(np.float64)
+        face = np.asarray(case["face"], dtype=np.float32).astype(np.float64)
+        bridge = positions[2, 1:] - positions[1, 1:]
+        bridge_parameter = float(
+            np.dot(face[1:] - positions[1, 1:], bridge) / np.dot(bridge, bridge)
+        )
+        bridge_distance_squared = float(
+            np.dot(face[1:] - positions[1, 1:], face[1:] - positions[1, 1:])
+        )
+        first_segment = positions[1, 1:] - positions[0, 1:]
+        first_parameter = float(
+            np.dot(face[1:] - positions[0, 1:], first_segment)
+            / np.dot(first_segment, first_segment)
+        )
+        first_closest = positions[0, 1:] + np.clip(first_parameter, 0.0, 1.0) * (
+            first_segment
+        )
+        first_residual = face[1:] - first_closest
+        first_distance_squared = float(np.dot(first_residual, first_residual))
+        self.assertAlmostEqual(bridge_parameter, 0.0, places=12)
+        self.assertAlmostEqual(
+            bridge_distance_squared, first_distance_squared, places=12
+        )
+
+        integer_result, floating_result, _ = (
+            self._run_direct_finite_segment_union_case(case)
+        )
+
+        self.assertEqual(integer_result[0:4], (1, 1, 0, 1))
+        self.assertAlmostEqual(
+            floating_result[0], bridge_distance_squared, places=12
+        )
+        self.assertEqual(integer_result[4:6], (0, 0))
 
     @staticmethod
     def _inactive_axis_offset_anchor_transport_case(
@@ -2986,6 +3128,9 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                     cell_face_y_m,
                     cell_face_z_m,
                     int(case["region"]),
+                    0,
+                    0,
+                    0,
                     result_i32,
                     result_f64,
                 )
@@ -3133,6 +3278,9 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                     cell_face_y_m,
                     cell_face_z_m,
                     int(case["region"]),
+                    0,
+                    0,
+                    0,
                     result_i32,
                     result_f64,
                 )
@@ -3240,6 +3388,9 @@ class HibmMpmSegmentPairGeometryTests(unittest.TestCase):
                 cell_face_y_m,
                 cell_face_z_m,
                 int(case["region"]),
+                0,
+                0,
+                0,
                 result_i32,
                 result_f64,
             )
