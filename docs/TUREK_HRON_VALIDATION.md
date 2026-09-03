@@ -1,8 +1,9 @@
 # Turek–Hron FSI Validation Report
 
-Status as of 2026-07-07. Solver: HIBM-MPM (sharp immersed boundary + Material
-Point Method), Python + Taichi, CUDA. Commands use `python` from the active
-environment. Case: `cases/turek_hron_fsi.py`.
+Base results as of 2026-07-07; R26A status updated through 2026-09-03. Solver:
+HIBM-MPM (sharp immersed boundary + Material Point Method), Python + Taichi,
+CUDA. Commands use `python` from the active environment. Case:
+`cases/turek_hron_fsi.py`.
 
 Architecture update (2026-08-13): Turek-Hron FSI1/2/3 no longer owns a
 case-local Picard/Aitken/IQN state machine or an explicit single-pass mode. All
@@ -105,6 +106,40 @@ component artifact and is not a canonical gate result. The failed canonical
 source has changed, all `f16737e` solid artifacts are source-stale and the
 entire frozen component chain must be regenerated. No nx8 fixed-fluid, coupled
 preflight, or FSI1 run is yet authorized.
+
+**R26A component prerequisite completion (2026-09-03).** The stale boundary
+above was superseded at clean commit `7b80a6b`. The marker-Q failure was a
+feasible rank-deficient affine system whose f32 device PCG lost its required
+self-adjoint/positive-semidefinite behavior. Turek now opts into a bounded f64
+rank-revealing direct fallback; the public adapter still defaults to PCG, so
+the ANSYS route is unchanged. Every projection cycle persists its actual
+backend, rank, iteration/constraint counts, and residuals. Focused verification
+passed `86` tests plus `120` subtests, compilation, Ruff, diff checks, and a
+fresh read-only review with no remaining P0--P3 finding.
+
+A non-artifact 20-step strict-CUDA reproduction crossed the old failure point.
+At step 19 the main Q transaction split 336 equations into 16 independent, 12
+dependent, and 308 unactuated rows and completed with a maximum structural
+residual of `6.686404049105477e-06 m/s`, below the frozen `1e-4 m/s` limit.
+The complete source-matched component chain then passed:
+
+- three 40-row solid runs plus both comparisons; S100/S200 Point-A relative
+  delta was `0.0003264915974131584`, and nx4/nx8 was `0.0`;
+- fixed-fluid nx4 `r06` and nx8 `r01`, each with 500 accepted rows and two
+  recorded Q cycles per row; their velocity/force span-leakage pairs were
+  `0.0005504236666806834/0.0006353449740090614` and
+  `0.0004303681250445346/0.00035212848977038484`;
+- fixed-fluid nx4/nx8 force-per-span relative delta
+  `0.0063723531512411 < 0.02`; and
+- independent one-step and two-step coupled preflights. Each accepted macro
+  step advanced both fluid and solid by exactly `0.005 s`, with zero remaining
+  time; final accepted times were `0.005 s` and `0.010 s`.
+
+This completes only the preregistered component prerequisite and authorizes
+FSI1-S0 next. It is not FSI1 numerical evidence. The current dense fallback is
+limited to 512 constraints: L0 has 336, while L1/L2 have 669/1002. A scalable
+rank-deficient backend is therefore still required before M0/M1; no later case,
+Oracle arm, or learned predictor is authorized.
 
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It

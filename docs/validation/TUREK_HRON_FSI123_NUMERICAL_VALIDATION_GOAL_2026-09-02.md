@@ -493,6 +493,90 @@ solid artifact by source identity, so the complete frozen component chain must
 be regenerated before nx4/nx8 fixed-fluid and coupled-preflight gates. No
 fixed-fluid PASS or FSI1 evidence exists.
 
+#### 5.4.3 Rank-deficient Q repair and complete component pass (2026-09-03)
+
+At clean commit `7b80a6b`, the generic marker-Q defect was closed for the L0
+component path without changing the default ANSYS behavior. The failing 336-row
+affine Q system was physically feasible but rank deficient. Its intended
+static rank was 16: 12 positive-mobility rows were dependent and 308 rows were
+unactuated. The prior f32 device matvec was not sufficiently self-adjoint for
+PCG at the failure point. Turek now explicitly opts into a bounded f64
+rank-revealing direct fallback after the unchanged PCG path fails; the public
+projector default remains PCG and the official ANSYS allocator does not opt in.
+The fallback audits the actual rounded f32 correction against all active rows
+before commit and retains the existing atomic transaction boundary.
+
+The same commit makes marker-Q evidence source-complete. Both Q implementation
+files are explicit source-hash members, and each generic projection cycle is
+retained in order with a strict stage, backend, rank flag, marker/constraint and
+iteration counts, actual maximum residual, and rank-partition residuals. The
+fixed-fluid history stores this ledger as strict deterministic JSON. Focused
+verification passed `86` tests plus `120` subtests; compilation, Ruff E9/F,
+`git diff --check`, and a fresh read-only review also passed with no remaining
+P0--P3 finding.
+
+One non-artifact 20-step strict-CUDA nx4 reproduction completed the old step-19
+failure. Its main Q transaction used `rank_revealing_direct`, with 112 markers,
+336 constraints, rank partition `(16,12,308)`, and actual/structural maximum
+residual `6.686404049105477e-06 m/s`. The consistency Q stayed on PCG. Step 20
+also completed. This diagnostic authorized canonical component reruns but is
+not itself a component artifact.
+
+The complete frozen solid chain was regenerated against `7b80a6b` and passed
+as `PASS_COMPONENT_ONLY`:
+
+- `turek_hron__component__solid_s100_nx4__20260903__r10`;
+- `turek_hron__component__solid_s200_nx4__20260903__r07`;
+- `turek_hron__component__solid_s100_s200_nx4__20260903__r07`, Point-A
+  relative-vector delta `0.0003264915974131584`;
+- `turek_hron__component__solid_s200_nx8__20260903__r07`; and
+- `turek_hron__component__solid_s200_nx4_nx8__20260903__r07`, Point-A
+  relative-vector delta `0.0`.
+
+All three constituent runs contain 40 rows, zero root displacement, and zero
+displacement/velocity span leakage. Their manifests are clean, source-matched,
+strict-CUDA artifacts at the same commit.
+
+Both frozen fixed-fluid runs then passed all 500 rows:
+
+| run | velocity span leakage | force span leakage | max inlet error | mass imbalance |
+| --- | ---: | ---: | ---: | ---: |
+| `turek_hron__component__fixed_fluid_nx4__20260903__r06` | `5.504236666806834e-4` | `6.353449740090614e-4` | `0.0023600231749394684` | `0.0006576385367210474` |
+| `turek_hron__component__fixed_fluid_nx8__20260903__r01` | `4.303681250445346e-4` | `3.5212848977038484e-4` | `0.0023600154078545765` | `0.0011460183582938626` |
+
+Every row contains exactly two ordered Q cycles (`main` and
+`post_dirichlet_reconstruction_consistency`). Each run used PCG for 523 cycles
+and rank-revealing direct Q for 477 cycles; the first and last direct
+occurrences were at main steps 19 and 500. The rank signature was always
+`(16,12,308)`.
+Maximum Q residuals were `9.701458475319669e-05 m/s` for nx4 and
+`9.830097405938432e-05 m/s` for nx8; maximum direct structural residuals were
+`7.689253834541887e-06` and `7.699662091908976e-06 m/s`. The source-matched
+comparison
+`turek_hron__component__fixed_fluid_nx4_nx8__20260903__r01` passed with
+force-per-span relative-vector delta `0.0063723531512411`.
+
+Finally, fresh parentless production-path preflights passed as
+`PASS_SMOKE_ONLY`:
+
+- `turek_hron__component__coupled_preflight_step1_nx4__20260903__r01`
+  accepted one step to `0.005 s` in 10 coupling iterations; and
+- `turek_hron__component__coupled_preflight_step2_nx4__20260903__r01`
+  independently started at zero and accepted two steps to `0.010 s`, using 10
+  coupling iterations per step.
+
+For every accepted preflight row, both fluid and solid consumed the complete
+`0.005 s` macro interval and reported zero unadvanced time. All artifact hashes,
+source hashes, clean-commit identity, row schemas, and final accepted-time
+arrays were revalidated after completion.
+
+The component prerequisite is therefore complete and authorizes **FSI1-S0
+only**. This is not an FSI1 numerical pass. The current dense fallback has a
+hard 512-constraint limit: L0 has 336 constraints, but L1 and L2 have 669 and
+1002. A scalable rank-deficient Q backend must be implemented and validated
+before M0/M1; this known boundary cannot be bypassed by changing markers,
+tolerance, or the preregistered matrix.
+
 The solid-only matrix contains three fresh runs:
 
 | run | grid | solid substeps | macro steps | prescribed load |
@@ -938,8 +1022,10 @@ diagnostic; the final claim remains no-commit live coupling/CG/matvec work.
 6. Implement and test the deterministic limit-cycle analyzer.
 7. Close the generic-core marker-Q/pressure-nullspace wiring defect, then
    regenerate the entire frozen component chain and complete the remaining
-   component gates — active; no fixed-fluid PASS or FSI1 evidence exists.
-8. Run FSI1-S0, then M0/M1, then conditional F0.
+   component gates — complete at clean commit `7b80a6b` with source-matched
+   solid, fixed-fluid, comparison, and one-/two-step preflight artifacts.
+8. Run FSI1-S0, then M0/M1, then conditional F0 — S0 is now active; M0/M1
+   remain blocked on a scalable rank-deficient Q backend.
 9. If and only if FSI1 passes, run FSI2.
 10. If and only if FSI2 passes, run FSI3.
 11. If and only if all three reach benchmark quality, close R26A and open the
