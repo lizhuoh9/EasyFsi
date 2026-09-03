@@ -10905,6 +10905,460 @@ class CanonicalComponentFaceLedgerContractMixin:
             1,
         )
 
+    def test_interpolation_reconstructs_deformed_registered_connector_pair_route(
+        self,
+    ) -> None:
+        """The formal step-7 x=0 lane reconstructs on its matched face."""
+
+        from simulation_core import (
+            HibmMpmIbBoundaryConditions,
+            HibmMpmIbNodeSearch,
+            HibmMpmSurfaceMarkers,
+        )
+
+        fluid = self.fluid
+        fixture_class = type(self)
+        previous_fixture = (
+            fixture_class.segment_component_face_boundary,
+            fixture_class.segment_component_face_search,
+            fixture_class.segment_component_face_markers,
+        )
+        boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=self._GRID_NODES,
+            marker_capacity=4,
+        )
+        search = HibmMpmIbNodeSearch(
+            grid_nodes=self._GRID_NODES,
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=4,
+        )
+        markers = HibmMpmSurfaceMarkers(marker_capacity=4)
+        replacement_fixture = (boundary, search, markers)
+        coordinate_fields = (
+            fluid.cell_face_x_m,
+            fluid.cell_face_y_m,
+            fluid.cell_face_z_m,
+            fluid.cell_center_x_m,
+            fluid.cell_center_y_m,
+            fluid.cell_center_z_m,
+        )
+        previous_coordinates = tuple(
+            field.to_numpy() for field in coordinate_fields
+        )
+        x_faces = np.linspace(0.0, 0.05, 5, dtype=np.float64).astype(
+            np.float32
+        )
+        x_centers = (
+            (np.arange(4, dtype=np.float64) + 0.5) * 0.05 / 4.0
+        ).astype(np.float32)
+        y_faces = (
+            np.arange(20, 25, dtype=np.float64) * 0.41 / 48.0
+        ).astype(np.float32)
+        y_centers = (
+            (np.arange(20, 24, dtype=np.float64) + 0.5) * 0.41 / 48.0
+        ).astype(np.float32)
+        z_faces = (
+            np.arange(249, 254, dtype=np.float64) * 2.5 / 288.0
+        ).astype(np.float32)
+        z_centers = (
+            (np.arange(249, 253, dtype=np.float64) + 0.5) * 2.5 / 288.0
+        ).astype(np.float32)
+        replacement_coordinates = (
+            x_faces,
+            y_faces,
+            z_faces,
+            x_centers,
+            y_centers,
+            z_centers,
+        )
+        marker_positions = np.asarray(
+            (
+                (0.02500000037252903, 0.189999058842659, 2.1689815521240234),
+                (
+                    0.02500000037252903,
+                    0.18999910354614258,
+                    2.1754629611968994,
+                ),
+                (
+                    0.02500000037252903,
+                    0.18999920785427094,
+                    2.1819443702697754,
+                ),
+                (
+                    0.02500000037252903,
+                    0.18999932706356049,
+                    2.1884260177612305,
+                ),
+            ),
+            dtype=np.float64,
+        )
+        marker_velocities = np.asarray(
+            (
+                (0.0, -1.5938184515107423e-4, -3.5972857403976377e-6),
+                (0.0, -1.4773076691199094e-4, -3.0044279810681473e-6),
+                (0.0, -1.330966188106686e-4, -2.405094846835709e-6),
+                (0.0, -1.1601158621488139e-4, -1.8756118151941337e-6),
+            ),
+            dtype=np.float64,
+        )
+        author_weights = np.asarray(
+            (
+                (0.15178167819976807, 0.8482183218002319),
+                (0.8124950528144836, 0.18750496208667755),
+            ),
+            dtype=np.float64,
+        )
+        author_targets = (
+            author_weights[0] @ marker_velocities[0:2],
+            author_weights[1] @ marker_velocities[2:4],
+        )
+        face_center = np.asarray(
+            (x_centers[0], y_centers[1], z_faces[2]),
+            dtype=np.float64,
+        )
+        bridge_segment = marker_positions[2] - marker_positions[1]
+        bridge_parameter = float(
+            np.dot(face_center - marker_positions[1], bridge_segment)
+            / np.dot(bridge_segment, bridge_segment)
+        )
+        self.assertGreater(bridge_parameter, 0.0)
+        self.assertLess(bridge_parameter, 1.0)
+        expected_bridge_velocity = marker_velocities[1] + bridge_parameter * (
+            marker_velocities[2] - marker_velocities[1]
+        )
+        formal_sample_z_m = np.asarray(
+            (2.1744792461395264, 2.1831600666046143),
+            dtype=np.float64,
+        )
+        formal_sample_velocity_mps = np.asarray(
+            (
+                (
+                    -8.242600983976445e-7,
+                    3.363195730798907e-7,
+                    -1.481515500927344e-4,
+                ),
+                (
+                    -6.824328693255666e-7,
+                    1.266201707039727e-6,
+                    -1.460144412703812e-4,
+                ),
+            ),
+            dtype=np.float64,
+        )
+        velocity = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
+        for component in range(3):
+            component_z_m = z_faces[:4] if component == 2 else z_centers
+            slope = (
+                formal_sample_velocity_mps[1, component]
+                - formal_sample_velocity_mps[0, component]
+            ) / (formal_sample_z_m[1] - formal_sample_z_m[0])
+            component_velocity = formal_sample_velocity_mps[0, component] + slope * (
+                component_z_m.astype(np.float64) - formal_sample_z_m[0]
+            )
+            velocity[:, :, :, component] = component_velocity[
+                np.newaxis,
+                np.newaxis,
+                :,
+            ]
+        formal_claim_alpha = 0.42259857058525085
+        formal_claim_target_mps = -6.439535354729742e-5
+        claims = (
+            _ComponentFaceClaim(
+                source_row=(0, 1, 1),
+                boundary_point_m=(
+                    0.0062500000931322575,
+                    0.18999910354614258,
+                    2.1744792461395264,
+                ),
+                interior_point_m=(
+                    0.0062500000931322575,
+                    0.1749652773141861,
+                    2.1744792461395264,
+                ),
+                normal=(0.0, -1.0000001192092896, 0.0),
+                target_velocity_mps=tuple(float(v) for v in author_targets[0]),
+                region_id=101,
+            ),
+            _ComponentFaceClaim(
+                source_row=(0, 1, 2),
+                boundary_point_m=(
+                    0.0062500000931322575,
+                    0.18999923765659332,
+                    2.183159828186035,
+                ),
+                interior_point_m=(
+                    0.0062500000931322575,
+                    0.1749652773141861,
+                    2.1831600666046143,
+                ),
+                normal=(0.0, -1.0, 1.5858668120927177e-5),
+                target_velocity_mps=tuple(float(v) for v in author_targets[1]),
+                region_id=101,
+            ),
+        )
+        target = (0, 1, 2)
+        target_pair = (*target, 2)
+        observed: dict[str, tuple[int | float, ...]] = {}
+
+        def capture_stages(stage: str) -> None:
+            if stage == "hibm_velocity_row_direct_presample_after":
+                observed["samples"] = tuple(
+                    float(value)
+                    for source_row in ((0, 1, 1), (0, 1, 2))
+                    for value in boundary.velocity_dirichlet_component_face_actual_sample_velocity_mps[
+                        source_row
+                    ]
+                )
+            elif stage == "hibm_velocity_row_segment_pair_precompute_after":
+                observed["precompute"] = (
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                            target_pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_full_valid[
+                            target_pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_first_author_kind[
+                            target_pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_second_author_kind[
+                            target_pair
+                        ]
+                    ),
+                    float(
+                        boundary.velocity_dirichlet_component_face_segment_pair_boundary_target_mps[
+                            target_pair
+                        ]
+                    ),
+                    *tuple(
+                        float(value)
+                        for value in boundary.velocity_dirichlet_component_face_segment_pair_boundary_point_m[
+                            target_pair
+                        ]
+                    ),
+                    *tuple(
+                        float(value)
+                        for value in boundary.velocity_dirichlet_component_face_segment_pair_nominal_probe_m[
+                            target_pair
+                        ]
+                    ),
+                )
+            elif stage == "hibm_velocity_row_claim_prepare_after":
+                observed["prepare"] = (
+                    int(
+                        boundary.velocity_dirichlet_component_face_claim_count[
+                            target
+                        ][2]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_projection_only_seam[
+                            target_pair
+                        ]
+                    ),
+                    float(
+                        boundary.velocity_dirichlet_component_face_claim_alpha[
+                            target
+                        ][2]
+                    ),
+                    float(
+                        boundary.velocity_dirichlet_component_face_claim_target_mps[
+                            target
+                        ][2]
+                    ),
+                )
+            elif stage == "hibm_velocity_row_segment_reconstruct_after":
+                observed["reconstruct"] = (
+                    float(
+                        boundary.velocity_dirichlet_component_face_claim_alpha[
+                            target
+                        ][2]
+                    ),
+                    float(
+                        boundary.velocity_dirichlet_component_face_claim_target_mps[
+                            target
+                        ][2]
+                    ),
+                )
+
+        try:
+            (
+                fixture_class.segment_component_face_boundary,
+                fixture_class.segment_component_face_search,
+                fixture_class.segment_component_face_markers,
+            ) = replacement_fixture
+            for field, coordinates in zip(
+                coordinate_fields,
+                replacement_coordinates,
+                strict=True,
+            ):
+                field.from_numpy(coordinates)
+            self._load_component_face_claims(
+                claims,
+                use_segment_fixture=True,
+            )
+            markers.load_markers(
+                positions_m=tuple(tuple(float(v) for v in row) for row in marker_positions),
+                velocities_mps=tuple(
+                    tuple(float(v) for v in row) for row in marker_velocities
+                ),
+                normals=((0.0, -1.0, 0.0),) * 4,
+                areas_m2=(0.25,) * 4,
+                region_ids=(101,) * 4,
+            )
+            markers.set_projection_segments(((0, 1), (1, 2), (2, 3)))
+            search._last_search_support_radius_xyz_m = (
+                1.5 * 0.05 / 4.0,
+                1.5 * 0.41 / 48.0,
+                1.5 * 2.5 / 288.0,
+            )
+            search._last_search_support_anisotropic = True
+            search._last_search_inactive_axis = 0
+            for source_row, indices, weights, nearest in zip(
+                ((0, 1, 1), (0, 1, 2)),
+                ((0, 1, -1), (2, 3, -1)),
+                author_weights,
+                (1, 2),
+                strict=True,
+            ):
+                search.node_projection_marker_indices[source_row] = indices
+                search.node_projection_marker_weights[source_row] = (
+                    float(weights[0]),
+                    float(weights[1]),
+                    0.0,
+                )
+                search.nearest_marker[source_row] = nearest
+            fluid.velocity.from_numpy(velocity)
+
+            report = self._assemble_component_face_ledger(
+                interpolate_interior_velocity=True,
+                use_marker_geometry=True,
+                use_segment_fixture=True,
+                provide_marker_topology=True,
+                surface_projection_inactive_axis=0,
+                primary_region_id=101,
+                secondary_region_id=202,
+                stage_observer=capture_stages,
+            )["canonical_velocity_dirichlet_report"]
+            state = self._canonical_component_state(target, 2)
+
+            self.assertIn("samples", observed)
+            np.testing.assert_allclose(
+                np.asarray(observed["samples"], dtype=np.float64).reshape(2, 3),
+                formal_sample_velocity_mps,
+                rtol=2.0e-5,
+                atol=2.0e-9,
+            )
+            self.assertIn("precompute", observed)
+            precompute = observed["precompute"]
+            self.assertEqual(precompute[:4], (1, 1, 0, 0))
+            np.testing.assert_allclose(
+                float(precompute[4]),
+                float(expected_bridge_velocity[2]),
+                rtol=2.0e-5,
+                atol=1.0e-10,
+            )
+            pair_boundary_point = np.asarray(
+                precompute[5:8],
+                dtype=np.float64,
+            )
+            pair_nominal_probe = np.asarray(
+                precompute[8:11],
+                dtype=np.float64,
+            )
+            pair_ray = pair_nominal_probe - pair_boundary_point
+            pair_ray_length_squared = float(np.dot(pair_ray, pair_ray))
+            self.assertGreater(pair_ray_length_squared, 1.0e-24)
+            expected_pair_alpha = float(
+                np.dot(face_center - pair_boundary_point, pair_ray)
+                / pair_ray_length_squared
+            )
+            expected_pair_sample_velocity_mps = float(
+                np.interp(
+                    pair_nominal_probe[2],
+                    z_faces[:4].astype(np.float64),
+                    velocity[0, 0, :, 2].astype(np.float64),
+                )
+            )
+            expected_reconstructed_target_mps = float(
+                precompute[4]
+                + (expected_pair_sample_velocity_mps - precompute[4])
+                * expected_pair_alpha
+            )
+            self.assertIn("prepare", observed)
+            self.assertEqual(observed["prepare"][:2], (2, 4))
+            np.testing.assert_allclose(
+                float(observed["prepare"][2]),
+                formal_claim_alpha,
+                rtol=2.0e-5,
+                atol=2.0e-7,
+            )
+            np.testing.assert_allclose(
+                float(observed["prepare"][3]),
+                formal_claim_target_mps,
+                rtol=2.0e-5,
+                atol=2.0e-9,
+            )
+            self.assertIn("reconstruct", observed)
+            np.testing.assert_allclose(
+                float(observed["reconstruct"][0]),
+                expected_pair_alpha,
+                rtol=2.0e-5,
+                atol=2.0e-7,
+            )
+            np.testing.assert_allclose(
+                float(observed["reconstruct"][1]),
+                expected_reconstructed_target_mps,
+                rtol=2.0e-5,
+                atol=2.0e-9,
+            )
+            self.assertTrue(state["active"])
+            self.assertTrue(state["owned"])
+            self.assertEqual(state["region_id"], 101)
+            reconstructed_target_mps = float(state["value_mps"])
+            np.testing.assert_allclose(
+                reconstructed_target_mps,
+                expected_reconstructed_target_mps,
+                rtol=2.0e-5,
+                atol=2.0e-9,
+            )
+            self.assertGreater(
+                abs(reconstructed_target_mps - formal_claim_target_mps),
+                2.0e-7,
+            )
+            self.assertEqual(int(report["target_conflict_count"]), 0)
+            self.assertEqual(int(report["region_conflict_count"]), 0)
+            self.assertEqual(int(report["alpha_conflict_count"]), 0)
+            self.assertEqual(
+                int(
+                    boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
+                        None
+                    ]
+                ),
+                1,
+            )
+        finally:
+            for field, coordinates in zip(
+                coordinate_fields,
+                previous_coordinates,
+                strict=True,
+            ):
+                field.from_numpy(coordinates)
+            fluid.velocity.fill((0.0, 0.0, 0.0))
+            fluid.obstacle.fill(0)
+            fluid.clear_velocity_dirichlet_boundary_rows()
+            (
+                fixture_class.segment_component_face_boundary,
+                fixture_class.segment_component_face_search,
+                fixture_class.segment_component_face_markers,
+            ) = previous_fixture
+
     def _assert_interpolation_rejects_registered_connector_topology_atomically(
         self,
         projection_segments: tuple[tuple[int, int], ...],

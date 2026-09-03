@@ -23989,13 +23989,13 @@ class HibmMpmIbBoundaryConditions:
                                 ):
                                     allow_obstacle_fluid_interface = 1
                                 (
-                                    canonical_storage_valid,
-                                    canonical_storage,
-                                    canonical_alpha,
-                                    canonical_geometry_error,
-                                    _canonical_pair_valid,
-                                    _canonical_pair_storage,
-                                    _canonical_pair_alpha,
+                                    _canonical_storage_valid,
+                                    _canonical_storage,
+                                    _canonical_alpha,
+                                    _canonical_geometry_error,
+                                    canonical_pair_valid,
+                                    canonical_pair_storage,
+                                    canonical_pair_alpha,
                                 ) = self._select_canonical_component_face_storage_device(
                                     canonical_geometry_base,
                                     component_axis,
@@ -24019,16 +24019,19 @@ class HibmMpmIbBoundaryConditions:
                                         canonical_sample_velocity[component_axis]
                                         - canonical_boundary_target
                                     )
-                                    * canonical_alpha
+                                    * canonical_pair_alpha
                                 )
+                                # Exact face-first pairs are identified by the
+                                # storage face nearest the shared ray, not by
+                                # the generic ray's earliest progress.
                                 if (
-                                    canonical_storage_valid == 0
-                                    or canonical_storage.x != target.x
-                                    or canonical_storage.y != target.y
-                                    or canonical_storage.z != target.z
-                                    or canonical_alpha <= 1.0e-6
-                                    or ti.math.isnan(canonical_alpha)
-                                    or ti.math.isinf(canonical_alpha)
+                                    canonical_pair_valid == 0
+                                    or canonical_pair_storage.x != target.x
+                                    or canonical_pair_storage.y != target.y
+                                    or canonical_pair_storage.z != target.z
+                                    or canonical_pair_alpha <= 1.0e-6
+                                    or ti.math.isnan(canonical_pair_alpha)
+                                    or ti.math.isinf(canonical_pair_alpha)
                                     or ti.math.isnan(reconstructed_target_candidate)
                                     or ti.math.isinf(reconstructed_target_candidate)
                                 ):
@@ -24037,7 +24040,7 @@ class HibmMpmIbBoundaryConditions:
                                     reconstructed_target = (
                                         reconstructed_target_candidate
                                     )
-                                    reconstructed_alpha = canonical_alpha
+                                    reconstructed_alpha = canonical_pair_alpha
                                     accepted_endpoint_clamped = (
                                         distinct_pair_endpoint_clamped
                                     )
