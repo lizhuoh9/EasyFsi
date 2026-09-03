@@ -802,6 +802,16 @@ numerical-pass status. FSI1-F0 is forbidden until S0, M0, and M1 are complete
 with zero numerical-contract violations and the exploratory formula below passes
 for all four primary metrics.
 
+Before any L1 or L2 coupled run, the case configuration must also validate the
+configured solid substep against
+`NeoHookeanMaterial.stable_explicit_dt_s`, using the minimum active solid-grid
+spacing. A 2026-09-03 static audit estimated the current FSI1 L0 limit as about
+`5.46e-5 s` versus the configured `5e-5 s`, so S0 remains inside the
+declared bound. At L1 the estimated limit is about `2.73e-5 s`; reusing 100
+solid substeps with `dt=0.005 s` would exceed it by about 1.83 times and must
+fail configuration validation. This safety gate is fixed before M0 and may not
+be relaxed in response to the numerical result.
+
 FSI1 formal runs are uninterrupted from step 1. The 2 s ramp is followed by 2 s
 settling. Adjacent windows \(t=4\)–6 s and \(t=6\)–8 s are assessed.
 
@@ -1082,15 +1092,20 @@ diagnostic; the final claim remains no-commit live coupling/CG/matvec work.
 8. Implement and review formal S0 provenance, accepted-only chunks, work
    accounting, rollback evidence, and offline acceptance — complete at
    `db22bb1`.
-9. Regenerate the entire frozen component chain at final clean HEAD — active;
-   all `7b80a6b` component artifacts are source-stale.
-10. If and only if every regenerated component passes, run the fresh 1600-step
+9. Record the first formal S0 attempt at `0df48f4`: it accepted three macro
+   steps, then failed closed at candidate step 4 on a registered local-connector
+   component-face conflict. Diagnose and repair that exact gate — complete at
+   `7862472`; this is not an S0 pass.
+10. Regenerate the entire frozen component chain at final clean HEAD — active;
+    every artifact predating `7862472` is source-stale.
+11. If and only if every regenerated component passes, run a fresh 1600-step
     FSI1-S0 strict-CUDA campaign from zero.
-11. Implement and validate a scalable rank-deficient Q backend, then run M0/M1
-    and conditional F0. L1/L2 remain blocked until that backend passes.
-12. If and only if FSI1 passes, run FSI2.
-13. If and only if FSI2 passes, run FSI3.
-14. If and only if all three reach benchmark quality, close R26A and open the
+12. Implement and validate a scalable rank-deficient Q backend and enforce the
+    solid explicit-stability substep gate, then run M0/M1 and conditional F0.
+    L1/L2 remain blocked until both prerequisites pass.
+13. If and only if FSI1 passes, run FSI2.
+14. If and only if FSI2 passes, run FSI3.
+15. If and only if all three reach benchmark quality, close R26A and open the
     separately preregistered Oracle goal.
 
 No later item may be started to avoid, dilute, or reinterpret an earlier failed

@@ -141,6 +141,33 @@ limited to 512 constraints: L0 has 336, while L1/L2 have 669/1002. A scalable
 rank-deficient backend is therefore still required before M0/M1; no later case,
 Oracle arm, or learned predictor is authorized.
 
+**R26A formal S0 bridge-repair update (2026-09-03).** At clean commit
+`0df48f4`, formal run
+`turek_hron__fsi1_s0__0df48f4__r01` accepted exactly three macro steps, then
+failed closed while preparing candidate step 4 with
+`FAIL_NUMERICAL_HEALTH`. The accepted-only rows for steps 0--2 remain
+preserved. The first canonical component-face witness had two direct author
+segments, `(1,2)` and `(3,4)`, separated by the registered local connector
+`(2,3)`; the same conflict appeared in four spanwise copies. This is a
+failed S0 attempt, not FSI1 evidence, and it did not authorize any later stage.
+
+The root cause was a missing arbitration case for that unique local connector.
+Commit `7862472` admits a registered bridge only when it is the sole connector,
+joins each author's nearest marker, makes both joins degree two, is unclamped,
+and is strictly closer to the face than both authors. Disconnected and
+ambiguous topologies, a long outer chord, endpoint clamping, and exact distance
+ties remain fail-closed. Strict-CUDA verification passed the four integration
+contracts for successful reconstruction plus disconnected, ambiguous, and
+outer-chord rejection; the direct geometry contracts cover bridge win, clamping,
+tie rejection, and author-order parity. Python compilation and
+`git diff --check` also passed, and an independent final review found no
+P0--P2 issue.
+
+Every component artifact from before `7862472` is now source-stale. The entire
+frozen component chain must be regenerated at the final clean source identity
+before a fresh S0 run starts from zero. No FSI1-S0 pass, FSI2 authorization,
+Oracle result, or learned-model evidence exists yet.
+
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It
 deliberately separates confirmed results from confounded comparisons. Every
