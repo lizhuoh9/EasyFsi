@@ -570,8 +570,9 @@ For every accepted preflight row, both fluid and solid consumed the complete
 source hashes, clean-commit identity, row schemas, and final accepted-time
 arrays were revalidated after completion.
 
-The component prerequisite is therefore complete and authorizes **FSI1-S0
-only**. This is not an FSI1 numerical pass. The current dense fallback has a
+The component prerequisite was complete at `7b80a6b` and authorized
+**FSI1-S0 only** for that exact source. This is not an FSI1 numerical pass. The
+current dense fallback has a
 hard 512-constraint limit: L0 has 336 constraints, but L1 and L2 have 669 and
 1002. A scalable rank-deficient Q backend must be implemented and validated
 before M0/M1; this known boundary cannot be bypassed by changing markers,
@@ -612,6 +613,60 @@ and one separate fresh two-step coupled preflight through the production generic
 FSI path. The two-step run starts at \(t=0\); it must not resume or copy the
 one-step state. These runs check launch, transaction, accepted-time, and artifact
 contracts only.
+
+#### 5.4.4 Formal S0 evidence path and source invalidation (2026-09-03)
+
+Clean local commit `db22bb1` adds the formal FSI1-S0 campaign path. It binds the
+complete effective case configuration, fail-fast mechanism probe, requested and
+measured strict-CUDA runtime identity, immutable marker-layout identity, clean
+Git commit, and recursive hashes of every production Python file under
+`benchmarks/`, `cases/`, `simulation_core/`, `src/`, and `tools/`.
+
+The accepted observer publishes only after the physical step commits. Rejected
+coupling trials never enter accepted arrays, while their fluid solves, solid
+macro solves, MPM substeps, pressure-CG iterations, and exact pressure-operator
+applications remain in the accepted step's work ledger. Beam-marker force,
+cylinder pressure force, and cylinder viscous force are all copied at the same
+final accepted trial's pre-solid-load stage. IQN rank, condition number, update
+mode, fallback reason, update limiting, and fallback count are retained with
+explicit padding semantics.
+
+Accepted evidence is create-only and written in fixed chunks of 1000 steps,
+plus one shorter final chunk. NPZ publication precedes its manifest. Every
+manifest binds the source/config identity, array dtype/shape/hash, units,
+accepted step/time range, marker identity, runtime identity, and from-start
+lineage. Failure artifacts use the registered
+`BLOCKED_SOURCE_MISMATCH`, `BLOCKED_ENVIRONMENT`, or
+`FAIL_NUMERICAL_HEALTH` classification. Nonfinite mechanism-probe candidates
+are encoded as explicit `nan`, `positive_infinity`, or `negative_infinity`
+diagnostics and remain strict JSON; rollback success is reported only after the
+generic solver has actually restored the physical state.
+
+The reviewed implementation passed 199 focused non-CUDA tests plus 30 subtests.
+Three focused CUDA pressure-work checks also passed: legacy Jacobi clears stale
+CG counters, a positive-iteration FV-CG solve satisfies exact
+`matvec = iterations + 2`, and zero-RHS FV-CG reports zero iterations with one
+exact-confirmation matvec. Compilation and `git diff --check` passed, and two
+independent read-only reviews reported no remaining P0--P3 finding. These are
+implementation and focused-regression results, not a full-suite result and not
+an FSI1 numerical result.
+
+Because `db22bb1` changes production source after `7b80a6b`, every component
+artifact listed in Section 5.4.3 is now historical and source-stale. The entire
+solid, fixed-fluid, nx4/nx8 comparison, and independent one-/two-step coupled
+preflight chain must be regenerated from the final clean HEAD before S0 may
+start. The formal S0 command is:
+
+~~~text
+python3 -m tools.validation.run_turek_hron_fsi_campaign \
+  --output-root validation_runs/turek_hron_fsi123_r26a \
+  --label <new-unique-label>
+~~~
+
+The runner has no chunk-size override and always starts from zero with marker
+re-seeding disabled. No formal 1600-step S0 run has yet been launched, so there
+is currently no `PASS_FSI1_S0_GATE_ONLY`, no FSI1 pass, and no authorization for
+M0/M1.
 
 ### 5.5 Frozen formulas, tolerances, and evidence labels
 
@@ -937,8 +992,10 @@ Allowed classifications include:
 - **PASS_CONTRACT_ONLY**
 - **PASS_COMPONENT_ONLY**
 - **PASS_SMOKE_ONLY**
+- **PASS_FSI1_S0_GATE_ONLY**
 - **PASS_EXPLORATORY**
 - **PASS_BENCHMARK_QUALITY**
+- **FAIL_FSI1_S0_GATE**
 - **FAIL_REFERENCE_CONTRACT**
 - **FAIL_NUMERICAL_HEALTH**
 - **FAIL_STEADY_STATE**
@@ -1014,21 +1071,26 @@ diagnostic; the final claim remains no-commit live coupling/CG/matvec work.
 
 ## 14. Immediate execution order
 
-1. R25B import-boundary repair — complete at b7f32c0; no CUDA rerun.
-2. Freeze the vertical-flap predictor route — active.
-3. Create the R26A branch and this goal — active.
-4. Implement and test canonical multi-source references.
-5. Import and manifest the two official raw series.
-6. Implement and test the deterministic limit-cycle analyzer.
-7. Close the generic-core marker-Q/pressure-nullspace wiring defect, then
-   regenerate the entire frozen component chain and complete the remaining
-   component gates — complete at clean commit `7b80a6b` with source-matched
-   solid, fixed-fluid, comparison, and one-/two-step preflight artifacts.
-8. Run FSI1-S0, then M0/M1, then conditional F0 — S0 is now active; M0/M1
-   remain blocked on a scalable rank-deficient Q backend.
-9. If and only if FSI1 passes, run FSI2.
-10. If and only if FSI2 passes, run FSI3.
-11. If and only if all three reach benchmark quality, close R26A and open the
+1. R25B import-boundary repair — complete at `b7f32c0`; no CUDA rerun.
+2. Freeze the vertical-flap predictor route — complete.
+3. Create the R26A branch and this goal — complete.
+4. Implement and test canonical multi-source references — complete.
+5. Import and manifest the two official raw series — complete.
+6. Implement and test the deterministic limit-cycle analyzer — complete.
+7. Close the generic-core marker-Q/pressure-nullspace wiring defect — complete
+   at `7b80a6b`; the 512-constraint dense limit remains explicit.
+8. Implement and review formal S0 provenance, accepted-only chunks, work
+   accounting, rollback evidence, and offline acceptance — complete at
+   `db22bb1`.
+9. Regenerate the entire frozen component chain at final clean HEAD — active;
+   all `7b80a6b` component artifacts are source-stale.
+10. If and only if every regenerated component passes, run the fresh 1600-step
+    FSI1-S0 strict-CUDA campaign from zero.
+11. Implement and validate a scalable rank-deficient Q backend, then run M0/M1
+    and conditional F0. L1/L2 remain blocked until that backend passes.
+12. If and only if FSI1 passes, run FSI2.
+13. If and only if FSI2 passes, run FSI3.
+14. If and only if all three reach benchmark quality, close R26A and open the
     separately preregistered Oracle goal.
 
 No later item may be started to avoid, dilute, or reinterpret an earlier failed
