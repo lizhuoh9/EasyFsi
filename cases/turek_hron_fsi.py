@@ -3188,6 +3188,7 @@ def run_turek_hron_fsi(
         ),
         primary_region_id=PRIMARY_REGION_ID,
         secondary_region_id=SECONDARY_UNUSED_REGION_ID,
+        rank_revealing_direct=True,
     )
     mu_pa, lambda_pa = _lame_parameters(config)
     plane_dx_m, plane_dy_m, plane_dz_m = fluid_cell_spacing_m(config)

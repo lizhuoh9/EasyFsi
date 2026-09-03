@@ -11,6 +11,7 @@ velocity field is changed once, only after convergence has been established.
 from dataclasses import dataclass
 import math
 
+import numpy as np
 import taichi as ti
 
 from .core import (
@@ -52,6 +53,15 @@ class HibmMpmMarkerMacConstraintReport:
     iterations: int
     max_residual_mps: float
     sample_identity_generation: int = 0
+    backend: str = "pcg"
+    rank_revealed: bool = False
+    independent_constraint_count: int = 0
+    dependent_constraint_count: int = 0
+    unactuated_constraint_count: int = 0
+    max_structural_residual_mps: float = 0.0
+    max_independent_residual_mps: float = 0.0
+    max_dependent_residual_mps: float = 0.0
+    max_unactuated_residual_mps: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -292,6 +302,22 @@ class HibmMpmMarkerMacConstraintOperator:
         self._device_iterations = ti.field(dtype=ti.i32, shape=())
         self._device_active_marker_count = ti.field(dtype=ti.i32, shape=())
         self._device_constraint_count = ti.field(dtype=ti.i32, shape=())
+        self._rank_direct_max_structural_residual = ti.field(
+            dtype=ti.f32,
+            shape=(),
+        )
+        self._rank_direct_max_independent_residual = ti.field(
+            dtype=ti.f32,
+            shape=(),
+        )
+        self._rank_direct_max_dependent_residual = ti.field(
+            dtype=ti.f32,
+            shape=(),
+        )
+        self._rank_direct_max_unactuated_residual = ti.field(
+            dtype=ti.f32,
+            shape=(),
+        )
 
         self._markers = None
         self._fluid = None
@@ -323,6 +349,11 @@ class HibmMpmMarkerMacConstraintOperator:
         self._pressure_nullspace_topology_generation = 0
         self._pressure_nullspace_component_face_valid_mask_generation = 0
         self._pressure_nullspace_poisoned = False
+        self._solve_backend = "pcg"
+        self._rank_revealed = False
+        self._rank_direct_independent_constraint_count = 0
+        self._rank_direct_dependent_constraint_count = 0
+        self._rank_direct_unactuated_constraint_count = 0
 
     @ti.kernel
     def _reset_transaction_kernel(self):
@@ -376,6 +407,10 @@ class HibmMpmMarkerMacConstraintOperator:
         self._device_iterations[None] = 0
         self._device_active_marker_count[None] = 0
         self._device_constraint_count[None] = 0
+        self._rank_direct_max_structural_residual[None] = 0.0
+        self._rank_direct_max_independent_residual[None] = 0.0
+        self._rank_direct_max_dependent_residual[None] = 0.0
+        self._rank_direct_max_unactuated_residual[None] = 0.0
 
     @ti.kernel
     def _reset_pressure_nullspace_prepare_kernel(self):
@@ -1823,6 +1858,189 @@ class HibmMpmMarkerMacConstraintOperator:
                 )
 
     @ti.kernel
+    def _copy_rank_direct_metric_to_dense_scratch_kernel(self):
+        """Borrow the bounded pressure dense storage for one Q direct solve."""
+
+        for row in range(self.constraint_capacity):
+            self._pressure_nullspace_row_active[row] = self._row_active[row]
+        for row, support in self._pressure_nullspace_inverse_mass_per_kg:
+            self._pressure_nullspace_inverse_mass_per_kg[row, support] = (
+                ti.cast(self._stencil_inverse_mass_per_kg[row, support], ti.f64)
+            )
+
+    @ti.kernel
+    def _materialize_rank_direct_correction_and_audit_kernel(self):
+        """Round the private f64 direct correction then audit every Q row."""
+
+        self._true_candidate_max_residual[None] = 0.0
+        self._rank_direct_max_structural_residual[None] = 0.0
+        self._rank_direct_max_independent_residual[None] = 0.0
+        self._rank_direct_max_dependent_residual[None] = 0.0
+        self._rank_direct_max_unactuated_residual[None] = 0.0
+        for i, j, k in self._correction:
+            self._correction[i, j, k] = ti.cast(
+                self._pressure_nullspace_correction[i, j, k],
+                ti.f32,
+            )
+        for row in range(self.constraint_capacity):
+            if self._row_active[row] != 0:
+                axis = row % 3
+                sampled_correction = 0.0
+                for support in ti.static(range(8)):
+                    if self._stencil_free[row, support] != 0:
+                        index = self._stencil_index[row, support]
+                        sampled_correction += (
+                            self._stencil_weight[row, support]
+                            * self._correction[index.x, index.y, index.z][axis]
+                        )
+                residual = ti.abs(self._rhs[row] - sampled_correction)
+                finite = residual == residual and residual < 3.4e38
+                if not finite:
+                    residual = 3.4e38
+                ti.atomic_max(self._true_candidate_max_residual[None], residual)
+                ti.atomic_max(
+                    self._rank_direct_max_structural_residual[None],
+                    residual,
+                )
+                if self._pressure_nullspace_factor_row_selected[row] != 0:
+                    ti.atomic_max(
+                        self._rank_direct_max_independent_residual[None],
+                        residual,
+                    )
+                elif self._pressure_nullspace_row_inverse_norm[row] > 0.0:
+                    ti.atomic_max(
+                        self._rank_direct_max_dependent_residual[None],
+                        residual,
+                    )
+                else:
+                    ti.atomic_max(
+                        self._rank_direct_max_unactuated_residual[None],
+                        residual,
+                    )
+
+    def _solve_rank_revealing_direct(self, tolerance: float) -> None:
+        """Solve a compatible rank-deficient Q system without changing PCG.
+
+        The dense resource is intentionally the one owned by the existing
+        pressure nullspace implementation.  Q borrows it only while its
+        ordinary transaction is prepared; P resets it before establishing its
+        separate public lifecycle.  The selected rows provide a correction
+        basis, while the least-squares objective includes every positive-energy
+        physical row so a representative-only solve cannot hide dependencies.
+        """
+
+        # Publish the attempted backend before every direct-only failure path,
+        # but do not let a previous factor partition survive this transaction.
+        self._solve_backend = "rank_revealing_direct"
+        self._rank_revealed = False
+        self._rank_direct_independent_constraint_count = 0
+        self._rank_direct_dependent_constraint_count = 0
+        self._rank_direct_unactuated_constraint_count = 0
+        self._reset_rank_direct_diagnostics_kernel()
+        if self.constraint_capacity > HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS:
+            self._phase = "failed"
+            raise RuntimeError(
+                "rank-revealing direct marker constraint capacity exceeds the "
+                "exact backend limit: "
+                f"{self.constraint_capacity} > "
+                f"{HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS}"
+            )
+        self._ensure_pressure_nullspace_resources()
+        self._reset_pressure_nullspace_prepare_kernel()
+        self._copy_rank_direct_metric_to_dense_scratch_kernel()
+        self._assemble_pressure_nullspace_schur_kernel()
+        self._symmetrize_pressure_nullspace_schur_kernel()
+        relative_pivot_tolerance = max(
+            1.0e-14,
+            64.0 * math.ulp(1.0) * float(self.marker_capacity),
+        )
+        self._factor_pressure_nullspace_schur_kernel(relative_pivot_tolerance)
+        if int(self._pressure_nullspace_failure_code[None]) != 0:
+            self._phase = "failed"
+            raise RuntimeError("rank-revealing direct marker factorization failed")
+
+        active = self._pressure_nullspace_row_active.to_numpy().astype(bool)
+        inverse_norm = self._pressure_nullspace_row_inverse_norm.to_numpy()
+        selected = self._pressure_nullspace_factor_order.to_numpy()
+        selected = selected[selected >= 0].astype(np.intp, copy=False)
+        active_count = int(np.count_nonzero(active))
+        positive = active & (inverse_norm > 0.0)
+        selected_mask = np.zeros(self.constraint_capacity, dtype=bool)
+        selected_mask[selected] = True
+        self._rank_direct_independent_constraint_count = int(selected.size)
+        self._rank_direct_dependent_constraint_count = int(
+            np.count_nonzero(positive & ~selected_mask)
+        )
+        self._rank_direct_unactuated_constraint_count = int(
+            np.count_nonzero(active & ~positive)
+        )
+        if (
+            self._rank_direct_independent_constraint_count
+            + self._rank_direct_dependent_constraint_count
+            + self._rank_direct_unactuated_constraint_count
+            != active_count
+        ):
+            self._phase = "failed"
+            raise RuntimeError("rank-revealing direct marker partition is inconsistent")
+        self._rank_revealed = True
+
+        correction = np.zeros((*self.grid_nodes, 3), dtype=np.float64)
+        if selected.size:
+            schur = self._pressure_nullspace_schur.to_numpy()
+            rhs = self._rhs.to_numpy().astype(np.float64, copy=False)
+            positive_rows = np.flatnonzero(positive)
+            columns = schur[np.ix_(positive_rows, selected)]
+            column_norm = np.linalg.norm(columns, axis=0)
+            if (
+                not np.all(np.isfinite(column_norm))
+                or np.any(column_norm <= 0.0)
+            ):
+                self._phase = "failed"
+                raise RuntimeError("rank-revealing direct marker basis is singular")
+            normalized_columns = columns / column_norm
+            normal_matrix = normalized_columns.T @ normalized_columns
+            normal_matrix = 0.5 * (normal_matrix + normal_matrix.T)
+            normal_rhs = normalized_columns.T @ rhs[positive_rows]
+            try:
+                cholesky = np.linalg.cholesky(normal_matrix)
+                forward = np.linalg.solve(cholesky, normal_rhs)
+                coefficients = np.linalg.solve(cholesky.T, forward) / column_norm
+            except np.linalg.LinAlgError as exc:
+                self._phase = "failed"
+                raise RuntimeError(
+                    "rank-revealing direct marker normal factorization failed"
+                ) from exc
+            indices = self._stencil_index.to_numpy()
+            weights = self._stencil_weight.to_numpy()
+            free = self._stencil_free.to_numpy()
+            inverse_mass = self._stencil_inverse_mass_per_kg.to_numpy()
+            for coefficient, row in zip(coefficients, selected, strict=True):
+                axis = int(row % 3)
+                for support in range(8):
+                    if int(free[row, support]) == 0:
+                        continue
+                    index = tuple(int(value) for value in indices[row, support])
+                    correction[index][axis] += (
+                        float(inverse_mass[row, support])
+                        * float(weights[row, support])
+                        * float(coefficient)
+                    )
+        self._pressure_nullspace_correction.from_numpy(correction)
+        self._materialize_rank_direct_correction_and_audit_kernel()
+        self._max_residual_mps = float(self._true_candidate_max_residual[None])
+        self._converged = self._max_residual_mps <= tolerance
+        self._iterations = 0
+        if not self._converged:
+            self._phase = "failed"
+            raise RuntimeError(
+                "rank-revealing direct marker correction residual exceeds the "
+                "absolute marker constraint tolerance: "
+                f"{self._max_residual_mps} > {tolerance}"
+            )
+        self._snapshot_solved_correction_kernel()
+        self._phase = "solved"
+
+    @ti.kernel
     def _commit_kernel(
         self,
         velocity: ti.template(),
@@ -1863,6 +2081,23 @@ class HibmMpmMarkerMacConstraintOperator:
         self._pressure_nullspace_topology_generation = 0
         self._pressure_nullspace_component_face_valid_mask_generation = 0
 
+    @ti.kernel
+    def _reset_rank_direct_diagnostics_kernel(self):
+        self._rank_direct_max_structural_residual[None] = 0.0
+        self._rank_direct_max_independent_residual[None] = 0.0
+        self._rank_direct_max_dependent_residual[None] = 0.0
+        self._rank_direct_max_unactuated_residual[None] = 0.0
+
+    def _reset_rank_direct_diagnostics(self) -> None:
+        """Retire every externally visible direct-backend diagnostic."""
+
+        self._solve_backend = "pcg"
+        self._rank_revealed = False
+        self._rank_direct_independent_constraint_count = 0
+        self._rank_direct_dependent_constraint_count = 0
+        self._rank_direct_unactuated_constraint_count = 0
+        self._reset_rank_direct_diagnostics_kernel()
+
     def _retire_transaction_lifecycle(self) -> None:
         """Fail closed before an attempted transaction can touch device rows."""
 
@@ -1888,6 +2123,7 @@ class HibmMpmMarkerMacConstraintOperator:
         self._prepared_topology_generation = 0
         self._prepared_component_face_valid_mask_generation = 0
         self._clear_pressure_nullspace_lifecycle()
+        self._reset_rank_direct_diagnostics()
 
     def _poison_pressure_nullspace_transaction(self) -> None:
         """Make a failed pressure transaction impossible to reuse.
@@ -3037,6 +3273,11 @@ class HibmMpmMarkerMacConstraintOperator:
         self._prepared_component_face_valid_mask_generation = (
             prepared_valid_mask_generation
         )
+        self._solve_backend = "pcg"
+        self._rank_revealed = False
+        self._rank_direct_independent_constraint_count = 0
+        self._rank_direct_dependent_constraint_count = 0
+        self._rank_direct_unactuated_constraint_count = 0
         self._phase = "prepared"
 
     def _unsatisfiable_support_provenance(
@@ -3143,6 +3384,7 @@ class HibmMpmMarkerMacConstraintOperator:
         topology_generation: int | None = None,
         component_face_valid_mask_generation: int | None = None,
         obstacle_field=None,
+        rank_revealing_direct: bool = False,
     ) -> None:
         """Solve the marker Schur complement on device-resident fields."""
 
@@ -3156,6 +3398,8 @@ class HibmMpmMarkerMacConstraintOperator:
             raise ValueError("max_iterations must be positive")
         if not math.isfinite(tolerance) or tolerance <= 0.0:
             raise ValueError("absolute_tolerance_mps must be finite and positive")
+        if not isinstance(rank_revealing_direct, bool):
+            raise TypeError("rank_revealing_direct must be a bool")
 
         self._audit_transaction_inputs(
             self._fluid,
@@ -3175,6 +3419,12 @@ class HibmMpmMarkerMacConstraintOperator:
                 tolerance,
             )
         self._check_convergence_kernel(tolerance)
+        if (
+            rank_revealing_direct
+            and int(self._device_converged[None]) == 0
+        ):
+            self._solve_rank_revealing_direct(tolerance)
+            return
         self._compute_initial_rz_kernel()
         iteration_budget = (
             0 if int(self._device_converged[None]) != 0 else iterations
@@ -3308,6 +3558,29 @@ class HibmMpmMarkerMacConstraintOperator:
             max_residual_mps=float(self._max_residual_mps),
             sample_identity_generation=int(
                 self._prepared_sampling_identity_generation
+            ),
+            backend=self._solve_backend,
+            rank_revealed=bool(self._rank_revealed),
+            independent_constraint_count=int(
+                self._rank_direct_independent_constraint_count
+            ),
+            dependent_constraint_count=int(
+                self._rank_direct_dependent_constraint_count
+            ),
+            unactuated_constraint_count=int(
+                self._rank_direct_unactuated_constraint_count
+            ),
+            max_structural_residual_mps=float(
+                self._rank_direct_max_structural_residual[None]
+            ),
+            max_independent_residual_mps=float(
+                self._rank_direct_max_independent_residual[None]
+            ),
+            max_dependent_residual_mps=float(
+                self._rank_direct_max_dependent_residual[None]
+            ),
+            max_unactuated_residual_mps=float(
+                self._rank_direct_max_unactuated_residual[None]
             ),
         )
 

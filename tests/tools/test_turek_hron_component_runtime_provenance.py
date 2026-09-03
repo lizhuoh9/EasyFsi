@@ -112,6 +112,36 @@ def test_fixed_fluid_runtime_installs_t0_dynamic_particle_volume():
     assert "if bool(self._config.classify_far_internal_nodes):" in source
 
 
+def test_fixed_fluid_runtime_emits_strict_deterministic_marker_q_trace_json():
+    trace = [
+        {
+            "backend": "rank_revealing_direct",
+            "rank_revealed": True,
+            "dependent_constraint_count": 12,
+            "max_dependent_residual_mps": 8.0e-5,
+        },
+        {
+            "backend": "pcg",
+            "rank_revealed": False,
+            "dependent_constraint_count": 0,
+            "max_dependent_residual_mps": 0.0,
+        },
+    ]
+    projection = {"hibm_marker_mac_q_cycle_trace": trace}
+
+    serialized = runtimes._strict_marker_mac_q_cycle_trace_json(projection)
+
+    assert serialized == runtimes._strict_marker_mac_q_cycle_trace_json(projection)
+    assert serialized == json.dumps(
+        trace, allow_nan=False, sort_keys=True, separators=(",", ":")
+    )
+    assert json.loads(serialized) == trace
+    source = inspect.getsource(runtimes._FixedFluidRuntime.assemble)
+    assert '"hibm_marker_mac_q_cycle_trace_json"' in source
+    with pytest.raises(RuntimeError, match="FAIL_MARKER_MAC_Q_TRACE"):
+        runtimes._strict_marker_mac_q_cycle_trace_json({})
+
+
 def test_fixed_fluid_initialization_audit_rejects_obstacle_outside_beam_volume():
     class Field:
         def __init__(self, value):

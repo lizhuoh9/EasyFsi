@@ -323,6 +323,10 @@ def test_fixed_fluid_runner_uses_step_dt_and_exact_post_ramp_window(tmp_path: Pa
                 row["_transient_fluid_velocity_active_field_mps"] = [
                     [0.0, 0.0, 100.0]
                 ]
+            row["hibm_marker_mac_q_cycle_trace_json"] = (
+                '[{"backend":"rank_revealing_direct",'
+                '"rank_revealed":true}]'
+            )
             row.pop("history_schema_version")
             return row
 
@@ -351,6 +355,31 @@ def test_fixed_fluid_runner_uses_step_dt_and_exact_post_ramp_window(tmp_path: Pa
     ).splitlines()[0]
     assert "_transient_fluid_velocity_active_field_mps" not in history_header
     assert "history_schema_version" in history_header
+    history_rows = list(
+        module.csv.DictReader(
+            (tmp_path / "fluid" / "history.csv").open(encoding="utf-8")
+        )
+    )
+    assert json.loads(history_rows[0]["hibm_marker_mac_q_cycle_trace_json"]) == [
+        {"backend": "rank_revealing_direct", "rank_revealed": True}
+    ]
+
+
+def test_affine_q_source_hashes_are_explicit_provenance_members():
+    module = _module()
+    expected_paths = (
+        "simulation_core/coupling/hibm_mpm/marker_mac_constraint.py",
+        "simulation_core/coupling/hibm_mpm/marker_mac_projector.py",
+    )
+
+    source_hashes = module._source_hashes()
+    provenance = module._capture_provenance({"mode": "solid-only"})
+    for source_path in expected_paths:
+        assert source_path in module._SOURCE_PATHS
+        assert source_hashes[source_path] == module._sha_file(
+            module._REPO_ROOT / source_path
+        )
+        assert provenance["source_hashes"][source_path] == source_hashes[source_path]
 
 
 def test_run_claims_output_before_runtime_work_and_json_is_strict(tmp_path: Path):

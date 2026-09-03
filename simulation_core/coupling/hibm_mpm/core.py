@@ -206,6 +206,27 @@ HIBM_PRESSURE_NEUMANN_FV_CG_FORCE_REASON = "hibm_pressure_neumann_requires_fv_so
 # object without that attribute and pressure_warm_start=False (the default).
 HIBM_PRESSURE_WARMSTART_SLOT_COUNT = 5
 
+_MARKER_MAC_Q_STATUS_KEYS = (
+    "pre_projection_velocity_projector_prepared",
+    "pre_projection_velocity_projector_converged",
+    "pre_projection_velocity_projector_committed",
+)
+_MARKER_MAC_Q_CYCLE_FIELDS = (
+    ("backend", "string"),
+    ("rank_revealed", "bool"),
+    ("active_marker_count", "count"),
+    ("constraint_count", "count"),
+    ("iterations", "count"),
+    ("max_residual_mps", "residual"),
+    ("independent_constraint_count", "count"),
+    ("dependent_constraint_count", "count"),
+    ("unactuated_constraint_count", "count"),
+    ("max_structural_residual_mps", "residual"),
+    ("max_independent_residual_mps", "residual"),
+    ("max_dependent_residual_mps", "residual"),
+    ("max_unactuated_residual_mps", "residual"),
+)
+
 
 def _debug_stage_progress(message: str) -> None:
     if os.environ.get("HIBM_DEBUG_STAGE_PROGRESS") == "1":
@@ -226,6 +247,73 @@ def _select_hibm_pressure_projection_solver(
     return pressure_solver, False, ""
 
 
+def _strict_marker_mac_q_bool(value: object) -> bool | None:
+    if not isinstance(value, (bool, np.bool_)):
+        return None
+    return bool(value)
+
+
+def _marker_mac_q_cycle_trace(
+    projection_reports: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Retain every verified affine-Q transaction across projection stages."""
+
+    trace: list[dict[str, object]] = []
+    for cycle_index, report in enumerate(projection_reports, start=1):
+        if not any(key in report for key in _MARKER_MAC_Q_STATUS_KEYS):
+            continue
+        statuses = tuple(
+            _strict_marker_mac_q_bool(report.get(key))
+            for key in _MARKER_MAC_Q_STATUS_KEYS
+        )
+        if all(status is False for status in statuses):
+            continue
+        if not all(status is True for status in statuses):
+            raise RuntimeError(
+                "marker-MAC affine-Q diagnostics have invalid transaction status"
+            )
+        projection_stage = report.get("hibm_projection_stage", "main")
+        if not isinstance(projection_stage, str) or not projection_stage:
+            raise RuntimeError(
+                "marker-MAC affine-Q diagnostics have invalid projection stage"
+            )
+        cycle: dict[str, object] = {
+            "cycle_index": int(cycle_index),
+            "projection_stage": projection_stage,
+        }
+        for key, kind in _MARKER_MAC_Q_CYCLE_FIELDS:
+            value = report.get(key)
+            if kind == "string":
+                valid = isinstance(value, str) and bool(value)
+                normalized = value if valid else None
+            elif kind == "bool":
+                normalized = _strict_marker_mac_q_bool(value)
+                valid = normalized is not None
+            elif kind == "count":
+                valid = (
+                    not isinstance(value, (bool, np.bool_))
+                    and isinstance(value, (int, np.integer))
+                    and int(value) >= 0
+                )
+                normalized = int(value) if valid else None
+            else:
+                valid = (
+                    not isinstance(value, (bool, np.bool_))
+                    and isinstance(value, (int, float, np.integer, np.floating))
+                    and math.isfinite(float(value))
+                    and float(value) >= 0.0
+                )
+                normalized = float(value) if valid else None
+            if not valid:
+                raise RuntimeError(
+                    "marker-MAC affine-Q diagnostics missing or invalid "
+                    f"{key} at cycle {cycle_index}"
+                )
+            cycle[key] = normalized
+        trace.append(cycle)
+    return trace
+
+
 def _combine_projection_reports(
     projection_reports: list[dict[str, Any]],
     *,
@@ -240,6 +328,9 @@ def _combine_projection_reports(
     combined = dict(projection_reports[-1])
     combined["fluid_substeps"] = int(fluid_substeps)
     combined["fluid_advection_scheme"] = str(fluid_advection_scheme)
+    marker_mac_q_trace = _marker_mac_q_cycle_trace(projection_reports)
+    if marker_mac_q_trace:
+        combined["hibm_marker_mac_q_cycle_trace"] = marker_mac_q_trace
     sum_keys = (
         "cg_project_calls",
         "cg_iterations_total",

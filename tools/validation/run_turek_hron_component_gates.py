@@ -60,6 +60,8 @@ _SOURCE_PATHS = (
     "benchmarks/official/solid_mpm_fsi_runner.py",
     "simulation_core/coupling/hibm_mpm/core.py",
     "simulation_core/coupling/hibm_mpm/interface_state.py",
+    "simulation_core/coupling/hibm_mpm/marker_mac_constraint.py",
+    "simulation_core/coupling/hibm_mpm/marker_mac_projector.py",
     "simulation_core/diagnostics/runtime.py",
     "simulation_core/drivers/generic_fsi_solver.py",
     "simulation_core/fluids/solver.py",

@@ -28,13 +28,17 @@ class HibmMpmMarkerMacConstraintProjector:
         absolute_tolerance_mps: float,
         primary_region_id: int,
         secondary_region_id: int,
+        rank_revealing_direct: bool = False,
     ) -> None:
+        if not isinstance(rank_revealing_direct, (bool, np.bool_)):
+            raise TypeError("rank_revealing_direct must be a boolean")
         self.markers_owner = markers
         self.operator = operator
         self.max_iterations = int(max_iterations)
         self.absolute_tolerance_mps = float(absolute_tolerance_mps)
         self.primary_region_id = int(primary_region_id)
         self.secondary_region_id = int(secondary_region_id)
+        self.rank_revealing_direct = bool(rank_revealing_direct)
         self._prepared_fluid: CartesianFluidSolver | None = None
         self._prepared_sampling_identity: Any | None = None
         self._prepared_component_face_valid_mask: Any | None = None
@@ -142,6 +146,7 @@ class HibmMpmMarkerMacConstraintProjector:
             topology_generation=topology_generation,
             component_face_valid_mask_generation=valid_mask_generation,
             obstacle_field=fluid.hibm_no_slip_sampling_obstacle,
+            rank_revealing_direct=self.rank_revealing_direct,
         )
 
     def commit_projection_transaction(self) -> Mapping[str, object]:

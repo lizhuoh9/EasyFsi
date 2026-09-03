@@ -7,12 +7,29 @@ adapters can be inspected without importing that CLI back into production code.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import asdict
 from types import MappingProxyType
 from typing import Any, Mapping
 
 import numpy as np
+
+
+def _strict_marker_mac_q_cycle_trace_json(
+    fluid_projection: Mapping[str, object],
+) -> str:
+    """Encode the complete generic affine-Q ledger as one history scalar."""
+
+    trace = fluid_projection.get("hibm_marker_mac_q_cycle_trace")
+    if not isinstance(trace, list) or not trace or not all(
+        isinstance(cycle, Mapping) for cycle in trace
+    ):
+        raise RuntimeError("FAIL_MARKER_MAC_Q_TRACE:missing-or-invalid")
+    try:
+        return json.dumps(trace, allow_nan=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("FAIL_MARKER_MAC_Q_TRACE:not-strict-json") from error
 
 
 def _strict_cuda_runtime() -> Any:
@@ -290,6 +307,7 @@ class _FixedFluidRuntime:
                 ),
                 primary_region_id=PRIMARY_REGION_ID,
                 secondary_region_id=SECONDARY_UNUSED_REGION_ID,
+                rank_revealing_direct=True,
             )
         )
         self._assemble_loads = assemble_hibm_mpm_sharp_fluid_to_mpm_loads
@@ -547,6 +565,9 @@ class _FixedFluidRuntime:
         report, observations = self._assemble(run_fluid_predictor=True)
         self._last_report = report
         projection = report.fluid_projection
+        marker_mac_q_cycle_trace_json = _strict_marker_mac_q_cycle_trace_json(
+            projection
+        )
         time_fields = self._verified_fluid_time(
             predictor_time_observations=observations,
             fluid_projection=projection,
@@ -641,6 +662,7 @@ class _FixedFluidRuntime:
             "projection_physical_failure": bool(
                 projection.get("pressure_projection_physical_failure", True)
             ),
+            "hibm_marker_mac_q_cycle_trace_json": marker_mac_q_cycle_trace_json,
             "expected_marker_count": int(
                 2 * int(self._marker_counts[0]) + int(self._marker_counts[1])
             ),
