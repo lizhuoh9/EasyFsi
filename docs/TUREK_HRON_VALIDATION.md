@@ -1,6 +1,6 @@
 # Turek–Hron FSI Validation Report
 
-Base results as of 2026-07-07; R26A status updated through 2026-09-03. Solver:
+Base results as of 2026-07-07; R26A status updated through 2026-09-04. Solver:
 HIBM-MPM (sharp immersed boundary + Material Point Method), Python + Taichi,
 CUDA. Commands use `python` from the active environment. Case:
 `cases/turek_hron_fsi.py`.
@@ -167,6 +167,51 @@ Every component artifact from before `7862472` is now source-stale. The entire
 frozen component chain must be regenerated at the final clean source identity
 before a fresh S0 run starts from zero. No FSI1-S0 pass, FSI2 authorization,
 Oracle result, or learned-model evidence exists yet.
+
+**R26A collective F-space repair and component requalification
+(2026-09-04).** A later source-matched component attempt at clean commit
+`ef1b8fe` passed the first five solid-only stages, then failed closed in nx4
+fixed-fluid with no certified prospective hard-target repair. The zero-
+correction collective residual in the captured state was
+`3.944443960790522e-6 m/s`, already below the frozen public absolute tolerance
+`1e-4 m/s`; the old cyclic Kaczmarz path nevertheless increased it to
+`2.238149609e-4 m/s` after 21,504 sweeps. A compact f32-audited least-squares
+witness reached about `3.92419578e-6 m/s`, and the active matrix had rank 10
+with a clean singular-value gap. This was a solver-path defect, not evidence
+for widening a tolerance or adding another geometry allowlist.
+
+Clean commit `8fb44de` measures the identity correction first and, only when
+needed, builds a bounded per-axis F-space least-squares sufficient witness.
+The candidate is materialized as f32 and accepted only after the existing
+device audit checks every active row. Any nonfinite value, inconsistent
+repeated mobility, out-of-bounds support, failed solve, or residual above the
+frozen tolerance remains fail-closed. The private witness does not reuse or
+alter terminal-Q or pressure-nullspace transaction state. Fourteen focused
+strict-CUDA contracts passed in one process (`39.749 s`), together with Python
+compilation, structure validation, `git diff --check`, and a fresh independent
+read-only review with no blocking finding.
+
+The complete frozen component protocol then passed at clean commit `8fb44de`,
+source SHA256 `4c88aa85bb2db42d75907ae794da7d9d4028b6c900d124c5191fc838fb878877`:
+
+- solid S100-nx4, S200-nx4, and S200-nx8 each completed 40 rows; the
+  S100/S200 Point-A relative-vector delta was
+  `0.0003264915974131584`, and the nx4/nx8 delta was `0.0`;
+- fixed-fluid nx4 and nx8 each completed 500 rows. Their velocity/force
+  span-leakage pairs were
+  `0.0005504236896309334/0.0006353428425121972` and
+  `0.00043036809698871847/0.0003521289640626043`; the source-matched
+  force-per-span relative-vector delta was `0.006372355169562249 < 0.02`;
+- independent one-step and two-step coupled preflights both passed as
+  `PASS_SMOKE_ONLY`. Every accepted row advanced fluid and solid by exactly
+  `0.005 s` with zero unadvanced time; their final accepted times were
+  `0.005 s` and `0.010 s`.
+
+The artifact labels all end in `__8fb44de__r01` and live under
+`validation_runs/turek_hron_component_gates/`. This completes only the
+source-matched component prerequisite and authorizes a new formal FSI1-S0 run
+from zero. It is not `PASS_FSI1_S0_GATE_ONLY`, does not establish FSI1
+benchmark quality, and does not authorize FSI2, FSI3, Oracle, or learning.
 
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It

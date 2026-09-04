@@ -1,7 +1,7 @@
 # Turek–Hron FSI1/FSI2/FSI3 Numerical Validation R26A Goal
 
-Status: active. This design is frozen before R26A implementation or any new
-Turek–Hron numerical campaign.
+Status: active. The frozen component prerequisite is complete at `8fb44de`;
+the next authorized numerical action is a fresh formal FSI1-S0 run from zero.
 
 Branch: **codex/turek-hron-fsi123-validation-r26a**
 
@@ -664,9 +664,56 @@ python3 -m tools.validation.run_turek_hron_fsi_campaign \
 ~~~
 
 The runner has no chunk-size override and always starts from zero with marker
-re-seeding disabled. No formal 1600-step S0 run has yet been launched, so there
-is currently no `PASS_FSI1_S0_GATE_ONLY`, no FSI1 pass, and no authorization for
-M0/M1.
+re-seeding disabled. The first formal attempt later failed closed at candidate
+step 4 and is retained only as accepted-prefix failure evidence; it is not an
+S0 pass. See Section 5.4.5 for the final component requalification boundary.
+
+#### 5.4.5 Collective F-space repair and final component pass (2026-09-04)
+
+At clean commit `ef1b8fe`, the regenerated solid-only stages passed, but nx4
+fixed-fluid failed closed because collective closure reported no certified
+hard-target repair. The captured zero-correction residual was
+`3.944443960790522e-6 m/s`, below the frozen public absolute tolerance
+`1e-4 m/s`. The old cyclic Kaczmarz path worsened it to
+`2.238149609e-4 m/s` after 21,504 sweeps, while a compact f32-audited
+least-squares witness reached about `3.92419578e-6 m/s`. The active matrix had
+rank 10 with a clean singular-value gap.
+
+Commit `8fb44de` fixes the class rather than the captured face: it accepts an
+already-compatible identity correction before solving, otherwise constructs a
+bounded, isolated, per-axis F-space least-squares sufficient witness. The f64
+candidate is cast to f32 and accepted only by the device all-active-row audit.
+No public tolerance changed, no target is averaged, and no soft fallback or
+geometry allowlist was added. Nonfinite data and witness invariant failures
+remain fail-closed, and all collective scratch is retired without touching
+terminal-Q or pressure-nullspace committed state.
+
+Fourteen directly affected strict-CUDA contracts passed in one process in
+`39.749 s`. Python compilation, structure validation, `git diff --check`, and
+a fresh independent read-only review also passed. The complete source-matched
+component protocol then passed at clean `8fb44de`, with every artifact bound to
+source SHA256
+`4c88aa85bb2db42d75907ae794da7d9d4028b6c900d124c5191fc838fb878877`:
+
+- `turek_hron__component__solid_s100_nx4__8fb44de__r01`;
+- `turek_hron__component__solid_s200_nx4__8fb44de__r01`;
+- `turek_hron__component__solid_s100_s200_nx4__8fb44de__r01`, Point-A
+  relative-vector delta `0.0003264915974131584`;
+- `turek_hron__component__solid_s200_nx8__8fb44de__r01`;
+- `turek_hron__component__solid_s200_nx4_nx8__8fb44de__r01`, Point-A
+  relative-vector delta `0.0`;
+- `turek_hron__component__fixed_fluid_nx4__8fb44de__r01` and
+  `turek_hron__component__fixed_fluid_nx8__8fb44de__r01`, both 500 rows;
+- `turek_hron__component__fixed_fluid_nx4_nx8__8fb44de__r01`, force-per-span
+  relative-vector delta `0.006372355169562249`; and
+- independent `turek_hron__component__coupled_preflight_step1_nx4__8fb44de__r01`
+  and `turek_hron__component__coupled_preflight_step2_nx4__8fb44de__r01` runs,
+  both `PASS_SMOKE_ONLY`, with exact fluid/solid macro-time accounting.
+
+This is `PASS_COMPONENT_ONLY` plus the preregistered smoke prerequisite. It
+authorizes only a fresh 1600-step FSI1-S0 strict-CUDA run from zero. There is
+still no `PASS_FSI1_S0_GATE_ONLY`, no FSI1 pass, and no authorization for M0/M1
+or later cases.
 
 ### 5.5 Frozen formulas, tolerances, and evidence labels
 
@@ -1096,10 +1143,10 @@ diagnostic; the final claim remains no-commit live coupling/CG/matvec work.
    steps, then failed closed at candidate step 4 on a registered local-connector
    component-face conflict. Diagnose and repair that exact gate — complete at
    `7862472`; this is not an S0 pass.
-10. Regenerate the entire frozen component chain at final clean HEAD — active;
-    every artifact predating `7862472` is source-stale.
-11. If and only if every regenerated component passes, run a fresh 1600-step
-    FSI1-S0 strict-CUDA campaign from zero.
+10. Regenerate the entire frozen component chain at final clean HEAD — complete
+    at `8fb44de`; all ten stages are source-matched and passed.
+11. Run a fresh 1600-step FSI1-S0 strict-CUDA campaign from zero — active; the
+    component prerequisite is satisfied, but no S0 pass exists yet.
 12. Implement and validate a scalable rank-deficient Q backend and enforce the
     solid explicit-stability substep gate, then run M0/M1 and conditional F0.
     L1/L2 remain blocked until both prerequisites pass.
