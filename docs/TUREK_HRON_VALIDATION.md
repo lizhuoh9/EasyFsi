@@ -2,8 +2,9 @@
 
 Base results as of 2026-07-07; R26A status updated through 2026-09-05. Solver:
 HIBM-MPM (sharp immersed boundary + Material Point Method), Python + Taichi,
-CUDA. Commands use `python` from the active environment. Case:
-`cases/turek_hron_fsi.py`.
+CUDA. For R26A artifacts at and after `293dc69`, the active interpreter must
+measure as CPython `3.10.12`, NumPy `2.1.2`, and SciPy `1.15.3`; any
+mismatch is `BLOCKED_ENVIRONMENT`. Case: `cases/turek_hron_fsi.py`.
 
 Architecture update (2026-08-13): Turek-Hron FSI1/2/3 no longer owns a
 case-local Picard/Aitken/IQN state machine or an explicit single-pass mode. All
@@ -273,6 +274,78 @@ All ten labels end in `__5afba27__r01` under
 supersedes `8fb44de` and authorizes only a fresh formal FSI1-S0 run from zero.
 It is not `PASS_FSI1_S0_GATE_ONLY` and does not authorize M0/M1, FSI2, FSI3,
 Oracle, or learning.
+
+**R26A minimax F-only repair, host pinning, and requalification
+(2026-09-05).** A fresh formal run,
+`turek_hron__fsi1_s0__27111d3__r01`, started from zero at clean commit
+`27111d3`. It accepted steps 1--7 through `t=0.035 s`, then failed closed
+while preparing candidate step 8 with `certificate_count=0`. The
+zero-correction residual was `1.0104837565449998e-4 m/s`; the existing
+least-squares F-only candidate
+reduced its device-audited maximum residual to
+`1.0004986688727513e-4 m/s`, still just above the frozen `1e-4 m/s`
+limit. The accepted prefix is failure evidence only, not an S0 pass, and the
+formal run cannot resume because no complete transition checkpoint was
+published.
+
+An independent minimax solve of the same captured 336-row system reached
+`9.82453917360385e-5 m/s` in f64 and
+`9.824539301916957e-5 m/s` under the production f32 device audit. The
+`certificate_count=0` result was correct: this system needed no H
+authorization. The false negative belonged only to the old F-feasibility
+decision, which used the minimum-L2 witness as its sole sufficient witness for
+an L-infinity acceptance criterion. It was not authorization to widen the
+tolerance, admit a new topology, or expose H columns.
+
+Clean commit `d3044d9` retains the bounded least-squares fast path and, only
+when its f32 device audit fails, solves a column-normalized minimax LP. The LP
+candidate remains provisional until the unchanged device audit accepts every
+active row. Backend failure, nonfinite data, inconsistent constraints, or a
+remaining excessive residual stays atomic and fail-closed; scratch is cleared
+and no physical state is committed. Fourteen targeted collective strict-CUDA
+contracts passed in one process (`758.463 s`), including signed minimax,
+fast-path, backend-failure, true-inconsistency, F/H, rank, and scratch-
+retirement cases. Python compilation, Ruff, `git diff --check`, 66 focused
+host/static tests, and two independent read-only reviews also passed. The
+earlier broad component-face module attempt was interrupted and has no
+module-level verdict.
+
+Clean commit `293dc69` additionally binds formal and component evidence to a
+strict JSON-safe host numerics identity: CPython `3.10.12`, NumPy `2.1.2`,
+and SciPy `1.15.3`. Component `run_manifest.json` files use schema 2,
+future formal accepted-chunk manifests use `schema_version: 2`, and the
+host-identity payload remains schema 1. `requirements.txt` participates in
+source provenance, and a wrong host environment fails before solver or Taichi
+initialization. The host identity
+SHA256 for this campaign is
+`db88ab4094ab1be43ad58b7c18cc59c756a45e1ac4f44978bc6238a4738c6a47`.
+
+The complete ten-stage component protocol then passed at clean `293dc69`.
+Every artifact is bound to source SHA256
+`f186fa55278ef55a82f8ae2f740defad0766f3350450355bf6c1710fa279d7f3`
+and the host identity above:
+
+- the three solid runs each completed 40 rows. S100/S200 nx4 and S200
+  nx4/nx8 Point-A relative-vector deltas were
+  `0.0003264915974131584` and `0.0`;
+- fixed-fluid nx4 and nx8 each completed 500 rows. Their velocity/force
+  span-leakage pairs were
+  `0.0005504236652169761/0.0006353445200368427` and
+  `0.00043036809704860384/0.0003521293000030293`; their drag means were
+  `12.84566396988839` and `12.927745876346897 N/m`;
+- the fixed-fluid nx4/nx8 force-per-span relative-vector delta was
+  `0.006372353579412674 < 0.02`; and
+- independent one- and two-step coupled preflights passed as
+  `PASS_SMOKE_ONLY`, with final accepted times exactly `0.005 s` and
+  `0.010 s` and zero unadvanced fluid/solid time.
+
+All ten labels end in `__293dc69__r01` under
+`validation_runs/turek_hron_component_gates/`. This chain supersedes
+`5afba27` and authorizes only one fresh formal 1600-step FSI1-S0 strict-CUDA
+run from zero after this documentation-only record is committed. The new label
+must contain that clean documentation commit's short SHA; it must not resume or
+reuse the `27111d3` prefix. This is not `PASS_FSI1_S0_GATE_ONLY` and does
+not authorize M0/M1, FSI2, FSI3, Oracle, or learning.
 
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It

@@ -1,7 +1,9 @@
 # Turek–Hron FSI1/FSI2/FSI3 Numerical Validation R26A Goal
 
-Status: active. The frozen component prerequisite is complete at `5afba27`;
-the next authorized numerical action is a fresh formal FSI1-S0 run from zero.
+Status: active. The current frozen component prerequisite is complete at clean
+`293dc69` under the pinned host-numerics identity. After this documentation-
+only record is committed, the next authorized numerical action is one fresh
+formal 1600-step FSI1-S0 strict-CUDA campaign from zero; no S0 pass exists yet.
 
 Branch: **codex/turek-hron-fsi123-validation-r26a**
 
@@ -772,6 +774,67 @@ This supersedes the `8fb44de` prerequisite. It authorizes only a fresh
 1600-step FSI1-S0 strict-CUDA campaign from zero. No S0 pass or authorization
 for M0/M1 and later cases exists yet.
 
+#### 5.4.7 Minimax F-only repair, host identity, and requalification (2026-09-05)
+
+Formal run `turek_hron__fsi1_s0__27111d3__r01` started from zero at clean
+`27111d3`, accepted steps 1--7 through `t=0.035 s`, and failed closed
+while preparing candidate step 8 with `certificate_count=0`. The
+zero-correction residual was `1.0104837565449998e-4 m/s`. The existing
+minimum-L2 F-only candidate reached a device maximum residual of
+`1.0004986688727513e-4 m/s`, just above the frozen `1e-4 m/s` limit. The
+accepted prefix remains failure evidence only; it is not an S0 pass and lacks
+a complete transition checkpoint for formal resume.
+
+The same captured 336-row system has a feasible minimax F-only witness:
+`9.82453917360385e-5 m/s` in f64 and
+`9.824539301916957e-5 m/s` in the production f32 device audit.
+`certificate_count=0` was therefore correct; the false negative belonged
+only to the old L2-only F-feasibility decision. This was not a reason to
+change the public tolerance,
+admit geometry, or authorize H. Clean `d3044d9` retains least squares as the
+fast path and invokes a column-normalized minimax LP only after that
+candidate's f32 device audit fails. The LP output cannot commit state directly;
+the unchanged all-row device audit is the sole acceptance boundary, and every
+failure path remains atomic and fail-closed.
+
+Verification passed 14 targeted collective strict-CUDA contracts in one
+process (`758.463 s`), 66 focused host/static tests, Python compilation,
+Ruff, `git diff --check`, and two fresh independent read-only reviews. This
+does not claim a verdict for the interrupted broad component-face module run.
+
+Clean `293dc69` also makes the numerical host part of formal provenance:
+CPython `3.10.12`, NumPy `2.1.2`, SciPy `1.15.3`, identity SHA256
+`db88ab4094ab1be43ad58b7c18cc59c756a45e1ac4f44978bc6238a4738c6a47`.
+Component `run_manifest.json` files use schema 2, future formal
+accepted-chunk manifests use `schema_version: 2`, and the host-identity
+payload remains schema 1. `requirements.txt` is source-tracked, and host
+mismatch fails before solver or Taichi initialization.
+
+The complete ten-stage source-matched chain passed at clean `293dc69`, with
+every manifest bound to source SHA256
+`f186fa55278ef55a82f8ae2f740defad0766f3350450355bf6c1710fa279d7f3`
+and the host identity above:
+
+- `solid_s100_nx4`, `solid_s200_nx4`, and `solid_s200_nx8` each
+  completed 40 rows;
+- solid S100/S200 nx4 and S200 nx4/nx8 Point-A relative-vector deltas were
+  `0.0003264915974131584` and `0.0`;
+- `fixed_fluid_nx4` and `fixed_fluid_nx8` each completed 500 rows, with
+  velocity/force span-leakage pairs
+  `0.0005504236652169761/0.0006353445200368427` and
+  `0.00043036809704860384/0.0003521293000030293`;
+- their force-per-span relative-vector delta was
+  `0.006372353579412674 < 0.02`; and
+- independent one- and two-step coupled preflights passed as
+  `PASS_SMOKE_ONLY`, with exact final accepted times `0.005 s` and
+  `0.010 s` and zero unadvanced fluid/solid time.
+
+All ten artifact labels end in `__293dc69__r01`. This supersedes
+`5afba27` and authorizes only a fresh 1600-step FSI1-S0 strict-CUDA campaign
+from zero after this documentation-only record is committed. Its label must
+contain that clean commit's short SHA and must not reuse the `27111d3`
+prefix. No S0 pass or authorization for M0/M1 and later cases exists yet.
+
 ### 5.5 Frozen formulas, tolerances, and evidence labels
 
 For nonzero finer/reference vector \(\mathbf b\), define
@@ -1206,16 +1269,27 @@ diagnostic; the final claim remains no-commit live coupling/CG/matvec work.
     failed closed at candidate step 8. Diagnose and repair the certificate-
     connected weighted F/H class — complete at `5afba27`; this is not an S0
     pass.
-12. Regenerate the entire frozen component chain at final clean HEAD — complete
-    at `5afba27`; all ten stages are source-matched and passed.
-13. Run a fresh 1600-step FSI1-S0 strict-CUDA campaign from zero — active; the
-    component prerequisite is satisfied, but no S0 pass exists yet.
-14. Implement and validate a scalable rank-deficient Q backend and enforce the
+12. Regenerate the frozen component chain at `5afba27` — complete, then
+    consumed by the `27111d3` formal attempt and superseded by later source
+    changes.
+13. Record formal attempt `27111d3`: seven accepted steps, then a candidate-
+    step 8 F-only false negative with a correct zero-certificate result —
+    complete; this is not an S0 pass.
+14. Replace the L2-only sufficient decision with the device-audited max-norm
+    fallback — complete at `d3044d9`.
+15. Bind and fail closed on the pinned host-numerics identity — complete at
+    `293dc69`.
+16. Regenerate the entire ten-stage component chain at `293dc69` — complete;
+    every stage is source- and host-matched and passed.
+17. Commit this documentation-only record, then run one fresh 1600-step FSI1-S0
+    strict-CUDA campaign from zero — active. Use a new label containing that
+    documentation commit's short SHA; do not resume the `27111d3` prefix.
+18. Implement and validate a scalable rank-deficient Q backend and enforce the
     solid explicit-stability substep gate, then run M0/M1 and conditional F0.
     L1/L2 remain blocked until both prerequisites pass.
-15. If and only if FSI1 passes, run FSI2.
-16. If and only if FSI2 passes, run FSI3.
-17. If and only if all three reach benchmark quality, close R26A and open the
+19. If and only if FSI1 passes, run FSI2.
+20. If and only if FSI2 passes, run FSI3.
+21. If and only if all three reach benchmark quality, close R26A and open the
     separately preregistered Oracle goal.
 
 No later item may be started to avoid, dilute, or reinterpret an earlier failed
