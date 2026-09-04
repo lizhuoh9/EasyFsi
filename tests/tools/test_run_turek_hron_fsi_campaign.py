@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from tools.validation import run_turek_hron_fsi_campaign as campaign
+from tools.validation import turek_hron_component_gate_contracts as contracts
 
 
 RUNTIME_IDENTITY = {
@@ -41,6 +42,12 @@ def _provenance() -> dict[str, object]:
         "source_hashes": {"cases/turek_hron_fsi.py": "d" * 64},
         "source_sha256": "e" * 64,
         "config_source_sha256": "f" * 64,
+        "host_numerics_identity": contracts.host_numerics_identity(),
+        "host_numerics_identity_sha256": (
+            contracts.host_numerics_identity_sha256(
+                contracts.host_numerics_identity()
+            )
+        ),
     }
 
 
@@ -126,6 +133,7 @@ def test_formal_source_hashes_cover_direct_and_transitive_production_code() -> N
         "simulation_core/fluids/solver.py",
         "src/refactored/validation/turek_hron_fsi/references.py",
         "tools/validation/run_turek_hron_fsi_campaign.py",
+        "requirements.txt",
     } <= paths
 
 
@@ -166,6 +174,7 @@ def test_effective_config_binding_preserves_captured_source_identity() -> None:
 
     assert bound["git"] == source["git"]
     assert bound["source_hashes"] == source["source_hashes"]
+    assert bound["host_numerics_identity"] == source["host_numerics_identity"]
     assert bound["config"] == effective
     assert bound["config_sha256"] != source["config_sha256"]
 
@@ -292,12 +301,19 @@ def test_accepted_writer_publishes_exact_immutable_chunks_and_manifests(
     with np.load(second_npz, allow_pickle=False) as archive:
         np.testing.assert_array_equal(archive["accepted_step"], [4, 5])
     manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == 2
     assert manifest["first_accepted_step"] == 1
     assert manifest["last_accepted_step"] == 3
     assert manifest["accepted_step_count"] == 3
     assert manifest["npz_sha256"] == campaign.sha256_file(first_npz)
     assert set(manifest["array_sha256"]) == first_names
     assert manifest["git"]["dirty"] is False
+    assert manifest["host_numerics_identity"] == contracts.host_numerics_identity()
+    assert manifest["host_numerics_identity_sha256"] == (
+        contracts.host_numerics_identity_sha256(
+            contracts.host_numerics_identity()
+        )
+    )
     assert manifest["parent_checkpoint_lineage"] == {
         "kind": "from_start",
         "parent": None,
@@ -455,6 +471,11 @@ def test_s0_gate_does_not_require_single_run_canonical_accuracy() -> None:
             "BLOCKED_SOURCE_MISMATCH",
         ),
         (
+            "BLOCKED_SOURCE_MISMATCH",
+            ValueError("FAIL_HOST_NUMERICS_IDENTITY"),
+            "BLOCKED_ENVIRONMENT",
+        ),
+        (
             "BLOCKED_ENVIRONMENT",
             RuntimeError("strict CUDA initialization failed"),
             "BLOCKED_ENVIRONMENT",
@@ -510,6 +531,20 @@ def test_campaign_failure_artifact_preserves_original_diagnostics(
     assert payload["error"] == "nonfinite pressure"
     assert payload["accepted_step_count"] == 17
     assert payload["provenance"] == _provenance()
+    assert payload["host_numerics_identity"] == contracts.host_numerics_identity()
+    assert payload["host_numerics_identity_sha256"] == (
+        contracts.host_numerics_identity_sha256(
+            contracts.host_numerics_identity()
+        )
+    )
+
+
+def test_host_numerics_identity_is_captured_before_solver_imports() -> None:
+    source = inspect.getsource(campaign.run_fsi1_s0_campaign)
+
+    assert source.index("provenance = capture_provenance(FSI1_S0_SPEC)") < source.index(
+        'case = importlib.import_module("cases.turek_hron_fsi")'
+    )
 
 
 def test_strict_runtime_is_initialized_before_the_numerical_run() -> None:

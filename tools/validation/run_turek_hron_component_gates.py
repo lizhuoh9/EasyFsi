@@ -33,10 +33,13 @@ from tools.validation.turek_hron_component_gate_contracts import (
     force_vector as force_vector,
     frozen_component_config,
     full_time,
+    host_numerics_identity,
+    host_numerics_identity_sha256,
     integrated_mass_imbalance,
     numerical_taichi_runtime_identity,
     point_a_vector as point_a_vector,
     relative_vector_delta,
+    validate_host_numerics_identity,
     validate_taichi_runtime_identity,
 )
 from tools.validation.turek_hron_component_gate_runtimes import (
@@ -46,7 +49,7 @@ from tools.validation.turek_hron_component_gate_runtimes import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_SCHEMA = 1
+_SCHEMA = 2
 _HISTORY_SCHEMA = 4
 _ROOT_TOLERANCE_M = 1.0e-8
 _LEAKAGE_TOLERANCE = 1.0e-3
@@ -69,6 +72,7 @@ _SOURCE_PATHS = (
     "tools/validation/run_turek_hron_component_gates.py",
     "tools/validation/turek_hron_component_gate_contracts.py",
     "tools/validation/turek_hron_component_gate_runtimes.py",
+    "requirements.txt",
 )
 
 
@@ -111,6 +115,7 @@ def _capture_provenance(config: Mapping[str, Any]) -> dict[str, Any]:
 
     sources = _source_hashes()
     config_payload = dict(config)
+    host_identity = host_numerics_identity()
     return {
         "git": _git_identity(),
         "config": config_payload,
@@ -120,6 +125,10 @@ def _capture_provenance(config: Mapping[str, Any]) -> dict[str, Any]:
         "config_source_sha256": hashlib.sha256(
             _canonical({"config": config_payload, "sources": sources})
         ).hexdigest(),
+        "host_numerics_identity": host_identity,
+        "host_numerics_identity_sha256": host_numerics_identity_sha256(
+            host_identity
+        ),
     }
 
 
@@ -149,6 +158,15 @@ def _write_artifacts(
         raise ValueError("FAIL_PROVENANCE_CONFIG")
     if identity.get("source_hashes") != _source_hashes():
         raise ValueError("FAIL_PROVENANCE_SOURCE_DRIFT")
+    host_identity = validate_host_numerics_identity(
+        identity.get("host_numerics_identity")
+    )
+    if identity.get("host_numerics_identity_sha256") != host_numerics_identity_sha256(
+        host_identity
+    ):
+        raise ValueError("FAIL_PROVENANCE_HOST_NUMERICS_HASH")
+    if host_identity != host_numerics_identity():
+        raise ValueError("FAIL_PROVENANCE_HOST_NUMERICS_DRIFT")
     history_path, final_path, summary_path, manifest_path = (
         run_dir / "history.csv",
         run_dir / "final.npz",
@@ -176,6 +194,7 @@ def _write_artifacts(
         else taichi_runtime_identity
     )
     payload["artifact_sha256"] = artifact_hashes
+    payload["host_numerics_identity"] = host_identity
     payload["taichi_runtime_identity"] = runtime_identity
     summary_path.write_bytes(_canonical(payload) + b"\n")
     manifest = {
@@ -191,6 +210,10 @@ def _write_artifacts(
         "source_hashes": identity["source_hashes"],
         "source_sha256": identity["source_sha256"],
         "marker_layout_sha256": marker_layout_sha256,
+        "host_numerics_identity": host_identity,
+        "host_numerics_identity_sha256": host_numerics_identity_sha256(
+            host_identity
+        ),
         "taichi_runtime_identity": runtime_identity,
         "taichi_runtime_identity_sha256": hashlib.sha256(
             _canonical(runtime_identity)
@@ -396,6 +419,17 @@ def _read_completed(
         raise ValueError(f"FAIL_ARTIFACT_SOURCE_HASH: {path}")
     if manifest.get("source_hashes") != _source_hashes():
         raise ValueError(f"FAIL_ARTIFACT_SOURCE_DRIFT: {path}")
+    host_identity = validate_host_numerics_identity(
+        manifest.get("host_numerics_identity")
+    )
+    if manifest.get("host_numerics_identity_sha256") != host_numerics_identity_sha256(
+        host_identity
+    ):
+        raise ValueError(f"FAIL_ARTIFACT_HOST_NUMERICS_HASH: {path}")
+    if summary.get("host_numerics_identity") != host_identity:
+        raise ValueError(f"FAIL_ARTIFACT_HOST_NUMERICS_MISMATCH: {path}")
+    if host_identity != host_numerics_identity():
+        raise ValueError(f"FAIL_ARTIFACT_HOST_NUMERICS_DRIFT: {path}")
     if manifest.get("config_source_sha256") != hashlib.sha256(
         _canonical({"config": manifest["config"], "sources": sources})
     ).hexdigest():
@@ -457,6 +491,8 @@ def compare_completed_runs(left: Path, right: Path) -> dict[str, Any]:
     for key in ("source_sha256", "marker_layout_sha256"):
         if lm.get(key) != rm.get(key):
             raise ValueError(f"comparison source identity mismatch: {key}")
+    if lm.get("host_numerics_identity") != rm.get("host_numerics_identity"):
+        raise ValueError("comparison host numerics identity mismatch")
     if numerical_taichi_runtime_identity(
         lm.get("taichi_runtime_identity")
     ) != numerical_taichi_runtime_identity(rm.get("taichi_runtime_identity")):

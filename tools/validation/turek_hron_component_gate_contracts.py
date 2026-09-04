@@ -5,11 +5,80 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import platform
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
 _ROOT_TOLERANCE_M = 1.0e-8
+_HOST_NUMERICS_IDENTITY_SCHEMA = 1
+_HOST_NUMERICS_PYTHON_IMPLEMENTATION = "CPython"
+_HOST_NUMERICS_PYTHON_FAMILY = (3, 10)
+_HOST_NUMERICS_NUMPY_VERSION = "2.1.2"
+_HOST_NUMERICS_SCIPY_VERSION = "1.15.3"
+
+
+def validate_host_numerics_identity(identity: Any) -> dict[str, Any]:
+    """Validate the pinned host numerical runtime used by formal evidence."""
+
+    if not isinstance(identity, Mapping):
+        raise ValueError("FAIL_HOST_NUMERICS_IDENTITY")
+    try:
+        payload = json.loads(json.dumps(dict(identity), allow_nan=False))
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("FAIL_HOST_NUMERICS_IDENTITY") from error
+    python_identity = payload.get("python")
+    if not isinstance(python_identity, dict):
+        raise ValueError("FAIL_HOST_NUMERICS_IDENTITY")
+    version = python_identity.get("version")
+    parts = version.split(".") if isinstance(version, str) else []
+    valid = (
+        set(payload)
+        == {"schema_version", "python", "numpy_version", "scipy_version"}
+        and type(payload.get("schema_version")) is int
+        and set(python_identity) == {"implementation", "version"}
+        and payload.get("schema_version") == _HOST_NUMERICS_IDENTITY_SCHEMA
+        and python_identity.get("implementation")
+        == _HOST_NUMERICS_PYTHON_IMPLEMENTATION
+        and len(parts) == 3
+        and all(part.isdigit() for part in parts)
+        and tuple(int(part) for part in parts[:2])
+        == _HOST_NUMERICS_PYTHON_FAMILY
+        and payload.get("numpy_version") == _HOST_NUMERICS_NUMPY_VERSION
+        and payload.get("scipy_version") == _HOST_NUMERICS_SCIPY_VERSION
+    )
+    if not valid:
+        raise ValueError("FAIL_HOST_NUMERICS_IDENTITY")
+    return payload
+
+
+def host_numerics_identity() -> dict[str, Any]:
+    """Measure and validate the host Python/NumPy/SciPy runtime before jobs."""
+
+    try:
+        from scipy import __version__ as scipy_version
+    except ImportError as error:
+        raise RuntimeError("FAIL_HOST_NUMERICS_IDENTITY") from error
+    return validate_host_numerics_identity(
+        {
+            "schema_version": _HOST_NUMERICS_IDENTITY_SCHEMA,
+            "python": {
+                "implementation": platform.python_implementation(),
+                "version": platform.python_version(),
+            },
+            "numpy_version": np.__version__,
+            "scipy_version": scipy_version,
+        }
+    )
+
+
+def host_numerics_identity_sha256(identity: Any) -> str:
+    payload = validate_host_numerics_identity(identity)
+    return hashlib.sha256(
+        json.dumps(
+            payload, allow_nan=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def frozen_component_config(

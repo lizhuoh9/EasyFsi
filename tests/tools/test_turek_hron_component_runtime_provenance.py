@@ -54,6 +54,41 @@ def test_runtime_identity_validation_and_numerical_comparison_contract():
         contracts.validate_taichi_runtime_identity(invalid)
 
 
+def test_host_numerics_identity_is_strict_json_safe_and_pinned():
+    identity = contracts.host_numerics_identity()
+
+    assert contracts.validate_host_numerics_identity(identity) == identity
+    assert identity["python"]["version"].startswith("3.10.")
+    assert identity["numpy_version"] == "2.1.2"
+    assert identity["scipy_version"] == "1.15.3"
+    assert contracts.host_numerics_identity_sha256(identity) == runner.hashlib.sha256(
+        runner._canonical(identity)
+    ).hexdigest()
+
+    invalid = deepcopy(identity)
+    invalid["scipy_version"] = "1.15.2"
+    with pytest.raises(ValueError, match="FAIL_HOST_NUMERICS_IDENTITY"):
+        contracts.validate_host_numerics_identity(invalid)
+
+    invalid = deepcopy(identity)
+    invalid["schema_version"] = True
+    with pytest.raises(ValueError, match="FAIL_HOST_NUMERICS_IDENTITY"):
+        contracts.validate_host_numerics_identity(invalid)
+
+
+def test_host_numerics_identity_measures_imported_scipy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import scipy
+
+    monkeypatch.setattr(scipy, "__version__", "1.15.2")
+    with pytest.raises(
+        ValueError,
+        match="FAIL_HOST_NUMERICS_IDENTITY",
+    ):
+        contracts.host_numerics_identity()
+
+
 def test_runtime_constructor_rejects_callable_returning_prebuilt_instance():
     effective = {"mode": "solid-only"}
 
@@ -216,6 +251,13 @@ def test_runtime_identity_is_hashed_in_summary_manifest_and_read_back(tmp_path: 
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["taichi_runtime_identity"] == RUNTIME_IDENTITY
     assert manifest["taichi_runtime_identity"] == RUNTIME_IDENTITY
+    assert summary["host_numerics_identity"] == contracts.host_numerics_identity()
+    assert manifest["host_numerics_identity"] == contracts.host_numerics_identity()
+    assert manifest["host_numerics_identity_sha256"] == (
+        contracts.host_numerics_identity_sha256(
+            contracts.host_numerics_identity()
+        )
+    )
     assert manifest["taichi_runtime_identity_sha256"] == runner.hashlib.sha256(
         runner._canonical(RUNTIME_IDENTITY)
     ).hexdigest()

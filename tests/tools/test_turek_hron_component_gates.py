@@ -370,6 +370,7 @@ def test_affine_q_source_hashes_are_explicit_provenance_members():
     expected_paths = (
         "simulation_core/coupling/hibm_mpm/marker_mac_constraint.py",
         "simulation_core/coupling/hibm_mpm/marker_mac_projector.py",
+        "requirements.txt",
     )
 
     source_hashes = module._source_hashes()
@@ -573,6 +574,40 @@ def test_mode_specific_compare_verifies_hashes_and_persists_parent_identities(
         module.compare_completed_runs(left, right)
     monkeypatch.setattr(module, "persist_comparison", lambda *args, **kwargs: {"status": "FAIL_COMPONENT_COMPARISON"})
     assert module.main(["compare", "--left", "l", "--right", "r", "--label", "failed"]) == 1
+
+
+def test_component_comparison_requires_exact_host_numerics_identity(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _module()
+    base = {
+        "source_sha256": "a" * 64,
+        "marker_layout_sha256": "b" * 64,
+        "taichi_runtime_identity": RUNTIME_IDENTITY,
+        "config": {
+            "mode": "solid-only",
+            "grid_nodes": (4, 48, 288),
+            "solid_substeps": 100,
+        },
+    }
+    left = {**base, "host_numerics_identity": {"runtime": "left"}}
+    right = {
+        **base,
+        "host_numerics_identity": {"runtime": "right"},
+        "config": {
+            "mode": "solid-only",
+            "grid_nodes": (4, 48, 288),
+            "solid_substeps": 200,
+        },
+    }
+    monkeypatch.setattr(
+        module,
+        "_read_completed",
+        lambda path: (left if Path(path).name == "left" else right, {}, []),
+    )
+
+    with pytest.raises(ValueError, match="comparison host numerics identity mismatch"):
+        module.compare_completed_runs(Path("left"), Path("right"))
 
 
 def test_compare_requires_one_oriented_axis_and_uses_fixed_fluid_window_mean(

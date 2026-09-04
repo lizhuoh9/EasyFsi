@@ -21,6 +21,11 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from tools.validation.turek_hron_component_gate_contracts import (
+    host_numerics_identity,
+    host_numerics_identity_sha256,
+    validate_host_numerics_identity,
+)
 from src.refactored.validation.turek_hron_fsi.accepted_interface import (
     AcceptedRecordValidator,
     MARKER_FORCE_SUM_RELATIVE_TOLERANCE as _MARKER_FORCE_SUM_RELATIVE_TOLERANCE,
@@ -94,6 +99,7 @@ def _source_paths() -> tuple[str, ...]:
         for path in (_REPO_ROOT / root).rglob("*.py")
         if "__pycache__" not in path.parts
     }
+    paths.add("requirements.txt")
     if not paths:
         raise RuntimeError("FAIL_PROVENANCE_SOURCE_DISCOVERY")
     return tuple(sorted(paths))
@@ -167,6 +173,7 @@ def capture_provenance(config: Mapping[str, Any]) -> dict[str, Any]:
         for relative in _source_paths()
     }
     payload = dict(config)
+    host_identity = host_numerics_identity()
     return {
         "git": git,
         "config": payload,
@@ -176,6 +183,10 @@ def capture_provenance(config: Mapping[str, Any]) -> dict[str, Any]:
         "config_source_sha256": hashlib.sha256(
             _canonical({"config": payload, "sources": source_hashes})
         ).hexdigest(),
+        "host_numerics_identity": host_identity,
+        "host_numerics_identity_sha256": host_numerics_identity_sha256(
+            host_identity
+        ),
     }
 
 
@@ -187,6 +198,13 @@ def bind_effective_config(
 
     payload = _json_copy(dict(config))
     sources = _json_copy(dict(source_provenance["source_hashes"]))
+    host_identity = validate_host_numerics_identity(
+        source_provenance.get("host_numerics_identity")
+    )
+    if source_provenance.get("host_numerics_identity_sha256") != (
+        host_numerics_identity_sha256(host_identity)
+    ):
+        raise ValueError("FAIL_PROVENANCE_HOST_NUMERICS_HASH")
     return {
         "git": _json_copy(dict(source_provenance["git"])),
         "config": payload,
@@ -196,6 +214,10 @@ def bind_effective_config(
         "config_source_sha256": hashlib.sha256(
             _canonical({"config": payload, "sources": sources})
         ).hexdigest(),
+        "host_numerics_identity": host_identity,
+        "host_numerics_identity_sha256": host_numerics_identity_sha256(
+            host_identity
+        ),
     }
 
 
@@ -282,6 +304,13 @@ class AcceptedInterfaceChunkWriter:
         self.chunk_size = int(chunk_size)
         self.expected_steps = int(expected_steps)
         self.provenance = _json_copy(dict(provenance))
+        self.host_numerics_identity = validate_host_numerics_identity(
+            self.provenance.get("host_numerics_identity")
+        )
+        if self.provenance.get("host_numerics_identity_sha256") != (
+            host_numerics_identity_sha256(self.host_numerics_identity)
+        ):
+            raise ValueError("FAIL_PROVENANCE_HOST_NUMERICS_HASH")
         self.marker_layout_sha256 = marker_layout_sha256
         self.taichi_runtime_identity = _validate_runtime_identity(
             taichi_runtime_identity
@@ -370,7 +399,7 @@ class AcceptedInterfaceChunkWriter:
         )
         manifest_path = self.output_dir / f"{stem}.manifest.json"
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifact": "accepted_turek_hron_interface_chunk",
             "first_accepted_step": int(arrays["accepted_step"][0]),
             "last_accepted_step": int(arrays["accepted_step"][-1]),
@@ -386,6 +415,10 @@ class AcceptedInterfaceChunkWriter:
                 "config_source_sha256"
             ],
             "marker_layout_sha256": self.marker_layout_sha256,
+            "host_numerics_identity": self.host_numerics_identity,
+            "host_numerics_identity_sha256": host_numerics_identity_sha256(
+                self.host_numerics_identity
+            ),
             "taichi_runtime_identity": self.taichi_runtime_identity,
             "parent_checkpoint_lineage": self.parent_checkpoint_lineage,
             "field_semantics": {
@@ -398,10 +431,10 @@ class AcceptedInterfaceChunkWriter:
                     "committed post-solid marker state stored alongside, but "
                     "not used to resample the pre-solid force constituents"
                 ),
-                "marker_force_sum_relative_tolerance": (
+                "marker_force_sum_relative_tolerance": float(
                     _MARKER_FORCE_SUM_RELATIVE_TOLERANCE
                 ),
-                "total_force_closure_relative_tolerance": (
+                "total_force_closure_relative_tolerance": float(
                     _TOTAL_FORCE_CLOSURE_RELATIVE_TOLERANCE
                 ),
             },
@@ -485,6 +518,16 @@ def _write_failure(
         "provenance": (
             None if provenance is None else dict(provenance)
         ),
+        "host_numerics_identity": (
+            None
+            if provenance is None
+            else provenance.get("host_numerics_identity")
+        ),
+        "host_numerics_identity_sha256": (
+            None
+            if provenance is None
+            else provenance.get("host_numerics_identity_sha256")
+        ),
         "created_utc": datetime.now(timezone.utc).isoformat(),
     }
     try:
@@ -500,6 +543,8 @@ def _campaign_failure_status(
 ) -> str:
     """Classify a failure from its explicit execution boundary."""
 
+    if str(error) == "FAIL_HOST_NUMERICS_IDENTITY":
+        return "BLOCKED_ENVIRONMENT"
     if isinstance(error, (ImportError, MemoryError, OSError)):
         return "BLOCKED_ENVIRONMENT"
     if phase_status in _FAILURE_STATUSES:
@@ -761,6 +806,10 @@ def run_fsi1_s0_campaign(
             ],
             "marker_layout_sha256": observed_marker_hash,
             "taichi_runtime_identity": observed_runtime,
+            "host_numerics_identity": provenance["host_numerics_identity"],
+            "host_numerics_identity_sha256": provenance[
+                "host_numerics_identity_sha256"
+            ],
             "provenance": provenance,
             "acceptance": report,
         }
