@@ -1,6 +1,6 @@
 # Turek–Hron FSI Validation Report
 
-Base results as of 2026-07-07; R26A status updated through 2026-09-04. Solver:
+Base results as of 2026-07-07; R26A status updated through 2026-09-05. Solver:
 HIBM-MPM (sharp immersed boundary + Material Point Method), Python + Taichi,
 CUDA. Commands use `python` from the active environment. Case:
 `cases/turek_hron_fsi.py`.
@@ -212,6 +212,67 @@ The artifact labels all end in `__8fb44de__r01` and live under
 source-matched component prerequisite and authorizes a new formal FSI1-S0 run
 from zero. It is not `PASS_FSI1_S0_GATE_ONLY`, does not establish FSI1
 benchmark quality, and does not authorize FSI2, FSI3, Oracle, or learning.
+
+**R26A certificate-connected weighted F/H repair and requalification
+(2026-09-05).** The next formal run,
+`turek_hron__fsi1_s0__0025e12__r01`, started from zero at clean commit
+`0025e12`. It accepted steps 1--7 through `t=0.035 s`, then failed closed while
+preparing candidate step 8 because marker compatibility closure did not
+converge with three hard-target certificates. The accepted prefix is preserved,
+but it is not an S0 pass and cannot be resumed as formal evidence because no
+complete transition checkpoint was published.
+
+The captured candidate-step algebra contained 336 active marker-axis rows. An
+F-only solve remained just above the frozen absolute limit, while an F/H solve
+was feasible. The defect was therefore not a reason to widen the `1e-4 m/s`
+tolerance or add a geometry allowlist: the then-current hard-target solve scope
+and the global acceptance audit were not aligned. Clean commit `5afba27`
+authorizes H columns only within certificate-connected row components, includes
+all active F rows in the joint solve, determines structural rank without
+mobility scaling, and then computes the inverse-mass minimum-energy correction.
+The f64 candidate is cast to f32 and must pass separate device audits for both
+authorized repair rows and every active row. All nonfinite, rank, support, and
+residual failures remain fail-closed.
+
+The canonical device report schema is now version 6 and records whether the
+collective repair was applied, its exact backend, certificate count, repair and
+global residuals, hard-target DOF count, and maximum hard-target delta. The
+strict runner cross-validates those fields. A captured-step diagnostic replay
+closed with repair/global maxima
+`2.27050833246e-7/8.83974644239e-5 m/s`, 70 hard-target DOFs, and maximum H
+delta `1.05458639155e-4 m/s`. This replay is diagnostic only, not formal S0
+evidence.
+
+Verification included a RED/GREEN inverse-mass weighting and mobility-rank
+contract, four focused F/H strict-CUDA tests (`93.276 s`), one real hybrid
+integration (`177.698 s`), all 18 collective strict-CUDA tests (`862.117 s`),
+65 host/static report tests (`2.275 s`), Python compilation, structure
+validation, and `git diff --check`. A final independent read-only review gave a
+`ship` verdict with no P0/P1 finding.
+
+The complete frozen component protocol was then regenerated at clean commit
+`5afba27`, with every artifact bound to source SHA256
+`d1deddc51e16b3a862f25318d4bef75a773bd202d9d2e3e596615df5fe67a492`:
+
+- the three 40-row solid runs passed; S100/S200 nx4 and S200 nx4/nx8 Point-A
+  relative-vector deltas were `0.0003372753055382118` and
+  `1.0950965526574071e-5`;
+- fixed-fluid nx4 and nx8 each completed 500 rows. Their velocity/force
+  span-leakage pairs were
+  `0.0005504237140905238/0.0006353417123744162` and
+  `0.0004303681097731811/0.00035212962421930457`; their drag means were
+  `12.84566414514538` and `12.927746012667047 N/m`;
+- the fixed-fluid nx4/nx8 force-per-span relative-vector delta was
+  `0.006372354632268758 < 0.02`; and
+- independent one- and two-step coupled preflights passed as
+  `PASS_SMOKE_ONLY`, with final accepted times exactly `0.005 s` and
+  `0.010 s`.
+
+All ten labels end in `__5afba27__r01` under
+`validation_runs/turek_hron_component_gates/`. This new source-matched chain
+supersedes `8fb44de` and authorizes only a fresh formal FSI1-S0 run from zero.
+It is not `PASS_FSI1_S0_GATE_ONLY` and does not authorize M0/M1, FSI2, FSI3,
+Oracle, or learning.
 
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It

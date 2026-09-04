@@ -1,6 +1,6 @@
 # Turek–Hron FSI1/FSI2/FSI3 Numerical Validation R26A Goal
 
-Status: active. The frozen component prerequisite is complete at `8fb44de`;
+Status: active. The frozen component prerequisite is complete at `5afba27`;
 the next authorized numerical action is a fresh formal FSI1-S0 run from zero.
 
 Branch: **codex/turek-hron-fsi123-validation-r26a**
@@ -715,6 +715,63 @@ authorizes only a fresh 1600-step FSI1-S0 strict-CUDA run from zero. There is
 still no `PASS_FSI1_S0_GATE_ONLY`, no FSI1 pass, and no authorization for M0/M1
 or later cases.
 
+#### 5.4.6 Certificate-connected weighted F/H repair and requalification (2026-09-05)
+
+Formal run `turek_hron__fsi1_s0__0025e12__r01` started from zero at clean
+commit `0025e12`, accepted steps 1--7 through `t=0.035 s`, and failed closed
+while preparing candidate step 8 with three hard-target certificates because
+marker compatibility closure did not converge. The accepted prefix is retained
+as failure evidence only. It is not an S0 pass, and no complete transition
+checkpoint exists from which a formal run may resume.
+
+The captured candidate contained 336 active marker-axis rows. F-only closure
+remained just above the frozen `1e-4 m/s` absolute limit, while a joint F/H
+solution was feasible. The repair therefore fixes the solver class rather than
+widening a tolerance or admitting another topology. Clean commit `5afba27`
+forms certificate-connected row components, exposes H columns only inside
+those components, includes every active F row in the joint system, determines
+structural rank before mobility weighting, and solves the inverse-mass
+minimum-energy problem. The f64 result is materialized as f32 and accepted only
+after device audits pass both the authorized repair-row tolerance and the
+global all-active-row tolerance. Failure remains atomic and fail-closed.
+
+Device report schema 6 identifies the applied backend and records certificate
+count, repair/global residuals, hard-target DOF count, and maximum H delta. The
+strict runner checks field types, finiteness, bounds, and cross-consistency. An
+exact captured-step diagnostic replay closed with repair/global residual maxima
+`2.27050833246e-7/8.83974644239e-5 m/s`, 70 hard-target DOFs, and maximum H
+delta `1.05458639155e-4 m/s`; it remains diagnostic-only evidence.
+
+Focused verification passed the RED/GREEN inverse-mass weighting and
+mobility-rank contract, four F/H strict-CUDA tests (`93.276 s`), one real
+hybrid integration (`177.698 s`), all 18 collective strict-CUDA tests
+(`862.117 s`), 65 host/static report tests (`2.275 s`), compilation, structure
+validation, and `git diff --check`. A fresh independent review returned
+`ship` with no P0/P1 finding.
+
+The complete frozen component chain was regenerated at clean `5afba27`, and
+all ten artifacts are bound to source SHA256
+`d1deddc51e16b3a862f25318d4bef75a773bd202d9d2e3e596615df5fe67a492`:
+
+- `turek_hron__component__solid_s100_nx4__5afba27__r01`;
+- `turek_hron__component__solid_s200_nx4__5afba27__r01`;
+- `turek_hron__component__solid_s100_s200_nx4__5afba27__r01`, Point-A
+  relative-vector delta `0.0003372753055382118`;
+- `turek_hron__component__solid_s200_nx8__5afba27__r01`;
+- `turek_hron__component__solid_s200_nx4_nx8__5afba27__r01`, Point-A
+  relative-vector delta `1.0950965526574071e-5`;
+- `turek_hron__component__fixed_fluid_nx4__5afba27__r01` and
+  `turek_hron__component__fixed_fluid_nx8__5afba27__r01`, both 500 rows;
+- `turek_hron__component__fixed_fluid_nx4_nx8__5afba27__r01`, force-per-span
+  relative-vector delta `0.006372354632268758`; and
+- independent `turek_hron__component__coupled_preflight_step1_nx4__5afba27__r01`
+  and `turek_hron__component__coupled_preflight_step2_nx4__5afba27__r01` runs,
+  both `PASS_SMOKE_ONLY`, with final accepted times `0.005 s` and `0.010 s`.
+
+This supersedes the `8fb44de` prerequisite. It authorizes only a fresh
+1600-step FSI1-S0 strict-CUDA campaign from zero. No S0 pass or authorization
+for M0/M1 and later cases exists yet.
+
 ### 5.5 Frozen formulas, tolerances, and evidence labels
 
 For nonzero finer/reference vector \(\mathbf b\), define
@@ -1143,16 +1200,22 @@ diagnostic; the final claim remains no-commit live coupling/CG/matvec work.
    steps, then failed closed at candidate step 4 on a registered local-connector
    component-face conflict. Diagnose and repair that exact gate — complete at
    `7862472`; this is not an S0 pass.
-10. Regenerate the entire frozen component chain at final clean HEAD — complete
-    at `8fb44de`; all ten stages are source-matched and passed.
-11. Run a fresh 1600-step FSI1-S0 strict-CUDA campaign from zero — active; the
+10. Regenerate the entire frozen component chain at `8fb44de` — complete, then
+    superseded by the next source change.
+11. Record the formal `0025e12` S0 attempt: it accepted seven macro steps and
+    failed closed at candidate step 8. Diagnose and repair the certificate-
+    connected weighted F/H class — complete at `5afba27`; this is not an S0
+    pass.
+12. Regenerate the entire frozen component chain at final clean HEAD — complete
+    at `5afba27`; all ten stages are source-matched and passed.
+13. Run a fresh 1600-step FSI1-S0 strict-CUDA campaign from zero — active; the
     component prerequisite is satisfied, but no S0 pass exists yet.
-12. Implement and validate a scalable rank-deficient Q backend and enforce the
+14. Implement and validate a scalable rank-deficient Q backend and enforce the
     solid explicit-stability substep gate, then run M0/M1 and conditional F0.
     L1/L2 remain blocked until both prerequisites pass.
-13. If and only if FSI1 passes, run FSI2.
-14. If and only if FSI2 passes, run FSI3.
-15. If and only if all three reach benchmark quality, close R26A and open the
+15. If and only if FSI1 passes, run FSI2.
+16. If and only if FSI2 passes, run FSI3.
+17. If and only if all three reach benchmark quality, close R26A and open the
     separately preregistered Oracle goal.
 
 No later item may be started to avoid, dilute, or reinterpret an earlier failed
