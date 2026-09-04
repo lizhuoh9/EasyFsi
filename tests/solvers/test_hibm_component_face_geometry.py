@@ -290,13 +290,83 @@ class HibmComponentFaceGeometryTests(
         operator._measure_collective_target_closure_kernel(0)
         self.assertGreater(float(operator._collective_max_residual[None]), 1.0e-6)
         self._seed_isolated_collective_rows(operator, rows)
-        self.assertTrue(
-            operator._collective_isolated_f_only_feasible(1.0e-6)
-        )
+        with mock.patch(
+            "simulation_core.coupling.hibm_mpm.marker_mac_constraint."
+            "_solve_column_normalized_linf",
+            side_effect=AssertionError("L2 success must skip minimax"),
+        ):
+            self.assertTrue(
+                operator._collective_isolated_f_only_feasible(1.0e-6)
+            )
         np.testing.assert_array_equal(
             operator._collective_delta_free.to_numpy(),
             np.zeros((4, 4, 4, 3), dtype=np.float32),
         )
+
+    def test_collective_isolated_f_only_finds_linf_witness_after_l2_misses(
+        self,
+    ) -> None:
+        """A feasible max-norm closure is not rejected by the L2 candidate."""
+
+        shared_support = (((0, 0, 0), 1.0, True, 1.0),)
+        for signed_target in (3.0e-4, -3.0e-4):
+            with self.subTest(signed_target=signed_target):
+                operator = self._new_isolated_collective_witness_operator()
+                self._seed_isolated_collective_rows(
+                    operator,
+                    (
+                        (0, 0.0, shared_support),
+                        (3, 0.0, shared_support),
+                        (6, signed_target, shared_support),
+                    ),
+                )
+                self.assertTrue(
+                    operator._collective_isolated_f_only_feasible(1.6e-4)
+                )
+                np.testing.assert_array_equal(
+                    operator._collective_delta_free.to_numpy(),
+                    np.zeros((4, 4, 4, 3), dtype=np.float32),
+                )
+
+    def test_collective_isolated_f_only_linf_solver_failure_is_atomic(
+        self,
+    ) -> None:
+        """A minimax backend failure is explicit and leaves no correction."""
+
+        shared_support = (((0, 0, 0), 1.0, True, 1.0),)
+        scenarios = (
+            {
+                "return_value": mock.Mock(
+                    success=False,
+                    message="diagnostic failure",
+                )
+            },
+            {"side_effect": ValueError("diagnostic exception")},
+        )
+        for patch_kwargs in scenarios:
+            with self.subTest(patch_kwargs=tuple(patch_kwargs)):
+                operator = self._new_isolated_collective_witness_operator()
+                self._seed_isolated_collective_rows(
+                    operator,
+                    (
+                        (0, 0.0, shared_support),
+                        (3, 0.0, shared_support),
+                        (6, 3.0e-4, shared_support),
+                    ),
+                )
+                with mock.patch(
+                    "scipy.optimize.linprog",
+                    **patch_kwargs,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "minimax solve failed",
+                    ):
+                        operator._collective_isolated_f_only_feasible(1.6e-4)
+                np.testing.assert_array_equal(
+                    operator._collective_delta_free.to_numpy(),
+                    np.zeros((4, 4, 4, 3), dtype=np.float32),
+                )
 
     def test_collective_isolated_fh_closes_all_active_rows_after_three_row_certificate(
         self,

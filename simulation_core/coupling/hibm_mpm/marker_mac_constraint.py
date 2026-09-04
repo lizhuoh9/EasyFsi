@@ -41,6 +41,61 @@ def _uses_marker_constraint_hash(marker_count: int) -> bool:
     return int(marker_count) > HIBM_MARKER_CONSTRAINT_HASH_THRESHOLD
 
 
+def _solve_column_normalized_linf(
+    matrix: np.ndarray,
+    rhs: np.ndarray,
+) -> np.ndarray:
+    """Return one Chebyshev witness for a column-normalized dense system."""
+
+    row_count, column_count = matrix.shape
+    objective = np.zeros(column_count + 1, dtype=np.float64)
+    objective[-1] = 1.0
+    upper_matrix = np.vstack(
+        (
+            np.column_stack(
+                (matrix, -np.ones(row_count, dtype=np.float64))
+            ),
+            np.column_stack(
+                (-matrix, -np.ones(row_count, dtype=np.float64))
+            ),
+        )
+    )
+    upper_rhs = np.concatenate((rhs, -rhs))
+    try:
+        from scipy.optimize import linprog
+
+        result = linprog(
+            objective,
+            A_ub=upper_matrix,
+            b_ub=upper_rhs,
+            bounds=[(None, None)] * column_count + [(0.0, None)],
+            method="highs-ds",
+            options={
+                "dual_feasibility_tolerance": 1.0e-10,
+                "primal_feasibility_tolerance": 1.0e-10,
+            },
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "collective isolated F-only minimax solve failed"
+        ) from exc
+    if not result.success:
+        raise RuntimeError(
+            "collective isolated F-only minimax solve failed: "
+            f"{result.message}"
+        )
+    solution = np.asarray(result.x[:column_count], dtype=np.float64)
+    if (
+        solution.shape != (column_count,)
+        or not np.all(np.isfinite(solution))
+        or not math.isfinite(float(result.fun))
+    ):
+        raise RuntimeError(
+            "collective isolated F-only minimax solution is non-finite"
+        )
+    return solution
+
+
 @dataclass(frozen=True)
 class HibmMpmMarkerMacConstraintReport:
     """Immutable result of one marker-MAC constraint transaction."""
@@ -2423,9 +2478,10 @@ class HibmMpmMarkerMacConstraintOperator:
     def _collective_isolated_f_only_feasible(self, tolerance: float) -> bool:
         """Seek private F feasibility without altering terminal-Q transaction state.
 
-        This is an isolated, bounded sufficient least-squares witness, not
-        terminal Q's factorization or a complete minimax feasibility decision.
-        The f64 candidate is cast into collective f32 scratch and accepted only
+        A least-squares candidate is the fast path.  If its max residual misses,
+        a bounded Chebyshev solve seeks the complete F-only max-norm witness
+        before any H authorization is considered.  Neither path alters terminal
+        Q's factorization.  Each f64 candidate is cast into f32 and accepted only
         through the existing device all-row audit.
         """
 
@@ -2468,6 +2524,7 @@ class HibmMpmMarkerMacConstraintOperator:
                 1.0e-14,
                 64.0 * math.ulp(1.0) * float(self.marker_capacity),
             )
+            axis_systems = []
             for axis in range(3):
                 axis_rows = rows[rows % 3 == axis]
                 dof_column: dict[tuple[int, int, int], int] = {}
@@ -2532,10 +2589,21 @@ class HibmMpmMarkerMacConstraintOperator:
                     raise RuntimeError(
                         "collective isolated F-only correction basis is singular"
                     )
+                normalized_matrix = matrix / column_norm
+                axis_rhs = rhs[axis_rows]
+                axis_systems.append(
+                    (
+                        axis,
+                        dof_column,
+                        column_norm,
+                        normalized_matrix,
+                        axis_rhs,
+                    )
+                )
                 try:
                     solution, _, _, _ = np.linalg.lstsq(
-                        matrix / column_norm,
-                        rhs[axis_rows],
+                        normalized_matrix,
+                        axis_rhs,
                         rcond=rcond,
                     )
                 except np.linalg.LinAlgError as exc:
@@ -2560,6 +2628,35 @@ class HibmMpmMarkerMacConstraintOperator:
             if not math.isfinite(residual):
                 raise RuntimeError(
                     "collective isolated F-only residual is non-finite"
+                )
+            if residual <= tolerance:
+                return True
+
+            correction.fill(0.0)
+            for (
+                axis,
+                dof_column,
+                column_norm,
+                normalized_matrix,
+                axis_rhs,
+            ) in axis_systems:
+                solution = _solve_column_normalized_linf(
+                    normalized_matrix,
+                    axis_rhs,
+                )
+                for index, column in dof_column.items():
+                    correction[index][axis] = solution[column] / column_norm[column]
+            correction_f32 = correction.astype(np.float32)
+            if not np.all(np.isfinite(correction_f32)):
+                raise RuntimeError(
+                    "collective isolated F-only minimax correction is non-finite"
+                )
+            self._collective_delta_free.from_numpy(correction_f32)
+            self._measure_collective_target_closure_kernel(0)
+            residual = float(self._collective_max_residual[None])
+            if not math.isfinite(residual):
+                raise RuntimeError(
+                    "collective isolated F-only minimax residual is non-finite"
                 )
             return residual <= tolerance
         finally:
@@ -4082,9 +4179,9 @@ class HibmMpmMarkerMacConstraintOperator:
                     immutable_hard_row_count=immutable_hard_row_count,
                 )
 
-            # F-only is private scratch.  A bounded isolated LS witness is
-            # more meaningful than a finite cyclic iteration; terminal Q still
-            # makes the authoritative decision after ledger publication.
+            # F-only is private scratch.  A bounded isolated witness tries the
+            # LS fast path, then a minimax fallback; terminal Q still makes the
+            # authoritative decision after ledger publication.
             if self._collective_isolated_f_only_feasible(absolute_tolerance):
                 return self._collective_closure_result(
                     attempted=True,

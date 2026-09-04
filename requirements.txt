@@ -6,8 +6,8 @@
 numpy==2.1.2
 taichi==1.7.4
 trimesh==4.11.5
-# Numerics / diagnostics and rendering helpers (tools/, validation scripts):
 scipy==1.15.3
+# Diagnostics and rendering helpers (tools/, validation scripts):
 matplotlib==3.10.0
 pillow==12.2.0
 # Official Fluent HDF5 case/data readers and fine-FSI validation contracts:
