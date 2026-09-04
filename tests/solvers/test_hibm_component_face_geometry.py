@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import numpy as np
 import taichi as ti
@@ -189,6 +190,329 @@ class HibmComponentFaceGeometryTests(
             )
         )
         return operator.report()
+
+    @staticmethod
+    def _new_isolated_collective_witness_operator():
+        from simulation_core.coupling.hibm_mpm.marker_mac_constraint import (
+            HibmMpmMarkerMacConstraintOperator,
+        )
+
+        return HibmMpmMarkerMacConstraintOperator(
+            grid_nodes=(4, 4, 4),
+            marker_capacity=3,
+        )
+
+    @staticmethod
+    def _seed_isolated_collective_rows(operator, rows) -> None:
+        operator._reset_collective_target_closure_kernel()
+        for row, rhs, supports in rows:
+            operator._collective_row_active[row] = 1
+            operator._collective_rhs[row] = rhs
+            for support, (index, weight, free, inverse_mass) in enumerate(
+                supports
+            ):
+                operator._collective_index[row, support] = index
+                operator._collective_weight[row, support] = weight
+                operator._collective_free[row, support] = int(free)
+                operator._collective_inverse_mass[row, support] = inverse_mass
+
+    @staticmethod
+    def _collective_three_row_fixture(*, inconsistent: bool):
+        return (
+            (0, 2.0e-3, (((0, 0, 0), 1.0, True, 2.0),)),
+            (3, -1.0e-3, (((0, 0, 1), 1.0, True, 2.0),)),
+            (
+                6,
+                8.0e-3 if inconsistent else 5.012e-4,
+                (
+                    ((0, 0, 0), 0.5, True, 2.0),
+                    ((0, 0, 1), 0.5, True, 2.0),
+                ),
+            ),
+        )
+
+    def test_collective_identity_within_absolute_tolerance_skips_isolated_ls(
+        self,
+    ) -> None:
+        """Zero correction is accepted before any private witness is built."""
+
+        _, _, q_free_face = self._load_collective_q_free_owned_hard_face_case(
+            marker_y_velocities=(1.0, 1.0)
+        )
+        operator = self._get_marker_mac_constraint_operator()
+        fluid = self.fluid
+        previous_authority = fluid.velocity_dirichlet_boundary_authority
+        fluid.velocity[q_free_face] = (0.0, 1.0, 0.0)
+        velocity_before = fluid.velocity.to_numpy().tobytes(order="C")
+        try:
+            fluid.set_velocity_dirichlet_boundary_authority("canonical")
+            fluid._invalidate_velocity_dirichlet_component_ledger()
+            with mock.patch.object(
+                type(operator),
+                "_collective_isolated_f_only_feasible",
+                autospec=True,
+                side_effect=AssertionError("identity residual must skip LS"),
+            ):
+                self._assemble_component_face_ledger(
+                    close_marker_constraints=True,
+                    marker_compatibility_iterations_per_batch=8,
+                    primary_region_id=101,
+                    secondary_region_id=202,
+                )
+            self.assertEqual(
+                fluid.velocity.to_numpy().tobytes(order="C"), velocity_before
+            )
+        finally:
+            fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
+            fluid.clear_velocity_dirichlet_boundary_rows()
+
+    def test_collective_isolated_ls_finds_three_row_two_dof_f32_witness(
+        self,
+    ) -> None:
+        """LS closes a near-inconsistent system that cyclic sweeps worsen."""
+
+        operator = self._new_isolated_collective_witness_operator()
+        rows = self._collective_three_row_fixture(inconsistent=False)
+        self._seed_isolated_collective_rows(operator, rows)
+        operator._measure_collective_target_closure_kernel(0)
+        self.assertGreater(float(operator._collective_max_residual[None]), 1.0e-6)
+        for _ in range(64):
+            operator._collective_kaczmarz_sweep_kernel(0)
+        operator._measure_collective_target_closure_kernel(0)
+        self.assertGreater(float(operator._collective_max_residual[None]), 1.0e-6)
+        self._seed_isolated_collective_rows(operator, rows)
+        self.assertTrue(
+            operator._collective_isolated_f_only_feasible(1.0e-6)
+        )
+        np.testing.assert_array_equal(
+            operator._collective_delta_free.to_numpy(),
+            np.zeros((4, 4, 4, 3), dtype=np.float32),
+        )
+
+    def test_collective_isolated_ls_keeps_rank_decisions_per_axis(
+        self,
+    ) -> None:
+        """One x-axis mobility scale cannot truncate another x free DOF."""
+
+        operator = self._new_isolated_collective_witness_operator()
+        self._seed_isolated_collective_rows(
+            operator,
+            (
+                (0, 1.0e-8, (((0, 0, 0), 1.0, True, 1.0e-16),)),
+                (3, 1.0, (((0, 0, 1), 1.0, True, 1.0e16),)),
+            ),
+        )
+        self.assertTrue(
+            operator._collective_isolated_f_only_feasible(1.0e-9)
+        )
+
+    def test_collective_isolated_ls_rejects_inconsistent_rows_without_certificate(
+        self,
+    ) -> None:
+        """A failed private witness cannot manufacture an H certificate."""
+
+        operator = self._new_isolated_collective_witness_operator()
+        self._seed_isolated_collective_rows(
+            operator,
+            self._collective_three_row_fixture(inconsistent=True),
+        )
+        self.assertEqual(int(operator._collective_certificate_count[None]), 0)
+        self.assertFalse(
+            operator._collective_isolated_f_only_feasible(1.0e-6)
+        )
+        self.assertEqual(int(operator._collective_certificate_count[None]), 0)
+        np.testing.assert_array_equal(
+            operator._collective_delta_free.to_numpy(),
+            np.zeros((4, 4, 4, 3), dtype=np.float32),
+        )
+
+    def test_collective_isolated_ls_preserves_terminal_committed_state(
+        self,
+    ) -> None:
+        """The private witness never touches a committed terminal-Q transaction."""
+
+        operator = self._new_isolated_collective_witness_operator()
+        operator._ensure_pressure_nullspace_resources()
+        operator._phase = "committed"
+        operator._prepared = True
+        operator._committed = True
+        operator._markers = object()
+        operator._fluid = object()
+        operator._component_face_valid_mask = object()
+        operator._prepared_ledger_generation = 31
+        operator._prepared_topology_generation = 37
+        operator._prepared_component_face_valid_mask_generation = 41
+        operator._pressure_nullspace_prepared = True
+        operator._pressure_nullspace_apply_count = 43
+        operator._pressure_nullspace_fluid = object()
+        operator._pressure_nullspace_component_face_valid_mask = object()
+        operator._solve_backend = "rank_revealing_direct"
+        operator._rank_revealed = True
+        operator._rank_direct_independent_constraint_count = 2
+        operator._rank_direct_dependent_constraint_count = 3
+        operator._rank_direct_unactuated_constraint_count = 4
+        operator._max_residual_mps = 0.125
+        operator._iterations = 47
+        operator._rhs.fill(0.125)
+        operator._stencil_index.from_numpy(
+            np.full((9, 8, 3), -7, dtype=np.int32)
+        )
+        operator._stencil_weight.fill(0.25)
+        operator._stencil_free.fill(1)
+        operator._correction.fill(0.375)
+        operator._solved_correction_snapshot.fill(0.5)
+        operator._pressure_nullspace_row_active.fill(1)
+        operator._pressure_nullspace_mobility_snapshot.fill(0.625)
+        operator._pressure_nullspace_inverse_mass_per_kg.fill(0.75)
+        operator._pressure_nullspace_schur.fill(0.625)
+        operator._pressure_nullspace_factor.fill(0.75)
+        operator._pressure_nullspace_row_inverse_norm.fill(0.875)
+        operator._pressure_nullspace_factor_row_selected.fill(1)
+        operator._pressure_nullspace_factor_order.fill(2)
+        operator._pressure_nullspace_rhs.fill(1.0)
+        operator._pressure_nullspace_forward.fill(1.125)
+        operator._pressure_nullspace_lambda.fill(1.25)
+        operator._pressure_nullspace_correction.fill(0.875)
+        attribute_names = (
+            "_phase",
+            "_prepared",
+            "_committed",
+            "_markers",
+            "_fluid",
+            "_component_face_valid_mask",
+            "_prepared_ledger_generation",
+            "_prepared_topology_generation",
+            "_prepared_component_face_valid_mask_generation",
+            "_pressure_nullspace_prepared",
+            "_pressure_nullspace_apply_count",
+            "_pressure_nullspace_fluid",
+            "_pressure_nullspace_component_face_valid_mask",
+            "_solve_backend",
+            "_rank_revealed",
+            "_rank_direct_independent_constraint_count",
+            "_rank_direct_dependent_constraint_count",
+            "_rank_direct_unactuated_constraint_count",
+            "_max_residual_mps",
+            "_iterations",
+        )
+        field_names = (
+            "_rhs",
+            "_stencil_index",
+            "_stencil_weight",
+            "_stencil_free",
+            "_correction",
+            "_solved_correction_snapshot",
+            "_pressure_nullspace_row_active",
+            "_pressure_nullspace_mobility_snapshot",
+            "_pressure_nullspace_inverse_mass_per_kg",
+            "_pressure_nullspace_schur",
+            "_pressure_nullspace_factor",
+            "_pressure_nullspace_row_inverse_norm",
+            "_pressure_nullspace_factor_row_selected",
+            "_pressure_nullspace_factor_order",
+            "_pressure_nullspace_rhs",
+            "_pressure_nullspace_forward",
+            "_pressure_nullspace_lambda",
+            "_pressure_nullspace_correction",
+        )
+
+        def terminal_state():
+            return (
+                tuple(getattr(operator, name) for name in attribute_names),
+                tuple(
+                    getattr(operator, name).to_numpy().tobytes(order="C")
+                    for name in field_names
+                ),
+            )
+
+        terminal_before = terminal_state()
+        self._seed_isolated_collective_rows(
+            operator,
+            self._collective_three_row_fixture(inconsistent=False),
+        )
+        self.assertTrue(
+            operator._collective_isolated_f_only_feasible(1.0e-6)
+        )
+        terminal_after = terminal_state()
+        self.assertEqual(terminal_after, terminal_before)
+
+    def test_collective_isolated_ls_rejects_inconsistent_repeated_mobility(
+        self,
+    ) -> None:
+        """Duplicate free support cannot silently choose one mobility value."""
+
+        operator = self._new_isolated_collective_witness_operator()
+        self._seed_isolated_collective_rows(
+            operator,
+            (
+                (0, 1.0e-3, (((0, 0, 0), 1.0, True, 1.0),)),
+                (3, 1.0e-3, (((0, 0, 0), 1.0, True, 2.0),)),
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "inconsistent mobility"):
+            operator._collective_isolated_f_only_feasible(1.0e-6)
+        np.testing.assert_array_equal(
+            operator._collective_delta_free.to_numpy(),
+            np.zeros((4, 4, 4, 3), dtype=np.float32),
+        )
+
+    def test_collective_nonfinite_residual_saturates_before_identity_gate(
+        self,
+    ) -> None:
+        """NaN cannot be mistaken for an acceptable zero correction."""
+
+        operator = self._new_isolated_collective_witness_operator()
+        operator._reset_collective_target_closure_kernel()
+        operator._collective_row_active[0] = 1
+        operator._collective_rhs[0] = float("nan")
+        operator._measure_collective_target_closure_kernel(0)
+        self.assertGreater(float(operator._collective_max_residual[None]), 1.0e37)
+        with self.assertRaisesRegex(RuntimeError, "rhs is non-finite"):
+            operator._collective_isolated_f_only_feasible(1.0e-6)
+        np.testing.assert_array_equal(
+            operator._collective_delta_free.to_numpy(),
+            np.zeros((4, 4, 4, 3), dtype=np.float32),
+        )
+
+    def test_collective_witness_exception_retires_public_close_scratch(self) -> None:
+        """A witness invariant error cannot leave rows live for the next close."""
+
+        self._load_collective_q_free_owned_hard_face_case(
+            marker_y_velocities=(1.0, 2.0)
+        )
+        operator = self._get_marker_mac_constraint_operator()
+        fluid = self.fluid
+        previous_authority = fluid.velocity_dirichlet_boundary_authority
+        try:
+            fluid.set_velocity_dirichlet_boundary_authority("canonical")
+            fluid._invalidate_velocity_dirichlet_component_ledger()
+            with mock.patch.object(
+                type(operator),
+                "_collective_isolated_f_only_feasible",
+                autospec=True,
+                side_effect=RuntimeError("witness invariant sentinel"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "witness invariant sentinel"
+                ):
+                    self._assemble_component_face_ledger(
+                        close_marker_constraints=True,
+                        marker_compatibility_iterations_per_batch=8,
+                        primary_region_id=101,
+                        secondary_region_id=202,
+                    )
+            self.assertEqual(int(operator._collective_active_count[None]), 0)
+            self.assertEqual(int(operator._collective_certificate_count[None]), 0)
+            self.assertEqual(int(operator._collective_max_residual[None]), 0)
+            self.assertFalse(np.any(operator._collective_row_active.to_numpy()))
+            self.assertFalse(np.any(operator._collective_rhs.to_numpy()))
+            np.testing.assert_array_equal(
+                operator._collective_delta_free.to_numpy(),
+                np.zeros((4, 4, 4, 3), dtype=np.float32),
+            )
+        finally:
+            fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
+            fluid.clear_velocity_dirichlet_boundary_rows()
 
     def test_collective_rank_deficient_q_free_rows_close_owned_hard_target_before_marker_q(
         self,

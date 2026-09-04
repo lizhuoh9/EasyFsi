@@ -1576,7 +1576,18 @@ class HibmMpmMarkerMacConstraintOperator:
         self._collective_max_residual[None] = 0.0
         for row in range(self.constraint_capacity):
             if self._collective_row_active[row] != 0:
-                ti.atomic_max(self._collective_max_residual[None], ti.abs(self._collective_row_residual(row, include_hard)))
+                magnitude = ti.abs(
+                    self._collective_row_residual(row, include_hard)
+                )
+                # ``atomic_max`` does not reliably promote NaN.  Saturating
+                # every non-finite (or f32-overflow-scale) residual makes the
+                # zero-correction fast path fail closed instead.
+                if (
+                    ti.math.isnan(magnitude)
+                    or ti.math.isinf(magnitude)
+                ):
+                    magnitude = 3.4e38
+                ti.atomic_max(self._collective_max_residual[None], magnitude)
 
     @ti.kernel
     def _certify_collective_proportional_free_rows_kernel(self, tolerance_mps: ti.f64):
@@ -2379,6 +2390,151 @@ class HibmMpmMarkerMacConstraintOperator:
             )
         self._snapshot_solved_correction_kernel()
         self._phase = "solved"
+
+    def _collective_isolated_f_only_feasible(self, tolerance: float) -> bool:
+        """Seek private F feasibility without altering terminal-Q transaction state.
+
+        This is an isolated, bounded sufficient least-squares witness, not
+        terminal Q's factorization or a complete minimax feasibility decision.
+        The f64 candidate is cast into collective f32 scratch and accepted only
+        through the existing device all-row audit.
+        """
+
+        if (
+            self.constraint_capacity
+            > HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS
+        ):
+            raise RuntimeError(
+                "collective isolated F-only witness exceeds bounded capacity: "
+                f"{self.constraint_capacity} > "
+                f"{HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS}"
+            )
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError("collective isolated F-only tolerance must be positive")
+
+        # This is the only scratch the isolated witness may mutate.  It is
+        # cleared on every exit so an unsuccessful witness cannot leak into
+        # the later certificate/H path or a subsequent close attempt.
+        self._collective_delta_free.fill(0.0)
+        try:
+            active = self._collective_row_active.to_numpy().astype(bool)
+            rhs = self._collective_rhs.to_numpy().astype(np.float64, copy=False)
+            indices = self._collective_index.to_numpy()
+            weights = self._collective_weight.to_numpy().astype(
+                np.float64, copy=False
+            )
+            free = self._collective_free.to_numpy().astype(bool)
+            inverse_mass = self._collective_inverse_mass.to_numpy().astype(
+                np.float64, copy=False
+            )
+            rows = np.flatnonzero(active)
+            if not np.all(np.isfinite(rhs[rows])):
+                raise RuntimeError("collective isolated F-only rhs is non-finite")
+
+            correction = np.zeros((*self.grid_nodes, 3), dtype=np.float64)
+            # Normalize each correction-space column before SVD.  Mobility
+            # determines whether a support is free, but its numerical scale is
+            # not part of this yes/no F-space feasibility witness.
+            rcond = max(
+                1.0e-14,
+                64.0 * math.ulp(1.0) * float(self.marker_capacity),
+            )
+            for axis in range(3):
+                axis_rows = rows[rows % 3 == axis]
+                dof_column: dict[tuple[int, int, int], int] = {}
+                mobility_by_dof: dict[tuple[int, int, int], float] = {}
+                for row in axis_rows:
+                    for support in range(8):
+                        weight = float(weights[row, support])
+                        if not math.isfinite(weight):
+                            raise RuntimeError(
+                                "collective isolated F-only weight is non-finite"
+                            )
+                        if weight == 0.0:
+                            continue
+                        index = tuple(
+                            int(value) for value in indices[row, support]
+                        )
+                        if any(
+                            value < 0 or value >= self.grid_nodes[dimension]
+                            for dimension, value in enumerate(index)
+                        ):
+                            raise RuntimeError(
+                                "collective isolated F-only support is out of bounds"
+                            )
+                        if not free[row, support]:
+                            continue
+                        mobility = float(inverse_mass[row, support])
+                        if not math.isfinite(mobility) or mobility <= 0.0:
+                            raise RuntimeError(
+                                "collective isolated F-only free mobility is invalid"
+                            )
+                        prior_mobility = mobility_by_dof.get(index)
+                        if prior_mobility is None:
+                            dof_column[index] = len(dof_column)
+                            mobility_by_dof[index] = mobility
+                        elif mobility != prior_mobility:
+                            raise RuntimeError(
+                                "collective isolated F-only repeated free support "
+                                "has inconsistent mobility"
+                            )
+
+                matrix = np.zeros(
+                    (axis_rows.size, len(dof_column)), dtype=np.float64
+                )
+                for local_row, row in enumerate(axis_rows):
+                    for support in range(8):
+                        if not free[row, support]:
+                            continue
+                        weight = float(weights[row, support])
+                        if weight == 0.0:
+                            continue
+                        index = tuple(
+                            int(value) for value in indices[row, support]
+                        )
+                        matrix[local_row, dof_column[index]] += weight
+                if not dof_column:
+                    continue
+                column_norm = np.linalg.norm(matrix, axis=0)
+                if (
+                    not np.all(np.isfinite(column_norm))
+                    or np.any(column_norm <= 0.0)
+                ):
+                    raise RuntimeError(
+                        "collective isolated F-only correction basis is singular"
+                    )
+                try:
+                    solution, _, _, _ = np.linalg.lstsq(
+                        matrix / column_norm,
+                        rhs[axis_rows],
+                        rcond=rcond,
+                    )
+                except np.linalg.LinAlgError as exc:
+                    raise RuntimeError(
+                        "collective isolated F-only least-squares failed"
+                    ) from exc
+                if not np.all(np.isfinite(solution)):
+                    raise RuntimeError(
+                        "collective isolated F-only solution is non-finite"
+                    )
+                for index, column in dof_column.items():
+                    correction[index][axis] = solution[column] / column_norm[column]
+
+            correction_f32 = correction.astype(np.float32)
+            if not np.all(np.isfinite(correction_f32)):
+                raise RuntimeError(
+                    "collective isolated F-only correction is non-finite"
+                )
+            self._collective_delta_free.from_numpy(correction_f32)
+            self._measure_collective_target_closure_kernel(0)
+            residual = float(self._collective_max_residual[None])
+            if not math.isfinite(residual):
+                raise RuntimeError(
+                    "collective isolated F-only residual is non-finite"
+                )
+            return residual <= tolerance
+        finally:
+            self._collective_delta_free.fill(0.0)
 
     @ti.kernel
     def _commit_kernel(
@@ -3501,34 +3657,41 @@ class HibmMpmMarkerMacConstraintOperator:
             self._reset_collective_target_closure_kernel()
             return {"attempted": False, "closed": False, "constraint_count": 0, "f_only_converged": False, "certificate_count": 0, "immutable_hard_row_count": 0}
 
-        # F-only is the ordinary Q space.  Its scratch correction is always
-        # discarded: it never reaches fluid.velocity or a ledger claim.
-        for _ in range(max(1, active_count)):
-            for _ in range(sweeps):
-                self._collective_kaczmarz_sweep_kernel(0)
+        # Every post-build exit, including a witness invariant failure, retires
+        # private collective rows and counters.  H is applied before a normal
+        # return; the finally block clears scratch only and never touches it.
+        try:
+            # Terminal Q measures the zero correction before attempting a
+            # solve.  Do the same: a cyclic sweep may move an already
+            # acceptable system away from its physical absolute tolerance.
             self._measure_collective_target_closure_kernel(0)
-            # This private F-only correction is discarded.  If it can already
-            # satisfy terminal Q's public absolute tolerance, leave H bitwise
-            # unchanged and let terminal Q remain the authoritative verifier.
             if float(self._collective_max_residual[None]) <= absolute_tolerance:
-                self._reset_collective_target_closure_kernel()
                 return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": True, "certificate_count": 0, "immutable_hard_row_count": immutable_hard_row_count}
 
-        self._certify_collective_proportional_free_rows_kernel(absolute_tolerance)
-        certificate_count = int(self._collective_certificate_count[None])
-        if certificate_count == 0:
+            # F-only is private scratch.  A bounded isolated LS witness is
+            # more meaningful than a finite cyclic iteration; terminal Q still
+            # makes the authoritative decision after ledger publication.
+            if self._collective_isolated_f_only_feasible(absolute_tolerance):
+                return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": True, "certificate_count": 0, "immutable_hard_row_count": immutable_hard_row_count}
+
+            self._certify_collective_proportional_free_rows_kernel(
+                absolute_tolerance
+            )
+            certificate_count = int(self._collective_certificate_count[None])
+            if certificate_count == 0:
+                return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": False, "certificate_count": 0, "immutable_hard_row_count": immutable_hard_row_count}
+            for _ in range(max(1, certificate_count)):
+                for _ in range(sweeps):
+                    self._collective_kaczmarz_sweep_kernel(1)
+                self._measure_collective_target_closure_kernel(1)
+                if float(self._collective_max_residual[None]) <= closure_tolerance:
+                    self._apply_collective_hard_target_delta_kernel(
+                        claim_target_mps, prospective_velocity
+                    )
+                    return {"attempted": True, "closed": True, "constraint_count": active_count, "f_only_converged": False, "certificate_count": certificate_count, "immutable_hard_row_count": immutable_hard_row_count}
+            return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": False, "certificate_count": certificate_count, "immutable_hard_row_count": immutable_hard_row_count}
+        finally:
             self._reset_collective_target_closure_kernel()
-            return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": False, "certificate_count": 0, "immutable_hard_row_count": immutable_hard_row_count}
-        for _ in range(max(1, certificate_count)):
-            for _ in range(sweeps):
-                self._collective_kaczmarz_sweep_kernel(1)
-            self._measure_collective_target_closure_kernel(1)
-            if float(self._collective_max_residual[None]) <= closure_tolerance:
-                self._apply_collective_hard_target_delta_kernel(claim_target_mps, prospective_velocity)
-                self._reset_collective_target_closure_kernel()
-                return {"attempted": True, "closed": True, "constraint_count": active_count, "f_only_converged": False, "certificate_count": certificate_count, "immutable_hard_row_count": immutable_hard_row_count}
-        self._reset_collective_target_closure_kernel()
-        return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": False, "certificate_count": certificate_count, "immutable_hard_row_count": immutable_hard_row_count}
 
     def prepare(
         self,
