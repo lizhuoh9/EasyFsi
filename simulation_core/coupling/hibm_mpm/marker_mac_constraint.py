@@ -3507,7 +3507,10 @@ class HibmMpmMarkerMacConstraintOperator:
             for _ in range(sweeps):
                 self._collective_kaczmarz_sweep_kernel(0)
             self._measure_collective_target_closure_kernel(0)
-            if float(self._collective_max_residual[None]) <= closure_tolerance:
+            # This private F-only correction is discarded.  If it can already
+            # satisfy terminal Q's public absolute tolerance, leave H bitwise
+            # unchanged and let terminal Q remain the authoritative verifier.
+            if float(self._collective_max_residual[None]) <= absolute_tolerance:
                 self._reset_collective_target_closure_kernel()
                 return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": True, "certificate_count": 0, "immutable_hard_row_count": immutable_hard_row_count}
 

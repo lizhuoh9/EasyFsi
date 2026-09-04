@@ -295,6 +295,62 @@ class GenericMarkerQpWiringTests(unittest.TestCase):
             source,
         )
 
+    def test_post_solid_project_runs_for_qp_even_without_active_h_rows(self) -> None:
+        """The post-solid Q/P audit must not inherit H-only skip semantics."""
+
+        function = _function_ast(advance_hibm_mpm_sharp_mpm_step)
+        parents = {
+            child: parent
+            for parent in ast.walk(function)
+            for child in ast.iter_child_nodes(parent)
+        }
+        post_solid_project = next(
+            call
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "fluid"
+            and call.func.attr == "project"
+            and any(
+                keyword.arg == "dt_s"
+                and isinstance(keyword.value, ast.Call)
+                and isinstance(keyword.value.func, ast.Name)
+                and keyword.value.func.id == "float"
+                and len(keyword.value.args) == 1
+                and isinstance(keyword.value.args[0], ast.Name)
+                and keyword.value.args[0].id == "post_solid_project_dt"
+                for keyword in call.keywords
+            )
+        )
+        enclosing = parents[post_solid_project]
+        while not isinstance(enclosing, ast.If):
+            enclosing = parents[enclosing]
+
+        self.assertIsInstance(enclosing.test, ast.BoolOp)
+        self.assertIsInstance(enclosing.test.op, ast.Or)
+        active_gate = next(
+            value
+            for value in enclosing.test.values
+            if isinstance(value, ast.Compare)
+            and len(value.ops) == 1
+            and isinstance(value.ops[0], ast.Gt)
+            and isinstance(value.left, ast.Call)
+            and isinstance(value.left.func, ast.Name)
+            and value.left.func.id == "_hibm_active_velocity_component_count"
+            and len(value.comparators) == 1
+            and isinstance(value.comparators[0], ast.Constant)
+            and value.comparators[0].value == 0
+        )
+        self.assertIsInstance(active_gate, ast.Compare)
+        self.assertTrue(
+            any(
+                isinstance(value, ast.Name)
+                and value.id == "marker_mac_projection_enabled"
+                for value in enclosing.test.values
+            )
+        )
+
     def test_turek_fixed_and_coupled_paths_allocate_once_and_forward_adapter(self) -> None:
         config = TurekHronFsiConfig()
         self.assertEqual(config.flow_hibm_marker_mac_constraint_iterations, 64)

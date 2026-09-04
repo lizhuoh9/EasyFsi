@@ -165,12 +165,16 @@ class HibmComponentFaceGeometryTests(
         )
         return marker_positions, owned_hard_face, q_free_face
 
-    def _solve_collective_q_free_marker_q(self):
+    def _solve_collective_q_free_marker_q(
+        self,
+        *,
+        absolute_tolerance_mps: float = 1.0e-6,
+    ):
         valid_mask = self._prepare_and_seal_marker_mac_constraint_ledger()
         operator = self._prepare_marker_mac_constraint_transaction(valid_mask)
         operator.solve_device(
             max_iterations=32,
-            absolute_tolerance_mps=1.0e-6,
+            absolute_tolerance_mps=absolute_tolerance_mps,
             component_face_valid_mask=(
                 self.fluid.hibm_no_slip_component_face_valid_mask
             ),
@@ -375,32 +379,58 @@ class HibmComponentFaceGeometryTests(
     ) -> None:
         """Closure tolerance failure alone is not an F-space infeasibility proof."""
 
-        self._load_collective_q_free_owned_hard_face_case(
-            marker_y_velocities=(1.0, 1.000025)
+        marker_positions, owned_hard_face, _q_free_face = (
+            self._load_collective_q_free_owned_hard_face_case(
+                marker_y_velocities=(1.0, 1.000025)
+            )
         )
         fluid = self.fluid
         previous_authority = fluid.velocity_dirichlet_boundary_authority
         try:
             fluid.set_velocity_dirichlet_boundary_authority("canonical")
             fluid._invalidate_velocity_dirichlet_component_ledger()
-            ledger_before = self._canonical_ledger_bytes()
             velocity_before = fluid.velocity.to_numpy().tobytes(order="C")
 
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "marker compatibility closure did not converge",
-            ):
-                self._assemble_component_face_ledger(
-                    close_marker_constraints=True,
-                    marker_compatibility_iterations_per_batch=8,
-                    primary_region_id=101,
-                    secondary_region_id=202,
-                )
+            self._assemble_component_face_ledger(
+                close_marker_constraints=True,
+                marker_compatibility_iterations_per_batch=8,
+                primary_region_id=101,
+                secondary_region_id=202,
+            )
 
-            self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+            self.assertEqual(
+                np.float32(
+                    self._canonical_component_state(owned_hard_face, 1)[
+                        "value_mps"
+                    ]
+                ).tobytes(),
+                np.float32(1.0).tobytes(),
+            )
             self.assertEqual(
                 fluid.velocity.to_numpy().tobytes(order="C"),
                 velocity_before,
+            )
+
+            report = self._solve_collective_q_free_marker_q(
+                absolute_tolerance_mps=1.0e-5,
+            )
+            self.assertTrue(report.converged)
+            self.assertEqual(
+                np.float32(
+                    self._canonical_component_state(owned_hard_face, 1)[
+                        "value_mps"
+                    ]
+                ).tobytes(),
+                np.float32(1.0).tobytes(),
+            )
+            np.testing.assert_allclose(
+                [
+                    self._numpy_sample_marker_mac_velocity(position)[1]
+                    for position in marker_positions
+                ],
+                (1.0, 1.000025),
+                rtol=0.0,
+                atol=1.0e-5,
             )
         finally:
             fluid.set_velocity_dirichlet_boundary_authority(previous_authority)

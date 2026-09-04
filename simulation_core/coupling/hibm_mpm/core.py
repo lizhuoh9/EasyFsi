@@ -34679,7 +34679,10 @@ def advance_hibm_mpm_sharp_mpm_step(
     post_solid_projection_applied = False
     post_solid_project_report: dict[str, Any] | None = None
     post_solid_no_slip_report: HibmMpmNoSlipResidualReport | None = None
-    if _hibm_active_velocity_component_count(next_velocity_report) > 0:
+    if (
+        _hibm_active_velocity_component_count(next_velocity_report) > 0
+        or marker_mac_projection_enabled
+    ):
         requested_pressure_solver = str(pressure_solver)
         (
             effective_pressure_solver,
