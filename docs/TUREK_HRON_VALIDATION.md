@@ -406,6 +406,41 @@ All ten labels end in `__f2320f5__r01` under
 documentation commit's short SHA. This is not `PASS_FSI1_S0_GATE_ONLY` and
 does not authorize M0/M1, FSI2, FSI3, Oracle, or learning.
 
+**R26A formal absolute-coupling gate binding (2026-09-05).** Formal run
+`turek_hron__fsi1_s0__75c240a__r01` started from zero at clean `75c240a`,
+accepted steps 1--7 through `t=0.035 s`, and then failed closed at step 8 as
+`FAIL_NUMERICAL_HEALTH`. It exhausted all 16 coupling trials with final
+relative residual `0.2993190969189178` and final absolute RMS residual
+`7.839528620993855e-6 m/s`. The best observed pair was relative residual
+`0.022642592094207343` with absolute RMS residual
+`4.6934343661611526e-7 m/s`. The accepted prefix is failure evidence only;
+there is no transition checkpoint, accepted-interface output is not restart
+state, and this run cannot be resumed or reclassified as an S0 pass.
+
+The generic solver behaved exactly as configured: it accepts relative or
+enabled absolute convergence, but the formal spec omitted
+`fsi_coupling_absolute_tolerance_mps` and therefore inherited the case default
+`0.0`, disabling the absolute branch. Near the start of the two-second inlet
+ramp, the final candidate RMS speed was only about `2.6191e-5 m/s`, so a small
+absolute mismatch was divided by a near-zero physical scale. The offline FSI1
+acceptance contract already requires every accepted step's absolute coupling
+RMS to be at most `1e-4 m/s`, so this was a formal-runner configuration
+omission rather than permission to relax the registered numerical gate.
+
+Clean `33b3db0` adds that existing `1e-4 m/s` limit explicitly to
+`FSI1_S0_SPEC` and its exact frozen-matrix test. It does not change the generic
+solver, the case default, offline acceptance, topology, physics, or any of the
+15 files in the component-gate source identity. The targeted test first failed
+on the missing key and then passed; the complete formal-campaign focused module
+passed 31 tests in `1.16 s`. Python compilation, Ruff, `git diff --check`, and
+a final read-only review (`SHIP`, no P0--P3 finding) passed. The component
+source SHA256 remains exactly
+`478eb7707fd20761654443b334782a252ffee90dc29ba2c9b9707ba747b67c89`,
+so the `f2320f5` component chain remains source-matched and nx4/nx8 must not be
+rerun. This authorizes only a new documentation commit followed by one fresh
+1600-step strict-CUDA S0 from zero under a new label containing that commit's
+short SHA; it does not authorize any later gate.
+
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It
 deliberately separates confirmed results from confounded comparisons. Every

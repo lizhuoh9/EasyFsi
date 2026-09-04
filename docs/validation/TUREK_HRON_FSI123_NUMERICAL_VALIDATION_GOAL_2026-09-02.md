@@ -896,6 +896,46 @@ FSI1-S0 strict-CUDA campaign from zero whose label contains that documentation
 commit's short SHA. It is not `PASS_FSI1_S0_GATE_ONLY` and does not authorize
 M0/M1, FSI2, FSI3, Oracle, or learning.
 
+#### 5.4.9 Formal absolute-coupling gate binding (2026-09-05)
+
+Formal run `turek_hron__fsi1_s0__75c240a__r01` started from zero at clean
+`75c240a`, accepted steps 1--7 through `t=0.035 s`, and failed closed at step
+8 as `FAIL_NUMERICAL_HEALTH`. It exhausted all 16 coupling trials with final
+relative residual `0.2993190969189178` and final absolute RMS residual
+`7.839528620993855e-6 m/s`. The best observed relative/absolute pair was
+`0.022642592094207343 / 4.6934343661611526e-7 m/s`. This accepted prefix is
+failure evidence only. It has no transition checkpoint; accepted-interface
+arrays and CSV history are not restart state, so it cannot be formally resumed
+or reclassified as an S0 pass.
+
+The generic solver correctly evaluates relative convergence or an enabled
+absolute gate. The formal S0 spec, however, omitted
+`fsi_coupling_absolute_tolerance_mps` and inherited the case default `0.0`,
+which disabled that gate. At the final trial the candidate RMS speed was only
+about `2.6191e-5 m/s`, making the pure-relative ratio ill-conditioned during
+the early two-second inlet ramp. The offline FSI1 acceptance contract already
+requires every accepted step's absolute coupling RMS to be no greater than
+`1e-4 m/s`; the failure therefore exposed a formal-runner configuration
+omission, not a reason to relax the preregistered acceptance contract.
+
+Clean `33b3db0` adds only `fsi_coupling_absolute_tolerance_mps = 1e-4 m/s` to
+the frozen `FSI1_S0_SPEC` and its exact-matrix test. It leaves the generic
+solver, case default, offline acceptance, topology, and physical model
+unchanged. The targeted test demonstrated RED on the missing key and GREEN
+after the fix; all 31 formal-campaign focused tests passed in `1.16 s`.
+Compilation, Ruff, `git diff --check`, and a final read-only review (`SHIP`, no
+P0--P3 finding) also passed. This is a focused configuration-contract result,
+not a CUDA or full-suite verdict.
+
+Neither changed file belongs to the component gate's explicit 15-file source
+identity. Its SHA256 remains
+`478eb7707fd20761654443b334782a252ffee90dc29ba2c9b9707ba747b67c89`,
+so the `f2320f5` ten-stage chain remains current and nx4/nx8 must not be rerun.
+The formal all-Python source identity does change. This authorizes only a clean
+documentation commit and one fresh 1600-step strict-CUDA S0 from zero under a
+new label containing that documentation commit's short SHA. No resume, S0
+pass, M0/M1, FSI2, FSI3, Oracle, or learning authorization exists yet.
+
 ### 5.5 Frozen formulas, tolerances, and evidence labels
 
 For nonzero finer/reference vector \(\mathbf b\), define
@@ -1349,15 +1389,23 @@ diagnostic; the final claim remains no-commit live coupling/CG/matvec work.
     minimax fallback — complete at `f2320f5`; no tolerance or topology change.
 19. Regenerate the entire ten-stage component chain at `f2320f5` — complete;
     every stage is source-, host-, and strict-CUDA-matched and passed.
-20. Commit this documentation-only record, then run one fresh 1600-step FSI1-S0
+20. Record formal attempt `75c240a`: seven accepted steps, then step 8 exhausted
+    all 16 coupling trials because the formal spec inherited the disabled
+    absolute gate — complete; this is `FAIL_NUMERICAL_HEALTH`, not an S0 pass,
+    and has no resumable checkpoint.
+21. Bind the already-registered `1e-4 m/s` absolute coupling gate explicitly in
+    the formal S0 spec — complete at `33b3db0`; focused tests and review passed,
+    and the unchanged component source identity forbids an nx4/nx8 rerun.
+22. Commit this documentation-only record, then run one fresh 1600-step FSI1-S0
     strict-CUDA campaign from zero — active. Use a label containing that new
-    documentation commit's short SHA; do not resume the `f513f9b` prefix.
-21. Implement and validate a scalable rank-deficient Q backend and enforce the
+    documentation commit's short SHA; do not resume or reuse the `75c240a`
+    prefix.
+23. Implement and validate a scalable rank-deficient Q backend and enforce the
     solid explicit-stability substep gate, then run M0/M1 and conditional F0.
     L1/L2 remain blocked until both prerequisites pass.
-22. If and only if FSI1 passes, run FSI2.
-23. If and only if FSI2 passes, run FSI3.
-24. If and only if all three reach benchmark quality, close R26A and open the
+24. If and only if FSI1 passes, run FSI2.
+25. If and only if FSI2 passes, run FSI3.
+26. If and only if all three reach benchmark quality, close R26A and open the
     separately preregistered Oracle goal.
 
 No later item may be started to avoid, dilute, or reinterpret an earlier failed
