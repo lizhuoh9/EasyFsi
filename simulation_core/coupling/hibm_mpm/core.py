@@ -26453,6 +26453,10 @@ class HibmMpmIbBoundaryConditions:
         cell_center_x_m,
         cell_center_y_m,
         cell_center_z_m,
+        cell_width_x_m=None,
+        cell_width_y_m=None,
+        cell_width_z_m=None,
+        marker_mac_constraint_operator: Any | None = None,
         stage_observer: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
         sweeps_per_batch = int(iterations_per_batch)
@@ -26716,6 +26720,120 @@ class HibmMpmIbBoundaryConditions:
                 None
             ]
         )
+        collective_qh_closure = {
+            "attempted": False,
+            "closed": False,
+            "constraint_count": 0,
+            "f_only_converged": False,
+            "certificate_count": 0,
+            "immutable_hard_row_count": 0,
+        }
+        if marker_mac_constraint_operator is not None:
+            collective_qh_closure = (
+                marker_mac_constraint_operator.close_prospective_owned_hard_targets_collectively(
+                    marker_position_m=self.velocity_dirichlet_marker_target_closure_sample_position_m,
+                    marker_sample_valid=self.velocity_dirichlet_marker_target_closure_sample_valid,
+                    marker_velocity_mps=markers.v_gamma_mps,
+                    marker_region_id=markers.region_id,
+                    physical_marker_count=int(markers.marker_count),
+                    primary_region_id=int(primary_region_id),
+                    secondary_region_id=int(secondary_region_id),
+                    prospective_velocity=self.velocity_dirichlet_marker_target_closure_value_mps,
+                    component_face_valid_mask=self.velocity_dirichlet_marker_target_closure_component_face_valid_mask,
+                    hard_fixed_component_mask=self.velocity_dirichlet_marker_target_closure_hard_fixed_component_mask,
+                    external_exact_component_mask=self.velocity_dirichlet_marker_target_closure_external_exact_component_mask,
+                    adjustable_component_mask=self.velocity_dirichlet_marker_target_closure_adjustable_component_mask,
+                    claim_target_mps=self.velocity_dirichlet_component_face_claim_target_mps,
+                    cell_face_x_m=cell_face_x_m,
+                    cell_face_y_m=cell_face_y_m,
+                    cell_face_z_m=cell_face_z_m,
+                    cell_center_x_m=cell_center_x_m,
+                    cell_center_y_m=cell_center_y_m,
+                    cell_center_z_m=cell_center_z_m,
+                    cell_width_x_m=cell_width_x_m,
+                    cell_width_y_m=cell_width_y_m,
+                    cell_width_z_m=cell_width_z_m,
+                    density_kgm3=density,
+                    sweeps_per_batch=sweeps_per_batch,
+                    closure_tolerance_mps=closure_tolerance,
+                    absolute_tolerance_mps=tolerance,
+                )
+            )
+            if (
+                bool(collective_qh_closure["attempted"])
+                and not bool(collective_qh_closure["closed"])
+                and not bool(collective_qh_closure["f_only_converged"])
+            ):
+                immutable_hard_row_count = int(
+                    collective_qh_closure["immutable_hard_row_count"]
+                )
+                if immutable_hard_row_count != 0:
+                    raise RuntimeError(
+                        "immutable marker row is incompatible with external/non-owned "
+                        "hard targets before HIBM-owned target closure: "
+                        "collective_qh_immutable_hard_row_count="
+                        f"{immutable_hard_row_count}, certificate_count="
+                        f"{collective_qh_closure['certificate_count']}"
+                    )
+                raise RuntimeError(
+                    "marker compatibility closure did not converge before canonical "
+                    "commit; collective marker Q/H path has no certified prospective "
+                    "hard-target repair: "
+                    f"certificate_count={collective_qh_closure['certificate_count']}"
+                )
+        if bool(collective_qh_closure["closed"]):
+            # Collective FH has changed prospective owned hard targets after
+            # the legacy scan.  Reuse its complete measurement so projection-
+            # only rows sharing those faces cannot reach canonical commit on
+            # stale physical-only metrics.
+            if stage_observer is not None:
+                stage_observer("hibm_marker_closure_collective_audit_before")
+            self._measure_marker_target_closure_kernel(
+                *measurement_arguments,
+                tolerance,
+            )
+            if stage_observer is not None:
+                stage_observer("hibm_marker_closure_collective_audit_after")
+            constraint_count = int(
+                self.report_velocity_dirichlet_marker_target_closure_constraint_count[
+                    None
+                ]
+            )
+            adjustable_count = int(
+                self.report_velocity_dirichlet_marker_target_closure_adjustable_count[
+                    None
+                ]
+            )
+            immutable_count = int(
+                self.report_velocity_dirichlet_marker_target_closure_immutable_count[
+                    None
+                ]
+            )
+            invalid_count = int(
+                self.report_velocity_dirichlet_marker_target_closure_invalid_count[
+                    None
+                ]
+            )
+            failure_code = int(
+                self.report_velocity_dirichlet_marker_target_closure_failure_code[
+                    None
+                ]
+            )
+            final_max_residual = float(
+                self.report_velocity_dirichlet_marker_target_closure_max_residual_mps[
+                    None
+                ]
+            )
+            final_adjustable_max_residual = float(
+                self.report_velocity_dirichlet_marker_target_closure_max_adjustable_residual_mps[
+                    None
+                ]
+            )
+            final_immutable_max_residual = float(
+                self.report_velocity_dirichlet_marker_target_closure_max_immutable_residual_mps[
+                    None
+                ]
+            )
         if (
             invalid_count != 0
             or failure_code != 0
@@ -26920,6 +27038,10 @@ class HibmMpmIbBoundaryConditions:
         interpolate_interior_velocity: bool = False,
         primary_region_id: int = 0,
         secondary_region_id: int = 1,
+        marker_mac_constraint_operator: Any | None = None,
+        cell_width_x_m=None,
+        cell_width_y_m=None,
+        cell_width_z_m=None,
         stage_observer: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
         """Prepare, validate, then atomically commit canonical MAC claims.
@@ -26962,6 +27084,17 @@ class HibmMpmIbBoundaryConditions:
             raise ValueError("canonical component-face field shape mismatch")
         if tuple(obstacle_field.shape) != nodes or tuple(velocity_field.shape) != nodes:
             raise ValueError("fluid field shape mismatch for component-face assembly")
+        if marker_mac_constraint_operator is not None:
+            width_fields = (cell_width_x_m, cell_width_y_m, cell_width_z_m)
+            expected_width_shapes = ((nodes[0],), (nodes[1],), (nodes[2],))
+            if any(field is None for field in width_fields) or any(
+                tuple(field.shape) != expected_shape
+                for field, expected_shape in zip(width_fields, expected_width_shapes)
+            ):
+                raise ValueError(
+                    "cell_width_x_m/y_m/z_m must match grid axes when marker "
+                    "MAC collective closure is enabled"
+                )
         if int(search.marker_capacity) != int(self.marker_capacity):
             raise ValueError(
                 "search marker_capacity must match component-face boundary capacity"
@@ -27562,6 +27695,10 @@ class HibmMpmIbBoundaryConditions:
                         cell_center_x_m=cell_center_x_m,
                         cell_center_y_m=cell_center_y_m,
                         cell_center_z_m=cell_center_z_m,
+                        cell_width_x_m=cell_width_x_m,
+                        cell_width_y_m=cell_width_y_m,
+                        cell_width_z_m=cell_width_z_m,
+                        marker_mac_constraint_operator=marker_mac_constraint_operator,
                         stage_observer=stage_observer,
                     )
                 )
@@ -31709,6 +31846,8 @@ def _assemble_and_seal_hibm_velocity_component_face_ledger(
     primary_region_id: int,
     secondary_region_id: int,
     interpolate_interior_velocity: bool,
+    marker_mac_constraint_operator: Any | None = None,
+    marker_mac_constraint_absolute_tolerance_mps: float | None = None,
 ) -> dict[str, object]:
     """Build and seal the sole HIBM velocity-boundary representation."""
 
@@ -31717,6 +31856,14 @@ def _assemble_and_seal_hibm_velocity_component_face_ledger(
         raise RuntimeError(
             "HIBM-MPM requires canonical component-face velocity authority; "
             f"got {authority!r}"
+        )
+    if (
+        marker_mac_constraint_operator is not None
+        and marker_mac_constraint_absolute_tolerance_mps is None
+    ):
+        raise ValueError(
+            "marker_mac_constraint_absolute_tolerance_mps is required when "
+            "marker_mac_constraint_operator is supplied"
         )
     fluid._invalidate_velocity_dirichlet_component_ledger()
     result = ib_boundary.assemble_velocity_dirichlet_component_face_ledger(
@@ -31763,6 +31910,21 @@ def _assemble_and_seal_hibm_velocity_component_face_ledger(
         primary_region_id=int(primary_region_id),
         secondary_region_id=int(secondary_region_id),
         interpolate_interior_velocity=bool(interpolate_interior_velocity),
+        **(
+            {}
+            if marker_mac_constraint_operator is None
+            else {
+                "marker_mac_constraint_operator": (
+                    marker_mac_constraint_operator
+                ),
+                "cell_width_x_m": fluid.cell_width_x_m,
+                "cell_width_y_m": fluid.cell_width_y_m,
+                "cell_width_z_m": fluid.cell_width_z_m,
+                "marker_compatibility_absolute_tolerance_mps": (
+                    marker_mac_constraint_absolute_tolerance_mps
+                ),
+            }
+        ),
     )
     fluid.prepare_and_seal_velocity_dirichlet_component_ledger()
     report = dict(result)
@@ -32404,6 +32566,16 @@ def assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             secondary_region_id=secondary_region_id,
             interpolate_interior_velocity=(
                 interpolate_velocity_dirichlet_with_interior
+            ),
+            marker_mac_constraint_operator=(
+                None
+                if not marker_mac_projection_enabled
+                else marker_mac_constraint_projector.operator
+            ),
+            marker_mac_constraint_absolute_tolerance_mps=(
+                None
+                if not marker_mac_projection_enabled
+                else marker_mac_constraint_projector.absolute_tolerance_mps
             ),
         )
 
@@ -34161,6 +34333,16 @@ def advance_hibm_mpm_sharp_mpm_step(
             secondary_region_id=secondary_region_id,
             interpolate_interior_velocity=(
                 interpolate_velocity_dirichlet_with_interior
+            ),
+            marker_mac_constraint_operator=(
+                None
+                if not marker_mac_projection_enabled
+                else marker_mac_constraint_projector.operator
+            ),
+            marker_mac_constraint_absolute_tolerance_mps=(
+                None
+                if not marker_mac_projection_enabled
+                else marker_mac_constraint_projector.absolute_tolerance_mps
             ),
         )
 

@@ -3624,6 +3624,10 @@ class CanonicalComponentFaceLedgerContractMixin:
                 "marker_compatibility_closure_tolerance_mps": 1.0e-6,
                 "marker_compatibility_density_kgm3": float(fluid.rho),
             }
+            if not use_segment_fixture:
+                marker_compatibility_arguments[
+                    "marker_mac_constraint_operator"
+                ] = cls._get_marker_mac_constraint_operator()
         marker_geometry_arguments = {}
         if use_marker_geometry:
             marker_geometry_arguments = {
@@ -3671,6 +3675,9 @@ class CanonicalComponentFaceLedgerContractMixin:
             cell_center_x_m=fluid.cell_center_x_m,
             cell_center_y_m=fluid.cell_center_y_m,
             cell_center_z_m=fluid.cell_center_z_m,
+            cell_width_x_m=fluid.cell_width_x_m,
+            cell_width_y_m=fluid.cell_width_y_m,
+            cell_width_z_m=fluid.cell_width_z_m,
             grid_nodes=cls._GRID_NODES,
             marker_region_id=markers.region_id,
             surface_projection_inactive_axis=surface_projection_inactive_axis,

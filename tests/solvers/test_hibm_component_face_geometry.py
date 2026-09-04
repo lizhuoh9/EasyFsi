@@ -120,6 +120,412 @@ class HibmComponentFaceGeometryTests(
         )
         return marker_positions, marker_velocities
 
+    def _load_collective_q_free_owned_hard_face_case(
+        self,
+        *,
+        marker_y_velocities: tuple[float, float],
+    ) -> tuple[
+        tuple[tuple[float, float, float], ...],
+        tuple[int, int, int],
+        tuple[int, int, int],
+    ]:
+        """Stage two rows sharing one owned hard and one Q-free y face."""
+
+        marker_positions = (
+            (0.375, 0.30, 0.375),
+            (0.375, 0.45, 0.375),
+        )
+        owned_hard_face = (1, 1, 1)
+        q_free_face = (1, 2, 1)
+        self._load_component_face_claims(
+            (
+                _ComponentFaceClaim(
+                    source_row=(1, 0, 1),
+                    boundary_point_m=marker_positions[0],
+                    interior_point_m=(0.375, 0.30, 0.625),
+                    normal=(0.0, 0.0, 1.0),
+                    target_velocity_mps=(
+                        0.0,
+                        marker_y_velocities[0],
+                        0.0,
+                    ),
+                    region_id=202,
+                ),
+            )
+        )
+        self.component_face_markers.load_markers(
+            positions_m=marker_positions,
+            velocities_mps=tuple(
+                (0.0, velocity_y_mps, 0.0)
+                for velocity_y_mps in marker_y_velocities
+            ),
+            normals=((0.0, 0.0, 1.0),) * 2,
+            areas_m2=(0.02, 0.02),
+            region_ids=(202, 202),
+        )
+        return marker_positions, owned_hard_face, q_free_face
+
+    def _solve_collective_q_free_marker_q(self):
+        valid_mask = self._prepare_and_seal_marker_mac_constraint_ledger()
+        operator = self._prepare_marker_mac_constraint_transaction(valid_mask)
+        operator.solve_device(
+            max_iterations=32,
+            absolute_tolerance_mps=1.0e-6,
+            component_face_valid_mask=(
+                self.fluid.hibm_no_slip_component_face_valid_mask
+            ),
+            rank_revealing_direct=True,
+        )
+        self.assertTrue(
+            operator.commit_if_converged(
+                self.fluid,
+                component_face_valid_mask=(
+                    self.fluid.hibm_no_slip_component_face_valid_mask
+                ),
+            )
+        )
+        return operator.report()
+
+    def test_collective_rank_deficient_q_free_rows_close_owned_hard_target_before_marker_q(
+        self,
+    ) -> None:
+        """Closure must make an owned hard target compatible with shared Q-free support."""
+
+        marker_positions, owned_hard_face, q_free_face = (
+            self._load_collective_q_free_owned_hard_face_case(
+                marker_y_velocities=(1.0, 2.0)
+            )
+        )
+        fluid = self.fluid
+        previous_authority = fluid.velocity_dirichlet_boundary_authority
+        try:
+            fluid.set_velocity_dirichlet_boundary_authority("canonical")
+            fluid._invalidate_velocity_dirichlet_component_ledger()
+            self._assemble_component_face_ledger(
+                close_marker_constraints=True,
+                marker_compatibility_iterations_per_batch=8,
+                primary_region_id=101,
+                secondary_region_id=202,
+            )
+
+            owned_state = self._canonical_component_state(owned_hard_face, 1)
+            self.assertTrue(owned_state["active"] and owned_state["owned"])
+            self.assertAlmostEqual(
+                float(owned_state["value_mps"]),
+                2.0 / 3.0,
+                places=5,
+            )
+            self.assertEqual(float(fluid.velocity[q_free_face][1]), 0.0)
+
+            report = self._solve_collective_q_free_marker_q()
+            self.assertEqual(report.backend, "rank_revealing_direct")
+            self.assertTrue(report.rank_revealed)
+            self.assertGreaterEqual(report.dependent_constraint_count, 1)
+            self.assertLessEqual(report.max_residual_mps, 1.0e-6)
+            np.testing.assert_allclose(
+                [
+                    self._numpy_sample_marker_mac_velocity(position)[1]
+                    for position in marker_positions
+                ],
+                (1.0, 2.0),
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+        finally:
+            fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
+            fluid.clear_velocity_dirichlet_boundary_rows()
+
+    def test_collective_hard_repair_reaudits_shared_projection_only_row_before_commit(
+        self,
+    ) -> None:
+        """A physical-row repair cannot silently break a derived H-only row."""
+
+        fixture_class = type(self)
+        previous_fixture = (
+            fixture_class.component_face_boundary,
+            fixture_class.component_face_search,
+            fixture_class.component_face_markers,
+            fixture_class.marker_mac_constraint_operator,
+        )
+        fixture_class.component_face_boundary = HibmMpmIbBoundaryConditions(
+            grid_nodes=self._GRID_NODES,
+            marker_capacity=3,
+        )
+        fixture_class.component_face_search = HibmMpmIbNodeSearch(
+            grid_nodes=self._GRID_NODES,
+            bounds_min_m=(0.0, 0.0, 0.0),
+            bounds_max_m=(1.0, 1.0, 1.0),
+            marker_capacity=3,
+        )
+        fixture_class.component_face_markers = HibmMpmSurfaceMarkers(
+            marker_capacity=3
+        )
+        fixture_class.marker_mac_constraint_operator = None
+        fluid = self.fluid
+        previous_authority = fluid.velocity_dirichlet_boundary_authority
+        try:
+            self._load_collective_q_free_owned_hard_face_case(
+                marker_y_velocities=(1.0, 2.0)
+            )
+            markers = fixture_class.component_face_markers
+            projection_vertex = 2
+            markers.x_gamma_m[projection_vertex] = (0.375, 0.25, 0.375)
+            markers.v_gamma_mps[projection_vertex] = (0.0, 1.0, 0.0)
+            markers.n_gamma[projection_vertex] = (0.0, 0.0, 1.0)
+            markers.A_gamma_m2[projection_vertex] = 0.0
+            markers.region_id[projection_vertex] = -1
+            markers.projection_vertex_pressure_owner_index[
+                projection_vertex
+            ] = projection_vertex
+            markers.projection_vertex_count = 3
+
+            fluid.set_velocity_dirichlet_boundary_authority("canonical")
+            fluid._invalidate_velocity_dirichlet_component_ledger()
+            ledger_before = self._canonical_ledger_bytes()
+            velocity_before = fluid.velocity.to_numpy().tobytes(order="C")
+            stages: list[str] = []
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "marker compatibility closure did not converge",
+            ):
+                self._assemble_component_face_ledger(
+                    close_marker_constraints=True,
+                    marker_compatibility_iterations_per_batch=8,
+                    primary_region_id=101,
+                    secondary_region_id=202,
+                    stage_observer=stages.append,
+                )
+
+            self.assertIn(
+                "hibm_marker_closure_collective_audit_before",
+                stages,
+            )
+            self.assertIn(
+                "hibm_marker_closure_collective_audit_after",
+                stages,
+            )
+            self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+            self.assertEqual(
+                fluid.velocity.to_numpy().tobytes(order="C"),
+                velocity_before,
+            )
+        finally:
+            fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
+            fluid.clear_velocity_dirichlet_boundary_rows()
+            (
+                fixture_class.component_face_boundary,
+                fixture_class.component_face_search,
+                fixture_class.component_face_markers,
+                fixture_class.marker_mac_constraint_operator,
+            ) = previous_fixture
+
+    def test_collective_q_free_feasible_rows_keep_owned_hard_target_bitwise_unchanged(
+        self,
+    ) -> None:
+        """A feasible free solve must not perturb an already compatible hard target."""
+
+        marker_positions, owned_hard_face, _q_free_face = (
+            self._load_collective_q_free_owned_hard_face_case(
+                marker_y_velocities=(1.0, 1.0)
+            )
+        )
+        fluid = self.fluid
+        previous_authority = fluid.velocity_dirichlet_boundary_authority
+        try:
+            fluid.set_velocity_dirichlet_boundary_authority("canonical")
+            fluid._invalidate_velocity_dirichlet_component_ledger()
+            self._assemble_component_face_ledger(
+                close_marker_constraints=True,
+                marker_compatibility_iterations_per_batch=8,
+                primary_region_id=101,
+                secondary_region_id=202,
+            )
+
+            owned_value = np.float32(
+                self._canonical_component_state(owned_hard_face, 1)["value_mps"]
+            )
+            self.assertEqual(owned_value.tobytes(), np.float32(1.0).tobytes())
+
+            report = self._solve_collective_q_free_marker_q()
+            self.assertTrue(report.converged)
+            self.assertEqual(
+                np.float32(
+                    self._canonical_component_state(owned_hard_face, 1)[
+                        "value_mps"
+                    ]
+                ).tobytes(),
+                np.float32(1.0).tobytes(),
+            )
+            np.testing.assert_allclose(
+                [
+                    self._numpy_sample_marker_mac_velocity(position)[1]
+                    for position in marker_positions
+                ],
+                (1.0, 1.0),
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+        finally:
+            fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
+            fluid.clear_velocity_dirichlet_boundary_rows()
+
+    def test_collective_q_free_defect_within_absolute_tolerance_does_not_rewrite_hard_target(
+        self,
+    ) -> None:
+        """Closure tolerance failure alone is not an F-space infeasibility proof."""
+
+        self._load_collective_q_free_owned_hard_face_case(
+            marker_y_velocities=(1.0, 1.000025)
+        )
+        fluid = self.fluid
+        previous_authority = fluid.velocity_dirichlet_boundary_authority
+        try:
+            fluid.set_velocity_dirichlet_boundary_authority("canonical")
+            fluid._invalidate_velocity_dirichlet_component_ledger()
+            ledger_before = self._canonical_ledger_bytes()
+            velocity_before = fluid.velocity.to_numpy().tobytes(order="C")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "marker compatibility closure did not converge",
+            ):
+                self._assemble_component_face_ledger(
+                    close_marker_constraints=True,
+                    marker_compatibility_iterations_per_batch=8,
+                    primary_region_id=101,
+                    secondary_region_id=202,
+                )
+
+            self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+            self.assertEqual(
+                fluid.velocity.to_numpy().tobytes(order="C"),
+                velocity_before,
+            )
+        finally:
+            fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
+            fluid.clear_velocity_dirichlet_boundary_rows()
+
+    def test_collective_certificate_rejects_near_proportional_full_rank_free_rows(
+        self,
+    ) -> None:
+        """A small coefficient difference cannot certify an exact rank defect."""
+
+        operator = self._get_marker_mac_constraint_operator()
+        first_row = 0
+        second_row = 3
+        first_weights = (np.float32(0.5), np.float32(0.5))
+        second_weights = (np.float32(0.5), np.float32(0.5000005))
+        determinant = np.float64(first_weights[0]) * np.float64(
+            second_weights[1]
+        ) - np.float64(first_weights[1]) * np.float64(second_weights[0])
+        self.assertNotEqual(determinant, 0.0)
+        self.assertLess(
+            abs(float(second_weights[1] - first_weights[1])),
+            1.0e-6,
+        )
+
+        operator._reset_collective_target_closure_kernel()
+        try:
+            for row, weights in (
+                (first_row, first_weights),
+                (second_row, second_weights),
+            ):
+                operator._collective_row_active[row] = 1
+                operator._collective_rhs[row] = 1.0 + 0.001 * row
+                for support, (index, weight) in enumerate(
+                    zip(
+                        ((0, 0, 0), (0, 1, 0)),
+                        weights,
+                        strict=True,
+                    )
+                ):
+                    operator._collective_index[row, support] = index
+                    operator._collective_weight[row, support] = weight
+                    operator._collective_free[row, support] = 1
+                operator._collective_index[row, 2] = (1, 1, 1)
+                operator._collective_weight[row, 2] = 0.25
+                operator._collective_adjustable[row, 2] = 1
+
+            operator._certify_collective_proportional_free_rows_kernel(1.0e-4)
+            self.assertEqual(
+                int(operator._collective_certificate_count[None]),
+                0,
+            )
+        finally:
+            operator._reset_collective_target_closure_kernel()
+
+    def test_collective_q_free_rows_with_external_hard_face_fail_before_ledger_commit(
+        self,
+    ) -> None:
+        """A shared Q-free rank defect cannot rewrite an external hard target."""
+
+        marker_positions = (
+            (0.375, 0.30, 0.375),
+            (0.375, 0.45, 0.375),
+        )
+        external_hard_face = (1, 1, 1)
+        self._load_component_face_claims(())
+        self.component_face_markers.load_markers(
+            positions_m=marker_positions,
+            velocities_mps=((0.0, 1.0, 0.0), (0.0, 2.0, 0.0)),
+            normals=((0.0, 0.0, 1.0),) * 2,
+            areas_m2=(0.02, 0.02),
+            region_ids=(202, 202),
+        )
+        fluid = self.fluid
+        previous_authority = fluid.velocity_dirichlet_boundary_authority
+        try:
+            fluid.set_velocity_dirichlet_boundary_authority("canonical")
+            fluid.velocity_dirichlet_boundary_active_component_mask[
+                external_hard_face
+            ] = 0b010
+            fluid.velocity_dirichlet_boundary_value_mps[external_hard_face] = (
+                0.0,
+                1.0,
+                0.0,
+            )
+            fluid.velocity_dirichlet_boundary_pressure_mobility[
+                external_hard_face
+            ] = (1.0, 0.0, 1.0)
+            fluid.velocity_dirichlet_boundary_component_enforcement_weight[
+                external_hard_face
+            ] = (0.0, 1.0, 0.0)
+            fluid.velocity_dirichlet_boundary_component_region_id[
+                external_hard_face
+            ] = (-1, 202, -1)
+            fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[
+                external_hard_face
+            ] = 0b010
+            fluid.velocity_dirichlet_boundary_external_exact_component_mask[
+                external_hard_face
+            ] = 0b010
+            fluid.velocity_dirichlet_boundary_owned_component_mask[
+                external_hard_face
+            ] = 0
+            ledger_before = self._canonical_ledger_bytes()
+            velocity_before = fluid.velocity.to_numpy().tobytes(order="C")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "immutable marker row is incompatible",
+            ):
+                self._assemble_component_face_ledger(
+                    close_marker_constraints=True,
+                    marker_compatibility_iterations_per_batch=8,
+                    primary_region_id=101,
+                    secondary_region_id=202,
+                )
+
+            self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+            self.assertEqual(
+                fluid.velocity.to_numpy().tobytes(order="C"),
+                velocity_before,
+            )
+        finally:
+            fluid.set_velocity_dirichlet_boundary_authority(previous_authority)
+            fluid.clear_velocity_dirichlet_boundary_rows()
+
     def test_relocation_source_linear_key_compiles_as_taichi_function(
         self,
     ) -> None:

@@ -250,6 +250,59 @@ class HibmMpmMarkerMacConstraintOperator:
         )
         self._grid_scratch = ti.Vector.field(3, dtype=ti.f32, shape=shape)
 
+        # Private prospective closure workspace.  This deliberately does not
+        # participate in the public Q transaction: the canonical ledger has
+        # not committed while target compatibility is being decided.
+        self._collective_row_active = ti.field(
+            dtype=ti.i32, shape=self.constraint_capacity
+        )
+        self._collective_row_certificate = ti.field(
+            dtype=ti.i32, shape=self.constraint_capacity
+        )
+        self._collective_row_immutable_hard = ti.field(
+            dtype=ti.i32, shape=self.constraint_capacity
+        )
+        self._collective_marker_owner = ti.field(
+            dtype=ti.i32, shape=self.marker_capacity
+        )
+        self._collective_hash_occupied = ti.field(
+            dtype=ti.i32, shape=self._marker_constraint_hash_capacity
+        )
+        self._collective_hash_position_m = ti.Vector.field(
+            3, dtype=ti.f32, shape=self._marker_constraint_hash_capacity
+        )
+        self._collective_hash_target_mps = ti.Vector.field(
+            3, dtype=ti.f32, shape=self._marker_constraint_hash_capacity
+        )
+        self._collective_hash_owner = ti.field(
+            dtype=ti.i32, shape=self._marker_constraint_hash_capacity
+        )
+        self._collective_owner_failure = ti.field(dtype=ti.i32, shape=())
+        self._collective_rhs = ti.field(dtype=ti.f32, shape=self.constraint_capacity)
+        self._collective_index = ti.Vector.field(
+            3, dtype=ti.i32, shape=(self.constraint_capacity, 8)
+        )
+        self._collective_weight = ti.field(
+            dtype=ti.f32, shape=(self.constraint_capacity, 8)
+        )
+        self._collective_free = ti.field(
+            dtype=ti.i32, shape=(self.constraint_capacity, 8)
+        )
+        self._collective_adjustable = ti.field(
+            dtype=ti.i32, shape=(self.constraint_capacity, 8)
+        )
+        self._collective_inverse_mass = ti.field(
+            dtype=ti.f32, shape=(self.constraint_capacity, 8)
+        )
+        self._collective_delta_free = ti.Vector.field(3, dtype=ti.f32, shape=shape)
+        self._collective_delta_hard = ti.Vector.field(3, dtype=ti.f32, shape=shape)
+        self._collective_active_count = ti.field(dtype=ti.i32, shape=())
+        self._collective_certificate_count = ti.field(dtype=ti.i32, shape=())
+        self._collective_immutable_hard_row_count = ti.field(
+            dtype=ti.i32, shape=()
+        )
+        self._collective_max_residual = ti.field(dtype=ti.f32, shape=())
+
         # Pressure increments need the *linear* homogeneous projector
         #
         #   N = I - P J_I.T (J_I P J_I.T)^-1 J_I,
@@ -1327,6 +1380,293 @@ class HibmMpmMarkerMacConstraintOperator:
         if mass > 1.0e-30:
             inverse_mass = 1.0 / mass
         return inverse_mass
+
+    @ti.kernel
+    def _reset_collective_target_closure_kernel(self):
+        self._collective_active_count[None] = 0
+        self._collective_certificate_count[None] = 0
+        self._collective_immutable_hard_row_count[None] = 0
+        self._collective_max_residual[None] = 0.0
+        self._collective_owner_failure[None] = 0
+        for row in range(self.constraint_capacity):
+            self._collective_row_active[row] = 0
+            self._collective_row_certificate[row] = 0
+            self._collective_row_immutable_hard[row] = 0
+            self._collective_rhs[row] = 0.0
+        for row, support in self._collective_weight:
+            self._collective_index[row, support] = ti.Vector([-1, -1, -1])
+            self._collective_weight[row, support] = 0.0
+            self._collective_free[row, support] = 0
+            self._collective_adjustable[row, support] = 0
+            self._collective_inverse_mass[row, support] = 0.0
+        for i, j, k in self._collective_delta_free:
+            self._collective_delta_free[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+            self._collective_delta_hard[i, j, k] = ti.Vector([0.0, 0.0, 0.0])
+        for marker in range(self.marker_capacity):
+            self._collective_marker_owner[marker] = -1
+        for slot in range(self._marker_constraint_hash_capacity):
+            self._collective_hash_occupied[slot] = 0
+
+    @ti.kernel
+    def _canonicalize_collective_marker_owners_kernel(
+        self,
+        marker_position_m: ti.template(),
+        marker_velocity_mps: ti.template(),
+        marker_region_id: ti.template(),
+        marker_count: ti.i32,
+        primary_region_id: ti.i32,
+        secondary_region_id: ti.i32,
+    ):
+        # This private map mirrors terminal-Q canonicalization.  Its serial
+        # insertion order makes the minimum identical-marker index the owner;
+        # a coincident different target remains a fail-closed input error.
+        ti.loop_config(serialize=True)
+        for marker in range(marker_count):
+            region = marker_region_id[marker]
+            active = region == primary_region_id or region == secondary_region_id
+            if active:
+                position = marker_position_m[marker]
+                target = marker_velocity_mps[marker]
+                finite = True
+                for axis in ti.static(range(3)):
+                    finite = finite and position[axis] == position[axis]
+                    finite = finite and target[axis] == target[axis]
+                if not finite:
+                    ti.atomic_max(self._collective_owner_failure[None], 1)
+                else:
+                    self._collective_marker_owner[marker] = marker
+                    slot = self._marker_constraint_hash_slot(position)
+                    probe = 0
+                    resolved = 0
+                    while probe < self._marker_constraint_hash_capacity and resolved == 0:
+                        if self._collective_hash_occupied[slot] == 0:
+                            self._collective_hash_occupied[slot] = 1
+                            self._collective_hash_position_m[slot] = position
+                            self._collective_hash_target_mps[slot] = target
+                            self._collective_hash_owner[slot] = marker
+                            resolved = 1
+                        else:
+                            representative = self._collective_hash_position_m[slot]
+                            same_position = True
+                            same_target = True
+                            for axis in ti.static(range(3)):
+                                same_position = same_position and position[axis] == representative[axis]
+                                same_target = same_target and target[axis] == self._collective_hash_target_mps[slot][axis]
+                            if same_position:
+                                self._collective_marker_owner[marker] = self._collective_hash_owner[slot]
+                                if not same_target:
+                                    ti.atomic_max(self._collective_owner_failure[None], 2)
+                                resolved = 1
+                            else:
+                                slot = (slot + 1) & (self._marker_constraint_hash_capacity - 1)
+                        probe += 1
+                    if resolved == 0:
+                        ti.atomic_max(self._collective_owner_failure[None], 3)
+
+    @ti.kernel
+    def _build_collective_target_closure_rows_kernel(
+        self, marker_position_m: ti.template(), marker_sample_valid: ti.template(),
+        marker_velocity_mps: ti.template(), marker_region_id: ti.template(),
+        physical_marker_count: ti.i32, primary_region_id: ti.i32,
+        secondary_region_id: ti.i32, prospective_velocity: ti.template(),
+        component_face_valid_mask: ti.template(), hard_fixed_component_mask: ti.template(),
+        external_exact_component_mask: ti.template(), adjustable_component_mask: ti.template(),
+        cell_face_x_m: ti.template(), cell_face_y_m: ti.template(), cell_face_z_m: ti.template(),
+        cell_center_x_m: ti.template(), cell_center_y_m: ti.template(), cell_center_z_m: ti.template(),
+        cell_width_x_m: ti.template(), cell_width_y_m: ti.template(), cell_width_z_m: ti.template(),
+        density_kgm3: ti.f32,
+    ):
+        nx = ti.static(self.grid_nodes[0])
+        ny = ti.static(self.grid_nodes[1])
+        nz = ti.static(self.grid_nodes[2])
+        for marker in range(physical_marker_count):
+            selected = self._collective_marker_owner[marker] == marker
+            selected = selected and marker_sample_valid[marker] != 0
+            selected = selected and (marker_region_id[marker] == primary_region_id or marker_region_id[marker] == secondary_region_id)
+            for axis in ti.static(range(3)):
+                row = 3 * marker + axis
+                if selected:
+                    base, fraction = mac_component_stencil_base_fraction(
+                        marker_position_m[marker], axis, cell_face_x_m, cell_face_y_m,
+                        cell_face_z_m, cell_center_x_m, cell_center_y_m, cell_center_z_m,
+                        nx, ny, nz,
+                    )
+                    valid_weight = 0.0
+                    sampled = 0.0
+                    bit = 1 << axis
+                    for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
+                        i = base.x + oi
+                        j = base.y + oj
+                        k = base.z + ok
+                        weight = mac_stencil_weight(fraction, oi, oj, ok)
+                        if (component_face_valid_mask[i, j, k] & bit) != 0:
+                            valid_weight += weight
+                            sampled += weight * prospective_velocity[i, j, k][axis]
+                    if valid_weight > 1.0e-12:
+                        self._collective_row_active[row] = 1
+                        ti.atomic_add(self._collective_active_count[None], 1)
+                        self._collective_rhs[row] = marker_velocity_mps[marker][axis] - sampled / valid_weight
+                        for oi, oj, ok in ti.static(ti.ndrange(2, 2, 2)):
+                            i = base.x + oi
+                            j = base.y + oj
+                            k = base.z + ok
+                            support = 4 * oi + 2 * oj + ok
+                            weight = mac_stencil_weight(fraction, oi, oj, ok)
+                            self._collective_index[row, support] = ti.Vector([i, j, k])
+                            if (component_face_valid_mask[i, j, k] & bit) != 0:
+                                self._collective_weight[row, support] = weight / valid_weight
+                                hard = (hard_fixed_component_mask[i, j, k] & bit) != 0
+                                external = (external_exact_component_mask[i, j, k] & bit) != 0
+                                self._collective_free[row, support] = 1 if not hard and not external else 0
+                                self._collective_adjustable[row, support] = 1 if (hard and not external and (adjustable_component_mask[i, j, k] & bit) != 0) else 0
+                                if external or (hard and (adjustable_component_mask[i, j, k] & bit) == 0):
+                                    self._collective_row_immutable_hard[row] = 1
+                                self._collective_inverse_mass[row, support] = self._component_inverse_mass_per_kg(
+                                    cell_width_x_m, cell_width_y_m, cell_width_z_m,
+                                    density_kgm3, i, j, k, axis,
+                                )
+                        if self._collective_row_immutable_hard[row] != 0:
+                            ti.atomic_add(self._collective_immutable_hard_row_count[None], 1)
+
+    @ti.func
+    def _collective_row_residual(self, row: ti.i32, include_hard: ti.i32):
+        axis = row % 3
+        residual = self._collective_rhs[row]
+        for support in ti.static(range(8)):
+            index = self._collective_index[row, support]
+            weight = self._collective_weight[row, support]
+            if weight != 0.0 and index.x >= 0:
+                if self._collective_free[row, support] != 0:
+                    residual -= weight * self._collective_delta_free[index.x, index.y, index.z][axis]
+                if include_hard != 0 and self._collective_adjustable[row, support] != 0:
+                    residual -= weight * self._collective_delta_hard[index.x, index.y, index.z][axis]
+        return residual
+
+    @ti.kernel
+    def _collective_kaczmarz_sweep_kernel(self, include_hard: ti.i32):
+        ti.loop_config(serialize=True)
+        for row in range(self.constraint_capacity):
+            eligible = self._collective_row_active[row] != 0
+            if include_hard != 0:
+                eligible = eligible and self._collective_row_certificate[row] != 0
+            if eligible:
+                axis = row % 3
+                denominator = 0.0
+                for support in ti.static(range(8)):
+                    weight = self._collective_weight[row, support]
+                    inv_mass = self._collective_inverse_mass[row, support]
+                    if self._collective_free[row, support] != 0:
+                        denominator += weight * weight * inv_mass
+                    if include_hard != 0 and self._collective_adjustable[row, support] != 0:
+                        denominator += weight * weight * inv_mass
+                if denominator > 1.0e-24:
+                    residual = self._collective_row_residual(row, include_hard)
+                    for support in ti.static(range(8)):
+                        index = self._collective_index[row, support]
+                        weight = self._collective_weight[row, support]
+                        inv_mass = self._collective_inverse_mass[row, support]
+                        delta = weight * inv_mass * residual / denominator
+                        if self._collective_free[row, support] != 0:
+                            self._collective_delta_free[index.x, index.y, index.z][axis] += delta
+                        if include_hard != 0 and self._collective_adjustable[row, support] != 0:
+                            self._collective_delta_hard[index.x, index.y, index.z][axis] += delta
+
+    @ti.kernel
+    def _measure_collective_target_closure_kernel(self, include_hard: ti.i32):
+        self._collective_max_residual[None] = 0.0
+        for row in range(self.constraint_capacity):
+            if self._collective_row_active[row] != 0:
+                ti.atomic_max(self._collective_max_residual[None], ti.abs(self._collective_row_residual(row, include_hard)))
+
+    @ti.kernel
+    def _certify_collective_proportional_free_rows_kernel(self, tolerance_mps: ti.f64):
+        self._collective_certificate_count[None] = 0
+        for row in range(self.constraint_capacity):
+            self._collective_row_certificate[row] = 0
+        # A finite Kaczmarz timeout is not an infeasibility proof.  FH is only
+        # unlocked by this algebraic proportional-free-row lower-bound witness.
+        for first in range(self.constraint_capacity):
+            if self._collective_row_active[first] != 0:
+                axis = first % 3
+                for second in range(first + 1, self.constraint_capacity):
+                    if self._collective_row_active[second] != 0 and second % 3 == axis:
+                        pivot_a = ti.cast(0.0, ti.f64)
+                        pivot_c = ti.cast(0.0, ti.f64)
+                        have_pivot = 0
+                        first_adjustable = 0
+                        second_adjustable = 0
+                        for support in ti.static(range(8)):
+                            first_adjustable = ti.max(first_adjustable, self._collective_adjustable[first, support])
+                            second_adjustable = ti.max(second_adjustable, self._collective_adjustable[second, support])
+                            first_weight = ti.cast(self._collective_weight[first, support], ti.f64)
+                            if have_pivot == 0 and self._collective_free[first, support] != 0 and first_weight != 0.0:
+                                index = self._collective_index[first, support]
+                                for candidate in ti.static(range(8)):
+                                    other = self._collective_index[second, candidate]
+                                    second_weight = ti.cast(self._collective_weight[second, candidate], ti.f64)
+                                    if self._collective_free[second, candidate] != 0 and second_weight != 0.0 and index.x == other.x and index.y == other.y and index.z == other.z:
+                                        pivot_a = first_weight
+                                        pivot_c = second_weight
+                                        have_pivot = 1
+                        proportional = have_pivot != 0
+                        if proportional:
+                            for support in ti.static(range(8)):
+                                first_weight = ti.cast(self._collective_weight[first, support], ti.f64)
+                                if self._collective_free[first, support] != 0 and first_weight != 0.0:
+                                    matching_count = 0
+                                    matching_cross_product = 0
+                                    index = self._collective_index[first, support]
+                                    for candidate in ti.static(range(8)):
+                                        other = self._collective_index[second, candidate]
+                                        second_weight = ti.cast(self._collective_weight[second, candidate], ti.f64)
+                                        if self._collective_free[second, candidate] != 0 and second_weight != 0.0 and index.x == other.x and index.y == other.y and index.z == other.z:
+                                            matching_count += 1
+                                            if second_weight * pivot_a == first_weight * pivot_c:
+                                                matching_cross_product = 1
+                                    if matching_count != 1 or matching_cross_product == 0:
+                                        proportional = False
+                                second_weight = ti.cast(self._collective_weight[second, support], ti.f64)
+                                if self._collective_free[second, support] != 0 and second_weight != 0.0:
+                                    matching_count = 0
+                                    matching_cross_product = 0
+                                    index = self._collective_index[second, support]
+                                    for candidate in ti.static(range(8)):
+                                        other = self._collective_index[first, candidate]
+                                        first_weight = ti.cast(self._collective_weight[first, candidate], ti.f64)
+                                        if self._collective_free[first, candidate] != 0 and first_weight != 0.0 and index.x == other.x and index.y == other.y and index.z == other.z:
+                                            matching_count += 1
+                                            if second_weight * pivot_a == first_weight * pivot_c:
+                                                matching_cross_product = 1
+                                    if matching_count != 1 or matching_cross_product == 0:
+                                        proportional = False
+                        if proportional and first_adjustable != 0 and second_adjustable != 0:
+                            first_rhs = ti.cast(self._collective_rhs[first], ti.f64)
+                            second_rhs = ti.cast(self._collective_rhs[second], ti.f64)
+                            left_product = pivot_a * second_rhs
+                            right_product = pivot_c * first_rhs
+                            tolerance_product = tolerance_mps * (
+                                ti.abs(pivot_a) + ti.abs(pivot_c)
+                            )
+                            eps64 = ti.cast(2.220446049250313e-16, ti.f64)
+                            roundoff_margin = ti.cast(32.0, ti.f64) * eps64 * (
+                                ti.abs(left_product)
+                                + ti.abs(right_product)
+                                + tolerance_product
+                            )
+                            if ti.abs(left_product - right_product) > tolerance_product + roundoff_margin:
+                                self._collective_row_certificate[first] = 1
+                                self._collective_row_certificate[second] = 1
+        for row in range(self.constraint_capacity):
+            if self._collective_row_certificate[row] != 0:
+                ti.atomic_add(self._collective_certificate_count[None], 1)
+
+    @ti.kernel
+    def _apply_collective_hard_target_delta_kernel(self, claim_target_mps: ti.template(), prospective_velocity: ti.template()):
+        for i, j, k in self._collective_delta_hard:
+            delta = self._collective_delta_hard[i, j, k]
+            if delta.x != 0.0 or delta.y != 0.0 or delta.z != 0.0:
+                claim_target_mps[i, j, k] += delta
+                prospective_velocity[i, j, k] += delta
 
     @ti.kernel
     def _prepare_rows_kernel(
@@ -3070,6 +3410,122 @@ class HibmMpmMarkerMacConstraintOperator:
             )
         if audit_failure_code != 0:
             self._invalidate_stale_transaction("cached inputs changed")
+
+    def close_prospective_owned_hard_targets_collectively(
+        self,
+        *,
+        marker_position_m,
+        marker_sample_valid,
+        marker_velocity_mps,
+        marker_region_id,
+        physical_marker_count: int,
+        primary_region_id: int,
+        secondary_region_id: int,
+        prospective_velocity,
+        component_face_valid_mask,
+        hard_fixed_component_mask,
+        external_exact_component_mask,
+        adjustable_component_mask,
+        claim_target_mps,
+        cell_face_x_m,
+        cell_face_y_m,
+        cell_face_z_m,
+        cell_center_x_m,
+        cell_center_y_m,
+        cell_center_z_m,
+        cell_width_x_m,
+        cell_width_y_m,
+        cell_width_z_m,
+        density_kgm3: float,
+        sweeps_per_batch: int,
+        closure_tolerance_mps: float,
+        absolute_tolerance_mps: float,
+    ) -> dict[str, object]:
+        """Close a certified collective F/H defect before ledger publication."""
+
+        if self._phase in {"prepared", "solved"}:
+            raise RuntimeError("collective target closure cannot reuse a pending Q transaction")
+        count = int(physical_marker_count)
+        sweeps = int(sweeps_per_batch)
+        closure_tolerance = float(closure_tolerance_mps)
+        absolute_tolerance = float(absolute_tolerance_mps)
+        density = float(density_kgm3)
+        if count < 0 or count > self.marker_capacity:
+            raise ValueError("physical_marker_count exceeds marker_capacity")
+        if (
+            sweeps <= 0
+            or not math.isfinite(closure_tolerance)
+            or closure_tolerance <= 0.0
+            or not math.isfinite(absolute_tolerance)
+            or absolute_tolerance <= 0.0
+            or closure_tolerance > absolute_tolerance
+        ):
+            raise ValueError(
+                "collective closure requires 0 < closure_tolerance_mps <= "
+                "absolute_tolerance_mps"
+            )
+        if not math.isfinite(density) or density <= 0.0:
+            raise ValueError("collective closure density must be positive")
+
+        self._reset_collective_target_closure_kernel()
+        self._canonicalize_collective_marker_owners_kernel(
+            marker_position_m,
+            marker_velocity_mps,
+            marker_region_id,
+            count,
+            int(primary_region_id),
+            int(secondary_region_id),
+        )
+        owner_failure = int(self._collective_owner_failure[None])
+        if owner_failure != 0:
+            self._reset_collective_target_closure_kernel()
+            raise RuntimeError(
+                "collective target closure marker canonicalization failed before "
+                f"canonical commit: failure_code={owner_failure}"
+            )
+        self._build_collective_target_closure_rows_kernel(
+            marker_position_m, marker_sample_valid, marker_velocity_mps,
+            marker_region_id, count, int(primary_region_id), int(secondary_region_id),
+            prospective_velocity, component_face_valid_mask,
+            hard_fixed_component_mask, external_exact_component_mask,
+            adjustable_component_mask,
+            cell_face_x_m, cell_face_y_m, cell_face_z_m,
+            cell_center_x_m, cell_center_y_m, cell_center_z_m,
+            cell_width_x_m, cell_width_y_m, cell_width_z_m, density,
+        )
+        active_count = int(self._collective_active_count[None])
+        immutable_hard_row_count = int(
+            self._collective_immutable_hard_row_count[None]
+        )
+        if active_count == 0:
+            self._reset_collective_target_closure_kernel()
+            return {"attempted": False, "closed": False, "constraint_count": 0, "f_only_converged": False, "certificate_count": 0, "immutable_hard_row_count": 0}
+
+        # F-only is the ordinary Q space.  Its scratch correction is always
+        # discarded: it never reaches fluid.velocity or a ledger claim.
+        for _ in range(max(1, active_count)):
+            for _ in range(sweeps):
+                self._collective_kaczmarz_sweep_kernel(0)
+            self._measure_collective_target_closure_kernel(0)
+            if float(self._collective_max_residual[None]) <= closure_tolerance:
+                self._reset_collective_target_closure_kernel()
+                return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": True, "certificate_count": 0, "immutable_hard_row_count": immutable_hard_row_count}
+
+        self._certify_collective_proportional_free_rows_kernel(absolute_tolerance)
+        certificate_count = int(self._collective_certificate_count[None])
+        if certificate_count == 0:
+            self._reset_collective_target_closure_kernel()
+            return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": False, "certificate_count": 0, "immutable_hard_row_count": immutable_hard_row_count}
+        for _ in range(max(1, certificate_count)):
+            for _ in range(sweeps):
+                self._collective_kaczmarz_sweep_kernel(1)
+            self._measure_collective_target_closure_kernel(1)
+            if float(self._collective_max_residual[None]) <= closure_tolerance:
+                self._apply_collective_hard_target_delta_kernel(claim_target_mps, prospective_velocity)
+                self._reset_collective_target_closure_kernel()
+                return {"attempted": True, "closed": True, "constraint_count": active_count, "f_only_converged": False, "certificate_count": certificate_count, "immutable_hard_row_count": immutable_hard_row_count}
+        self._reset_collective_target_closure_kernel()
+        return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": False, "certificate_count": certificate_count, "immutable_hard_row_count": immutable_hard_row_count}
 
     def prepare(
         self,
