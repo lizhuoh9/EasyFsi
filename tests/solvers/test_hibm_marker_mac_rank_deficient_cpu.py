@@ -9,6 +9,7 @@ behavior; the public caller must opt in to a rank-revealing direct path.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest import mock
 import unittest
 
 import numpy as np
@@ -27,6 +28,9 @@ sim_runtime._INITIALIZED_ARCH = "cpu"
 sim_runtime._INITIALIZED_FP = "f32"
 
 from simulation_core import HibmMpmSurfaceMarkers  # noqa: E402
+from simulation_core.coupling.hibm_mpm import (  # noqa: E402
+    marker_mac_constraint as marker_constraint,
+)
 from simulation_core.coupling.hibm_mpm.marker_mac_constraint import (  # noqa: E402
     HibmMpmMarkerMacConstraintOperator,
 )
@@ -50,6 +54,17 @@ class _RankDeficientMarkerMacFixture:
         (0.09999992, 0.0, 0.0),
         (-7.992e-5, 0.0, 0.0),
         (1.80000005e-4, 0.0, 0.0),
+    )
+
+    MINIMAX_REQUIRED_POSITIONS_M = (
+        (0.0, 0.25, 0.25),
+        (0.0, 0.30, 0.25),
+        (0.0, 0.35, 0.25),
+    )
+    MINIMAX_REQUIRED_TARGETS_MPS = (
+        (0.0, 0.0, 0.0),
+        (1.964916e-4, 0.0, 0.0),
+        (1.964916e-4, 0.0, 0.0),
     )
 
     def __init__(self) -> None:
@@ -147,6 +162,11 @@ class _RankDeficientMarkerMacFixture:
             areas_m2=(1.0,) * len(positions),
             region_ids=(1,) * len(positions),
         )
+
+    def keep_only_first_x_face_free(self) -> None:
+        valid_mask = np.full(self.GRID_NODES, 0b110, dtype=np.int32)
+        valid_mask[0, 0, 0] = 0b111
+        self.component_face_valid_mask.from_numpy(valid_mask)
 
     def prepared_operator(
         self,
@@ -286,10 +306,15 @@ class HibmMarkerMacRankDeficientCpuTests(unittest.TestCase):
         matrix = self._prepared_x_stencil_matrix(operator)
         velocity_before_solve = self._velocity_bytes(fixture)
 
-        operator.solve_device(
-            **fixture.solve_kwargs(),
-            rank_revealing_direct=True,
-        )
+        with mock.patch.object(
+            marker_constraint,
+            "_solve_column_normalized_linf",
+            side_effect=AssertionError("L2 fast path unexpectedly used minimax"),
+        ):
+            operator.solve_device(
+                **fixture.solve_kwargs(),
+                rank_revealing_direct=True,
+            )
         self.assertEqual(self._velocity_bytes(fixture), velocity_before_solve)
         committed = operator.commit_if_converged(
             fixture.fluid,
@@ -320,6 +345,119 @@ class HibmMarkerMacRankDeficientCpuTests(unittest.TestCase):
             fixture.MARKER_TARGETS_MPS,
         )
 
+    def test_direct_minimax_fallback_commits_when_l2_misses_max_norm_gate(
+        self,
+    ) -> None:
+        fixture = _RankDeficientMarkerMacFixture()
+        fixture.reset(
+            positions_m=fixture.MINIMAX_REQUIRED_POSITIONS_M,
+            targets_mps=fixture.MINIMAX_REQUIRED_TARGETS_MPS,
+        )
+        fixture.keep_only_first_x_face_free()
+        operator = fixture.prepared_operator()
+        matrix = self._prepared_x_stencil_matrix(operator)
+        np.testing.assert_allclose(
+            matrix,
+            np.asarray(((1.0, 0.0),) * 3, dtype=np.float64),
+            rtol=0.0,
+            atol=2.0e-6,
+        )
+        target_x = np.asarray(
+            [target[0] for target in fixture.MINIMAX_REQUIRED_TARGETS_MPS],
+            dtype=np.float64,
+        )
+        least_squares, _, _, _ = np.linalg.lstsq(matrix, target_x, rcond=None)
+        self.assertGreater(
+            float(np.max(np.abs(matrix @ least_squares - target_x))),
+            fixture.ABSOLUTE_TOLERANCE_MPS,
+        )
+        minimax_witness = np.asarray(
+            (0.5 * (float(np.min(target_x)) + float(np.max(target_x))), 0.0),
+            dtype=np.float64,
+        )
+        self.assertLessEqual(
+            float(np.max(np.abs(matrix @ minimax_witness - target_x))),
+            fixture.ABSOLUTE_TOLERANCE_MPS,
+        )
+        velocity_before_solve = self._velocity_bytes(fixture)
+
+        with mock.patch.object(
+            marker_constraint,
+            "_solve_column_normalized_linf",
+            wraps=marker_constraint._solve_column_normalized_linf,
+        ) as solve_linf:
+            operator.solve_device(
+                **fixture.solve_kwargs(),
+                rank_revealing_direct=True,
+            )
+        self.assertEqual(solve_linf.call_count, 1)
+        self.assertEqual(self._velocity_bytes(fixture), velocity_before_solve)
+        committed = operator.commit_if_converged(
+            fixture.fluid,
+            component_face_valid_mask=fixture.component_face_valid_mask,
+            topology_generation=fixture.TOPOLOGY_GENERATION,
+            component_face_valid_mask_generation=fixture.VALID_MASK_GENERATION,
+            obstacle_field=fixture.obstacle,
+        )
+
+        report = operator.report()
+        self.assertTrue(committed)
+        self.assertTrue(report.converged)
+        self.assertTrue(report.committed)
+        self.assertEqual(report.backend, "rank_revealing_direct")
+        self.assertLessEqual(
+            report.max_residual_mps,
+            fixture.ABSOLUTE_TOLERANCE_MPS,
+        )
+        self._assert_actual_x_face_residual(
+            fixture,
+            matrix,
+            fixture.MINIMAX_REQUIRED_TARGETS_MPS,
+        )
+
+    def test_direct_minimax_failure_keeps_velocity_uncommitted(self) -> None:
+        fixture = _RankDeficientMarkerMacFixture()
+        fixture.reset(
+            positions_m=fixture.MINIMAX_REQUIRED_POSITIONS_M,
+            targets_mps=fixture.MINIMAX_REQUIRED_TARGETS_MPS,
+        )
+        fixture.keep_only_first_x_face_free()
+        operator = fixture.prepared_operator()
+        velocity_before_solve = self._velocity_bytes(fixture)
+
+        with mock.patch.object(
+            marker_constraint,
+            "_solve_column_normalized_linf",
+            side_effect=RuntimeError("rank-direct minimax sentinel"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "rank-direct minimax sentinel",
+            ):
+                operator.solve_device(
+                    **fixture.solve_kwargs(),
+                    rank_revealing_direct=True,
+                )
+
+        self.assertEqual(self._velocity_bytes(fixture), velocity_before_solve)
+        report = operator.report()
+        self.assertFalse(report.converged)
+        self.assertFalse(report.committed)
+        self.assertEqual(report.backend, "rank_revealing_direct")
+        self.assertTrue(report.rank_revealed)
+        self.assertEqual(operator._phase, "failed")
+        with self.assertRaisesRegex(RuntimeError, "transaction is not converged"):
+            operator.commit_if_converged(
+                fixture.fluid,
+                component_face_valid_mask=fixture.component_face_valid_mask,
+                topology_generation=fixture.TOPOLOGY_GENERATION,
+                component_face_valid_mask_generation=(
+                    fixture.VALID_MASK_GENERATION
+                ),
+                obstacle_field=fixture.obstacle,
+            )
+        self.assertEqual(self._velocity_bytes(fixture), velocity_before_solve)
+
     def test_opt_in_direct_rejects_infeasible_dependent_rhs_atomically(self) -> None:
         fixture = _RankDeficientMarkerMacFixture()
         infeasible_targets = (
@@ -339,16 +477,37 @@ class HibmMarkerMacRankDeficientCpuTests(unittest.TestCase):
             float(np.max(np.abs(matrix @ least_squares - target_x))),
             fixture.ABSOLUTE_TOLERANCE_MPS,
         )
+        _, _, right_vectors = np.linalg.svd(matrix.T, full_matrices=True)
+        left_null = right_vectors[-1]
+        np.testing.assert_allclose(
+            left_null @ matrix,
+            np.zeros(matrix.shape[1], dtype=np.float64),
+            rtol=0.0,
+            atol=1.0e-10,
+        )
+        minimax_lower_bound = abs(float(left_null @ target_x)) / float(
+            np.linalg.norm(left_null, ord=1)
+        )
+        self.assertGreater(
+            minimax_lower_bound,
+            fixture.ABSOLUTE_TOLERANCE_MPS,
+        )
         velocity_before_solve = self._velocity_bytes(fixture)
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "rank-revealing direct marker correction residual exceeds",
-        ):
-            operator.solve_device(
-                **fixture.solve_kwargs(),
-                rank_revealing_direct=True,
-            )
+        with mock.patch.object(
+            marker_constraint,
+            "_solve_column_normalized_linf",
+            wraps=marker_constraint._solve_column_normalized_linf,
+        ) as solve_linf:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "rank-revealing direct marker correction residual exceeds",
+            ):
+                operator.solve_device(
+                    **fixture.solve_kwargs(),
+                    rank_revealing_direct=True,
+                )
+        self.assertEqual(solve_linf.call_count, 1)
         self.assertEqual(self._velocity_bytes(fixture), velocity_before_solve)
         report = operator.report()
         self.assertFalse(report.converged)

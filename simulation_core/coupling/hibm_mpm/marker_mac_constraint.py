@@ -44,6 +44,8 @@ def _uses_marker_constraint_hash(marker_count: int) -> bool:
 def _solve_column_normalized_linf(
     matrix: np.ndarray,
     rhs: np.ndarray,
+    *,
+    failure_context: str,
 ) -> np.ndarray:
     """Return one Chebyshev witness for a column-normalized dense system."""
 
@@ -76,13 +78,10 @@ def _solve_column_normalized_linf(
             },
         )
     except Exception as exc:
-        raise RuntimeError(
-            "collective isolated F-only minimax solve failed"
-        ) from exc
+        raise RuntimeError(f"{failure_context} minimax solve failed") from exc
     if not result.success:
         raise RuntimeError(
-            "collective isolated F-only minimax solve failed: "
-            f"{result.message}"
+            f"{failure_context} minimax solve failed: {result.message}"
         )
     solution = np.asarray(result.x[:column_count], dtype=np.float64)
     if (
@@ -90,9 +89,7 @@ def _solve_column_normalized_linf(
         or not np.all(np.isfinite(solution))
         or not math.isfinite(float(result.fun))
     ):
-        raise RuntimeError(
-            "collective isolated F-only minimax solution is non-finite"
-        )
+        raise RuntimeError(f"{failure_context} minimax solution is non-finite")
     return solution
 
 
@@ -2362,6 +2359,8 @@ class HibmMpmMarkerMacConstraintOperator:
         separate public lifecycle.  The selected rows provide a correction
         basis, while the least-squares objective includes every positive-energy
         physical row so a representative-only solve cannot hide dependencies.
+        Least squares is the fast path; a bounded Chebyshev fallback aligns the
+        candidate objective with the authoritative all-row max-residual audit.
         """
 
         # Publish the attempted backend before every direct-only failure path,
@@ -2449,22 +2448,51 @@ class HibmMpmMarkerMacConstraintOperator:
             weights = self._stencil_weight.to_numpy()
             free = self._stencil_free.to_numpy()
             inverse_mass = self._stencil_inverse_mass_per_kg.to_numpy()
-            for coefficient, row in zip(coefficients, selected, strict=True):
-                axis = int(row % 3)
-                for support in range(8):
-                    if int(free[row, support]) == 0:
-                        continue
-                    index = tuple(int(value) for value in indices[row, support])
-                    correction[index][axis] += (
-                        float(inverse_mass[row, support])
-                        * float(weights[row, support])
-                        * float(coefficient)
-                    )
+
+            def assemble_selected_correction(
+                basis_coefficients: np.ndarray,
+            ) -> np.ndarray:
+                candidate = np.zeros((*self.grid_nodes, 3), dtype=np.float64)
+                for coefficient, row in zip(
+                    basis_coefficients, selected, strict=True
+                ):
+                    axis = int(row % 3)
+                    for support in range(8):
+                        if int(free[row, support]) == 0:
+                            continue
+                        index = tuple(int(value) for value in indices[row, support])
+                        candidate[index][axis] += (
+                            float(inverse_mass[row, support])
+                            * float(weights[row, support])
+                            * float(coefficient)
+                        )
+                return candidate
+
+            correction = assemble_selected_correction(coefficients)
         self._pressure_nullspace_correction.from_numpy(correction)
         self._materialize_rank_direct_correction_and_audit_kernel()
         self._max_residual_mps = float(self._true_candidate_max_residual[None])
         self._converged = self._max_residual_mps <= tolerance
         self._iterations = 0
+        if not self._converged and selected.size:
+            try:
+                normalized_solution = _solve_column_normalized_linf(
+                    normalized_columns,
+                    rhs[positive_rows],
+                    failure_context="rank-revealing direct marker",
+                )
+            except Exception:
+                self._phase = "failed"
+                raise
+            correction = assemble_selected_correction(
+                normalized_solution / column_norm
+            )
+            self._pressure_nullspace_correction.from_numpy(correction)
+            self._materialize_rank_direct_correction_and_audit_kernel()
+            self._max_residual_mps = float(
+                self._true_candidate_max_residual[None]
+            )
+            self._converged = self._max_residual_mps <= tolerance
         if not self._converged:
             self._phase = "failed"
             raise RuntimeError(
@@ -2643,6 +2671,7 @@ class HibmMpmMarkerMacConstraintOperator:
                 solution = _solve_column_normalized_linf(
                     normalized_matrix,
                     axis_rhs,
+                    failure_context="collective isolated F-only",
                 )
                 for index, column in dof_column.items():
                     correction[index][axis] = solution[column] / column_norm[column]
