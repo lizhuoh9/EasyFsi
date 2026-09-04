@@ -115,6 +115,7 @@ def test_fsi1_s0_spec_is_the_review_frozen_matrix() -> None:
         "flow_cg_tolerance": 1.0e-6,
         "flow_reprojection_iterations": 1200,
         "flow_reprojection_cg_tolerance": 1.0e-4,
+        "fsi_coupling_absolute_tolerance_mps": 1.0e-4,
         "solid_substeps": 100,
         "velocity_damping": 1.0,
         "marker_reseed_interval_steps": None,
