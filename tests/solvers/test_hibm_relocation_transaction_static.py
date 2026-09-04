@@ -333,7 +333,7 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
                 )
             )
 
-    def test_marker_closure_has_only_serialized_kaczmarz_device_solver(
+    def test_marker_closure_reports_serialized_kaczmarz_with_certified_collective_repair(
         self,
     ) -> None:
         module = ast.parse(self.source)
@@ -350,6 +350,11 @@ class HibmRelocationTransactionStaticTests(unittest.TestCase):
         self.assertIn("iterations_per_batch", keyword_only_arguments)
         closure_source = ast.unparse(closure)
         self.assertIn("serialized_kaczmarz", closure_source)
+        self.assertIn(
+            "certificate_authorized_inverse_mass_weighted_lstsq",
+            closure_source,
+        )
+        self.assertIn("collective_repair_applied", closure_source)
         self.assertIn(
             "_marker_target_closure_kaczmarz_sweep_kernel",
             closure_source,

@@ -1194,6 +1194,13 @@ class AnsysVerticalFlapFsiSmokeTests(unittest.TestCase):
                         "projection_only_invalid_axis_count": 0,
                         "projection_only_constraint_count": 0,
                         "projection_only_max_residual_mps": 0.0,
+                        "collective_repair_applied": False,
+                        "collective_repair_backend": "none",
+                        "collective_repair_certificate_count": 0,
+                        "collective_repair_max_residual_mps": 0.0,
+                        "collective_global_max_residual_mps": 0.0,
+                        "collective_repair_hard_target_dof_count": 0,
+                        "collective_repair_max_abs_hard_target_delta_mps": 0.0,
                     }
                 },
             )

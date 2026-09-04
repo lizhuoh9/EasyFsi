@@ -329,7 +329,7 @@ class CanonicalVelocityBoundaryComponentReportContracts(unittest.TestCase):
             HibmMpmIbBoundaryConditions.assemble_velocity_dirichlet_component_face_ledger
         )
 
-        self.assertIn('"schema_version": 5', builder_source)
+        self.assertIn('"schema_version": 6', builder_source)
         self.assertIn(
             "_classify_canonical_obstacle_storage_component_device",
             report_kernel_source,

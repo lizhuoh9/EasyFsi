@@ -16,7 +16,7 @@ def _velocity_dirichlet_report(seed: int) -> dict[str, object]:
         "hibm_velocity_dirichlet_segment_identical_provenance_merged_component_count": seed,
         "hibm_velocity_dirichlet_segment_endpoint_clamped_component_count": seed,
         "hibm_velocity_dirichlet_max_segment_endpoint_clamp_overrun_support_ratio": 0.25,
-        "canonical_velocity_dirichlet_report": {"schema_version": 5},
+        "canonical_velocity_dirichlet_report": {"schema_version": 6},
     }
 
 

@@ -192,19 +192,25 @@ class HibmComponentFaceGeometryTests(
         return operator.report()
 
     @staticmethod
-    def _new_isolated_collective_witness_operator():
+    def _new_isolated_collective_witness_operator(marker_capacity: int = 3):
         from simulation_core.coupling.hibm_mpm.marker_mac_constraint import (
             HibmMpmMarkerMacConstraintOperator,
         )
 
         return HibmMpmMarkerMacConstraintOperator(
             grid_nodes=(4, 4, 4),
-            marker_capacity=3,
+            marker_capacity=marker_capacity,
         )
 
     @staticmethod
-    def _seed_isolated_collective_rows(operator, rows) -> None:
+    def _seed_isolated_collective_rows(
+        operator,
+        rows,
+        *,
+        adjustable_supports=(),
+    ) -> None:
         operator._reset_collective_target_closure_kernel()
+        adjustable = set(adjustable_supports)
         for row, rhs, supports in rows:
             operator._collective_row_active[row] = 1
             operator._collective_rhs[row] = rhs
@@ -214,6 +220,9 @@ class HibmComponentFaceGeometryTests(
                 operator._collective_index[row, support] = index
                 operator._collective_weight[row, support] = weight
                 operator._collective_free[row, support] = int(free)
+                operator._collective_adjustable[row, support] = int(
+                    (row, support) in adjustable
+                )
                 operator._collective_inverse_mass[row, support] = inverse_mass
 
     @staticmethod
@@ -286,6 +295,298 @@ class HibmComponentFaceGeometryTests(
         )
         np.testing.assert_array_equal(
             operator._collective_delta_free.to_numpy(),
+            np.zeros((4, 4, 4, 3), dtype=np.float32),
+        )
+
+    def test_collective_isolated_fh_closes_all_active_rows_after_three_row_certificate(
+        self,
+    ) -> None:
+        """A certificate authorizes H; it does not restrict the FH solve rows."""
+
+        operator = self._new_isolated_collective_witness_operator(
+            marker_capacity=4
+        )
+        rows = (
+            (
+                0,
+                0.0,
+                (
+                    ((0, 0, 0), 0.5, True, 1.0),
+                    ((1, 0, 0), 0.5, False, 1.0),
+                ),
+            ),
+            (
+                3,
+                2.0e-3,
+                (
+                    ((0, 0, 0), 0.5, True, 1.0),
+                    ((1, 0, 1), 0.5, False, 1.0),
+                ),
+            ),
+            (
+                6,
+                4.0e-3,
+                (
+                    ((0, 0, 0), 0.5, True, 1.0),
+                    ((1, 0, 2), 0.5, False, 1.0),
+                ),
+            ),
+            (
+                9,
+                1.0e-3,
+                (
+                    ((0, 0, 0), 0.5, True, 1.0),
+                    ((0, 0, 1), 0.5, True, 1.0),
+                ),
+            ),
+        )
+        self._seed_isolated_collective_rows(
+            operator,
+            rows,
+            adjustable_supports=((0, 1), (3, 1), (6, 1)),
+        )
+        operator._certify_collective_proportional_free_rows_kernel(1.0e-4)
+        self.assertEqual(
+            int(operator._collective_certificate_count[None]),
+            3,
+        )
+        np.testing.assert_array_equal(
+            operator._collective_row_certificate.to_numpy()[[0, 3, 6, 9]],
+            np.array([1, 1, 1, 0], dtype=np.int32),
+        )
+
+        self.assertTrue(
+            operator._collective_isolated_fh_repair(
+                closure_tolerance=1.0e-6,
+                absolute_tolerance=1.0e-4,
+            )
+        )
+        operator._measure_collective_target_closure_kernel(1)
+        self.assertLessEqual(
+            float(operator._collective_max_residual[None]),
+            1.0e-6,
+        )
+        self.assertTrue(np.any(operator._collective_delta_hard.to_numpy()))
+
+    def test_collective_isolated_fh_uses_inverse_mass_minimum_energy_without_mobility_rank_loss(
+        self,
+    ) -> None:
+        """Applied H is mobility weighted without hiding an independent row."""
+
+        operator = self._new_isolated_collective_witness_operator(
+            marker_capacity=2
+        )
+        self._seed_isolated_collective_rows(
+            operator,
+            (
+                (
+                    0,
+                    1.0,
+                    (
+                        ((0, 0, 0), 1.0, True, 1.0),
+                        ((1, 0, 0), 1.0, False, 4.0),
+                    ),
+                ),
+                (
+                    3,
+                    1.0e-8,
+                    (((0, 0, 1), 1.0, True, 1.0e-32),),
+                ),
+            ),
+            adjustable_supports=((0, 1),),
+        )
+        operator._collective_row_certificate[0] = 1
+        operator._collective_certificate_count[None] = 1
+
+        self.assertTrue(
+            operator._collective_isolated_fh_repair(
+                closure_tolerance=1.0e-9,
+                absolute_tolerance=1.0e-9,
+            )
+        )
+        free_delta = operator._collective_delta_free.to_numpy()
+        hard_delta = operator._collective_delta_hard.to_numpy()
+        np.testing.assert_allclose(
+            (
+                free_delta[0, 0, 0, 0],
+                hard_delta[1, 0, 0, 0],
+                free_delta[0, 0, 1, 0],
+            ),
+            (0.2, 0.8, 1.0e-8),
+            rtol=1.0e-6,
+            atol=1.0e-12,
+        )
+
+    def test_collective_isolated_fh_does_not_rewrite_uncertified_component(
+        self,
+    ) -> None:
+        """One certificate cannot authorize H in a disconnected component."""
+
+        operator = self._new_isolated_collective_witness_operator(
+            marker_capacity=5
+        )
+        rows = (
+            (
+                0,
+                0.0,
+                (
+                    ((0, 0, 0), 0.5, True, 1.0),
+                    ((1, 0, 0), 0.5, False, 1.0),
+                ),
+            ),
+            (
+                3,
+                2.0e-3,
+                (
+                    ((0, 0, 0), 0.5, True, 1.0),
+                    ((1, 0, 1), 0.5, False, 1.0),
+                ),
+            ),
+            (
+                6,
+                4.0e-3,
+                (
+                    ((0, 0, 0), 0.5, True, 1.0),
+                    ((1, 0, 2), 0.5, False, 1.0),
+                ),
+            ),
+            (
+                9,
+                0.0,
+                (
+                    ((0, 1, 0), 0.5, True, 1.0),
+                    ((1, 1, 0), 0.5, False, 1.0),
+                ),
+            ),
+            (
+                12,
+                4.0e-5,
+                (
+                    ((0, 1, 0), 0.5, True, 1.0),
+                    ((1, 1, 1), 0.5, False, 1.0),
+                ),
+            ),
+        )
+        self._seed_isolated_collective_rows(
+            operator,
+            rows,
+            adjustable_supports=(
+                (0, 1),
+                (3, 1),
+                (6, 1),
+                (9, 1),
+                (12, 1),
+            ),
+        )
+        operator._certify_collective_proportional_free_rows_kernel(1.0e-4)
+        self.assertEqual(
+            int(operator._collective_certificate_count[None]),
+            3,
+        )
+        np.testing.assert_array_equal(
+            operator._collective_row_certificate.to_numpy()[
+                [0, 3, 6, 9, 12]
+            ],
+            np.array([1, 1, 1, 0, 0], dtype=np.int32),
+        )
+
+        self.assertTrue(
+            operator._collective_isolated_fh_repair(
+                closure_tolerance=1.0e-6,
+                absolute_tolerance=1.0e-4,
+            )
+        )
+        hard_delta = operator._collective_delta_hard.to_numpy()
+        self.assertEqual(float(hard_delta[1, 1, 0, 0]), 0.0)
+        self.assertEqual(float(hard_delta[1, 1, 1, 0]), 0.0)
+        self.assertTrue(np.any(hard_delta))
+        operator._measure_collective_target_closure_kernel(1)
+        residual = float(operator._collective_max_residual[None])
+        self.assertGreater(residual, 1.0e-6)
+        self.assertLessEqual(residual, 1.0e-4)
+
+    def test_collective_isolated_fh_rejects_absolute_infeasible_uncertified_component_atomically(
+        self,
+    ) -> None:
+        """A disconnected component must remain globally F-feasible."""
+
+        operator = self._new_isolated_collective_witness_operator(
+            marker_capacity=5
+        )
+        rows = (
+            (
+                0,
+                0.0,
+                (
+                    ((0, 0, 0), 0.5, True, 1.0),
+                    ((1, 0, 0), 0.5, False, 1.0),
+                ),
+            ),
+            (
+                3,
+                2.0e-3,
+                (
+                    ((0, 0, 0), 0.5, True, 1.0),
+                    ((1, 0, 1), 0.5, False, 1.0),
+                ),
+            ),
+            (
+                6,
+                4.0e-3,
+                (
+                    ((0, 0, 0), 0.5, True, 1.0),
+                    ((1, 0, 2), 0.5, False, 1.0),
+                ),
+            ),
+            (9, 0.0, (((0, 1, 0), 1.0, True, 1.0),)),
+            (12, 4.0e-4, (((0, 1, 0), 1.0, True, 1.0),)),
+        )
+        self._seed_isolated_collective_rows(
+            operator,
+            rows,
+            adjustable_supports=((0, 1), (3, 1), (6, 1)),
+        )
+        operator._certify_collective_proportional_free_rows_kernel(1.0e-4)
+        self.assertEqual(
+            int(operator._collective_certificate_count[None]),
+            3,
+        )
+        row_state_before = tuple(
+            field.to_numpy().tobytes(order="C")
+            for field in (
+                operator._collective_rhs,
+                operator._collective_index,
+                operator._collective_weight,
+                operator._collective_free,
+                operator._collective_adjustable,
+            )
+        )
+
+        self.assertFalse(
+            operator._collective_isolated_fh_repair(
+                closure_tolerance=1.0e-6,
+                absolute_tolerance=1.0e-4,
+            )
+        )
+        self.assertEqual(
+            tuple(
+                field.to_numpy().tobytes(order="C")
+                for field in (
+                    operator._collective_rhs,
+                    operator._collective_index,
+                    operator._collective_weight,
+                    operator._collective_free,
+                    operator._collective_adjustable,
+                )
+            ),
+            row_state_before,
+        )
+        np.testing.assert_array_equal(
+            operator._collective_delta_free.to_numpy(),
+            np.zeros((4, 4, 4, 3), dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            operator._collective_delta_hard.to_numpy(),
             np.zeros((4, 4, 4, 3), dtype=np.float32),
         )
 
@@ -529,11 +830,41 @@ class HibmComponentFaceGeometryTests(
         try:
             fluid.set_velocity_dirichlet_boundary_authority("canonical")
             fluid._invalidate_velocity_dirichlet_component_ledger()
-            self._assemble_component_face_ledger(
+            assembly_report = self._assemble_component_face_ledger(
                 close_marker_constraints=True,
                 marker_compatibility_iterations_per_batch=8,
                 primary_region_id=101,
                 secondary_region_id=202,
+            )
+
+            closure = assembly_report["canonical_velocity_dirichlet_report"][
+                "marker_target_closure"
+            ]
+            self.assertEqual(
+                closure["solver"],
+                "serialized_kaczmarz+"
+                "certificate_authorized_inverse_mass_weighted_lstsq",
+            )
+            self.assertTrue(closure["collective_repair_applied"])
+            self.assertEqual(
+                closure["collective_repair_backend"],
+                "certificate_authorized_inverse_mass_weighted_lstsq",
+            )
+            self.assertGreater(
+                closure["collective_repair_certificate_count"], 0
+            )
+            self.assertGreater(
+                closure["collective_repair_hard_target_dof_count"], 0
+            )
+            self.assertGreater(
+                closure["collective_repair_max_abs_hard_target_delta_mps"],
+                0.0,
+            )
+            self.assertLessEqual(
+                closure["collective_repair_max_residual_mps"], 1.0e-6
+            )
+            self.assertLessEqual(
+                closure["collective_global_max_residual_mps"], 1.0e-5
             )
 
             owned_state = self._canonical_component_state(owned_hard_face, 1)

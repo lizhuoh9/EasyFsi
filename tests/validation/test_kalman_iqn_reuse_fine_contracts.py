@@ -235,6 +235,13 @@ def h3_inputs(material_inputs):
             "final_max_immutable_residual_mps": 1.0e-7,
             "final_max_adjustable_residual_mps": 1.0e-7,
             "projection_only_max_residual_mps": 1.0e-7,
+            "collective_repair_applied": False,
+            "collective_repair_backend": "none",
+            "collective_repair_certificate_count": 0,
+            "collective_repair_max_residual_mps": 0.0,
+            "collective_global_max_residual_mps": 0.0,
+            "collective_repair_hard_target_dof_count": 0,
+            "collective_repair_max_abs_hard_target_delta_mps": 0.0,
             "projection_only_invalid_axis_count": 0,
         })
         canonical["marker_target_closure"] = closure

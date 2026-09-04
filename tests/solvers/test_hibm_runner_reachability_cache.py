@@ -185,7 +185,7 @@ class HibmRunnerReachabilityCacheTests(unittest.TestCase):
         velocity_report = {
             "hibm_velocity_dirichlet_authority": "canonical",
             "canonical_velocity_dirichlet_report": {
-                "schema_version": 5,
+                "schema_version": 6,
                 "authority": "canonical_component_face",
                 "final_active_storage_row_count": 1,
                 "final_active_component_count": 3,

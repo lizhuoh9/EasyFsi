@@ -8184,6 +8184,13 @@ CANONICAL_HIBM_VELOCITY_DIRICHLET_MARKER_TARGET_CLOSURE_REPORT_KEYS = (
     "adjustable_constraint_count",
     "immutable_constraint_count",
     "solver",
+    "collective_repair_applied",
+    "collective_repair_backend",
+    "collective_repair_certificate_count",
+    "collective_repair_max_residual_mps",
+    "collective_global_max_residual_mps",
+    "collective_repair_hard_target_dof_count",
+    "collective_repair_max_abs_hard_target_delta_mps",
     "solve_count",
     "initial_max_residual_mps",
     "final_max_residual_mps",
@@ -8351,11 +8358,38 @@ def _canonical_marker_target_closure_health_failure(
         )
     if closure_report.get("enabled") is not True:
         return "canonical marker-target closure is not enabled"
-    solver = closure_report.get("solver")
-    if solver != "serialized_kaczmarz":
+    repair_applied = closure_report.get("collective_repair_applied")
+    if type(repair_applied) is not bool:
         return (
-            "canonical marker-target closure solver is invalid: "
-            f"{solver!r}"
+            "canonical marker-target closure collective repair applied flag is "
+            f"invalid: {repair_applied!r}"
+        )
+    repair_backend = closure_report.get("collective_repair_backend")
+    if not isinstance(repair_backend, str):
+        return (
+            "canonical marker-target closure collective repair backend is "
+            f"invalid: {repair_backend!r}"
+        )
+    expected_solver = (
+        "serialized_kaczmarz+certificate_authorized_inverse_mass_weighted_lstsq"
+        if repair_applied
+        else "serialized_kaczmarz"
+    )
+    solver = closure_report.get("solver")
+    if solver != expected_solver:
+        return (
+            "canonical marker-target closure solver is invalid for collective "
+            f"repair: {solver!r}"
+        )
+    expected_backend = (
+        "certificate_authorized_inverse_mass_weighted_lstsq"
+        if repair_applied
+        else "none"
+    )
+    if repair_backend != expected_backend:
+        return (
+            "canonical marker-target closure collective repair backend is "
+            f"invalid: {repair_backend!r}"
         )
 
     count_keys = (
@@ -8367,6 +8401,8 @@ def _canonical_marker_target_closure_health_failure(
         "projection_only_evaluated_axis_count",
         "projection_only_invalid_axis_count",
         "projection_only_constraint_count",
+        "collective_repair_certificate_count",
+        "collective_repair_hard_target_dof_count",
     )
     counts: dict[str, int] = {}
     for key in count_keys:
@@ -8437,6 +8473,9 @@ def _canonical_marker_target_closure_health_failure(
         "closure_tolerance_mps",
         "density_kgm3",
         "projection_only_max_residual_mps",
+        "collective_repair_max_residual_mps",
+        "collective_global_max_residual_mps",
+        "collective_repair_max_abs_hard_target_delta_mps",
     )
     scalars: dict[str, float] = {}
     for key in scalar_keys:
@@ -8461,6 +8500,16 @@ def _canonical_marker_target_closure_health_failure(
     )
     if any(scalars[key] < 0.0 for key in residual_keys):
         return f"canonical marker-target closure residual is negative: {scalars}"
+    collective_scalar_keys = (
+        "collective_repair_max_residual_mps",
+        "collective_global_max_residual_mps",
+        "collective_repair_max_abs_hard_target_delta_mps",
+    )
+    if any(scalars[key] < 0.0 for key in collective_scalar_keys):
+        return (
+            "canonical marker-target closure collective repair scalar is negative: "
+            f"{scalars}"
+        )
     absolute_tolerance = scalars["absolute_tolerance_mps"]
     closure_tolerance = scalars["closure_tolerance_mps"]
     if not 0.0 < closure_tolerance < absolute_tolerance:
@@ -8493,6 +8542,60 @@ def _canonical_marker_target_closure_health_failure(
             "the absolute tolerance: "
             f"residual={scalars['projection_only_max_residual_mps']}, "
             f"tolerance={absolute_tolerance}"
+        )
+    collective_certificate_count = counts["collective_repair_certificate_count"]
+    collective_hard_target_dof_count = counts[
+        "collective_repair_hard_target_dof_count"
+    ]
+    collective_repair_max_residual = scalars[
+        "collective_repair_max_residual_mps"
+    ]
+    collective_global_max_residual = scalars[
+        "collective_global_max_residual_mps"
+    ]
+    collective_max_abs_hard_target_delta = scalars[
+        "collective_repair_max_abs_hard_target_delta_mps"
+    ]
+    if repair_applied:
+        if collective_certificate_count <= 0:
+            return (
+                "canonical marker-target closure collective repair is missing "
+                "a certificate"
+            )
+        if collective_hard_target_dof_count <= 0:
+            return (
+                "canonical marker-target closure collective repair is missing "
+                "hard-target degrees of freedom"
+            )
+        if collective_max_abs_hard_target_delta <= 0.0:
+            return (
+                "canonical marker-target closure collective repair has no "
+                "hard-target delta"
+            )
+        if collective_repair_max_residual > closure_tolerance:
+            return (
+                "canonical marker-target closure collective repair residual "
+                "exceeds closure tolerance: "
+                f"residual={collective_repair_max_residual}, "
+                f"tolerance={closure_tolerance}"
+            )
+        if collective_global_max_residual > absolute_tolerance:
+            return (
+                "canonical marker-target closure collective global residual "
+                "exceeds absolute tolerance: "
+                f"residual={collective_global_max_residual}, "
+                f"tolerance={absolute_tolerance}"
+            )
+    elif (
+        collective_certificate_count != 0
+        or collective_hard_target_dof_count != 0
+        or collective_repair_max_residual != 0.0
+        or collective_global_max_residual != 0.0
+        or collective_max_abs_hard_target_delta != 0.0
+    ):
+        return (
+            "canonical marker-target closure collective repair metrics are "
+            "nonzero without a repair"
         )
     return None
 
@@ -8539,7 +8642,7 @@ def _canonical_hibm_velocity_dirichlet_health_failure(
     if not isinstance(device_report, Mapping):
         return "canonical velocity Dirichlet device report is missing or invalid"
     schema_version = device_report.get("schema_version")
-    if type(schema_version) is not int or schema_version != 5:
+    if type(schema_version) is not int or schema_version != 6:
         return (
             "canonical velocity Dirichlet schema version is invalid: "
             f"{schema_version!r}"

@@ -65,6 +65,16 @@ class HibmMpmMarkerMacConstraintReport:
 
 
 @dataclass(frozen=True)
+class _CollectiveFhRepairResult:
+    """Accepted device-audited diagnostics for one private F/H candidate."""
+
+    repair_max_residual_mps: float
+    global_max_residual_mps: float
+    hard_target_dof_count: int
+    max_abs_hard_target_delta_mps: float
+
+
+@dataclass(frozen=True)
 class HibmMpmMarkerPressureNullspaceReport:
     """Immutable state of one prepared homogeneous pressure transaction.
 
@@ -259,6 +269,9 @@ class HibmMpmMarkerMacConstraintOperator:
         self._collective_row_certificate = ti.field(
             dtype=ti.i32, shape=self.constraint_capacity
         )
+        self._collective_row_repair_active = ti.field(
+            dtype=ti.i32, shape=self.constraint_capacity
+        )
         self._collective_row_immutable_hard = ti.field(
             dtype=ti.i32, shape=self.constraint_capacity
         )
@@ -302,6 +315,7 @@ class HibmMpmMarkerMacConstraintOperator:
             dtype=ti.i32, shape=()
         )
         self._collective_max_residual = ti.field(dtype=ti.f32, shape=())
+        self._collective_max_repair_residual = ti.field(dtype=ti.f32, shape=())
 
         # Pressure increments need the *linear* homogeneous projector
         #
@@ -1387,10 +1401,12 @@ class HibmMpmMarkerMacConstraintOperator:
         self._collective_certificate_count[None] = 0
         self._collective_immutable_hard_row_count[None] = 0
         self._collective_max_residual[None] = 0.0
+        self._collective_max_repair_residual[None] = 0.0
         self._collective_owner_failure[None] = 0
         for row in range(self.constraint_capacity):
             self._collective_row_active[row] = 0
             self._collective_row_certificate[row] = 0
+            self._collective_row_repair_active[row] = 0
             self._collective_row_immutable_hard[row] = 0
             self._collective_rhs[row] = 0.0
         for row, support in self._collective_weight:
@@ -1588,6 +1604,19 @@ class HibmMpmMarkerMacConstraintOperator:
                 ):
                     magnitude = 3.4e38
                 ti.atomic_max(self._collective_max_residual[None], magnitude)
+
+    @ti.kernel
+    def _measure_collective_fh_repair_residual_kernel(self):
+        self._collective_max_residual[None] = 0.0
+        self._collective_max_repair_residual[None] = 0.0
+        for row in range(self.constraint_capacity):
+            if self._collective_row_active[row] != 0:
+                magnitude = ti.abs(self._collective_row_residual(row, 1))
+                if ti.math.isnan(magnitude) or ti.math.isinf(magnitude):
+                    magnitude = 3.4e38
+                ti.atomic_max(self._collective_max_residual[None], magnitude)
+                if self._collective_row_repair_active[row] != 0:
+                    ti.atomic_max(self._collective_max_repair_residual[None], magnitude)
 
     @ti.kernel
     def _certify_collective_proportional_free_rows_kernel(self, tolerance_mps: ti.f64):
@@ -2535,6 +2564,342 @@ class HibmMpmMarkerMacConstraintOperator:
             return residual <= tolerance
         finally:
             self._collective_delta_free.fill(0.0)
+
+    def _collective_isolated_fh_repair(
+        self,
+        *,
+        closure_tolerance: float,
+        absolute_tolerance: float,
+    ) -> _CollectiveFhRepairResult | None:
+        """Build one bounded, certificate-authorized all-row F/H repair.
+
+        F and H use distinct correction-space columns even at one MAC face.
+        A certificate row only authorizes H in its row/variable connected
+        component; every active row still participates in the per-axis solve.
+        The device audit then requires closure accuracy on authorized rows and
+        the established absolute accuracy on every active row.
+        """
+
+        if (
+            self.constraint_capacity
+            > HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS
+        ):
+            raise RuntimeError(
+                "collective isolated F/H repair exceeds bounded capacity: "
+                f"{self.constraint_capacity} > "
+                f"{HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS}"
+            )
+        if (
+            not math.isfinite(closure_tolerance)
+            or closure_tolerance <= 0.0
+            or not math.isfinite(absolute_tolerance)
+            or absolute_tolerance <= 0.0
+            or closure_tolerance > absolute_tolerance
+        ):
+            raise ValueError(
+                "collective isolated F/H repair requires "
+                "0 < closure_tolerance <= absolute_tolerance"
+            )
+
+        # The isolated witness is private until the caller accepts its device
+        # audit.  A failed or exceptional attempt must leave neither F nor H
+        # scratch available to the later apply path.
+        self._collective_delta_free.fill(0.0)
+        self._collective_delta_hard.fill(0.0)
+        self._collective_row_repair_active.fill(0)
+        succeeded = False
+        try:
+            active = self._collective_row_active.to_numpy().astype(bool)
+            certificate = self._collective_row_certificate.to_numpy().astype(bool)
+            rhs = self._collective_rhs.to_numpy().astype(np.float64, copy=False)
+            indices = self._collective_index.to_numpy()
+            weights = self._collective_weight.to_numpy().astype(
+                np.float64, copy=False
+            )
+            free = self._collective_free.to_numpy().astype(bool)
+            adjustable = self._collective_adjustable.to_numpy().astype(bool)
+            inverse_mass = self._collective_inverse_mass.to_numpy().astype(
+                np.float64, copy=False
+            )
+            rows = np.flatnonzero(active)
+            if not np.all(np.isfinite(rhs[rows])):
+                raise RuntimeError("collective isolated F/H rhs is non-finite")
+
+            correction_free = np.zeros((*self.grid_nodes, 3), dtype=np.float64)
+            correction_hard = np.zeros((*self.grid_nodes, 3), dtype=np.float64)
+            repair_active = np.zeros(self.constraint_capacity, dtype=np.int32)
+            # Keep this rank decision identical to the F-only witness.  The
+            # mobility fields admit an F or H column but do not scale the
+            # feasibility column space.
+            rcond = max(
+                1.0e-14,
+                64.0 * math.ulp(1.0) * float(self.marker_capacity),
+            )
+            for axis in range(3):
+                axis_rows = rows[rows % 3 == axis]
+                parent: dict[tuple[object, ...], tuple[object, ...]] = {}
+
+                def find(node: tuple[object, ...]) -> tuple[object, ...]:
+                    root = parent.setdefault(node, node)
+                    while root != parent[root]:
+                        root = parent[root]
+                    while node != root:
+                        previous = parent[node]
+                        parent[node] = root
+                        node = previous
+                    return root
+
+                def union(
+                    first: tuple[object, ...], second: tuple[object, ...]
+                ) -> None:
+                    first_root = find(first)
+                    second_root = find(second)
+                    if first_root != second_root:
+                        parent[second_root] = first_root
+
+                for row in axis_rows:
+                    row_key = ("row", int(row))
+                    find(row_key)
+                    for support in range(8):
+                        weight = float(weights[row, support])
+                        if not math.isfinite(weight):
+                            raise RuntimeError(
+                                "collective isolated F/H weight is non-finite"
+                            )
+                        if weight == 0.0:
+                            continue
+                        index = tuple(
+                            int(value) for value in indices[row, support]
+                        )
+                        if any(
+                            value < 0 or value >= self.grid_nodes[dimension]
+                            for dimension, value in enumerate(index)
+                        ):
+                            raise RuntimeError(
+                                "collective isolated F/H support is out of bounds"
+                            )
+                        if free[row, support]:
+                            union(row_key, ("free", index))
+                        if adjustable[row, support]:
+                            union(row_key, ("hard", index))
+
+                authorized_roots = {
+                    find(("row", int(row)))
+                    for row in axis_rows
+                    if certificate[row]
+                }
+                for row in axis_rows:
+                    if find(("row", int(row))) in authorized_roots:
+                        repair_active[row] = 1
+
+                dof_column: dict[tuple[str, tuple[int, int, int]], int] = {}
+                mobility_by_dof: dict[tuple[str, tuple[int, int, int]], float] = {}
+                for row in axis_rows:
+                    for support in range(8):
+                        weight = float(weights[row, support])
+                        if not math.isfinite(weight):
+                            raise RuntimeError(
+                                "collective isolated F/H weight is non-finite"
+                            )
+                        if weight == 0.0:
+                            continue
+                        index = tuple(
+                            int(value) for value in indices[row, support]
+                        )
+                        if any(
+                            value < 0 or value >= self.grid_nodes[dimension]
+                            for dimension, value in enumerate(index)
+                        ):
+                            raise RuntimeError(
+                                "collective isolated F/H support is out of bounds"
+                            )
+                        for kind, enabled in (
+                            ("free", bool(free[row, support])),
+                            (
+                                "hard",
+                                bool(
+                                    adjustable[row, support]
+                                    and repair_active[row] != 0
+                                ),
+                            ),
+                        ):
+                            if not enabled:
+                                continue
+                            mobility = float(inverse_mass[row, support])
+                            if not math.isfinite(mobility) or mobility <= 0.0:
+                                raise RuntimeError(
+                                    "collective isolated F/H active mobility is invalid"
+                                )
+                            key = (kind, index)
+                            prior_mobility = mobility_by_dof.get(key)
+                            if prior_mobility is None:
+                                dof_column[key] = len(dof_column)
+                                mobility_by_dof[key] = mobility
+                            elif mobility != prior_mobility:
+                                raise RuntimeError(
+                                    "collective isolated F/H repeated active support "
+                                    "has inconsistent mobility"
+                                )
+
+                matrix = np.zeros(
+                    (axis_rows.size, len(dof_column)), dtype=np.float64
+                )
+                for local_row, row in enumerate(axis_rows):
+                    for support in range(8):
+                        weight = float(weights[row, support])
+                        if weight == 0.0:
+                            continue
+                        index = tuple(
+                            int(value) for value in indices[row, support]
+                        )
+                        if free[row, support]:
+                            matrix[local_row, dof_column[("free", index)]] += weight
+                        if (
+                            adjustable[row, support]
+                            and repair_active[row] != 0
+                        ):
+                            matrix[local_row, dof_column[("hard", index)]] += weight
+                if not dof_column:
+                    continue
+                column_norm = np.linalg.norm(matrix, axis=0)
+                if (
+                    not np.all(np.isfinite(column_norm))
+                    or np.any(column_norm <= 0.0)
+                ):
+                    raise RuntimeError(
+                        "collective isolated F/H correction basis is singular"
+                    )
+                try:
+                    structural_left, structural_singular, _ = np.linalg.svd(
+                        matrix / column_norm,
+                        full_matrices=False,
+                    )
+                    if (
+                        not np.all(np.isfinite(structural_singular))
+                        or structural_singular.size == 0
+                        or structural_singular[0] <= 0.0
+                    ):
+                        raise RuntimeError(
+                            "collective isolated F/H structural basis is singular"
+                        )
+                    structural_rank = int(
+                        np.count_nonzero(
+                            structural_singular
+                            > rcond * structural_singular[0]
+                        )
+                    )
+                    if structural_rank == 0:
+                        raise RuntimeError(
+                            "collective isolated F/H structural rank is zero"
+                        )
+
+                    # Decide structural rank without mobility so a very light
+                    # independent DOF cannot disappear.  Within that row
+                    # space, solve the established inverse-mass minimum-energy
+                    # problem in coordinates delta=sqrt(D)*y.
+                    row_basis = structural_left[:, :structural_rank]
+                    reduced_matrix = row_basis.T @ matrix
+                    reduced_rhs = row_basis.T @ rhs[axis_rows]
+                    mobility = np.empty(len(dof_column), dtype=np.float64)
+                    for key, column in dof_column.items():
+                        mobility[column] = mobility_by_dof[key]
+                    mobility /= float(np.max(mobility))
+                    square_root_mobility = np.sqrt(mobility)
+                    if (
+                        not np.all(np.isfinite(square_root_mobility))
+                        or np.any(square_root_mobility <= 0.0)
+                    ):
+                        raise RuntimeError(
+                            "collective isolated F/H mobility scale is invalid"
+                        )
+                    weighted_matrix = (
+                        reduced_matrix
+                        * square_root_mobility[np.newaxis, :]
+                    )
+                    row_norm = np.linalg.norm(weighted_matrix, axis=1)
+                    if (
+                        not np.all(np.isfinite(row_norm))
+                        or np.any(row_norm <= 0.0)
+                    ):
+                        raise RuntimeError(
+                            "collective isolated F/H weighted row basis is singular"
+                        )
+                    scaled_matrix = weighted_matrix / row_norm[:, np.newaxis]
+                    scaled_rhs = reduced_rhs / row_norm
+                    orthogonal, triangular = np.linalg.qr(
+                        scaled_matrix.T,
+                        mode="reduced",
+                    )
+                    diagonal = np.diag(triangular)
+                    if (
+                        not np.all(np.isfinite(orthogonal))
+                        or not np.all(np.isfinite(triangular))
+                        or np.any(diagonal == 0.0)
+                    ):
+                        raise RuntimeError(
+                            "collective isolated F/H weighted factor is singular"
+                        )
+                    minimum_norm_coordinates = orthogonal @ np.linalg.solve(
+                        triangular.T,
+                        scaled_rhs,
+                    )
+                    solution = (
+                        square_root_mobility * minimum_norm_coordinates
+                    )
+                except np.linalg.LinAlgError as exc:
+                    raise RuntimeError(
+                        "collective isolated F/H weighted solve failed"
+                    ) from exc
+                if not np.all(np.isfinite(solution)):
+                    raise RuntimeError(
+                        "collective isolated F/H solution is non-finite"
+                    )
+                for (kind, index), column in dof_column.items():
+                    correction = solution[column]
+                    if kind == "free":
+                        correction_free[index][axis] = correction
+                    else:
+                        correction_hard[index][axis] = correction
+
+            correction_free_f32 = correction_free.astype(np.float32)
+            correction_hard_f32 = correction_hard.astype(np.float32)
+            if (
+                not np.all(np.isfinite(correction_free_f32))
+                or not np.all(np.isfinite(correction_hard_f32))
+            ):
+                raise RuntimeError("collective isolated F/H correction is non-finite")
+            self._collective_delta_free.from_numpy(correction_free_f32)
+            self._collective_delta_hard.from_numpy(correction_hard_f32)
+            self._collective_row_repair_active.from_numpy(repair_active)
+            self._measure_collective_fh_repair_residual_kernel()
+            repair_residual = float(self._collective_max_repair_residual[None])
+            residual = float(self._collective_max_residual[None])
+            if (
+                not math.isfinite(repair_residual)
+                or not math.isfinite(residual)
+            ):
+                raise RuntimeError("collective isolated F/H residual is non-finite")
+            succeeded = (
+                repair_residual <= closure_tolerance
+                and residual <= absolute_tolerance
+            )
+            if not succeeded:
+                return None
+            return _CollectiveFhRepairResult(
+                repair_max_residual_mps=repair_residual,
+                global_max_residual_mps=residual,
+                hard_target_dof_count=int(
+                    np.count_nonzero(correction_hard_f32)
+                ),
+                max_abs_hard_target_delta_mps=float(
+                    np.max(np.abs(correction_hard_f32), initial=0.0)
+                ),
+            )
+        finally:
+            if not succeeded:
+                self._collective_delta_free.fill(0.0)
+                self._collective_delta_hard.fill(0.0)
+                self._collective_row_repair_active.fill(0)
 
     @ti.kernel
     def _commit_kernel(
@@ -3567,6 +3932,41 @@ class HibmMpmMarkerMacConstraintOperator:
         if audit_failure_code != 0:
             self._invalidate_stale_transaction("cached inputs changed")
 
+    @staticmethod
+    def _collective_closure_result(
+        *,
+        attempted: bool,
+        closed: bool,
+        constraint_count: int,
+        f_only_converged: bool,
+        certificate_count: int,
+        immutable_hard_row_count: int,
+        repair_applied: bool = False,
+        repair_backend: str = "none",
+        repair_max_residual_mps: float = 0.0,
+        global_max_residual_mps: float = 0.0,
+        hard_target_dof_count: int = 0,
+        max_abs_hard_target_delta_mps: float = 0.0,
+    ) -> dict[str, object]:
+        """Return one complete, non-stale collective closure diagnostic."""
+
+        return {
+            "attempted": attempted,
+            "closed": closed,
+            "constraint_count": constraint_count,
+            "f_only_converged": f_only_converged,
+            "certificate_count": certificate_count,
+            "immutable_hard_row_count": immutable_hard_row_count,
+            "repair_applied": repair_applied,
+            "repair_backend": repair_backend,
+            "repair_max_residual_mps": repair_max_residual_mps,
+            "global_max_residual_mps": global_max_residual_mps,
+            "hard_target_dof_count": hard_target_dof_count,
+            "max_abs_hard_target_delta_mps": (
+                max_abs_hard_target_delta_mps
+            ),
+        }
+
     def close_prospective_owned_hard_targets_collectively(
         self,
         *,
@@ -3655,7 +4055,14 @@ class HibmMpmMarkerMacConstraintOperator:
         )
         if active_count == 0:
             self._reset_collective_target_closure_kernel()
-            return {"attempted": False, "closed": False, "constraint_count": 0, "f_only_converged": False, "certificate_count": 0, "immutable_hard_row_count": 0}
+            return self._collective_closure_result(
+                attempted=False,
+                closed=False,
+                constraint_count=0,
+                f_only_converged=False,
+                certificate_count=0,
+                immutable_hard_row_count=0,
+            )
 
         # Every post-build exit, including a witness invariant failure, retires
         # private collective rows and counters.  H is applied before a normal
@@ -3666,30 +4073,79 @@ class HibmMpmMarkerMacConstraintOperator:
             # acceptable system away from its physical absolute tolerance.
             self._measure_collective_target_closure_kernel(0)
             if float(self._collective_max_residual[None]) <= absolute_tolerance:
-                return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": True, "certificate_count": 0, "immutable_hard_row_count": immutable_hard_row_count}
+                return self._collective_closure_result(
+                    attempted=True,
+                    closed=False,
+                    constraint_count=active_count,
+                    f_only_converged=True,
+                    certificate_count=0,
+                    immutable_hard_row_count=immutable_hard_row_count,
+                )
 
             # F-only is private scratch.  A bounded isolated LS witness is
             # more meaningful than a finite cyclic iteration; terminal Q still
             # makes the authoritative decision after ledger publication.
             if self._collective_isolated_f_only_feasible(absolute_tolerance):
-                return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": True, "certificate_count": 0, "immutable_hard_row_count": immutable_hard_row_count}
+                return self._collective_closure_result(
+                    attempted=True,
+                    closed=False,
+                    constraint_count=active_count,
+                    f_only_converged=True,
+                    certificate_count=0,
+                    immutable_hard_row_count=immutable_hard_row_count,
+                )
 
             self._certify_collective_proportional_free_rows_kernel(
                 absolute_tolerance
             )
             certificate_count = int(self._collective_certificate_count[None])
             if certificate_count == 0:
-                return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": False, "certificate_count": 0, "immutable_hard_row_count": immutable_hard_row_count}
-            for _ in range(max(1, certificate_count)):
-                for _ in range(sweeps):
-                    self._collective_kaczmarz_sweep_kernel(1)
-                self._measure_collective_target_closure_kernel(1)
-                if float(self._collective_max_residual[None]) <= closure_tolerance:
-                    self._apply_collective_hard_target_delta_kernel(
-                        claim_target_mps, prospective_velocity
-                    )
-                    return {"attempted": True, "closed": True, "constraint_count": active_count, "f_only_converged": False, "certificate_count": certificate_count, "immutable_hard_row_count": immutable_hard_row_count}
-            return {"attempted": True, "closed": False, "constraint_count": active_count, "f_only_converged": False, "certificate_count": certificate_count, "immutable_hard_row_count": immutable_hard_row_count}
+                return self._collective_closure_result(
+                    attempted=True,
+                    closed=False,
+                    constraint_count=active_count,
+                    f_only_converged=False,
+                    certificate_count=0,
+                    immutable_hard_row_count=immutable_hard_row_count,
+                )
+            repair = self._collective_isolated_fh_repair(
+                closure_tolerance=closure_tolerance,
+                absolute_tolerance=absolute_tolerance,
+            )
+            if repair is not None:
+                self._apply_collective_hard_target_delta_kernel(
+                    claim_target_mps, prospective_velocity
+                )
+                return self._collective_closure_result(
+                    attempted=True,
+                    closed=True,
+                    constraint_count=active_count,
+                    f_only_converged=False,
+                    certificate_count=certificate_count,
+                    immutable_hard_row_count=immutable_hard_row_count,
+                    repair_applied=True,
+                    repair_backend=(
+                        "certificate_authorized_inverse_mass_weighted_lstsq"
+                    ),
+                    repair_max_residual_mps=(
+                        repair.repair_max_residual_mps
+                    ),
+                    global_max_residual_mps=(
+                        repair.global_max_residual_mps
+                    ),
+                    hard_target_dof_count=repair.hard_target_dof_count,
+                    max_abs_hard_target_delta_mps=(
+                        repair.max_abs_hard_target_delta_mps
+                    ),
+                )
+            return self._collective_closure_result(
+                attempted=True,
+                closed=False,
+                constraint_count=active_count,
+                f_only_converged=False,
+                certificate_count=certificate_count,
+                immutable_hard_row_count=immutable_hard_row_count,
+            )
         finally:
             self._reset_collective_target_closure_kernel()
 

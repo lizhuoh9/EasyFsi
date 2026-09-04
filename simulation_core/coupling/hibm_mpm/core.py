@@ -26727,6 +26727,12 @@ class HibmMpmIbBoundaryConditions:
             "f_only_converged": False,
             "certificate_count": 0,
             "immutable_hard_row_count": 0,
+            "repair_applied": False,
+            "repair_backend": "none",
+            "repair_max_residual_mps": 0.0,
+            "global_max_residual_mps": 0.0,
+            "hard_target_dof_count": 0,
+            "max_abs_hard_target_delta_mps": 0.0,
         }
         if marker_mac_constraint_operator is not None:
             collective_qh_closure = (
@@ -26834,6 +26840,35 @@ class HibmMpmIbBoundaryConditions:
                     None
                 ]
             )
+        collective_repair_applied = bool(
+            collective_qh_closure["repair_applied"]
+        )
+        if collective_repair_applied:
+            collective_repair_backend = str(
+                collective_qh_closure["repair_backend"]
+            )
+            collective_repair_certificate_count = int(
+                collective_qh_closure["certificate_count"]
+            )
+            collective_repair_max_residual_mps = float(
+                collective_qh_closure["repair_max_residual_mps"]
+            )
+            collective_global_max_residual_mps = float(
+                collective_qh_closure["global_max_residual_mps"]
+            )
+            collective_repair_hard_target_dof_count = int(
+                collective_qh_closure["hard_target_dof_count"]
+            )
+            collective_repair_max_abs_hard_target_delta_mps = float(
+                collective_qh_closure["max_abs_hard_target_delta_mps"]
+            )
+        else:
+            collective_repair_backend = "none"
+            collective_repair_certificate_count = 0
+            collective_repair_max_residual_mps = 0.0
+            collective_global_max_residual_mps = 0.0
+            collective_repair_hard_target_dof_count = 0
+            collective_repair_max_abs_hard_target_delta_mps = 0.0
         if (
             invalid_count != 0
             or failure_code != 0
@@ -26852,7 +26887,29 @@ class HibmMpmIbBoundaryConditions:
             "constraint_count": constraint_count,
             "adjustable_constraint_count": adjustable_count,
             "immutable_constraint_count": immutable_count,
-            "solver": "serialized_kaczmarz",
+            "solver": (
+                "serialized_kaczmarz+"
+                "certificate_authorized_inverse_mass_weighted_lstsq"
+                if collective_repair_applied
+                else "serialized_kaczmarz"
+            ),
+            "collective_repair_applied": collective_repair_applied,
+            "collective_repair_backend": collective_repair_backend,
+            "collective_repair_certificate_count": (
+                collective_repair_certificate_count
+            ),
+            "collective_repair_max_residual_mps": (
+                collective_repair_max_residual_mps
+            ),
+            "collective_global_max_residual_mps": (
+                collective_global_max_residual_mps
+            ),
+            "collective_repair_hard_target_dof_count": (
+                collective_repair_hard_target_dof_count
+            ),
+            "collective_repair_max_abs_hard_target_delta_mps": (
+                collective_repair_max_abs_hard_target_delta_mps
+            ),
             "solve_count": solve_count,
             "initial_max_residual_mps": initial_max_residual,
             "final_max_residual_mps": final_max_residual,
@@ -27638,6 +27695,13 @@ class HibmMpmIbBoundaryConditions:
                     "adjustable_constraint_count": 0,
                     "immutable_constraint_count": 0,
                     "solver": "serialized_kaczmarz",
+                    "collective_repair_applied": False,
+                    "collective_repair_backend": "none",
+                    "collective_repair_certificate_count": 0,
+                    "collective_repair_max_residual_mps": 0.0,
+                    "collective_global_max_residual_mps": 0.0,
+                    "collective_repair_hard_target_dof_count": 0,
+                    "collective_repair_max_abs_hard_target_delta_mps": 0.0,
                     "solve_count": 0,
                     "initial_max_residual_mps": 0.0,
                     "final_max_residual_mps": 0.0,
@@ -27786,7 +27850,7 @@ class HibmMpmIbBoundaryConditions:
             ]
         )
         canonical_velocity_dirichlet_report = {
-            "schema_version": 5,
+            "schema_version": 6,
             "authority": "canonical_component_face",
             "new_owned_claim_component_count": int(
                 self.report_velocity_dirichlet_component_face_active_component_count[

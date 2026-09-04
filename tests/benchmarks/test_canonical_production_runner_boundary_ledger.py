@@ -93,7 +93,7 @@ def _healthy_canonical_device_report() -> dict[str, object]:
     report: dict[str, object] = {key: 0 for key in CANONICAL_REPORT_KEYS}
     report.update(
         {
-            "schema_version": 5,
+            "schema_version": 6,
             "authority": "canonical_component_face",
             "new_owned_claim_component_count": 3,
             "final_active_component_count": 5,
@@ -122,6 +122,13 @@ def _healthy_canonical_device_report() -> dict[str, object]:
                 "adjustable_constraint_count": 2,
                 "immutable_constraint_count": 1,
                 "solver": "serialized_kaczmarz",
+                "collective_repair_applied": False,
+                "collective_repair_backend": "none",
+                "collective_repair_certificate_count": 0,
+                "collective_repair_max_residual_mps": 0.0,
+                "collective_global_max_residual_mps": 0.0,
+                "collective_repair_hard_target_dof_count": 0,
+                "collective_repair_max_abs_hard_target_delta_mps": 0.0,
                 "solve_count": 1,
                 "initial_max_residual_mps": 2.0e-4,
                 "final_max_residual_mps": 5.0e-5,
@@ -770,7 +777,7 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         self.assertIn('"canonical_velocity_dirichlet_report"', source)
         self.assertNotIn("HibmMpmVelocityDirichletBoundaryReport(", source)
 
-    def test_direct_runner_uses_the_only_serialized_kaczmarz_closure(
+    def test_direct_runner_uses_serialized_kaczmarz_with_certified_collective_repair(
         self,
     ) -> None:
         function = _function_node("_apply_hibm_sharp_marker_boundary_to_fluid")
@@ -786,6 +793,14 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         iterations = keywords["marker_compatibility_iterations_per_batch"]
         self.assertIsInstance(iterations, ast.Constant)
         self.assertEqual(iterations.value, 64)
+        closure_source = inspect.getsource(
+            HibmMpmIbBoundaryConditions._close_owned_hard_targets_to_marker_constraints
+        )
+        self.assertIn('"serialized_kaczmarz+"', closure_source)
+        self.assertIn(
+            '"certificate_authorized_inverse_mass_weighted_lstsq"',
+            closure_source,
+        )
 
     def test_canonical_health_accepts_a_sealed_device_measured_report(self) -> None:
         self.assertIsNone(
@@ -831,7 +846,7 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                 self.assertIn("unexpected key", failure)
 
     def test_canonical_health_rejects_removed_schema_versions(self) -> None:
-        for schema_version in (2, 3, 4):
+        for schema_version in (2, 3, 4, 5):
             with self.subTest(schema_version=schema_version):
                 report = _healthy_canonical_runner_report()
                 report["canonical_velocity_dirichlet_report"][
@@ -845,7 +860,7 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                 self.assertIsNotNone(failure)
                 self.assertIn("schema version", failure.lower())
 
-    def test_canonical_health_requires_exact_schema_five_keys(self) -> None:
+    def test_canonical_health_requires_exact_schema_six_keys(self) -> None:
         missing = _healthy_canonical_runner_report()
         missing["canonical_velocity_dirichlet_report"].pop(
             "marker_target_closure"
@@ -976,6 +991,92 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
                 )
                 self.assertIsNotNone(failure)
                 self.assertIn("closure", failure.lower())
+
+    def test_canonical_health_validates_collective_repair_metadata(self) -> None:
+        healthy = _healthy_canonical_runner_report()
+        closure = healthy["canonical_velocity_dirichlet_report"][
+            "marker_target_closure"
+        ]
+        closure.update(
+            {
+                "solver": (
+                    "serialized_kaczmarz+"
+                    "certificate_authorized_inverse_mass_weighted_lstsq"
+                ),
+                "collective_repair_applied": True,
+                "collective_repair_backend": (
+                    "certificate_authorized_inverse_mass_weighted_lstsq"
+                ),
+                "collective_repair_certificate_count": 3,
+                "collective_repair_max_residual_mps": 5.0e-7,
+                "collective_global_max_residual_mps": 5.0e-5,
+                "collective_repair_hard_target_dof_count": 2,
+                "collective_repair_max_abs_hard_target_delta_mps": 2.0e-5,
+            }
+        )
+        self.assertIsNone(
+            solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(healthy)
+        )
+        for label, mutate in (
+            (
+                "applied requires hybrid solver",
+                lambda value: value.__setitem__("solver", "serialized_kaczmarz"),
+            ),
+            (
+                "applied requires backend",
+                lambda value: value.__setitem__("collective_repair_backend", "none"),
+            ),
+            (
+                "applied requires certificates",
+                lambda value: value.__setitem__("collective_repair_certificate_count", 0),
+            ),
+            (
+                "applied requires hard target dofs",
+                lambda value: value.__setitem__("collective_repair_hard_target_dof_count", 0),
+            ),
+            (
+                "applied requires nonzero hard target change",
+                lambda value: value.__setitem__(
+                    "collective_repair_max_abs_hard_target_delta_mps", 0.0
+                ),
+            ),
+            (
+                "repair residual is bounded by closure tolerance",
+                lambda value: value.__setitem__(
+                    "collective_repair_max_residual_mps", 2.0e-6
+                ),
+            ),
+            (
+                "global residual is bounded by absolute tolerance",
+                lambda value: value.__setitem__(
+                    "collective_global_max_residual_mps", 2.0e-4
+                ),
+            ),
+            (
+                "repair scalar is finite",
+                lambda value: value.__setitem__(
+                    "collective_repair_max_residual_mps", float("nan")
+                ),
+            ),
+            (
+                "repair scalar is nonnegative",
+                lambda value: value.__setitem__(
+                    "collective_repair_max_abs_hard_target_delta_mps", -1.0e-7
+                ),
+            ),
+        ):
+            with self.subTest(label=label):
+                report = _healthy_canonical_runner_report()
+                bad = report["canonical_velocity_dirichlet_report"][
+                    "marker_target_closure"
+                ]
+                bad.update(closure)
+                mutate(bad)
+                failure = solid_mpm_fsi_runner._hibm_velocity_dirichlet_health_failure(
+                    report
+                )
+                self.assertIsNotNone(failure)
+                self.assertIn("collective", failure.lower())
 
     def test_canonical_health_accepts_pressure_normal_external_subset(self) -> None:
         report = _healthy_canonical_runner_report()
@@ -1404,7 +1505,7 @@ class CanonicalProductionRunnerBoundaryLedgerContracts(unittest.TestCase):
         self.assertIsNotNone(failure)
         self.assertIn("exceed duplicate", failure.lower())
 
-    def test_schema_five_requires_segment_diagnostics(self) -> None:
+    def test_schema_six_requires_segment_diagnostics(self) -> None:
         for key in (
             solid_mpm_fsi_runner.CANONICAL_HIBM_VELOCITY_DIRICHLET_SEGMENT_RUNNER_REPORT_KEYS
         ):
