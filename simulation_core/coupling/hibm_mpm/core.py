@@ -18544,14 +18544,38 @@ class HibmMpmIbBoundaryConditions:
                                     target[component_axis]
                                     - candidate_direct[component_axis]
                                 )
+                                same_storage_pair_routes_to_target = 0
                                 if (
                                     expected_pair_storage_offset >= 0
                                     and expected_pair_storage_offset <= 1
-                                    and self.velocity_dirichlet_component_face_direct_relocation_pair_offset[
-                                        candidate_direct
-                                    ][component_axis]
-                                    == expected_pair_storage_offset
                                 ):
+                                    if (
+                                        component_axis
+                                        == surface_projection_inactive_axis
+                                    ):
+                                        # The cached pair route is published
+                                        # only for transverse components.  An
+                                        # extrusion component instead requires
+                                        # both ordinary author selectors to
+                                        # reach this exact face independently.
+                                        same_storage_pair_routes_to_target = (
+                                            direct_slot_routes_to_target[
+                                                direct_slot
+                                            ]
+                                            != 0
+                                            and self.velocity_dirichlet_relocation_shadow_selected_storage_offset[
+                                                candidate_direct
+                                            ][component_axis]
+                                            == expected_pair_storage_offset
+                                        )
+                                    else:
+                                        same_storage_pair_routes_to_target = (
+                                            self.velocity_dirichlet_component_face_direct_relocation_pair_offset[
+                                                candidate_direct
+                                            ][component_axis]
+                                            == expected_pair_storage_offset
+                                        )
+                                if same_storage_pair_routes_to_target != 0:
                                     same_storage_candidate_count += 1
                                     if same_storage_candidate_count == 1:
                                         selected_direct_author = candidate_direct

@@ -14750,6 +14750,43 @@ class CanonicalComponentFaceLedgerContractMixin:
                         pair
                     ]
                 )
+                observed["prepared_mode"] = int(
+                    boundary.velocity_dirichlet_component_face_segment_projection_only_seam[
+                        pair
+                    ]
+                )
+                observed["pair_cache"] = (
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                            pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_full_valid[
+                            pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_first_author_linear_key[
+                            pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_second_author_linear_key[
+                            pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_first_author_kind[
+                            pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_second_author_kind[
+                            pair
+                        ]
+                    ),
+                )
                 observed["target_conflicts"] = int(
                     boundary.report_velocity_dirichlet_component_face_target_conflict_count[
                         None
@@ -14863,21 +14900,12 @@ class CanonicalComponentFaceLedgerContractMixin:
                 )
                 self.assertEqual((observed["first_key"], observed["second_key"]), (-1, -1))
 
-    def test_inactive_axis_same_projected_point_shadow_rejects_nonidentical_contracts(
+    def test_inactive_axis_same_projected_point_target_drift_uses_general_geometry(
         self,
     ) -> None:
-        """Same-point serialized and effective differences remain fail-closed."""
+        """Target drift bypasses exact suppression and uses proven geometry."""
 
         nextafter_two = float(np.nextafter(np.float32(2.0), np.float32(np.inf)))
-        baseline, _, baseline_failure = (
-            self._run_inactive_axis_same_projected_point_shadow_prepare(
-                endpoint_marker=None,
-                shadow_serialized_x=2.0,
-                shadow_sample_x=nextafter_two,
-                stop_after_prepare=True,
-            )
-        )
-        self.assertIsNone(baseline_failure)
         for name, serialized, sample in (
             ("serialized_ulp", nextafter_two, nextafter_two),
             ("effective_delta", 2.0, float(np.float32(2.0 + 4.0e-6))),
@@ -14888,21 +14916,18 @@ class CanonicalComponentFaceLedgerContractMixin:
                         endpoint_marker=None,
                         shadow_serialized_x=serialized,
                         shadow_sample_x=sample,
-                        stop_after_prepare=False,
+                        stop_after_prepare=True,
                     )
                 )
-                self.assertIsNotNone(failure)
-                self.assertRegex(
-                    str(failure),
-                    r"conflicting canonical component-face claims \(target\)",
-                )
+                self.assertIsNone(failure)
                 self.assertEqual(observed["claim_count"], 2)
-                self.assertLess(observed["first_key"], -1)
-                self.assertLess(observed["second_key"], -1)
+                self.assertEqual(observed["prepared_mode"], 12)
+                self.assertEqual(observed["pair_cache"], (1, 1, 10, 6, 0, 1))
                 self.assertEqual(
-                    observed["target_conflicts"],
-                    baseline["target_conflicts"] + 1,
+                    (observed["first_key"], observed["second_key"]),
+                    (10, 6),
                 )
+                self.assertEqual(observed["target_conflicts"], 0)
                 self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
                 if name == "serialized_ulp":
                     self.assertEqual(
@@ -14921,54 +14946,46 @@ class CanonicalComponentFaceLedgerContractMixin:
                         1.0e-6,
                     )
 
-    def test_inactive_axis_same_projected_point_shadow_rejects_identity_drift(
+    def test_inactive_axis_same_projected_point_metric_drift_uses_general_geometry(
         self,
     ) -> None:
-        """One-ULP identity drift must not enter the same-point exception."""
+        """Metric drift bypasses exact suppression and uses proven geometry."""
 
         shadow_sample = float(np.nextafter(np.float32(2.0), np.float32(np.inf)))
-        baseline, _, baseline_failure = (
-            self._run_inactive_axis_same_projected_point_shadow_prepare(
-                endpoint_marker=None,
-                shadow_serialized_x=2.0,
-                shadow_sample_x=shadow_sample,
-                stop_after_prepare=True,
-            )
-        )
-        self.assertIsNone(baseline_failure)
-        for identity_drift in (
+        for metric_drift in (
             "projection_weights",
             "boundary_z",
-            "nearest_marker",
         ):
-            with self.subTest(identity_drift=identity_drift):
+            with self.subTest(metric_drift=metric_drift):
                 observed, ledger_before, failure = (
                     self._run_inactive_axis_same_projected_point_shadow_prepare(
                         endpoint_marker=None,
                         shadow_serialized_x=2.0,
                         shadow_sample_x=shadow_sample,
-                        stop_after_prepare=False,
-                        identity_drift=identity_drift,
+                        stop_after_prepare=True,
+                        identity_drift=metric_drift,
                     )
                 )
-                self.assertIsNotNone(failure)
-                self.assertRegex(
-                    str(failure),
-                    r"conflicting canonical component-face claims \(target\)",
-                )
+                self.assertIsNone(failure)
                 self.assertEqual(observed["shadow_valid"], 1)
                 self.assertEqual(observed["shadow_source"], (0, 1, 2))
                 self.assertEqual(observed["shadow_storage"], (0, 2, 2))
                 self.assertEqual(observed["relocation_blocked_count"], 0)
                 self.assertEqual(observed["claim_count"], 2)
-                self.assertLess(observed["first_key"], -1)
-                self.assertLess(observed["second_key"], -1)
+                self.assertEqual(observed["prepared_mode"], 12)
+                self.assertEqual(observed["pair_cache"], (1, 1, 10, 6, 0, 1))
                 self.assertEqual(
-                    observed["target_conflicts"],
-                    baseline["target_conflicts"] + 1,
+                    (observed["first_key"], observed["second_key"]),
+                    (10, 6),
                 )
+                self.assertEqual(observed["target_conflicts"], 0)
                 self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
-                if identity_drift == "projection_weights":
+                self.assertGreater(observed["shadow_effective_delta_mps"], 0.0)
+                self.assertLessEqual(
+                    observed["shadow_effective_delta_mps"],
+                    1.0e-6,
+                )
+                if metric_drift == "projection_weights":
                     self.assertEqual(
                         np.float32(sum(observed["shadow_projection_weights"])),
                         np.float32(1.0),
@@ -14986,7 +15003,7 @@ class CanonicalComponentFaceLedgerContractMixin:
                         ),
                         1.0e-6,
                     )
-                elif identity_drift == "boundary_z":
+                else:
                     self.assertGreater(
                         abs(
                             float(observed["shadow_boundary_point_m"][2])
@@ -15001,9 +15018,52 @@ class CanonicalComponentFaceLedgerContractMixin:
                         ),
                         1.0e-6,
                     )
-                else:
-                    self.assertEqual(observed["direct_nearest_marker"], 0)
-                    self.assertEqual(observed["shadow_nearest_marker"], 1)
+
+    def test_inactive_axis_same_projected_point_nearest_drift_fails_closed(
+        self,
+    ) -> None:
+        """A discrete nearest-marker identity change is not metric drift."""
+
+        shadow_sample = float(np.nextafter(np.float32(2.0), np.float32(np.inf)))
+        baseline, _, baseline_failure = (
+            self._run_inactive_axis_same_projected_point_shadow_prepare(
+                endpoint_marker=None,
+                shadow_serialized_x=2.0,
+                shadow_sample_x=shadow_sample,
+                stop_after_prepare=True,
+            )
+        )
+        self.assertIsNone(baseline_failure)
+        observed, ledger_before, failure = (
+            self._run_inactive_axis_same_projected_point_shadow_prepare(
+                endpoint_marker=None,
+                shadow_serialized_x=2.0,
+                shadow_sample_x=shadow_sample,
+                stop_after_prepare=False,
+                identity_drift="nearest_marker",
+            )
+        )
+
+        self.assertIsNotNone(failure)
+        self.assertRegex(
+            str(failure),
+            r"conflicting canonical component-face claims \(target\)",
+        )
+        self.assertEqual(observed["shadow_valid"], 1)
+        self.assertEqual(observed["shadow_source"], (0, 1, 2))
+        self.assertEqual(observed["shadow_storage"], (0, 2, 2))
+        self.assertEqual(observed["relocation_blocked_count"], 0)
+        self.assertEqual(observed["claim_count"], 2)
+        self.assertLess(observed["first_key"], -1)
+        self.assertLess(observed["second_key"], -1)
+        self.assertEqual(observed["prepared_mode"], 0)
+        self.assertEqual(
+            observed["target_conflicts"],
+            baseline["target_conflicts"] + 1,
+        )
+        self.assertEqual(observed["direct_nearest_marker"], 0)
+        self.assertEqual(observed["shadow_nearest_marker"], 1)
+        self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
 
     def test_shifted_inactive_axis_double_relocation_reconstructs_one_face_ray(
         self,
@@ -16990,6 +17050,11 @@ class CanonicalComponentFaceLedgerContractMixin:
                                 direct_row
                             ][component_axis]
                         ),
+                        int(
+                            boundary.velocity_dirichlet_component_face_direct_relocation_pair_offset[
+                                direct_row
+                            ][component_axis]
+                        ),
                     )
                     observed["precompute"] = (
                         int(
@@ -17084,6 +17149,15 @@ class CanonicalComponentFaceLedgerContractMixin:
                         ),
                     )
                 elif stage == "hibm_velocity_row_segment_reconstruct_after":
+                    pair_modes = (
+                        boundary.velocity_dirichlet_component_face_segment_projection_only_seam.to_numpy()
+                    )
+                    observed["active_pair_modes"] = {
+                        tuple(int(value) for value in pair): int(
+                            pair_modes[tuple(pair)]
+                        )
+                        for pair in np.argwhere(pair_modes != 0)
+                    }
                     observed["reconstructed_count"] = int(
                         boundary.report_velocity_dirichlet_component_face_interpolated_surface_pair_reconstructed_count[
                             None
@@ -17118,7 +17192,14 @@ class CanonicalComponentFaceLedgerContractMixin:
             )["canonical_velocity_dirichlet_report"]
 
             self.assertEqual(observed["materialized"], (1, shadow_row, direct_row))
-            self.assertEqual(observed["selected_storage_offsets"], (0, 0, 0))
+            self.assertEqual(
+                observed["selected_storage_offsets"],
+                (0, 0, 0, -1),
+                msg=(
+                    "equal-axis pairs use the two ordinary selectors; the "
+                    "transverse-only pair route stays unavailable"
+                ),
+            )
             precompute = observed["precompute"]
             self.assertEqual(
                 precompute[:6],
@@ -17150,9 +17231,16 @@ class CanonicalComponentFaceLedgerContractMixin:
             )
             self.assertEqual(int(report["target_conflict_count"]), 0)
             self.assertEqual(
+                observed["active_pair_modes"],
+                {
+                    (*target, component_axis): 12,
+                    (*target, 1): 4,
+                },
+            )
+            self.assertEqual(
                 observed["reconstructed_count"],
-                3,
-                "the fixture reconstructs its auxiliary y/z pairs and the target x pair",
+                2,
+                "the fixture reconstructs its auxiliary y pair and target x pair",
             )
             state = self._canonical_component_state(target, component_axis)
             self.assertTrue(state["active"] and state["owned"])
@@ -17164,6 +17252,109 @@ class CanonicalComponentFaceLedgerContractMixin:
         finally:
             boundary.__dict__.pop(validate_name, None)
             boundary.__dict__.pop(closure_name, None)
+            self.fluid.cell_face_x_m.from_numpy(original_x_faces)
+            self.fluid.cell_center_x_m.from_numpy(original_x_centers)
+
+    def test_inactive_axis_same_storage_candidate_requires_shadow_selector_to_target(
+        self,
+    ) -> None:
+        """A shadow selected onto the other face cannot form the target pair."""
+
+        class _StopAfterPairPrecompute(Exception):
+            pass
+
+        boundary = self.segment_component_face_boundary
+        search = self.segment_component_face_search
+        original_x_faces = self.fluid.cell_face_x_m.to_numpy()
+        original_x_centers = self.fluid.cell_center_x_m.to_numpy()
+        try:
+            fixture = self._load_inactive_axis_extrusion_cohort_fixture(
+                shadow_slots=(1,),
+                target_x_index=2,
+            )
+            target = fixture["target"]
+            component_axis = int(fixture["component_axis"])
+            direct_row = fixture["direct_rows"][1]
+            shadow_row = fixture["shadow_rows"][1]
+            target_pair = (*target, component_axis)
+
+            search.node_boundary_point_m[direct_row] = (0.54, 0.375, 0.625)
+            search.node_interior_fluid_point_m[direct_row] = (0.54, 0.75, 0.625)
+            search.node_boundary_point_m[shadow_row] = (0.66, 0.375, 0.625)
+            search.node_interior_fluid_point_m[shadow_row] = (0.66, 0.5, 0.625)
+            search.node_projection_marker_weights[shadow_row] = (0.5, 0.5, 0.0)
+
+            ledger_before = self._canonical_ledger_bytes()
+            observed: dict[str, object] = {}
+
+            def capture_precompute(stage: str) -> None:
+                if stage != "hibm_velocity_row_segment_pair_precompute_after":
+                    return
+                observed["selected_storage_offsets"] = (
+                    int(
+                        boundary.velocity_dirichlet_component_face_direct_selected_storage_offset[
+                            direct_row
+                        ][component_axis]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_relocation_shadow_selected_storage_offset[
+                            direct_row
+                        ][component_axis]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_direct_relocation_pair_offset[
+                            direct_row
+                        ][component_axis]
+                    ),
+                )
+                observed["pair_cache"] = (
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_admission_valid[
+                            target_pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_full_valid[
+                            target_pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_first_author_kind[
+                            target_pair
+                        ]
+                    ),
+                    int(
+                        boundary.velocity_dirichlet_component_face_segment_pair_second_author_kind[
+                            target_pair
+                        ]
+                    ),
+                )
+                observed["prepared_mode"] = int(
+                    boundary.velocity_dirichlet_component_face_segment_projection_only_seam[
+                        target_pair
+                    ]
+                )
+                raise _StopAfterPairPrecompute
+
+            with self.assertRaises(_StopAfterPairPrecompute):
+                self._assemble_component_face_ledger(
+                    interpolate_interior_velocity=True,
+                    use_marker_geometry=True,
+                    use_segment_fixture=True,
+                    provide_marker_topology=True,
+                    surface_projection_inactive_axis=0,
+                    stage_observer=capture_precompute,
+                )
+
+            self.assertEqual(observed["selected_storage_offsets"], (0, 1, -1))
+            self.assertEqual(observed["pair_cache"][:2], (0, 0))
+            self.assertNotIn(1, observed["pair_cache"][2:])
+            self.assertEqual(observed["prepared_mode"], 0)
+            self.assertEqual(self._canonical_ledger_bytes(), ledger_before)
+            self._assert_component_face_relocation_transient_neutral(
+                use_segment_fixture=True
+            )
+        finally:
             self.fluid.cell_face_x_m.from_numpy(original_x_faces)
             self.fluid.cell_center_x_m.from_numpy(original_x_centers)
 
