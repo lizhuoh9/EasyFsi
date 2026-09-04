@@ -347,6 +347,65 @@ must contain that clean documentation commit's short SHA; it must not resume or
 reuse the `27111d3` prefix. This is not `PASS_FSI1_S0_GATE_ONLY` and does
 not authorize M0/M1, FSI2, FSI3, Oracle, or learning.
 
+**R26A rank-direct max-residual repair and component requalification
+(2026-09-05).** Formal run `turek_hron__fsi1_s0__f513f9b__r01` started from
+zero at clean `f513f9b`, accepted steps 1--7 through `t=0.035 s`, and failed
+closed while preparing candidate step 8 as `FAIL_NUMERICAL_HEALTH`. The
+rank-revealing-direct minimum-L2 candidate's device audit returned
+`0.00010005016520153731 m/s`, just above the unchanged `1e-4 m/s` limit.
+The accepted prefix is failure evidence only, is not an S0 pass, and has no
+complete transition checkpoint for formal resume.
+
+A diagnostic-only replay from zero at the same source isolated physical step
+8, coupling trial 7, Q solve 5. Its 336 active rows contained 30 positive rows
+and a 17-column selected basis. The existing L2 correction had an f32
+all-active-row maximum residual of `0.00010005030344473198 m/s`; the same
+selected basis admitted an f32 device-audited minimax witness of
+`9.82458223006688e-5 m/s`. The replay rethrew the original error and did not
+commit physical velocity. This established an objective mismatch, not a
+reason to alter geometry admission or the public tolerance.
+
+Clean `f2320f5` preserves least squares as the fast path. Only when that
+candidate fails the existing f32 all-active-row audit does it solve the
+column-normalized selected-basis Chebyshev problem, materialize the correction
+to f32, and repeat the same device audit. Backend failure, nonfinite output,
+or a truly infeasible system remains atomic and fail-closed; no topology gate,
+tolerance, or soft fallback changed. The complete seven-test CPU module passed
+in `16.169 s`, and five focused strict-CUDA contracts passed in one process in
+`184.138 s`. Python compilation, Ruff check, `git diff --check`, and a fresh
+final read-only review (`SHIP`, no P0--P3 finding) also passed. This does not
+claim a verdict for the broad component-face module or the full test suite.
+
+The complete ten-stage source- and host-matched component chain then passed at
+clean `f2320f5`. A post-run integrity pass revalidated every file and array
+hash, parent identity, row ledger, and accepted-time ledger. Every manifest is
+bound to source SHA256
+`478eb7707fd20761654443b334782a252ffee90dc29ba2c9b9707ba747b67c89`
+and host identity
+`db88ab4094ab1be43ad58b7c18cc59c756a45e1ac4f44978bc6238a4738c6a47`:
+
+- the three solid constituents each completed 40 rows; the S100/S200 nx4 and
+  S200 nx4/nx8 Point-A relative-vector deltas were
+  `0.0003264915974131584` and `0.0`;
+- fixed-fluid nx4 and nx8 each completed 500 rows. Their velocity/force
+  span-leakage pairs were
+  `0.0005504236378906395/0.0006353412795713001` and
+  `0.00043036809436382663/0.0003521303648396529`; their drag means were
+  `12.845664033171927` and `12.927745742812588 N/m`;
+- the fixed-fluid nx4/nx8 force-per-span relative-vector delta was
+  `0.006372346408124445 < 0.02`; and
+- independent one- and two-step coupled preflights passed as
+  `PASS_SMOKE_ONLY`, with coupling-iteration counts `[10]` and `[10, 10]`,
+  exact final accepted times `0.005 s` and `0.010 s`, and zero unadvanced
+  fluid/solid time.
+
+All ten labels end in `__f2320f5__r01` under
+`validation_runs/turek_hron_component_gates/`. This chain supersedes
+`293dc69` and authorizes only a new documentation commit followed by one fresh
+1600-step FSI1-S0 strict-CUDA run from zero whose label contains that
+documentation commit's short SHA. This is not `PASS_FSI1_S0_GATE_ONLY` and
+does not authorize M0/M1, FSI2, FSI3, Oracle, or learning.
+
 This report records what has been **verified by runnable experiment**, what has
 been **diagnosed but not fixed**, and what is a **method-limited frontier**. It
 deliberately separates confirmed results from confounded comparisons. Every

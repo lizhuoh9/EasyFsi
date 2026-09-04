@@ -835,6 +835,67 @@ from zero after this documentation-only record is committed. Its label must
 contain that clean commit's short SHA and must not reuse the `27111d3`
 prefix. No S0 pass or authorization for M0/M1 and later cases exists yet.
 
+#### 5.4.8 Rank-direct max-residual repair and requalification (2026-09-05)
+
+Formal run `turek_hron__fsi1_s0__f513f9b__r01` started from zero at clean
+`f513f9b`, accepted steps 1--7 through `t=0.035 s`, and failed closed while
+preparing candidate step 8 as `FAIL_NUMERICAL_HEALTH`. The
+rank-revealing-direct minimum-L2 candidate's device audit returned
+`0.00010005016520153731 m/s` against the unchanged `1e-4 m/s` limit. The
+accepted prefix is failure evidence only, is not an S0 pass, and has no
+complete transition checkpoint for formal resume.
+
+A diagnostic-only replay from zero at that source isolated physical step 8,
+coupling trial 7, Q solve 5. Its 336 active rows contained 30 positive rows and
+a 17-column selected basis. The L2 correction had an f32 all-active-row
+maximum residual of `0.00010005030344473198 m/s`; the same selected basis had
+an f32 device-audited minimax witness of `9.82458223006688e-5 m/s`. The replay
+re-threw the original error and committed no physical velocity. This was an
+objective mismatch, not evidence for a topology or tolerance change.
+
+Clean `f2320f5` retains least squares as the fast path and invokes the
+column-normalized selected-basis Chebyshev solve only after that candidate
+fails the existing f32 all-active-row device audit. The correction is rounded
+to f32 and must pass that unchanged audit before commit. Backend failure,
+nonfinite output, and true minimax infeasibility remain atomic and fail-closed;
+no public tolerance, topology admission, or soft fallback changed.
+
+The complete seven-test CPU module passed in `16.169 s`; five focused
+strict-CUDA contracts passed in one process in `184.138 s`, covering the L2
+fast path, minimax success, backend-exception atomicity, true infeasibility,
+and full collective/scratch behavior. Python compilation, Ruff check,
+`git diff --check`, and a fresh final read-only review (`SHIP`, no P0--P3
+finding) also passed. This is not a broad module or full-suite verdict.
+
+The complete ten-stage source- and host-matched component chain then passed at
+clean `f2320f5`. A post-run verifier revalidated file and array hashes, source,
+host and Taichi identities, parent identities, row counts, and time ledgers.
+Every manifest is bound to source SHA256
+`478eb7707fd20761654443b334782a252ffee90dc29ba2c9b9707ba747b67c89`
+and host identity
+`db88ab4094ab1be43ad58b7c18cc59c756a45e1ac4f44978bc6238a4738c6a47`:
+
+- `solid_s100_nx4`, `solid_s200_nx4`, and `solid_s200_nx8` each completed
+  40 rows;
+- solid S100/S200 nx4 and S200 nx4/nx8 Point-A relative-vector deltas were
+  `0.0003264915974131584` and `0.0`;
+- fixed-fluid nx4 and nx8 each completed 500 rows, with velocity/force
+  span-leakage pairs `0.0005504236378906395/0.0006353412795713001` and
+  `0.00043036809436382663/0.0003521303648396529`, and drag means
+  `12.845664033171927` and `12.927745742812588 N/m`;
+- their force-per-span relative-vector delta was
+  `0.006372346408124445 < 0.02`; and
+- independent one- and two-step coupled preflights passed as
+  `PASS_SMOKE_ONLY`, used `[10]` and `[10, 10]` coupling iterations, ended at
+  exactly `0.005 s` and `0.010 s`, and left zero unadvanced fluid/solid time.
+
+All ten labels end in `__f2320f5__r01` under
+`validation_runs/turek_hron_component_gates/`. This supersedes `293dc69` and
+authorizes only a new documentation commit followed by one fresh 1600-step
+FSI1-S0 strict-CUDA campaign from zero whose label contains that documentation
+commit's short SHA. It is not `PASS_FSI1_S0_GATE_ONLY` and does not authorize
+M0/M1, FSI2, FSI3, Oracle, or learning.
+
 ### 5.5 Frozen formulas, tolerances, and evidence labels
 
 For nonzero finer/reference vector \(\mathbf b\), define
@@ -1281,15 +1342,22 @@ diagnostic; the final claim remains no-commit live coupling/CG/matvec work.
     `293dc69`.
 16. Regenerate the entire ten-stage component chain at `293dc69` — complete;
     every stage is source- and host-matched and passed.
-17. Commit this documentation-only record, then run one fresh 1600-step FSI1-S0
-    strict-CUDA campaign from zero — active. Use a new label containing that
-    documentation commit's short SHA; do not resume the `27111d3` prefix.
-18. Implement and validate a scalable rank-deficient Q backend and enforce the
+17. Record formal attempt `f513f9b`: seven accepted steps, then a candidate-
+    step 8 rank-direct L2/max-residual mismatch — complete; this is
+    `FAIL_NUMERICAL_HEALTH`, not an S0 pass.
+18. Diagnose that exact rank-direct failure and implement the unchanged-audit
+    minimax fallback — complete at `f2320f5`; no tolerance or topology change.
+19. Regenerate the entire ten-stage component chain at `f2320f5` — complete;
+    every stage is source-, host-, and strict-CUDA-matched and passed.
+20. Commit this documentation-only record, then run one fresh 1600-step FSI1-S0
+    strict-CUDA campaign from zero — active. Use a label containing that new
+    documentation commit's short SHA; do not resume the `f513f9b` prefix.
+21. Implement and validate a scalable rank-deficient Q backend and enforce the
     solid explicit-stability substep gate, then run M0/M1 and conditional F0.
     L1/L2 remain blocked until both prerequisites pass.
-19. If and only if FSI1 passes, run FSI2.
-20. If and only if FSI2 passes, run FSI3.
-21. If and only if all three reach benchmark quality, close R26A and open the
+22. If and only if FSI1 passes, run FSI2.
+23. If and only if FSI2 passes, run FSI3.
+24. If and only if all three reach benchmark quality, close R26A and open the
     separately preregistered Oracle goal.
 
 No later item may be started to avoid, dilute, or reinterpret an earlier failed
