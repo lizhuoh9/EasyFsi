@@ -6,6 +6,65 @@ CUDA. For R26A artifacts at and after `293dc69`, the active interpreter must
 measure as CPython `3.10.12`, NumPy `2.1.2`, and SciPy `1.15.3`; any
 mismatch is `BLOCKED_ENVIRONMENT`. Case: `cases/turek_hron_fsi.py`.
 
+<!-- BEGIN R26A ROBUSTNESS 2026-09-05 -->
+## R26A robustness preparation, 2026-09-05
+
+The current source changes require a fresh component chain before formal S0.
+The earlier f2320f5 chain remains historical evidence for its own source; the
+case and marker-constraint operator have now changed. No new component pass or
+FSI1/2/3 benchmark pass is claimed by the focused checks below.
+
+- The case validates finite physical inputs and the declared material CFL
+  before allocating simulation state. L1 FSI1 at dt=0.005 uses 200 solid
+  substeps; L1 at dt=0.0025 uses 100, and L2 at dt=0.0025 uses 200. Both
+  accepted fluid time and accepted solid time still equal the full macro dt.
+- A candidate step is checked against its stage's numerical health contract
+  before acceptance/history publication. Failure rolls back physical state and
+  records the candidate and rollback scope; derived search/boundary caches are
+  explicitly marked for rebuild. No rejected prefix is a restart checkpoint.
+- The four former 512-row barriers (rank-direct Q, pressure P, collective F,
+  and certificate-authorized F/H) now select a bounded sparse backend for
+  larger capacities. Small-system paths keep their original algorithms.
+  Structural rank, all-row f32 residual audits, H authorization, and resource
+  limits remain enforced. The final Q audit includes the actual rounded
+  velocity addition and the same hard/external masks as commit.
+- Large P prepares a QR basis once and reuses device ndarray buffers. Its
+  device triangular solve uses the full Jx, including input on zero-mobility
+  faces; it preserves the fixed linear projector and leaves those faces
+  unchanged. Per-apply convergence loops or host scalar reads are not added.
+- The formal CLI now selects all 13 frozen stages with --stage and explicit
+  --prerequisite campaign manifests. It recomputes prerequisite assessments
+  from hashed CSV/chunks and checks full config, source, host and runtime
+  identity before initialization. Progress is printed for accepted step 1 and
+  each 25th accepted step; a silent first trial can still be computing.
+- FSI2/3 have their own relative-convergence policy. FSI3 M0/tight retain zero
+  absolute tolerance. Dynamic final quality rechecks every M0/M1/F0 run against
+  the strict benchmark limits, even though M0 may enter refinement at the
+  exploratory limits. Periodic telemetry uses accepted physical fields and the
+  existing last-three-complete-cycle analyzer; no adaptive-relaxation history
+  is invented where only initial Picard relaxation and the IQN limiter exist.
+
+Focused validation completed before source freeze:
+
+| Gate | Result |
+| --- | --- |
+| New nonzero Q / weighted P strict-CUDA regressions | 6 tests + 6 subtests passed (400.00 s) |
+| Existing pressure-projector contracts, including resource/lifecycle/zero-mobility behavior | 29 passed (1171.03 s) |
+| Isolated CPU direct-Q regressions | 7 passed (358.93 s) |
+| Large F/FH CUDA closure plus sparse-structure CPU equivalence/budget | 3 tests + 2 subtests passed (6.92 s) |
+| Formal runner, FSI1/periodic acceptance, stage contracts | 138 CPU tests passed (25.60 s) |
+| All 21 changed/new Python files | compilation, full Ruff and diff checks passed |
+
+The physical/CFL guard and candidate-rollback tests also passed during their
+implementation (9 and 3 tests respectively). Independent Astra/max review
+returned ACCEPTED with no remaining P0-P3 findings in Q/P/f32, F/FH, stage
+contracts, formal runner and acceptance. This accepts the reviewed code and
+focused tests only. It does not establish a full-suite, component-chain or
+formal FSI1/2/3 numerical pass. The complete source-matched component chain
+must now be regenerated once, followed by the registered formal sequence.
+
+<!-- END R26A ROBUSTNESS 2026-09-05 -->
+
 Architecture update (2026-08-13): Turek-Hron FSI1/2/3 no longer owns a
 case-local Picard/Aitken/IQN state machine or an explicit single-pass mode. All
 presets now use the shared marker-velocity IQN-ILS loop in

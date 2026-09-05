@@ -37,6 +37,173 @@ HIBM_MARKER_PRESSURE_NULLSPACE_RESOURCE_MAX_BYTES = 256 * 1024 * 1024
 HIBM_MARKER_CONSTRAINT_HASH_THRESHOLD = 64
 
 
+def _sparse_normalized_pivoted_cholesky(
+    rows: list[dict[tuple[int, int, int, int], float]],
+    *,
+    relative_pivot_tolerance: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Factor a sparse row Gram without materialising its M-by-M matrix."""
+
+    count = len(rows)
+    norms = np.fromiter(
+        (math.sqrt(sum(value * value for value in row.values())) for row in rows),
+        dtype=np.float64,
+        count=count,
+    )
+    if not np.all(np.isfinite(norms)):
+        raise RuntimeError("sparse marker row norm is non-finite")
+    positive = norms > 0.0
+    residual = np.where(positive, 1.0, 0.0)
+    columns: list[np.ndarray] = []
+    selected: list[int] = []
+
+    def normalized_dot(first: int, second: int) -> float:
+        if not positive[first] or not positive[second]:
+            return 0.0
+        left, right = rows[first], rows[second]
+        if len(left) > len(right):
+            left, right = right, left
+        value = sum(weight * right.get(key, 0.0) for key, weight in left.items())
+        return value / (norms[first] * norms[second])
+
+    while True:
+        pivot = int(np.argmax(residual))
+        pivot_value = float(residual[pivot])
+        if pivot_value <= relative_pivot_tolerance:
+            break
+        column = np.fromiter(
+            (normalized_dot(row, pivot) for row in range(count)),
+            dtype=np.float64,
+            count=count,
+        )
+        if columns:
+            # ``column_stack`` creates a transient second M-by-r array.  Fail
+            # before that allocation, rather than discovering the pressure
+            # resource limit after a large rank-deficient solve has started.
+            next_rank = len(columns) + 1
+            workspace_bytes = 2 * count * next_rank * 8
+            workspace_bytes += next_rank * next_rank * 8
+            if workspace_bytes > HIBM_MARKER_PRESSURE_NULLSPACE_RESOURCE_MAX_BYTES:
+                raise RuntimeError(
+                    "sparse marker rank workspace exceeds memory budget: "
+                    f"{workspace_bytes} > "
+                    f"{HIBM_MARKER_PRESSURE_NULLSPACE_RESOURCE_MAX_BYTES} bytes"
+                )
+            prior = np.column_stack(columns)
+            column -= prior @ prior[pivot]
+        if not np.all(np.isfinite(column)):
+            raise RuntimeError("sparse marker factor column is non-finite")
+        pivot_value = float(column[pivot])
+        if pivot_value < -8.0 * relative_pivot_tolerance:
+            raise RuntimeError("sparse marker Gram is not positive semidefinite")
+        if pivot_value <= relative_pivot_tolerance:
+            residual[pivot] = 0.0
+            continue
+        column /= math.sqrt(pivot_value)
+        columns.append(column)
+        selected.append(pivot)
+        next_residual = residual - column * column
+        if np.any(next_residual[positive] < -8.0 * relative_pivot_tolerance):
+            raise RuntimeError("sparse marker Gram has a negative residual pivot")
+        residual = np.where(positive, np.maximum(0.0, next_residual), 0.0)
+    factor = (
+        np.column_stack(columns)
+        if columns
+        else np.empty((count, 0), dtype=np.float64)
+    )
+    return np.asarray(selected, dtype=np.intp), factor, norms
+
+
+def _sparse_metric_columns(
+    rows: list[dict[tuple[int, int, int, int], float]],
+    selected: np.ndarray,
+) -> np.ndarray:
+    """Return only the M-by-r Gram columns needed by a reduced solve."""
+
+    columns = np.empty((len(rows), selected.size), dtype=np.float64)
+    for column, pivot in enumerate(selected):
+        pivot_row = rows[int(pivot)]
+        for row, values in enumerate(rows):
+            if len(values) <= len(pivot_row):
+                columns[row, column] = sum(
+                    value * pivot_row.get(key, 0.0)
+                    for key, value in values.items()
+                )
+            else:
+                columns[row, column] = sum(
+                    value * values.get(key, 0.0)
+                    for key, value in pivot_row.items()
+                )
+    if not np.all(np.isfinite(columns)):
+        raise RuntimeError("sparse marker Gram columns are non-finite")
+    return columns
+
+
+
+def _sparse_structural_decomposition(
+    matrix,
+    *,
+    column_norm: np.ndarray,
+    rcond: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a row-space basis and minimum-norm lift without dense M-by-D.
+
+    Twice-reorthogonalized sparse row expansion retains directions down to
+    roundoff. The small M-by-r SVD then applies the original singular-value
+    cutoff. In particular, mobility never participates in structural rank.
+    Only one expanded D-vector and rank-sized workspaces are materialized.
+    """
+
+    normalized = matrix.multiply(1.0 / column_norm).tocsr()
+    row_count, dof_count = normalized.shape
+    basis: list[np.ndarray] = []
+    sparse_bytes = sum(
+        array.nbytes for array in
+        (normalized.data, normalized.indices, normalized.indptr)
+    )
+    for row in range(row_count):
+        candidate = normalized.getrow(row).toarray().ravel()
+        initial_norm = float(np.linalg.norm(candidate))
+        if not math.isfinite(initial_norm):
+            raise RuntimeError("sparse structural row is non-finite")
+        if initial_norm == 0.0:
+            continue
+        for _ in range(2):
+            for direction in basis:
+                candidate -= np.dot(direction, candidate) * direction
+        remaining_norm = float(np.linalg.norm(candidate))
+        if remaining_norm <= 8.0 * math.ulp(1.0) * initial_norm:
+            continue
+        next_rank = len(basis) + 1
+        # Include simultaneous QR/SVD/lift and later minimax/weighted work.
+        workspace_bytes = sparse_bytes + 8 * (
+            6 * (row_count + dof_count) * next_rank
+            + 4 * next_rank * next_rank + 2 * dof_count
+        )
+        if workspace_bytes > HIBM_MARKER_PRESSURE_NULLSPACE_RESOURCE_MAX_BYTES:
+            raise RuntimeError(
+                "sparse structural workspace exceeds memory budget: "
+                f"{workspace_bytes} > "
+                f"{HIBM_MARKER_PRESSURE_NULLSPACE_RESOURCE_MAX_BYTES} bytes"
+            )
+        basis.append(candidate / remaining_norm)
+    if not basis:
+        raise RuntimeError("sparse structural rank is zero")
+    orthogonal = np.column_stack(basis)
+    represented = normalized @ orthogonal
+    left, singular, right = np.linalg.svd(represented, full_matrices=False)
+    if not np.all(np.isfinite(singular)) or singular[0] <= 0.0:
+        raise RuntimeError("sparse structural factor is non-finite or singular")
+    rank = int(np.count_nonzero(singular > rcond * singular[0]))
+    if rank == 0:
+        raise RuntimeError("sparse structural rank is zero")
+    row_basis = left[:, :rank]
+    lift = (orthogonal @ right[:rank].T) / singular[:rank]
+    if not np.all(np.isfinite(lift)):
+        raise RuntimeError("sparse structural solution lift is non-finite")
+    return row_basis, lift
+
+
 def _uses_marker_constraint_hash(marker_count: int) -> bool:
     return int(marker_count) > HIBM_MARKER_CONSTRAINT_HASH_THRESHOLD
 
@@ -405,12 +572,28 @@ class HibmMpmMarkerMacConstraintOperator:
         self._pressure_nullspace_max_input_constraint = None
         self._pressure_nullspace_max_unactuated_input_constraint = None
         self._pressure_nullspace_max_constraint_residual = None
+        self._pressure_sparse_factor_capacity = 0
+        self._pressure_sparse_dof_capacity = 0
+        self._pressure_sparse_dof_count = 0
+        self._pressure_sparse_dof_indices = None
+        self._pressure_sparse_sqrt_mobility = None
+        self._pressure_sparse_factor = None
+        self._pressure_sparse_triangular = None
+        self._pressure_sparse_actual_rank = 0
+        self._pressure_sparse_backend = (
+            self.constraint_capacity > HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS
+        )
+        self._pressure_nullspace_base_resource_bytes = 0
 
         self._rz_old = ti.field(dtype=ti.f64, shape=())
         self._rz_new = ti.field(dtype=ti.f64, shape=())
         self._p_ap = ti.field(dtype=ti.f64, shape=())
         self._max_residual = ti.field(dtype=ti.f32, shape=())
         self._true_candidate_max_residual = ti.field(dtype=ti.f32, shape=())
+        self._final_f32_candidate_max_residual = ti.field(
+            dtype=ti.f32,
+            shape=(),
+        )
         self._failure_code = ti.field(dtype=ti.i32, shape=())
         self._audit_failure_code = ti.field(dtype=ti.i32, shape=())
         self._solved_correction_integrity_failure = ti.field(
@@ -519,6 +702,7 @@ class HibmMpmMarkerMacConstraintOperator:
         self._p_ap[None] = 0.0
         self._max_residual[None] = 0.0
         self._true_candidate_max_residual[None] = 0.0
+        self._final_f32_candidate_max_residual[None] = 0.0
         self._failure_code[None] = 0
         self._audit_failure_code[None] = 0
         self._solved_correction_integrity_failure[None] = 0
@@ -559,9 +743,10 @@ class HibmMpmMarkerMacConstraintOperator:
         for row, support in self._pressure_nullspace_mobility_snapshot:
             self._pressure_nullspace_mobility_snapshot[row, support] = 0.0
             self._pressure_nullspace_inverse_mass_per_kg[row, support] = 0.0
-        for row, column in self._pressure_nullspace_schur:
-            self._pressure_nullspace_schur[row, column] = 0.0
-            self._pressure_nullspace_factor[row, column] = 0.0
+        if ti.static(not self._pressure_sparse_backend):
+            for row, column in self._pressure_nullspace_schur:
+                self._pressure_nullspace_schur[row, column] = 0.0
+                self._pressure_nullspace_factor[row, column] = 0.0
         for i, j, k in self._pressure_nullspace_correction:
             self._pressure_nullspace_correction[i, j, k] = ti.Vector(
                 [0.0, 0.0, 0.0]
@@ -1056,6 +1241,65 @@ class HibmMpmMarkerMacConstraintOperator:
                                 )
                     value /= self._pressure_nullspace_factor[row, factor_slot]
                     self._pressure_nullspace_lambda[factor_slot] = value
+
+    @ti.kernel
+    def _project_pressure_nullspace_sparse_kernel(
+        self,
+        basis: ti.types.ndarray(dtype=ti.f64, ndim=2),
+        triangular: ti.types.ndarray(dtype=ti.f64, ndim=2),
+        indices: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        sqrt_mobility: ti.types.ndarray(dtype=ti.f64, ndim=1),
+        rank: ti.i32,
+        dof_count: ti.i32,
+    ):
+        max_input = ti.cast(0.0, ti.f64)
+        max_unactuated_input = ti.cast(0.0, ti.f64)
+        ti.loop_config(serialize=True)
+        for row in range(self.constraint_capacity):
+            max_input = ti.max(max_input, ti.abs(self._pressure_nullspace_rhs[row]))
+            if (
+                self._pressure_nullspace_row_active[row] != 0
+                and self._pressure_nullspace_row_inverse_norm[row] == 0.0
+            ):
+                max_unactuated_input = ti.max(
+                    max_unactuated_input, ti.abs(self._pressure_nullspace_rhs[row])
+                )
+        self._pressure_nullspace_max_input_constraint[None] = ti.max(
+            self._pressure_nullspace_max_input_constraint[None], max_input
+        )
+        self._pressure_nullspace_max_unactuated_input_constraint[None] = ti.max(
+            self._pressure_nullspace_max_unactuated_input_constraint[None],
+            max_unactuated_input,
+        )
+        # C.T = Q R for normalized selected rows of J sqrt(A).
+        # Use the full Jx, including nonzero input on zero-mobility faces.
+        # Solving R.T z = normalized Jx preserves those fixed coordinates
+        # while canceling their marker contribution with actuated faces.
+        ti.loop_config(serialize=True)
+        for column in range(rank):
+            row = self._pressure_nullspace_factor_order[column]
+            coefficient = (
+                self._pressure_nullspace_rhs[row]
+                * self._pressure_nullspace_row_inverse_norm[row]
+            )
+            for previous in range(column):
+                coefficient -= (
+                    triangular[previous, column]
+                    * self._pressure_nullspace_forward[previous]
+                )
+            self._pressure_nullspace_forward[column] = (
+                coefficient / triangular[column, column]
+            )
+        ti.loop_config(serialize=True)
+        for dof in range(dof_count):
+            correction = ti.cast(0.0, ti.f64)
+            for column in range(rank):
+                correction += basis[dof, column] * self._pressure_nullspace_forward[column]
+            axis = indices[dof, 0]
+            i, j, k = indices[dof, 1], indices[dof, 2], indices[dof, 3]
+            self._pressure_nullspace_correction[i, j, k][axis] = (
+                sqrt_mobility[dof] * correction
+            )
 
     @ti.kernel
     def _clear_pressure_nullspace_candidate_kernel(self):
@@ -2290,6 +2534,55 @@ class HibmMpmMarkerMacConstraintOperator:
                 )
 
     @ti.kernel
+    def _compute_final_f32_candidate_residual_kernel(self):
+        """Audit the rounded velocity value which commit will actually publish."""
+
+        self._final_f32_candidate_max_residual[None] = 0.0
+        for row in range(self.constraint_capacity):
+            if self._row_active[row] != 0:
+                axis = row % 3
+                sampled = ti.cast(0.0, ti.f32)
+                for support in ti.static(range(8)):
+                    index = self._stencil_index[row, support]
+                    if index.x >= 0:
+                        value = self._fluid.velocity[index.x, index.y, index.z][axis]
+                        hard = self._fluid.velocity_dirichlet_boundary_hard_fixed_component_mask[
+                            index.x, index.y, index.z
+                        ]
+                        external = self._fluid.velocity_dirichlet_boundary_external_exact_component_mask[
+                            index.x, index.y, index.z
+                        ]
+                        if ((hard | external) & (1 << axis)) == 0:
+                            value = ti.cast(
+                                value + self._correction[index.x, index.y, index.z][axis],
+                                ti.f32,
+                            )
+                        sampled += self._stencil_weight[row, support] * value
+                target = self._marker_target_snapshot_mps[row // 3][axis]
+                residual = ti.abs(target - sampled)
+                finite = residual == residual and residual < 3.4e38
+                if not finite:
+                    residual = 3.4e38
+                ti.atomic_max(
+                    self._final_f32_candidate_max_residual[None],
+                    residual,
+                )
+
+    def _require_final_f32_candidate_audit(self, tolerance: float) -> None:
+        """Fail closed if adding Q to the live f32 grid loses the correction."""
+
+        self._compute_final_f32_candidate_residual_kernel()
+        residual = float(self._final_f32_candidate_max_residual[None])
+        self._max_residual_mps = max(self._max_residual_mps, residual)
+        if not math.isfinite(residual) or residual > tolerance:
+            self._phase = "failed"
+            self._converged = False
+            raise RuntimeError(
+                "final f32 candidate velocity residual exceeds the absolute "
+                f"marker constraint tolerance: {residual} > {tolerance}"
+            )
+
+    @ti.kernel
     def _copy_rank_direct_metric_to_dense_scratch_kernel(self):
         """Borrow the bounded pressure dense storage for one Q direct solve."""
 
@@ -2372,13 +2665,13 @@ class HibmMpmMarkerMacConstraintOperator:
         self._rank_direct_unactuated_constraint_count = 0
         self._reset_rank_direct_diagnostics_kernel()
         if self.constraint_capacity > HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS:
-            self._phase = "failed"
-            raise RuntimeError(
-                "rank-revealing direct marker constraint capacity exceeds the "
-                "exact backend limit: "
-                f"{self.constraint_capacity} > "
-                f"{HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS}"
-            )
+            try:
+                self._solve_rank_revealing_sparse(tolerance)
+            except Exception:
+                self._phase = "failed"
+                self._converged = False
+                raise
+            return
         self._ensure_pressure_nullspace_resources()
         self._reset_pressure_nullspace_prepare_kernel()
         self._copy_rank_direct_metric_to_dense_scratch_kernel()
@@ -2500,6 +2793,224 @@ class HibmMpmMarkerMacConstraintOperator:
                 "absolute marker constraint tolerance: "
                 f"{self._max_residual_mps} > {tolerance}"
             )
+        self._require_final_f32_candidate_audit(tolerance)
+        self._snapshot_solved_correction_kernel()
+        self._phase = "solved"
+
+    def _sparse_metric_rows(
+        self, *, row_active, inverse_mobility, allow_zero_mobility: bool = False
+    ) -> tuple[list[dict[tuple[int, int, int, int], float]], dict]:
+        """Build sparse J sqrt(D) rows using the supplied Q or P metric."""
+
+        active = row_active.to_numpy().astype(bool)
+        indices = self._stencil_index.to_numpy()
+        weights = self._stencil_weight.to_numpy().astype(np.float64, copy=False)
+        free = self._stencil_free.to_numpy().astype(bool)
+        inverse_mass = inverse_mobility.to_numpy().astype(
+            np.float64,
+            copy=False,
+        )
+        rows: list[dict[tuple[int, int, int, int], float]] = []
+        mobility_by_dof: dict[tuple[int, int, int, int], float] = {}
+        for row in range(self.constraint_capacity):
+            values: dict[tuple[int, int, int, int], float] = {}
+            if active[row]:
+                axis = row % 3
+                for support in range(8):
+                    if not free[row, support]:
+                        continue
+                    weight = float(weights[row, support])
+                    mobility = float(inverse_mass[row, support])
+                    if weight == 0.0:
+                        continue
+                    if (
+                        not math.isfinite(weight)
+                        or not math.isfinite(mobility)
+                        or mobility < 0.0
+                        or (mobility == 0.0 and not allow_zero_mobility)
+                    ):
+                        raise RuntimeError("rank-revealing sparse marker support is invalid")
+                    index = tuple(int(value) for value in indices[row, support])
+                    if any(
+                        value < 0 or value >= self.grid_nodes[dimension]
+                        for dimension, value in enumerate(index)
+                    ):
+                        raise RuntimeError("rank-revealing sparse marker support is out of bounds")
+                    key = (axis, *index)
+                    previous = mobility_by_dof.setdefault(key, mobility)
+                    if previous != mobility:
+                        raise RuntimeError(
+                            "rank-revealing sparse marker shared support has inconsistent mobility"
+                        )
+                    if mobility > 0.0:
+                        values[key] = values.get(key, 0.0) + weight * math.sqrt(mobility)
+            rows.append(values)
+        return rows, mobility_by_dof
+
+    @ti.kernel
+    def _audit_sparse_q_partition_kernel(
+        self, partition: ti.types.ndarray(dtype=ti.i32, ndim=1)
+    ):
+        self._true_candidate_max_residual[None] = 0.0
+        self._rank_direct_max_structural_residual[None] = 0.0
+        self._rank_direct_max_independent_residual[None] = 0.0
+        self._rank_direct_max_dependent_residual[None] = 0.0
+        self._rank_direct_max_unactuated_residual[None] = 0.0
+        for row in range(self.constraint_capacity):
+            if self._row_active[row] != 0:
+                axis = row % 3
+                sampled = ti.cast(0.0, ti.f32)
+                for support in ti.static(range(8)):
+                    if self._stencil_free[row, support] != 0:
+                        index = self._stencil_index[row, support]
+                        sampled += (
+                            self._stencil_weight[row, support]
+                            * self._correction[index.x, index.y, index.z][axis]
+                        )
+                residual = ti.abs(self._rhs[row] - sampled)
+                if not (residual == residual and residual < 3.4e38):
+                    residual = 3.4e38
+                ti.atomic_max(self._true_candidate_max_residual[None], residual)
+                ti.atomic_max(
+                    self._rank_direct_max_structural_residual[None], residual
+                )
+                if partition[row] == 1:
+                    ti.atomic_max(
+                        self._rank_direct_max_independent_residual[None], residual
+                    )
+                elif partition[row] == 2:
+                    ti.atomic_max(
+                        self._rank_direct_max_dependent_residual[None], residual
+                    )
+                elif partition[row] == 3:
+                    ti.atomic_max(
+                        self._rank_direct_max_unactuated_residual[None], residual
+                    )
+
+    def _solve_rank_revealing_sparse(self, tolerance: float) -> None:
+        """Scalable Q solve retaining sparse supports and M-by-r work only."""
+
+        rows, _mobility = self._sparse_metric_rows(
+            row_active=self._row_active,
+            inverse_mobility=self._stencil_inverse_mass_per_kg,
+        )
+        relative_pivot_tolerance = max(
+            1.0e-14,
+            64.0 * math.ulp(1.0) * float(self.marker_capacity),
+        )
+        selected, _factor, norms = _sparse_normalized_pivoted_cholesky(
+            rows,
+            relative_pivot_tolerance=relative_pivot_tolerance,
+        )
+        active = self._row_active.to_numpy().astype(bool)
+        rhs = self._rhs.to_numpy().astype(np.float64, copy=False)
+        positive = active & (norms > 0.0)
+        selected_mask = np.zeros(self.constraint_capacity, dtype=bool)
+        selected_mask[selected] = True
+        partition = np.zeros(self.constraint_capacity, dtype=np.int32)
+        partition[active & ~positive] = 3
+        partition[positive] = 2
+        partition[selected] = 1
+        self._rank_direct_independent_constraint_count = int(selected.size)
+        self._rank_direct_dependent_constraint_count = int(
+            np.count_nonzero(positive & ~selected_mask)
+        )
+        self._rank_direct_unactuated_constraint_count = int(
+            np.count_nonzero(active & ~positive)
+        )
+        self._rank_revealed = True
+        if not np.all(np.isfinite(rhs[active])):
+            self._phase = "failed"
+            raise RuntimeError("rank-revealing sparse Q rhs is non-finite")
+        columns = _sparse_metric_columns(rows, selected)
+        correction = np.zeros((*self.grid_nodes, 3), dtype=np.float64)
+        if selected.size:
+            column_norm = np.linalg.norm(columns[positive], axis=0)
+            if (
+                not np.all(np.isfinite(column_norm))
+                or np.any(column_norm <= 0.0)
+            ):
+                self._phase = "failed"
+                raise RuntimeError("rank-revealing sparse Q basis is singular")
+            normalized_columns = columns[positive] / column_norm
+            try:
+                coefficients, _, _, _ = np.linalg.lstsq(
+                    normalized_columns,
+                    rhs[positive],
+                    rcond=relative_pivot_tolerance,
+                )
+            except np.linalg.LinAlgError as exc:
+                self._phase = "failed"
+                raise RuntimeError(
+                    "rank-revealing sparse Q least-squares failed"
+                ) from exc
+            indices = self._stencil_index.to_numpy()
+            weights = self._stencil_weight.to_numpy().astype(np.float64, copy=False)
+            free = self._stencil_free.to_numpy().astype(bool)
+            inverse_mass = self._stencil_inverse_mass_per_kg.to_numpy().astype(
+                np.float64,
+                copy=False,
+            )
+
+            def assemble(solution: np.ndarray) -> np.ndarray:
+                candidate = np.zeros((*self.grid_nodes, 3), dtype=np.float64)
+                for coefficient, row in zip(
+                    solution / column_norm,
+                    selected,
+                    strict=True,
+                ):
+                    axis = int(row % 3)
+                    for support in range(8):
+                        if not free[row, support]:
+                            continue
+                        weight = float(weights[row, support])
+                        if weight != 0.0:
+                            index = tuple(
+                                int(value) for value in indices[row, support]
+                            )
+                            candidate[index][axis] += (
+                                float(inverse_mass[row, support])
+                                * weight
+                                * float(coefficient)
+                            )
+                return candidate
+
+            correction = assemble(coefficients)
+        correction_f32 = correction.astype(np.float32)
+        if not np.all(np.isfinite(correction_f32)):
+            self._phase = "failed"
+            raise RuntimeError("rank-revealing sparse Q correction is non-finite")
+        self._correction.from_numpy(correction_f32)
+        self._audit_sparse_q_partition_kernel(partition)
+        self._max_residual_mps = float(self._true_candidate_max_residual[None])
+        if self._max_residual_mps > tolerance and selected.size:
+            minimax = _solve_column_normalized_linf(
+                normalized_columns,
+                rhs[positive],
+                failure_context="rank-revealing sparse Q",
+            )
+            correction_f32 = assemble(minimax).astype(np.float32)
+            if not np.all(np.isfinite(correction_f32)):
+                self._phase = "failed"
+                raise RuntimeError(
+                    "rank-revealing sparse Q minimax correction is non-finite"
+                )
+            self._correction.from_numpy(correction_f32)
+            self._audit_sparse_q_partition_kernel(partition)
+            self._max_residual_mps = float(self._true_candidate_max_residual[None])
+        self._converged = (
+            math.isfinite(self._max_residual_mps)
+            and self._max_residual_mps <= tolerance
+        )
+        self._iterations = 0
+        if not self._converged:
+            self._phase = "failed"
+            raise RuntimeError(
+                "rank-revealing sparse Q correction residual exceeds the absolute "
+                f"marker constraint tolerance: {self._max_residual_mps} > {tolerance}"
+            )
+        self._rank_direct_max_structural_residual[None] = self._max_residual_mps
+        self._require_final_f32_candidate_audit(tolerance)
         self._snapshot_solved_correction_kernel()
         self._phase = "solved"
 
@@ -2513,15 +3024,10 @@ class HibmMpmMarkerMacConstraintOperator:
         through the existing device all-row audit.
         """
 
-        if (
+        sparse_backend = (
             self.constraint_capacity
             > HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS
-        ):
-            raise RuntimeError(
-                "collective isolated F-only witness exceeds bounded capacity: "
-                f"{self.constraint_capacity} > "
-                f"{HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS}"
-            )
+        )
         if not math.isfinite(tolerance) or tolerance <= 0.0:
             raise ValueError("collective isolated F-only tolerance must be positive")
 
@@ -2593,9 +3099,16 @@ class HibmMpmMarkerMacConstraintOperator:
                                 "has inconsistent mobility"
                             )
 
-                matrix = np.zeros(
-                    (axis_rows.size, len(dof_column)), dtype=np.float64
-                )
+                if sparse_backend:
+                    from scipy.sparse import lil_matrix
+
+                    matrix = lil_matrix(
+                        (axis_rows.size, len(dof_column)), dtype=np.float64
+                    )
+                else:
+                    matrix = np.zeros(
+                        (axis_rows.size, len(dof_column)), dtype=np.float64
+                    )
                 for local_row, row in enumerate(axis_rows):
                     for support in range(8):
                         if not free[row, support]:
@@ -2609,7 +3122,13 @@ class HibmMpmMarkerMacConstraintOperator:
                         matrix[local_row, dof_column[index]] += weight
                 if not dof_column:
                     continue
-                column_norm = np.linalg.norm(matrix, axis=0)
+                if sparse_backend:
+                    matrix = matrix.tocsr()
+                    column_norm = np.sqrt(
+                        np.asarray(matrix.multiply(matrix).sum(axis=0)).ravel()
+                    )
+                else:
+                    column_norm = np.linalg.norm(matrix, axis=0)
                 if (
                     not np.all(np.isfinite(column_norm))
                     or np.any(column_norm <= 0.0)
@@ -2617,7 +3136,13 @@ class HibmMpmMarkerMacConstraintOperator:
                     raise RuntimeError(
                         "collective isolated F-only correction basis is singular"
                     )
-                normalized_matrix = matrix / column_norm
+                solution_lift = None
+                if sparse_backend:
+                    normalized_matrix, solution_lift = _sparse_structural_decomposition(
+                        matrix, column_norm=column_norm, rcond=rcond
+                    )
+                else:
+                    normalized_matrix = matrix / column_norm
                 axis_rhs = rhs[axis_rows]
                 axis_systems.append(
                     (
@@ -2626,6 +3151,7 @@ class HibmMpmMarkerMacConstraintOperator:
                         column_norm,
                         normalized_matrix,
                         axis_rhs,
+                        solution_lift,
                     )
                 )
                 try:
@@ -2638,6 +3164,8 @@ class HibmMpmMarkerMacConstraintOperator:
                     raise RuntimeError(
                         "collective isolated F-only least-squares failed"
                     ) from exc
+                if solution_lift is not None:
+                    solution = solution_lift @ solution
                 if not np.all(np.isfinite(solution)):
                     raise RuntimeError(
                         "collective isolated F-only solution is non-finite"
@@ -2667,12 +3195,15 @@ class HibmMpmMarkerMacConstraintOperator:
                 column_norm,
                 normalized_matrix,
                 axis_rhs,
+                solution_lift,
             ) in axis_systems:
                 solution = _solve_column_normalized_linf(
                     normalized_matrix,
                     axis_rhs,
                     failure_context="collective isolated F-only",
                 )
+                if solution_lift is not None:
+                    solution = solution_lift @ solution
                 for index, column in dof_column.items():
                     correction[index][axis] = solution[column] / column_norm[column]
             correction_f32 = correction.astype(np.float32)
@@ -2706,15 +3237,10 @@ class HibmMpmMarkerMacConstraintOperator:
         the established absolute accuracy on every active row.
         """
 
-        if (
+        sparse_backend = (
             self.constraint_capacity
             > HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS
-        ):
-            raise RuntimeError(
-                "collective isolated F/H repair exceeds bounded capacity: "
-                f"{self.constraint_capacity} > "
-                f"{HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS}"
-            )
+        )
         if (
             not math.isfinite(closure_tolerance)
             or closure_tolerance <= 0.0
@@ -2867,9 +3393,16 @@ class HibmMpmMarkerMacConstraintOperator:
                                     "has inconsistent mobility"
                                 )
 
-                matrix = np.zeros(
-                    (axis_rows.size, len(dof_column)), dtype=np.float64
-                )
+                if sparse_backend:
+                    from scipy.sparse import lil_matrix
+
+                    matrix = lil_matrix(
+                        (axis_rows.size, len(dof_column)), dtype=np.float64
+                    )
+                else:
+                    matrix = np.zeros(
+                        (axis_rows.size, len(dof_column)), dtype=np.float64
+                    )
                 for local_row, row in enumerate(axis_rows):
                     for support in range(8):
                         weight = float(weights[row, support])
@@ -2887,7 +3420,13 @@ class HibmMpmMarkerMacConstraintOperator:
                             matrix[local_row, dof_column[("hard", index)]] += weight
                 if not dof_column:
                     continue
-                column_norm = np.linalg.norm(matrix, axis=0)
+                if sparse_backend:
+                    matrix = matrix.tocsr()
+                    column_norm = np.sqrt(
+                        np.asarray(matrix.multiply(matrix).sum(axis=0)).ravel()
+                    )
+                else:
+                    column_norm = np.linalg.norm(matrix, axis=0)
                 if (
                     not np.all(np.isfinite(column_norm))
                     or np.any(column_norm <= 0.0)
@@ -2896,35 +3435,39 @@ class HibmMpmMarkerMacConstraintOperator:
                         "collective isolated F/H correction basis is singular"
                     )
                 try:
-                    structural_left, structural_singular, _ = np.linalg.svd(
-                        matrix / column_norm,
-                        full_matrices=False,
-                    )
-                    if (
-                        not np.all(np.isfinite(structural_singular))
-                        or structural_singular.size == 0
-                        or structural_singular[0] <= 0.0
-                    ):
-                        raise RuntimeError(
-                            "collective isolated F/H structural basis is singular"
+                    if sparse_backend:
+                        row_basis, _solution_lift = _sparse_structural_decomposition(
+                            matrix, column_norm=column_norm, rcond=rcond
                         )
-                    structural_rank = int(
-                        np.count_nonzero(
-                            structural_singular
-                            > rcond * structural_singular[0]
+                        reduced_matrix = np.asarray(matrix.T @ row_basis).T
+                    else:
+                        structural_left, structural_singular, _ = np.linalg.svd(
+                            matrix / column_norm,
+                            full_matrices=False,
                         )
-                    )
-                    if structural_rank == 0:
-                        raise RuntimeError(
-                            "collective isolated F/H structural rank is zero"
+                        if (
+                            not np.all(np.isfinite(structural_singular))
+                            or structural_singular.size == 0
+                            or structural_singular[0] <= 0.0
+                        ):
+                            raise RuntimeError(
+                                "collective isolated F/H structural basis is singular"
+                            )
+                        structural_rank = int(
+                            np.count_nonzero(
+                                structural_singular
+                                > rcond * structural_singular[0]
+                            )
                         )
+                        if structural_rank == 0:
+                            raise RuntimeError(
+                                "collective isolated F/H structural rank is zero"
+                            )
 
-                    # Decide structural rank without mobility so a very light
-                    # independent DOF cannot disappear.  Within that row
-                    # space, solve the established inverse-mass minimum-energy
-                    # problem in coordinates delta=sqrt(D)*y.
-                    row_basis = structural_left[:, :structural_rank]
-                    reduced_matrix = row_basis.T @ matrix
+                        row_basis = structural_left[:, :structural_rank]
+                        reduced_matrix = row_basis.T @ matrix
+                    # Structural rank is independent of mobility. Solve the
+                    # same minimum-energy problem in delta=sqrt(D)*y below.
                     reduced_rhs = row_basis.T @ rhs[axis_rows]
                     mobility = np.empty(len(dof_column), dtype=np.float64)
                     for key, column in dof_column.items():
@@ -3058,6 +3601,7 @@ class HibmMpmMarkerMacConstraintOperator:
     def _clear_pressure_nullspace_lifecycle(self) -> None:
         """Invalidate owners/generations while retaining opt-in allocations."""
 
+        self._pressure_sparse_actual_rank = 0
         self._pressure_nullspace_prepared = False
         self._pressure_nullspace_poisoned = False
         self._pressure_nullspace_apply_count = 0
@@ -3280,9 +3824,19 @@ class HibmMpmMarkerMacConstraintOperator:
         """Launch one projector apply without reading a device scalar."""
 
         self._gather_pressure_nullspace_rhs_kernel(input_face_correction)
-        self._solve_pressure_nullspace_factor_kernel()
         self._clear_pressure_nullspace_candidate_kernel()
-        self._scatter_pressure_nullspace_correction_kernel()
+        if self._pressure_sparse_backend:
+            self._project_pressure_nullspace_sparse_kernel(
+                self._pressure_sparse_factor,
+                self._pressure_sparse_triangular,
+                self._pressure_sparse_dof_indices,
+                self._pressure_sparse_sqrt_mobility,
+                self._pressure_sparse_actual_rank,
+                self._pressure_sparse_dof_count,
+            )
+        else:
+            self._solve_pressure_nullspace_factor_kernel()
+            self._scatter_pressure_nullspace_correction_kernel()
         self._build_pressure_nullspace_candidate_kernel(input_face_correction)
         self._measure_pressure_nullspace_residual_kernel()
 
@@ -3393,12 +3947,14 @@ class HibmMpmMarkerMacConstraintOperator:
         return report
 
     def _ensure_pressure_nullspace_resources(self) -> None:
-        """Lazily allocate the bounded dense pressure projector resources."""
+        """Allocate common linear storage and the small-system dense backend once."""
 
         if self._pressure_nullspace_resources_allocated:
             return
         constraints = int(self.constraint_capacity)
-        dense_bytes = constraints * constraints * 8
+        dense_bytes = (
+            0 if self._pressure_sparse_backend else constraints * constraints * 8
+        )
         grid_cells = math.prod(int(value) for value in self.grid_nodes)
         # Two f64 vector grids plus marker support/factor/work storage.  This is
         # an honest upper estimate for fail-fast purposes, not an allocator
@@ -3411,13 +3967,6 @@ class HibmMpmMarkerMacConstraintOperator:
             + 3 * constraints * 4
             + 10 * 8
         )
-        if constraints > HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS:
-            raise RuntimeError(
-                "pressure marker dense nullspace capacity exceeds the exact "
-                "backend limit: "
-                f"{constraints} > "
-                f"{HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_CONSTRAINTS}"
-            )
         if dense_bytes > HIBM_MARKER_PRESSURE_NULLSPACE_DENSE_MAX_BYTES:
             raise RuntimeError(
                 "pressure marker dense nullspace factor exceeds memory budget"
@@ -3442,14 +3991,15 @@ class HibmMpmMarkerMacConstraintOperator:
             dtype=ti.f64,
             shape=(constraints, 8),
         )
-        self._pressure_nullspace_schur = ti.field(
-            dtype=ti.f64,
-            shape=(constraints, constraints),
-        )
-        self._pressure_nullspace_factor = ti.field(
-            dtype=ti.f64,
-            shape=(constraints, constraints),
-        )
+        if not self._pressure_sparse_backend:
+            self._pressure_nullspace_schur = ti.field(
+                dtype=ti.f64,
+                shape=(constraints, constraints),
+            )
+            self._pressure_nullspace_factor = ti.field(
+                dtype=ti.f64,
+                shape=(constraints, constraints),
+            )
         self._pressure_nullspace_row_inverse_norm = ti.field(
             dtype=ti.f64,
             shape=constraints,
@@ -3518,8 +4068,121 @@ class HibmMpmMarkerMacConstraintOperator:
             dtype=ti.f64,
             shape=(),
         )
+        self._pressure_nullspace_base_resource_bytes = int(estimated_bytes)
         self._pressure_nullspace_resource_bytes = int(estimated_bytes)
         self._pressure_nullspace_resources_allocated = True
+
+    def _prepare_sparse_pressure_factor(self, relative_pivot_tolerance: float) -> None:
+        rows, _mobility = self._sparse_metric_rows(
+            row_active=self._pressure_nullspace_row_active,
+            inverse_mobility=self._pressure_nullspace_inverse_mass_per_kg,
+            allow_zero_mobility=True,
+        )
+        selected, rank_factor, norms = _sparse_normalized_pivoted_cholesky(
+            rows, relative_pivot_tolerance=relative_pivot_tolerance
+        )
+        rank = int(selected.size)
+        capacity = max(1, self._pressure_sparse_factor_capacity)
+        while capacity < rank:
+            capacity *= 2
+        dofs = sorted({key for row in selected for key in rows[int(row)]})
+        dof_count = len(dofs)
+        dof_capacity = max(1, self._pressure_sparse_dof_capacity)
+        while dof_capacity < dof_count:
+            dof_capacity *= 2
+        base_bytes = self._pressure_nullspace_base_resource_bytes
+        new_buffer_bytes = (
+            dof_capacity * (capacity * 8 + 4 * 4 + 8) + capacity * capacity * 8
+        )
+        old_buffer_bytes = (
+            self._pressure_sparse_dof_capacity
+            * (self._pressure_sparse_factor_capacity * 8 + 4 * 4 + 8)
+            + self._pressure_sparse_factor_capacity ** 2 * 8
+        )
+        workspace_bytes = (
+            base_bytes + old_buffer_bytes + 2 * new_buffer_bytes
+            + 3 * self.constraint_capacity * rank * 8
+            + 3 * dof_count * rank * 8 + rank * rank * 8
+        )
+        if workspace_bytes > HIBM_MARKER_PRESSURE_NULLSPACE_RESOURCE_MAX_BYTES:
+            raise RuntimeError(
+                "sparse pressure factor workspace exceeds memory budget: "
+                f"{workspace_bytes} bytes"
+            )
+        factor = np.zeros((dof_capacity, capacity), dtype=np.float64)
+        triangular_buffer = np.zeros((capacity, capacity), dtype=np.float64)
+        indices = np.zeros((dof_capacity, 4), dtype=np.int32)
+        sqrt_mobility = np.ones(dof_capacity, dtype=np.float64)
+        triangular_diagonal = np.empty(0, dtype=np.float64)
+        if rank:
+            dof_index = {key: index for index, key in enumerate(dofs)}
+            selected_rows = np.zeros((dof_count, rank), dtype=np.float64)
+            for column, row in enumerate(selected):
+                for key, weight in rows[int(row)].items():
+                    selected_rows[dof_index[key], column] = weight / norms[row]
+            try:
+                orthogonal, triangular = np.linalg.qr(selected_rows, mode="reduced")
+            except np.linalg.LinAlgError as error:
+                raise RuntimeError("sparse pressure reduced QR failed") from error
+            triangular_diagonal = np.diag(triangular)
+            if (
+                not np.all(np.isfinite(orthogonal))
+                or not np.all(np.isfinite(triangular))
+                or np.any(triangular_diagonal == 0.0)
+            ):
+                raise RuntimeError("sparse pressure reduced QR is singular")
+            factor[:dof_count, :rank] = orthogonal
+            triangular_buffer[:rank, :rank] = triangular
+            indices[:dof_count] = np.asarray(dofs, dtype=np.int32)
+            sqrt_mobility[:dof_count] = np.sqrt([_mobility[key] for key in dofs])
+        if (
+            capacity != self._pressure_sparse_factor_capacity
+            or dof_capacity != self._pressure_sparse_dof_capacity
+        ):
+            self._pressure_sparse_factor = ti.ndarray(
+                dtype=ti.f64, shape=(dof_capacity, capacity)
+            )
+            self._pressure_sparse_triangular = ti.ndarray(
+                dtype=ti.f64, shape=(capacity, capacity)
+            )
+            self._pressure_sparse_dof_indices = ti.ndarray(
+                dtype=ti.i32, shape=(dof_capacity, 4)
+            )
+            self._pressure_sparse_sqrt_mobility = ti.ndarray(
+                dtype=ti.f64, shape=dof_capacity
+            )
+            self._pressure_sparse_factor_capacity = capacity
+            self._pressure_sparse_dof_capacity = dof_capacity
+        self._pressure_sparse_factor.from_numpy(factor)
+        self._pressure_sparse_triangular.from_numpy(triangular_buffer)
+        self._pressure_sparse_dof_indices.from_numpy(indices)
+        self._pressure_sparse_sqrt_mobility.from_numpy(sqrt_mobility)
+        order = np.full(self.constraint_capacity, -1, dtype=np.int32)
+        order[:rank] = selected
+        selected_mask = np.zeros(self.constraint_capacity, dtype=np.int32)
+        selected_mask[selected] = 1
+        inverse_norm = np.zeros(self.constraint_capacity, dtype=np.float64)
+        positive = norms > 0.0
+        inverse_norm[positive] = 1.0 / norms[positive]
+        active = self._pressure_nullspace_row_active.to_numpy().astype(bool)
+        dependent = active & positive & (selected_mask == 0)
+        residual_diagonal = 1.0 - np.sum(rank_factor * rank_factor, axis=1)
+        self._pressure_nullspace_factor_order.from_numpy(order)
+        self._pressure_nullspace_factor_row_selected.from_numpy(selected_mask)
+        self._pressure_nullspace_row_inverse_norm.from_numpy(inverse_norm)
+        self._pressure_nullspace_independent_constraint_count[None] = rank
+        self._pressure_nullspace_dependent_constraint_count[None] = int(np.count_nonzero(dependent))
+        self._pressure_nullspace_unactuated_constraint_count[None] = int(np.count_nonzero(active & ~positive))
+        self._pressure_nullspace_min_factor_pivot[None] = (
+            float(np.min(triangular_diagonal ** 2)) if rank else 0.0
+        )
+        self._pressure_nullspace_max_dependent_normalized_pivot[None] = (
+            max(0.0, float(np.max(residual_diagonal[dependent])))
+            if np.any(dependent) else 0.0
+        )
+        self._pressure_nullspace_resource_bytes = base_bytes + new_buffer_bytes
+        self._pressure_sparse_actual_rank = rank
+        self._pressure_sparse_dof_count = dof_count
 
     def _audit_pressure_nullspace_transaction_inputs(
         self,
@@ -3626,27 +4289,30 @@ class HibmMpmMarkerMacConstraintOperator:
             raise RuntimeError(
                 "pressure actuation weight must be zero on external-exact marker support"
             )
-        self._assemble_pressure_nullspace_schur_kernel()
-        self._symmetrize_pressure_nullspace_schur_kernel()
-        failure_code = int(self._pressure_nullspace_failure_code[None])
-        if failure_code == 3:
-            raise RuntimeError(
-                "pressure actuation weight is inconsistent on shared marker support"
-            )
         relative_pivot_tolerance = max(
             1.0e-14,
             64.0 * math.ulp(1.0) * float(self.marker_capacity),
         )
-        self._factor_pressure_nullspace_schur_kernel(
-            relative_pivot_tolerance,
-        )
-        failure_code = int(self._pressure_nullspace_failure_code[None])
-        if failure_code == 2:
-            raise RuntimeError(
-                "pressure marker Schur complement is not positive semidefinite"
+        if self._pressure_sparse_backend:
+            self._prepare_sparse_pressure_factor(relative_pivot_tolerance)
+        else:
+            self._assemble_pressure_nullspace_schur_kernel()
+            self._symmetrize_pressure_nullspace_schur_kernel()
+            failure_code = int(self._pressure_nullspace_failure_code[None])
+            if failure_code == 3:
+                raise RuntimeError(
+                    "pressure actuation weight is inconsistent on shared marker support"
+                )
+            self._factor_pressure_nullspace_schur_kernel(
+                relative_pivot_tolerance,
             )
-        if failure_code != 0:
-            raise RuntimeError("pressure marker Schur factorization failed")
+            failure_code = int(self._pressure_nullspace_failure_code[None])
+            if failure_code == 2:
+                raise RuntimeError(
+                    "pressure marker Schur complement is not positive semidefinite"
+                )
+            if failure_code != 0:
+                raise RuntimeError("pressure marker Schur factorization failed")
         active_count = int(
             self._pressure_nullspace_active_constraint_count[None]
         )
@@ -3700,8 +4366,9 @@ class HibmMpmMarkerMacConstraintOperator:
 
         ``max_iterations`` remains in the generic API so an iterative backend
         can be substituted without changing callers.  This implementation is
-        intentionally a prepared f64 Cholesky solve: it is linear across outer
-        FV-CG matvecs and therefore performs no input-dependent inner stopping.
+        a prepared f64 direct projection (Cholesky for small systems, reduced
+        orthogonal basis for large systems). It is linear across outer FV-CG
+        matvecs and performs no input-dependent inner stopping.
         """
 
         if isinstance(max_iterations, bool) or int(max_iterations) <= 0:
@@ -4690,6 +5357,7 @@ class HibmMpmMarkerMacConstraintOperator:
                 "marker constraint tolerance after solve: "
                 f"{true_candidate_residual} > {tolerance}"
             )
+        self._require_final_f32_candidate_audit(tolerance)
         self._snapshot_solved_correction_kernel()
         self._phase = "solved"
 
@@ -4742,6 +5410,9 @@ class HibmMpmMarkerMacConstraintOperator:
             raise RuntimeError(
                 "solved correction integrity changed before commit"
             )
+        self._require_final_f32_candidate_audit(
+            self._absolute_tolerance_mps
+        )
         self._commit_kernel(
             fluid.velocity,
             fluid.velocity_dirichlet_boundary_hard_fixed_component_mask,

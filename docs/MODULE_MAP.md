@@ -133,6 +133,15 @@ raw-series identities, and separately labelled LS-DYNA cross-checks.
 catalog. `limit_cycle.py` owns the preregistered rising-crossing, extrema,
 stability, and FFT calculations without importing Taichi or solver code.
 
+The stage layer is also solver-free: campaign_stages.py owns immutable stage
+specifications, prerequisite order and cross-run research gates; acceptance.py
+owns the shared typed physical-history and candidate-step health contract;
+periodic_acceptance.py binds FSI2/3 policy, accepted interface records and the
+existing limit-cycle analysis. The CLI in
+tools/validation/run_turek_hron_fsi_campaign.py owns execution, provenance
+replay, output claims and progress. A stage pass, exploratory pass and final
+benchmark-quality pass are distinct statuses.
+
 The upstream FSI2/FSI3 bytes and their exact manifests live under
 `docs/validation/turek_hron_featflow/`; `.gitattributes` marks the `.point`
 files non-text so line-ending conversion cannot invalidate their SHA256

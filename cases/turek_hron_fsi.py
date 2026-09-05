@@ -7,6 +7,7 @@ import json
 import math
 import tempfile
 from dataclasses import asdict, dataclass, replace
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -51,6 +52,7 @@ from simulation_core.drivers.generic_fsi_solver import (
     solve_fsi_runtime,
 )
 from simulation_core.fluids import CartesianFluidSolver, FluidDomainSpec
+from simulation_core.materials import NeoHookeanMaterial
 from simulation_core.solids.neo_hookean_mpm import (
     CONSTITUTIVE_MODELS,
     NeoHookeanMpmState,
@@ -644,6 +646,125 @@ def with_beam_surface_force_support(config: TurekHronFsiConfig) -> TurekHronFsiC
     return replace(
         config, mpm_support_radius_m=beam_surface_force_support_radius_m(config)
     )
+
+
+def _validate_turek_hron_physical_config(config: TurekHronFsiConfig) -> None:
+    """Reject malformed or elastically unstable fixed-step configurations."""
+
+    def positive_finite_float(value: object, name: str) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{name} must be finite and positive; got {value!r}"
+            ) from exc
+        if not math.isfinite(number) or number <= 0.0:
+            raise ValueError(
+                f"{name} must be finite and positive; got {value!r}"
+            )
+        return number
+
+    def positive_integral(value: object, name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+            raise ValueError(
+                f"{name} must be a positive integer; got {value!r} "
+                f"({type(value).__name__})"
+            )
+        return int(value)
+
+    dt_s = positive_finite_float(config.dt_s, "dt_s")
+    for name in (
+        "step_count",
+        "solid_substeps",
+        "flow_predictor_substeps",
+    ):
+        positive_integral(getattr(config, name), name)
+    solid_substeps = positive_integral(config.solid_substeps, "solid_substeps")
+
+    try:
+        grid_nodes = tuple(config.grid_nodes)
+    except TypeError as exc:
+        raise ValueError("grid_nodes must contain exactly three integers >= 4") from exc
+    if len(grid_nodes) != 3:
+        raise ValueError("grid_nodes must contain exactly three integers >= 4")
+    validated_grid_nodes: list[int] = []
+    for value in grid_nodes:
+        if isinstance(value, bool) or not isinstance(value, Integral) or value < 4:
+            raise ValueError(
+                "grid_nodes must contain exactly three integers >= 4; got "
+                f"{grid_nodes!r}"
+            )
+        validated_grid_nodes.append(int(value))
+
+    bounds_extent_m = (
+        positive_finite_float(config.span_m, "span_m"),
+        positive_finite_float(config.channel_height_m, "channel_height_m"),
+        positive_finite_float(config.channel_length_m, "channel_length_m"),
+    )
+    grid_spacing_m = tuple(
+        extent_m / float(node_count)
+        for extent_m, node_count in zip(
+            bounds_extent_m, validated_grid_nodes, strict=True
+        )
+    )
+    active_grid_spacing_m = (
+        grid_spacing_m[1:]
+        if bool(config.enforce_plane_strain_x)
+        else grid_spacing_m
+    )
+    min_active_grid_spacing_m = min(active_grid_spacing_m)
+
+    density_kgm3 = positive_finite_float(
+        config.solid_density_kgm3, "solid_density_kgm3"
+    )
+    youngs_modulus_pa = positive_finite_float(
+        config.young_modulus_pa, "young_modulus_pa"
+    )
+    try:
+        poissons_ratio = float(config.poisson_ratio)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "poisson_ratio must be finite and in [0, 0.5); got "
+            f"{config.poisson_ratio!r}"
+        ) from exc
+    if not math.isfinite(poissons_ratio) or not 0.0 <= poissons_ratio < 0.5:
+        raise ValueError(
+            "poisson_ratio must be finite and in [0, 0.5); got "
+            f"{config.poisson_ratio!r}"
+        )
+
+    try:
+        if str(config.solid_constitutive_model) == "plane_stress_linear":
+            shear_modulus_pa, lame_lambda_pa = _lame_parameters(config)
+            material = NeoHookeanMaterial(
+                name="turek-hron-fsi",
+                density_kgm3=density_kgm3,
+                shear_modulus_pa=shear_modulus_pa,
+                bulk_modulus_pa=lame_lambda_pa + (2.0 / 3.0) * shear_modulus_pa,
+                youngs_modulus_pa=youngs_modulus_pa,
+                poissons_ratio=poissons_ratio,
+            )
+        else:
+            material = NeoHookeanMaterial.from_youngs_modulus(
+                name="turek-hron-fsi",
+                density_kgm3=density_kgm3,
+                youngs_modulus_pa=youngs_modulus_pa,
+                poissons_ratio=poissons_ratio,
+            )
+        stable_limit_s = material.stable_explicit_dt_s(min_active_grid_spacing_m)
+    except (ArithmeticError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid Turek-Hron solid material for explicit stability") from exc
+    if not math.isfinite(stable_limit_s) or stable_limit_s <= 0.0:
+        raise ValueError("Turek-Hron stable explicit solid dt must be finite and positive")
+
+    dt_sub_s = dt_s / float(solid_substeps)
+    if dt_sub_s > stable_limit_s:
+        required_min_substeps = math.ceil(dt_s / stable_limit_s)
+        raise ValueError(
+            "Turek-Hron solid explicit stability limit exceeded: "
+            f"dt_sub_s={dt_sub_s:.16g}, stable_limit_s={stable_limit_s:.16g}, "
+            f"required_min_substeps={required_min_substeps}"
+        )
 
 
 def _validate_marker_grid_consistency(config: TurekHronFsiConfig) -> None:
@@ -1312,6 +1433,61 @@ def _restore_marker_pressure_neumann_gradient_state(
         raise ValueError("marker pressure-Neumann gradient state must be finite")
     full[:count] = array
     field.from_numpy(full)
+
+
+class TurekHronStepAcceptanceError(RuntimeError):
+    """A candidate failed its campaign row contract before publication."""
+
+    def __init__(self, context, candidate_row, validation_error):
+        self.context = context
+        self.candidate_row = _strict_json_diagnostic_value(candidate_row)
+        self.validation_error = str(validation_error)
+        super().__init__(
+            f"Turek-Hron candidate step {context.step} rejected: "
+            f"{self.validation_error}"
+        )
+
+
+def _append_validated_fsi_row(
+    history: list[dict[str, Any]],
+    row: dict[str, Any],
+    *,
+    context: FsiStepContext,
+    candidate_step_validator: Callable[[Mapping[str, Any]], None] | None,
+) -> None:
+    """Validate private candidate evidence before appending accepted history."""
+    if candidate_step_validator is not None:
+        try:
+            candidate_step_validator(dict(row))
+        except Exception as error:
+            # The generic transaction uses __cause__ exclusively for rollback
+            # failure. Preserve the validation cause explicitly in diagnostics.
+            raise TurekHronStepAcceptanceError(context, row, error) from None
+    history.append(row)
+
+
+def _step_acceptance_failure_payload(
+    error: TurekHronStepAcceptanceError,
+    *,
+    preset: str,
+    completed_steps: int,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "case": TUREK_HRON_CASE_ID,
+        "preset": preset,
+        "failure_kind": "candidate_step_acceptance",
+        "failed_step": int(error.context.step),
+        "failed_time_s": float(error.context.time_s),
+        "completed_steps": int(completed_steps),
+        "validation_error": error.validation_error,
+        "candidate_row": error.candidate_row,
+        **_post_rollback_evidence(error),
+        "restored_state_scope": [
+            "fluid", "solid", "marker_interface", "marker_pressure_gradient"
+        ],
+        "derived_search_boundary_state": "requires_rebuild",
+    }
 
 
 class _TurekHronFsiRuntime:
@@ -3344,13 +3520,17 @@ def run_turek_hron_fsi(
     transition_diagnostic_step: int | None = None,
     resume_transition_checkpoint: Path | str | None = None,
     accepted_step_observer: Callable[[dict[str, np.ndarray]], None] | None = None,
+    candidate_step_validator: Callable[[Mapping[str, Any]], None] | None = None,
     taichi_runtime_config: TaichiRuntimeConfig | None = None,
 ) -> dict[str, Any]:
     """Run every Turek-Hron preset through the sole generic FSI runtime."""
 
+    _validate_turek_hron_physical_config(config)
     _validate_marker_grid_consistency(config)
     _validate_fsi_coupling_controls(config)
     config = with_beam_surface_force_support(config)
+    if candidate_step_validator is not None and not callable(candidate_step_validator):
+        raise TypeError("candidate_step_validator must be callable")
     if accepted_step_observer is not None:
         if not callable(accepted_step_observer):
             raise TypeError("accepted_step_observer must be callable")
@@ -4064,7 +4244,12 @@ def run_turek_hron_fsi(
                 f"{context.step}: {mechanism_probe_decision.reason}"
             )
 
-        history.append(row)
+        _append_validated_fsi_row(
+            history,
+            row,
+            context=context,
+            candidate_step_validator=candidate_step_validator,
+        )
         latest_report_box["value"] = latest_report
         return row
 
@@ -4470,6 +4655,22 @@ def run_turek_hron_fsi(
                 **pending_mechanism_failure_payload,
                 **_post_rollback_evidence(error),
             },
+        )
+        raise
+    except TurekHronStepAcceptanceError as error:
+        (
+            incremental_header_written,
+            last_flushed_index,
+            _persistence_errors,
+        ) = _persist_fsi_coupling_failure_evidence(
+            incremental_history_path=incremental_history_path,
+            history=history,
+            last_flushed_index=last_flushed_index,
+            incremental_header_written=incremental_header_written,
+            output_dir=output_dir,
+            failure_payload=_step_acceptance_failure_payload(
+                error, preset=str(preset), completed_steps=len(history)
+            ),
         )
         raise
     except FsiCouplingConvergenceError as error:

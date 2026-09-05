@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import fields
 import inspect
 import unittest
+from unittest import mock
 
 import numpy as np
 import taichi as ti
@@ -296,7 +297,7 @@ class HibmMarkerPressureNullspaceOperatorTests(unittest.TestCase):
         )
 
     def _make_one_weighted_support_boundary_owned(self, mask_field) -> None:
-        fixture = self.fixture()
+        self.fixture()
         stencil_indices = self.operator._stencil_index.to_numpy()
         stencil_weights = self.operator._stencil_weight.to_numpy()
         selected: tuple[int, int] | None = None
@@ -504,7 +505,7 @@ class HibmMarkerPressureNullspaceOperatorTests(unittest.TestCase):
         self.assertFalse(self.operator._pressure_nullspace_resources_allocated)
         self.assertIsNone(self.operator._pressure_nullspace_factor)
 
-    def test_dense_backend_capacity_fails_before_pressure_resource_allocation(
+    def test_resource_budget_fails_before_pressure_resource_allocation(
         self,
     ) -> None:
         fixture = self.fixture()
@@ -526,11 +527,15 @@ class HibmMarkerPressureNullspaceOperatorTests(unittest.TestCase):
             component_face_valid_mask_generation=fixture.VALID_MASK_GENERATION,
         )
 
-        with self.assertRaisesRegex(RuntimeError, "capacity.*limit"):
-            oversized.prepare_pressure_constraint_nullspace(
-                pressure_actuation_weight=self.mobility,
-                component_face_valid_mask=fixture.component_face_valid_mask,
-            )
+        with mock.patch(
+            "simulation_core.coupling.hibm_mpm.marker_mac_constraint."
+            "HIBM_MARKER_PRESSURE_NULLSPACE_RESOURCE_MAX_BYTES", 64
+        ):
+            with self.assertRaisesRegex(RuntimeError, "resource|memory|budget"):
+                oversized.prepare_pressure_constraint_nullspace(
+                    pressure_actuation_weight=self.mobility,
+                    component_face_valid_mask=fixture.component_face_valid_mask,
+                )
 
         self.assertFalse(oversized._pressure_nullspace_resources_allocated)
         self.assertIsNone(oversized._pressure_nullspace_factor)

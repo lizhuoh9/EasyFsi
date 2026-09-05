@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import inspect
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 
 from cases.turek_hron_fsi import (
@@ -28,12 +28,14 @@ class TurekHronFsiCouplingControlGuardTests(unittest.TestCase):
         _validate_fsi_coupling_controls(TurekHronFsiConfig())
 
     def test_run_turek_hron_fsi_calls_the_guard_before_solver_setup(self) -> None:
-        source = inspect.getsource(run_turek_hron_fsi)
-        self.assertIn("_validate_fsi_coupling_controls(config)", source)
-        self.assertLess(
-            source.index("_validate_fsi_coupling_controls(config)"),
-            source.index("TaichiRuntimeConfig"),
-        )
+        with (
+            patch("cases.turek_hron_fsi._build_fluid") as build_fluid,
+            patch("cases.turek_hron_fsi._build_solid") as build_solid,
+        ):
+            with self.assertRaisesRegex(ValueError, "fsi_coupling_iterations"):
+                run_turek_hron_fsi(_config(fsi_coupling_iterations=0))
+        build_fluid.assert_not_called()
+        build_solid.assert_not_called()
 
     # -- fsi_coupling_iterations -------------------------------------------
 

@@ -510,3 +510,60 @@ def test_steady_acceptance_rejects_trend_and_wide_p05_p95_span(
     metric = report["metrics"]["tip_uy_turek_hron_m"]
     assert metric["stable"] is False
     assert metric["stability_violations"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "gate"),
+    [
+        ("fsi_coupling_absolute_residual_mps", 1.01e-4, "coupling convergence"),
+        ("fsi_coupling_max_marker_residual_mps", 1.01e-3, "coupling convergence"),
+        ("post_solid_projection_l2", 0.101, "post-solid projection CG"),
+        ("post_solid_projection_max_abs", 10.01, "post-solid projection CG"),
+        ("mpm_scatter_action_reaction_residual_n", 1.01e-6, "scatter"),
+        ("mpm_deformation_clamp_count", 1, "MPM integrity"),
+        ("flux_imbalance_rel", 0.0101, "flux imbalance"),
+        ("solid_macro_accepted_time_s", 0.004, "solid physical time"),
+    ],
+)
+def test_candidate_step_uses_existing_numerical_hard_gates(field, value, gate):
+    from src.refactored.validation.turek_hron_fsi import acceptance
+    config = Fsi1AcceptanceConfig(expected_steps=1600, expected_marker_count=100)
+    row = {**_history_row(500), field: value}
+    with pytest.raises(TurekHronAcceptanceError, match=gate):
+        acceptance.validate_fsi1_step(row, config, expected_step=500)
+
+
+def test_candidate_step_does_not_apply_a_window_mean_to_one_row(tmp_path):
+    from src.refactored.validation.turek_hron_fsi import acceptance
+    config = Fsi1AcceptanceConfig(expected_steps=1600, expected_marker_count=100)
+    row = {**_history_row(500), "flux_imbalance_rel": 0.0075}
+    acceptance.validate_fsi1_step(row, config, expected_step=500)
+    history = _stable_history(1600)
+    for candidate in history:
+        candidate["flux_imbalance_rel"] = 0.0075
+    path = tmp_path / "history.csv"
+    _write_history(path, history)
+    result = assess_fsi1_history_csv(path, config)
+    assert not result["acceptance_passed"]
+    assert "full-load mean flux imbalance" in str(result)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("step", 501, "step"),
+        ("time_s", 2.5000001, "physical-time"),
+        ("history_schema_version", 3, "schema"),
+        ("stress_expected_marker_count", 99, "marker identity"),
+        ("fsi_coupling_absolute_residual_mps", float("nan"), "finite"),
+        ("post_solid_projection_cg_converged_all", "unknown", "boolean"),
+        ("solid_substeps", 100.5, "integer"),
+    ],
+)
+def test_candidate_step_rejects_invalid_identity_and_nonfinite_data(field, value, message):
+    from src.refactored.validation.turek_hron_fsi import acceptance
+    config = Fsi1AcceptanceConfig(expected_steps=1600, expected_marker_count=100)
+    with pytest.raises(TurekHronAcceptanceError, match=message):
+        acceptance.validate_fsi1_step(
+            {**_history_row(500), field: value}, config, expected_step=500
+        )

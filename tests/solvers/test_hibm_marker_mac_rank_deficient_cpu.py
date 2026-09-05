@@ -518,21 +518,22 @@ class HibmMarkerMacRankDeficientCpuTests(unittest.TestCase):
             fixture.ABSOLUTE_TOLERANCE_MPS,
         )
 
-    def test_direct_capacity_failure_has_current_not_stale_diagnostics(self) -> None:
+    def test_direct_resource_failure_has_current_not_stale_diagnostics(self) -> None:
         fixture = _RankDeficientMarkerMacFixture()
-        # This only reaches the capacity guard; constructing ordinary sparse
-        # transaction fields at capacity 513 must not allocate the dense Q/P
-        # scratch owned by the opt-in backend.
+        # Sparse rank work must reject a deliberately insufficient budget
+        # before publishing a partial rank partition or physical correction.
         operator = fixture.prepared_operator(marker_capacity=171)
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "rank-revealing direct marker constraint capacity exceeds",
+        with mock.patch.object(
+            marker_constraint, "HIBM_MARKER_PRESSURE_NULLSPACE_RESOURCE_MAX_BYTES", 64
         ):
-            operator.solve_device(
-                **fixture.solve_kwargs(),
-                rank_revealing_direct=True,
-            )
+            with self.assertRaisesRegex(RuntimeError, "memory budget"):
+                operator.solve_device(
+                    **fixture.solve_kwargs(),
+                    rank_revealing_direct=True,
+                )
+        self.assertEqual(operator._phase, "failed")
+        self.assertFalse(operator._pressure_nullspace_resources_allocated)
         report = operator.report()
         self.assertEqual(report.backend, "rank_revealing_direct")
         self.assertFalse(report.rank_revealed)

@@ -3,6 +3,10 @@
 这里是项目文档的统一入口。请先按任务选择文档，不要递归读取整个
 `docs/refactoring/`。
 
+## Agent 与运行环境
+
+- [`refactoring/AGENT_WORKFLOW_AUDIT_2026-09-05.md`](refactoring/AGENT_WORKFLOW_AUDIT_2026-09-05.md)：Astra 指令迁移、项目聊天记录审计、PowerShell/WSL 防复发规则及 R26A 持久环境恢复证据。
+
 ## 代码结构
 
 - [`../ARCHITECTURE.md`](../ARCHITECTURE.md)：依赖方向和兼容策略。

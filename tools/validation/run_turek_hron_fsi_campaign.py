@@ -1,4 +1,4 @@
-"""Create-only formal Turek--Hron FSI1-S0 campaign runner.
+"""Create-only, stage-gated formal Turek--Hron FSI1/2/3 campaign runner.
 
 Import time is deliberately limited to the standard library and NumPy.
 """
@@ -12,12 +12,13 @@ import json
 import math
 import os
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict
 from datetime import datetime, timezone
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 import numpy as np
 
@@ -37,30 +38,14 @@ from src.refactored.validation.turek_hron_fsi.accepted_interface import (
     UNITS as _UNITS,
     stack_accepted_arrays,
 )
-
-
-FSI1_S0_SPEC = {
-    "stage": "fsi1-s0",
-    "preset": "fsi1",
-    "grid_nodes": (4, 48, 288),
-    "dt_s": 0.005,
-    "step_count": 1600,
-    "markers_per_side": "auto",
-    "markers_per_tip": "auto",
-    "ib_anisotropic_envelope": True,
-    "classify_far_internal_nodes": True,
-    "flow_cg_preconditioner": "fv_multigrid",
-    "flow_predictor_substeps": 1,
-    "fluid_advection_scheme": "rk2",
-    "flow_projection_iterations": 4000,
-    "flow_cg_tolerance": 1.0e-6,
-    "flow_reprojection_iterations": 1200,
-    "flow_reprojection_cg_tolerance": 1.0e-4,
-    "fsi_coupling_absolute_tolerance_mps": 1.0e-4,
-    "solid_substeps": 100,
-    "velocity_damping": 1.0,
-    "marker_reseed_interval_steps": None,
-}
+from src.refactored.validation.turek_hron_fsi.campaign_stages import (
+    FSI1_S0_SPEC as FSI1_S0_SPEC,
+    STAGE_NAMES,
+    assess_stage,
+    is_periodic_stage,
+    stage_prerequisites,
+    stage_spec,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SOURCE_ROOTS = (
@@ -137,7 +122,11 @@ def claim_output_dir(root: Path | str, label: str) -> Path:
 def expected_fsi1_s0_marker_count() -> int:
     """Derive the frozen automatic marker count without solver state."""
 
-    _, ny, nz = FSI1_S0_SPEC["grid_nodes"]
+    return expected_stage_marker_count("fsi1-s0")
+
+
+def expected_stage_marker_count(stage: str) -> int:
+    _, ny, nz = stage_spec(stage)["grid_nodes"]
     dy = 0.41 / ny
     dz = 2.5 / nz
     side = max(48, math.ceil(0.35 / (0.75 * dz)))
@@ -324,7 +313,7 @@ class AcceptedInterfaceChunkWriter:
             "parent": None,
         }:
             raise ValueError(
-                "formal FSI1-S0 lineage must be from_start with no parent"
+                "formal campaign lineage must be from_start with no parent"
             )
         provenance_config = self.provenance.get("config", {})
         frozen_spec = (
@@ -476,16 +465,16 @@ class AcceptedInterfaceChunkWriter:
         return list(self._manifests)
 
 
-def _assert_exact_config(config: Any) -> dict[str, Any]:
+def _assert_exact_config(config: Any, stage: str = "fsi1-s0") -> dict[str, Any]:
     effective = asdict(config)
-    for key, expected in FSI1_S0_SPEC.items():
+    for key, expected in stage_spec(stage).items():
         if key in {"stage", "preset"}:
             continue
         observed = effective.get(key)
         if isinstance(expected, tuple):
             observed = tuple(observed)
         if observed != expected:
-            raise ValueError(f"FAIL_FROZEN_FSI1_S0_CONFIG: {key}")
+            raise ValueError(f"FAIL_FROZEN_{stage.upper().replace('-', '_')}_CONFIG: {key}")
     return effective
 
 
@@ -563,10 +552,15 @@ def fsi1_s0_gate_passed(report: Mapping[str, Any]) -> bool:
 
 
 def _build_effective_fsi1_s0_config(case: Any) -> Any:
-    requested = case.fsi1_config(
+    return _build_effective_stage_config(case, "fsi1-s0")
+
+
+def _build_effective_stage_config(case: Any, stage: str) -> Any:
+    spec = stage_spec(stage)
+    requested = getattr(case, f"{spec['preset']}_config")(
         **{
             key: value
-            for key, value in FSI1_S0_SPEC.items()
+            for key, value in spec.items()
             if key not in {"stage", "preset"}
         }
     )
@@ -578,242 +572,460 @@ def _formal_config_payload(
     *,
     mechanism_probe: Any,
     runtime_request: Any,
+    stage: str = "fsi1-s0",
+    geometry_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
-        "stage": FSI1_S0_SPEC["stage"],
-        "preset": FSI1_S0_SPEC["preset"],
+        "stage": stage,
+        "preset": stage_spec(stage)["preset"],
         "accepted_interface_chunk_size": _FORMAL_ACCEPTED_INTERFACE_CHUNK_SIZE,
-        "mechanism_probe": asdict(mechanism_probe),
+        "mechanism_probe": None if mechanism_probe is None else asdict(mechanism_probe),
         "taichi_runtime_request": asdict(runtime_request),
-        "frozen_campaign_spec": FSI1_S0_SPEC,
+        "frozen_campaign_spec": stage_spec(stage),
         "effective_case_config": dict(effective),
+        "geometry_identity": None if geometry_identity is None else dict(geometry_identity),
     }
 
 
-def run_fsi1_s0_campaign(
-    output_root: Path | str,
-    *,
-    label: str,
-) -> dict[str, Any]:
-    """Run the exact frozen S0 case from step one and assess it offline."""
+def _geometry_identity(case: Any, config: Any) -> dict[str, Any]:
+    positions, normals, areas = case.build_marker_layout(config)
+    count = len(positions)
+    arrays = {
+        "marker_reference_position_m": np.asarray(positions, dtype=np.float32).astype(np.float64),
+        "marker_fixed_area_m2": np.asarray(areas, dtype=np.float32).astype(np.float64),
+        "marker_region_id": np.full(count, case.PRIMARY_REGION_ID, dtype=np.int32),
+        "marker_order": np.arange(count, dtype=np.int64),
+    }
+    return {
+        "marker_count": count,
+        "static_array_sha256": {key: array_sha256(value) for key, value in arrays.items()},
+        "initial_normal_sha256": array_sha256(np.asarray(normals, dtype=np.float32).astype(np.float64)),
+        "projection_segments": [list(pair) for pair in case.build_marker_projection_segments(config)],
+        "storage": "f32 marker position/area materialized as f64; i32 regions; i64 order",
+    }
 
-    run_dir = claim_output_dir(output_root, label)
+
+def _verify_geometry(record: Mapping[str, Any], geometry: Mapping[str, Any]) -> None:
+    for name, expected in geometry["static_array_sha256"].items():
+        if array_sha256(record[name]) != expected:
+            raise ValueError(f"accepted marker geometry identity mismatch: {name}")
+
+
+def _acceptance_config(stage: str) -> Any:
+    acceptance = importlib.import_module("src.refactored.validation.turek_hron_fsi.acceptance")
+    spec = stage_spec(stage)
+    return acceptance.Fsi1AcceptanceConfig(
+        expected_steps=spec["step_count"], expected_dt_s=spec["dt_s"],
+        expected_fluid_predictor_substeps=spec["flow_predictor_substeps"],
+        expected_solid_substeps=spec["solid_substeps"],
+        expected_marker_count=expected_stage_marker_count(stage),
+    )
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"formal artifact must be a JSON object: {path}")
+    return value
+
+
+def _artifact_path(run_dir: Path, value: Any) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ValueError("formal artifact path must be nonempty text")
+    path = Path(value)
+    path = path if path.is_absolute() else run_dir / path
+    path = path.resolve(strict=True)
+    if path.parent != run_dir.resolve(strict=True):
+        raise ValueError("formal artifact must be directly inside its run directory")
+    return path
+
+
+def iter_validated_accepted_records(
+    manifest_paths: Iterable[Path | str], *, provenance: Mapping[str, Any],
+    marker_layout_sha256: str, taichi_runtime_identity: Mapping[str, Any],
+) -> Iterator[dict[str, np.ndarray]]:
+    """Recompute chunk and array hashes, then replay the shared record validator."""
+    spec = provenance["config"]["frozen_campaign_spec"]
+    geometry = provenance["config"]["geometry_identity"]
+    validator = AcceptedRecordValidator(
+        required_arrays=_REQUIRED_ARRAYS, nan_padded_arrays=_NAN_PADDED_ARRAYS,
+        static_arrays=_STATIC_ARRAYS, expected_dt_s=float(spec["dt_s"]),
+        expected_solid_substeps=int(spec["solid_substeps"]),
+    )
+    count = 0
+    for supplied_path in manifest_paths:
+        path = Path(supplied_path).resolve(strict=True)
+        manifest = _read_json(path)
+        if manifest.get("schema_version") != 2 or manifest.get("artifact") != "accepted_turek_hron_interface_chunk":
+            raise ValueError("accepted chunk manifest schema mismatch")
+        for key in ("git", "config", "config_sha256", "source_hashes", "source_sha256",
+                    "config_source_sha256", "host_numerics_identity", "host_numerics_identity_sha256"):
+            if manifest.get(key) != _json_copy(provenance[key]):
+                raise ValueError(f"accepted chunk provenance mismatch: {key}")
+        if (manifest.get("marker_layout_sha256") != marker_layout_sha256
+                or manifest.get("taichi_runtime_identity") != taichi_runtime_identity
+                or manifest.get("parent_checkpoint_lineage") != {"kind": "from_start", "parent": None}):
+            raise ValueError("accepted chunk runtime, geometry or from-start lineage mismatch")
+        expected_count = min(_FORMAL_ACCEPTED_INTERFACE_CHUNK_SIZE, int(spec["step_count"]) - count)
+        if expected_count <= 0 or manifest.get("accepted_step_count") != expected_count:
+            raise ValueError("accepted chunk count violates the frozen chunk protocol")
+        stem = f"accepted_interface_{count:06d}_{count + expected_count - 1:06d}"
+        if path.name != f"{stem}.manifest.json":
+            raise ValueError("accepted chunk sequence does not match its immutable label")
+        npz_path = path.with_name(f"{stem}.npz")
+        if sha256_file(npz_path) != manifest.get("npz_sha256"):
+            raise ValueError("accepted chunk NPZ hash mismatch")
+        with np.load(npz_path, allow_pickle=False) as archive:
+            arrays = {key: archive[key] for key in archive.files}
+        allowed = _REQUIRED_ARRAYS | {f"{key}_length" for key in _RAGGED_ARRAYS}
+        if not _REQUIRED_ARRAYS <= arrays.keys() or set(arrays) - allowed:
+            raise ValueError("accepted chunk array schema mismatch")
+        for key in ("array_dtype", "array_shape", "array_sha256", "units"):
+            if set(manifest.get(key, {})) != set(arrays):
+                raise ValueError(f"accepted chunk {key} coverage mismatch")
+        for key, value in arrays.items():
+            if (manifest["array_dtype"][key] != str(value.dtype)
+                    or manifest["array_shape"][key] != list(value.shape)
+                    or manifest["array_sha256"][key] != array_sha256(value)
+                    or manifest["units"][key] != _UNITS.get(key.removesuffix("_length"), "1")):
+                raise ValueError(f"accepted chunk array integrity mismatch: {key}")
+            if key not in _STATIC_ARRAYS and (value.ndim == 0 or value.shape[0] != expected_count):
+                raise ValueError(f"accepted chunk dynamic row count mismatch: {key}")
+        for index in range(expected_count):
+            record = {}
+            for key in _REQUIRED_ARRAYS:
+                value = arrays[key] if key in _STATIC_ARRAYS else arrays[key][index]
+                length_key = f"{key}_length"
+                if length_key in arrays:
+                    raw_length = arrays[length_key][index]
+                    if not np.issubdtype(raw_length.dtype, np.integer) or raw_length.shape != () or not 0 <= raw_length <= len(value):
+                        raise ValueError("accepted ragged length is invalid")
+                    value = value[:int(raw_length)]
+                record[key] = np.asarray(value)
+            checked = validator.validate(record, accepted_count=count, finalized=False)
+            _verify_geometry(checked, geometry)
+            count += 1
+            yield checked
+        if (manifest.get("first_accepted_step") != count - expected_count + 1
+                or manifest.get("last_accepted_step") != count
+                or manifest.get("first_accepted_time_s") != float(arrays["accepted_time_s"][0])
+                or manifest.get("last_accepted_time_s") != float(arrays["accepted_time_s"][-1])):
+            raise ValueError("accepted chunk row/time metadata mismatch")
+    if count != int(spec["step_count"]):
+        raise ValueError("accepted records do not complete the frozen stage")
+
+
+def _assess_artifacts(
+    stage: str, history_csv: Path, manifests: list[Path], provenance: Mapping[str, Any],
+    marker_hash: str, runtime_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    acceptance = importlib.import_module("src.refactored.validation.turek_hron_fsi.acceptance")
+    periodic = importlib.import_module("src.refactored.validation.turek_hron_fsi.periodic_acceptance")
+    config = _acceptance_config(stage)
+    effective = provenance["config"]["effective_case_config"]
+    records = iter_validated_accepted_records(
+        manifests, provenance=provenance, marker_layout_sha256=marker_hash,
+        taichi_runtime_identity=runtime_identity,
+    )
+    if is_periodic_stage(stage):
+        return periodic.assess_periodic_history_csv(
+            history_csv, config, coupling_relative_residual_max=stage_spec(stage)["fsi_coupling_tolerance"],
+            accepted_records=records, span_m=effective["span_m"], health_only=stage.endswith("-h0"),
+            marker_segments=provenance["config"]["geometry_identity"]["projection_segments"],
+        )
+    rows, _ = acceptance.read_numerical_history_csv(history_csv, config)
+    count = 0
+    for count, record in enumerate(records, start=1):
+        if count > len(rows):
+            raise ValueError("accepted records exceed history")
+        periodic.validate_record_history_pair(record, rows[count - 1], span_m=effective["span_m"])
+    if count != len(rows):
+        raise ValueError("accepted records do not match history row count")
+    return acceptance.assess_fsi1_history_csv(history_csv, config)
+
+
+def _stage_assessment(stage: str, report: Mapping[str, Any], predecessors: Mapping[str, Any]) -> dict[str, Any]:
+    metrics = report.get("metrics", {})
+    if not is_periodic_stage(stage):
+        metrics = {key: value["mean"] for key, value in metrics.items()}
+    return assess_stage(
+        stage, metrics=metrics,
+        numerical_health_passed=report.get("numerical_contract_passed") is True,
+        settled=report.get("limit_cycle_stable" if is_periodic_stage(stage) else "steady_state_passed") is True,
+        prerequisite_reports={key: value["stage_assessment"] for key, value in predecessors.items()},
+    )
+
+
+def _stage_status(stage: str, passed: bool) -> str:
+    if stage == "fsi1-s0":
+        return "PASS_FSI1_S0_GATE_ONLY" if passed else "FAIL_FSI1_S0_GATE"
+    return f"{'PASS' if passed else 'FAIL'}_{stage.upper().replace('-', '_')}_GATE"
+
+
+def _load_prerequisites(
+    stage: str, paths: Iterable[Path | str], *, source_provenance: Mapping[str, Any],
+    case: Any, runtime_request: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Recompute each prerequisite recursively from immutable source-matched files."""
+    supplied = {}
+    for value in paths:
+        path = Path(value).resolve(strict=True)
+        name = _read_json(path).get("stage")
+        if name not in stage_prerequisites(stage) or name in supplied:
+            raise ValueError("unexpected or duplicate prerequisite stage")
+        supplied[name] = path
+    if set(supplied) != set(stage_prerequisites(stage)):
+        raise ValueError(f"missing prerequisite manifests for {stage}: {sorted(set(stage_prerequisites(stage)) - supplied.keys())}")
+    cache: dict[Path, dict[str, Any]] = {}
+    visiting: set[Path] = set()
+    stage_paths: dict[str, Path] = {}
+
+    def load(path: Path, name: str) -> dict[str, Any]:
+        if name in stage_paths and stage_paths[name] != path:
+            raise ValueError("prerequisite graph mixes different artifacts for one stage")
+        stage_paths[name] = path
+        if path in cache:
+            if cache[path]["stage"] != name:
+                raise ValueError("prerequisite stage alias mismatch")
+            return cache[path]
+        if path in visiting:
+            raise ValueError("cyclic prerequisite lineage")
+        visiting.add(path)
+        manifest = _read_json(path)
+        if manifest.get("schema_version") != 2 or manifest.get("stage") != name:
+            raise ValueError("prerequisite campaign schema/stage mismatch")
+        root = path.parent
+        previous = manifest.get("provenance")
+        if not isinstance(previous, dict):
+            raise ValueError("prerequisite provenance missing")
+        git = previous.get("git", {})
+        if git.get("dirty") is not False or git.get("dirty_paths") != [] or len(git.get("commit", "")) != 40:
+            raise ValueError("prerequisite source was not clean")
+        for key in ("source_hashes", "source_sha256", "host_numerics_identity", "host_numerics_identity_sha256"):
+            if previous.get(key) != _json_copy(source_provenance[key]):
+                raise ValueError(f"prerequisite current identity mismatch: {key}")
+        effective_config = _build_effective_stage_config(case, name)
+        effective = _assert_exact_config(effective_config, name)
+        expected_config = _formal_config_payload(
+            effective, stage=name, mechanism_probe=None if is_periodic_stage(name) else case.TurekHronMechanismProbe(),
+            runtime_request=runtime_request, geometry_identity=_geometry_identity(case, effective_config),
+        )
+        if bind_effective_config(previous, expected_config) != previous:
+            raise ValueError("prerequisite effective config/provenance hash mismatch")
+        if manifest.get("host_numerics_identity") != previous["host_numerics_identity"] or manifest.get("host_numerics_identity_sha256") != previous["host_numerics_identity_sha256"]:
+            raise ValueError("prerequisite host identity mismatch")
+        previous_runtime = _validate_runtime_identity(manifest.get("taichi_runtime_identity"))
+        preflight = _artifact_path(root, manifest.get("preflight_manifest"))
+        if sha256_file(preflight) != manifest.get("preflight_manifest_sha256") or _read_json(preflight).get("provenance") != previous:
+            raise ValueError("prerequisite preflight provenance mismatch")
+        predecessor_links = manifest.get("prerequisite_manifests", {})
+        if set(predecessor_links) != set(stage_prerequisites(name)):
+            raise ValueError("prerequisite ancestry is incomplete")
+        if _read_json(preflight) != {
+            "schema_version": 2, "stage": name, "provenance": previous,
+            "prerequisite_manifests": predecessor_links,
+            "parent_checkpoint_lineage": {"kind": "from_start", "parent": None},
+        }:
+            raise ValueError("prerequisite preflight lineage mismatch")
+        predecessors = {}
+        for predecessor, link in predecessor_links.items():
+            parent_path = Path(link["path"]).resolve(strict=True)
+            if sha256_file(parent_path) != link["sha256"]:
+                raise ValueError("prerequisite ancestor manifest hash mismatch")
+            predecessors[predecessor] = load(parent_path, predecessor)
+            if predecessors[predecessor]["taichi_runtime_identity"] != previous_runtime:
+                raise ValueError("prerequisite ancestor runtime mismatch")
+        history = _artifact_path(root, manifest.get("history_csv"))
+        if sha256_file(history) != manifest.get("history_csv_sha256"):
+            raise ValueError("prerequisite history hash mismatch")
+        chunks = [_artifact_path(root, value) for value in manifest.get("accepted_interface_manifests", [])]
+        if not chunks or {p.name: sha256_file(p) for p in chunks} != manifest.get("accepted_interface_manifest_sha256"):
+            raise ValueError("prerequisite accepted chunk manifest hashes mismatch")
+        report = _assess_artifacts(name, history, chunks, previous, manifest["marker_layout_sha256"], previous_runtime)
+        acceptance_path = _artifact_path(root, manifest.get("acceptance_file"))
+        if sha256_file(acceptance_path) != manifest.get("acceptance_sha256") or _read_json(acceptance_path) != _json_copy(report) or manifest.get("acceptance") != _json_copy(report):
+            raise ValueError("prerequisite acceptance does not match recomputed history")
+        assessment = _stage_assessment(name, report, predecessors)
+        if manifest.get("stage_assessment") != _json_copy(assessment) or manifest.get("stage_gate_passed") is not True or assessment["stage_gate_passed"] is not True:
+            raise ValueError("prerequisite stage failed its recomputed gate")
+        if (manifest.get("status") != _stage_status(name, True)
+                or manifest.get("single_run_acceptance_status") != report["status"]
+                or manifest.get("single_run_acceptance_passed") is not (report.get("acceptance_passed") is True)
+                or Path(manifest.get("run_dir", "")).resolve() != root
+                or (name == "fsi1-s0" and manifest.get("s0_gate_passed") is not True)):
+            raise ValueError("prerequisite campaign summary disagrees with its assessment")
+        visiting.remove(path)
+        cache[path] = manifest
+        return manifest
+
+    results = {name: load(path, name) for name, path in supplied.items()}
+    runtimes = [value["taichi_runtime_identity"] for value in results.values()]
+    if any(value != runtimes[0] for value in runtimes[1:]):
+        raise ValueError("prerequisite runtime identities differ")
+    for name, value in results.items():
+        if name.split("-")[0] != stage.split("-")[0] and value["stage_assessment"]["benchmark_quality_passed"] is not True:
+            raise ValueError("cross-case prerequisite lacks benchmark quality")
+    links = {name: {"path": str(path), "sha256": sha256_file(path)} for name, path in supplied.items()}
+    return results, links
+
+
+def run_campaign_stage(
+    output_root: Path | str, *, label: str, stage: str,
+    prerequisite_manifests: Iterable[Path | str] = (),
+) -> dict[str, Any]:
+    """Execute one exact frozen stage from zero after verified prerequisite gates."""
+    spec = stage_spec(stage)
+    run_dir = claim_output_dir(output_root, label).resolve()
     provenance: dict[str, Any] | None = None
     writer: AcceptedInterfaceChunkWriter | None = None
     observed_marker_hash: str | None = None
-    observed_runtime: dict[str, Any] | None = None
     failure_status = "BLOCKED_SOURCE_MISMATCH"
     try:
-        # This must precede solver imports and every Taichi runtime action.
-        provenance = capture_provenance(FSI1_S0_SPEC)
+        # Capture source/host before solver imports or any runtime action.
+        provenance = capture_provenance(spec)
         failure_status = "BLOCKED_ENVIRONMENT"
         case = importlib.import_module("cases.turek_hron_fsi")
-        runtime = importlib.import_module(
-            "simulation_core.diagnostics.runtime"
-        )
+        runtime = importlib.import_module("simulation_core.diagnostics.runtime")
         failure_status = "BLOCKED_SOURCE_MISMATCH"
-        config = _build_effective_fsi1_s0_config(case)
-        effective = _assert_exact_config(config)
-        mechanism_probe = case.TurekHronMechanismProbe()
-        runtime_request = runtime.TaichiRuntimeConfig(
-            arch="cuda",
-            strict_arch=True,
+        config = _build_effective_stage_config(case, stage)
+        case._validate_turek_hron_physical_config(config)
+        case._validate_marker_grid_consistency(config)
+        case._validate_fsi_coupling_controls(config)
+        effective = _assert_exact_config(config, stage)
+        geometry = _geometry_identity(case, config)
+        if geometry["marker_count"] != expected_stage_marker_count(stage):
+            raise ValueError("frozen stage automatic marker geometry mismatch")
+        mechanism_probe = None if is_periodic_stage(stage) else case.TurekHronMechanismProbe()
+        runtime_request = runtime.TaichiRuntimeConfig(arch="cuda", strict_arch=True)
+        formal_payload = _formal_config_payload(
+            effective, stage=stage, mechanism_probe=mechanism_probe,
+            runtime_request=runtime_request, geometry_identity=geometry,
         )
-        formal_config_payload = _formal_config_payload(
-            effective,
-            mechanism_probe=mechanism_probe,
-            runtime_request=runtime_request,
+        provenance = bind_effective_config(provenance, formal_payload)
+        predecessors, prerequisite_links = _load_prerequisites(
+            stage, prerequisite_manifests, source_provenance=provenance,
+            case=case, runtime_request=runtime_request,
         )
-        provenance = bind_effective_config(
-            provenance,
-            formal_config_payload,
-        )
+        acceptance = importlib.import_module("src.refactored.validation.turek_hron_fsi.acceptance")
+        periodic = importlib.import_module("src.refactored.validation.turek_hron_fsi.periodic_acceptance")
+        acceptance_config = _acceptance_config(stage)
+        policy = (periodic.dynamic_numerical_policy(spec["fsi_coupling_tolerance"])
+                  if is_periodic_stage(stage) else acceptance.FSI1_NUMERICAL_HEALTH_POLICY)
+        if bind_effective_config(capture_provenance(spec), formal_payload) != provenance:
+            raise RuntimeError("FAIL_PROVENANCE_DRIFT")
+        preflight = run_dir / "campaign_preflight.json"
+        _exclusive_json(preflight, {
+            "schema_version": 2, "stage": stage, "provenance": provenance,
+            "prerequisite_manifests": prerequisite_links,
+            "parent_checkpoint_lineage": {"kind": "from_start", "parent": None},
+        })
         failure_status = "BLOCKED_ENVIRONMENT"
         runtime.init_taichi(runtime_request)
+        initialized_runtime = _validate_runtime_identity(runtime.taichi_runtime_identity())
+        failure_status = "BLOCKED_SOURCE_MISMATCH"
+        if any(value["taichi_runtime_identity"] != initialized_runtime for value in predecessors.values()):
+            raise ValueError("current Taichi runtime differs from prerequisite identity")
         failure_status = "FAIL_NUMERICAL_HEALTH"
 
-        def accepted_step_observer(
-            record: dict[str, np.ndarray],
-        ) -> None:
-            nonlocal writer, observed_marker_hash, observed_runtime
-            nonlocal failure_status
+        def accepted_step_observer(record: dict[str, np.ndarray]) -> None:
+            nonlocal writer, observed_marker_hash, failure_status
             failure_status = "BLOCKED_SOURCE_MISMATCH"
-            marker_hash = _metadata_text(
-                record, "marker_layout_sha256"
-            )
+            marker_hash = _metadata_text(record, "marker_layout_sha256")
             if len(marker_hash) != 64:
-                raise ValueError(
-                    "marker_layout_sha256 must be a SHA-256 digest"
-                )
+                raise ValueError("marker_layout_sha256 must be a SHA-256 digest")
             int(marker_hash, 16)
-            runtime_identity = _validate_runtime_identity(
-                json.loads(
-                    _metadata_text(
-                        record, "taichi_runtime_identity_json"
-                    )
-                )
-            )
-            if (
-                observed_marker_hash is not None
-                and observed_marker_hash != marker_hash
-            ):
-                raise ValueError(
-                    "accepted records changed marker layout identity"
-                )
-            if (
-                observed_runtime is not None
-                and observed_runtime != runtime_identity
-            ):
-                raise ValueError(
-                    "accepted records changed Taichi runtime identity"
-                )
+            record_runtime = _validate_runtime_identity(json.loads(
+                _metadata_text(record, "taichi_runtime_identity_json")))
+            if observed_marker_hash is not None and observed_marker_hash != marker_hash:
+                raise ValueError("accepted records changed marker layout identity")
+            if record_runtime != initialized_runtime:
+                raise ValueError("accepted records changed Taichi runtime identity")
             observed_marker_hash = marker_hash
-            observed_runtime = runtime_identity
-            arrays = dict(record)
-            arrays.pop("marker_layout_sha256")
-            arrays.pop("taichi_runtime_identity_json")
-            expected_marker_count = expected_fsi1_s0_marker_count()
-            if (
-                np.asarray(
-                    arrays["marker_reference_position_m"]
-                ).shape
-                != (expected_marker_count, 3)
-            ):
-                raise ValueError(
-                    "accepted record marker count does not match the "
-                    "frozen automatic geometry"
-                )
+            arrays = {key: value for key, value in record.items()
+                      if key not in {"marker_layout_sha256", "taichi_runtime_identity_json"}}
+            _verify_geometry(arrays, geometry)
             if writer is None:
                 writer = AcceptedInterfaceChunkWriter(
-                    run_dir,
-                    chunk_size=_FORMAL_ACCEPTED_INTERFACE_CHUNK_SIZE,
-                    expected_steps=FSI1_S0_SPEC["step_count"],
-                    provenance=provenance,
-                    marker_layout_sha256=marker_hash,
-                    taichi_runtime_identity=runtime_identity,
-                    parent_checkpoint_lineage={
-                        "kind": "from_start",
-                        "parent": None,
-                    },
+                    run_dir, chunk_size=_FORMAL_ACCEPTED_INTERFACE_CHUNK_SIZE,
+                    expected_steps=spec["step_count"], provenance=provenance,
+                    marker_layout_sha256=marker_hash, taichi_runtime_identity=initialized_runtime,
+                    parent_checkpoint_lineage={"kind": "from_start", "parent": None},
                 )
             failure_status = "FAIL_NUMERICAL_HEALTH"
             writer.record(arrays)
+            if writer.accepted_count == 1 or writer.accepted_count % 25 == 0:
+                print(f"[{stage}] accepted step={writer.accepted_count}/{spec['step_count']} "
+                      f"time_s={float(arrays['accepted_time_s']):.9g} "
+                      f"coupling_trials={int(arrays['coupling_trial_count'])} "
+                      f"rejected_trials={int(arrays['coupling_rejected_trial_count'])}",
+                      file=sys.stderr, flush=True)
+
+        def candidate_step_validator(row: Mapping[str, Any]) -> None:
+            expected_step = 1 if writer is None else writer.accepted_count + 1
+            acceptance.validate_numerical_step(row, acceptance_config,
+                                              expected_step=expected_step, policy=policy)
 
         summary = case.run_turek_hron_fsi(
-            config,
-            preset="fsi1",
-            output_dir=run_dir,
-            fail_fast_probe=mechanism_probe,
-            accepted_step_observer=accepted_step_observer,
-            taichi_runtime_config=runtime_request,
+            config, preset=spec["preset"], output_dir=run_dir,
+            fail_fast_probe=mechanism_probe, accepted_step_observer=accepted_step_observer,
+            candidate_step_validator=candidate_step_validator, taichi_runtime_config=runtime_request,
         )
         failure_status = "BLOCKED_SOURCE_MISMATCH"
-        summary_config = summary.get("config")
-        if (
-            not isinstance(summary_config, Mapping)
-            or _json_copy(summary_config) != _json_copy(effective)
-        ):
-            raise RuntimeError(
-                "formal summary effective configuration mismatch"
-            )
-        failure_status = "FAIL_NUMERICAL_HEALTH"
-        if writer is None:
-            raise RuntimeError(
-                "formal run returned without accepted interface records"
-            )
-        if (
-            int(summary.get("completed_steps", -1))
-            != FSI1_S0_SPEC["step_count"]
-        ):
-            raise RuntimeError(
-                "formal run did not complete the exact expected step count"
-            )
-        failure_status = "BLOCKED_SOURCE_MISMATCH"
+        if not isinstance(summary.get("config"), Mapping) or _json_copy(summary["config"]) != _json_copy(effective):
+            raise RuntimeError("formal summary effective configuration mismatch")
         if summary.get("marker_layout_sha256") != observed_marker_hash:
             raise RuntimeError("summary marker layout identity mismatch")
-        summary_runtime = _validate_runtime_identity(
-            summary.get("taichi_runtime_identity")
-        )
-        if summary_runtime != observed_runtime:
+        summary_runtime = _validate_runtime_identity(summary.get("taichi_runtime_identity"))
+        if summary_runtime != initialized_runtime or _validate_runtime_identity(runtime.taichi_runtime_identity()) != initialized_runtime:
             raise RuntimeError("summary Taichi runtime identity mismatch")
-        final_provenance = bind_effective_config(
-            capture_provenance(FSI1_S0_SPEC),
-            formal_config_payload,
-        )
-        if final_provenance != provenance or _assert_exact_config(config) != effective:
+        if (bind_effective_config(capture_provenance(spec), formal_payload) != provenance
+                or _assert_exact_config(config, stage) != effective
+                or _geometry_identity(case, config) != geometry):
             raise RuntimeError("FAIL_PROVENANCE_DRIFT")
-        failure_status = "FAIL_NUMERICAL_HEALTH"
-        manifests = writer.finalize()
-
-        acceptance = importlib.import_module(
-            "src.refactored.validation.turek_hron_fsi.acceptance"
-        )
+        if any(sha256_file(Path(link["path"])) != link["sha256"] for link in prerequisite_links.values()):
+            raise RuntimeError("prerequisite manifest changed during execution")
         final = summary.get("final")
-        if not isinstance(final, Mapping):
-            raise RuntimeError("formal summary is missing the final row")
-        failure_status = "BLOCKED_SOURCE_MISMATCH"
-        marker_count = final.get("marker_total_count")
-        if (
-            isinstance(marker_count, bool)
-            or not isinstance(marker_count, Integral)
-            or int(marker_count) <= 0
-        ):
-            raise RuntimeError(
-                "formal summary has no valid marker count"
-            )
-        expected_marker_count = expected_fsi1_s0_marker_count()
-        if int(marker_count) != expected_marker_count:
-            raise RuntimeError(
-                "formal summary marker count does not match the frozen "
-                "automatic geometry"
-            )
+        if not isinstance(final, Mapping) or isinstance(final.get("marker_total_count"), bool) or final.get("marker_total_count") != geometry["marker_count"]:
+            raise RuntimeError("formal summary marker count does not match frozen geometry")
         failure_status = "FAIL_NUMERICAL_HEALTH"
-        acceptance_config = acceptance.Fsi1AcceptanceConfig(
-            expected_steps=FSI1_S0_SPEC["step_count"],
-            expected_dt_s=FSI1_S0_SPEC["dt_s"],
-            expected_fluid_predictor_substeps=effective[
-                "flow_predictor_substeps"
-            ],
-            expected_solid_substeps=effective["solid_substeps"],
-            expected_marker_count=expected_marker_count,
-        )
-        history_csv = Path(
-            summary.get(
-                "history_csv",
-                run_dir / "turek_hron_fsi_history.csv",
-            )
-        )
-        report = acceptance.assess_fsi1_history_csv(
-            history_csv, acceptance_config
-        )
-        _exclusive_json(run_dir / "fsi1_acceptance.json", report)
-        s0_gate_passed = fsi1_s0_gate_passed(report)
+        if writer is None:
+            raise RuntimeError("formal run returned without accepted interface records")
+        if isinstance(summary.get("completed_steps"), bool) or summary.get("completed_steps") != spec["step_count"]:
+            raise RuntimeError("formal run did not complete the exact expected step count")
+        manifests = writer.finalize()
+        history = _artifact_path(run_dir, str(summary.get("history_csv", run_dir / "turek_hron_fsi_history.csv")))
+        report = _assess_artifacts(stage, history, manifests, provenance, observed_marker_hash, initialized_runtime)
+        acceptance_path = run_dir / ("periodic_acceptance.json" if is_periodic_stage(stage) else "fsi1_acceptance.json")
+        _exclusive_json(acceptance_path, report)
+        assessment = _stage_assessment(stage, report, predecessors)
+        passed = assessment["stage_gate_passed"] is True
         result = {
-            "status": (
-                "PASS_FSI1_S0_GATE_ONLY"
-                if s0_gate_passed
-                else "FAIL_FSI1_S0_GATE"
-            ),
-            "s0_gate_passed": s0_gate_passed,
-            "single_run_acceptance_status": str(
-                report.get("status", "failed")
-            ),
-            "single_run_acceptance_passed": (
-                report.get("acceptance_passed") is True
-            ),
-            "run_dir": str(run_dir),
-            "accepted_interface_manifests": [
-                str(path) for path in manifests
-            ],
+            "schema_version": 2, "stage": stage, "status": _stage_status(stage, passed),
+            "stage_gate_passed": passed, "stage_assessment": assessment,
+            **({"s0_gate_passed": passed} if stage == "fsi1-s0" else {}),
+            "single_run_acceptance_status": str(report.get("status", "failed")),
+            "single_run_acceptance_passed": report.get("acceptance_passed") is True,
+            "run_dir": str(run_dir), "history_csv": str(history),
+            "history_csv_sha256": sha256_file(history),
+            "acceptance_file": str(acceptance_path), "acceptance_sha256": sha256_file(acceptance_path),
+            "preflight_manifest": str(preflight), "preflight_manifest_sha256": sha256_file(preflight),
+            "accepted_interface_manifests": [str(path) for path in manifests],
+            "accepted_interface_manifest_sha256": {path.name: sha256_file(path) for path in manifests},
+            "prerequisite_manifests": prerequisite_links,
             "marker_layout_sha256": observed_marker_hash,
-            "taichi_runtime_identity": observed_runtime,
+            "taichi_runtime_identity": initialized_runtime,
             "host_numerics_identity": provenance["host_numerics_identity"],
-            "host_numerics_identity_sha256": provenance[
-                "host_numerics_identity_sha256"
-            ],
-            "provenance": provenance,
-            "acceptance": report,
+            "host_numerics_identity_sha256": provenance["host_numerics_identity_sha256"],
+            "provenance": provenance, "acceptance": report,
+            "quality_boundary": "selected-stage gate; only the stage assessment can grant exploratory or benchmark-quality status",
         }
+        if stage.startswith("fsi3-") and "fsi2-f0" in predecessors:
+            result["fsi2_coupling_work_comparison"] = {
+                "current_stage": stage, "reference_stage": "fsi2-f0",
+                "current": report.get("coupling_trial_distribution", {}),
+                "fsi2": predecessors["fsi2-f0"]["acceptance"].get("coupling_trial_distribution", {}),
+                "interpretation": "descriptive trial-count distributions; different case/stage trajectories are not a speedup comparison",
+            }
         _exclusive_json(run_dir / "campaign_manifest.json", result)
         return result
     except Exception as error:
@@ -822,39 +1034,34 @@ def run_fsi1_s0_campaign(
                 writer.preserve_partial()
             except Exception:
                 pass
-        status = _campaign_failure_status(
-            error,
-            phase_status=failure_status,
-        )
-        _write_failure(
-            run_dir,
-            error,
-            provenance,
-            writer,
-            status=status,
-        )
+        _write_failure(run_dir, error, provenance, writer,
+                       status=_campaign_failure_status(error, phase_status=failure_status))
         raise
 
 
+def run_fsi1_s0_campaign(output_root: Path | str, *, label: str) -> dict[str, Any]:
+    """Preserve the original public S0 entrypoint and its gate-only status."""
+    return run_campaign_stage(output_root, label=label, stage="fsi1-s0")
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Run the frozen formal Turek-Hron FSI1-S0 campaign"
-        )
-    )
+    parser = argparse.ArgumentParser(description="Run one frozen formal Turek-Hron FSI campaign stage")
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--label", required=True)
+    parser.add_argument("--stage", choices=STAGE_NAMES, default="fsi1-s0")
+    parser.add_argument("--prerequisite", type=Path, action="append", default=[])
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    result = run_fsi1_s0_campaign(
-        args.output_root,
-        label=args.label,
-    )
+    if args.stage == "fsi1-s0" and not args.prerequisite:
+        result = run_fsi1_s0_campaign(args.output_root, label=args.label)
+    else:
+        result = run_campaign_stage(args.output_root, label=args.label, stage=args.stage,
+                                    prerequisite_manifests=args.prerequisite)
     print(json.dumps(result, allow_nan=False, sort_keys=True))
-    return 0 if result["s0_gate_passed"] is True else 2
+    return 0 if result.get("stage_gate_passed", result.get("s0_gate_passed")) is True else 2
 
 
 if __name__ == "__main__":

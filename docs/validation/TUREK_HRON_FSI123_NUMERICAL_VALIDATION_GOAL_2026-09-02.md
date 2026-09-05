@@ -1,9 +1,11 @@
 # Turek–Hron FSI1/FSI2/FSI3 Numerical Validation R26A Goal
 
-Status: active. The current frozen component prerequisite is complete at clean
-`293dc69` under the pinned host-numerics identity. After this documentation-
-only record is committed, the next authorized numerical action is one fresh
-formal 1600-step FSI1-S0 strict-CUDA campaign from zero; no S0 pass exists yet.
+Status: active. The 2026-09-05 robustness changes modify component-identity
+source files; the f2320f5 component chain is now historical and must be
+regenerated after the final source freeze. No formal FSI1-S0 pass exists.
+The next numerical sequence is component recertification, fresh FSI1-S0,
+M0/M1, gated F0, then the registered FSI2 and FSI3 stages. See the current
+robustness section in docs/TUREK_HRON_VALIDATION.md for changes and evidence.
 
 Branch: **codex/turek-hron-fsi123-validation-r26a**
 
@@ -12,6 +14,16 @@ Start commit: **b7f32c0b66b8bc86277cdac86c88724301746cbf**
 The start commit is the reviewed R25B import-boundary repair. R25B remains
 complete and frozen. It is not rerun on CUDA, reinterpreted, or extended by this
 goal.
+
+## Current execution stop condition
+
+The user requested a quota checkpoint on 2026-09-05: when the main Codex
+quota is observed at 10% remaining or less, stop this task's owned test and
+numerical processes, preserve completed artifacts and an exact handoff, then
+stop work. This is not a numerical failure or permission to consume a reset.
+Use append-only live checkpoints outside the repository so monitoring does
+not dirty an active formal run. User authorization is required to resume after
+that stop boundary.
 
 ## 1. Purpose and evidence boundary
 

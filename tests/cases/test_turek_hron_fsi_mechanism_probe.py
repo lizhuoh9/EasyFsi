@@ -289,7 +289,7 @@ class TurekHronMechanismProbeFlushOrderingTests(unittest.TestCase):
             candidate_index,
         )
         append_index = source.index(
-            "history.append(row)",
+            "_append_validated_fsi_row(",
             raise_index,
         )
         solve_index = source.index("generic_run = solve_fsi_runtime(")

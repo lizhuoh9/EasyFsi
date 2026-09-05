@@ -1,8 +1,7 @@
-"""Fail-closed, offline acceptance analysis for Turek--Hron FSI1 histories.
+"""Shared pre-commit and offline acceptance for Turek--Hron FSI1.
 
-This module deliberately has no solver imports.  It consumes only the committed
-per-step CSV certificate, so running it cannot initialize Taichi, mutate a run,
-or conceal a missing physical/numerical certificate behind a summary value.
+Pure host checks consume candidate rows or committed CSV certificates without
+initializing Taichi or mutating a run. Window statistics remain offline gates.
 """
 
 from __future__ import annotations
@@ -24,6 +23,39 @@ from .references import (
 
 class TurekHronAcceptanceError(ValueError):
     """Raised when a history cannot serve as acceptance evidence."""
+
+
+@dataclass(frozen=True)
+class NumericalHealthPolicy:
+    """Registered coupling/probe policy; all other hard gates are shared."""
+
+    mechanism_probe_required: bool = True
+    enforce_absolute_coupling_limits: bool = True
+    coupling_relative_residual_max: float | None = None
+    required_finite_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mechanism_probe_required, bool) or not isinstance(
+            self.enforce_absolute_coupling_limits, bool
+        ):
+            raise ValueError("numerical health switches must be booleans")
+        value = self.coupling_relative_residual_max
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+            or not np.isfinite(value)
+            or value <= 0.0
+        ):
+            raise ValueError("coupling_relative_residual_max must be finite and positive")
+        if not self.enforce_absolute_coupling_limits and value is None:
+            raise ValueError("relative coupling tolerance is required without absolute gates")
+        if not isinstance(self.required_finite_fields, tuple) or any(
+            not isinstance(field, str) or not field for field in self.required_finite_fields
+        ):
+            raise ValueError("required_finite_fields must be a tuple of field names")
+
+
+FSI1_NUMERICAL_HEALTH_POLICY = NumericalHealthPolicy()
 
 
 @dataclass(frozen=True)
@@ -214,7 +246,9 @@ def _finite_float(value: object, *, field: str, row_number: int) -> float:
     return converted
 
 
-def _typed_history_rows(path: Path) -> tuple[dict[str, Any], ...]:
+def _typed_history_rows(
+    path: Path, *, extra_float_fields: tuple[str, ...] = ()
+) -> tuple[dict[str, Any], ...]:
     try:
         handle = path.open("r", newline="", encoding="utf-8-sig")
     except OSError as exc:
@@ -229,7 +263,7 @@ def _typed_history_rows(path: Path) -> tuple[dict[str, Any], ...]:
             raise TurekHronAcceptanceError(
                 f"history CSV has duplicate columns: {duplicates}"
             )
-        missing = sorted(REQUIRED_FIELDS.difference(fieldnames))
+        missing = sorted((REQUIRED_FIELDS | set(extra_float_fields)).difference(fieldnames))
         if missing:
             raise TurekHronAcceptanceError(
                 f"history CSV has missing required columns: {missing}"
@@ -238,27 +272,41 @@ def _typed_history_rows(path: Path) -> tuple[dict[str, Any], ...]:
     if not raw_rows:
         raise TurekHronAcceptanceError("history CSV has no data rows")
 
-    typed: list[dict[str, Any]] = []
-    for row_number, raw in enumerate(raw_rows, start=2):
-        floats = {
-            field: _finite_float(raw.get(field), field=field, row_number=row_number)
-            for field in _FLOAT_FIELDS
-        }
-        integers: dict[str, int] = {}
-        for field in _INTEGER_FIELDS:
-            value = _finite_float(raw.get(field), field=field, row_number=row_number)
-            if not value.is_integer():
-                raise TurekHronAcceptanceError(
-                    f"row {row_number} field {field!r} must be an integer; got {value!r}"
-                )
-            integers[field] = int(value)
-        booleans = {
-            field: _strict_bool(raw.get(field), field=field, row_number=row_number)
-            for field in _BOOLEAN_FIELDS
-        }
-        strings = {field: str(raw.get(field, "")).strip() for field in _STRING_FIELDS}
-        typed.append({**floats, **integers, **booleans, **strings})
-    return tuple(typed)
+    return tuple(
+        _typed_history_row(
+            raw, row_number=row_number, extra_float_fields=extra_float_fields
+        )
+        for row_number, raw in enumerate(raw_rows, start=2)
+    )
+
+
+def _typed_history_row(
+    raw: Mapping[str, Any], *, row_number: int,
+    extra_float_fields: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    missing = sorted((REQUIRED_FIELDS | set(extra_float_fields)).difference(raw))
+    if missing:
+        raise TurekHronAcceptanceError(
+            f"row {row_number} has missing required columns: {missing}"
+        )
+    floats = {
+        field: _finite_float(raw.get(field), field=field, row_number=row_number)
+        for field in (*_FLOAT_FIELDS, *extra_float_fields)
+    }
+    integers: dict[str, int] = {}
+    for field in _INTEGER_FIELDS:
+        value = _finite_float(raw.get(field), field=field, row_number=row_number)
+        if not value.is_integer():
+            raise TurekHronAcceptanceError(
+                f"row {row_number} field {field!r} must be an integer; got {value!r}"
+            )
+        integers[field] = int(value)
+    booleans = {
+        field: _strict_bool(raw.get(field), field=field, row_number=row_number)
+        for field in _BOOLEAN_FIELDS
+    }
+    strings = {field: str(raw.get(field, "")).strip() for field in _STRING_FIELDS}
+    return {**floats, **integers, **booleans, **strings}
 
 
 def _validate_history_identity(
@@ -318,11 +366,12 @@ def _failed_steps(
     return tuple(int(row["step"]) for row in rows if predicate(row))
 
 
-def _numerical_contract_violations(
+def _step_numerical_contract_violations(
     rows: Sequence[Mapping[str, Any]],
     config: Fsi1AcceptanceConfig,
     *,
     dt_s: float,
+    policy: NumericalHealthPolicy = FSI1_NUMERICAL_HEALTH_POLICY,
 ) -> tuple[str, ...]:
     expected_marker_count = int(rows[0]["stress_expected_marker_count"])
     time_tolerance = max(1.0e-15, 1.0e-12 * abs(float(dt_s)))
@@ -341,7 +390,7 @@ def _numerical_contract_violations(
     checks = (
         (
             "mechanism probe",
-            lambda row: not row["mechanism_probe_enabled"]
+            lambda row: row["mechanism_probe_enabled"] != policy.mechanism_probe_required
             or row["mechanism_probe_triggered"],
         ),
         (
@@ -358,11 +407,17 @@ def _numerical_contract_violations(
             lambda row: not row["fsi_coupling_residual_measured"]
             or not row["fsi_coupling_converged"]
             or row["fsi_coupling_absolute_residual_mps"] < 0.0
-            or row["fsi_coupling_absolute_residual_mps"]
-            > config.coupling_absolute_residual_mps_max
+            or (policy.enforce_absolute_coupling_limits
+                and row["fsi_coupling_absolute_residual_mps"]
+                > config.coupling_absolute_residual_mps_max)
             or row["fsi_coupling_max_marker_residual_mps"] < 0.0
-            or row["fsi_coupling_max_marker_residual_mps"]
-            > config.coupling_max_marker_residual_mps_max,
+            or (policy.enforce_absolute_coupling_limits
+                and row["fsi_coupling_max_marker_residual_mps"]
+                > config.coupling_max_marker_residual_mps_max)
+            or (policy.coupling_relative_residual_max is not None
+                and (row["fsi_coupling_residual"] < 0.0
+                     or row["fsi_coupling_residual"]
+                     > policy.coupling_relative_residual_max)),
         ),
         (
             "main projection CG",
@@ -463,6 +518,19 @@ def _numerical_contract_violations(
         steps = _failed_steps(rows, predicate)
         if steps:
             violations.append(f"{label} gate failed at steps {_step_preview(steps)}")
+    return tuple(violations)
+
+
+def _numerical_contract_violations(
+    rows: Sequence[Mapping[str, Any]],
+    config: Fsi1AcceptanceConfig,
+    *,
+    dt_s: float,
+    policy: NumericalHealthPolicy = FSI1_NUMERICAL_HEALTH_POLICY,
+) -> tuple[str, ...]:
+    violations = list(_step_numerical_contract_violations(
+        rows, config, dt_s=dt_s, policy=policy
+    ))
     full_load_flux = tuple(
         abs(float(row["flux_imbalance_rel"]))
         for row in rows
@@ -478,6 +546,77 @@ def _numerical_contract_violations(
             f"{config.flux_imbalance_rel_mean_max:.6g}"
         )
     return tuple(violations)
+
+
+def validate_numerical_step(
+    row: Mapping[str, Any],
+    config: Fsi1AcceptanceConfig,
+    *,
+    expected_step: int,
+    policy: NumericalHealthPolicy = FSI1_NUMERICAL_HEALTH_POLICY,
+) -> None:
+    """Reject a candidate before commit using the exact offline per-row gates.
+
+    Full-load mean flux, steady windows and reference errors require multiple
+    accepted rows and deliberately remain in the final offline assessment.
+    """
+    if (
+        isinstance(expected_step, bool)
+        or not isinstance(expected_step, Integral)
+        or not 1 <= expected_step <= config.expected_steps
+    ):
+        raise TurekHronAcceptanceError(
+            "expected_step must lie in 1..expected_steps"
+        )
+    extra = (*policy.required_finite_fields,
+             *(() if policy.coupling_relative_residual_max is None
+               else ("fsi_coupling_residual",)))
+    typed = _typed_history_row(
+        row, row_number=int(expected_step) + 1, extra_float_fields=extra
+    )
+    if typed["step"] != expected_step:
+        raise TurekHronAcceptanceError(
+            f"candidate step {typed['step']} != expected step {expected_step}"
+        )
+    if typed["history_schema_version"] != HISTORY_SCHEMA_VERSION:
+        raise TurekHronAcceptanceError(
+            f"candidate requires history schema version {HISTORY_SCHEMA_VERSION}"
+        )
+    dt_s = float(config.expected_dt_s)
+    if abs(typed["time_s"] - expected_step * dt_s) > max(1.0e-15, dt_s * 1.0e-12):
+        raise TurekHronAcceptanceError(
+            "candidate time_s violates the absolute-only physical-time tolerance"
+        )
+    violations = _step_numerical_contract_violations(
+        (typed,), config, dt_s=dt_s, policy=policy
+    )
+    if violations:
+        raise TurekHronAcceptanceError("; ".join(violations))
+
+
+def validate_fsi1_step(
+    row: Mapping[str, Any], config: Fsi1AcceptanceConfig, *, expected_step: int
+) -> None:
+    """Preserve the FSI1 pre-commit contract and all its original thresholds."""
+    validate_numerical_step(row, config, expected_step=expected_step)
+
+
+def read_numerical_history_csv(
+    history_csv: str | Path,
+    config: Fsi1AcceptanceConfig,
+    *,
+    policy: NumericalHealthPolicy = FSI1_NUMERICAL_HEALTH_POLICY,
+    extra_float_fields: tuple[str, ...] = (),
+) -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
+    """Parse exact accepted history and assess shared per-row and mean-flux gates."""
+    fields = (*extra_float_fields, *policy.required_finite_fields)
+    if policy.coupling_relative_residual_max is not None:
+        fields = (*fields, "fsi_coupling_residual")
+    rows = _typed_history_rows(Path(history_csv), extra_float_fields=fields)
+    dt_s = _validate_history_identity(rows, config)
+    return rows, _numerical_contract_violations(
+        rows, config, dt_s=dt_s, policy=policy
+    )
 
 
 def _window_stats(times: np.ndarray, values: np.ndarray) -> dict[str, float]:
@@ -753,7 +892,12 @@ def assess_fsi1_history_csv(
 __all__ = [
     "CANONICAL_FSI1_REFERENCE",
     "Fsi1AcceptanceConfig",
+    "NumericalHealthPolicy",
+    "FSI1_NUMERICAL_HEALTH_POLICY",
     "LOCAL_LS_DYNA_REFERENCE",
     "TurekHronAcceptanceError",
     "assess_fsi1_history_csv",
+    "read_numerical_history_csv",
+    "validate_fsi1_step",
+    "validate_numerical_step",
 ]
