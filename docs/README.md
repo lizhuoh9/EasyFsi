@@ -74,6 +74,7 @@ runner 中使用同样方式搜索 `preflow`、`prepare_sst_wall_distance`、
 
 ## 其他验证主题
 
+- [`validation/TUREK_HRON_R15_FALLBACK_VALIDATION_REPORT_2026-09-06.md`](validation/TUREK_HRON_R15_FALLBACK_VALIDATION_REPORT_2026-09-06.md): R15 fallback test corrections, strict-CUDA evidence and pending continuous-validation gates.
 - [`TUREK_HRON_VALIDATION.md`](TUREK_HRON_VALIDATION.md)：Turek-Hron FSI。
 - [`validation/TUREK_HRON_FSI123_NUMERICAL_VALIDATION_GOAL_2026-09-02.md`](validation/TUREK_HRON_FSI123_NUMERICAL_VALIDATION_GOAL_2026-09-02.md)：R26A 的 Featflow 多来源合同、FSI1/2/3 空间与时间收敛矩阵、硬门控顺序，以及 Oracle/模型禁入边界。
 - [`ANSYS_VERTICAL_FLAP_2D_TO_3D_SLAB_EQUIVALENCE.md`](ANSYS_VERTICAL_FLAP_2D_TO_3D_SLAB_EQUIVALENCE.md)：2D/3D slab 等价性。

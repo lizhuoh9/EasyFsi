@@ -509,17 +509,43 @@ class CommonTraceCohortContractMixin:
             record['intended_fault_verified'] = (record['one_raw_coordinate_changed']
                 and record['raw_y_delta_m'] > 0 and record['candidate_geometry_probe']['all_guards_passed'])
         elif fault == 'r15_actual_shadows_only':
+            # Prepare recomputes direct routes from geometry. Deactivate actual
+            # D authority after proof; cached selector edits do not remove it.
+            protected_names = set(DATA['accepted_seed_fields']) | set(COMMON_NEUTRAL_FIELDS)
+            protected_names.update('velocity_dirichlet_component_face_segment_pair_' + suffix
+                                   for suffix in self._systemic_pair_observation(case)['cache'])
+            protected = {name: getattr(boundary, name).to_numpy().tobytes() for name in protected_names}
+            original_active = boundary.active_ib_node.to_numpy().copy()
+            expected_active = original_active.copy()
+            direct_rows = []
             for direct in (item for item in case['sources'] if item['kind'] == 0):
                 address = tuple(direct['local_original_source_row'])
-                for suffix, desired in (('direct_selected_storage_offset', direct['slot'] // 2),
-                                        ('direct_relocation_pair_offset', -1)):
-                    name = 'velocity_dirichlet_component_face_' + suffix
-                    value = np.asarray(getattr(boundary, name)[address], dtype=np.int32).copy()
-                    if int(value[2]) != desired:
-                        value[2] = desired
-                        write('boundary', name, address, value)
-            record['intended_fault_verified'] = bool(record['writes'])
-            record['scope'] = 'Deliberate selector corruption after geometric proof; actual S/S consumers must reject.'
+                before, after = write('boundary', 'active_ib_node', address, 0)
+                self.assertEqual(int(before), 1)
+                self.assertEqual(int(after), 0)
+                expected_active[address] = 0
+                direct_rows.append(address)
+            self.assertEqual(len(set(direct_rows)), 2)
+            self.assertEqual(boundary.active_ib_node.to_numpy().tobytes(), expected_active.tobytes())
+            self.assertEqual(int(np.count_nonzero(original_active != expected_active)), 2)
+            shadows = []
+            for shadow in (item for item in case['sources'] if item['kind'] == 1):
+                source = tuple(shadow['local_original_source_row'])
+                storage = tuple(shadow['local_storage_row'])
+                self.assertNotIn(source, direct_rows)
+                active = int(boundary.active_ib_node[source])
+                valid = int(boundary.velocity_dirichlet_relocation_shadow_claim_valid[storage])
+                self.assertEqual((active, valid), (1, 1))
+                shadows.append({'source': source, 'storage': storage, 'active': active, 'claim_valid': valid})
+            self.assertEqual(len(shadows), 2)
+            self.assertEqual({name: getattr(boundary, name).to_numpy().tobytes() for name in protected}, protected)
+            record['inactive_direct_rows'] = direct_rows
+            record['active_shadow_authors'] = shadows
+            record['protected_field_sha256'] = {name: hashlib.sha256(raw).hexdigest()
+                                                for name, raw in sorted(protected.items())}
+            record['cache_proof_and_shadow_inputs_byte_equal'] = True
+            record['intended_fault_verified'] = True
+            record['scope'] = 'Only two direct activity flags cleared after proof; actual S/S consumers must reject during prepare.'
         elif fault == 'contaminated_common_mode':
             before, after = write('boundary', 'velocity_dirichlet_component_face_segment_projection_only_seam',
                                   (*case['local_face'], 2), COMMON_MODE | 4)
@@ -638,14 +664,17 @@ class CommonTraceCohortContractMixin:
                     self.assertEqual(observed['precompute']['fallback_valid'], 1)
                     self.assertTrue(all(observed['precompute']['guards'].values()))
                     self.assertEqual(prepared['count'], 2)
-                    self.assertNotEqual(common['mode'], COMMON_MODE)
+                    self.assertEqual(common['mode'] & COMMON_MODE, 0)
                     self.assertEqual(common['consumed_mask'], 0)
                     if fault == 'r15_bad_actual_projection':
                         self.assertEqual(common['seed_mask'], 5)
                         self.assertNotEqual(common['proved_mask'] & 9, 9)
                         self.assertIn(prepared['native_author_witnesses'], ([-395, -2], [-252, -255]))
                     else:
+                        self.assertGreater(prepared['conflicts'], 0)
+                        self.assertEqual(common['seed_mask'], 5)
                         self.assertEqual(common['proved_mask'], 15)
+                        self.assertTrue(observed['fault']['cache_proof_and_shadow_inputs_byte_equal'])
                         self.assertIn(prepared['native_author_witnesses'], ([-135, -2], [-256, -255]))
                     observed['target_fallback_rejection_verified'] = True
                 if fault == 'r15_conflicting_candidate_probes':
@@ -668,7 +697,7 @@ class CommonTraceCohortContractMixin:
                 observed['common_fields_after_native_rejection'] = self._systemic_common_neutral()
                 self.assertTrue(observed['common_fields_after_native_rejection']['all_neutral'])
                 self._assert_component_face_relocation_transient_neutral(use_segment_fixture=True)
-                if fault == 'r15_conflicting_candidate_probes':
+                if fault in ('r15_conflicting_candidate_probes', 'r15_actual_shadows_only'):
                     adjacent = boundary.velocity_dirichlet_component_face_adjacent_direct_pair_target_valid.to_numpy()
                     self.assertTrue(bool(np.all(adjacent == 0)))
                     observed['native_cleanup_field_count'] = 41
@@ -820,6 +849,13 @@ class CommonTraceCohortContractMixin:
                 fields['velocity_dirichlet_relocation_winner_source_linear_key'] = (i * 96 + j) * 400 + k
             for name in ('boundary_point_m', 'nominal_probe_m'):
                 case['expected_fallback_pair'][name] = reflect_point(case['expected_fallback_pair'][name])
+            # A reflected exactly tangential ray still chooses offset 0 at a tie.
+            # One f32 ULP makes this manufactured S0 ray prefer offset 1.
+            shadow = next(source for source in case['sources'] if source['slot'] == 1)
+            payload = next(item for item in case['accepted']
+                           if item['local_storage_row'] == shadow['local_storage_row'])
+            point = payload['fields']['velocity_dirichlet_relocation_shadow_sample_point_m']
+            point[2] = float(np.nextafter(np.float32(point[2]), np.float32(-np.inf)))
             case['expected_original_routed_slots'] = [1, 2, 3]
             case['expected_cache_identity'] = [5, 1, 0, 1]
             case['expected_common'] = {'seed_mask': 3, 'consumed_mask': 6,

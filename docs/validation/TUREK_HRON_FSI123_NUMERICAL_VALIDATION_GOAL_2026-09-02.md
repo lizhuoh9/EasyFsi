@@ -1,5 +1,14 @@
 # Turek–Hron FSI1/FSI2/FSI3 Numerical Validation R26A Goal
 
+## R15 test-correction checkpoint, 2026-09-06
+
+Full GREEN25 r02 completed with three failing methods; two corrected fixtures
+subsequently passed 2/2. The reviewed extrusion cache assertion correction
+and complete GREEN25 r03 remain pending native verification at this commit.
+The solver core is unchanged; continuous and formal success remain unproved.
+See [TUREK_HRON_R15_FALLBACK_VALIDATION_REPORT_2026-09-06.md](TUREK_HRON_R15_FALLBACK_VALIDATION_REPORT_2026-09-06.md) for hashes,
+exact test changes, evidence boundaries and required next gates.
+
 ## Explicit continuation and WIP publication, 2026-09-06
 
 The user resumed work after the archived quota stop, explicitly withdrew the

@@ -16431,6 +16431,30 @@ class CanonicalComponentFaceLedgerContractMixin:
                                 )
                                 for slot in shadow_slots
                             }
+                            observed["z_fallback"] = {
+                                slot: tuple(
+                                    (
+                                        int(
+                                            boundary.velocity_dirichlet_component_face_common_trace_fallback_valid[
+                                                pair
+                                            ]
+                                        ),
+                                        int(
+                                            boundary.velocity_dirichlet_component_face_common_trace_fallback_prior_adjacent_direct[
+                                                pair
+                                            ]
+                                        ),
+                                        tuple(
+                                            int(value)
+                                            for value in boundary.velocity_dirichlet_component_face_segment_pair_owner_indices[
+                                                pair
+                                            ]
+                                        ),
+                                    )
+                                    for pair in z_pairs[slot]
+                                )
+                                for slot in shadow_slots
+                            }
                             observed["z_pair_offsets"] = {
                                 slot: int(
                                     boundary.velocity_dirichlet_component_face_direct_relocation_pair_offset[
@@ -16562,14 +16586,24 @@ class CanonicalComponentFaceLedgerContractMixin:
                         self.assertEqual(observed["y_prepare"][slot], (2, 36))
                         self.assertEqual(
                             observed["z_precompute"][slot],
-                            ((-1, -1, 0, 0), (-1, -1, 0, 0)),
+                            ((0, 1, 1, 1), (0, 1, 1, 1)),
                         )
-                        # An exact storage tie keeps the ordinary lower face,
-                        # but neither face can authorize a direct/shadow pair.
+                        self.assertEqual(
+                            observed["z_fallback"][slot],
+                            ((1, 0, (0, 1, -1)), (1, 0, (0, 1, -1))),
+                        )
+                        # A fallback seed proves geometry without adding consumers.
+                        # The exact storage tie still keeps the ordinary lower face.
                         self.assertEqual(observed["z_pair_offsets"][slot], -1)
+                        _, shadow_source_row, storage_base_row = observed["materialized"][slot]
+                        expected_seed_keys = tuple(
+                            (row[0] * self._GRID_NODES[1] + row[1])
+                            * self._GRID_NODES[2] + row[2]
+                            for row in (storage_base_row, shadow_source_row)
+                        )
                         self.assertEqual(
                             observed["z_pair_keys"][slot],
-                            ((-1, -1), (-1, -1)),
+                            (expected_seed_keys, expected_seed_keys),
                         )
                         self.assertEqual(
                             observed["z_prepare"][slot],
