@@ -1,0 +1,811 @@
+{
+  "status": "HOST_EXTRACTED_NATIVE_EQUIVALENCE_NOT_YET_VERIFIED",
+  "grid_nodes": [
+    4,
+    4,
+    4
+  ],
+  "original_grid_nodes": [
+    4,
+    96,
+    400
+  ],
+  "marker_capacity": 4,
+  "scope": "Focused operator fixture seeded at precompute_before; not a full restart or physical step.",
+  "velocity_policy": "u=(0,0,0.2+0.25*y+0.1*z); change only velocity values, serialize each source with its original weights.",
+  "mac_grid_policy": "velocity[...,2] evaluated at (cell_center_x,cell_center_y,cell_face_z[k]).",
+  "support_radius_xyz_m": [
+    0.018750000000000003,
+    0.00640625,
+    0.009375000000000001
+  ],
+  "accepted_seed_fields": [
+    "velocity_dirichlet_component_face_actual_sample_valid",
+    "velocity_dirichlet_component_face_actual_sample_point_m",
+    "velocity_dirichlet_component_face_actual_sample_velocity_mps",
+    "velocity_dirichlet_relocation_shadow_claim_valid",
+    "velocity_dirichlet_relocation_shadow_source_row",
+    "velocity_dirichlet_relocation_shadow_storage_base_row",
+    "velocity_dirichlet_relocation_shadow_sample_point_m",
+    "velocity_dirichlet_relocation_shadow_sample_velocity_mps",
+    "velocity_dirichlet_relocation_shadow_reconstruction_alpha",
+    "velocity_dirichlet_relocation_winner_source_linear_key"
+  ],
+  "coordinate_fields": [
+    "cell_face_x_m",
+    "cell_center_x_m",
+    "cell_width_x_m",
+    "cell_face_y_m",
+    "cell_center_y_m",
+    "cell_width_y_m",
+    "cell_face_z_m",
+    "cell_center_z_m",
+    "cell_width_z_m"
+  ],
+  "cases": [
+    {
+      "capture_id": "r15_invalid_first_pair_z342",
+      "original_face": [
+        0,
+        50,
+        342
+      ],
+      "local_face": [
+        0,
+        1,
+        2
+      ],
+      "origin": [
+        0,
+        49,
+        340
+      ],
+      "original_seed_slots": [
+        0,
+        1
+      ],
+      "expected_original_routed_slots": [
+        0,
+        1,
+        3
+      ],
+      "expected_consumed_slots": [
+        0,
+        3
+      ],
+      "expected_consumed_mask": 9,
+      "expected_prepare_count": 2,
+      "expected_cache_identity": [
+        5,
+        6,
+        0,
+        0
+      ],
+      "expected_fallback_pair": {
+        "boundary_point_m": [
+          0.0062500000931322575,
+          0.21000094711780548,
+          2.137500047683716
+        ],
+        "normal": [
+          0.0,
+          1.0,
+          -1.379437162540853e-05
+        ],
+        "nominal_probe_m": [
+          0.0062500000931322575,
+          0.22192707657814026,
+          2.137500047683716
+        ],
+        "boundary_target_mps": -1.3238209248811472e-05,
+        "clamp_support_ratio": 0.0,
+        "geometry_tolerance": 5.10944346387987e-07,
+        "admission_valid": 1,
+        "full_valid": 1,
+        "endpoint_clamped": 0,
+        "direct_face_owner_shadow": 0
+      },
+      "expected_common": {
+        "seed_mask": 5,
+        "consumed_mask": 9,
+        "actual_keys": [
+          5,
+          2
+        ],
+        "owner_indices": [
+          1,
+          2,
+          -1
+        ]
+      },
+      "original_cached_pair": {
+        "admission_valid": 0,
+        "full_valid": 0,
+        "first_author_linear_key": 20341,
+        "second_author_linear_key": 19941,
+        "first_author_kind": 0,
+        "second_author_kind": 1,
+        "direct_face_owner_shadow": 0,
+        "endpoint_clamped": 1,
+        "boundary_point_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "normal": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "nominal_probe_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "boundary_target_mps": -1.2899145076517016e-05,
+        "geometry_tolerance": 0.0,
+        "clamp_support_ratio": 0.296192467212677,
+        "owner_indices": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      "expected_fallback_valid": 1,
+      "expected_prior_adjacent_direct": 0,
+      "coordinates": {
+        "cell_face_x_m": [
+          0.0,
+          0.012500000186264515,
+          0.02500000037252903,
+          0.03750000149011612,
+          0.05000000074505806
+        ],
+        "cell_center_x_m": [
+          0.0062500000931322575,
+          0.01875000074505806,
+          0.03125,
+          0.04374999925494194
+        ],
+        "cell_width_x_m": [
+          0.012500000186264515,
+          0.012500000186264515,
+          0.012500000186264515,
+          0.012500000186264515
+        ],
+        "cell_face_y_m": [
+          0.20927083492279053,
+          0.2135416716337204,
+          0.21781249344348907,
+          0.22208333015441895,
+          0.22635416686534882
+        ],
+        "cell_center_y_m": [
+          0.21140624582767487,
+          0.21567708253860474,
+          0.2199479192495346,
+          0.22421875596046448
+        ],
+        "cell_width_y_m": [
+          0.0042708334513008595,
+          0.0042708334513008595,
+          0.0042708334513008595,
+          0.0042708334513008595
+        ],
+        "cell_face_z_m": [
+          2.125,
+          2.1312499046325684,
+          2.137500047683716,
+          2.143749952316284,
+          2.1500000953674316
+        ],
+        "cell_center_z_m": [
+          2.128124952316284,
+          2.1343750953674316,
+          2.140625,
+          2.1468749046325684
+        ],
+        "cell_width_z_m": [
+          0.0062500000931322575,
+          0.0062500000931322575,
+          0.0062500000931322575,
+          0.0062500000931322575
+        ]
+      },
+      "markers": {
+        "positions": [
+          [
+            0.02500000037252903,
+            0.2100008726119995,
+            2.1300930976867676
+          ],
+          [
+            0.02500000037252903,
+            0.2100009322166443,
+            2.1365745067596436
+          ],
+          [
+            0.02500000037252903,
+            0.21000102162361145,
+            2.1430559158325195
+          ],
+          [
+            0.02500000037252903,
+            0.21000109612941742,
+            2.1495373249053955
+          ]
+        ],
+        "normals": [
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ]
+        ],
+        "areas": [
+          0.00032407406251877546,
+          0.00032407406251877546,
+          0.00032407406251877546,
+          0.00032407406251877546
+        ],
+        "regions": [
+          101,
+          101,
+          101,
+          101
+        ],
+        "original_velocities": [
+          [
+            0.0,
+            0.0001235269446624443,
+            -9.298970326199196e-06
+          ],
+          [
+            0.0,
+            0.0001355380518361926,
+            -1.2899145076517016e-05
+          ],
+          [
+            0.0,
+            0.00014743585779797286,
+            -1.5273351891664788e-05
+          ],
+          [
+            0.0,
+            0.00015858170809224248,
+            -1.6357564163627103e-05
+          ]
+        ],
+        "original_ids": [
+          89,
+          90,
+          91,
+          92
+        ],
+        "edges": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            2,
+            3
+          ]
+        ],
+        "original_degrees": [
+          2,
+          2,
+          2,
+          2
+        ],
+        "compact_degrees": [
+          1,
+          2,
+          2,
+          1
+        ]
+      },
+      "sources": [
+        {
+          "slot": 0,
+          "kind": 0,
+          "original_source_row": [
+            0,
+            50,
+            341
+          ],
+          "local_original_source_row": [
+            0,
+            1,
+            1
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            1
+          ],
+          "local_geometry_base_row": [
+            0,
+            1,
+            1
+          ],
+          "active": 1,
+          "node_kind": 1,
+          "B": [
+            0.0062500000931322575,
+            0.2100009173154831,
+            2.1343750953674316
+          ],
+          "nominal_Q": [
+            0.0062500000931322575,
+            0.22192707657814026,
+            2.1343750953674316
+          ],
+          "normal": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "original_velocity": [
+            0.0,
+            0.00013146227865945548,
+            -1.1677485417749267e-05
+          ],
+          "original_indices": [
+            89,
+            90,
+            -1
+          ],
+          "weights": [
+            0.33933353424072266,
+            0.6606664657592773,
+            0.0
+          ],
+          "original_nearest": 90,
+          "local_projection_indices": [
+            0,
+            1,
+            -1
+          ],
+          "local_nearest_marker": 1,
+          "route_facts": {
+            "selected_offset": 1,
+            "ordinary_selector_reaches_face": true,
+            "pair_route_offset": 1
+          }
+        },
+        {
+          "slot": 1,
+          "kind": 1,
+          "original_source_row": [
+            0,
+            49,
+            341
+          ],
+          "local_original_source_row": [
+            0,
+            0,
+            1
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            1
+          ],
+          "local_geometry_base_row": [
+            0,
+            1,
+            1
+          ],
+          "active": 1,
+          "node_kind": 1,
+          "B": [
+            0.0062500000931322575,
+            0.2100009173154831,
+            2.1343750953674316
+          ],
+          "nominal_Q": [
+            0.0062500000931322575,
+            0.2176562398672104,
+            2.1343750953674316
+          ],
+          "normal": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "original_velocity": [
+            0.0,
+            0.00013146220589987934,
+            -1.1677463589876425e-05
+          ],
+          "original_indices": [
+            89,
+            90,
+            -1
+          ],
+          "weights": [
+            0.33933955430984497,
+            0.660660445690155,
+            0.0
+          ],
+          "original_nearest": 90,
+          "local_projection_indices": [
+            0,
+            1,
+            -1
+          ],
+          "local_nearest_marker": 1,
+          "route_facts": {
+            "selected_offset": 1,
+            "ordinary_selector_reaches_face": true,
+            "pair_route_offset": 1
+          }
+        },
+        {
+          "slot": 2,
+          "kind": 0,
+          "original_source_row": [
+            0,
+            50,
+            342
+          ],
+          "local_original_source_row": [
+            0,
+            1,
+            2
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            2
+          ],
+          "local_geometry_base_row": [
+            0,
+            1,
+            2
+          ],
+          "active": 1,
+          "node_kind": 1,
+          "B": [
+            0.0062500000931322575,
+            0.21000099182128906,
+            2.140625
+          ],
+          "nominal_Q": [
+            0.0062500000931322575,
+            0.22192707657814026,
+            2.140624761581421
+          ],
+          "normal": [
+            0.0,
+            1.0,
+            -1.999135383812245e-05
+          ],
+          "original_velocity": [
+            0.0,
+            0.00014297361485660076,
+            -1.4382911103894003e-05
+          ],
+          "original_indices": [
+            90,
+            91,
+            -1
+          ],
+          "weights": [
+            0.3750477433204651,
+            0.6249522566795349,
+            0.0
+          ],
+          "original_nearest": 91,
+          "local_projection_indices": [
+            1,
+            2,
+            -1
+          ],
+          "local_nearest_marker": 2,
+          "route_facts": {
+            "selected_offset": 1,
+            "ordinary_selector_reaches_face": false,
+            "pair_route_offset": -1
+          }
+        },
+        {
+          "slot": 3,
+          "kind": 1,
+          "original_source_row": [
+            0,
+            49,
+            342
+          ],
+          "local_original_source_row": [
+            0,
+            0,
+            2
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            2
+          ],
+          "local_geometry_base_row": [
+            0,
+            1,
+            2
+          ],
+          "active": 1,
+          "node_kind": 1,
+          "B": [
+            0.0062500000931322575,
+            0.21000099182128906,
+            2.140625
+          ],
+          "nominal_Q": [
+            0.0062500000931322575,
+            0.2176562398672104,
+            2.140625
+          ],
+          "normal": [
+            0.0,
+            0.9999999403953552,
+            0.0
+          ],
+          "original_velocity": [
+            0.0,
+            0.00014297349844127893,
+            -1.438288927602116e-05
+          ],
+          "original_indices": [
+            90,
+            91,
+            -1
+          ],
+          "weights": [
+            0.37505680322647095,
+            0.624943196773529,
+            0.0
+          ],
+          "original_nearest": 91,
+          "local_projection_indices": [
+            1,
+            2,
+            -1
+          ],
+          "local_nearest_marker": 2,
+          "route_facts": {
+            "selected_offset": 0,
+            "ordinary_selector_reaches_face": true,
+            "pair_route_offset": -1
+          }
+        }
+      ],
+      "accepted": [
+        {
+          "original_storage_row": [
+            0,
+            50,
+            341
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            1
+          ],
+          "fields": {
+            "velocity_dirichlet_component_face_actual_sample_valid": 1,
+            "velocity_dirichlet_component_face_actual_sample_point_m": [
+              0.0062500000931322575,
+              0.22192707657814026,
+              2.1343750953674316
+            ],
+            "velocity_dirichlet_component_face_actual_sample_velocity_mps": [
+              -1.770974563441996e-06,
+              5.41329245606903e-05,
+              -8.139399869833142e-05
+            ],
+            "velocity_dirichlet_relocation_shadow_claim_valid": 1,
+            "velocity_dirichlet_relocation_shadow_source_row": [
+              0,
+              49,
+              341
+            ],
+            "velocity_dirichlet_relocation_shadow_storage_base_row": [
+              0,
+              50,
+              341
+            ],
+            "velocity_dirichlet_relocation_shadow_sample_point_m": [
+              0.0062500000931322575,
+              0.2199479192495346,
+              2.1343750953674316
+            ],
+            "velocity_dirichlet_relocation_shadow_sample_velocity_mps": [
+              -4.7489618282270385e-07,
+              5.5367981985909864e-05,
+              -7.306563929887488e-05
+            ],
+            "velocity_dirichlet_relocation_shadow_reconstruction_alpha": 0.5706408023834229,
+            "velocity_dirichlet_relocation_winner_source_linear_key": 19941
+          }
+        },
+        {
+          "original_storage_row": [
+            0,
+            50,
+            342
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            2
+          ],
+          "fields": {
+            "velocity_dirichlet_component_face_actual_sample_valid": 1,
+            "velocity_dirichlet_component_face_actual_sample_point_m": [
+              0.0062500000931322575,
+              0.22192707657814026,
+              2.140624761581421
+            ],
+            "velocity_dirichlet_component_face_actual_sample_velocity_mps": [
+              3.280303644714877e-06,
+              4.983348844689317e-05,
+              -7.62009367463179e-05
+            ],
+            "velocity_dirichlet_relocation_shadow_claim_valid": 1,
+            "velocity_dirichlet_relocation_shadow_source_row": [
+              0,
+              49,
+              342
+            ],
+            "velocity_dirichlet_relocation_shadow_storage_base_row": [
+              0,
+              50,
+              342
+            ],
+            "velocity_dirichlet_relocation_shadow_sample_point_m": [
+              0.0062500000931322575,
+              0.2199479192495346,
+              2.140625
+            ],
+            "velocity_dirichlet_relocation_shadow_sample_velocity_mps": [
+              5.861114004801493e-06,
+              5.1491340855136514e-05,
+              -6.73603790346533e-05
+            ],
+            "velocity_dirichlet_relocation_shadow_reconstruction_alpha": 0.570637583732605,
+            "velocity_dirichlet_relocation_winner_source_linear_key": 19942
+          }
+        }
+      ],
+      "obstacle": [
+        [
+          [
+            1,
+            1,
+            1,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            1,
+            1,
+            1,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            1,
+            1,
+            1,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            1,
+            1,
+            1,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      ]
+    }
+  ],
+  "physical_steps_executed": 0,
+  "not_a_restart_checkpoint": true,
+  "source_precleanup_snapshot_sha256": "19a14e2d5a69a075b0e2b83ec5faada1b09f7d1999ff88611c7fa1a3c4d4572d",
+  "source_query_report_sha256": "3dca4de1635b05a77a488f939a7d638174ea2b8678f5d8e12524abaebe33651a"
+}

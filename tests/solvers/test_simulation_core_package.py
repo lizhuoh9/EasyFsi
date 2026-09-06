@@ -150,7 +150,7 @@ class SimulationCorePackageTests(unittest.TestCase):
         fluid_source = FLUID_SOLVER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn(
-            "_assemble_and_seal_hibm_velocity_component_face_ledger",
+            "_assemble_hibm_velocity_component_face_ledger",
             hibm_source,
         )
         self.assertIn(

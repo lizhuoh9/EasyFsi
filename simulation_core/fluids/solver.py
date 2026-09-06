@@ -1588,6 +1588,7 @@ class CartesianFluidSolver:
         # existing shadow fields.
         self.velocity_dirichlet_boundary_authority = "legacy"
         self.velocity_dirichlet_component_ledger_generation = 0
+        self._hibm_marker_compatibility_closure_pending = False
         self.velocity_dirichlet_component_ledger_sealed = False
         self._velocity_dirichlet_component_ledger_consumer_generations = {}
         self._velocity_dirichlet_component_ledger_consumer_capabilities = {}
@@ -5581,6 +5582,7 @@ class CartesianFluidSolver:
             ] = self.saved_external_velocity_boundary_z_face_value_mps[side, i, j]
 
     def save_state(self) -> None:
+        self._require_hibm_marker_compatibility_closure_complete()
         self._save_state_kernel()
         self._sst_saved_wall_distance_valid = bool(self._sst_wall_distance_valid)
         self._sst_saved_wall_distance_cache_key = self._sst_wall_distance_cache_key
@@ -5655,6 +5657,9 @@ class CartesianFluidSolver:
         self.last_hibm_row_cloud_orphan_cell_count = 0
         self.last_hibm_row_cloud_orphan_component_count = 0
         self._hibm_reachability_checksum = None
+        # Restore discards the intermediate canonical rows instead of saving
+        # their qualification; the next HIBM assembly must rebuild them.
+        self._hibm_marker_compatibility_closure_pending = False
 
     @ti.kernel
     def _clear_pressure_interface_matrix_terms_kernel(self):
@@ -5836,7 +5841,15 @@ class CartesianFluidSolver:
         )
         return missing, unexpected, mismatched, invalid_capabilities
 
+    def _require_hibm_marker_compatibility_closure_complete(self) -> None:
+        if bool(getattr(self, "_hibm_marker_compatibility_closure_pending", False)):
+            raise RuntimeError(
+                "HIBM marker compatibility closure is pending; "
+                "intermediate band geometry cannot be sealed or consumed"
+            )
+
     def seal_velocity_dirichlet_component_ledger(self) -> None:
+        self._require_hibm_marker_compatibility_closure_complete()
         authority = self._validated_velocity_dirichlet_boundary_authority(
             self.velocity_dirichlet_boundary_authority
         )
@@ -5867,6 +5880,7 @@ class CartesianFluidSolver:
         self.velocity_dirichlet_component_ledger_sealed = True
 
     def _require_velocity_dirichlet_component_ledger_sealed(self) -> None:
+        self._require_hibm_marker_compatibility_closure_complete()
         authority = self._validated_velocity_dirichlet_boundary_authority(
             self.velocity_dirichlet_boundary_authority
         )
@@ -6336,6 +6350,7 @@ class CartesianFluidSolver:
     def prepare_and_seal_velocity_dirichlet_component_ledger(self) -> None:
         """Prepare every canonical consumer and seal the current generation."""
 
+        self._require_hibm_marker_compatibility_closure_complete()
         self._require_canonical_velocity_dirichlet_boundary_authority()
         self._invalidate_hibm_pressure_reachability()
         self.prepare_velocity_dirichlet_component_ledger_apply()
@@ -6390,6 +6405,7 @@ class CartesianFluidSolver:
         self._invalidate_velocity_dirichlet_component_ledger()
         self._invalidate_hibm_pressure_reachability()
         self._clear_velocity_dirichlet_boundary_rows_kernel()
+        self._hibm_marker_compatibility_closure_pending = False
 
     @ti.kernel
     def _clear_force_kernel(self):

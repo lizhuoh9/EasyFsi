@@ -1,0 +1,732 @@
+{
+  "status": "HOST_EXTRACTED_NATIVE_EQUIVALENCE_NOT_YET_VERIFIED",
+  "grid_nodes": [
+    4,
+    4,
+    4
+  ],
+  "original_grid_nodes": [
+    4,
+    96,
+    400
+  ],
+  "marker_capacity": 4,
+  "scope": "Focused operator fixture seeded at precompute_before; not a full restart or physical step.",
+  "velocity_policy": "u=(0,0,0.2+0.25*y+0.1*z); change only velocity values, serialize each source with its original weights.",
+  "mac_grid_policy": "velocity[...,2] evaluated at (cell_center_x,cell_center_y,cell_face_z[k]).",
+  "support_radius_xyz_m": [
+    0.018750000000000003,
+    0.00640625,
+    0.009375000000000001
+  ],
+  "accepted_seed_fields": [
+    "velocity_dirichlet_component_face_actual_sample_valid",
+    "velocity_dirichlet_component_face_actual_sample_point_m",
+    "velocity_dirichlet_component_face_actual_sample_velocity_mps",
+    "velocity_dirichlet_relocation_shadow_claim_valid",
+    "velocity_dirichlet_relocation_shadow_source_row",
+    "velocity_dirichlet_relocation_shadow_storage_base_row",
+    "velocity_dirichlet_relocation_shadow_sample_point_m",
+    "velocity_dirichlet_relocation_shadow_sample_velocity_mps",
+    "velocity_dirichlet_relocation_shadow_reconstruction_alpha",
+    "velocity_dirichlet_relocation_winner_source_linear_key"
+  ],
+  "coordinate_fields": [
+    "cell_face_x_m",
+    "cell_center_x_m",
+    "cell_width_x_m",
+    "cell_face_y_m",
+    "cell_center_y_m",
+    "cell_width_y_m",
+    "cell_face_z_m",
+    "cell_center_z_m",
+    "cell_width_z_m"
+  ],
+  "cases": [
+    {
+      "capture_id": "r14_tilted_z305",
+      "original_face": [
+        0,
+        50,
+        305
+      ],
+      "local_face": [
+        0,
+        1,
+        2
+      ],
+      "origin": [
+        0,
+        49,
+        303
+      ],
+      "expected_original_routed_slots": [
+        0,
+        2
+      ],
+      "original_seed_slots": [
+        2,
+        3
+      ],
+      "expected_consumed_slots": [
+        0,
+        2,
+        3
+      ],
+      "expected_consumed_mask": 13,
+      "original_cached_pair": {
+        "admission_valid": 1,
+        "full_valid": 1,
+        "first_author_linear_key": 20305,
+        "second_author_linear_key": 19905,
+        "first_author_kind": 0,
+        "second_author_kind": 1,
+        "direct_face_owner_shadow": 0,
+        "endpoint_clamped": 0,
+        "boundary_point_m": [
+          0.0062500000931322575,
+          0.21000446379184723,
+          1.9062503576278687
+        ],
+        "normal": [
+          0.0,
+          1.0,
+          -6.30445865681395e-05
+        ],
+        "nominal_probe_m": [
+          0.0062500000931322575,
+          0.22192707657814026,
+          1.9062496423721313
+        ],
+        "boundary_target_mps": -4.1336112190037966e-05,
+        "geometry_tolerance": 4.5738755716229207e-07,
+        "clamp_support_ratio": 0.0,
+        "owner_indices": [
+          54,
+          55,
+          -1
+        ]
+      },
+      "original_prepared_common": {
+        "segment_projection_only_seam": 256,
+        "common_trace_seed_mask": 12,
+        "common_trace_proved_mask": 13,
+        "common_trace_consumed_mask": 13,
+        "claim_count": 3
+      },
+      "original_prepared_positive_actual_keys": [
+        20304,
+        20305
+      ],
+      "route_and_cache_faces": {
+        "original_splus_primary_route_face": [
+          0,
+          50,
+          306
+        ],
+        "local_splus_primary_route_face": [
+          0,
+          1,
+          3
+        ],
+        "original_cached_certified_face": [
+          0,
+          50,
+          305
+        ],
+        "local_cached_certified_face": [
+          0,
+          1,
+          2
+        ],
+        "splus_route_basis": "Materialized Splus selected offset at its storage row; not a direct canonical cached-B/Q selector query."
+      },
+      "coordinates": {
+        "cell_face_x_m": [
+          0.0,
+          0.012500000186264515,
+          0.02500000037252903,
+          0.03750000149011612,
+          0.05000000074505806
+        ],
+        "cell_center_x_m": [
+          0.0062500000931322575,
+          0.01875000074505806,
+          0.03125,
+          0.04374999925494194
+        ],
+        "cell_width_x_m": [
+          0.012500000186264515,
+          0.012500000186264515,
+          0.012500000186264515,
+          0.012500000186264515
+        ],
+        "cell_face_y_m": [
+          0.20927083492279053,
+          0.2135416716337204,
+          0.21781249344348907,
+          0.22208333015441895,
+          0.22635416686534882
+        ],
+        "cell_center_y_m": [
+          0.21140624582767487,
+          0.21567708253860474,
+          0.2199479192495346,
+          0.22421875596046448
+        ],
+        "cell_width_y_m": [
+          0.0042708334513008595,
+          0.0042708334513008595,
+          0.0042708334513008595,
+          0.0042708334513008595
+        ],
+        "cell_face_z_m": [
+          1.8937499523162842,
+          1.899999976158142,
+          1.90625,
+          1.912500023841858,
+          1.9187500476837158
+        ],
+        "cell_center_z_m": [
+          1.896875023841858,
+          1.9031250476837158,
+          1.9093749523162842,
+          1.915624976158142
+        ],
+        "cell_width_z_m": [
+          0.0062500000931322575,
+          0.0062500000931322575,
+          0.0062500000931322575,
+          0.0062500000931322575
+        ]
+      },
+      "markers": {
+        "positions": [
+          [
+            0.02500000037252903,
+            0.2100042700767517,
+            1.903241753578186
+          ],
+          [
+            0.02500000037252903,
+            0.21000467240810394,
+            1.909723162651062
+          ],
+          [
+            0.02500000037252903,
+            0.21000520884990692,
+            1.9162046909332275
+          ],
+          [
+            0.02500000037252903,
+            0.21000570058822632,
+            1.9226861000061035
+          ]
+        ],
+        "normals": [
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ]
+        ],
+        "areas": [
+          0.00032407406251877546,
+          0.00032407406251877546,
+          0.00032407406251877546,
+          0.00032407406251877546
+        ],
+        "regions": [
+          101,
+          101,
+          101,
+          101
+        ],
+        "original_velocities": [
+          [
+            0.0,
+            0.0008345626411028206,
+            -4.1535393393132836e-05
+          ],
+          [
+            0.0,
+            0.0009055434493348002,
+            -4.110608279006556e-05
+          ],
+          [
+            0.0,
+            0.0009995736181735992,
+            -4.206604717182927e-05
+          ],
+          [
+            0.0,
+            0.001092473859898746,
+            -4.4061162043362856e-05
+          ]
+        ],
+        "original_pressure_owner_indices": [
+          54,
+          55,
+          56,
+          57
+        ],
+        "original_ids": [
+          54,
+          55,
+          56,
+          57
+        ],
+        "edges": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            2,
+            3
+          ]
+        ],
+        "local_pressure_owner_indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      "sources": [
+        {
+          "slot": 0,
+          "kind": 0,
+          "original_source_row": [
+            0,
+            50,
+            304
+          ],
+          "local_original_source_row": [
+            0,
+            1,
+            1
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            1
+          ],
+          "active": 1,
+          "node_kind": 1,
+          "B": [
+            0.0062500000931322575,
+            0.2100042700767517,
+            1.903241753578186
+          ],
+          "nominal_Q": [
+            0.0062500000931322575,
+            0.22192709147930145,
+            1.9032410383224487
+          ],
+          "normal": [
+            0.0,
+            1.0,
+            -5.9990474255755544e-05
+          ],
+          "original_velocity": [
+            0.0,
+            0.0008345626411028206,
+            -4.1535393393132836e-05
+          ],
+          "original_indices": [
+            54,
+            55,
+            -1
+          ],
+          "weights": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "original_nearest": 54,
+          "local_projection_indices": [
+            0,
+            1,
+            -1
+          ],
+          "local_nearest_marker": 0,
+          "local_geometry_base_row": [
+            0,
+            1,
+            1
+          ],
+          "route_facts": {
+            "selected_offset": 1,
+            "selected_offset_equals_expected": true,
+            "direct_relocation_pair_offset": -1,
+            "pair_offset_equals_expected": false
+          }
+        },
+        {
+          "slot": 2,
+          "kind": 0,
+          "original_source_row": [
+            0,
+            50,
+            305
+          ],
+          "local_original_source_row": [
+            0,
+            1,
+            2
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            2
+          ],
+          "active": 1,
+          "node_kind": 1,
+          "B": [
+            0.0062500000931322575,
+            0.21000465750694275,
+            1.9093753099441528
+          ],
+          "nominal_Q": [
+            0.0062500000931322575,
+            0.22192707657814026,
+            1.9093745946884155
+          ],
+          "normal": [
+            0.0,
+            1.0,
+            -5.9992500609951094e-05
+          ],
+          "original_velocity": [
+            0.0,
+            0.0009017338743433356,
+            -4.112912210985087e-05
+          ],
+          "original_indices": [
+            54,
+            55,
+            -1
+          ],
+          "weights": [
+            0.05367010831832886,
+            0.9463298916816711,
+            0.0
+          ],
+          "original_nearest": 55,
+          "local_projection_indices": [
+            0,
+            1,
+            -1
+          ],
+          "local_nearest_marker": 1,
+          "local_geometry_base_row": [
+            0,
+            1,
+            2
+          ],
+          "route_facts": {
+            "selected_offset": 1,
+            "selected_offset_equals_expected": false,
+            "direct_relocation_pair_offset": 0,
+            "pair_offset_equals_expected": true
+          }
+        },
+        {
+          "slot": 3,
+          "kind": 1,
+          "original_source_row": [
+            0,
+            49,
+            305
+          ],
+          "local_original_source_row": [
+            0,
+            0,
+            2
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            2
+          ],
+          "active": 1,
+          "node_kind": 1,
+          "B": [
+            0.0062500000931322575,
+            0.21000465750694275,
+            1.9093750715255737
+          ],
+          "nominal_Q": [
+            0.0062500000931322575,
+            0.2176562398672104,
+            1.9093745946884155
+          ],
+          "normal": [
+            0.0,
+            1.0,
+            -6.231876614037901e-05
+          ],
+          "original_velocity": [
+            0.0,
+            0.00090173096396029,
+            -4.1129140299744904e-05
+          ],
+          "original_indices": [
+            54,
+            55,
+            -1
+          ],
+          "weights": [
+            0.053711116313934326,
+            0.9462888836860657,
+            0.0
+          ],
+          "original_nearest": 55,
+          "local_projection_indices": [
+            0,
+            1,
+            -1
+          ],
+          "local_nearest_marker": 1,
+          "local_geometry_base_row": [
+            0,
+            1,
+            2
+          ],
+          "route_facts": {
+            "selected_offset": 1,
+            "selected_offset_equals_expected": false,
+            "direct_relocation_pair_offset": -1,
+            "pair_offset_equals_expected": false
+          }
+        }
+      ],
+      "accepted": [
+        {
+          "original_storage_row": [
+            0,
+            50,
+            304
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            1
+          ],
+          "fields": {
+            "velocity_dirichlet_component_face_actual_sample_valid": 1,
+            "velocity_dirichlet_component_face_actual_sample_point_m": [
+              0.0062500000931322575,
+              0.22192709147930145,
+              1.9032410383224487
+            ],
+            "velocity_dirichlet_component_face_actual_sample_velocity_mps": [
+              8.364153472939506e-06,
+              -2.5383135380252497e-06,
+              -3.2906853448366746e-05
+            ],
+            "velocity_dirichlet_relocation_shadow_claim_valid": 0,
+            "velocity_dirichlet_relocation_shadow_source_row": [
+              -1,
+              -1,
+              -1
+            ],
+            "velocity_dirichlet_relocation_shadow_storage_base_row": [
+              -1,
+              -1,
+              -1
+            ],
+            "velocity_dirichlet_relocation_shadow_sample_point_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "velocity_dirichlet_relocation_shadow_sample_velocity_mps": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "velocity_dirichlet_relocation_shadow_reconstruction_alpha": 0.0,
+            "velocity_dirichlet_relocation_winner_source_linear_key": 9223372036854775807
+          }
+        },
+        {
+          "original_storage_row": [
+            0,
+            50,
+            305
+          ],
+          "local_storage_row": [
+            0,
+            1,
+            2
+          ],
+          "fields": {
+            "velocity_dirichlet_component_face_actual_sample_valid": 1,
+            "velocity_dirichlet_component_face_actual_sample_point_m": [
+              0.0062500000931322575,
+              0.22192707657814026,
+              1.9093745946884155
+            ],
+            "velocity_dirichlet_component_face_actual_sample_velocity_mps": [
+              5.216394583840156e-06,
+              1.0407514309918042e-05,
+              -2.077407407341525e-05
+            ],
+            "velocity_dirichlet_relocation_shadow_claim_valid": 1,
+            "velocity_dirichlet_relocation_shadow_source_row": [
+              0,
+              49,
+              305
+            ],
+            "velocity_dirichlet_relocation_shadow_storage_base_row": [
+              0,
+              50,
+              305
+            ],
+            "velocity_dirichlet_relocation_shadow_sample_point_m": [
+              0.0062500000931322575,
+              0.21994774043560028,
+              1.909374475479126
+            ],
+            "velocity_dirichlet_relocation_shadow_sample_velocity_mps": [
+              6.3815195971983485e-06,
+              8.747842912271153e-06,
+              1.3829371710016858e-05
+            ],
+            "velocity_dirichlet_relocation_shadow_reconstruction_alpha": 0.5704895257949829,
+            "velocity_dirichlet_relocation_winner_source_linear_key": 19905
+          }
+        }
+      ],
+      "obstacle": [
+        [
+          [
+            0,
+            0,
+            1,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            0,
+            0,
+            1,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            0,
+            0,
+            1,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            0,
+            0,
+            1,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      ]
+    }
+  ],
+  "original_full_replay_status": "EXPECTED_FROZEN_REJECTION",
+  "original_process_sha256": "7abb3882a42e5c742d190d6db4396ba78bf3200118ae899321432a222384a2fe"
+}

@@ -1,5 +1,227 @@
 # Turek–Hron FSI Validation Report
 
+## Explicit continuation and WIP publication, 2026-09-06
+
+The user resumed work after the archived quota stop, explicitly withdrew the
+10% stop threshold, and authorized committing and pushing all current project
+work to GitHub before quota exhaustion. The earlier pause below is historical.
+No quota-reset credit has been used. The current core is still the reviewed
+`26f37eb1` candidate; its 25-test native verification and continuous physical
+validation remain incomplete at this source checkpoint.
+
+The next focused run will use a fresh output label and a manifest that records
+this commit's actual execution identity while preserving source and input
+hashes. The old A50 baseline and all original captured identities remain intact.
+The full-replay geometry-binding review correction is being prepared externally.
+
+Publication destination: [R15 WIP source and complete diagnostic evidence](https://github.com/lizhuoh9/EasyFsi/releases/tag/r15-wip-20260906-1330).
+The 141,016,737-byte archived snapshot predates this explicit continuation;
+its SHA256 is `671728300c42b7e0a0d50a9169d39ab50854b66ef53d2f9d808ac2c2fa15b5c7`.
+It preserves the stopped WIP and original evidence without claiming a native,
+continuous, component or formal benchmark pass.
+
+## Earlier R15 quota-stop snapshot, 2026-09-06
+
+The campaign is `PAUSED_AT_USER_QUOTA_BOUNDARY`. The root observed 10% main
+quota remaining and stopped all owned test/numerical work under the user's
+preserved stop/archive rule. No reset credit was redeemed; both existing credits
+remain untouched. Resume requires an explicit user continuation.
+
+The reviewed candidate is applied at core `26f37eb1`, with focused test mixin
+`2423bdc6` and new R15 fixture `c4141569`. Its native verification is incomplete.
+The frozen 25-test strict-CUDA/f32 regression was interrupted during first
+compilation, before any case file or terminal test report was completed.
+Owner PID/PGID400 received SIGINT and then SIGTERM; exit status was -15.
+Exec32892 and the stop helper are closed. This interruption is an administrative
+quota stop, not a numerical failure or a regression pass. No owned GPU job remains.
+
+The original A50 R15 failure was reproduced at exactly four faces with unchanged
+inputs and source: (x=0..3,y=50,z=342), axis2. Full readback verified18x153 native
+snapshot arrays,207 original input arrays,193 source files, all eight atomic
+publication fields and39 cleanup fields. The frozen replay advances no time.
+Its readback report is `039f3270a52e408e56be740ab05e795dbcd7cc803fd493c37abac1062c9dc5c0`.
+
+The isolated R04 native candidate query identified the cause of that rejection:
+the first ordinary pair lacks a valid physical geometry proof, while five
+alternative pairs among the four materialized candidates agree on one owner
+and physical B/Q. The repair searches the candidate pairs only when the old
+admission-and-full-valid cache is unavailable. It requires a unique consistent
+trace, a seed containing a direct member and proof of every actually consumed
+member. Ambiguous candidates retain rejection; original valid caches and the
+zero/one-consumer behavior are preserved by contract. Two new temporary i32
+fields participate in native cleanup, bringing the cleanup inventory to41.
+
+The unchanged A50 consumer baseline completed2/2 strict-CUDA tests, with
+1189.862763533 s native time and1230.101830959 s owned-process time.
+Its16 exported canonical arrays were decoded and hash-checked, and source193,
+host and runtime identities remained unchanged. Report:
+`239766dd9e669da86573ac5749c8511dc9b07117e582e9e40354dd5258405839`.
+This is the old-source comparison baseline; it does not validate the candidate.
+Independent Astra/max reviews accepted the candidate core and focused tests
+for controlled native validation; final launch guards9/9 and Ruff F/E9 passed.
+
+The R12/R13/R14/R15 full-replay package completed host preparation only:
+828 original arrays,1377 old-success snapshot arrays and983 immutable files
+were verified. Its overall independent review is incomplete. A confirmed gap
+remains in `success_adapter.py:115`: bind the replay's cached B/Q and related
+geometry/target contracts to the existing frozen R04 query. Stable array hashes
+alone do not prove correct geometry. The four native full replays were not started.
+
+The latest physical result remains A50 R15: five accepted steps to0.025 s,
+then a step6 rejection at trial time0.030 s. Accepted fluid and solid time were
+each audited as0.025 s. Continuous success after this candidate, independent
+complete rollback equality, the source-current coarse S0 operator check,
+component qualification and formal FSI1/FSI2/FSI3 acceptance remain unverified.
+
+After explicit resume, verify source/host/process/quota state; use a fresh
+`native_green_r02` output and owner label for the unchanged25 focused contracts.
+Do not reuse occupied `native_green_r01` or overwrite its manifest/evidence.
+Then close the query-binding review gap, refresh package pins, run the four
+frozen controls serially, and execute a fresh complete physical diagnostic.
+Rebuild the original coarse operator from the R04 pose with4x48x288, auto112,
+solid100,dt0.005,nine post-solid passes and external time0.040 s; keep original
+targets and the1e-6 gate. Recompute source manifests before component/formal
+qualification. Reduced field dumps and failed prefixes are not restart states.
+No new repair commit or push was made.
+
+**Earlier A50 repair state (historical evidence):**
+
+The common-trace face-route repair is applied at core `a50b67f0`.
+All 14 focused contracts pass on strict CUDA/f32 in 1231.187055591 s
+(`PASS_FOURTEEN_FOCUSED_ROUTE_CONTRACTS`), with no skips, errors or audit
+failures and unchanged source/runtime identity. This includes the new tilted
+R14 D/S affine regression and the previous 13 contracts.
+
+The preceding from-zero coupled run was R14 on the earlier `d8a14f64` core:
+five accepted steps to t = 0.025 s, then step 6 at trial t = 0.030 s rejects
+during assembly 83 with 56 common-trace reconstruction conflicts. The frozen
+failure replay records 18 native stages of 153 arrays; 76 common cohorts are
+prepared and all 56 newly rejected lanes have D/S cached seeds. An isolated
+native query at face (0, 50, 305), axis 2, finds scalar primary face 306 but
+certified pair face 305. The repair retains the existing pair route for every
+admitted common trace while preserving cached B/N/Q, membership checks,
+numerical gates and atomic publication.
+
+Full-domain R12/R13/R14 controls on `a50b67f0` now pass their required
+native results and complete artifact readback. Each records 21 snapshots of
+153 arrays (3,213 readbacks), verifies 193 source files and 747 pinned files,
+preserves 32 non-output inputs, audits all eight outputs and clears 39 temporary
+fields. R12 retains its endpoint route with no common mode and eight byte-exact
+outputs. R13 preserves all 12 common cohorts and 15 cache payloads. R14 preserves
+all 76 common cohorts, all 15 full-domain cache arrays, prepared certificates and
+positive keys, with zero conflicts in the 56 formerly rejected lanes.
+
+Fresh R15 on `a50b67f0` exited 1 after five accepted steps to t = 0.025 s.
+It requested eight steps from zero with fixed 112 markers, 4x96x400, solid200
+and dt = 0.005 s. Step 6 at trial t = 0.030 s failed during assembly 99 with
+four `prepare_pair_arbitration` conflicts; the first is face (0, 50, 342),
+axis 2, path 0, claim_count 2. The 153-array precleanup snapshot and 207-field
+assembly-input manifest are complete with no capture errors. Source193 and
+the 25 execution dependencies match before and after the run.
+
+The host-only `accepted_time_audit_r02` passes its audit with outcome
+`FAILED_WITH_VALIDATED_ACCEPTED_PREFIX`: accepted fluid and solid time each
+equals 0.025 s, and `fresh8_diagnostic_passed=false`. Five candidate/native
+records and their CSV fields validate. The failure reporter records restored
+physical state; complete independent post-rollback equality remains outstanding.
+At that A50 checkpoint the R15 prepare-pair root cause was unresolved. The
+later candidate diagnosis and stopped verification are recorded above. These
+historical zero-time controls do not establish current coupled or formal acceptance.
+
+The original coarse S0 obstruction has no recorded source-current recheck in
+the inspected R04/frozen-coarse and later band/common evidence. A zero-time
+current-operator check still needs the R04 pose, 4x48x288, automatic 112 markers,
+solid100 and dt = 0.005 s, with the current post-solid budget of nine band passes
+and external-boundary time 0.040 s. Rebuild geometry and topology from current
+source; the old coefficients and obstruction certificate remain historical.
+That reconstructed-pose check is not a complete physical restart or an S0 pass.
+Source audit `source_identity_boundaries_r03.json` records component15
+`f4a5891b` and formal206 `3693bf85`; all 10 historical component manifests
+still need current-source qualification.
+
+**Prior common-cohort repair at core `d8a14f64` (historical evidence):**
+
+The earlier reviewed common-cohort repair was applied at core `d8a14f64`.
+Three unchanged compact fixtures covering r13 z305/z306/z347 now pass strict
+CUDA/f32 assembly and the existing affine known-solution check. The original
+core rejected all three in558.449204s; the candidate passes all three in
+1133.775381s, including cold compilation. The highest affine error is
+1.49011612e-8m/s. This comparison measures correctness, not acceleration.
+All193 source hashes and full runtime identity stay fixed within each run;
+only core.py differs between runs. Fixture bytes, cached geometry/routes and
+original/shadow sample payload observations are identical.
+
+The fix separates cached geometry seeds from actual consumed authors. A new
+path can replace an existing rejection only after every actual member and
+the cached seeds pass current source/storage, registered-owner and geometric
+support checks. It preserves the cached B/N/Q, canonical sample formula and
+single atomic publication. Failed proof retains the original rejection
+events; no global health counter is reset to admit a cohort. The new temporary
+owner/mask fields are included in native commit and error cleanup.
+
+The integrated strict-CUDA suite passes all 10 new and 3 existing contracts
+in 792.493602486 s. Seven negative cases preserve all eight canonical fields
+byte-exact before fixture reset and inspect native error cleanup. The targeted
+bad additional source reaches actual arbitration, separately from the six
+global-invalid-input controls.
+
+Both full-domain frozen replays pass. R13 completes all 12 original conflict
+lanes with common mode256 and zero global conflicts. All14 old cache payloads
+match the immutable original precompute; all15 including specified owners
+remain fixed through both precommits. R12 retains its endpoint route with no
+common mode and all eight final arrays byte-exact to the old native success.
+Both restore40 real inputs, preserve32 non-output inputs, satisfy complete C8
+publication and clear39 temporary fields. Six native snapshots of153 arrays
+per run and final source/runtime identities pass artifact checks.
+Owned times1198.438568592/39.114366293s include different compilation/cache
+conditions; they do not establish acceleration.
+
+At that earlier checkpoint, original ad7b570e r13 had five accepted steps
+to t=.025s, then step6 rejected at t=.030s. Accepted fluid and solid time each
+equaled .025s; complete independent physical post-rollback equality was still
+outstanding. That evidence led to the fresh fixed112,4x96x400,solid200,eight-step
+R14 diagnostic, whose later failure is recorded above.
+These zero-time controls are not a coupled, component or formal FSI1/2/3 pass.
+The112 physical marker obligations, thresholds and formal order are unchanged.
+
+**Prior band-ordering evidence:** the reviewed production band-ordering correction
+is applied at core `c989f6ba` / fluid `a1a3324b`. All 45 distinct host checks pass.
+The strict-CUDA production-helper frozen-pose check r03 completed in 58.056119 s
+with `PASS_PRODUCTION_ORDERING_FROZEN_POSE`; it advanced zero physical time.
+Coupled and benchmark acceptance remain pending.
+
+The preceding r02 reconstructed ordering control passed on unchanged old source
+`cda0eca0` / `fe841f4c`, preserving its strict shared-field RED comparison and old
+hard-system lower bound `2.184912935710554e-6 m/s`. Both frozen-pose checks added
+92 excluded cells and then zero, reaching 2536 from 2444. The final 336 rows
+include 290 hard-only rows and 46 with free support; the former witness rows
+254/257 gain legal free support, so this does not solve the old H-only system.
+Native final H/global residuals are `8.992282687358966e-7` /
+`4.3388867197791114e-5 m/s`, below the unchanged `1e-6` / `1e-4` gates.
+All 112 raw positions and targets remain unchanged. The checks reconstruct a
+private owner from an incomplete capture; intermediate marker health is not
+qualified and no physical step, component gate or formal benchmark passed.
+
+The from-zero diagnostic r11 accepted four steps to `t=0.020 s`, then
+rejected step 5 with two geometry `prepare_pair_arbitration` conflicts. Its first
+reported face is `(1,50,304)`, axis 0. Revalidation with the original candidate
+and native-record validators passes for all four accepted records: all 356 CSV
+values match exactly, and all 4 x 34 native fields match in dtype, shape and byte
+hash. Fluid and solid each consume `.005 s` per step and `.020 s` in total, with
+zero remaining time; each accepted step has one trial and no rejection. All 193
+recorded solver source hashes are unchanged before and after the run.
+
+Runtime reports restored fluid, solid, marker interface and marker pressure
+gradient state, while derived search/boundary state requires rebuilding.
+Capture errors are empty; a full post-rollback state comparison remains pending.
+The earlier r09 result remains one accepted step to `t=0.005 s` before its
+certified step-2 failure; its candidate/native-record and fluid/solid time audits
+passed.
+Earlier geometry/provenance and zero-free certificate corrections passed 16 and
+19 focused strict-CUDA tests respectively. [The trace-space audit](validation/TUREK_HRON_TRACE_SPACE_AUDIT_2026-09-05.md)
+records the exact source, control and implementation boundaries. Source-matched
+component requalification and formal FSI1/2/3 acceptance remain pending.
+
 Base results as of 2026-07-07; R26A status updated through 2026-09-05. Solver:
 HIBM-MPM (sharp immersed boundary + Material Point Method), Python + Taichi,
 CUDA. For R26A artifacts at and after `293dc69`, the active interpreter must
@@ -9,10 +231,13 @@ mismatch is `BLOCKED_ENVIRONMENT`. Case: `cases/turek_hron_fsi.py`.
 <!-- BEGIN R26A ROBUSTNESS 2026-09-05 -->
 ## R26A robustness preparation, 2026-09-05
 
-The current source changes require a fresh component chain before formal S0.
-The earlier f2320f5 chain remains historical evidence for its own source; the
-case and marker-constraint operator have now changed. No new component pass or
-FSI1/2/3 benchmark pass is claimed by the focused checks below.
+All ten component stages passed at frozen HEAD5dcba96. Fresh formal S0 then
+failed after seven accepted steps: the original hard-target trace cannot meet
+the strict1e-6 gate, as independently certified. Fixed112 refinement remains
+under investigation. See [the trace-space audit](validation/TUREK_HRON_TRACE_SPACE_AUDIT_2026-09-05.md) for complete
+current evidence. Subsequent component-identity changes require requalification;
+no formal FSI1/2/3 benchmark pass exists. The focused checks below describe the
+reviewed5dcba96 implementation scope.
 
 - The case validates finite physical inputs and the declared material CFL
   before allocating simulation state. L1 FSI1 at dt=0.005 uses 200 solid
@@ -59,9 +284,10 @@ The physical/CFL guard and candidate-rollback tests also passed during their
 implementation (9 and 3 tests respectively). Independent Astra/max review
 returned ACCEPTED with no remaining P0-P3 findings in Q/P/f32, F/FH, stage
 contracts, formal runner and acceptance. This accepts the reviewed code and
-focused tests only. It does not establish a full-suite, component-chain or
-formal FSI1/2/3 numerical pass. The complete source-matched component chain
-must now be regenerated once, followed by the registered formal sequence.
+focused tests only. Component recertification subsequently passed for that
+frozen source, while formal S0 exposed the unresolved trace-space defect. That
+trajectory result governs the current numerical status; a review verdict does
+not establish a formal FSI1/2/3 pass.
 
 <!-- END R26A ROBUSTNESS 2026-09-05 -->
 

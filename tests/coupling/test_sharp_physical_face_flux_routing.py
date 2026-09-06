@@ -38,7 +38,7 @@ def test_generic_sharp_assembly_forwards_its_projection_topology_to_predictor(
     )
     boundary = SimpleNamespace(build_from_search_device_fields=Mock(return_value=None))
     with patch.object(
-        core, "_assemble_and_seal_hibm_velocity_component_face_ledger", return_value={}
+        core, "_assemble_hibm_velocity_component_face_ledger", return_value={}
     ), pytest.raises(_PredictorReached):
         core.assemble_hibm_mpm_sharp_fluid_to_mpm_loads(
             fluid=fluid,

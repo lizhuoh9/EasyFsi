@@ -855,7 +855,7 @@ class HibmMpmSurfaceMarkerTests(unittest.TestCase):
                     source,
                 )
                 self.assertIn(
-                    "_assemble_and_seal_hibm_velocity_component_face_ledger",
+                    "_assemble_hibm_velocity_component_face_ledger",
                     source,
                 )
 

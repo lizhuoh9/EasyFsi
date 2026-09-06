@@ -1,5 +1,25 @@
 # Simulation Core Module Map
 
+## Explicit continuation and WIP publication, 2026-09-06
+
+The user resumed work after the archived quota stop, explicitly withdrew the
+10% stop threshold, and authorized committing and pushing all current project
+work to GitHub before quota exhaustion. The earlier pause below is historical.
+No quota-reset credit has been used. The current core is still the reviewed
+`26f37eb1` candidate; its 25-test native verification and continuous physical
+validation remain incomplete at this source checkpoint.
+
+The next focused run will use a fresh output label and a manifest that records
+this commit's actual execution identity while preserving source and input
+hashes. The old A50 baseline and all original captured identities remain intact.
+The full-replay geometry-binding review correction is being prepared externally.
+
+Publication destination: [R15 WIP source and complete diagnostic evidence](https://github.com/lizhuoh9/EasyFsi/releases/tag/r15-wip-20260906-1330).
+The 141,016,737-byte archived snapshot predates this explicit continuation;
+its SHA256 is `671728300c42b7e0a0d50a9169d39ab50854b66ef53d2f9d808ac2c2fa15b5c7`.
+It preserves the stopped WIP and original evidence without claiming a native,
+continuous, component or formal benchmark pass.
+
 This repository treats `simulation_core/` as the reusable solver core. Root-level
 Python files are intentionally limited to `simulation_core/__init__.py`; real
 implementation belongs in the functional packages below.
@@ -51,11 +71,99 @@ projection. The generic `hibm_mpm/core.py` sharp-load assembly also passes its
 existing outlet/inlet settings to both predictor and projection. Standalone
 throughflow callers must explicitly declare the openings they require.
 
-Generic sharp-HIBM band and air sweeps invalidate their canonical ledger even
-when the returned cell increment is zero. Rebuild/prepare/seal before testing an
-early exit or invoking a reachability reader. Positive overflow/tiny cleanup
-also reseals before its next reader, and nested helpers publish the report from
-that same generation. No reader performs lazy repair or relaxes the sealed guard.
+Generic sharp-HIBM band sweeps invalidate their canonical ledger even when the
+returned cell increment is zero. `_stabilize_hibm_solid_band` uses the existing
+assembler with `enable_marker_compatibility_closure=False` to rebuild geometric
+claims and refresh the raw pressure-hard mask while topology changes. Only a
+zero-increment sweep permits full marker closure and prepare/seal; a positive
+last increment fails closed. Initial and air-conversion loops retain cap 8;
+the post-solid path retains its first sweep plus eight more (cap 9), with cap 8
+for the existing conditional disconnected path.
+
+`_hibm_marker_compatibility_closure_pending` blocks full preparation, sealing,
+public consumers and trial `save_state`. Invalidation preserves the pending
+state; successful full row clearing or a complete trial restore releases it.
+Intermediate geometry-only ledgers remain unsealed and carry no marker-health
+qualification. Air conversion with zero added cells still rebuilds/closes before
+its next reader. Positive overflow/tiny cleanup also reseals before its next
+reader, and nested helpers publish that generation's report. No reader performs
+lazy repair or relaxes the sealed guard. See the
+[trace-space audit](validation/TUREK_HRON_TRACE_SPACE_AUDIT_2026-09-05.md) for the
+bounded frozen-pose evidence and the outstanding coupled validation. The
+common-face route repair at `a50b67f0` passes all 14 strict-CUDA contracts and
+repaired R12/R13/R14 full-domain controls with complete artifact readback.
+Fresh R15 exited 1 after five accepted steps to t = 0.025 s; step 6, assembly 99
+reports four `prepare_pair_arbitration` conflicts, first face (0, 50, 342),
+axis 2, path 0, claim_count 2. The complete 153-array precleanup capture and
+207-field input manifest support diagnosis. The host terminal audit passes as
+`FAILED_WITH_VALIDATED_ACCEPTED_PREFIX`, with fluid/solid time each 0.025 s
+and fresh8 false; independent full physical rollback equality is unverified.
+The original coarse S0 obstruction still needs a source-current zero-time
+operator check at the R04 pose: 4x48x288, automatic112, solid100, nine post-solid
+passes and external-boundary time 0.040 s, using rebuilt current topology.
+Historical coefficient certificates and fine-grid control passes do not
+qualify that coarse check or formal coupled acceptance.
+
+## Canonical Component-Face Cohorts
+
+`coupling/hibm_mpm/core.py` owns the interpolated segment-pair cache and
+the actual source-consumption contract. `_precompute_canonical_component_face_common_trace_members_kernel`
+proves original direct/shadow sources, materialized storage payloads, registered
+unique finite owner and support against the cached trace. Seed and proved masks
+are eligibility data. Native prepare tracks actual consumption locally and
+publishes the consumed mask only for an admitted common cohort.
+
+Prepare can select common mode256 only for an existing rejection whose actual
+members differ from the cached seeds and whose entire consumed mask is proved.
+Region/normal, count and identity checks remain mandatory. An unsuccessful
+proof publishes the original pending health events; it never clears global
+errors. Existing successful and inactive-axis routes retain their contracts.
+
+`_reconstruct_canonical_component_face_common_trace` rechecks the exact mode,
+membership and cache linkage, then consumes the existing cached B/N/Q and
+shared canonical trace/target publication helpers. Every admitted common trace
+requests the existing pair route at its certified physical face; it does not
+switch back to a scalar primary face according to D/D or D/S seed kinds.
+The shared route, alpha, geometry and finite-target checks remain mandatory.
+Unique-owner indices and
+the three masks are transaction state cleared by native commit and error
+cleanup. Focused tests distinguish a valid unused geometry seed from actual
+membership and check the eight canonical fields before any fixture reset.
+The mixin is `tests/solvers/_hibm_common_trace_cohort_contracts.py`, integrated
+by `tests/solvers/test_hibm_component_face_geometry.py`; its immutable geometry
+fixture is `tests/solvers/fixtures/turek_hron_common_trace_cohorts.json`.
+The additional immutable
+`tests/solvers/fixtures/turek_hron_common_trace_r14_tilted.json` retains R14's
+tilted D/S geometry at original face(0,50,305), axis2. The same mixin's
+`test_systemic_r14_tilted_ds_common_cohort_reconstructs_affine_velocity`
+checks actual native reconstruction against an affine known solution.
+Its compact RED/GREEN result is separate from full-domain and coupled evidence.
+
+## Candidate-pair fallback for the stopped R15 WIP
+
+`_precompute_canonical_component_face_fallback_trace_geometry_kernel` in
+`simulation_core/coupling/hibm_mpm/core.py` enumerates the available pairs among
+up to four complete candidates when the old admission/full-valid cache is absent.
+It keeps valid legacy caches, including C0, and requires one consistent unique
+owner/B/Q with a direct-containing seed. Actual consumers still need registered
+source and cached-trace membership proof; at least one actual direct member is
+required. A fallback seed may equal the actual consumed mask. The original shape
+rejection is forced only for fallback groups with at least two claims, preserving
+zero/one-consumer behavior. Ambiguity and invalid membership retain rejection.
+
+New temporary fields `velocity_dirichlet_component_face_common_trace_fallback_valid`
+and `velocity_dirichlet_component_face_common_trace_fallback_prior_adjacent_direct`
+are scalar i32 component-face fields. Both use zero initialization and native
+commit/error cleanup; full replay inventory is155 arrays and41 cleanup fields.
+The existing common-cohort mixin now has21 tests, with four legacy controls in the
+external25-test gate, and uses `turek_hron_common_trace_r15_fallback.json`.
+
+Current core26f37eb1 is applied WIP. Its25-test strict-CUDA gate was interrupted at
+the user's10% quota boundary during first compilation, with zero completed tests.
+Only the unchanged A50 consumer baseline2/2 has completed. Full R12-R15 replay
+preparation is host-only and needs its independent query-binding review amendment.
+See the existing trace-repair handoff for the exact source hashes, stopped process
+and resume order. No continuous or formal benchmark pass is claimed.
 
 ## Removed Legacy Entry Points
 

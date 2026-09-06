@@ -5,7 +5,9 @@ import csv
 import hashlib
 import json
 import math
+import sys
 import tempfile
+import traceback
 from dataclasses import asdict, dataclass, replace
 from numbers import Integral
 from pathlib import Path
@@ -1545,8 +1547,16 @@ class _TurekHronFsiRuntime:
         self._gradient_rollback_base: np.ndarray | None = None
         self._step_transaction_ready = False
         self._trial_index = 0
+        self._failure_context: FsiStepContext | None = None
+        self._failure_phase = "not_started"
+        self._rollback_outcome = "not_attempted"
+        self._rollback_failure: str | None = None
 
     def begin_step(self, context: FsiStepContext) -> np.ndarray:
+        self._failure_context = context
+        self._failure_phase = "begin_step"
+        self._rollback_outcome = "not_attempted"
+        self._rollback_failure = None
         self._clear_step_bases()
         self.fluid.save_state()
         self.solid.save_state()
@@ -1603,6 +1613,7 @@ class _TurekHronFsiRuntime:
         context: FsiStepContext,
         marker_velocity_guess_mps: np.ndarray,
     ) -> FsiTrialResult:
+        self._failure_phase = "evaluate_trial"
         self._restore_step_base(context, marker_velocity_guess_mps)
         trial_index = self._trial_index
         trial_token = (
@@ -1664,6 +1675,7 @@ class _TurekHronFsiRuntime:
         trial: FsiTrialResult,
         coupling: FsiCouplingReport,
     ) -> dict[str, Any]:
+        self._failure_phase = "commit_step"
         row = dict(
             self.commit_case_step(
                 context,
@@ -1679,16 +1691,19 @@ class _TurekHronFsiRuntime:
         context: FsiStepContext,
         committed_row: dict[str, Any],
     ) -> None:
+        self._failure_phase = "publish_step"
         if self.publish_case_step is not None:
             self.publish_case_step(context, committed_row)
 
     def rollback_step(self, context: FsiStepContext) -> None:
         del context
+        self._rollback_outcome = "attempted"
         if (
             not self._step_transaction_ready
             or self._marker_rollback_base is None
             or self._gradient_rollback_base is None
         ):
+            self._rollback_outcome = "no_complete_snapshot"
             self._clear_step_bases()
             return
         try:
@@ -1702,6 +1717,11 @@ class _TurekHronFsiRuntime:
                 self.markers,
                 self._gradient_rollback_base,
             )
+            self._rollback_outcome = "restored"
+        except Exception as error:
+            self._rollback_outcome = "failed"
+            self._rollback_failure = f"{type(error).__name__}:{error}"
+            raise
         finally:
             self._clear_step_bases()
 
@@ -1713,6 +1733,7 @@ class _TurekHronFsiRuntime:
         self._step_transaction_ready = False
 
     def finalize_run(self) -> dict[str, Any]:
+        self._failure_phase = "finalize_run"
         return dict(self.finalize_case_run())
 
 
@@ -3481,6 +3502,7 @@ def _persist_fsi_coupling_failure_evidence(
     artifact_payload = {
         **failure_payload,
         "completed_history_rows_flushed": int(updated_flushed_index),
+        **({"persistence_errors": list(persistence_errors)} if persistence_errors else {}),
     }
     if output_dir is not None:
         try:
@@ -3496,6 +3518,48 @@ def _persist_fsi_coupling_failure_evidence(
     )
 
 
+def _rewrite_history_csv_atomically(
+    history_path: Path,
+    history: list[dict[str, Any]],
+    *,
+    history_writer: Any | None = None,
+) -> None:
+    """Replace failure-time history only after a complete temporary write.
+
+    The ordinary periodic path remains append-only for progress visibility.
+    Generic runtime recovery deliberately does not trust its cursor: a later
+    snapshot/publish failure can occur after the append has reached disk but
+    before the caller advances ``last_flushed_index``.  Rewriting every
+    accepted row through a sibling temporary file gives recovery one atomic
+    publication point and leaves the old destination untouched on a writer or
+    replacement failure.
+    """
+
+    if history_writer is None:
+        history_writer = _flush_history_csv
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=history_path.parent,
+            prefix=history_path.name + ".",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+        history_writer(
+            temporary_path,
+            history,
+            header_written=False,
+        )
+        temporary_path.replace(history_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
 def _post_rollback_evidence(error: BaseException) -> dict[str, Any]:
     rollback_failure = error.__cause__
     return {
@@ -3506,6 +3570,135 @@ def _post_rollback_evidence(error: BaseException) -> dict[str, Any]:
             else f"{type(rollback_failure).__name__}:{rollback_failure}"
         ),
     }
+
+
+def _runtime_failure_payload(
+    error: Exception,
+    *,
+    runtime: _TurekHronFsiRuntime,
+    preset: str,
+    history: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Describe observed runtime failure without synthesizing a coupling report."""
+    context = runtime._failure_context
+    phase = runtime._failure_phase
+    outcome = runtime._rollback_outcome
+    physical_state_restored = (
+        True if outcome == "restored" else False if outcome == "failed" else None
+    )
+    step_context = (
+        context if phase not in ("finalize_run", "final_output") else None
+    )
+    return {
+        "schema_version": 1,
+        "case": TUREK_HRON_CASE_ID,
+        "preset": preset,
+        "failure_kind": "runtime_exception",
+        "failure_phase": phase,
+        "error_type": type(error).__name__,
+        "error": str(error),
+        "error_traceback": traceback.format_exception(type(error), error, error.__traceback__),
+        "exception_cause": (
+            None if error.__cause__ is None
+            else f"{type(error.__cause__).__name__}:{error.__cause__}"
+        ),
+        "failed_step": None if step_context is None else int(step_context.step),
+        "failed_time_s": None if step_context is None else float(step_context.time_s),
+        "completed_steps": len(history),
+        "last_accepted_step": None if not history else int(history[-1]["step"]),
+        "last_accepted_time_s": None if not history else float(history[-1]["time_s"]),
+        "physical_state_restored": physical_state_restored,
+        "rollback_outcome": outcome,
+        "rollback_failure": runtime._rollback_failure,
+        "restored_state_scope": (
+            ["fluid", "solid", "marker_interface", "marker_pressure_gradient"]
+            if physical_state_restored is True else None
+        ),
+        "derived_search_boundary_state": (
+            "requires_rebuild" if physical_state_restored is True else "not_certified"
+        ),
+        "fsi_coupling_certificate_available": False,
+    }
+
+
+def _persist_runtime_failure_evidence(
+    error: Exception,
+    *,
+    runtime: _TurekHronFsiRuntime,
+    preset: str,
+    history: list[dict[str, Any]],
+    incremental_history_path: Path | None,
+    last_flushed_index: int,
+    incremental_header_written: bool,
+    output_dir: Path | str | None,
+    history_writer: Any | None = None,
+    artifact_writer: Any | None = None,
+) -> tuple[bool, int, tuple[str, ...]]:
+    """Save accepted history and generic failure evidence without masking error."""
+    if history_writer is None:
+        history_writer = _flush_history_csv
+    if artifact_writer is None:
+        artifact_writer = _write_fsi_coupling_failure_artifact
+    persistence_errors: list[str] = []
+    # Failure-time history is needed even when periodic CSV flushes are disabled.
+    history_path = incremental_history_path
+    if history_path is None and output_dir is not None:
+        history_path = Path(output_dir) / "turek_hron_fsi_history.csv"
+    completed_history_rows_flushed = 0
+    if history_path is not None and history:
+        try:
+            _rewrite_history_csv_atomically(
+                history_path,
+                history,
+                history_writer=history_writer,
+            )
+            completed_history_rows_flushed = len(history)
+        except Exception as persistence_error:
+            persistence_errors.append(
+                "history_flush:"
+                f"{type(persistence_error).__name__}:{persistence_error}"
+            )
+    artifact_payload = {
+        **_runtime_failure_payload(
+            error,
+            runtime=runtime,
+            preset=preset,
+            history=history,
+        ),
+        "completed_history_rows_flushed": completed_history_rows_flushed,
+        "completed_history_rows_flushed_scope": (
+            "complete accepted history published by this failure-recovery rewrite"
+        ),
+        **(
+            {"persistence_errors": list(persistence_errors)}
+            if persistence_errors
+            else {}
+        ),
+    }
+    if output_dir is not None:
+        try:
+            artifact_writer(Path(output_dir), artifact_payload)
+        except Exception as persistence_error:
+            persistence_errors.append(
+                "failure_artifact:"
+                f"{type(persistence_error).__name__}:{persistence_error}"
+            )
+    result = (
+        bool(history) and not persistence_errors,
+        completed_history_rows_flushed,
+        tuple(persistence_errors),
+    )
+    if persistence_errors:
+        try:
+            print(
+                "Turek-Hron failure evidence persistence: "
+                + "; ".join(persistence_errors),
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:
+            pass
+    return result
 
 
 def run_turek_hron_fsi(
@@ -4753,63 +4946,94 @@ def run_turek_hron_fsi(
             failure_payload=failure_payload,
         )
         raise
-
-    latest_report = latest_report_box["value"]
-    if latest_report is None:
-        raise RuntimeError("turek-hron FSI run did not advance")
-    if marker_layout_identity(
-        markers,
-        reference_positions_m=marker_reference_positions_m,
-    ) != marker_layout_sha256:
-        raise RuntimeError("Turek-Hron marker layout identity changed")
-    summary: dict[str, Any] = {
-        "case": TUREK_HRON_CASE_ID,
-        "preset": str(preset),
-        "config": asdict(config),
-        "marker_layout_sha256": marker_layout_sha256,
-        "marker_layout_identity_verified": True,
-        "taichi_runtime_identity": measured_taichi_runtime_identity,
-        "solver_path": (
-            "simulation_core.drivers.generic_fsi_solver.solve_fsi_runtime"
-        ),
-        "interface_unknown": "marker_velocity_mps",
-        "coupling_accelerator": "iqn_ils",
-        "generic_runtime_completed_steps": len(generic_run.history),
-        "wall_boundary_model": TUREK_HRON_WALL_BOUNDARY_MODEL,
-        "reference_results": _summary_reference_results(str(preset)),
-        "completed_steps": len(history),
-        "history": history,
-        "final": history[-1],
-    }
-    if output_dir is not None:
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        summary_path = out / "turek_hron_fsi_summary.json"
-        summary_path.write_text(
-            json.dumps(summary, indent=2, sort_keys=True, allow_nan=False),
-            encoding="utf-8",
+    except Exception as error:
+        (
+            incremental_header_written,
+            last_flushed_index,
+            _persistence_errors,
+        ) = _persist_runtime_failure_evidence(
+            error,
+            runtime=case_runtime,
+            preset=str(preset),
+            history=history,
+            incremental_history_path=incremental_history_path,
+            last_flushed_index=last_flushed_index,
+            incremental_header_written=incremental_header_written,
+            output_dir=output_dir,
         )
-        history_path = out / "turek_hron_fsi_history.csv"
-        with history_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(HISTORY_FIELDS))
-            writer.writeheader()
-            for row in history:
-                writer.writerow({key: row[key] for key in HISTORY_FIELDS})
-        summary["summary_json"] = str(summary_path)
-        summary["history_csv"] = str(history_path)
-        if export_final_flow_snapshot:
-            snapshot = build_turek_hron_final_fields_snapshot(
-                fluid,
-                solid,
-                config,
+        raise
+
+    # The generic runtime is complete; later export failures must preserve the
+    # committed physical state and record accepted history, never reopen or
+    # roll back the accepted final step.
+    case_runtime._failure_phase = "final_output"
+    case_runtime._rollback_outcome = "not_attempted"
+    case_runtime._rollback_failure = None
+    try:
+        latest_report = latest_report_box["value"]
+        if latest_report is None:
+            raise RuntimeError("turek-hron FSI run did not advance")
+        if marker_layout_identity(
+            markers,
+            reference_positions_m=marker_reference_positions_m,
+        ) != marker_layout_sha256:
+            raise RuntimeError("Turek-Hron marker layout identity changed")
+        summary: dict[str, Any] = {
+            "case": TUREK_HRON_CASE_ID,
+            "preset": str(preset),
+            "config": asdict(config),
+            "marker_layout_sha256": marker_layout_sha256,
+            "marker_layout_identity_verified": True,
+            "taichi_runtime_identity": measured_taichi_runtime_identity,
+            "solver_path": (
+                "simulation_core.drivers.generic_fsi_solver.solve_fsi_runtime"
+            ),
+            "interface_unknown": "marker_velocity_mps",
+            "coupling_accelerator": "iqn_ils",
+            "generic_runtime_completed_steps": len(generic_run.history),
+            "wall_boundary_model": TUREK_HRON_WALL_BOUNDARY_MODEL,
+            "reference_results": _summary_reference_results(str(preset)),
+            "completed_steps": len(history),
+            "history": history,
+            "final": history[-1],
+        }
+        if output_dir is not None:
+            out = Path(output_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            summary_path = out / "turek_hron_fsi_summary.json"
+            summary_path.write_text(
+                json.dumps(summary, indent=2, sort_keys=True, allow_nan=False),
+                encoding="utf-8",
             )
-            npz_path = out / "turek_hron_final_fields.npz"
-            np.savez(npz_path, **snapshot)
-            summary["final_fields_npz"] = str(npz_path)
-            png_path = out / "turek_hron_final_fields.png"
-            if _write_final_fields_contour_png(snapshot, png_path):
-                summary["final_fields_png"] = str(png_path)
-    return summary
+            history_path = out / "turek_hron_fsi_history.csv"
+            _rewrite_history_csv_atomically(history_path, history)
+            summary["summary_json"] = str(summary_path)
+            summary["history_csv"] = str(history_path)
+            if export_final_flow_snapshot:
+                snapshot = build_turek_hron_final_fields_snapshot(
+                    fluid,
+                    solid,
+                    config,
+                )
+                npz_path = out / "turek_hron_final_fields.npz"
+                np.savez(npz_path, **snapshot)
+                summary["final_fields_npz"] = str(npz_path)
+                png_path = out / "turek_hron_final_fields.png"
+                if _write_final_fields_contour_png(snapshot, png_path):
+                    summary["final_fields_png"] = str(png_path)
+        return summary
+    except Exception as error:
+        _persist_runtime_failure_evidence(
+            error,
+            runtime=case_runtime,
+            preset=str(preset),
+            history=history,
+            incremental_history_path=incremental_history_path,
+            last_flushed_index=last_flushed_index,
+            incremental_header_written=incremental_header_written,
+            output_dir=output_dir,
+        )
+        raise
 
 
 def _parse_grid_nodes(value: str) -> tuple[int, int, int]:

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from simulation_core.coupling.hibm_mpm.core import (
-    _assemble_and_seal_hibm_velocity_component_face_ledger,
+    _assemble_hibm_velocity_component_face_ledger,
     advance_hibm_mpm_sharp_mpm_step,
     assemble_hibm_mpm_sharp_fluid_to_mpm_loads,
 )
@@ -37,7 +37,7 @@ class HibmCanonicalCoreMigrationTests(unittest.TestCase):
         ):
             source = inspect.getsource(function)
             self.assertIn(
-                "_assemble_and_seal_hibm_velocity_component_face_ledger",
+                "_assemble_hibm_velocity_component_face_ledger",
                 source,
             )
             self.assertNotIn(
@@ -63,7 +63,7 @@ class HibmCanonicalCoreMigrationTests(unittest.TestCase):
             RuntimeError,
             "HIBM-MPM requires canonical component-face",
         ):
-            _assemble_and_seal_hibm_velocity_component_face_ledger(
+            _assemble_hibm_velocity_component_face_ledger(
                 fluid=SimpleNamespace(
                     velocity_dirichlet_boundary_authority="legacy"
                 ),

@@ -1915,12 +1915,53 @@ class HibmMpmMarkerMacConstraintOperator:
                     ti.atomic_max(self._collective_max_repair_residual[None], magnitude)
 
     @ti.kernel
+    def _certify_collective_zero_free_rows_kernel(self, tolerance_mps: ti.f64):
+        self._collective_certificate_count[None] = 0
+        for row in range(self.constraint_capacity):
+            if self._collective_row_active[row] != 0:
+                rhs = ti.cast(self._collective_rhs[row], ti.f64)
+                has_free = 0
+                has_owned_hard = 0
+                for support in ti.static(range(8)):
+                    weight = ti.cast(self._collective_weight[row, support], ti.f64)
+                    if self._collective_free[row, support] != 0 and weight != 0.0:
+                        has_free = 1
+                    mobility = ti.cast(
+                        self._collective_inverse_mass[row, support], ti.f64
+                    )
+                    if (
+                        self._collective_adjustable[row, support] != 0
+                        and weight != 0.0
+                        and not ti.math.isnan(weight)
+                        and not ti.math.isinf(weight)
+                        and mobility > 0.0
+                        and not ti.math.isnan(mobility)
+                        and not ti.math.isinf(mobility)
+                    ):
+                        has_owned_hard = 1
+                # J_F[row] is exactly zero, so e_row is a unit left-null
+                # witness.  Its defect must meet the stricter owned-H gate.
+                if (
+                    has_free == 0
+                    and has_owned_hard != 0
+                    and not ti.math.isnan(rhs)
+                    and not ti.math.isinf(rhs)
+                    and ti.abs(rhs) > tolerance_mps
+                ):
+                    self._collective_row_certificate[row] = 1
+        # Preserve certificates from other exact families and count each row
+        # once when this pass follows the proportional-F witness pass.
+        for row in range(self.constraint_capacity):
+            if self._collective_row_certificate[row] != 0:
+                ti.atomic_add(self._collective_certificate_count[None], 1)
+
+    @ti.kernel
     def _certify_collective_proportional_free_rows_kernel(self, tolerance_mps: ti.f64):
         self._collective_certificate_count[None] = 0
         for row in range(self.constraint_capacity):
             self._collective_row_certificate[row] = 0
-        # A finite Kaczmarz timeout is not an infeasibility proof.  FH is only
-        # unlocked by this algebraic proportional-free-row lower-bound witness.
+        # A finite Kaczmarz timeout is not an infeasibility proof.  This
+        # family uses an algebraic proportional-free-row lower-bound witness.
         for first in range(self.constraint_capacity):
             if self._collective_row_active[first] != 0:
                 axis = first % 3
@@ -4861,11 +4902,20 @@ class HibmMpmMarkerMacConstraintOperator:
         # private collective rows and counters.  H is applied before a normal
         # return; the finally block clears scratch only and never touches it.
         try:
+            # Zero-F owned-H defects must satisfy closure_tolerance even
+            # when the private F-only witness accepts absolute_tolerance.
+            self._certify_collective_zero_free_rows_kernel(closure_tolerance)
+            zero_free_certificate_count = int(
+                self._collective_certificate_count[None]
+            )
             # Terminal Q measures the zero correction before attempting a
             # solve.  Do the same: a cyclic sweep may move an already
             # acceptable system away from its physical absolute tolerance.
             self._measure_collective_target_closure_kernel(0)
-            if float(self._collective_max_residual[None]) <= absolute_tolerance:
+            if (
+                zero_free_certificate_count == 0
+                and float(self._collective_max_residual[None]) <= absolute_tolerance
+            ):
                 return self._collective_closure_result(
                     attempted=True,
                     closed=False,
@@ -4878,7 +4928,10 @@ class HibmMpmMarkerMacConstraintOperator:
             # F-only is private scratch.  A bounded isolated witness tries the
             # LS fast path, then a minimax fallback; terminal Q still makes the
             # authoritative decision after ledger publication.
-            if self._collective_isolated_f_only_feasible(absolute_tolerance):
+            if (
+                zero_free_certificate_count == 0
+                and self._collective_isolated_f_only_feasible(absolute_tolerance)
+            ):
                 return self._collective_closure_result(
                     attempted=True,
                     closed=False,
@@ -4891,6 +4944,7 @@ class HibmMpmMarkerMacConstraintOperator:
             self._certify_collective_proportional_free_rows_kernel(
                 absolute_tolerance
             )
+            self._certify_collective_zero_free_rows_kernel(closure_tolerance)
             certificate_count = int(self._collective_certificate_count[None])
             if certificate_count == 0:
                 return self._collective_closure_result(

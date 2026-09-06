@@ -12,6 +12,9 @@ from simulation_core import (
     HibmMpmSurfaceMarkers,
     TaichiRuntimeConfig,
 )
+from tests.solvers._hibm_common_trace_cohort_contracts import (
+    CommonTraceCohortContractMixin,
+)
 from tests.solvers._hibm_component_face_ledger_contracts import (
     CanonicalComponentFaceLedgerContractMixin,
     _ComponentFaceClaim,
@@ -32,6 +35,7 @@ def _relocation_source_linear_key_probe(
 
 class HibmComponentFaceGeometryTests(
     CanonicalComponentFaceLedgerContractMixin,
+    CommonTraceCohortContractMixin,
     unittest.TestCase,
 ):
     """Run the canonical component-face geometry and transaction contracts."""
@@ -239,6 +243,401 @@ class HibmComponentFaceGeometryTests(
                 ),
             ),
         )
+
+    def _public_collective_closure_fixture(
+        self,
+        *,
+        positions,
+        targets_y_mps,
+        owned_hard_faces=(),
+        free_faces=(),
+        external_hard_faces=(),
+        baseline_y_mps=0.0,
+        density_kgm3=1000.0,
+    ):
+        """Build real public-close rows on private, one-component MAC fields."""
+
+        count = len(positions)
+        operator = self._new_isolated_collective_witness_operator(count)
+        markers = HibmMpmSurfaceMarkers(marker_capacity=count)
+        markers.load_markers(
+            positions_m=positions,
+            velocities_mps=tuple((0.0, value, 0.0) for value in targets_y_mps),
+            normals=((0.0, 0.0, 1.0),) * count,
+            areas_m2=(0.02,) * count,
+            region_ids=(101,) * count,
+        )
+        sample_valid = ti.field(dtype=ti.i32, shape=count)
+        sample_valid.fill(1)
+        masks = {}
+        for name, faces in (
+            ("component_face_valid_mask", (*owned_hard_faces, *free_faces,
+                                           *external_hard_faces)),
+            ("hard_fixed_component_mask", (*owned_hard_faces,
+                                            *external_hard_faces)),
+            ("external_exact_component_mask", external_hard_faces),
+            ("adjustable_component_mask", owned_hard_faces),
+        ):
+            values = np.zeros(self._GRID_NODES, dtype=np.int32)
+            for face in faces:
+                values[face] = 0b010
+            field = ti.field(dtype=ti.i32, shape=self._GRID_NODES)
+            field.from_numpy(values)
+            masks[name] = field
+        baseline = np.zeros((*self._GRID_NODES, 3), dtype=np.float32)
+        for face in (*owned_hard_faces, *external_hard_faces):
+            baseline[face][1] = baseline_y_mps
+        prospective = ti.Vector.field(3, dtype=ti.f32, shape=self._GRID_NODES)
+        prospective.from_numpy(baseline)
+        claim_target = ti.Vector.field(3, dtype=ti.f32, shape=self._GRID_NODES)
+        claim_target.from_numpy(baseline)
+        arguments = {
+            "marker_position_m": markers.x_gamma_m,
+            "marker_sample_valid": sample_valid,
+            "marker_velocity_mps": markers.v_gamma_mps,
+            "marker_region_id": markers.region_id,
+            "physical_marker_count": count,
+            "primary_region_id": 101,
+            "secondary_region_id": 202,
+            "prospective_velocity": prospective,
+            "claim_target_mps": claim_target,
+            "density_kgm3": density_kgm3,
+            "sweeps_per_batch": 8,
+            "closure_tolerance_mps": 1.0e-6,
+            "absolute_tolerance_mps": 1.0e-4,
+            **masks,
+        }
+        for axis in "xyz":
+            for kind in ("face", "center", "width"):
+                name = f"cell_{kind}_{axis}_m"
+                arguments[name] = getattr(self.fluid, name)
+        return operator, arguments
+
+    def _run_public_collective_closure_fixture(self, operator, arguments):
+        """Observe actual built rows; assert private/public ownership afterward."""
+
+        before = {
+            name: field.to_numpy().copy()
+            for name, field in arguments.items()
+            if hasattr(field, "to_numpy")
+        }
+        canonical_velocity_before = self.fluid.velocity.to_numpy().tobytes()
+        phase_before = operator._phase
+        rows = {}
+        build_count = 0
+        original_build = operator._build_collective_target_closure_rows_kernel
+
+        def record_built_rows(*args, **kwargs):
+            nonlocal build_count
+            original_build(*args, **kwargs)
+            build_count += 1
+            for name in ("row_active", "rhs", "index", "weight", "free",
+                         "adjustable", "inverse_mass"):
+                rows[name] = getattr(operator, "_collective_" + name).to_numpy()
+
+        with mock.patch.object(
+            operator,
+            "_build_collective_target_closure_rows_kernel",
+            new=record_built_rows,
+        ):
+            result = operator.close_prospective_owned_hard_targets_collectively(
+                **arguments
+            )
+        self.assertEqual(build_count, 1)
+        allowed_hard = np.stack(
+            [((before["adjustable_component_mask"] >> axis) & 1) != 0
+             for axis in range(3)],
+            axis=-1,
+        )
+        for name, values in before.items():
+            current = arguments[name].to_numpy()
+            if name in {"prospective_velocity", "claim_target_mps"}:
+                np.testing.assert_array_equal(
+                    current[~allowed_hard], values[~allowed_hard]
+                )
+            else:
+                self.assertEqual(current.tobytes(), values.tobytes(), name)
+        self.assertEqual(
+            self.fluid.velocity.to_numpy().tobytes(), canonical_velocity_before
+        )
+        self.assertEqual(operator._phase, phase_before)
+        for name in ("row_active", "row_certificate", "row_repair_active",
+                     "delta_free", "delta_hard", "rhs"):
+            np.testing.assert_array_equal(
+                getattr(operator, "_collective_" + name).to_numpy(), 0
+            )
+        self.assertEqual(int(operator._collective_active_count[None]), 0)
+        self.assertEqual(int(operator._collective_certificate_count[None]), 0)
+        return result, rows, before
+
+    @staticmethod
+    def _materialized_collective_row_residual(arguments, rows, row):
+        """Measure the rounded prospective field, not an uncommitted delta."""
+
+        axis = row % 3
+        velocity = arguments["prospective_velocity"].to_numpy()
+        target = arguments["marker_velocity_mps"].to_numpy()[row // 3, axis]
+        sampled = np.float32(0.0)
+        for support in range(8):
+            weight = np.float32(rows["weight"][row, support])
+            if weight != 0.0:
+                index = tuple(int(value) for value in rows["index"][row, support])
+                sampled = np.float32(sampled + weight * velocity[index][axis])
+        return abs(float(np.float32(target - sampled)))
+
+    def test_collective_zero_free_owned_hard_rows_close_below_absolute_tolerance(
+        self,
+    ) -> None:
+        """An absolute-feasible zero-F defect still needs the stricter H gate."""
+
+        operator, arguments = self._public_collective_closure_fixture(
+            positions=((0.5, 0.3125, 0.375), (0.5, 0.4375, 0.375)),
+            targets_y_mps=(0.0, 1.842820324782224e-6),
+            owned_hard_faces=((1, 1, 1), (2, 1, 1)),
+        )
+        result, rows, _ = self._run_public_collective_closure_fixture(
+            operator, arguments
+        )
+        self.assertLessEqual(float(np.max(np.abs(rows["rhs"]))), 1.0e-4)
+        self.assertGreater(float(rows["rhs"][4]), 1.0e-6)
+        self.assertFalse(np.any(rows["free"] & (rows["weight"] != 0.0)))
+        for row in (1, 4):
+            np.testing.assert_array_equal(
+                rows["weight"][row][rows["weight"][row] != 0.0],
+                np.array([0.5, 0.5], dtype=np.float32),
+            )
+        self.assertTrue(result["closed"])
+        self.assertFalse(result["f_only_converged"])
+        self.assertEqual(result["certificate_count"], 1)
+        self.assertTrue(result["repair_applied"])
+        self.assertLessEqual(result["repair_max_residual_mps"], 1.0e-6)
+        self.assertLessEqual(result["global_max_residual_mps"], 1.0e-4)
+        for row in (1, 4):
+            self.assertLessEqual(
+                self._materialized_collective_row_residual(arguments, rows, row),
+                1.0e-6,
+            )
+
+    def test_collective_zero_free_rows_bypass_feasible_f_only_return(self) -> None:
+        """A separate solvable F row cannot hide the zero-F H-tolerance defect."""
+
+        operator, arguments = self._public_collective_closure_fixture(
+            positions=((0.5, 0.30, 0.375), (0.5, 0.45, 0.375),
+                       (0.125, 0.75, 0.875)),
+            targets_y_mps=(0.0, 1.842820324782224e-6, 2.0e-3),
+            owned_hard_faces=((1, 1, 1), (2, 1, 1)),
+            free_faces=((0, 3, 3),),
+        )
+        result, rows, before = self._run_public_collective_closure_fixture(
+            operator, arguments
+        )
+        self.assertGreater(float(np.max(np.abs(rows["rhs"]))), 1.0e-4)
+        free_support = rows["free"][7] & (rows["weight"][7] != 0.0)
+        self.assertEqual(int(np.count_nonzero(free_support)), 1)
+        self.assertEqual(float(rows["weight"][7][free_support.astype(bool)][0]), 1.0)
+        self.assertTrue(result["closed"])
+        self.assertFalse(result["f_only_converged"])
+        self.assertEqual(result["certificate_count"], 1)
+        for row in (1, 4):
+            self.assertLessEqual(
+                self._materialized_collective_row_residual(arguments, rows, row),
+                1.0e-6,
+            )
+        self.assertEqual(
+            float(arguments["prospective_velocity"][(0, 3, 3)][1]),
+            float(before["prospective_velocity"][0, 3, 3, 1]),
+        )
+
+    def test_collective_zero_free_and_proportional_certificates_share_repair(
+        self,
+    ) -> None:
+        """Independent e-row and proportional-F witnesses retain both H scopes."""
+
+        operator, arguments = self._public_collective_closure_fixture(
+            positions=((0.5, 0.30, 0.375), (0.5, 0.45, 0.375),
+                       (0.125, 0.30, 0.625), (0.125, 0.45, 0.625)),
+            targets_y_mps=(0.0, 1.842820324782224e-6, 1.0e-3, 2.0e-3),
+            owned_hard_faces=((1, 1, 1), (2, 1, 1), (0, 1, 2)),
+            free_faces=((0, 2, 2),),
+        )
+        result, rows, _ = self._run_public_collective_closure_fixture(
+            operator, arguments
+        )
+        self.assertTrue(result["closed"])
+        self.assertFalse(result["f_only_converged"])
+        self.assertEqual(result["certificate_count"], 3)
+        self.assertEqual(result["hard_target_dof_count"], 3)
+        self.assertLessEqual(result["repair_max_residual_mps"], 1.0e-6)
+        self.assertLessEqual(result["global_max_residual_mps"], 1.0e-4)
+        for row in (1, 4):
+            self.assertLessEqual(
+                self._materialized_collective_row_residual(arguments, rows, row),
+                1.0e-6,
+            )
+        self.assertNotEqual(
+            float(arguments["claim_target_mps"][(0, 1, 2)][1]), 0.0
+        )
+
+    def test_collective_zero_free_infeasible_hard_rows_reject_atomically(
+        self,
+    ) -> None:
+        """A valid F witness cannot authorize a failed H candidate for commit."""
+
+        operator, arguments = self._public_collective_closure_fixture(
+            positions=((0.5, 0.30, 0.375), (0.5, 0.45, 0.375)),
+            targets_y_mps=(0.0, 3.0e-6),
+            owned_hard_faces=((1, 1, 1), (2, 1, 1)),
+        )
+        result, _, before = self._run_public_collective_closure_fixture(
+            operator, arguments
+        )
+        self.assertFalse(result["closed"])
+        self.assertFalse(result["f_only_converged"])
+        self.assertEqual(result["certificate_count"], 1)
+        self.assertFalse(result["repair_applied"])
+        for name in ("claim_target_mps", "prospective_velocity"):
+            self.assertEqual(arguments[name].to_numpy().tobytes(), before[name].tobytes())
+
+    def test_collective_zero_free_certificate_does_not_use_mobility_threshold(
+        self,
+    ) -> None:
+        """A tiny pressure diagonal does not make a nonzero F coefficient zero."""
+
+        tiny_offset_y = float(np.nextafter(np.float32(0.25), np.float32(0.5)))
+        operator, arguments = self._public_collective_closure_fixture(
+            positions=((0.5, tiny_offset_y, 0.375),),
+            targets_y_mps=(1.842820324782224e-6,),
+            owned_hard_faces=((1, 1, 1), (2, 1, 1)),
+            free_faces=((1, 2, 1), (2, 2, 1)),
+            density_kgm3=1.0e30,
+        )
+        result, rows, before = self._run_public_collective_closure_fixture(
+            operator, arguments
+        )
+        active_free = (rows["free"][1] != 0) & (rows["weight"][1] != 0.0)
+        self.assertTrue(np.any(active_free))
+        mobility = rows["inverse_mass"][1][active_free].astype(np.float64)
+        weights = rows["weight"][1][active_free].astype(np.float64)
+        self.assertTrue(np.all(np.isfinite(mobility) & (mobility > 0.0)))
+        self.assertLess(float(np.sum(weights * weights * mobility)), 1.0e-20)
+        self.assertTrue(result["f_only_converged"])
+        self.assertFalse(result["closed"])
+        self.assertEqual(result["certificate_count"], 0)
+        for name in ("claim_target_mps", "prospective_velocity"):
+            self.assertEqual(arguments[name].to_numpy().tobytes(), before[name].tobytes())
+
+    def test_collective_zero_weight_free_support_keeps_hard_certificate(self) -> None:
+        """A valid-mask F flag with exactly zero interpolation weight is not J_F."""
+
+        operator, arguments = self._public_collective_closure_fixture(
+            positions=((0.5, 0.25, 0.375),),
+            targets_y_mps=(1.842820324782224e-6,),
+            owned_hard_faces=((1, 1, 1), (2, 1, 1)),
+            free_faces=((1, 2, 1), (2, 2, 1)),
+        )
+        result, rows, _ = self._run_public_collective_closure_fixture(
+            operator, arguments
+        )
+        self.assertTrue(np.any(rows["free"][1] != 0))
+        self.assertFalse(np.any((rows["free"][1] != 0) & (rows["weight"][1] != 0.0)))
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["certificate_count"], 1)
+        self.assertLessEqual(
+            self._materialized_collective_row_residual(arguments, rows, 1), 1.0e-6
+        )
+
+    def test_collective_zero_weight_hard_support_cannot_authorize_repair(self) -> None:
+        """Immutable weighted support cannot borrow authority from a zero H weight."""
+
+        for owned_faces in ((), ((1, 2, 1), (2, 2, 1))):
+            with self.subTest(zero_weight_owned_support=bool(owned_faces)):
+                operator, arguments = self._public_collective_closure_fixture(
+                    positions=((0.5, 0.25, 0.375),),
+                    targets_y_mps=(1.842820324782224e-6,),
+                    external_hard_faces=((1, 1, 1), (2, 1, 1)),
+                    owned_hard_faces=owned_faces,
+                )
+                result, rows, before = self._run_public_collective_closure_fixture(
+                    operator, arguments
+                )
+                self.assertFalse(np.any(
+                    (rows["adjustable"][1] != 0) & (rows["weight"][1] != 0.0)
+                ))
+                self.assertTrue(result["f_only_converged"])
+                self.assertFalse(result["closed"])
+                self.assertEqual(result["certificate_count"], 0)
+                for name in ("claim_target_mps", "prospective_velocity"):
+                    self.assertEqual(
+                        arguments[name].to_numpy().tobytes(), before[name].tobytes()
+                    )
+
+    def test_collective_zero_free_owned_hard_repair_preserves_external_support(
+        self,
+    ) -> None:
+        """An immutable support does not veto the same row's legitimate owned H."""
+
+        baseline = np.float32(4.0e-6)
+        operator, arguments = self._public_collective_closure_fixture(
+            positions=((0.5, 0.30, 0.375), (0.5, 0.45, 0.375)),
+            targets_y_mps=(baseline, np.float32(baseline + np.float32(1.842820324782224e-6))),
+            owned_hard_faces=((2, 1, 1),),
+            external_hard_faces=((1, 1, 1),),
+            baseline_y_mps=baseline,
+        )
+        result, rows, before = self._run_public_collective_closure_fixture(
+            operator, arguments
+        )
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["certificate_count"], 1)
+        self.assertEqual(result["immutable_hard_row_count"], 2)
+        for name in ("claim_target_mps", "prospective_velocity"):
+            self.assertEqual(
+                arguments[name].to_numpy()[1, 1, 1].tobytes(),
+                before[name][1, 1, 1].tobytes(),
+            )
+        for row in (1, 4):
+            self.assertLessEqual(
+                self._materialized_collective_row_residual(arguments, rows, row),
+                1.0e-6,
+            )
+
+    def test_collective_zero_free_certificate_requires_finite_weighted_authority(
+        self,
+    ) -> None:
+        """Nonfinite data and invalid mobility cannot create an e-row witness."""
+
+        operator = self._new_isolated_collective_witness_operator(marker_capacity=1)
+        cases = (
+            ("finite", 2.0e-6, 1.0, 1.0, 1),
+            ("rhs_nan", float("nan"), 1.0, 1.0, 0),
+            ("rhs_inf", float("inf"), 1.0, 1.0, 0),
+            ("weight_nan", 2.0e-6, float("nan"), 1.0, 0),
+            ("weight_inf", 2.0e-6, float("inf"), 1.0, 0),
+            ("weight_zero", 2.0e-6, 0.0, 1.0, 0),
+            ("mobility_zero", 2.0e-6, 1.0, 0.0, 0),
+            ("mobility_negative", 2.0e-6, 1.0, -1.0, 0),
+            ("mobility_nan", 2.0e-6, 1.0, float("nan"), 0),
+            ("mobility_inf", 2.0e-6, 1.0, float("inf"), 0),
+            ("tiny_positive_mobility", 2.0e-6, 1.0, 1.0e-30, 1),
+            ("within_closure", float(np.float32(1.0e-6)), 1.0, 1.0, 0),
+        )
+        try:
+            for name, rhs, weight, mobility, expected in cases:
+                with self.subTest(case=name):
+                    self._seed_isolated_collective_rows(
+                        operator,
+                        ((0, rhs, (((0, 0, 0), weight, False, mobility),)),),
+                        adjustable_supports=((0, 0),),
+                    )
+                    operator._certify_collective_zero_free_rows_kernel(1.0e-6)
+                    self.assertEqual(
+                        int(operator._collective_certificate_count[None]), expected
+                    )
+                    self.assertEqual(int(operator._collective_row_certificate[0]), expected)
+                    np.testing.assert_array_equal(operator._collective_delta_hard.to_numpy(), 0.0)
+        finally:
+            operator._reset_collective_target_closure_kernel()
+
 
     def test_collective_identity_within_absolute_tolerance_skips_isolated_ls(
         self,

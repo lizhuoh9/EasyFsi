@@ -55,6 +55,12 @@ def _host_only_solver(
 
     solver = object.__new__(CartesianFluidSolver)
     solver.velocity_dirichlet_boundary_authority = authority
+    solver.velocity_dirichlet_boundary_authority_code_device = {
+        None: 1 if authority == "canonical" else 0
+    }
+    solver.last_hibm_reachability_valid = False
+    solver.hibm_reachability_revision = 0
+    solver._hibm_marker_compatibility_closure_pending = False
     solver.velocity_dirichlet_component_ledger_generation = generation
     solver.velocity_dirichlet_component_ledger_sealed = sealed
     solver.velocity_dirichlet_face_symmetric = 0
