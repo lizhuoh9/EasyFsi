@@ -1,6 +1,91 @@
 # Turek-Hron R15 fallback validation, 2026-09-06
 
-## Current checkpoint: reviewed test corrections; full GREEN25 pending
+## Latest result: focused gates passed; R16 stopped for publication
+
+The strict-CUDA/f32 GREEN25 r03 passed all 25 tests in 81.096244 s on clean
+source commit `efdb2527900ff455e2150fdef701cd15298be8fe`. The complete R12,
+R13, R14 and R15 frozen replays also passed. Each replay's 21 snapshots of
+155 fields and 41 cleanup fields were independently read back and recomputed.
+These checks advance zero physical time.
+
+The from-zero eight-step R16 diagnostic was stopped with SIGINT during Taichi
+compilation at 1% quota remaining to complete the user's authorized GitHub
+publication before exhaustion. Owner PID/PGID 410 exited -2 after 686.565025 s,
+with zero accepted steps and `KeyboardInterrupt`. Source193, all 77 dependencies,
+and host identities remained unchanged; wrapper audit errors are empty.
+This is an administrative interruption, not a measured numerical failure.
+The initial native `process.json` still says running; the final owner record
+and execution audit establish the actual exit.
+
+Continuous eight-step success, independent full rollback validation, and the
+registered component/formal benchmark gates remain unproved for this source.
+No reset credit was used. The old 10% threshold remains withdrawn.
+The following older checkpoints are historical; this block is the current state.
+
+## Verified evidence and continuation
+
+The source core SHA256 remains
+`26f37eb14179b73c0c4c4a7e29be53954dcade4a377ed4c91310026b88e51751`.
+GREEN25 r03 has no failures, errors, skips or expected failures. Zero and
+single consumer controls retain all 15 comparison keys and all eight canonical
+output arrays; both original nonempty C0 orders remain valid.
+Process SHA256:
+`5c706e671fd1320a3b405dc4a78f10d758e9eacf6644485a56cf79ff1c830874`.
+
+| Frozen input | Native result | Owner elapsed seconds | Preservation |
+| --- | --- | ---: | --- |
+| R12 | PASS | 1429.131 | All eight A50 outputs byte-exact |
+| R13 | PASS | 61.976 | All eight A50 outputs byte-exact |
+| R14 | PASS | 65.676 | All eight A50 outputs byte-exact |
+| R15 | PASS | 62.281 | Four former failure faces select owner 90/91 with query-matched geometry |
+
+Each replay rechecked 207 original input arrays, the 987-file immutable input
+inventory, source193, host/runtime and dependencies. R12/R13/R14 preserve the
+original valid-cache subsets. R15's source inputs remain byte-exact; its
+successful output is a corrected assembly, not a continuous FSI result.
+Full replay manifest SHA256:
+`c23236506c97ab4e503c51f596abf7c591f5a949defd10477fda9bce1c1d26bd`.
+
+The preserved R16 manifest SHA256 is
+`c2fe21f5084c9055d9427d30ff22bd3544dff7faba590e5d6de9034847cd1268`.
+Its accepted-record stream is empty; both accepted fluid and solid time are
+zero. Its 155-field precommit-failure observer was prepared but no precommit
+failure occurred before the compilation interruption. The four replay cleanup
+checks do not establish a fresh R16 after-cleanup capture or full rollback.
+The normal terminal auditor was reviewed and prepared, but was not run against
+this administrative interruption because its required normal terminal
+artifacts do not exist. Its SHA256 is
+`e29af2dced25cdcc4ffd1a864a3e2a3023de7ca8b523ab53dd9aaf286cefc003`.
+
+All logs, captures, reviewed adapters, manifests, interrupted output, earlier
+failed evidence and unapplied endpoint drafts are retained in the complete
+archive attached to the WIP release. They must not be treated as restart states.
+The release tag retains its historical source target; this documentation commit
+and the source identity in the new archive identify the latest checkpoint.
+
+1. On explicit continuation, verify WSL Ubuntu-22.04 user zhuohengli, worktree
+   `/home/zhuohengli/worktrees/HIBM-MPM-r25b-live`, branch
+   `codex/turek-hron-fsi123-validation-r26a`, current HEAD/status and interpreter
+   `/home/zhuohengli/.venvs/hibm-mpm-r26a-py310/bin/python`.
+2. Preserve the occupied R16 label. Prepare a new from-zero eight-step wrapper
+   and manifest for a new label, keeping 4x96x400, 112 physical markers,
+   dt_s=0.005, solid_substeps=200 and all original numerical thresholds.
+   Bridge this documentation-only HEAD to the tested source by all 193 hashes;
+   do not silently edit the archived manifests or reuse an occupied label.
+3. Clear PYTHONPATH/PYTHONHOME; set LD_LIBRARY_PATH=/usr/lib/wsl/lib,
+   SIMULATION_TAICHI_OFFLINE_CACHE=1, PYTHONUNBUFFERED=1 and
+   PYTHONDONTWRITEBYTECODE=1. Run one CUDA job, monitor its actual owner, then
+   bind the final owner SHA and run the corresponding reviewed terminal audit.
+   Every accepted macro step must consume the full 0.005 s for each subsystem.
+4. If the new run fails, diagnose the actual captured contract before another
+   launch. After continuous success, recompute the component source manifest and
+   complete the campaign's required requalification and registered ordering:
+   FSI1-S0, M0/M1, conditional F0, FSI2, then FSI3. Focused passes do not open the
+   Oracle/learning gate.
+
+Publication: [source and complete evidence](https://github.com/lizhuoh9/EasyFsi/releases/tag/r15-wip-20260906-1330).
+
+## Historical checkpoint: reviewed test corrections; full GREEN25 pending
 
 The user explicitly resumed work past the earlier 10% quota boundary and
 authorized committing and pushing all work before exhaustion. No quota reset

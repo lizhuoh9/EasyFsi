@@ -1,6 +1,32 @@
 # Turek-Hron FSI trace-repair continuation
 
-## Explicit continuation and WIP publication, 2026-09-06
+## Latest result: focused gates passed; R16 stopped for publication
+
+The strict-CUDA/f32 GREEN25 r03 passed all 25 tests in 81.096244 s on clean
+source commit `efdb2527900ff455e2150fdef701cd15298be8fe`. The complete R12,
+R13, R14 and R15 frozen replays also passed. Each replay's 21 snapshots of
+155 fields and 41 cleanup fields were independently read back and recomputed.
+These checks advance zero physical time.
+
+The from-zero eight-step R16 diagnostic was stopped with SIGINT during Taichi
+compilation at 1% quota remaining to complete the user's authorized GitHub
+publication before exhaustion. Owner PID/PGID 410 exited -2 after 686.565025 s,
+with zero accepted steps and `KeyboardInterrupt`. Source193, all 77 dependencies,
+and host identities remained unchanged; wrapper audit errors are empty.
+This is an administrative interruption, not a measured numerical failure.
+The initial native `process.json` still says running; the final owner record
+and execution audit establish the actual exit.
+
+Continuous eight-step success, independent full rollback validation, and the
+registered component/formal benchmark gates remain unproved for this source.
+No reset credit was used. The old 10% threshold remains withdrawn.
+The following older checkpoints are historical; this block is the current state.
+
+Full evidence and exact continuation requirements: [R15 fallback report](../validation/TUREK_HRON_R15_FALLBACK_VALIDATION_REPORT_2026-09-06.md).
+
+Publication: [source and complete evidence](https://github.com/lizhuoh9/EasyFsi/releases/tag/r15-wip-20260906-1330).
+
+## Historical explicit continuation checkpoint, 2026-09-06
 
 The user resumed work after the archived quota stop, explicitly withdrew the
 10% stop threshold, and authorized committing and pushing all current project
